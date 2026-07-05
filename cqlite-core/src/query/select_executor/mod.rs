@@ -207,6 +207,41 @@ fn project_expr_reshapes_row(expr: &SelectExpression) -> bool {
     !matches!(expr, SelectExpression::Column(_))
 }
 
+/// True when a plain-column `Project`'s OUTPUT column SET differs from the
+/// SSTable scan projection's column SET — i.e. the `Project` must TRIM helper
+/// columns the broadened scan added (issue #1952 streaming follow-up).
+///
+/// #1952 widened the scan projection to the UNION of the selected columns and
+/// the WHERE / ORDER BY / GROUP BY / aggregate-argument helper columns, relying
+/// on the `Project` step to trim the non-selected helpers back out. The
+/// materialized path runs `Project`; the streaming producer
+/// (`execute_streaming_background`) IGNORES a plain-column `Project`, so without
+/// this check it would emit rows still carrying the helper columns
+/// (e.g. `SELECT a WHERE b = 1` scans `["a","b"]` and would leak `b`).
+///
+/// Column ORDER is intentionally irrelevant: streamed rows are keyed by name in
+/// a `HashMap`, and output ordering is carried by the query metadata, so only
+/// the SET matters — a `Project` that merely reorders (same set) can still
+/// stream directly with no perf regression. When there is no scan step
+/// (e.g. a constant query) there is nothing to trim.
+fn project_trims_scan_columns(
+    columns: &[SelectExpression],
+    scan_projection: Option<&[String]>,
+) -> bool {
+    let Some(scan) = scan_projection else {
+        return false;
+    };
+    let output: std::collections::HashSet<&str> = columns
+        .iter()
+        .filter_map(|e| match e {
+            SelectExpression::Column(c) => Some(c.column.as_str()),
+            _ => None,
+        })
+        .collect();
+    let scan_set: std::collections::HashSet<&str> = scan.iter().map(|s| s.as_str()).collect();
+    output != scan_set
+}
+
 /// Default row-count safety valve for the bare `SelectExecutor` constructors
 /// (issue #1582). Matches [`crate::config::QueryConfig::max_result_rows`]'s
 /// default; the query engine overrides it via
@@ -517,23 +552,39 @@ impl SelectExecutor {
 
     /// Check if query plan requires full materialization before streaming
     fn requires_materialization(&self, plan: &OptimizedQueryPlan) -> bool {
+        // The SSTable scan projection = the source columns the scan keeps in each
+        // streamed row. A `Project` step whose output column SET differs from this
+        // scan set must TRIM helper columns (issue #1952), which the streaming
+        // producer cannot do — so such a plan must materialize.
+        let scan_projection: Option<&[String]> =
+            plan.execution_steps.iter().find_map(|step| match step {
+                ExecutionStep::SSTableScan { projection, .. } => Some(projection.as_slice()),
+                _ => None,
+            });
+
         for step in &plan.execution_steps {
             match step {
                 ExecutionStep::Sort { .. } => return true,
                 ExecutionStep::Aggregate { .. } => return true,
-                // Issue #1763: the streaming producer (`execute_streaming_background`)
-                // IGNORES `Project`, so it emits rows keyed by the SOURCE stored
-                // column names (e.g. `category`) even when the SELECT renames or
-                // evaluates them (e.g. `category AS cat`) — silently disagreeing
-                // with the query metadata, which uses the SELECT output names.
-                // A `Project` that RENAMES (alias) or EVALUATES (aggregate /
-                // arithmetic / literal / function) any item must fall back to the
-                // materialized execute()-then-stream path, which applies the
-                // `Project`. A `Project` of only plain `Column`s does not reshape
-                // the row (the scan already keyed those cells by the same names),
-                // so it can stream without materializing.
+                // The streaming producer (`execute_streaming_background`) IGNORES
+                // `Project`, so a `Project` step that changes the row's column SET
+                // or SHAPE must fall back to the materialized execute()-then-stream
+                // path (which applies the `Project`). Two disjoint cases:
+                //
+                //   * Issue #1763 — a RENAMING (`category AS cat`) or EVALUATING
+                //     (aggregate / arithmetic / literal / function) item reshapes
+                //     the row: streaming would key it by the SOURCE stored column
+                //     name, disagreeing with the SELECT-output query metadata.
+                //   * Issue #1952 (this follow-up) — a plain-column `Project` whose
+                //     OUTPUT set ≠ the scan projection set TRIMS the WHERE / ORDER
+                //     BY / GROUP BY / aggregate-arg helper columns the broadened
+                //     scan added; streaming would LEAK those helper columns.
+                //
+                // A `Project` of exactly the scan's plain columns (no reshape, no
+                // trim) keys each cell by the same name and can stream directly.
                 ExecutionStep::Project { columns }
-                    if columns.iter().any(project_expr_reshapes_row) =>
+                    if columns.iter().any(project_expr_reshapes_row)
+                        || project_trims_scan_columns(columns, scan_projection) =>
                 {
                     return true
                 }
@@ -1004,6 +1055,56 @@ impl SelectExecutor {
         Ok(projected_rows)
     }
 
+    /// Trim a plain-column `Project` down to its selected columns WITHOUT
+    /// reshaping the row (issue #1952 round-6 fix).
+    ///
+    /// The Project step's ONLY job for a plain-column SELECT (every expr is a
+    /// bare `Column`) is to drop the helper columns the #1952 scan-widening added
+    /// (WHERE / ORDER BY / GROUP BY / aggregate-argument columns that are not in
+    /// the SELECT clause). It is NOT a reshape: a plain column is identity-named,
+    /// so there are no new names to derive (#1763's alias/reshape naming does not
+    /// apply) and no computed values to build.
+    ///
+    /// Unlike [`Self::execute_projection`] — which is correct for reshaping /
+    /// computed rows but rebuilds each row with an EMPTY `RowKey` and errors on a
+    /// selected cell that is absent from a sparse row — this preserves each row's
+    /// real `key` (partition/clustering key), `metadata`, and `cell_metadata`
+    /// unchanged, and simply omits any selected cell that a sparse row lacks
+    /// (never an error). Preserving the key is the #1587-class contract downstream
+    /// consumers (per-partition-limit boundary detection, dedup, ordering, callers
+    /// inspecting `row.key`) rely on; before #1952 these bare-column selects
+    /// skipped the Project entirely and streamed the RAW keyed row.
+    ///
+    /// Rows are name-keyed maps and output column ORDER is carried by the query
+    /// metadata, so trimming = retaining the correct SET of named cells in place.
+    fn trim_projection(
+        &self,
+        mut rows: Vec<QueryRow>,
+        columns: &[SelectExpression],
+    ) -> Vec<QueryRow> {
+        // The selected plain-column source names. This method is only reached
+        // when every projection expr is a plain `Column` (the caller gates on
+        // `!columns.iter().any(project_expr_reshapes_row)`), so every expr
+        // contributes its source name and none reshapes.
+        let selected: std::collections::HashSet<&str> = columns
+            .iter()
+            .filter_map(|e| match e {
+                SelectExpression::Column(c) => Some(c.column.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        for row in &mut rows {
+            // Retain only the selected cells by source-name identity; key,
+            // metadata, and cell_metadata are left untouched. A selected cell
+            // absent from a sparse row is simply not present after the retain —
+            // never an error.
+            row.values
+                .retain(|name, _| selected.contains(name.as_ref()));
+        }
+        rows
+    }
+
     /// Execute a query without FROM clause (constant expressions like SELECT 1)
     fn execute_constant_query(
         &self,
@@ -1447,6 +1548,129 @@ mod tests {
         assert_eq!(projected[0].values.get("b"), Some(&Value::Integer(0)));
         assert_eq!(projected[0].values.get("c"), Some(&Value::Integer(0)));
         assert_eq!(projected[99].values.get("a"), Some(&Value::Integer(99)));
+    }
+
+    /// Issue #1952 (round-6 HIGH): a plain-column `Project` that only TRIMS the
+    /// #1952-widened helper columns must PRESERVE each row's real `RowKey`,
+    /// `metadata`, and `cell_metadata`, and drop only the unselected helper
+    /// columns. Pre-fix these bare-column selects routed through
+    /// `execute_projection`, which rebuilt every row with an EMPTY `RowKey`
+    /// (`vec![]`) — a #1587-class regression. This pins the key-preserving trim.
+    #[tokio::test]
+    async fn trim_projection_preserves_key_and_trims_helpers() {
+        let executor = create_test_executor().await;
+
+        // SELECT a, b  (helper column `helper` was added to the scan by #1952).
+        let columns = vec![
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "a".to_string(),
+            }),
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "b".to_string(),
+            }),
+        ];
+
+        let mut row = QueryRow::new(RowKey::new(vec![7, 8, 9]));
+        row.set("a", Value::Integer(1));
+        row.set("b", Value::Integer(2));
+        row.set("helper", Value::Integer(3));
+        row.set_metadata(crate::query::result::RowMetadata {
+            version: Some(42),
+            ttl: None,
+            tags: Default::default(),
+        });
+
+        let out = executor.trim_projection(vec![row], &columns);
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+
+        // Key PRESERVED (the core regression): not the empty `vec![]`.
+        assert_eq!(
+            r.key.0,
+            vec![7, 8, 9],
+            "trim must preserve the real RowKey, not destroy it to vec![]"
+        );
+        // Row metadata preserved.
+        assert_eq!(
+            r.metadata.version,
+            Some(42),
+            "row metadata must be preserved"
+        );
+        // Selected columns kept, helper trimmed.
+        assert_eq!(r.values.get("a"), Some(&Value::Integer(1)));
+        assert_eq!(r.values.get("b"), Some(&Value::Integer(2)));
+        assert!(
+            !r.values.contains_key("helper"),
+            "the unselected helper column must be trimmed"
+        );
+        let mut keys: Vec<&str> = r.values.keys().map(|k| k.as_ref()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["a", "b"], "only the selected columns remain");
+    }
+
+    /// Issue #1952 (round-6 HIGH, second defect): a selected column ABSENT from a
+    /// sparse row must be OMITTED by the trim, never an error. Pre-fix
+    /// `execute_projection` called `evaluate_select_expression(Column)`, which
+    /// returns `Err("Column not found: <col>")` for an absent cell — so a sparse
+    /// row aborted the whole query. This pins the tolerant trim AND documents the
+    /// contrasting pre-fix defect (`execute_projection` still errors on the same
+    /// input), proving the regression is real.
+    #[tokio::test]
+    async fn trim_projection_tolerates_absent_selected_cell() {
+        let executor = create_test_executor().await;
+
+        // SELECT a, b — but this row is sparse: it has `a` (and a helper) but no `b`.
+        let columns = vec![
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "a".to_string(),
+            }),
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "b".to_string(),
+            }),
+        ];
+
+        let build_row = || {
+            let mut row = QueryRow::new(RowKey::new(vec![1]));
+            row.set("a", Value::Integer(10));
+            row.set("helper", Value::Integer(99));
+            row
+        };
+
+        // NEW trim path: no error; `b` simply omitted, `a` kept, helper trimmed,
+        // key preserved.
+        let out = executor.trim_projection(vec![build_row()], &columns);
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+        assert_eq!(r.key.0, vec![1], "sparse row keeps its real key");
+        assert_eq!(r.values.get("a"), Some(&Value::Integer(10)));
+        assert!(
+            !r.values.contains_key("b"),
+            "absent selected cell `b` is omitted, not defaulted"
+        );
+        assert!(!r.values.contains_key("helper"), "helper trimmed");
+
+        // CONTRAST: the pre-fix path (`execute_projection`) ERRORS on the same
+        // sparse input — this is exactly the defect the trim fixes.
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+        let err = executor
+            .execute_projection(vec![build_row()], &columns, &mut ctx)
+            .expect_err("pre-fix execute_projection must error on the absent cell");
+        assert!(
+            err.to_string().contains("Column not found"),
+            "the pre-fix defect is a 'Column not found' error on a sparse row; got: {err}"
+        );
     }
 
     /// Issue #1590 (E8): `execute_limit` now applies OFFSET via `skip`/`take`
@@ -2017,6 +2241,101 @@ mod tests {
         assert_eq!(
             cols[0].name, "wt",
             "Alias must override Cassandra convention"
+        );
+    }
+
+    /// Build an optimized plan for `sql` against a fixed 4-column table, so
+    /// `requires_materialization` can be asserted directly (issue #1952 streaming
+    /// follow-up). The scan projection is the #1952 broadened union (selected +
+    /// WHERE/ORDER BY/GROUP BY/agg-arg helper columns).
+    async fn plan_for(sql: &str) -> OptimizedQueryPlan {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        schema
+            .parse_and_register_cql_schema(
+                "CREATE TABLE ks.t (id int PRIMARY KEY, a int, b int, c int)",
+            )
+            .await
+            .expect("schema registers");
+        let optimizer =
+            crate::query::select_optimizer::SelectOptimizer::new(schema.clone(), storage.clone());
+        let statement = crate::query::select_parser::parse_select(sql).unwrap();
+        optimizer.optimize(statement).await.unwrap()
+    }
+
+    /// #1952 streaming follow-up: a plain-column `SELECT` filtered by an
+    /// UNSELECTED WHERE column produces a scan projection (`a`,`b`) wider than the
+    /// SELECT output (`a`). The `Project` step must TRIM `b`; the streaming
+    /// producer ignores `Project`, so the plan MUST be routed through the
+    /// materialized path. Pre-fix this returned `false` (streaming leaked `b`).
+    #[tokio::test]
+    async fn requires_materialization_for_where_helper_trim() {
+        let plan = plan_for("SELECT a FROM ks.t WHERE b = 1").await;
+        let executor = create_test_executor().await;
+        assert!(
+            executor.requires_materialization(&plan),
+            "SELECT a WHERE b=1 scans [a,b] but outputs [a]; the Project TRIM of \
+             the helper column `b` must force materialization (streaming ignores \
+             Project and would leak `b`)"
+        );
+    }
+
+    /// #1952 streaming follow-up: an ORDER BY + WHERE query over UNSELECTED helper
+    /// columns must materialize (the trim path is additionally guaranteed by the
+    /// Sort step, but the projection-set check alone already forces it).
+    #[tokio::test]
+    async fn requires_materialization_for_order_by_helper_trim() {
+        let plan = plan_for("SELECT a FROM ks.t WHERE b = 1 ORDER BY c").await;
+        let executor = create_test_executor().await;
+        assert!(
+            executor.requires_materialization(&plan),
+            "SELECT a WHERE b=1 ORDER BY c scans [a,b,c] but outputs [a]; must \
+             materialize to trim helper columns b,c"
+        );
+    }
+
+    /// Regression: when the selected columns EXACTLY equal the scan projection
+    /// (no helper columns, no reshape) the optimizer emits NO redundant `Project`
+    /// and the plan streams directly — this must NOT be forced into
+    /// materialization (no perf regression for the common case).
+    #[tokio::test]
+    async fn no_materialization_when_output_equals_scan() {
+        // Both selected columns are exactly the scan set (WHERE column `a` is
+        // already selected), so there is no helper column to trim.
+        let plan = plan_for("SELECT a, b FROM ks.t WHERE a = 1").await;
+        let executor = create_test_executor().await;
+        assert!(
+            !executor.requires_materialization(&plan),
+            "SELECT a,b WHERE a=1 scans exactly [a,b] and outputs [a,b]; it must \
+             stream directly without materialization"
+        );
+    }
+
+    /// Regression: a reordered SELECT whose WHERE column is already selected
+    /// (`SELECT b, a WHERE a = 1`) has output set {a,b} == scan set {a,b}, so it
+    /// streams directly — `project_trims_scan_columns` compares SETS (not order),
+    /// so no false materialization is triggered.
+    #[tokio::test]
+    async fn no_materialization_for_reordered_select_no_helpers() {
+        let plan = plan_for("SELECT b, a FROM ks.t WHERE a = 1").await;
+        let executor = create_test_executor().await;
+        assert!(
+            !executor.requires_materialization(&plan),
+            "a reordered select with no helper columns (same column set) must \
+             stream directly"
         );
     }
 }

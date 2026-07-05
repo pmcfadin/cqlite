@@ -60,6 +60,33 @@ pub(crate) fn unwrap_aggregate(expr: &SelectExpression) -> Option<&AggregateFunc
     }
 }
 
+/// Source (stored) column names referenced by an aggregate's ARGUMENT
+/// expressions, excluding the `*` wildcard.
+///
+/// Issue #1952: the SSTable scan projection MUST include these so grouped,
+/// non-star aggregates read their input cells. `build_row_from_scan` filters
+/// decoded cells by the scan projection; without the argument column a grouped
+/// query that also projects a group dimension (`SELECT category, SUM(value) ...
+/// GROUP BY category`) scans ONLY the dimension and silently aggregates from
+/// missing inputs (SUM/AVG → 0/null, COUNT(col) → 0, MIN/MAX → null). Returns an
+/// empty vec for non-aggregate expressions and for `COUNT(*)` (no argument
+/// column). The SOURCE column is read directly (never an alias), matching the
+/// column the aggregation plan accumulates via [`aggregate_column_and_alias`].
+pub(crate) fn aggregate_arg_source_columns(expr: &SelectExpression) -> Vec<String> {
+    let Some(agg) = unwrap_aggregate(expr) else {
+        return Vec::new();
+    };
+    agg.args
+        .iter()
+        .filter_map(|arg| match arg {
+            SelectExpression::Column(col_ref) if col_ref.column != "*" => {
+                Some(col_ref.column.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The output column name for a (possibly aliased) aggregate SELECT expression,
 /// or `None` if `expr` is not an aggregate.
 ///
@@ -187,6 +214,24 @@ mod tests {
         assert_eq!(extract_column_name(&col("name")).as_deref(), Some("name"));
         let aliased_col = SelectExpression::Aliased(Box::new(col("name")), "n".to_string());
         assert_eq!(extract_column_name(&aliased_col).as_deref(), Some("n"));
+    }
+
+    /// Issue #1952: aggregate argument source columns are extracted for the scan
+    /// projection — the SOURCE column for a named aggregate, nothing for
+    /// `COUNT(*)` or a non-aggregate, so the scan never drops an aggregate input.
+    #[test]
+    fn aggregate_arg_source_columns_extracts_named_argument_only() {
+        assert_eq!(
+            aggregate_arg_source_columns(&sum_of("value")),
+            vec!["value"]
+        );
+        // COUNT(*) references no stored column.
+        assert!(aggregate_arg_source_columns(&count_star()).is_empty());
+        // Aliased aggregate still yields its inner argument's source column.
+        let aliased = SelectExpression::Aliased(Box::new(sum_of("value")), "s".to_string());
+        assert_eq!(aggregate_arg_source_columns(&aliased), vec!["value"]);
+        // Plain columns / non-aggregates contribute no aggregate-argument columns.
+        assert!(aggregate_arg_source_columns(&col("value")).is_empty());
     }
 
     /// A non-aggregate expression is not an aggregate name and falls back to the
