@@ -14,59 +14,69 @@ use super::comparator_value_parsing::parse_value_with_comparator as decode_scala
 // ============================================================================
 // Scalar decode shims (issue #1636 / J2)
 //
-// These are thin delegations to the ONE scalar decode body in
-// `comparator_value_parsing::parse_value_with_comparator` — the single owner of
-// per-type scalar decoding. They exist only to preserve the small
-// `parse_*_value` test/call surface; they carry no decode logic of their own, so
-// a scalar type fix still lands in exactly one place.
+// Test-only thin delegations to the ONE scalar decode body in
+// `comparator_value_parsing::parse_value_with_comparator` (the single owner of
+// per-type scalar decoding). Production code routes scalars there directly (the
+// `_ => decode_scalar_comparator(..)` arms below), so these carry NO decode logic
+// and exist only as the `parse_*_value` unit-test surface — hence `#[cfg(test)]`.
 // ============================================================================
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_boolean_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::Boolean)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_tinyint_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::TinyInt)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_smallint_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::SmallInt)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_int_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::Int)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_bigint_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::BigInt)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_counter_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::Counter)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_text_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::Text)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_blob_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::Blob)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_uuid_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::Uuid)
 }
 
-/// Decode a scalar value through the single scalar decode body.
+/// Decode a scalar value through the single scalar decode body (test surface).
+#[cfg(test)]
 pub(crate) fn parse_date_value(data: &[u8]) -> Result<Value> {
     decode_scalar_comparator(data, &ComparatorType::Date)
 }
