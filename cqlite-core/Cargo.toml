@@ -46,6 +46,11 @@ crc32fast = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 lru = "0.16"
+# Stack-backed worklist for the write-path size estimator so shallow/normal
+# mutations incur ZERO heap allocation on the admission/accounting hot path
+# (issue #1625). Already compiled transitively (via dashmap/parking_lot), so
+# this direct dependency adds nothing to the build tree.
+smallvec = "1"
 
 # Memory management
 bytes = { workspace = true }

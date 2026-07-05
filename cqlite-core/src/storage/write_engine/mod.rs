@@ -67,6 +67,10 @@ mod stats;
 mod sweep;
 #[cfg(all(test, feature = "write-support"))]
 mod test_support;
+// Issue #1625: honest memtable hard-limit admission tests live in a sibling
+// module to avoid growing the already-oversized `mod.rs` (epic #1116/#1135).
+#[cfg(all(test, feature = "write-support"))]
+mod admission_tests;
 
 #[cfg(feature = "write-support")]
 pub use maintenance::MaintenanceReport;
@@ -840,14 +844,9 @@ impl WriteEngine {
 
         reject_counter_cells(&mutation)?;
 
-        // Check hard limit before accepting write
-        if self.memtable.size_bytes() >= self.config.memtable_hard_limit {
-            return Err(Error::Storage(format!(
-                "Memtable at hard limit ({} bytes >= {} bytes). Flush required before accepting more writes.",
-                self.memtable.size_bytes(),
-                self.config.memtable_hard_limit
-            )));
-        }
+        // Honest hard-limit admission: gate on current size + the INCOMING
+        // mutation's estimated size, and reject a lone jumbo write (issue #1625).
+        self.check_admission(&mutation)?;
 
         // 1. Append to WAL (durability) — skipped when Durability::Disabled
         if self.config.durability == Durability::SyncEachWrite {
@@ -866,6 +865,61 @@ impl WriteEngine {
         self.rows_written += 1;
         crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
         self.record_memtable_gauges();
+
+        Ok(())
+    }
+
+    /// Honest memtable hard-limit admission (issue #1625).
+    ///
+    /// The pre-#1625 check compared only the *current* memtable size against the
+    /// hard limit — it never measured the incoming mutation, so (a) a single
+    /// jumbo mutation could be admitted into an empty memtable and blow straight
+    /// past the limit, and (b) a mutation could push a nearly-full memtable over
+    /// the limit before the next write was rejected. This gate measures the
+    /// incoming mutation with the SAME estimator the memtable uses for
+    /// accounting, then:
+    ///
+    /// 1. Rejects any single mutation whose estimate alone exceeds the hard
+    ///    limit (the ceiling for one mutation is the hard limit itself) with a
+    ///    distinct error, so a lone jumbo write can never be admitted.
+    /// 2. Rejects the write when `current_size + incoming` would exceed the hard
+    ///    limit (`saturating_add`, so the sum can never overflow `usize`).
+    fn check_admission(&self, mutation: &Mutation) -> Result<()> {
+        let hard_limit = self.config.memtable_hard_limit;
+        let incoming = self.memtable.estimate_mutation_size(mutation);
+
+        // (0) Fail-closed sentinel: the estimator returns `usize::MAX` when a
+        // mutation is pathological/unmeasurable (node-cap hit). Reject it
+        // EXPLICITLY and unconditionally — a `>` comparison against a
+        // configurable `hard_limit == usize::MAX` would otherwise be false and
+        // admit the very mutation the sentinel is meant to fence off.
+        if incoming == usize::MAX {
+            return Err(Error::Storage(
+                "Write rejected: mutation size could not be bounded (estimator \
+                 fail-closed sentinel); refusing admission"
+                    .to_string(),
+            ));
+        }
+
+        // (1) Single-mutation ceiling: one mutation may not exceed the hard
+        // limit on its own, regardless of how empty the memtable is.
+        if incoming > hard_limit {
+            return Err(Error::Storage(format!(
+                "Write rejected: single mutation estimated at {incoming} bytes exceeds \
+                 memtable hard limit {hard_limit} bytes (a single mutation may not exceed \
+                 the hard limit)"
+            )));
+        }
+
+        // (2) Projected sum: never admit a write that would push the memtable
+        // over the hard limit.
+        let projected = self.memtable.size_bytes().saturating_add(incoming);
+        if projected > hard_limit {
+            return Err(Error::Storage(format!(
+                "Write rejected: memtable {} + mutation {incoming} would exceed hard limit {hard_limit}",
+                self.memtable.size_bytes()
+            )));
+        }
 
         Ok(())
     }
@@ -904,14 +958,9 @@ impl WriteEngine {
 
         reject_counter_cells(&mutation)?;
 
-        // Check hard limit before accepting write
-        if self.memtable.size_bytes() >= self.config.memtable_hard_limit {
-            return Err(Error::Storage(format!(
-                "Memtable at hard limit ({} bytes >= {} bytes). Flush required before accepting more writes.",
-                self.memtable.size_bytes(),
-                self.config.memtable_hard_limit
-            )));
-        }
+        // Honest hard-limit admission: gate on current size + the INCOMING
+        // mutation's estimated size, and reject a lone jumbo write (issue #1625).
+        self.check_admission(&mutation)?;
 
         // 1. Append to WAL (durability) — skipped when Durability::Disabled
         if self.config.durability == Durability::SyncEachWrite {
