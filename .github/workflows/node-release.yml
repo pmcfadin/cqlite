@@ -176,6 +176,17 @@ jobs:
           else
             PRERELEASE=false
           fi
+          # Release integrity (issue #2026): a manual dispatch may only
+          # (re)publish a version that ALREADY has a git tag. This prevents
+          # publishing an arbitrary branch version and keeps the "never
+          # rewrite/create the tag" invariant — VERSION is validated semver, so
+          # the quoted ref arg is safe.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+              echo "::error::Refusing to publish: git tag v${VERSION} does not exist (dispatch may only republish an already-tagged release)"
+              exit 1
+            fi
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
           echo "Resolved publish version: $VERSION (prerelease=$PRERELEASE)"
@@ -336,6 +347,16 @@ jobs:
             PRERELEASE=true
           else
             PRERELEASE=false
+          fi
+          # Release integrity (issue #2026): on manual dispatch the tag must
+          # already exist so action-gh-release attaches to it rather than
+          # creating a new tag from the selected branch. VERSION is validated
+          # semver, so the quoted ref arg is safe.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+              echo "::error::Refusing to release: git tag v${VERSION} does not exist (dispatch must not create/rewrite the tag)"
+              exit 1
+            fi
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
