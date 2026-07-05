@@ -322,9 +322,13 @@ run_test_suite() {
     echo ""
 
     # Test 1: Basic SELECT with JSON output (simple_table)
+    # ORDER BY id (#1997): simple_table is single-PK (id UUID, no clustering), so an
+    # unordered LIMIT returns storage/token order which drifts across engine changes
+    # and flaps the snapshot. ORDER BY id makes it deterministic; the output is
+    # byte-identical to the committed golden (id-sorted).
     run_test \
         "test_select_json_simple" \
-        "SELECT * FROM test_basic.simple_table LIMIT 3" \
+        "SELECT * FROM test_basic.simple_table ORDER BY id LIMIT 3" \
         "json" \
         0 \
         "${SNAPSHOTS_DIR}/select_simple_json.golden"
