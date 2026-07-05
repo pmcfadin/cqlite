@@ -238,23 +238,26 @@ fn corpus_audit_missing_reference_exits_nonzero_and_names_finding() {
     );
 }
 
+/// Issue #2009 (CLI E2E for the component-change path): the
+/// `exhaustive_regeneration` tier is a COVERAGE/PRESENCE audit, NOT a byte-drift
+/// tier. Drive `--checksums` + `--expected-inventory` through the binary with a
+/// deliberate checksum DRIFT for a stable, PRESENT table+component identity and
+/// assert the audit stays clean (exit 0, no UNEXPECTED-COMPONENT-CHANGE). This is
+/// the only test exercising the disk -> `read_sha256_file` ->
+/// `check_component_changes` glue end-to-end with a drift, proving presence alone
+/// passes regardless of SHA256 (byte-parity lives in the sstabledump-parity-gate
+/// + nightly_docker tiers).
 #[test]
-fn corpus_audit_component_checksum_drift_exits_nonzero_and_names_finding() {
-    // Finding 5 (CLI E2E for the component-change path): drive `--checksums` +
-    // `--expected-inventory` through the binary with a deliberate checksum drift
-    // for a stable table+component identity. This is the only test that exercises
-    // the disk -> `read_sha256_file` -> `check_component_changes` glue end-to-end
-    // — the `UnexpectedComponentChange` path rewritten for the prior HIGH fix —
-    // which the other CLI tests never reach (they leave both inventories empty).
+fn corpus_audit_component_checksum_drift_stays_clean_under_presence_contract() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     write_common(root);
     write_reference_file(root);
     write_provenance(root);
 
-    // A stable, UUID-independent component identity (table_key/basename) that the
-    // committed-expected golden and the regenerated-actual checksums agree on,
-    // but with drifted SHA256s -> exactly one UNEXPECTED-COMPONENT-CHANGE finding.
+    // A stable, UUID-independent component identity (table_key/basename) present
+    // in both the committed-expected golden and the regenerated-actual checksums,
+    // but with drifted SHA256s -> under the coverage tier this must NOT fire.
     let component =
         format!("test-data/datasets/sstables/test_basic/simple_table-{UUID}/nb-1-big-Data.db");
     let expected_sha = "1".repeat(64);
@@ -297,16 +300,12 @@ fn corpus_audit_component_checksum_drift_exits_nonzero_and_names_finding() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !out.status.success(),
-        "expected non-zero exit for a component checksum drift, got: {combined}"
+        out.status.success(),
+        "a present identity with a drifted SHA256 must exit 0 (coverage tier), got: {combined}"
     );
     assert!(
-        combined.contains("UNEXPECTED-COMPONENT-CHANGE"),
-        "expected a named UNEXPECTED-COMPONENT-CHANGE finding, got: {combined}"
-    );
-    assert!(
-        combined.contains(&actual_sha) && combined.contains(&expected_sha),
-        "finding must name the drifted expected/regenerated checksums, got: {combined}"
+        !combined.contains("UNEXPECTED-COMPONENT-CHANGE"),
+        "no UNEXPECTED-COMPONENT-CHANGE finding may fire for a present-but-drifted identity, got: {combined}"
     );
 }
 

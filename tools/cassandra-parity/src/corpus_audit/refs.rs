@@ -98,6 +98,18 @@ fn is_corpus(path: &str) -> bool {
     path.starts_with(CORPUS_PREFIX)
 }
 
+/// True when any `/`-separated segment of `path` names a Cassandra system
+/// keyspace — exactly `system` or any `system_*` (covers `system`,
+/// `system_schema`, `system_auth`, `system_distributed`, `system_traces`,
+/// `system_views`, `system_virtual_schema`). The COVERAGE/PRESENCE audit
+/// excludes these from the expected inventory because a system keyspace's
+/// on-disk contents are inherently run-dependent and must not red the lane
+/// (issue #2009).
+pub fn is_system_keyspace_path(path: &str) -> bool {
+    path.split('/')
+        .any(|seg| seg == "system" || seg.starts_with("system_"))
+}
+
 /// A UUID-independent identity for a single component file: its [`table_key`]
 /// (parent directory with the trailing `-<uuid>` stripped) joined with its
 /// basename. So the same golden under `simple_table-<uuidA>/nb-1-big-Data.db.jsonl`

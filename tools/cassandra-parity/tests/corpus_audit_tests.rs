@@ -246,10 +246,13 @@ fn uuid_churn_alone_does_not_fire_unexpected_component_change() {
     );
 }
 
-/// A genuine checksum drift of a STABLE identity (same table+component) is still
-/// caught even though the regeneration churned the UUID directory.
+/// Issue #2009: the `exhaustive_regeneration` tier is a COVERAGE/PRESENCE audit,
+/// NOT a byte-drift/checksum tier. A checksum drift of a STABLE identity that is
+/// still PRESENT in the regenerated corpus (even under a churned UUID directory)
+/// must produce ZERO findings — presence alone passes. Byte-parity is owned by
+/// the sstabledump-parity-gate + nightly_docker tiers on the committed corpus.
 #[test]
-fn unexpected_component_change_fires_on_checksum_drift_across_uuid_churn() {
+fn unexpected_component_change_does_not_fire_on_checksum_drift_across_uuid_churn() {
     let regenerated = REF.replace(
         "simple_table-aaaa0000000000000000000000000001",
         "simple_table-bbbb0000000000000000000000000002",
@@ -267,12 +270,10 @@ fn unexpected_component_change_fires_on_checksum_drift_across_uuid_churn() {
             components: expected,
         },
     );
-    assert_eq!(
-        findings.len(),
-        1,
-        "drift under a stable identity must fire exactly one finding, got: {findings:?}"
+    assert!(
+        findings.is_empty(),
+        "a PRESENT identity must pass regardless of SHA256 (coverage tier), got: {findings:?}"
     );
-    assert_eq!(findings[0].kind, FindingKind::UnexpectedComponentChange);
 }
 
 /// A genuinely removed component (expected identity has no regenerated match at
@@ -299,8 +300,11 @@ fn unexpected_component_change_fires_on_removed_component() {
         .any(|f| f.kind == FindingKind::UnexpectedComponentChange && f.detail.contains("absent")));
 }
 
+/// Issue #2009 (full-audit path): a present component identity whose SHA256
+/// drifted must NOT fire under the COVERAGE/PRESENCE contract — the whole audit
+/// stays clean (byte-drift is not this tier's job).
 #[test]
-fn unexpected_component_change_fails_on_checksum_drift() {
+fn unexpected_component_change_does_not_fire_on_checksum_drift() {
     let comp = REF.to_string();
     let mut expected = BTreeMap::new();
     expected.insert(comp.clone(), "expected_sha".to_string());
@@ -318,9 +322,52 @@ fn unexpected_component_change_fails_on_checksum_drift() {
         Some(&good_provenance()),
         &all_corruption_fixtures(),
     );
-    assert!(!report.ok());
-    assert_eq!(report.count(FindingKind::UnexpectedComponentChange), 1);
-    assert!(report.render().contains(&comp));
+    assert!(
+        report.ok(),
+        "a present identity with a drifted SHA256 must pass the coverage tier, got: {}",
+        report.render()
+    );
+    assert_eq!(report.count(FindingKind::UnexpectedComponentChange), 0);
+}
+
+/// Issue #2009: `system*` keyspaces are excluded from the expected inventory
+/// (their on-disk contents are inherently run-dependent). An ABSENT expected
+/// component under `system` or `system_schema` produces ZERO findings, while an
+/// ABSENT non-system component still fires — proving the exclusion is scoped.
+#[test]
+fn system_keyspace_components_are_excluded_from_presence_check() {
+    let system =
+        "test-data/datasets/sstables/system/local-1234/nb-1-big-Statistics.db".to_string();
+    let system_schema =
+        "test-data/datasets/sstables/system_schema/tables-5678/nb-1-big-Statistics.db".to_string();
+    let non_system =
+        "test-data/datasets/sstables/test_basic/simple_table-abcd/nb-1-big-Statistics.db"
+            .to_string();
+
+    let mut expected = BTreeMap::new();
+    expected.insert(system, "sha_a".to_string());
+    expected.insert(system_schema, "sha_b".to_string());
+    expected.insert(non_system.clone(), "sha_c".to_string());
+
+    // Regenerated corpus reproduces NONE of them (empty checksums).
+    let inv = CorpusInventory::default();
+
+    let findings = corpus_audit::check_component_changes(
+        &inv,
+        &ExpectedInventory {
+            components: expected,
+        },
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "only the absent NON-system component should fire, got: {findings:?}"
+    );
+    assert_eq!(findings[0].kind, FindingKind::UnexpectedComponentChange);
+    assert!(
+        findings[0].subject.contains(&non_system) && findings[0].detail.contains("absent"),
+        "the single finding must name the non-system absent component, got: {findings:?}"
+    );
 }
 
 #[test]
