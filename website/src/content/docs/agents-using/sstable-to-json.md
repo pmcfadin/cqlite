@@ -91,7 +91,6 @@ Use `--overwrite` to replace an existing file (exit code `6` if the file exists 
 | No `--schema` flag | `Error: Schema not found for table 'simple_table'` | Add `--schema path/to/schema.cql` |
 | Wrong table name | `Error: Schema not found for table 'bad_name'` | Check table name matches schema |
 | Output file exists | exit code `6` | Add `--overwrite` |
-| BTI-format SSTable | WARN on stderr, 0 rows returned | BTI (`da-` prefix) not supported; use `nb-` SSTables |
 
 ## Type mapping
 

@@ -27,7 +27,7 @@ For the exhaustive engineering detail, see [Appendix F: Known Limitations](/cqli
 | `md-*` | Cassandra 4.0–4.1 | **Not supported** |
 | `mc-*` | Cassandra 3.11 | **Not supported** |
 | `la-*`, `ma-*` | Cassandra 3.x | **Not supported** |
-| `da-*-bti-*` / BTI format (Partitions.db / Rows.db) | Cassandra 5.0 opt-in | **Not supported** — detected and rejected with a clear error; see below |
+| `da-*-bti-*` / BTI format (Partitions.db / Rows.db) | Cassandra 5.0 opt-in | **Full** — read end-to-end and canonical `da` write since v0.12 |
 
 CQLite targets Cassandra 5.0 exclusively. If you need older formats, export your
 data with Cassandra's `sstabledump` tool first.
@@ -40,7 +40,7 @@ The default Cassandra 5.0 index format (`nb-*-big-Index.db` / `nb-*-big-Summary.
 is fully supported. All 33 test tables in the CQLite test corpus use this format and
 pass validation against `sstabledump` output.
 
-### BTI format (`da`) — not yet supported, fails cleanly
+### BTI format (`da`) — supported (read + write)
 
 BTI (trie-based index) is an opt-in feature in Cassandra 5.0, enabled with
 `selected_format: bti` in `cassandra.yaml`. It produces `da-*-bti-*` SSTables with
@@ -88,13 +88,11 @@ within-partition seeks. CQLite must scan rows linearly within the partition.
 - Narrow partitions (less than 100 rows): no impact
 - Wide partitions (10 000+ rows): O(n) linear scan within the partition
 
-### BTI format writing not implemented
+### BTI format writing supported
 
-The write engine produces BIG-format SSTables only. BTI-format writing
-(`Partitions.db`, `Rows.db`) is not implemented.
-
-**Rationale**: BTI is opt-in in Cassandra 5.0 and covers less than 5% of production
-deployments. BIG format covers all current use cases.
+Since v0.12, the write engine emits canonical `da`-format (BTI) SSTables with
+`Partitions.db` / `Rows.db` trie indexes in addition to the default BIG format
+(#872). BIG remains the default write target.
 
 ### IndexWriter memory buffering
 
@@ -155,12 +153,9 @@ or use Cassandra's `sstabledump` to export to JSON and reimport.
 
 ### BTI format (trie index)
 
-If your Cassandra cluster is configured with `selected_format: bti`, CQLite detects
-the `da-*-bti-*` SSTables and rejects them with a clear error rather than misreading
-them. Convert them to the default BIG format first — run `nodetool upgradesstables`
-after switching `selected_format` back to `big`, or export with `sstabledump`.
-End-to-end BTI read support is on the [roadmap](/cqlite/user-docs/roadmap/)
-([#660](https://github.com/pmcfadin/cqlite/issues/660)).
+If your Cassandra cluster is configured with `selected_format: bti`, CQLite reads
+the `da-*-bti-*` SSTables end-to-end via a dedicated trie-walk read path (#897) and
+can also write canonical `da`-format SSTables (#872) — no conversion needed.
 
 ### Wide partitions
 

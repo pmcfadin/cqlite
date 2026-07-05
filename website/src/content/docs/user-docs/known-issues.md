@@ -53,16 +53,6 @@ write path. The promoted-index writer and BTI-based O(log n) seeks are on the
 [roadmap](/cqlite/user-docs/roadmap/) (epic
 [#751](https://github.com/pmcfadin/cqlite/issues/751)).
 
-## Format coverage
-
-### BTI (`da`) SSTables are rejected, not read
-
-BTI/trie-index SSTables (`da-*-bti-*`, opt-in in Cassandra 5.0) are detected and
-rejected with a clear error rather than misread. This is by design until the
-dedicated BTI read path lands — see
-[Limitations](/cqlite/user-docs/limitations/) and roadmap item
-[#660](https://github.com/pmcfadin/cqlite/issues/660).
-
 ## Reporting something new
 
 If you hit a bug — wrong output, a panic, a parsing error, a performance cliff —
