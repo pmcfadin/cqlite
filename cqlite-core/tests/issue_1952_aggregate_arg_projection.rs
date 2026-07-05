@@ -531,6 +531,148 @@ async fn streaming_exact_match_projection_still_streams_correctly() {
     }
 }
 
+/// Parse a canonical UUID string (`xxxxxxxx-xxxx-...`) into its 16 raw bytes,
+/// matching `Value::Uuid([u8; 16])`.
+fn uuid_bytes(s: &str) -> [u8; 16] {
+    let hex: String = s.chars().filter(|c| *c != '-').collect();
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .unwrap_or_else(|_| panic!("bad uuid hex in {s}"));
+    }
+    out
+}
+
+/// #1952 (round-6 HIGH): a NON-aggregate, plain-column SELECT whose WHERE
+/// references an UNSELECTED column must PRESERVE each returned row's real
+/// partition/clustering `RowKey`. Pre-fix the kept `Project` step routed these
+/// bare-column selects through `SelectExecutor::execute_projection`, which
+/// rebuilt every row with an EMPTY `RowKey` (`vec![]`) — a #1587-class regression
+/// destroying the key downstream consumers (per-partition-limit boundary
+/// detection, dedup, ordering) rely on. This FAILS pre-fix (empty key).
+#[tokio::test]
+async fn nonaggregate_select_preserves_row_key() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT tenant_id, name \
+             FROM test_basic.multi_partition_table WHERE category = 'A'",
+        )
+        .await
+        .expect("non-aggregate filtered SELECT must execute");
+
+    assert_eq!(
+        result.rows.len(),
+        36,
+        "category A has 36 rows; got {}",
+        result.rows.len()
+    );
+    for row in &result.rows {
+        assert!(
+            !row.key.0.is_empty(),
+            "each returned row must carry its real (non-empty) partition key; \
+             pre-fix `execute_projection` destroyed it to vec![] (#1587-class \
+             regression)"
+        );
+    }
+}
+
+/// #1952 (round-6) audit guard: the UNSELECTED WHERE helper column (`category`)
+/// must NOT leak into a plain-column SELECT's output rows after the trim.
+#[tokio::test]
+async fn nonaggregate_select_does_not_leak_where_helper() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT tenant_id, name \
+             FROM test_basic.multi_partition_table WHERE category = 'A'",
+        )
+        .await
+        .expect("non-aggregate filtered SELECT must execute");
+
+    assert_eq!(result.rows.len(), 36, "category A has 36 rows");
+    for row in &result.rows {
+        assert!(
+            !row.values.contains_key("category"),
+            "the unselected WHERE helper column `category` must be trimmed, not \
+             leaked into the output row"
+        );
+        let mut keys: Vec<&str> = row.values.keys().map(|k| k.as_ref()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["name", "tenant_id"],
+            "output row must contain exactly the selected columns"
+        );
+    }
+}
+
+/// #1952 (round-6) value parity: selected column values for the filtered rows
+/// match the committed JSONL golden. Three known category-A rows (keyed by
+/// partition `tenant_id`) must carry their exact golden `name`, and the row's
+/// preserved key must contain the partition-key tenant_id bytes.
+#[tokio::test]
+async fn nonaggregate_select_value_parity_with_golden() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT tenant_id, name \
+             FROM test_basic.multi_partition_table WHERE category = 'A'",
+        )
+        .await
+        .expect("non-aggregate filtered SELECT must execute");
+
+    // (tenant_id, expected name) triples taken directly from nb-1-big-Data.db.jsonl
+    // for category A.
+    let expected: &[(&str, &str)] = &[
+        ("98e05820-982d-411c-961f-26d1057474e4", "Mrs"),
+        ("a75b0a43-21c4-4561-8331-472a710f2e37", "position"),
+        ("17213719-bb70-453b-8398-7cd097ca9d11", "return"),
+    ];
+
+    for &(tid, expected_name) in expected {
+        let tid_bytes = uuid_bytes(tid);
+        let row = result
+            .rows
+            .iter()
+            .find(|r| matches!(r.values.get("tenant_id"), Some(Value::Uuid(b)) if *b == tid_bytes))
+            .unwrap_or_else(|| panic!("row for tenant_id {tid} not found in result"));
+
+        assert_eq!(
+            row.values.get("name"),
+            Some(&Value::Text(expected_name.to_string())),
+            "name for tenant_id {tid} must match the golden value"
+        );
+        // The preserved partition key must embed the tenant_id bytes (composite
+        // PK `(tenant_id, user_id)`), proving the key is real, not vec![].
+        assert!(
+            row.key.0.windows(16).any(|w| w == tid_bytes),
+            "preserved partition key must contain the tenant_id bytes for {tid}"
+        );
+    }
+}
+
 /// Regression guard: `COUNT(*)` grouped needs no argument column and must stay
 /// correct after the projection change (the group size per category).
 #[tokio::test]

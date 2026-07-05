@@ -1055,6 +1055,56 @@ impl SelectExecutor {
         Ok(projected_rows)
     }
 
+    /// Trim a plain-column `Project` down to its selected columns WITHOUT
+    /// reshaping the row (issue #1952 round-6 fix).
+    ///
+    /// The Project step's ONLY job for a plain-column SELECT (every expr is a
+    /// bare `Column`) is to drop the helper columns the #1952 scan-widening added
+    /// (WHERE / ORDER BY / GROUP BY / aggregate-argument columns that are not in
+    /// the SELECT clause). It is NOT a reshape: a plain column is identity-named,
+    /// so there are no new names to derive (#1763's alias/reshape naming does not
+    /// apply) and no computed values to build.
+    ///
+    /// Unlike [`Self::execute_projection`] — which is correct for reshaping /
+    /// computed rows but rebuilds each row with an EMPTY `RowKey` and errors on a
+    /// selected cell that is absent from a sparse row — this preserves each row's
+    /// real `key` (partition/clustering key), `metadata`, and `cell_metadata`
+    /// unchanged, and simply omits any selected cell that a sparse row lacks
+    /// (never an error). Preserving the key is the #1587-class contract downstream
+    /// consumers (per-partition-limit boundary detection, dedup, ordering, callers
+    /// inspecting `row.key`) rely on; before #1952 these bare-column selects
+    /// skipped the Project entirely and streamed the RAW keyed row.
+    ///
+    /// Rows are name-keyed maps and output column ORDER is carried by the query
+    /// metadata, so trimming = retaining the correct SET of named cells in place.
+    fn trim_projection(
+        &self,
+        mut rows: Vec<QueryRow>,
+        columns: &[SelectExpression],
+    ) -> Vec<QueryRow> {
+        // The selected plain-column source names. This method is only reached
+        // when every projection expr is a plain `Column` (the caller gates on
+        // `!columns.iter().any(project_expr_reshapes_row)`), so every expr
+        // contributes its source name and none reshapes.
+        let selected: std::collections::HashSet<&str> = columns
+            .iter()
+            .filter_map(|e| match e {
+                SelectExpression::Column(c) => Some(c.column.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        for row in &mut rows {
+            // Retain only the selected cells by source-name identity; key,
+            // metadata, and cell_metadata are left untouched. A selected cell
+            // absent from a sparse row is simply not present after the retain —
+            // never an error.
+            row.values
+                .retain(|name, _| selected.contains(name.as_ref()));
+        }
+        rows
+    }
+
     /// Execute a query without FROM clause (constant expressions like SELECT 1)
     fn execute_constant_query(
         &self,
@@ -1498,6 +1548,129 @@ mod tests {
         assert_eq!(projected[0].values.get("b"), Some(&Value::Integer(0)));
         assert_eq!(projected[0].values.get("c"), Some(&Value::Integer(0)));
         assert_eq!(projected[99].values.get("a"), Some(&Value::Integer(99)));
+    }
+
+    /// Issue #1952 (round-6 HIGH): a plain-column `Project` that only TRIMS the
+    /// #1952-widened helper columns must PRESERVE each row's real `RowKey`,
+    /// `metadata`, and `cell_metadata`, and drop only the unselected helper
+    /// columns. Pre-fix these bare-column selects routed through
+    /// `execute_projection`, which rebuilt every row with an EMPTY `RowKey`
+    /// (`vec![]`) — a #1587-class regression. This pins the key-preserving trim.
+    #[tokio::test]
+    async fn trim_projection_preserves_key_and_trims_helpers() {
+        let executor = create_test_executor().await;
+
+        // SELECT a, b  (helper column `helper` was added to the scan by #1952).
+        let columns = vec![
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "a".to_string(),
+            }),
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "b".to_string(),
+            }),
+        ];
+
+        let mut row = QueryRow::new(RowKey::new(vec![7, 8, 9]));
+        row.set("a", Value::Integer(1));
+        row.set("b", Value::Integer(2));
+        row.set("helper", Value::Integer(3));
+        row.set_metadata(crate::query::result::RowMetadata {
+            version: Some(42),
+            ttl: None,
+            tags: Default::default(),
+        });
+
+        let out = executor.trim_projection(vec![row], &columns);
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+
+        // Key PRESERVED (the core regression): not the empty `vec![]`.
+        assert_eq!(
+            r.key.0,
+            vec![7, 8, 9],
+            "trim must preserve the real RowKey, not destroy it to vec![]"
+        );
+        // Row metadata preserved.
+        assert_eq!(
+            r.metadata.version,
+            Some(42),
+            "row metadata must be preserved"
+        );
+        // Selected columns kept, helper trimmed.
+        assert_eq!(r.values.get("a"), Some(&Value::Integer(1)));
+        assert_eq!(r.values.get("b"), Some(&Value::Integer(2)));
+        assert!(
+            !r.values.contains_key("helper"),
+            "the unselected helper column must be trimmed"
+        );
+        let mut keys: Vec<&str> = r.values.keys().map(|k| k.as_ref()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["a", "b"], "only the selected columns remain");
+    }
+
+    /// Issue #1952 (round-6 HIGH, second defect): a selected column ABSENT from a
+    /// sparse row must be OMITTED by the trim, never an error. Pre-fix
+    /// `execute_projection` called `evaluate_select_expression(Column)`, which
+    /// returns `Err("Column not found: <col>")` for an absent cell — so a sparse
+    /// row aborted the whole query. This pins the tolerant trim AND documents the
+    /// contrasting pre-fix defect (`execute_projection` still errors on the same
+    /// input), proving the regression is real.
+    #[tokio::test]
+    async fn trim_projection_tolerates_absent_selected_cell() {
+        let executor = create_test_executor().await;
+
+        // SELECT a, b — but this row is sparse: it has `a` (and a helper) but no `b`.
+        let columns = vec![
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "a".to_string(),
+            }),
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "b".to_string(),
+            }),
+        ];
+
+        let build_row = || {
+            let mut row = QueryRow::new(RowKey::new(vec![1]));
+            row.set("a", Value::Integer(10));
+            row.set("helper", Value::Integer(99));
+            row
+        };
+
+        // NEW trim path: no error; `b` simply omitted, `a` kept, helper trimmed,
+        // key preserved.
+        let out = executor.trim_projection(vec![build_row()], &columns);
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+        assert_eq!(r.key.0, vec![1], "sparse row keeps its real key");
+        assert_eq!(r.values.get("a"), Some(&Value::Integer(10)));
+        assert!(
+            !r.values.contains_key("b"),
+            "absent selected cell `b` is omitted, not defaulted"
+        );
+        assert!(!r.values.contains_key("helper"), "helper trimmed");
+
+        // CONTRAST: the pre-fix path (`execute_projection`) ERRORS on the same
+        // sparse input — this is exactly the defect the trim fixes.
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+        let err = executor
+            .execute_projection(vec![build_row()], &columns, &mut ctx)
+            .expect_err("pre-fix execute_projection must error on the absent cell");
+        assert!(
+            err.to_string().contains("Column not found"),
+            "the pre-fix defect is a 'Column not found' error on a sparse row; got: {err}"
+        );
     }
 
     /// Issue #1590 (E8): `execute_limit` now applies OFFSET via `skip`/`take`

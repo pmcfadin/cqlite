@@ -15,8 +15,9 @@
 
 use super::{
     build_row_from_scan, classify_partition_lookup, column_info_from_type_str, evaluate_predicates,
-    honest_targeted_path, parse_table_id, partition_key_digest, select_has_writetime_ttl,
-    sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
+    honest_targeted_path, parse_table_id, partition_key_digest, project_expr_reshapes_row,
+    select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
+    PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
@@ -203,8 +204,21 @@ impl SelectExecutor {
                         self.execute_limit(intermediate_results, *count, *offset, &mut context)?;
                 }
                 ExecutionStep::Project { columns } => {
-                    intermediate_results =
-                        self.execute_projection(intermediate_results, columns, &mut context)?;
+                    // Issue #1952 (round-6 fix): branch on whether the projection
+                    // RESHAPES the row. A plain-column Project only trims the
+                    // #1952-widened helper columns — route it through the
+                    // key-preserving `trim_projection` so the row keeps its real
+                    // RowKey / metadata and a sparse row's absent selected cell is
+                    // omitted rather than erroring. Only a reshaping / computed
+                    // projection (alias, arithmetic, aggregate, function,
+                    // writetime/ttl, collection-access) goes through
+                    // `execute_projection`, whose empty-RowKey + name-derivation is
+                    // correct for a computed row that has no natural stored key.
+                    intermediate_results = if columns.iter().any(project_expr_reshapes_row) {
+                        self.execute_projection(intermediate_results, columns, &mut context)?
+                    } else {
+                        self.trim_projection(intermediate_results, columns)
+                    };
                 }
             }
         }
