@@ -336,8 +336,7 @@ fn unexpected_component_change_does_not_fire_on_checksum_drift() {
 /// ABSENT non-system component still fires — proving the exclusion is scoped.
 #[test]
 fn system_keyspace_components_are_excluded_from_presence_check() {
-    let system =
-        "test-data/datasets/sstables/system/local-1234/nb-1-big-Statistics.db".to_string();
+    let system = "test-data/datasets/sstables/system/local-1234/nb-1-big-Statistics.db".to_string();
     let system_schema =
         "test-data/datasets/sstables/system_schema/tables-5678/nb-1-big-Statistics.db".to_string();
     let non_system =
