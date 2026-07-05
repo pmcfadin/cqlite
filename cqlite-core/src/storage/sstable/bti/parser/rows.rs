@@ -491,6 +491,18 @@ pub fn resolve_rows_db_entry(rows_db: &[u8], rows_offset: usize) -> BtiResult<Bt
 /// partition (as produced by [`iterate_rows_in_bti_trie`]).  `start`/`end` are
 /// byte-comparable clustering bounds in the **same encoding as the trie keys**.
 /// Reversed bounds (`start > end`) yield an empty result.
+///
+/// ## Implicit first block (issue #1968)
+///
+/// The trie stores a separator per block EXCEPT the first: the block covering
+/// keys BELOW `entries[0]`'s separator lives at the partition body start and has
+/// NO entry here (mirroring `RowIndexReader.separatorFloor`, which returns the
+/// partition start for a key below the first separator).  This function therefore
+/// only ever returns STORED blocks — it CANNOT return that implicit first block.
+/// A caller whose `start` sorts below `entries[0]`'s separator (e.g. an OPEN lower
+/// bound, `start == b""`) MUST additionally decode from the partition body start
+/// so the earliest clustering rows are not dropped; see
+/// `resolve_bti_clustering_seek_window` in `reader/data_access/bti.rs`.
 pub fn select_row_index_blocks_for_range(
     entries: &[(Vec<u8>, BtiRowIndexEntry)],
     start: &[u8],
