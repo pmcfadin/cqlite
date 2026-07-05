@@ -962,7 +962,7 @@ impl SchemaManager {
             None => (None, table_name),
         };
         self.find_schema_by_table(&keyspace, table)
-            .await
+            .await?
             .ok_or_else(|| {
                 Error::schema(format!(
                     "unknown table {}; no schema registered or discovered",
@@ -988,26 +988,29 @@ impl SchemaManager {
 
     /// Find schema by table name with optional keyspace matching.
     ///
-    /// Resolves THROUGH the shared registry (issue #1708); the registry clones
-    /// only the matched schema.
+    /// Resolves THROUGH the shared registry (issue #1708); the registry owns
+    /// freshness (issue #1708 roborev Medium): a fresh matched entry is cloned
+    /// once (issue #1587), an EXPIRED entry is refreshed rather than served
+    /// stale, and an unregistered table yields `Ok(None)` with NO fabrication
+    /// (issue #1710). The registry's refresh error (if any) propagates as `Err`.
     pub async fn find_schema_by_table(
         &self,
         keyspace: &Option<String>,
         table: &str,
-    ) -> Option<TableSchema> {
+    ) -> Result<Option<TableSchema>> {
         let found = self
             .registry
             .read()
             .await
             .find_schema_by_table(keyspace, table)
-            .await;
+            .await?;
         // Preserve the issue #1587 (E5) once-per-query deep-clone accounting: the
         // registry performs exactly one `TableSchema` clone on a hit.
         #[cfg(test)]
         if found.is_some() {
             TABLE_SCHEMA_CLONES.with(|c| c.set(c.get() + 1));
         }
-        found
+        Ok(found)
     }
 
     /// Extract table information from CQL without full parsing
@@ -1023,7 +1026,7 @@ impl SchemaManager {
     /// Get table schema by name (async for compatibility)
     pub async fn get_table_schema(&self, table_name: &str) -> Result<TableSchema> {
         // Try to find schema by table name
-        if let Some(schema) = self.find_schema_by_table(&None, table_name).await {
+        if let Some(schema) = self.find_schema_by_table(&None, table_name).await? {
             Ok(schema)
         } else {
             Err(Error::Schema(format!(
@@ -1452,6 +1455,65 @@ mod tests {
             got_v2.columns.len(),
             3,
             "manager must resolve THROUGH the registry, not a stale by-value snapshot"
+        );
+    }
+
+    /// Issue #1708 (roborev Medium): the registry OWNS freshness and the manager
+    /// merely delegates — an entry EXPIRED in the registry must NOT be served
+    /// stale through the manager. With `cache_ttl_seconds = 0` the registered
+    /// schema expires, so `load_schema`/`get_table_schema` must return the
+    /// registry's refresh outcome (an `Err` here — no SSTables back a
+    /// manually-registered schema), NOT `Ok(stale schema)`. RED on HEAD, which
+    /// read the registry map directly and served the expired entry forever.
+    #[tokio::test]
+    async fn test_manager_does_not_serve_ttl_expired_schema() {
+        let config = Config::default();
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        let mut reg_config = registry::SchemaRegistryConfig::default();
+        reg_config.cache_ttl_seconds = 0; // every registered entry expires immediately
+        let registry = Arc::new(RwLock::new(
+            registry::SchemaRegistry::new(reg_config, platform, config.clone())
+                .await
+                .unwrap(),
+        ));
+
+        // Register a real schema THROUGH the shared registry.
+        registry
+            .read()
+            .await
+            .register_schema(
+                table_schema_named("stale_tbl"),
+                registry::SchemaSource::Manual,
+            )
+            .await
+            .unwrap();
+
+        let storage = build_storage().await;
+        let manager = SchemaManager::new_with_registry(storage, registry.clone(), &config)
+            .await
+            .unwrap();
+
+        // Let the zero-TTL entry expire.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // The manager must delegate to the registry's refresh path (which errors
+        // for a manually-registered schema with no backing SSTables) rather than
+        // serve the stale entry. On HEAD this returned `Ok(stale)`.
+        let loaded = manager.load_schema("stale_tbl").await;
+        assert!(
+            loaded.is_err(),
+            "manager must delegate TTL freshness to the registry, not serve a stale schema; got {loaded:?}"
+        );
+        let got = manager.get_table_schema("stale_tbl").await;
+        assert!(
+            got.is_err(),
+            "get_table_schema must also honor registry expiry; got {got:?}"
+        );
+
+        // The unknown-table no-fabrication contract (#1710) still holds.
+        assert!(
+            manager.load_schema("never_defined_here").await.is_err(),
+            "unknown table still errors (no fabrication)"
         );
     }
 

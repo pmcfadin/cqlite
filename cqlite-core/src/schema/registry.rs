@@ -561,39 +561,76 @@ impl SchemaRegistry {
     /// Find a schema by table name, optionally scoped to a keyspace, cloning
     /// only the matched schema (issue #1708).
     ///
-    /// This is the single freshness-preserving lookup that [`crate::schema::SchemaManager`]
-    /// delegates to. Unlike [`Self::get_schema`] it reads the LIVE `schemas` map
-    /// directly (no TTL gate, no auto-discovery, no fabrication): a registry-side
-    /// TTL-refresh / re-registration is observed immediately by the manager, so
-    /// the manager can never serve a stale by-value snapshot. Returns `None` when
-    /// no schema matches (the manager maps that to its own not-found error).
+    /// This is the single freshness-owning lookup that [`crate::schema::SchemaManager`]
+    /// delegates to, so the registry — not the manager — owns freshness:
+    ///
+    /// * A **fresh** matched entry is returned by value with exactly ONE
+    ///   `TableSchema` deep clone (issue #1587).
+    /// * An **expired** matched entry is NOT served stale: it is routed through
+    ///   the SAME TTL-refresh seam [`Self::get_schema`] uses for the matched
+    ///   entry ([`Self::refresh_schema`]), and the refreshed schema (or that
+    ///   seam's error) is returned. This closes the roborev Medium where an
+    ///   entry expired in the registry was served stale indefinitely through the
+    ///   manager.
+    /// * **No match** returns `Ok(None)` with NO auto-discovery and NO
+    ///   fabrication (issue #1710): a table nobody registered must surface as
+    ///   not-found (the manager maps `None` to its own not-found error), never a
+    ///   synthesized schema.
     pub async fn find_schema_by_table(
         &self,
         keyspace: &Option<String>,
         table: &str,
-    ) -> Option<TableSchema> {
-        let schemas = self.schemas.read().await;
-
-        // Exact `keyspace.table` match first when a keyspace is provided.
-        if let Some(ks) = keyspace {
-            let key = format!("{}.{}", ks, table);
-            if let Some(entry) = schemas.get(&key) {
-                return Some(entry.schema.clone());
-            }
+    ) -> Result<Option<TableSchema>> {
+        // Resolve the matched entry under a read guard. Clone the schema ONLY
+        // when it is fresh (the single #1587 clone); when it is EXPIRED, capture
+        // just its identity so the guard can be dropped BEFORE running the
+        // refresh seam (no `.await` is ever held under the read guard).
+        enum Matched {
+            Fresh(TableSchema),
+            Expired { keyspace: String, table: String },
         }
 
-        // Otherwise match any registered schema by table name (keyspace-aware).
-        schemas
-            .values()
-            .find(|entry| {
-                crate::schema::table_name_matches(
-                    &Some(entry.schema.keyspace.clone()),
-                    &entry.schema.table,
-                    keyspace,
-                    table,
-                )
-            })
-            .map(|entry| entry.schema.clone())
+        let matched = {
+            let schemas = self.schemas.read().await;
+
+            // Exact `keyspace.table` match first when a keyspace is provided.
+            let mut hit = keyspace
+                .as_ref()
+                .and_then(|ks| schemas.get(&format!("{}.{}", ks, table)));
+
+            // Otherwise match any registered schema by table name (keyspace-aware).
+            if hit.is_none() {
+                hit = schemas.values().find(|entry| {
+                    crate::schema::table_name_matches(
+                        &Some(entry.schema.keyspace.clone()),
+                        &entry.schema.table,
+                        keyspace,
+                        table,
+                    )
+                });
+            }
+
+            match hit {
+                None => None,
+                Some(entry) if self.is_entry_expired(entry) => Some(Matched::Expired {
+                    keyspace: entry.schema.keyspace.clone(),
+                    table: entry.schema.table.clone(),
+                }),
+                Some(entry) => Some(Matched::Fresh(entry.schema.clone())),
+            }
+        }; // read guard dropped here — no `.await` occurred under it.
+
+        match matched {
+            // No match: no fabrication, no auto-discovery (issue #1710).
+            None => Ok(None),
+            Some(Matched::Fresh(schema)) => Ok(Some(schema)),
+            // Expired: delegate freshness through the same refresh seam
+            // `get_schema` uses for the matched entry — never serve the stale
+            // copy.
+            Some(Matched::Expired { keyspace, table }) => {
+                self.refresh_schema(&keyspace, &table).await.map(Some)
+            }
+        }
     }
 
     /// Validate a schema
@@ -2288,5 +2325,81 @@ mod tests {
             .expect_err("expired schema should attempt discovery");
 
         assert!(matches!(err, Error::Schema(message) if message.contains("No SSTables found")));
+    }
+
+    /// Roborev Medium (issue #1708 follow-up): `find_schema_by_table` — the
+    /// single lookup the manager delegates to — must apply the SAME
+    /// TTL-expiry/refresh handling `get_schema` uses for the matched entry, and
+    /// must NOT serve an expired entry stale. With `cache_ttl_seconds = 0` the
+    /// registered entry expires, so the lookup delegates to the refresh seam
+    /// (which errors here because no SSTables back a manually-registered schema)
+    /// EXACTLY as `get_schema` does. RED on HEAD (read the map directly and
+    /// returned `Ok(Some(stale))`).
+    #[tokio::test]
+    async fn find_schema_by_table_honors_ttl_expiry_like_get_schema() {
+        let mut config = SchemaRegistryConfig::default();
+        config.cache_ttl_seconds = 0;
+        let registry = make_registry(config).await;
+
+        registry
+            .register_schema(simple_schema("events"), SchemaSource::Manual)
+            .await
+            .expect("register events schema");
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // `get_schema` triggers the refresh seam and errors on the expired entry.
+        let get_err = registry
+            .get_schema("test_ks", "events")
+            .await
+            .expect_err("expired schema attempts refresh");
+        assert!(matches!(&get_err, Error::Schema(m) if m.contains("No SSTables found")));
+
+        // Scoped `keyspace.table` lookup on the EXPIRED entry must behave
+        // identically: delegate to refresh (error), never `Ok(Some(stale))`.
+        let scoped = registry
+            .find_schema_by_table(&Some("test_ks".to_string()), "events")
+            .await;
+        assert!(
+            matches!(&scoped, Err(Error::Schema(m)) if m.contains("No SSTables found")),
+            "scoped lookup on an EXPIRED entry must delegate to refresh (not serve stale), got {scoped:?}"
+        );
+
+        // The bare-table-name path must honor expiry too.
+        let bare = registry.find_schema_by_table(&None, "events").await;
+        assert!(
+            matches!(&bare, Err(Error::Schema(m)) if m.contains("No SSTables found")),
+            "bare lookup on an EXPIRED entry must delegate to refresh, got {bare:?}"
+        );
+    }
+
+    /// A FRESH matched entry is still returned by value, and an unknown table
+    /// returns `Ok(None)` with NO fabrication/auto-discovery (issue #1710
+    /// preserved) — the two non-expiry outcomes the refresh path must not alter.
+    #[tokio::test]
+    async fn find_schema_by_table_returns_fresh_and_none_for_unknown() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        registry
+            .register_schema(simple_schema("events"), SchemaSource::Manual)
+            .await
+            .expect("register");
+
+        let found = registry
+            .find_schema_by_table(&Some("test_ks".to_string()), "events")
+            .await
+            .expect("a fresh entry never triggers the refresh error path");
+        assert!(
+            matches!(found, Some(s) if s.table == "events"),
+            "fresh matched entry must be returned by value"
+        );
+
+        let missing = registry
+            .find_schema_by_table(&None, "never_registered")
+            .await
+            .expect("unknown table is Ok(None), not an error");
+        assert!(
+            missing.is_none(),
+            "unknown table must be None (no fabrication, no auto-discovery)"
+        );
     }
 }
