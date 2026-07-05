@@ -36,10 +36,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
+import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.RingEntry;
+import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
 
 /**
  * Connector metadata backed by Sidecar (DDL discovery) and the cqlite-flight
@@ -50,6 +54,26 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     private final CqliteFlightConfig config;
     private final SidecarClient sidecar;
     private final CqliteFlightClient flight;
+
+    /**
+     * Per-{@code (keyspace, table)} memo of the non-aggregated logical row-count
+     * statistics (issue #1336). One optimizer planning pass calls
+     * {@link #getTableStatistics} repeatedly for the same table; memoizing here bounds
+     * it to at most one {@code tokenRangeReplicas} fetch and one {@code table_stats}
+     * fetch per table. Concurrent-safe via {@link ConcurrentHashMap#computeIfAbsent}
+     * (Trino may plan on multiple threads); the derivation is idempotent and never
+     * returns null (it returns {@link TableStatistics#empty()} on any failure).
+     *
+     * <p>Negative ({@code empty()}) results are memoized on purpose. This cache is scoped
+     * to a single short-lived, per-planning-pass {@code ConnectorMetadata} instance, and
+     * memoizing {@code empty()} deliberately avoids re-hammering a failing/timing-out
+     * Sidecar (with slow timeouts) within that pass. The accepted tradeoff: a transient
+     * blip is not retried until the next planning pass (a new metadata instance). This is
+     * consistent with the spec's fail-closed requirement, where {@code empty()} is the
+     * correct grounded-or-not answer (issue #1336).
+     */
+    private final Map<SchemaTableName, TableStatistics> nonAggregatedStatsCache =
+            new ConcurrentHashMap<>();
 
     public CqliteFlightMetadata(CqliteFlightConfig config, SidecarClient sidecar, CqliteFlightClient flight) {
         this.config = config;
@@ -637,6 +661,17 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * only on the otherwise-pushable path), and MUST be for a supported AUTOMATIC GROUP BY.
      */
     TableStats fetchTableStats(CqliteFlightTableHandle handle) {
+        return fetchTableStats(handle, tokenRangeReplicas(handle.keyspace()));
+    }
+
+    /**
+     * Same as {@link #fetchTableStats(CqliteFlightTableHandle)} but over an
+     * ALREADY-FETCHED token-range replica set (issue #1336). The logical-row-count path
+     * derives the divisor and the target host set from ONE {@code tokenRangeReplicas}
+     * response, so it must not fetch it a second time here. Package-private and
+     * overridable as a test seam.
+     */
+    TableStats fetchTableStats(CqliteFlightTableHandle handle, TokenRangeReplicasResponse replicas) {
         byte[] body = tableStatsRequest(handle.keyspace(), handle.table());
         int port = config.flightPort();
         // Bound each per-replica DoAction with a deadline (issue #944): this runs during
@@ -644,9 +679,18 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         // (a TIMED_OUT FlightRuntimeException → the fetch-failure → UNAVAILABLE path in
         // aggregateNodeStats), never stall the planner.
         long timeoutMillis = config.tableStatsTimeoutMillis();
-        Set<String> hosts =
-                replicaHosts(sidecar.tokenRangeReplicas(handle.keyspace()), config.localDatacenter());
+        Set<String> hosts = replicaHosts(replicas, config.localDatacenter());
         return aggregateNodeStats(hosts, address -> flight.tableStats(address, port, body, timeoutMillis));
+    }
+
+    /**
+     * The keyspace's authoritative token-range read replicas from Sidecar. Package-
+     * private and overridable as a test seam (issue #1336) so the logical-row-count
+     * derivation can be driven end to end over decoded JSON fixtures without a live
+     * Sidecar.
+     */
+    TokenRangeReplicasResponse tokenRangeReplicas(String keyspace) {
+        return sidecar.tokenRangeReplicas(keyspace);
     }
 
     /**
@@ -665,30 +709,88 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * DC scoping. Static and package-private for unit testing without a live Sidecar.
      */
     static Set<String> replicaHosts(
-            in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse replicas,
+            TokenRangeReplicasResponse replicas,
             String localDatacenter) {
         Set<String> hosts = new LinkedHashSet<>();
         if (replicas == null || replicas.readReplicas() == null) {
             return hosts;
         }
         for (var range : replicas.readReplicas()) {
-            Map<String, List<String>> byDc = range.replicasByDatacenter();
-            if (byDc == null) {
-                continue;
-            }
-            // Mirror buildSplits/pickReplica DC scoping: use the local DC's replicas for
-            // this range when present, else fall back to every DC's replicas.
-            List<String> local =
-                    localDatacenter != null ? byDc.get(localDatacenter) : null;
-            if (local != null && !local.isEmpty()) {
-                addHosts(hosts, local);
-            } else {
-                for (List<String> dcReplicas : byDc.values()) {
-                    addHosts(hosts, dcReplicas);
-                }
+            hosts.addAll(scopedRangeReplicas(range, localDatacenter));
+        }
+        return hosts;
+    }
+
+    /**
+     * The distinct scoped read-replica HOSTS (ports stripped) of ONE token range,
+     * under the SAME DC-scoping rule {@link #replicaHosts} and split selection use:
+     * the local DC's replicas when it has any for the range, else every DC's replicas.
+     * Deduplicates replica entries within the range (a host repeated in the range's
+     * lists is one host). Returns an empty set for a null/absent replica map.
+     */
+    private static Set<String> scopedRangeReplicas(ReplicaInfo range, String localDatacenter) {
+        Set<String> hosts = new LinkedHashSet<>();
+        if (range == null) {
+            return hosts;
+        }
+        Map<String, List<String>> byDc = range.replicasByDatacenter();
+        if (byDc == null) {
+            return hosts;
+        }
+        // Mirror buildSplits/pickReplica DC scoping: use the local DC's replicas for
+        // this range when present, else fall back to every DC's replicas.
+        List<String> local = localDatacenter != null ? byDc.get(localDatacenter) : null;
+        if (local != null && !local.isEmpty()) {
+            addHosts(hosts, local);
+        } else {
+            for (List<String> dcReplicas : byDc.values()) {
+                addHosts(hosts, dcReplicas);
             }
         }
         return hosts;
+    }
+
+    /**
+     * The uniform per-token-range distinct scoped read-replica count, or empty when it
+     * is not well-defined (issue #1336). This is the divisor that turns the physical,
+     * replica-summed {@code table_stats} row total into a logical (de-replicated)
+     * cardinality: summing whole-table {@code live_rows} across the distinct scoped
+     * replica hosts counts each logical row once per replica that stores it, i.e.
+     * exactly {@code R} times when {@code R} is the shared per-range replica count.
+     *
+     * <p>The count is derived ONLY by counting distinct scoped replicas per range in the
+     * authoritative {@code tokenRangeReplicas} response, under the identical
+     * {@code localDatacenter} scoping as {@link #replicaHosts} (so the divisor matches
+     * the host set the stats sum was collected from). It NEVER parses keyspace
+     * {@code replication = {...}} strategy strings and makes no distributional
+     * assumption (no-heuristics mandate, issue #28).
+     *
+     * <p>Returns {@link OptionalInt#empty()} (fail closed → the caller reports no row
+     * count) when: there are no ranges, any range has zero scoped replicas, or the
+     * per-range counts are not identical across all ranges (e.g. a topology mid-
+     * transition). A present value is guaranteed {@code >= 1}.
+     */
+    static OptionalInt uniformReplicaCount(
+            TokenRangeReplicasResponse replicas, String localDatacenter) {
+        if (replicas == null || replicas.readReplicas() == null
+                || replicas.readReplicas().isEmpty()) {
+            return OptionalInt.empty();
+        }
+        int shared = -1;
+        for (var range : replicas.readReplicas()) {
+            int count = scopedRangeReplicas(range, localDatacenter).size();
+            if (count < 1) {
+                // A range with no scoped replica → cannot ground the divisor.
+                return OptionalInt.empty();
+            }
+            if (shared == -1) {
+                shared = count;
+            } else if (shared != count) {
+                // Non-uniform per-range replica counts (topology in transition).
+                return OptionalInt.empty();
+            }
+        }
+        return OptionalInt.of(shared);
     }
 
     private static void addHosts(Set<String> hosts, List<String> replicas) {
@@ -872,21 +974,22 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * known, so we return {@link TableStatistics#empty()} and let Trino estimate
      * rather than fabricate (#28).
      *
-     * <p>For a <em>non-aggregated</em> handle we intentionally report {@link
-     * TableStatistics#empty()} (unknown) rather than {@code stats.liveRows()}. The
-     * cqlite-flight {@code table_stats} action sums whole-table {@code Statistics.db}
-     * counts across ALL replica hosts of the keyspace, so on a replicated keyspace
-     * (e.g. RF=3) {@code liveRows()} is the PHYSICAL replica row total (≈ RF × the
-     * logical table cardinality), NOT the logical number of rows a scan emits. It is
-     * not authoritatively de-duplicated to a single copy of the token space, so
-     * exposing it would mislead Trino's cost optimizer. RF-correct / token-range-scoped
-     * optimizer row counts are deferred to a follow-up issue; until then we report no
-     * row-count estimate and let Trino fall back to its own. Note this does NOT affect
-     * the GROUP BY pushdown gate ({@link #estimateGroupRatio}), which uses an
-     * RF-invariant ratio ({@code partition_count / live_rows}) where replica
-     * over-counting cancels in numerator and denominator. Column-level stats are left
-     * unknown — Cassandra 5.0 stores no reliable per-regular-column NDV, so reporting
-     * any would be a heuristic (#28).
+     * <p>For a <em>non-aggregated</em> handle we report a LOGICAL (de-replicated) row
+     * count {@code ROW_COUNT = live_rows / R} (issue #1336). {@code live_rows} is the
+     * existing whole-table {@code table_stats} sum across the keyspace's distinct scoped
+     * replica hosts (≈ RF × the logical cardinality on a replicated keyspace); {@code R}
+     * is the {@link #uniformReplicaCount uniform per-token-range distinct scoped replica
+     * count}. Dividing by {@code R} un-does the replica over-count so the optimizer sees
+     * one copy of the token space. The derivation FAILS CLOSED to {@link
+     * TableStatistics#empty()} (today's behavior) when it cannot be grounded — non-
+     * uniform per-range replica counts, a zero-replica range, incomplete {@code
+     * table_stats} ({@code complete=false}), or ANY Sidecar/Flight error or timeout — so
+     * planning never sees a possibly-wrong number and never fails on a stats error. Note
+     * this does NOT affect the GROUP BY pushdown gate ({@link #estimateGroupRatio}),
+     * which uses an RF-invariant ratio ({@code partition_count / live_rows}) where
+     * replica over-counting cancels in numerator and denominator. Column-level stats are
+     * left unknown — Cassandra 5.0 stores no reliable per-regular-column NDV, so
+     * reporting any would be a heuristic (#28).
      */
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle table) {
@@ -900,13 +1003,52 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             // regardless of replication factor.
             return TableStatistics.builder().setRowCount(Estimate.of(1)).build();
         }
-        // Non-aggregated scan: stats.liveRows() is the replica-summed PHYSICAL row
-        // total (≈ RF × logical cardinality), not the logical rows a scan emits, and
-        // is not authoritatively de-duplicated to one copy of the token space. Do not
-        // expose a knowably-wrong number to the optimizer — report unknown and let
-        // Trino estimate. (RF-correct row counts are deferred to a follow-up issue;
-        // the GROUP BY gate is unaffected — see estimateGroupRatio.)
-        return TableStatistics.empty();
+        // Non-aggregated scan: report the logical (de-replicated) row count, memoized
+        // per (keyspace, table) so one planning pass fetches at most once per table.
+        // Negative empty() results are cached on purpose (issue #1336): this cache lives
+        // only for this short-lived per-planning-pass metadata instance, so memoizing
+        // empty() avoids re-hammering a down/slow Sidecar within the pass. The tradeoff is
+        // that a transient blip is not retried until the next pass (a new metadata instance).
+        SchemaTableName key = new SchemaTableName(handle.keyspace(), handle.table());
+        return nonAggregatedStatsCache.computeIfAbsent(
+                key, k -> logicalRowCountStatistics(handle));
+    }
+
+    /**
+     * Derive the non-aggregated logical row-count statistics
+     * {@code ROW_COUNT = live_rows / R} (issue #1336), or {@link TableStatistics#empty()}
+     * when the derivation cannot be grounded. Fetches the token-range replicas ONCE and
+     * reuses that response for BOTH the divisor {@code R} and the {@code table_stats}
+     * host set. Any {@link RuntimeException}/timeout anywhere degrades to {@code empty()}
+     * (same posture as {@code groupRatioForGate}): statistics failures must never fail
+     * query planning.
+     */
+    private TableStatistics logicalRowCountStatistics(CqliteFlightTableHandle handle) {
+        try {
+            TokenRangeReplicasResponse replicas = tokenRangeReplicas(handle.keyspace());
+            String localDatacenter = config != null ? config.localDatacenter() : null;
+            OptionalInt replicaCount = uniformReplicaCount(replicas, localDatacenter);
+            if (replicaCount.isEmpty()) {
+                // Non-uniform / zero-replica ranges → cannot de-replicate → fail closed.
+                return TableStatistics.empty();
+            }
+            int r = replicaCount.getAsInt();
+            if (r < 1) {
+                // Defensive: uniformReplicaCount already guarantees R >= 1, but never
+                // divide by a non-positive divisor.
+                return TableStatistics.empty();
+            }
+            TableStats stats = fetchTableStats(handle, replicas);
+            if (!stats.complete()) {
+                // Partial/undecodable per-node stats are not authoritative → fail closed.
+                return TableStatistics.empty();
+            }
+            double logicalRows = (double) stats.liveRows() / r;
+            return TableStatistics.builder().setRowCount(Estimate.of(logicalRows)).build();
+        } catch (RuntimeException e) {
+            // Any Sidecar/Flight error or timeout → no estimate; planning proceeds.
+            return TableStatistics.empty();
+        }
     }
 
     /** Resolve the table's Arrow schema by asking any flight node's GetSchema. */

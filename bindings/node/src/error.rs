@@ -449,6 +449,11 @@ mod tests {
                 Error::QueryExecution(_) => {
                     assert_eq!(err.category(), ErrorCategory::Query);
                 }
+                // Byte-bounded result budget (issue #1582): Query category,
+                // maps to the "QUERY" JS code via category().
+                Error::ResultTooLarge { .. } => {
+                    assert_eq!(err.category(), ErrorCategory::Query);
+                }
                 Error::UnsupportedQuery(_) => {
                     assert_eq!(err.category(), ErrorCategory::Query);
                 }

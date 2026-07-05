@@ -194,6 +194,25 @@ fn projected_column_name(expr: &SelectExpression, index: usize) -> std::sync::Ar
     }
 }
 
+/// True when a `Project` expression RENAMES or EVALUATES its input rather than
+/// passing a stored column through unchanged (issue #1763).
+///
+/// A plain `Column` is emitted by the SSTable scan under the same name a
+/// `Project` would re-key it to, so streaming it directly matches the query
+/// metadata. Anything else — an alias (`category AS cat`), an aggregate, an
+/// arithmetic/function expression, or a literal — reshapes or renames the row,
+/// so the streaming path must materialize (fall back to execute-then-stream) to
+/// apply the `Project` and keep row value keys equal to the metadata names.
+fn project_expr_reshapes_row(expr: &SelectExpression) -> bool {
+    !matches!(expr, SelectExpression::Column(_))
+}
+
+/// Default row-count safety valve for the bare `SelectExecutor` constructors
+/// (issue #1582). Matches [`crate::config::QueryConfig::max_result_rows`]'s
+/// default; the query engine overrides it via
+/// [`SelectExecutor::with_max_result_rows`].
+const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+
 /// SELECT query executor for SSTable-based storage
 pub struct SelectExecutor {
     /// Schema manager for metadata
@@ -202,6 +221,23 @@ pub struct SelectExecutor {
     storage: Arc<StorageEngine>,
     /// Clock used for TTL "remaining seconds" computation (injectable for tests).
     clock: Arc<dyn NowSeconds>,
+    /// Byte ceiling on a materialized result set (issue #1582 / D6).
+    ///
+    /// The materializing scan path accumulates a running estimate of the result
+    /// bytes and fails with [`Error::ResultTooLarge`] once this is exceeded.
+    /// Wired from [`crate::config::QueryConfig::max_result_bytes`] by the query
+    /// engine; defaults to [`crate::config::DEFAULT_MAX_RESULT_BYTES`] for the
+    /// bare constructors. Streaming queries are bounded by their channel buffer
+    /// and do not consult this budget.
+    max_result_bytes: usize,
+    /// Row-count safety valve on a materialized result set (issue #1582).
+    ///
+    /// Secondary to `max_result_bytes` (bytes are the correct memory unit), but
+    /// still load-bearing: the materializing scan fails once the collected row
+    /// count exceeds this valve. Wired from
+    /// [`crate::config::QueryConfig::max_result_rows`] by the query engine;
+    /// defaults to 1,000,000 for the bare constructors.
+    max_result_rows: usize,
 }
 
 impl std::fmt::Debug for SelectExecutor {
@@ -248,12 +284,41 @@ struct ExecutionContext {
 
 impl SelectExecutor {
     /// Create a new SELECT executor with a system (wall-clock) now source.
+    ///
+    /// Uses the default materialized-result byte budget
+    /// ([`crate::config::DEFAULT_MAX_RESULT_BYTES`]); call
+    /// [`SelectExecutor::with_max_result_bytes`] to override it (the query
+    /// engine wires it from [`crate::config::QueryConfig::max_result_bytes`]).
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
         Self {
             _schema: schema,
             storage,
             clock: Arc::new(SystemClock),
+            max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
+                .unwrap_or(usize::MAX),
+            max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
+    }
+
+    /// Override the byte ceiling on a materialized result set (issue #1582).
+    ///
+    /// Builder-style: the query engine calls this with
+    /// [`crate::config::QueryConfig::max_result_bytes`] so the config knob is
+    /// load-bearing on the read path.
+    pub fn with_max_result_bytes(mut self, max_result_bytes: usize) -> Self {
+        self.max_result_bytes = max_result_bytes;
+        self
+    }
+
+    /// Override the row-count safety valve on a materialized result set (issue
+    /// #1582).
+    ///
+    /// Builder-style: the query engine calls this with
+    /// [`crate::config::QueryConfig::max_result_rows`] so the config knob is
+    /// load-bearing on the read path (not a hardcoded constant).
+    pub fn with_max_result_rows(mut self, max_result_rows: usize) -> Self {
+        self.max_result_rows = max_result_rows;
+        self
     }
 
     /// Create a SELECT executor with a custom clock (for deterministic tests).
@@ -267,6 +332,9 @@ impl SelectExecutor {
             _schema: schema,
             storage,
             clock,
+            max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
+                .unwrap_or(usize::MAX),
+            max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
     }
 
@@ -453,6 +521,22 @@ impl SelectExecutor {
             match step {
                 ExecutionStep::Sort { .. } => return true,
                 ExecutionStep::Aggregate { .. } => return true,
+                // Issue #1763: the streaming producer (`execute_streaming_background`)
+                // IGNORES `Project`, so it emits rows keyed by the SOURCE stored
+                // column names (e.g. `category`) even when the SELECT renames or
+                // evaluates them (e.g. `category AS cat`) — silently disagreeing
+                // with the query metadata, which uses the SELECT output names.
+                // A `Project` that RENAMES (alias) or EVALUATES (aggregate /
+                // arithmetic / literal / function) any item must fall back to the
+                // materialized execute()-then-stream path, which applies the
+                // `Project`. A `Project` of only plain `Column`s does not reshape
+                // the row (the scan already keyed those cells by the same names),
+                // so it can stream without materializing.
+                ExecutionStep::Project { columns }
+                    if columns.iter().any(project_expr_reshapes_row) =>
+                {
+                    return true
+                }
                 _ => {}
             }
         }
@@ -1104,11 +1188,11 @@ impl SelectExecutor {
                         continue;
                     }
 
-                    let column_name = match expr {
-                        SelectExpression::Column(col_ref) => col_ref.column.clone(),
-                        SelectExpression::Aliased(_, alias) => alias.clone(),
-                        _ => format!("col_{i}"),
-                    };
+                    // Issue #1763: name aggregate result columns via the SAME
+                    // single source (`result_column_name` → `aggregate_output_name`)
+                    // that keys the emitted row values in `finalize_group`, so
+                    // metadata and row keys can never diverge (never `col_N`).
+                    let column_name = crate::query::select_naming::result_column_name(expr, i);
 
                     // Look up CQL type for this column in the schema (Issue #674).
                     let cql_type_opt = schema_opt.and_then(|schema| {

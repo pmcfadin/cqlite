@@ -24,6 +24,7 @@ pub mod parser;
 pub mod planner;
 pub mod prepared;
 pub mod result;
+pub(crate) mod result_budget;
 pub mod writetime_ttl_validator;
 
 // Advanced SELECT query components
@@ -33,6 +34,8 @@ pub mod select_ast;
 pub mod select_executor;
 #[cfg(feature = "state_machine")]
 pub mod select_integration_tests;
+#[cfg(feature = "state_machine")]
+pub mod select_naming;
 #[cfg(feature = "state_machine")]
 pub mod select_optimizer;
 #[cfg(feature = "state_machine")]

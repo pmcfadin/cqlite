@@ -65,6 +65,30 @@ pub enum Error {
     #[error("Query execution error: {0}")]
     QueryExecution(String),
 
+    /// A materialized result set exceeded the configured byte budget (issue #1582).
+    ///
+    /// Raised by the SELECT executor *while collecting* a materialized result
+    /// set, before it grows large enough to threaten the process's <128MB
+    /// memory target. This is the byte-unit successor to the coarse row-count
+    /// safety valve: a byte ceiling correctly distinguishes 1M harmless skinny
+    /// rows from 100k memory-blowing wide rows. The remedy is in the message —
+    /// bound the result with a `LIMIT` clause, or consume it incrementally via
+    /// the streaming query API instead of materializing the whole set.
+    #[error(
+        "result set exceeded the {budget_bytes}-byte materialization budget \
+         (estimated {estimated_bytes} bytes across {rows} rows so far); \
+         add a LIMIT clause to bound the result, or use the streaming query \
+         API (e.g. execute_streaming) to consume rows incrementally"
+    )]
+    ResultTooLarge {
+        /// Configured materialization byte budget that was exceeded.
+        budget_bytes: usize,
+        /// Estimated logical size (bytes) of the result collected so far.
+        estimated_bytes: usize,
+        /// Number of rows collected when the budget was exceeded.
+        rows: usize,
+    },
+
     /// Type conversion errors
     #[error("Type conversion error: {0}")]
     TypeConversion(String),
@@ -321,6 +345,9 @@ impl Error {
             // Context-dependent errors
             Error::Storage(_) => true,
             Error::QueryExecution(_) => false,
+            // Not recoverable by retry: the same query would re-materialize the
+            // same oversized result. The user must add LIMIT or stream.
+            Error::ResultTooLarge { .. } => false,
             Error::TypeConversion(_) => false,
             Error::NotFound(_) => false,
             Error::AlreadyExists(_) => false,
@@ -362,6 +389,7 @@ impl Error {
             Error::Schema(_) => ErrorCategory::Schema,
             Error::CqlParse(_) => ErrorCategory::Query,
             Error::QueryExecution(_) => ErrorCategory::Query,
+            Error::ResultTooLarge { .. } => ErrorCategory::Query,
             Error::TypeConversion(_) => ErrorCategory::Data,
             Error::Configuration(_) => ErrorCategory::Configuration,
             Error::Storage(_) => ErrorCategory::Storage,
