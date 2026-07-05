@@ -3317,7 +3317,7 @@ cqlite \
 
 ```plaintext
 OK: 1 row(s) affected (4.5ms)
-CQLite CLI v0.11.0
+CQLite CLI v0.13.0
 Use --help for available commands
 ```
 
@@ -3343,7 +3343,7 @@ cqlite \
 ```plaintext
 Flushed: 1 partitions, 50 bytes
   Output: /tmp/cqlite-write/data/test_basic/simple_table/nb-1-big-Data.db
-CQLite CLI v0.11.0
+CQLite CLI v0.13.0
 Use --help for available commands
 ```
 
@@ -3378,7 +3378,7 @@ cqlite \
 OK: 1 row(s) affected (20.2ms)
 Flushed: 1 partitions, 50 bytes
   Output: /tmp/cqlite-write/data/test_basic/simple_table/nb-1-big-Data.db
-CQLite CLI v0.11.0
+CQLite CLI v0.13.0
 Use --help for available commands
 ```
 
@@ -4441,9 +4441,10 @@ Primary source paths:
 
 Release announcements for CQLite. Each page covers what shipped and how to get it. For the complete, granular change list, see the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
 
-| Version                              | Date       | Highlights                                                                                     |
-| ------------------------------------ | ---------- | ---------------------------------------------------------------------------------------------- |
-| [v0.12.0](/cqlite/releases/v0-12-0/) | 2026-06-22 | Arrow Flight + Trino connector · CDC delta-export to Parquet · byte-for-byte compaction parity |
+| Version                              | Date       | Highlights                                                                                                                              |
+| ------------------------------------ | ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| [v0.13.0](/cqlite/releases/v0-13-0/) | 2026-07-05 | Performance release — read-path + point-read + compressed-chunk wins · byte-bounded results · `Database.refresh()` · 3 breaking changes |
+| [v0.12.0](/cqlite/releases/v0-12-0/) | 2026-06-22 | Arrow Flight + Trino connector · CDC delta-export to Parquet · byte-for-byte compaction parity                                          |
 
 <!-- Convention: newest release first. Give each new release page a lower
      sidebar.order than the previous one so it sorts above older releases
@@ -4502,6 +4503,66 @@ npm install @cqlite/node                  # Node.js
 ```
 
 Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
+
+# CQLite v0.13.0
+
+> The performance release — a read-path constant-factor bundle, positional point-reads, one payload+CRC read per compressed chunk, faster Node bindings, byte-bounded results, and Database.refresh().
+
+# CQLite v0.13.0 — the performance release
+
+[Section titled “CQLite v0.13.0 — the performance release”](#cqlite-v0130--the-performance-release)
+
+Read and query Apache Cassandra 5.0 SSTables faster — no cluster required. This release is all about the read path: less work per query, fewer syscalls per lookup, and one I/O per compressed chunk.
+
+## 🚀 Performance
+
+[Section titled “🚀 Performance”](#-performance)
+
+* **Read-path constant-factor bundle (Epic E)** — a sweep of query-engine hot-path cleanups: schema `Arc`, single projection, cached sort keys, a plan cache, and a `GROUP BY` hash (#1587); a read-path idiom bundle (de-async, `FxHash`, OFFSET skip/take, per-partition digest, IN-expansion allocation cuts; #1590); and dropping the `table_readers` read guard before scanning (#1591).
+* **Point-read I/O (C2)** — a `ReadAt` positional-read trait removes the point-read cursor convoy and the per-lookup `open(2)` (#1573).
+* **One payload + CRC read per compressed chunk** — the E3 A5 read-path bundle collapses each compressed chunk down to a single payload+CRC read (#1585).
+* **Node bindings throughput** — batch-fetch streaming rows per async task (#1443), move (not deep-clone) row values in `executeNative` (#1447), and cache `Set`/`Map` constructors per result conversion (#1448).
+* **Cached comparators** — derived comparators are cached on `SchemaEntry` so composite key ordering isn’t rebuilt per comparison (#1709).
+
+## 🧰 New APIs
+
+[Section titled “🧰 New APIs”](#-new-apis)
+
+* **Byte-bounded result budget** — queries now respect a `max_result_bytes` budget (default **64 MiB**). A result that would exceed it fails fast with `ResultTooLarge` instead of ballooning memory. Add a `LIMIT` clause or switch to the streaming query API (streaming is not subject to the budget) to recover (#1582).
+* **`Database.refresh()`** — re-discover SSTables written by Cassandra or another process after the database was opened. It is explicit-only and atomic, and reports how many tables were scanned and how many readers were added/removed (#1749).
+
+## ✅ Correctness & no-heuristics
+
+[Section titled “✅ Correctness & no-heuristics”](#-correctness--no-heuristics)
+
+* **No byte-pattern type guessing** — the raw-decode path no longer infers a value’s type from its byte pattern; blobs that happened to look like other types are returned faithfully as blobs, per the no-heuristics mandate (#1630).
+* **Unknown-table reads fail honestly** rather than returning a fabricated `uuid id` default schema (#1710, and see the breaking changes below).
+* **BTI `export-sstable` partition count** is read from the authoritative `Statistics.db` reader instead of a derived estimate (#1622).
+* **Chunk-CRC corruption surfaces on point lookups** instead of silently proceeding (#1411).
+* **Full-scan no longer issues duplicate scans** — bounded streaming replaces the old 4× duplicate table scan on the full-scan path (#1691).
+
+## ⚠️ Breaking changes
+
+[Section titled “⚠️ Breaking changes”](#️-breaking-changes)
+
+v0.13.0 ships **three** breaking changes. See the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md) for before/after examples and per-surface details.
+
+* **Python bindings** — CQL `duration` and `time` now decode to exact, lossless types matching Node, the CLI, and Cassandra: `time` → `int` (nanoseconds since midnight), `duration` → `cqlite.Duration(months, days, nanos)`. The old `datetime.time` / `datetime.timedelta` mapping was lossy (#1450).
+* **Discovery-driven flows** — reading a table with no registered or discovered schema now returns an error (`Table schema not found: {table}`) instead of a fabricated `uuid id` default schema (#1710).
+* **CLI** — YAML query output was removed. `--out yaml` and `--format yaml` are rejected at parse time; switch to `table`, `json`, `csv`, or `parquet` (#283).
+
+## Get it
+
+[Section titled “Get it”](#get-it)
+
+```bash
+brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
+cargo add cqlite-core                     # Rust library
+pip install cqlite-py                     # Python
+npm install @cqlite/node                  # Node.js
+```
+
+Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md), and upgrade notes in the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
 
 # SSTable Format Guide
 
@@ -12715,7 +12776,7 @@ CQLite reads Cassandra 5.0 SSTables directly from disk — no cluster, no JVM, n
 
 [Section titled “CLI Reference”](#cli-reference)
 
-This page is built from the actual `cqlite --help` output (binary version 0.11.0, built with `--features write-support`). Every example on this page was run against the real test datasets (`cassandra5-small-full-v3.1`).
+This page is built from the actual `cqlite --help` output (binary version 0.13.0, built with `--features write-support`). Every example on this page was run against the real test datasets (`cassandra5-small-full-v3.1`).
 
 ## Synopsis
 
@@ -13598,13 +13659,13 @@ If you see three JSON rows, you are ready to go. If you see errors, check [Troub
 
 [Section titled “Known Issues”](#known-issues)
 
-This page tracks **active bugs and sharp edges** in the current release (`v0.12.0`). It is deliberately short and honest: if something here bites you, you are not doing it wrong.
+This page tracks **active bugs and sharp edges** in the current release (`v0.13.0`). It is deliberately short and honest: if something here bites you, you are not doing it wrong.
 
 * For things CQLite **does not do by design or yet**, see [Limitations](/cqlite/user-docs/limitations/).
 * For **planned work and milestones**, see [Roadmap](/cqlite/user-docs/roadmap/).
 * Hit something not listed here? [**Open an issue**](https://github.com/pmcfadin/cqlite/issues/new/choose) — that is the single most useful thing you can do for the project.
 
-*Last reviewed: 2026-06-22 (v0.12.0).*
+*Last reviewed: 2026-07-05 (v0.13.0).*
 
 ## Python bindings
 
@@ -13896,13 +13957,14 @@ await db.close(); // safe to call again
 
 **`DatabaseOptions` fields**
 
-| Option         | Type                 | Default | Description                                                            |
-| -------------- | -------------------- | ------- | ---------------------------------------------------------------------- |
-| `schema`       | `string` (optional)  | —       | Path to a `.cql` schema file                                           |
-| `memoryLimit`  | `number` (optional)  | 1 GB    | Maximum memory budget in bytes                                         |
-| `cacheEnabled` | `boolean` (optional) | `true`  | Enable block, row, and query caches                                    |
-| `writable`     | `boolean` (optional) | `false` | Enable INSERT/UPDATE/DELETE                                            |
-| `writeDir`     | `string` (optional)  | —       | Directory for WAL and flushed SSTables; required when `writable: true` |
+| Option         | Type                     | Default | Description                                                            |
+| -------------- | ------------------------ | ------- | ---------------------------------------------------------------------- |
+| `schema`       | `string` (optional)      | —       | Path to a `.cql` schema file                                           |
+| `memoryLimit`  | `number` (optional)      | 1 GB    | Maximum memory budget in bytes                                         |
+| `cacheEnabled` | `boolean` (optional)     | `true`  | Enable block, row, and query caches                                    |
+| `writable`     | `boolean` (optional)     | `false` | Enable INSERT/UPDATE/DELETE                                            |
+| `writeDir`     | `string` (optional)      | —       | Directory for WAL and flushed SSTables; required when `writable: true` |
+| `otel`         | `OtelOptions` (optional) | —       | OpenTelemetry tracing config (requires an `observability` build)       |
 
 ## executeNative() — recommended
 
@@ -14146,6 +14208,51 @@ await db.close();
 * Counter columns cannot be written; `execute()` throws `CqliteError` for counter mutations.
 * The writer produces BIG-format index files, not BTI format.
 
+## Refreshing SSTables
+
+[Section titled “Refreshing SSTables”](#refreshing-sstables)
+
+If Cassandra or another process writes new SSTables into the directory after you open the database, call `db.refresh()` to re-discover them. Discovery is **explicit-only** (CQLite never re-scans behind your back) and **atomic** — the new view is swapped in as a whole, so concurrent queries never see a partial set.
+
+```javascript
+const report = await db.refresh(); // Promise<RefreshReport>
+console.log(`Scanned ${report.tablesScanned} tables`);
+console.log(`Added ${report.readersAdded}, removed ${report.readersRemoved} readers`);
+```
+
+`RefreshReport` has the numeric fields `tablesScanned`, `readersAdded`, and `readersRemoved`.
+
+## Limiting result size
+
+[Section titled “Limiting result size”](#limiting-result-size)
+
+Non-streaming queries respect a **byte-bounded result budget** with a core default of **64 MiB**. A query whose materialized result would exceed the budget fails fast — the thrown `CqliteError` has `code === "QUERY"` — instead of exhausting memory.
+
+To recover, add a `LIMIT` clause or switch to `executeStreaming()`, which is **not subject to the result budget**.
+
+## OpenTelemetry
+
+[Section titled “OpenTelemetry”](#opentelemetry)
+
+Builds compiled with the `observability` feature can emit OpenTelemetry traces. Pass an `otel` option to `Database.open()`:
+
+```javascript
+const db = await Database.open('/path/to/sstables', {
+  schema: '/path/to/schema.cql',
+  otel: {
+    enabled: true,
+    endpoint: 'http://localhost:4317',
+    protocol: 'grpc',            // 'grpc' or 'http'
+    serviceName: 'my-service',
+    serviceVersion: '1.2.3',
+    samplingRatio: 0.1,
+    timeoutMs: 5000,
+  },
+});
+```
+
+The `otel` config layers over the `CQLITE_OTEL_*` environment variables (explicit keys win). Omit it to leave tracing driven by the environment alone.
+
 ## TypeScript support
 
 [Section titled “TypeScript support”](#typescript-support)
@@ -14189,6 +14296,7 @@ async function query(): Promise<void> {
 | `db.executeStreaming(query, config?)`     | `StreamingResult`            | Memory-bounded async iteration                   |
 | `db.exportParquet(query, path, options?)` | `Promise<number>`            | Stream query results to a Parquet file           |
 | `db.getStats()`                           | `Promise<DatabaseStats>`     | Storage and memory metrics                       |
+| `db.refresh()`                            | `Promise<RefreshReport>`     | Re-discover SSTables on disk                     |
 | `db.prepare(query)`                       | `Promise<PreparedStatement>` | Parse and plan a query                           |
 | `db.flushRun()`                           | `Promise<string>`            | Flush memtable; returns Data.db path             |
 | `db.maintenanceStep(options?)`            | `Promise<MaintenanceReport>` | Incremental compaction                           |
@@ -14997,6 +15105,62 @@ with cqlite.open(
 * Counter columns cannot be written; `execute()` raises `CqliteError` for counter mutations.
 * Concurrent queries on the same handle require a warm-up query first (see issue #311).
 
+## Refreshing SSTables
+
+[Section titled “Refreshing SSTables”](#refreshing-sstables)
+
+If Cassandra or another process writes new SSTables into the directory after you open the database, call `db.refresh()` to re-discover them. Discovery is **explicit-only** (CQLite never re-scans behind your back) and **atomic** — the new view is swapped in as a whole, so concurrent queries never see a partial set.
+
+```python
+report = db.refresh()
+print(f"Scanned {report.tables_scanned} tables")
+print(f"Added {report.readers_added}, removed {report.readers_removed} readers")
+report.to_dict()   # {'tables_scanned': ..., 'readers_added': ..., 'readers_removed': ...}
+```
+
+`refresh()` returns a `RefreshReport` with integer attributes `tables_scanned`, `readers_added`, and `readers_removed`, plus a `to_dict()` helper.
+
+## Limiting result size
+
+[Section titled “Limiting result size”](#limiting-result-size)
+
+Non-streaming queries respect a **byte-bounded result budget** (default **64 MiB**). A query whose materialized result would exceed the budget fails fast with a `cqlite.QueryError` instead of exhausting memory. Set the budget via the `config` dict passed to `open()`:
+
+```python
+# Raise (or lower) the per-query result budget, in bytes
+db = cqlite.open(
+    "data/sstables",
+    schema="schema.cql",
+    config={"max_result_bytes": 128 * 1024 * 1024},   # 128 MiB
+)
+```
+
+If a query exceeds the budget, add a `LIMIT` clause or switch to `db.execute_streaming()` — **streaming is not subject to the result budget**.
+
+## OpenTelemetry
+
+[Section titled “OpenTelemetry”](#opentelemetry)
+
+Builds compiled with the `observability` feature can emit OpenTelemetry traces. Pass an `otel_config` dict to `open()`:
+
+```python
+db = cqlite.open(
+    "data/sstables",
+    schema="schema.cql",
+    otel_config={
+        "enabled": True,
+        "endpoint": "http://localhost:4317",
+        "protocol": "grpc",              # "grpc" or "http"
+        "service_name": "my-service",
+        "service_version": "1.2.3",
+        "sampling_ratio": 0.1,
+        "timeout_ms": 5000,
+    },
+)
+```
+
+The dict is layered over the `CQLITE_OTEL_*` environment variables (explicit keys win). Unknown keys raise `ValueError`. Omit `otel_config` to leave tracing driven by the environment alone.
+
 ## Thread safety
 
 [Section titled “Thread safety”](#thread-safety)
@@ -15017,6 +15181,7 @@ Each thread should create its own `StreamingIterator` via `execute_streaming()`.
 | `db.export_parquet(query, path, *, row_group_size?, compression?)` | Stream query results to a Parquet file; returns row count |
 | `db.prepare(query)`                                                | Parse and plan a query; returns `PreparedStatement`       |
 | `db.stats()`                                                       | Storage and memory metrics; returns `DatabaseStats`       |
+| `db.refresh()`                                                     | Re-discover SSTables on disk; returns `RefreshReport`     |
 | `db.flush_run()`                                                   | Flush memtable to SSTable; returns Data.db path           |
 | `db.maintenance_step(budget_ms)`                                   | Incremental compaction; returns `MaintenanceReport`       |
 | `db.write_stats`                                                   | Write engine snapshot; returns `WriteStats`               |
@@ -15346,11 +15511,11 @@ Auto-refresh — whether an opt-in per-query staleness check or a background fil
 
 [Section titled “Roadmap”](#roadmap)
 
-CQLite is at **v0.12.0**. The read path, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction — now with **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export — are production-ready. This page is what comes next.
+CQLite is at **v0.13.0**. The read path, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction — now with **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export — are production-ready. This page is what comes next.
 
 The roadmap is community-driven. The fastest way to move something up the list is to [**open or +1 an issue**](https://github.com/pmcfadin/cqlite/issues) describing your use case — and to [**star the repo**](https://github.com/pmcfadin/cqlite) so the project’s reach is visible.
 
-*Last reviewed: 2026-06-22 (v0.12.0).*
+*Last reviewed: 2026-07-05 (v0.13.0).*
 
 ## Milestones
 
@@ -15370,7 +15535,7 @@ The roadmap is community-driven. The fastest way to move something up the list i
 
 [Section titled “In-flight epics”](#in-flight-epics)
 
-These are the active workstreams between v0.12.0 and v1.0. Each links to its GitHub epic with the child tasks.
+These are the active workstreams between v0.13.0 and v1.0. Each links to its GitHub epic with the child tasks.
 
 > Query-engine completeness (#756), `WRITETIME()`/`TTL()` in `SELECT` (#689), writer format fidelity (#762), wide-partition performance (#751), BTI (`da`) end-to-end read (#660), and the CDC delta-scan envelope (#696) all **shipped in v0.12.0** — see the [changelog](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
 

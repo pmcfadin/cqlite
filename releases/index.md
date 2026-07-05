@@ -14,6 +14,7 @@ For the complete, granular change list, see the
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| [v0.13.0](/cqlite/releases/v0-13-0/) | 2026-07-05 | Performance release — read-path + point-read + compressed-chunk wins · byte-bounded results · `Database.refresh()` · 3 breaking changes |
 | [v0.12.0](/cqlite/releases/v0-12-0/) | 2026-06-22 | Arrow Flight + Trino connector · CDC delta-export to Parquet · byte-for-byte compaction parity |
 
 <!-- Convention: newest release first. Give each new release page a lower

@@ -44,7 +44,7 @@ cqlite \
 
 ```
 OK: 1 row(s) affected (4.5ms)
-CQLite CLI v0.11.0
+CQLite CLI v0.13.0
 Use --help for available commands
 ```
 
@@ -68,7 +68,7 @@ cqlite \
 ```
 Flushed: 1 partitions, 50 bytes
   Output: /tmp/cqlite-write/data/test_basic/simple_table/nb-1-big-Data.db
-CQLite CLI v0.11.0
+CQLite CLI v0.13.0
 Use --help for available commands
 ```
 
@@ -101,7 +101,7 @@ cqlite \
 OK: 1 row(s) affected (20.2ms)
 Flushed: 1 partitions, 50 bytes
   Output: /tmp/cqlite-write/data/test_basic/simple_table/nb-1-big-Data.db
-CQLite CLI v0.11.0
+CQLite CLI v0.13.0
 Use --help for available commands
 ```
 
