@@ -114,6 +114,93 @@ custom_config = {'memory': {'max_memory': 536870912}}  # 512 MB
 cqlite.validate_config(custom_config)
 ```
 
+### Refreshing SSTables (v0.13)
+
+If Cassandra (or another process) writes new SSTables while your database handle
+is open, call `refresh()` to re-discover them. Refresh is **explicit-only** (CQLite
+never rescans behind your back) and **atomic / fail-closed**: if any newly found
+generation fails to open, the swap is rolled back and the handle keeps serving the
+prior, consistent set of readers.
+
+```python
+import cqlite
+
+with cqlite.open('path/to/sstables', schema='schema.cql') as db:
+    # ... time passes; Cassandra flushes/compacts new SSTables to disk ...
+
+    report = db.refresh()
+    print(f'Tables scanned:  {report.tables_scanned}')
+    print(f'Readers added:   {report.readers_added}')
+    print(f'Readers removed: {report.readers_removed}')
+
+    # Subsequent queries see the newly discovered data
+    for row in db.execute('SELECT * FROM keyspace.table'):
+        print(row.to_dict())
+```
+
+`refresh()` returns a `RefreshReport` with the integer attributes
+`tables_scanned`, `readers_added`, and `readers_removed`, plus a `to_dict()`
+helper. It raises `RuntimeError` if the database is already closed, and
+`CqliteError` if a newly discovered generation fails to open (the prior reader
+set is preserved).
+
+### Result Byte Budget (v0.13)
+
+Non-streaming `execute()` queries are bounded by a result-size budget, defaulting
+to **64 MiB** (`64 * 1024 * 1024` bytes). When the materialized result's running
+byte estimate exceeds the budget, the query fails with a `cqlite.QueryError`
+directing you to add a `LIMIT` clause or switch to `execute_streaming()`. Streaming
+queries are **not** subject to this budget.
+
+Adjust the budget with the `max_result_bytes` key in the `config` passed to
+`cqlite.open()` (absent, it stays at 64 MiB):
+
+```python
+import cqlite
+
+# Raise the budget to 256 MiB for this handle
+config = {'max_result_bytes': 256 * 1024 * 1024}
+
+try:
+    with cqlite.open('path/to/data', schema='schema.cql', config=config) as db:
+        rows = db.execute('SELECT * FROM keyspace.big_table')
+        for row in rows:
+            process(row)
+except cqlite.QueryError as e:
+    # Result exceeded the byte budget — add a LIMIT or stream instead
+    print(f'Result too large: {e}')
+    for row in db.execute_streaming('SELECT * FROM keyspace.big_table'):
+        process(row)
+```
+
+### OpenTelemetry Tracing (v0.13)
+
+CQLite can emit OpenTelemetry traces when built with the `observability` Cargo
+feature; without that feature the configuration is accepted but is a no-op.
+Pass an `otel_config` dict to `cqlite.open()`. Values are layered over the
+`CQLITE_OTEL_*` environment variables, and OpenTelemetry is initialized once per
+process.
+
+```python
+import cqlite
+
+db = cqlite.open(
+    'path/to/sstables',
+    schema='schema.cql',
+    otel_config={
+        'enabled': True,                       # default False
+        'endpoint': 'http://localhost:4317',   # default 'http://localhost:4317'
+        'protocol': 'grpc',                    # 'grpc' (default) or 'http'
+        'service_name': 'cqlite',              # default 'cqlite'
+        'service_version': '0.13.0',           # default: package version
+        'sampling_ratio': 1.0,                 # default 1.0
+        'timeout_ms': 10000,                   # default 10000
+    },
+)
+```
+
+Unknown keys raise `ValueError`.
+
 ### Error Handling
 
 ```python

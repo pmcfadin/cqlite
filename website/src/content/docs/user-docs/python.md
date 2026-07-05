@@ -281,6 +281,67 @@ with cqlite.open(
 - Counter columns cannot be written; `execute()` raises `CqliteError` for counter mutations.
 - Concurrent queries on the same handle require a warm-up query first (see issue #311).
 
+## Refreshing SSTables
+
+If Cassandra or another process writes new SSTables into the directory after you
+open the database, call `db.refresh()` to re-discover them. Discovery is
+**explicit-only** (CQLite never re-scans behind your back) and **atomic** — the new
+view is swapped in as a whole, so concurrent queries never see a partial set.
+
+```python
+report = db.refresh()
+print(f"Scanned {report.tables_scanned} tables")
+print(f"Added {report.readers_added}, removed {report.readers_removed} readers")
+report.to_dict()   # {'tables_scanned': ..., 'readers_added': ..., 'readers_removed': ...}
+```
+
+`refresh()` returns a `RefreshReport` with integer attributes `tables_scanned`,
+`readers_added`, and `readers_removed`, plus a `to_dict()` helper.
+
+## Limiting result size
+
+Non-streaming queries respect a **byte-bounded result budget** (default **64 MiB**).
+A query whose materialized result would exceed the budget fails fast with a
+`cqlite.QueryError` instead of exhausting memory. Set the budget via the `config`
+dict passed to `open()`:
+
+```python
+# Raise (or lower) the per-query result budget, in bytes
+db = cqlite.open(
+    "data/sstables",
+    schema="schema.cql",
+    config={"max_result_bytes": 128 * 1024 * 1024},   # 128 MiB
+)
+```
+
+If a query exceeds the budget, add a `LIMIT` clause or switch to
+`db.execute_streaming()` — **streaming is not subject to the result budget**.
+
+## OpenTelemetry
+
+Builds compiled with the `observability` feature can emit OpenTelemetry traces.
+Pass an `otel_config` dict to `open()`:
+
+```python
+db = cqlite.open(
+    "data/sstables",
+    schema="schema.cql",
+    otel_config={
+        "enabled": True,
+        "endpoint": "http://localhost:4317",
+        "protocol": "grpc",              # "grpc" or "http"
+        "service_name": "my-service",
+        "service_version": "1.2.3",
+        "sampling_ratio": 0.1,
+        "timeout_ms": 5000,
+    },
+)
+```
+
+The dict is layered over the `CQLITE_OTEL_*` environment variables (explicit keys
+win). Unknown keys raise `ValueError`. Omit `otel_config` to leave tracing driven by
+the environment alone.
+
 ## Thread safety
 
 `Database` handles are thread-safe via `Arc<Database>`. All blocking operations
@@ -300,6 +361,7 @@ Do not share a single iterator across threads.
 | `db.export_parquet(query, path, *, row_group_size?, compression?)` | Stream query results to a Parquet file; returns row count |
 | `db.prepare(query)` | Parse and plan a query; returns `PreparedStatement` |
 | `db.stats()` | Storage and memory metrics; returns `DatabaseStats` |
+| `db.refresh()` | Re-discover SSTables on disk; returns `RefreshReport` |
 | `db.flush_run()` | Flush memtable to SSTable; returns Data.db path |
 | `db.maintenance_step(budget_ms)` | Incremental compaction; returns `MaintenanceReport` |
 | `db.write_stats` | Write engine snapshot; returns `WriteStats` |

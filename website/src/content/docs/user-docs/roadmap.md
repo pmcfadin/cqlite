@@ -8,7 +8,7 @@ sidebar:
 
 # Roadmap
 
-CQLite is at **v0.12.0**. The read path, CLI, output writers (including Parquet),
+CQLite is at **v0.13.0**. The read path, CLI, output writers (including Parquet),
 Python and Node.js bindings, and write support with STCS compaction — now with
 **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino
 connector, canonical BTI (`da`) write/read, and CDC-style delta export — are
@@ -19,7 +19,7 @@ The roadmap is community-driven. The fastest way to move something up the list i
 use case — and to [**star the repo**](https://github.com/pmcfadin/cqlite) so the
 project's reach is visible.
 
-_Last reviewed: 2026-06-22 (v0.12.0)._
+_Last reviewed: 2026-07-05 (v0.13.0)._
 
 ## Milestones
 
@@ -35,7 +35,7 @@ _Last reviewed: 2026-06-22 (v0.12.0)._
 
 ## In-flight epics
 
-These are the active workstreams between v0.12.0 and v1.0. Each links to its GitHub
+These are the active workstreams between v0.13.0 and v1.0. Each links to its GitHub
 epic with the child tasks.
 
 > Query-engine completeness (#756), `WRITETIME()`/`TTL()` in `SELECT` (#689), writer

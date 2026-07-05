@@ -36,6 +36,21 @@ impl Database {
     
     /// Get database statistics
     pub fn stats(&self) -> DatabaseStats;
+
+    /// Re-discover SSTables written by Cassandra or another process while this
+    /// handle is open (issue #1749). Refresh is explicit-only (CQLite never
+    /// rescans behind your back) and atomic / fail-closed: if a newly found
+    /// generation fails to open, the swap is rolled back and the prior reader
+    /// set is preserved.
+    pub async fn refresh(&self) -> Result<RefreshReport>;
+}
+
+/// Result of a `Database::refresh` call.
+#[derive(Debug, Clone)]
+pub struct RefreshReport {
+    pub tables_scanned: usize,
+    pub readers_added: usize,
+    pub readers_removed: usize,
 }
 
 // Configuration options
@@ -60,6 +75,24 @@ impl Default for Config {
     }
 }
 ```
+
+> **Note:** The struct above is an illustrative summary. The authoritative
+> configuration lives in `cqlite-core/src/config.rs` as a nested `QueryConfig`,
+> which includes the result byte budget introduced in v0.13:
+>
+> ```rust
+> pub struct QueryConfig {
+>     // ... other query settings ...
+>
+>     /// Maximum materialized (non-streaming) result size in bytes.
+>     /// Default: DEFAULT_MAX_RESULT_BYTES = 64 * 1024 * 1024 (64 MiB).
+>     pub max_result_bytes: u64,
+> }
+> ```
+>
+> When a non-streaming query's running byte estimate exceeds `max_result_bytes`,
+> execution fails with `Error::ResultTooLarge` (see [Error Handling](#error-handling)).
+> Streaming queries are not subject to this budget.
 
 ### Schema Management
 
@@ -220,6 +253,36 @@ impl Database {
     
     /// Stream large result sets
     pub fn select_stream(&self, query: &str) -> impl Stream<Item = Result<Row>>;
+}
+```
+
+### Observability (OpenTelemetry)
+
+CQLite can export OpenTelemetry traces when built with the `observability` Cargo
+feature (Epic #1031). Without that feature the configuration is accepted but is a
+no-op. OpenTelemetry is initialized once per process.
+
+```rust
+use cqlite::observability::{ObservabilityConfig, OtlpProtocol};
+use std::time::Duration;
+
+#[derive(Debug, Clone)]
+pub struct ObservabilityConfig {
+    pub enabled: bool,             // default: false
+    pub endpoint: String,          // default: "http://localhost:4317"
+    pub protocol: OtlpProtocol,    // Grpc | Http, default: Grpc
+    pub service_name: String,      // default: "cqlite"
+    pub service_version: String,   // default: package version
+    pub sampling_ratio: f64,       // default: 1.0
+    pub timeout: Duration,         // default: 10_000 ms
+}
+
+impl ObservabilityConfig {
+    /// Build a config from the `CQLITE_OTEL_*` environment variables.
+    pub fn from_env() -> Self;
+
+    /// Fluent builder for programmatic configuration.
+    pub fn builder() -> ObservabilityConfigBuilder;
 }
 ```
 
@@ -726,6 +789,17 @@ pub enum Error {
     
     #[error("Query error: {0}")]
     Query(String),
+    
+    /// A non-streaming query's materialized result exceeded the configured
+    /// `QueryConfig::max_result_bytes` budget (default 64 MiB). Category: Query;
+    /// not recoverable. The message directs the caller to add a `LIMIT` clause
+    /// or use `execute_streaming`. Streaming queries are exempt from the budget.
+    #[error("result too large: estimated {estimated_bytes} bytes across {rows} rows exceeds budget of {budget_bytes} bytes; add a LIMIT clause or use execute_streaming")]
+    ResultTooLarge {
+        budget_bytes: u64,
+        estimated_bytes: u64,
+        rows: usize,
+    },
     
     #[error("Not found: {0}")]
     NotFound(String),
