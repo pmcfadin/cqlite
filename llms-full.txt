@@ -1547,7 +1547,7 @@ jq -S '.' /tmp/reference.json > /tmp/ref-sorted.json
 diff /tmp/ref-sorted.json /tmp/cqlite-sorted.json
 ```
 
-Type differences between sstabledump JSON and CQLite JSON are expected and documented: Python uses native types (datetime, UUID, bytes); CLI uses JSON strings. Normalization is needed for comparison — see `bindings/python/tests/test_cli_parity.py` for the normalization logic.
+Type differences between sstabledump JSON and CQLite JSON are expected and documented: Python uses native types (v0.13 mapping: `timestamp`→`datetime`, `uuid`→`UUID`, `blob`→`bytes`, `time`→`int` ns since midnight, `duration`→`cqlite.Duration` — see the v0.13 Migration Guide, `docs/development/v0.13-migration-guide.md`); CLI uses JSON strings. Normalization is needed for comparison — see `bindings/python/tests/test_cli_parity.py` for the normalization logic.
 
 ## Adding a new table to parity coverage
 
@@ -2904,24 +2904,26 @@ Note: column order in `to_dict()` may vary; do not rely on insertion order.
 
 Python receives native types — no string serialization:
 
-| CQL type                     | Python type                    |
-| ---------------------------- | ------------------------------ |
-| `text`, `varchar`, `ascii`   | `str`                          |
-| `int`, `smallint`, `tinyint` | `int`                          |
-| `bigint`, `counter`          | `int`                          |
-| `float`, `double`            | `float`                        |
-| `boolean`                    | `bool`                         |
-| `uuid`, `timeuuid`           | `uuid.UUID`                    |
-| `timestamp`                  | `datetime.datetime` (UTC)      |
-| `date`                       | `datetime.date`                |
-| `time`                       | `datetime.timedelta`           |
-| `blob`                       | `bytes`                        |
-| `inet`                       | `str` (dotted decimal or IPv6) |
-| `decimal`                    | `decimal.Decimal`              |
-| `varint`                     | `int`                          |
-| `list<T>`                    | `list`                         |
-| `set<T>`                     | `frozenset`                    |
-| `map<K,V>`                   | `dict`                         |
+| CQL type                     | Python type                        |
+| ---------------------------- | ---------------------------------- |
+| `text`, `varchar`, `ascii`   | `str`                              |
+| `int`, `smallint`, `tinyint` | `int`                              |
+| `bigint`, `counter`          | `int`                              |
+| `float`, `double`            | `float`                            |
+| `boolean`                    | `bool`                             |
+| `uuid`, `timeuuid`           | `uuid.UUID`                        |
+| `timestamp`                  | `datetime.datetime` (UTC)          |
+| `date`                       | `datetime.date`                    |
+| `time`                       | `int` (nanoseconds since midnight) |
+| `blob`                       | `bytes`                            |
+| `inet`                       | `str` (dotted decimal or IPv6)     |
+| `decimal`                    | `decimal.Decimal`                  |
+| `varint`                     | `int`                              |
+| `list<T>`                    | `list`                             |
+| `set<T>`                     | `frozenset`                        |
+| `map<K,V>`                   | `dict`                             |
+
+> **v0.13:** `time` decodes to `int` (nanoseconds since midnight) and `duration` to `cqlite.Duration`. See the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
 
 ## Row access
 
@@ -14852,8 +14854,8 @@ CQL types are mapped to native Python types automatically:
 | `blob`                       | `bytes`                                  |
 | `timestamp`                  | `datetime.datetime` (UTC-aware)          |
 | `date`                       | `datetime.date`                          |
-| `time`                       | `datetime.time`                          |
-| `duration`                   | `datetime.timedelta`                     |
+| `time`                       | `int` (nanoseconds since midnight)       |
+| `duration`                   | `cqlite.Duration(months, days, nanos)`   |
 | `uuid`, `timeuuid`           | `uuid.UUID`                              |
 | `inet`                       | `ipaddress.IPv4Address` or `IPv6Address` |
 | `decimal`                    | `decimal.Decimal`                        |
@@ -14865,6 +14867,8 @@ CQL types are mapped to native Python types automatically:
 | `frozen<T>`                  | Unwrapped inner type                     |
 | UDT                          | `dict` with `_type` and `_keyspace` keys |
 | `null`                       | `None`                                   |
+
+> **v0.13:** `time` and `duration` now decode to exact, lossless types. See the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
 
 ## Streaming large result sets
 
@@ -16486,14 +16490,16 @@ Active users: 4 of 10
 | blob                                    | `bytes`                                            |
 | timestamp                               | `datetime.datetime` (timezone-aware, UTC)          |
 | date                                    | `datetime.date`                                    |
-| time                                    | `datetime.time`                                    |
+| time                                    | `int` (nanoseconds since midnight)                 |
 | uuid, timeuuid                          | `uuid.UUID`                                        |
-| duration                                | `datetime.timedelta`                               |
+| duration                                | `cqlite.Duration(months, days, nanos)`             |
 | inet                                    | `ipaddress.IPv4Address` or `ipaddress.IPv6Address` |
 | list, set                               | `list`                                             |
 | map                                     | `dict`                                             |
 | tuple                                   | `tuple`                                            |
 | UDT                                     | `dict` (field name → value)                        |
+
+> **v0.13:** `time` and `duration` now decode to exact, lossless types. See the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
 
 ## Streaming for large tables
 

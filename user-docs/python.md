@@ -118,8 +118,8 @@ CQL types are mapped to native Python types automatically:
 | `blob` | `bytes` |
 | `timestamp` | `datetime.datetime` (UTC-aware) |
 | `date` | `datetime.date` |
-| `time` | `datetime.time` |
-| `duration` | `datetime.timedelta` |
+| `time` | `int` (nanoseconds since midnight) |
+| `duration` | `cqlite.Duration(months, days, nanos)` |
 | `uuid`, `timeuuid` | `uuid.UUID` |
 | `inet` | `ipaddress.IPv4Address` or `IPv6Address` |
 | `decimal` | `decimal.Decimal` |
@@ -131,6 +131,8 @@ CQL types are mapped to native Python types automatically:
 | `frozen<T>` | Unwrapped inner type |
 | UDT | `dict` with `_type` and `_keyspace` keys |
 | `null` | `None` |
+
+> **v0.13:** `time` and `duration` now decode to exact, lossless types. See the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
 
 ## Streaming large result sets
 
