@@ -776,7 +776,7 @@ mod regression_1741c_tests;
 #[cfg(test)]
 mod regression_1741d_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write-support"))]
 mod regression_1741h_tests;
 
 #[cfg(test)]
