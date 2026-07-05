@@ -189,6 +189,90 @@ async fn grouped_min_max_with_selected_dimension_is_exact() {
     }
 }
 
+/// #1952 REGRESSION (roborev HIGH): `SELECT SUM(value) ... GROUP BY category`
+/// with `category` NOT in the SELECT clause. #1952 derived the scan projection
+/// from the SELECT clause, so the projection became `["value"]` and OMITTED the
+/// GROUP BY column `category`. `build_group_key` then read `category` as `Null`,
+/// collapsing ALL groups into one and returning a single wrong sum. The GROUP BY
+/// columns must ALWAYS be scanned. Asserts multiple distinct groups with EXACT
+/// per-group sums.
+#[tokio::test]
+async fn grouped_sum_with_unselected_dimension_is_per_group() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT SUM(value) \
+             FROM test_basic.multi_partition_table GROUP BY category",
+        )
+        .await
+        .expect("grouped SUM (unselected dimension) query must execute");
+
+    // Multiple distinct groups must be returned, not one collapsed group.
+    assert_eq!(
+        result.rows.len(),
+        GROUPS.len(),
+        "GROUP BY category must return one row per group ({} groups), not a \
+         single collapsed group; scan projection must include the GROUP BY \
+         column `category`",
+        GROUPS.len(),
+    );
+
+    for &(cat, _count, sum, _min, _max) in GROUPS {
+        let got = agg_value(&result.rows, cat, "Sum_value");
+        assert_eq!(
+            got,
+            Some(&Value::Float(sum as f64)),
+            "SUM(value) for category {cat}; GROUP BY column `category` must be \
+             scanned even though it is not in the SELECT clause",
+        );
+    }
+}
+
+/// #1952 REGRESSION companion: `SELECT COUNT(value) ... GROUP BY category` with
+/// `category` unselected must produce correct PER-GROUP counts, not one collapsed
+/// group.
+#[tokio::test]
+async fn grouped_count_column_with_unselected_dimension_is_per_group() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT COUNT(value) \
+             FROM test_basic.multi_partition_table GROUP BY category",
+        )
+        .await
+        .expect("grouped COUNT(col) (unselected dimension) query must execute");
+
+    assert_eq!(
+        result.rows.len(),
+        GROUPS.len(),
+        "GROUP BY category must return one row per group, not a collapsed group",
+    );
+
+    for &(cat, count, _sum, _min, _max) in GROUPS {
+        let got = agg_value(&result.rows, cat, "Count_value");
+        assert_eq!(
+            got,
+            Some(&Value::BigInt(count)),
+            "COUNT(value) for category {cat} must equal the non-null group size \
+             even though `category` is not in the SELECT clause",
+        );
+    }
+}
+
 /// Regression guard: `COUNT(*)` grouped needs no argument column and must stay
 /// correct after the projection change (the group size per category).
 #[tokio::test]

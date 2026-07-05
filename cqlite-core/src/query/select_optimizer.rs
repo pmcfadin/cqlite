@@ -246,7 +246,7 @@ impl SelectOptimizer {
         plan.execution_steps.push(ExecutionStep::SSTableScan {
             table: table_id,
             predicates: plan.sstable_predicates.clone(),
-            projection: extract_projection_columns(&statement.select_clause),
+            projection: extract_projection_columns(&statement),
         });
 
         // If we couldn't push any predicates down, keep the original WHERE as
@@ -600,12 +600,21 @@ fn literal_value(expr: &SelectExpression) -> Option<Value> {
 /// aggregate silently computed from missing inputs (SUM/AVG → 0/null, COUNT(col)
 /// → 0, MIN/MAX → null). `COUNT(*)` contributes no argument column, and an empty
 /// projection (`SELECT *`) still means scan-all.
-fn extract_projection_columns(select_clause: &SelectClause) -> Vec<String> {
-    match select_clause {
+///
+/// The union ALSO includes every `GROUP BY` source column, whether or not it is
+/// projected in the SELECT clause (the #1952 regression fix). `build_group_key`
+/// reads each grouped column's cell from the scanned row; if a grouped column is
+/// NOT in the SELECT clause -- `SELECT SUM(value) FROM t GROUP BY category` --
+/// deriving the projection from the SELECT clause alone omitted `category`, so
+/// every row's group key read `Null` and ALL groups collapsed into one, silently
+/// returning wrong grouped aggregates. Scanning the GROUP BY columns
+/// unconditionally keeps the group key correct.
+fn extract_projection_columns(statement: &SelectStatement) -> Vec<String> {
+    match &statement.select_clause {
         SelectClause::All => Vec::new(),
         SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
             let mut columns: Vec<String> = Vec::new();
-            let mut push_unique = |col: String| {
+            let push_unique = |columns: &mut Vec<String>, col: String| {
                 if !columns.contains(&col) {
                     columns.push(col);
                 }
@@ -614,12 +623,20 @@ fn extract_projection_columns(select_clause: &SelectClause) -> Vec<String> {
                 // Dimension / plain-column source (the SELECT output side is named
                 // later; the scan reads the SOURCE column).
                 if let Some((source, _)) = projection_source_and_output(expr) {
-                    push_unique(source);
+                    push_unique(&mut columns, source);
                 }
                 // Aggregate argument source columns (the #1952 fix). Empty for
                 // `COUNT(*)` and non-aggregate expressions.
                 for source in aggregate_arg_source_columns(expr) {
-                    push_unique(source);
+                    push_unique(&mut columns, source);
+                }
+            }
+            // GROUP BY source columns must ALWAYS be scanned so `build_group_key`
+            // can read them, even when a grouped column is not in the SELECT
+            // clause (the #1952 regression fix).
+            if let Some(group_by) = &statement.group_by {
+                for col in &group_by.columns {
+                    push_unique(&mut columns, col.column.clone());
                 }
             }
             columns
