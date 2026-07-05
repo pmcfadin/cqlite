@@ -224,8 +224,11 @@ try:
             return {}
         return dict(zip(row.field_names, row.field_types))
 
-    # Discover and register all UDTs in this keyspace so the driver can
-    # serialize UDT values as dicts (the same approach used for test_oa.udt_table).
+    # Discover all UDTs in this keyspace and cache their authoritative field
+    # order from system_schema.types; build_udt_value() emits POSITIONAL TUPLES
+    # in that declared order, which is what prepared-statement UDT serialization
+    # requires (issue #1991). register_user_type(..., dict) only affects how the
+    # driver DESERIALIZES UDTs read back — inserts never bind dicts here.
     udt_fields_cache = {}
     try:
         udts_rs = session.execute(
@@ -325,7 +328,8 @@ try:
         if bare == 'duration':
             return Duration(months=random.randint(0, 12), days=random.randint(0, 30),
                             nanoseconds=random.randint(0, 10**9))
-        # UDT: if the bare type name is a known UDT in this keyspace, build a dict
+        # UDT: if the bare type name is a known UDT in this keyspace, build a
+        # positional tuple in declared field order (issue #1991)
         if bare in udt_fields_cache:
             return build_udt_value(bare, depth=depth)
         # text, varchar, ascii, and anything unrecognized
