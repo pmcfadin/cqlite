@@ -260,6 +260,20 @@ mod tests {
     }
 
     #[test]
+    fn unresolvable_inner_type_decodes_to_blob_no_panic() {
+        // Spec Req 1 scenario 4 (no-heuristics #28): with NO header marshal type
+        // and NO wired registry, an unresolvable inner UDT short-name must stay an
+        // opaque `Value::Blob` carrying the exact bytes — never a byte-pattern
+        // guess, never a panic.
+        let parser = V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 0, 0, None);
+        let bytes = [0xDE, 0xAD, 0xBE, 0xEF];
+        let val = parser
+            .parse_value_from_raw_bytes(&bytes, "some_unregistered_udt", "col", 0)
+            .expect("unresolved UDT must not error");
+        assert_eq!(val, Value::Blob(bytes.to_vec()));
+    }
+
+    #[test]
     fn prefer_marshal_only_for_udt_elements() {
         let udt = "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61))";
         // UDT-bearing marshal wins over the schema short form.
