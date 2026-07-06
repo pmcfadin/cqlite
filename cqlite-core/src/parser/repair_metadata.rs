@@ -958,6 +958,17 @@ pub struct StatsExtras {
     /// placeholder in [`crate::parser::enhanced_statistics_parser`], which
     /// silently reported the MIN write timestamp as the max.
     pub max_timestamp: Option<i64>,
+    /// Authoritative SSTable `maxTTL` (seconds) decoded from STATS field 9
+    /// (issue #1537). Cassandra's `MetadataCollector` seeds the TTL tracker with
+    /// `Cell.NO_TTL` (`0`) and updates it only from EXPIRING cells, so a maxTTL of
+    /// `0` means "no expiring cells" and is surfaced fail-closed as `None`. Any
+    /// positive value is the true maximum TTL across the SSTable's expiring cells.
+    /// The compaction TTL-expiry LDT floor (issue #1537,
+    /// [`crate::storage::write_engine::merge::compute_expiry_ttl_ldt_floor`]) needs
+    /// this authoritative maximum: the enhanced (nb) parser only decodes the
+    /// EncodingStats `minTTL` baseline and honestly leaves `max_ttl = None`, so
+    /// this best-effort STATS-extras walk is the only source of the true maximum.
+    pub max_ttl: Option<i64>,
 }
 
 impl Default for StatsExtras {
@@ -969,6 +980,7 @@ impl Default for StatsExtras {
             max_local_deletion_time: NO_DELETION_TIME,
             tombstone_drop_times: Vec::new(),
             max_timestamp: None,
+            max_ttl: None,
         }
     }
 }
@@ -1032,8 +1044,17 @@ pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<
     let raw_max_ldt = c.read_u32()?;
     let max_local_deletion_time = decode_max_local_deletion_time(raw_max_ldt, modern);
 
-    // 6. minTTL, maxTTL.
-    c.skip(4 + 4)?;
+    // 6. minTTL (skip), maxTTL (read). Both are `int` (4 bytes BE) in every
+    //    encoding (nb / oa / da). maxTTL is the authoritative maximum TTL across
+    //    the SSTable's expiring cells (issue #1537); `0` (Cassandra `Cell.NO_TTL`,
+    //    the tracker seed) means "no expiring cells" and is surfaced as `None`.
+    c.skip(4)?; // minTTL
+    let raw_max_ttl = c.read_i32()?;
+    let max_ttl = if raw_max_ttl > 0 {
+        Some(i64::from(raw_max_ttl))
+    } else {
+        None
+    };
 
     // 7. compressionRatio (f64).
     c.read_f64()?;
@@ -1045,6 +1066,7 @@ pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<
         max_local_deletion_time,
         tombstone_drop_times,
         max_timestamp,
+        max_ttl,
     })
 }
 
@@ -1210,17 +1232,19 @@ mod tests {
     /// modern (12-byte: `i64 point + i32 value`) layout per `modern`.
     fn synthetic_statistics_extras(modern: bool, raw_max_ldt: u32, bins: &[(i64, u64)]) -> Vec<u8> {
         // Default fixture: minTimestamp=100, maxTimestamp=200.
-        synthetic_statistics_extras_ts(modern, raw_max_ldt, bins, 100, 200)
+        synthetic_statistics_extras_ts(modern, raw_max_ldt, bins, 100, 200, 0)
     }
 
     /// Same as [`synthetic_statistics_extras`] but with explicit min/max write
-    /// timestamps (STATS field 4), for exercising `decode_max_timestamp` (#1729).
+    /// timestamps (STATS field 4), for exercising `decode_max_timestamp` (#1729),
+    /// and an explicit `max_ttl` (STATS field 9, issue #1537).
     fn synthetic_statistics_extras_ts(
         modern: bool,
         raw_max_ldt: u32,
         bins: &[(i64, u64)],
         min_timestamp: i64,
         max_timestamp: i64,
+        max_ttl: i32,
     ) -> Vec<u8> {
         let mut stats = Vec::new();
         // estimatedPartitionSize + estimatedCellPerPartitionCount (empty).
@@ -1237,7 +1261,7 @@ mod tests {
         stats.extend_from_slice(&raw_max_ldt.to_be_bytes());
         // minTTL, maxTTL.
         stats.extend_from_slice(&0i32.to_be_bytes());
-        stats.extend_from_slice(&0i32.to_be_bytes());
+        stats.extend_from_slice(&max_ttl.to_be_bytes());
         // compressionRatio (f64).
         stats.extend_from_slice(&(-1.0f64).to_be_bytes());
         // TombstoneHistogram: maxBinSize, size, then bins.
@@ -1504,6 +1528,33 @@ mod tests {
         assert!(extras.tombstone_drop_times.is_empty());
         // Default fixture: maxTimestamp=200 (NOT the min=100 placeholder). #1729.
         assert_eq!(extras.max_timestamp, Some(200));
+        // Default fixture: maxTTL=0 (no expiring cells) → None (#1537).
+        assert_eq!(extras.max_ttl, None);
+    }
+
+    #[test]
+    fn stats_extras_decodes_authoritative_max_ttl() {
+        // Issue #1537: the STATS-extras walk must surface the authoritative maxTTL
+        // (field 9) so the compaction TTL-expiry LDT floor can lower the output's
+        // min-LDT baseline below a creation-time (`ldt - ttl`) tombstone. A positive
+        // maxTTL is the true max; `0` (Cassandra `Cell.NO_TTL`) means "no expiring
+        // cells" and must surface as `None`.
+        let bytes =
+            synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], 100, 200, 10_000_000);
+        let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(
+            extras.max_ttl,
+            Some(10_000_000),
+            "authoritative maxTTL must be decoded from STATS field 9"
+        );
+
+        // maxTTL == 0 → no expiring cells → None (fail-closed).
+        let none_bytes = synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], 100, 200, 0);
+        let none_extras = parse_stats_extras(&none_bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(
+            none_extras.max_ttl, None,
+            "maxTTL of 0 (no expiring cells) must surface as None"
+        );
     }
 
     #[test]
@@ -1512,7 +1563,7 @@ mod tests {
         // true max (not the min placeholder the enhanced parser used to emit).
         let min_ts = 1_000_000i64;
         let max_ts = 5_000_000i64;
-        let bytes = synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], min_ts, max_ts);
+        let bytes = synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], min_ts, max_ts, 0);
         let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
         assert_eq!(
             extras.max_timestamp,
@@ -1531,7 +1582,8 @@ mod tests {
         // Fail-closed (#1729): Cassandra seeds the max tracker with
         // Long.MIN_VALUE; an SSTable with no recorded write timestamp
         // serializes that sentinel → surfaced as None, never a bogus max.
-        let bytes = synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], i64::MAX, i64::MIN);
+        let bytes =
+            synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], i64::MAX, i64::MIN, 0);
         let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
         assert_eq!(extras.max_timestamp, None);
     }
