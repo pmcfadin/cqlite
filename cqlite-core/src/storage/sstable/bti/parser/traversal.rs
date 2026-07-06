@@ -76,7 +76,11 @@ pub(crate) fn load_bti_trie_via_footer<R: Read + Seek>(
 ///
 /// `Sparse` transitions are returned in their stored order; the parser preserves
 /// the on-disk ascending order, and we sort defensively.
-fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
+///
+/// Shared with [`super::rows_floor`], whose O(key-length) floor/ceiling walk
+/// follows the SAME ascending `(transition_byte, absolute_child_offset)` child
+/// order the DFS uses (issue #1647 / L1).
+pub(super) fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
     match &node.data {
         BtiNodeData::PayloadOnly { .. } => Vec::new(),
         BtiNodeData::Single { transition } => {

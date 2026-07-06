@@ -206,6 +206,13 @@ struct Counters {
     /// exactly one short-circuit; an in-range read records zero (the bound never
     /// fires, so the normal presence path runs).
     range_short_circuits: AtomicU64,
+    /// Per-partition `Rows.db` row-index entry deserializations
+    /// (`ROWS_DB_ENTRY_RESOLVES`, Issue #1647 / L1) — one per
+    /// `bti::parser::resolve_rows_db_entry` (`TrieIndexEntry.deserialize`). Consumer
+    /// L1: a single BTI clustering read must resolve the per-partition entry EXACTLY
+    /// once (the pre-L1 window path resolved it twice — once directly, once inside
+    /// `iterate_rows_for_partition`).
+    rows_db_entry_resolves: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -227,6 +234,7 @@ impl Counters {
             index_probes: AtomicU64::new(0),
             key_hash_calls: AtomicU64::new(0),
             range_short_circuits: AtomicU64::new(0),
+            rows_db_entry_resolves: AtomicU64::new(0),
         }
     }
 
@@ -291,6 +299,10 @@ impl Counters {
         self.range_short_circuits.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_rows_db_entry_resolve(&self) {
+        self.rows_db_entry_resolves.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -351,6 +363,10 @@ impl Counters {
         self.range_short_circuits.load(Ordering::Relaxed)
     }
 
+    fn rows_db_entry_resolves(&self) -> u64 {
+        self.rows_db_entry_resolves.load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
@@ -367,6 +383,7 @@ impl Counters {
         self.index_probes.store(0, Ordering::Relaxed);
         self.key_hash_calls.store(0, Ordering::Relaxed);
         self.range_short_circuits.store(0, Ordering::Relaxed);
+        self.rows_db_entry_resolves.store(0, Ordering::Relaxed);
     }
 }
 
@@ -572,6 +589,19 @@ pub fn record_range_short_circuit() {
     COUNTERS.record_range_short_circuit();
 }
 
+/// Record one per-partition `Rows.db` row-index entry deserialization
+/// (`ROWS_DB_ENTRY_RESOLVES`; consumer L1, Issue #1647).
+///
+/// Called unconditionally at the single `TrieIndexEntry.deserialize` site
+/// (`bti::parser::rows::resolve_rows_db_entry`); the body compiles to a no-op in a
+/// release build (design.md Decision 1). L1 collapses the clustering-window path's
+/// double resolve to one, so a warm-cache clustering read records exactly 1.
+#[inline(always)]
+pub fn record_rows_db_entry_resolve() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_rows_db_entry_resolve();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -672,6 +702,13 @@ pub fn key_hash_calls() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn range_short_circuits() -> u64 {
     COUNTERS.range_short_circuits()
+}
+
+/// Number of per-partition `Rows.db` row-index entry deserializations since the
+/// last [`reset`] (`ROWS_DB_ENTRY_RESOLVES`, Issue #1647 / L1).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn rows_db_entry_resolves() -> u64 {
+    COUNTERS.rows_db_entry_resolves()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
@@ -794,6 +831,11 @@ mod tests {
         for _ in 0..15 {
             c.record_range_short_circuit();
         }
+        // Issue #1647 Rows.db entry-resolve counter: multiplicity 16, distinct
+        // from every sibling so a mis-wired getter/field cross-up is caught.
+        for _ in 0..16 {
+            c.record_rows_db_entry_resolve();
+        }
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
@@ -810,6 +852,7 @@ mod tests {
         assert_eq!(c.index_probes(), 13);
         assert_eq!(c.key_hash_calls(), 14);
         assert_eq!(c.range_short_circuits(), 15);
+        assert_eq!(c.rows_db_entry_resolves(), 16);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
@@ -827,6 +870,7 @@ mod tests {
         assert_eq!(c.index_probes(), 0);
         assert_eq!(c.key_hash_calls(), 0);
         assert_eq!(c.range_short_circuits(), 0);
+        assert_eq!(c.rows_db_entry_resolves(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms
