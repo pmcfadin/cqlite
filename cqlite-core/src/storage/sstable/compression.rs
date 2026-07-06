@@ -555,6 +555,30 @@ fn calculate_repetition_score(data: &[u8]) -> f64 {
     (byte_repetition_score * 0.6 + pattern_repetition_score * 0.4).min(1.0)
 }
 
+/// The compression algorithm a reader uses to decompress a `Data.db`'s chunks.
+///
+/// Reduced to a plain algorithm field (issue #1597 / G1): the reader derives the
+/// algorithm from the single authoritative `CompressionInfo.db` parse and every
+/// decompression site funnels through [`Compression::decompress`] via
+/// [`CompressionReader::algorithm`]. The former streaming half (`read_streaming`,
+/// `read`, `with_block_size`, `block_size`, and the `buffer`/`block_size` fields)
+/// had zero consumers and was deleted.
+pub struct CompressionReader {
+    algorithm: CompressionAlgorithm,
+}
+
+impl CompressionReader {
+    /// Create a compression reader for the given algorithm.
+    pub fn new(algorithm: CompressionAlgorithm) -> Self {
+        Self { algorithm }
+    }
+
+    /// Get the compression algorithm.
+    pub fn algorithm(&self) -> &CompressionAlgorithm {
+        &self.algorithm
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,28 +910,4 @@ mod tests {
 
     // Note: Algorithm selection test temporarily disabled due to compilation issues
     // The functionality is tested via integration tests
-}
-
-/// The compression algorithm a reader uses to decompress a `Data.db`'s chunks.
-///
-/// Reduced to a plain algorithm field (issue #1597 / G1): the reader derives the
-/// algorithm from the single authoritative `CompressionInfo.db` parse and every
-/// decompression site funnels through [`Compression::decompress`] via
-/// [`CompressionReader::algorithm`]. The former streaming half (`read_streaming`,
-/// `read`, `with_block_size`, `block_size`, and the `buffer`/`block_size` fields)
-/// had zero consumers and was deleted.
-pub struct CompressionReader {
-    algorithm: CompressionAlgorithm,
-}
-
-impl CompressionReader {
-    /// Create a compression reader for the given algorithm.
-    pub fn new(algorithm: CompressionAlgorithm) -> Self {
-        Self { algorithm }
-    }
-
-    /// Get the compression algorithm.
-    pub fn algorithm(&self) -> &CompressionAlgorithm {
-        &self.algorithm
-    }
 }
