@@ -2352,7 +2352,10 @@ mod tests {
     #[test]
     fn checked_offset_past_i32_max_is_error() {
         // At the ceiling: i32::MAX still fits.
-        assert_eq!(super::checked_offset(i32::MAX as usize).ok(), Some(i32::MAX));
+        assert_eq!(
+            super::checked_offset(i32::MAX as usize).ok(),
+            Some(i32::MAX)
+        );
         // One past the ceiling must fail closed (would wrap to i32::MIN as i32).
         assert!(matches!(
             super::checked_offset(i32::MAX as usize + 1),
@@ -2388,7 +2391,10 @@ mod tests {
         let map_cols = vec![col(
             "m",
             DataType::Map,
-            Some(CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int))),
+            Some(CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::Int),
+            )),
         )];
         let map_rows = vec![row_one(
             "m",
