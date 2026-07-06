@@ -42,11 +42,20 @@
 //!
 //! [`SSTableManager::scan_stream`]: super::SSTableManager::scan_stream
 
+// `not(feature = "tombstones")`: the deadlock this pins lives ONLY in the lazy
+// per-generation fan-out k-way merge of the non-`tombstones` `scan_stream`. Under
+// `tombstones`, `scan_stream` delegates wholesale to the materializing `scan`
+// (mod.rs), which acquires NO operation-level admission permit — so the fan-out
+// admission topology (and its `max_admitted >= 1` wiring assertion) does not exist
+// there. Scoping the guard to the config whose code path it actually exercises
+// keeps `--all-features` green without weakening the regression coverage (issue
+// #1880).
 #![cfg(all(
     test,
     feature = "state_machine",
     feature = "cli-helpers",
-    feature = "scan-offload-probe"
+    feature = "scan-offload-probe",
+    not(feature = "tombstones")
 ))]
 
 use std::path::PathBuf;

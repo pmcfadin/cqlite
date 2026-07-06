@@ -689,88 +689,9 @@ mod tests {
         storage.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    #[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]
-    async fn test_batch_operations() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
-        let platform = Arc::new(Platform::new(&config).await.unwrap());
-
-        let mut storage = StorageEngine::open(
-            temp_dir.path(),
-            &config,
-            platform,
-            #[cfg(feature = "state_machine")]
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Test batch write operations
-        let batch_ops = vec![
-            BatchOperation::Put {
-                table_id: TableId::new("test_table"),
-                key: RowKey::from("key1"),
-                value: Value::Text("value1".to_string()),
-            },
-            BatchOperation::Put {
-                table_id: TableId::new("test_table"),
-                key: RowKey::from("key2"),
-                value: Value::Text("value2".to_string()),
-            },
-            BatchOperation::Delete {
-                table_id: TableId::new("test_table"),
-                key: RowKey::from("key3"),
-            },
-        ];
-
-        storage.batch_write(batch_ops).await.unwrap();
-        storage.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    #[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]
-    async fn test_batch_operations_fallback() {
-        // Add timeout to prevent hanging in parallel test execution
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            let temp_dir = TempDir::new().unwrap();
-            let mut config = Config::default();
-            // Force fallback path by setting small threshold so batch writer is not initialized
-            config.storage.memtable_size_threshold = 1024; // 1KB - smaller than 1MB threshold
-            let platform = Arc::new(Platform::new(&config).await.unwrap());
-
-            let mut storage = StorageEngine::open(
-                temp_dir.path(),
-                &config,
-                platform,
-                #[cfg(feature = "state_machine")]
-                None,
-            )
-            .await
-            .unwrap();
-
-            // Test batch write operations (should use fallback path)
-            let batch_ops = vec![
-                BatchOperation::Put {
-                    table_id: TableId::new("test_table"),
-                    key: RowKey::from("key1"),
-                    value: Value::Text("value1".to_string()),
-                },
-                BatchOperation::Put {
-                    table_id: TableId::new("test_table"),
-                    key: RowKey::from("key2"),
-                    value: Value::Text("value2".to_string()),
-                },
-                BatchOperation::Delete {
-                    table_id: TableId::new("test_table"),
-                    key: RowKey::from("key3"),
-                },
-            ];
-
-            storage.batch_write(batch_ops).await.unwrap();
-            storage.shutdown().await.unwrap();
-        })
-        .await
-        .expect("Test should complete within 30 seconds");
-    }
+    // NOTE: `test_batch_operations` and `test_batch_operations_fallback` were
+    // removed in Issue #1880. They drove `StorageEngine::batch_write`, whose
+    // WAL/MemTable implementation was deleted in Issue #175 — the method is now an
+    // always-erroring stub, so both tests could only ever panic under
+    // `--all-features`. There is no batch-write behavior left to assert.
 }
