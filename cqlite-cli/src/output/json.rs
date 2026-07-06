@@ -323,9 +323,9 @@ impl<W: Write + Send> StreamingWriter for StreamingJSONWriter<W> {
 
     fn write_chunk(&mut self, rows: &[QueryRow]) -> Result<usize, OutputError> {
         for row in rows {
-            let json_str = self.row_to_json_string(row).map_err(|e| {
-                OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-            })?;
+            let json_str = self
+                .row_to_json_string(row)
+                .map_err(|e| OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
             // Handle comma separator between rows
             if !self.first_row {
@@ -447,8 +447,18 @@ mod tests {
     fn test_borrowed_key_pretty_output_is_byte_identical() {
         let mut result = QueryResult::new();
         result.metadata.columns = vec![
-            ColumnInfo::new("id".to_string(), cqlite_core::types::DataType::Integer, false, 0),
-            ColumnInfo::new("name".to_string(), cqlite_core::types::DataType::Text, false, 1),
+            ColumnInfo::new(
+                "id".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "name".to_string(),
+                cqlite_core::types::DataType::Text,
+                false,
+                1,
+            ),
         ];
         let mut values = HashMap::new();
         values.insert("id".to_string(), Value::Integer(7));
@@ -463,8 +473,7 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert("id".to_string(), serde_json::json!(7));
         map.insert("name".to_string(), serde_json::json!("null"));
-        let expected =
-            serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
+        let expected = serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
 
         assert_eq!(json_str, expected);
         // A literal text "null" is a JSON string, never dropped.
