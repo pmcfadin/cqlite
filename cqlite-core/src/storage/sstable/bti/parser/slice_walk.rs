@@ -447,6 +447,55 @@ mod tests {
         );
     }
 
+    /// Append a synthetic 12-byte payload (the PayloadOnly layout: 8-byte data
+    /// offset + 4-byte length) to an internal-node fixture whose header already
+    /// carries a non-zero payload-flags nibble. Path-compressed BTI tries emit
+    /// exactly this shape — an internal Single/Sparse/Dense node that also ends a
+    /// key, so it carries an embedded payload trailing its child-pointer area.
+    fn with_trailing_payload(mut node: Vec<u8>) -> Vec<u8> {
+        node.extend_from_slice(&0xDEAD_BEEF_0000_1234u64.to_be_bytes());
+        node.extend_from_slice(&42u32.to_be_bytes());
+        node
+    }
+
+    // `find_child_offset` reads the child pointer at fixed offsets independent of
+    // the payload-flags nibble (correct — the child-pointer layout precedes any
+    // trailing payload). These agree-cases cross-check that payload-bearing path,
+    // which production path-compressed tries actually exercise but the zero-payload
+    // fixtures above never reach: header low nibble != 0 AND real trailing payload
+    // bytes. Both present-child and absent-child probes must agree with the oracle.
+    #[test]
+    fn find_child_offset_single8_with_payload_flag() {
+        // Single8 header 0x28: ordinal 2 (Single8) + payload-flags nibble 8.
+        // transition 0x41, delta 4 → child @6; trailing 12-byte payload ignored.
+        let node = with_trailing_payload(vec![0x28, 0x41, 0x04]);
+        // Guard: the oracle accepts the payload-bearing fixture as a Single node.
+        let parsed = parse_bti_node(&node, 10).unwrap();
+        assert!(matches!(parsed.data, BtiNodeData::Single { .. }));
+        assert_find_child_agrees(&node, 10, &[0x40, 0x41, 0x42]);
+    }
+
+    #[test]
+    fn find_child_offset_sparse8_with_payload_flag() {
+        // Sparse8 header 0x58: ordinal 5 + payload-flags nibble 8.
+        // bytes {0x10,0x20,0x30}, deltas {5,10,15}; trailing 12-byte payload.
+        let node = with_trailing_payload(vec![0x58, 0x03, 0x10, 0x20, 0x30, 0x05, 0x0A, 0x0F]);
+        let parsed = parse_bti_node(&node, 20).unwrap();
+        assert!(matches!(parsed.data, BtiNodeData::Sparse { .. }));
+        assert_find_child_agrees(&node, 20, &[0x0F, 0x10, 0x20, 0x30, 0x31]);
+    }
+
+    #[test]
+    fn find_child_offset_dense16_with_payload_flag() {
+        // Dense16 header 0xB8: ordinal 11 + payload-flags nibble 8.
+        // start 0x10, len 3, deltas {16, 0, 14}; trailing 12-byte payload.
+        let node =
+            with_trailing_payload(vec![0xB8, 0x10, 0x02, 0x00, 0x10, 0x00, 0x00, 0x00, 0x0E]);
+        let parsed = parse_bti_node(&node, 16).unwrap();
+        assert!(matches!(parsed.data, BtiNodeData::Dense { .. }));
+        assert_find_child_agrees(&node, 16, &[0x0F, 0x10, 0x11, 0x12, 0x13]);
+    }
+
     #[test]
     fn find_child_offset_payload_only_has_no_children() {
         let trie = [0x08u8, 0x11, 0xFF];
