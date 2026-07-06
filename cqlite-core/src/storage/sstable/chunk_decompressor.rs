@@ -4,6 +4,7 @@
 //! using CompressionInfo.db metadata to decompress chunks on-demand.
 
 use super::compression_info::CompressionInfo;
+#[cfg(feature = "zstd")]
 use super::zstd_frame::zstd_dictionary_rejection;
 use crate::parser::header::CassandraVersion;
 use crate::{Error, Result};
