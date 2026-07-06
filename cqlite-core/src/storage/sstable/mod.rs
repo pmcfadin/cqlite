@@ -1094,6 +1094,39 @@ impl SSTableManager {
     /// the partition-targeted metadata access path is genuinely engaged. The
     /// `tombstones`-build counterpart returns `false` (no prune; full metadata
     /// scan + retain) so the caller reports an honest fallback (Epic #951).
+    /// Prune a reader snapshot to the candidate generations that admit
+    /// `partition_key`, hoisting the BTI key hash+encoding to ONCE per read instead
+    /// of once per candidate (issue #1575 / C4).
+    ///
+    /// When ANY candidate is a BTI ("da") reader, the Murmur3-based byte-comparable
+    /// trie key is computed a SINGLE time and reused for every candidate's trie
+    /// prune (`might_contain_partition_encoded`); on `main` each candidate re-encoded
+    /// the same key, so an N-generation fan-out paid N identical Murmur3 hashes
+    /// (`KEY_HASH_CALLS == N`) where C4 pays 1. A BIG (`nb`) candidate has no BTI
+    /// encoding to hoist — its raw-key bloom check runs unchanged — so a non-BTI or
+    /// mixed candidate set stays correct. The pruning decision (and therefore the
+    /// resulting rows) is byte-identical to the per-candidate path.
+    #[cfg(not(feature = "tombstones"))]
+    fn prune_candidates(
+        readers: &[Arc<reader::SSTableReader>],
+        partition_key: &[u8],
+    ) -> Vec<Arc<reader::SSTableReader>> {
+        use crate::storage::sstable::bti::encode_partition_key_for_bti_trie;
+        // Encode once iff a BTI reader is present (BIG readers ignore `encoded`).
+        let encoded = readers
+            .iter()
+            .any(|r| r.is_bti())
+            .then(|| encode_partition_key_for_bti_trie(partition_key));
+        readers
+            .iter()
+            .filter(|r| match &encoded {
+                Some(enc) => r.might_contain_partition_encoded(partition_key, enc),
+                None => r.might_contain_partition(partition_key),
+            })
+            .cloned()
+            .collect()
+    }
+
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_partition_with_cell_metadata(
         &self,
@@ -1113,11 +1146,8 @@ impl SSTableManager {
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
         // This is the property #962 requires — only candidates are opened, never N.
-        let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
-            .iter()
-            .filter(|r| r.might_contain_partition(partition_key))
-            .cloned()
-            .collect();
+        // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
+        let candidates = Self::prune_candidates(&reader_list, partition_key);
 
         log::debug!(
             "SSTableManager::scan_partition_with_cell_metadata - {}/{} SSTables admit partition \
@@ -1271,11 +1301,8 @@ impl SSTableManager {
         }
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
-        let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
-            .iter()
-            .filter(|r| r.might_contain_partition(partition_key))
-            .cloned()
-            .collect();
+        // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
+        let candidates = Self::prune_candidates(&reader_list, partition_key);
 
         log::debug!(
             "SSTableManager::scan_partition - {}/{} SSTables admit partition key (len={}) for '{}'",

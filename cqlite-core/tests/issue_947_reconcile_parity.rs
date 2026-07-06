@@ -116,6 +116,7 @@ fn write_ttl(col: &str, v: &str, ttl: u32) -> CellOperation {
         column: col.to_string(),
         value: Value::Text(v.to_string()),
         ttl_seconds: ttl,
+        local_deletion_time: None,
     }
 }
 

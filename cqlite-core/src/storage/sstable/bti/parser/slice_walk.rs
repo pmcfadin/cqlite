@@ -20,7 +20,7 @@
 use crate::{error::Error, storage::sstable::bti::node::BtiResult};
 
 use super::node_decode::{classify_node_nibble, read_12bit_packed, read_be_unsigned};
-use super::partitions::{encode_partition_key_for_bti_trie, walk_bti_trie, BtiPartitionLocation};
+use super::partitions::{walk_bti_trie, BtiPartitionLocation};
 
 /// Resolve the absolute trie offset of the child reachable from the node at
 /// `node_offset` via `search_byte`, decoding ONLY that one child pointer in place.
@@ -264,18 +264,6 @@ pub(crate) fn lookup_partition_in_bti_slice(
         )));
     }
     walk_bti_trie(&file_bytes[..trie_size], root_offset as usize, encoded_key)
-}
-
-/// Look up a raw partition key in a resident `Partitions.db` buffer using the
-/// `Murmur3Partitioner` byte-comparable encoding, WITHOUT copying the trie.
-///
-/// Zero-copy analogue of [`super::partitions::lookup_raw_key_in_bti_partitions_db`].
-pub(crate) fn lookup_raw_key_in_bti_partitions_slice(
-    file_bytes: &[u8],
-    raw_key_bytes: &[u8],
-) -> BtiResult<Option<BtiPartitionLocation>> {
-    let encoded = encode_partition_key_for_bti_trie(raw_key_bytes);
-    lookup_partition_in_bti_slice(file_bytes, &encoded)
 }
 
 #[cfg(test)]

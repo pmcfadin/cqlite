@@ -394,12 +394,15 @@ impl DataWriter {
                                              // forever) — a data-liveness regression. The no-TTL path
                                              // stays byte-identical (explicit-ts, flags 0x00).
                         match mop.row_ttl_seconds {
+                            // Row-level `USING TTL` static write (no per-cell LDT
+                            // source): derive `now + ttl` (historical behavior).
                             Some(ttl) => self.write_cell_with_ttl(
                                 buf,
                                 column,
                                 value,
                                 mop.timestamp_micros,
                                 ttl,
+                                None,
                             )?,
                             None => self.write_cell_explicit_ts(
                                 buf,
@@ -414,18 +417,21 @@ impl DataWriter {
                     column,
                     value,
                     ttl_seconds,
+                    local_deletion_time,
                 } => {
                     // Only write if it's a static column
                     if static_column_names.contains(column) && !matches!(value, Value::Null) {
                         cells_written += 1;
                         // roborev #1020 Finding 1: schema-aware frozen-UDT value.
                         let canon = canonicalize_static_value(schema, column, value)?;
+                        // Issue #1538: honor the authoritative per-cell LDT verbatim.
                         self.write_cell_with_ttl(
                             buf,
                             column,
                             canon.as_ref(),
                             mop.timestamp_micros,
                             *ttl_seconds,
+                            *local_deletion_time,
                         )?;
                     }
                 }

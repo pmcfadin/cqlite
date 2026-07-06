@@ -292,6 +292,90 @@ async fn scan_try_parses_partition_headers() {
     );
 }
 
+/// Scenario (K2 DELIVERED): the per-row partition-BOUNDARY peek is now
+/// non-allocating (`peek_partition_boundary`) and does NOT run the full
+/// `parse_partition_header_full` (no key `to_vec`, no `PARTITION_HEADER_TRY_PARSES`
+/// increment). So on a genuinely WIDE-partition fixture — `test_timeseries/
+/// sensor_data` has ~200 rows per `sensor_id` partition — a full scan try-parses a
+/// partition header once per PARTITION (at a confirmed start), not once per ROW.
+///
+/// The assertion brackets the count as a per-partition bound:
+/// `distinct_partitions <= PARTITION_HEADER_TRY_PARSES < rows`. On `main` the
+/// per-row peek made the count `>= rows` (each of the ~200 rows/partition
+/// try-parsed), so `tries < rows` FAILS there and PASSES after K2. The lower bound
+/// (`>= distinct_partitions`) keeps it non-vacuous: every partition's header is
+/// still really parsed at least once.
+#[tokio::test]
+#[serial]
+async fn scan_boundary_peek_does_not_try_parse_per_row() {
+    if !fixture_data_present("test_timeseries", "sensor_data") {
+        eprintln!("Skipping (K2 wiring): test_timeseries/sensor_data Data.db not present");
+        return;
+    }
+    let Some(db) = setup("test_timeseries", "time-series.cql").await else {
+        eprintln!("Skipping (K2 wiring): could not ingest test_timeseries");
+        return;
+    };
+
+    rwc::reset();
+    assert_eq!(
+        rwc::partition_header_try_parses(),
+        0,
+        "reset must zero PARTITION_HEADER_TRY_PARSES"
+    );
+
+    let scan = db
+        .execute("SELECT * FROM test_timeseries.sensor_data")
+        .await
+        .expect("scan of test_timeseries.sensor_data");
+    let rows = scan.rows.len() as u64;
+    assert!(
+        rows > 0,
+        "present fixture must return rows (0 rows = read regression, not a skip)"
+    );
+
+    // Distinct partitions = distinct `sensor_id` (the partition key) values.
+    let mut partitions = std::collections::HashSet::new();
+    for row in &scan.rows {
+        if let Some(cqlite_core::Value::Uuid(b)) = row.values.get("sensor_id") {
+            partitions.insert(*b);
+        }
+    }
+    let distinct_partitions = partitions.len() as u64;
+    assert!(
+        distinct_partitions >= 1,
+        "fixture shape: sensor_data must expose at least one sensor_id partition"
+    );
+    // Genuinely wide: many more rows than partitions (otherwise `tries < rows`
+    // could not distinguish per-row from per-partition). Guards the fixture shape.
+    assert!(
+        rows >= distinct_partitions * 2,
+        "fixture shape changed: expected a WIDE fixture (rows {rows} >= 2 * partitions \
+         {distinct_partitions}); K2's per-row-vs-per-partition claim is only testable when wide"
+    );
+
+    let tries = rwc::partition_header_try_parses();
+    eprintln!(
+        "K2: rows={rows} distinct_partitions={distinct_partitions} \
+         PARTITION_HEADER_TRY_PARSES={tries}"
+    );
+
+    // K2 headline: the boundary peek stopped try-parsing per row, so the full
+    // parse now runs per PARTITION, not per row. FAILS on `main` (tries >= rows).
+    assert!(
+        tries < rows,
+        "K2: a scan must try-parse partition headers fewer times than it returns \
+         rows (per-partition, not per-row); got tries={tries} rows={rows}"
+    );
+    // Non-vacuous lower bound: each partition's header is really parsed at least
+    // once, so the count is at least the distinct-partition count.
+    assert!(
+        tries >= distinct_partitions,
+        "K2: every partition's header must be parsed at least once; got tries={tries} \
+         distinct_partitions={distinct_partitions}"
+    );
+}
+
 /// Scenario (K2/L currency): the shared display-row builder sorts each row's cells
 /// once, so `ROW_SORT_INVOCATIONS` is at least the number of returned live rows.
 /// K2/L (cells arrive pre-sorted) flip this to prove no per-row sort.
