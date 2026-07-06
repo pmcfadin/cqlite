@@ -126,8 +126,9 @@ fn test_parser_factory() {
     let hp = ParserFactory::recommend_backend(UseCase::HighPerformance);
     assert_eq!(hp, ParserBackend::Nom);
 
+    // Every use case now maps to nom, the single built-in backend (#1639).
     let prod = ParserFactory::recommend_backend(UseCase::Production);
-    assert_eq!(prod, ParserBackend::Auto);
+    assert_eq!(prod, ParserBackend::Nom);
 }
 
 #[test]
