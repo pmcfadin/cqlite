@@ -459,16 +459,15 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
         // Issue #933: parse the range-tombstone bound marker and pair it into a
         // complete `RangeMarker` so the merge can shadow covered cells AND
         // re-emit the surviving marker.
-        let (bound_values, bound_kind, (mfda_p, ldt_p), secondary, next_offset) =
-            match self
-                .parser
-                .parse_range_tombstone_marker_with_ldt(data, offset, schema)
-            {
-                Ok(v) => v,
-                // Truncated marker body at a chunk boundary (or corrupt at the
-                // final chunk): terminate exactly as the prior skip path did.
-                Err(_) => return MarkerOutcome::Stop,
-            };
+        let (bound_values, bound_kind, (mfda_p, ldt_p), secondary, next_offset) = match self
+            .parser
+            .parse_range_tombstone_marker_with_ldt(data, offset, schema)
+        {
+            Ok(v) => v,
+            // Truncated marker body at a chunk boundary (or corrupt at the
+            // final chunk): terminate exactly as the prior skip path did.
+            Err(_) => return MarkerOutcome::Stop,
+        };
 
         // ClusteringPrefix.Kind ordinals:
         //   0 EXCL_END, 1 INCL_START, 2 EXCL_END_INCL_START_BOUNDARY,

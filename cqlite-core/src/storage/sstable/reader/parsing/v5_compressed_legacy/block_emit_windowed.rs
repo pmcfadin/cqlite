@@ -975,7 +975,10 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                 Err(_) => MarkerOutcome::Stop,
             }
         } else {
-            match self.parser.skip_range_tombstone_marker(data, offset, schema) {
+            match self
+                .parser
+                .skip_range_tombstone_marker(data, offset, schema)
+            {
                 Ok(next_offset) => MarkerOutcome::Advanced(next_offset),
                 Err(_) => MarkerOutcome::Stop,
             }
@@ -1016,7 +1019,9 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                     // cells so a surviving clustering row does not resurface stale
                     // static data. No-op when shadowing is off.
                     let static_hidden = self.shadow.as_ref().is_some_and(|sh| {
-                        row_header_opt.as_ref().is_some_and(|h| sh.row_hidden(h, &[]))
+                        row_header_opt
+                            .as_ref()
+                            .is_some_and(|h| sh.row_hidden(h, &[]))
                     });
                     self.static_cells = if static_hidden { HashMap::new() } else { cells };
                 } else {

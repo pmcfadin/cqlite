@@ -153,25 +153,25 @@ impl V5CompressedLegacyParser {
             PartitionHeaderReadiness::Ready => {}
         }
 
-        let (partition_key, mut offset, partition_deletion) =
-            match self.parse_partition_header_full(data, 0) {
-                Ok(v) => v,
-                // Defense-in-depth: `Ready` guarantees the DeletionTime is fully
-                // present, so a parse failure here cannot be truncation. On a
-                // non-final chunk only re-request bytes if the header is still
-                // incomplete; otherwise skip a byte to resynchronise (NeedMore on
-                // a complete buffer would loop forever). Under `Ready` this stays
-                // the legacy skip-a-byte resync.
-                Err(_) => {
-                    if !at_final_chunk
-                        && self.partition_header_readiness(data)
-                            == PartitionHeaderReadiness::Incomplete
-                    {
-                        return Ok(ParseStep::NeedMore);
-                    }
-                    return Ok(ParseStep::Emitted(1));
+        let (partition_key, mut offset, partition_deletion) = match self
+            .parse_partition_header_full(data, 0)
+        {
+            Ok(v) => v,
+            // Defense-in-depth: `Ready` guarantees the DeletionTime is fully
+            // present, so a parse failure here cannot be truncation. On a
+            // non-final chunk only re-request bytes if the header is still
+            // incomplete; otherwise skip a byte to resynchronise (NeedMore on
+            // a complete buffer would loop forever). Under `Ready` this stays
+            // the legacy skip-a-byte resync.
+            Err(_) => {
+                if !at_final_chunk
+                    && self.partition_header_readiness(data) == PartitionHeaderReadiness::Incomplete
+                {
+                    return Ok(ParseStep::NeedMore);
                 }
-            };
+                return Ok(ParseStep::Emitted(1));
+            }
+        };
 
         // Issue #1046: per-PARTITION resolution build (this driver is re-entered
         // once per partition by the sliding-window caller; allocations scale with
