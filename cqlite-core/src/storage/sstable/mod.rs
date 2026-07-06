@@ -1783,6 +1783,11 @@ impl SSTableManager {
         // result.
         #[cfg(feature = "write-support")]
         if readers.len() > 1 {
+            // No schema: cross-generation LWW/tombstone reconciliation needs the
+            // schema to drive the KWayMerger, so this deliberately falls through to
+            // the lazy per-reader token-merge below — matching `scan`'s identical
+            // no-schema fallback (both accept the documented Issue #883 concat
+            // limitation rather than reconciling without a schema).
             if let Some(schema) = schema {
                 match generation_merge::stream_generations_for_read(
                     &readers,
@@ -1804,6 +1809,23 @@ impl SSTableManager {
                         // Never fail a read because the merge could not be
                         // constructed (unsupported format); fall back to the lazy
                         // streaming merge, matching `scan`'s fall-back-to-concatenation.
+                        //
+                        // Error-path asymmetry, intentional (issue #1579): this `Err`
+                        // is ONLY the merger-CONSTRUCTION failure (`KWayMerger::new`,
+                        // signalled back before any row is streamed), so falling back
+                        // here can never emit a partially-merged, mis-reconciled
+                        // result — the streaming task has not sent anything yet. A
+                        // `step()` error occurring MID-merge (after some partitions
+                        // were already streamed to the caller) is NOT retried here;
+                        // it is delivered downstream as an `Err` item on the output
+                        // channel (see `stream_generations_for_read`), ending the
+                        // stream at that point. That is deliberately SAFER than the
+                        // materializing `scan`'s fallback, which — if it could fail
+                        // partway through populating its `Vec` — would have no way to
+                        // signal "these rows are reconciled, the rest are not"; the
+                        // streaming channel's `Err` item gives the caller an honest,
+                        // unambiguous cutoff instead of silently returning a
+                        // half-reconciled table.
                         log::warn!(
                             "SSTableManager::scan_stream - cross-generation merge failed for '{}' ({}); \
                              falling back to lazy per-reader streaming merge",

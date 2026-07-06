@@ -347,6 +347,19 @@ fn push_metadata_rows(key_bytes: &[u8], rows: Vec<MergeEntry>, out: &mut Vec<Mer
 /// concatenation. A runtime `step()` error mid-stream is delivered as an `Err`
 /// item on the channel (the consumer sees it), matching the lazy path's read-error
 /// behaviour.
+///
+/// This is a deliberate, documented error-path asymmetry (issue #1579): the
+/// caller's fallback-to-concatenation only ever applies to the CONSTRUCTION
+/// failure above (nothing has been streamed yet, so falling back cannot mix
+/// reconciled and unreconciled rows). A `step()` failure after some partitions
+/// were already emitted downstream is NEVER retried/fallen-back — it ends the
+/// stream via the `Err` channel item instead. That is safer than it sounds: the
+/// materializing `merge_generations_for_read` has no equivalent mid-collection
+/// failure signal — a `step()` error there simply propagates the whole call as
+/// `Err` before any partial `Vec` is returned to the caller. The streaming
+/// driver's `Err` item preserves the same "no half-reconciled result surfaces
+/// silently" guarantee while still letting the caller observe exactly how many
+/// good rows it already received.
 #[cfg(not(feature = "tombstones"))]
 pub(super) async fn stream_generations_for_read(
     reader_list: &[Arc<reader::SSTableReader>],
