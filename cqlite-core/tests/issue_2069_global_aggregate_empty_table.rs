@@ -13,7 +13,7 @@
 //!
 //! Both the O(1) streaming fold (`try_execute_global_aggregate`) and the buffered
 //! path (`execute_aggregation`) must satisfy the rule; the buffered path is
-//! exercised via a partition-targeted lookup that matches nothing.
+//! exercised via a `LIMIT` clause that disqualifies the O(1) streaming fold.
 //!
 //! Run:
 //!   cargo test --package cqlite-core \
