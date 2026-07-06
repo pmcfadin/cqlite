@@ -528,6 +528,13 @@ impl SelectExecutor {
         let storage = Arc::clone(&self.storage);
         let buffer_size = config.buffer_size;
 
+        // Issue #1581 (roborev finding): a separate sender clone kept OUTSIDE the
+        // background task, so we can still report an error after
+        // `execute_streaming_background` returns — the ORIGINAL `tx` is moved
+        // into (and consumed/dropped by) that call, so it is gone by the time we
+        // observe its `Err`.
+        let error_tx = tx.clone();
+
         // Spawn background task to stream rows
         tokio::spawn(async move {
             if let Err(e) = Self::execute_streaming_background(
@@ -541,7 +548,15 @@ impl SelectExecutor {
             .await
             {
                 log::error!("Streaming execution error: {}", e);
-                // Error is logged; channel will close and consumer will see None
+                // Issue #1581 (roborev finding): surface the error through the
+                // channel as a terminal `Err` item instead of merely logging it
+                // and letting the channel close — a silent close previously made
+                // a mid-scan decode/read failure look like a clean (but
+                // truncated) end-of-stream to the consumer, so a query that
+                // `execute()` would have failed instead returned a partial
+                // result with exit code 0. `send` failing here just means the
+                // consumer already dropped the receiver; nothing more to do.
+                let _ = error_tx.send(Err(e)).await;
             }
         });
 
@@ -551,6 +566,9 @@ impl SelectExecutor {
             total_rows: None, // Unknown for streaming
             plan_info: None,
             performance: Default::default(),
+            // Issue #1581 (roborev finding 3): NOT a streaming-vs-materializing gap —
+            // the materializing `execute()` path (execute.rs) also hardcodes
+            // `warnings: vec![]` for SELECTs; neither path populates it today.
             warnings: vec![],
             // Issue #960: the streaming scan runs in the spawned task above, so the
             // access path is not yet recorded when this iterator is constructed.
