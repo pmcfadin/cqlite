@@ -1098,6 +1098,7 @@ async fn test_export_sstable_to_parquet() {
         &schema_file,
         &output_file,
         ExportFormat::Parquet,
+        true, // quiet: suppress progress in tests
     )
     .await;
 

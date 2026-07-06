@@ -19,11 +19,19 @@ pub async fn import_data(
     file: &Path,
     format: crate::cli::ImportFormat,
     table: Option<&str>,
+    quiet: bool,
 ) -> Result<()> {
     use crate::cli::ImportFormat;
+    use std::io::IsTerminal;
 
-    println!("Importing data from: {}", file.display());
-    println!("Format: {format}, Target table: {table:?}");
+    // Issue #1506 / #284: progress + status chatter is suppressed under --quiet
+    // and when stdout is not a TTY. Genuine warnings/errors are still surfaced.
+    let show_progress = !quiet && std::io::stdout().is_terminal();
+
+    if show_progress {
+        println!("Importing data from: {}", file.display());
+        println!("Format: {format}, Target table: {table:?}");
+    }
 
     // Validate input file exists
     if !file.exists() {
@@ -51,25 +59,34 @@ pub async fn import_data(
         format!("SELECT table_name FROM system.tables WHERE table_name = '{target_table}'");
     match database.execute(&table_check_query).await {
         Ok(result) if result.rows.is_empty() => {
-            println!(
-                "⚠️  Warning: Table '{}' not found in system catalog. Assuming it exists or will be created during import.",
-                target_table
-            );
+            if show_progress {
+                println!(
+                    "⚠️  Warning: Table '{}' not found in system catalog. Assuming it exists or will be created during import.",
+                    target_table
+                );
+            }
         }
         Ok(_) => {
-            println!("✓ Target table '{target_table}' found");
+            if show_progress {
+                println!("✓ Target table '{target_table}' found");
+            }
         }
         Err(_) => {
-            println!(
-                "⚠️  Warning: Could not verify table existence (system tables may not be implemented). Proceeding with import..."
-            );
+            if show_progress {
+                println!(
+                    "⚠️  Warning: Could not verify table existence (system tables may not be implemented). Proceeding with import..."
+                );
+            }
         }
     }
 
     // Get table schema for validation
-    let table_columns = get_table_columns(database, &target_table).await
+    let table_columns = get_table_columns(database, &target_table)
+        .await
         .unwrap_or_else(|_| {
-            println!("⚠️  Warning: Could not retrieve table schema. Import may fail if column types don't match.");
+            if show_progress {
+                println!("⚠️  Warning: Could not retrieve table schema. Import may fail if column types don't match.");
+            }
             Vec::new()
         });
 
@@ -78,11 +95,14 @@ pub async fn import_data(
 
     match format {
         ImportFormat::Csv => {
-            _imported_rows = import_csv_data(database, file, &target_table, &table_columns).await?;
+            _imported_rows =
+                import_csv_data(database, file, &target_table, &table_columns, show_progress)
+                    .await?;
         }
         ImportFormat::Json => {
             _imported_rows =
-                import_json_data(database, file, &target_table, &table_columns).await?;
+                import_json_data(database, file, &target_table, &table_columns, show_progress)
+                    .await?;
         }
         ImportFormat::Parquet => {
             return Err(anyhow::anyhow!(
@@ -91,12 +111,14 @@ pub async fn import_data(
         }
     }
 
-    println!("\n📊 Import Summary:");
-    println!("  Rows imported: {_imported_rows}");
-    if error_count > 0 {
-        println!("  Errors: {error_count}");
+    if show_progress {
+        println!("\n📊 Import Summary:");
+        println!("  Rows imported: {_imported_rows}");
+        if error_count > 0 {
+            println!("  Errors: {error_count}");
+        }
+        println!("  ✅ Import completed successfully!");
     }
-    println!("  ✅ Import completed successfully!");
 
     Ok(())
 }
@@ -107,6 +129,7 @@ pub async fn import_data(
     _file: &Path,
     _format: crate::cli::ImportFormat,
     _table: Option<&str>,
+    _quiet: bool,
 ) -> Result<()> {
     Err(anyhow::anyhow!(
         "Data import is not available in M1.\n\
@@ -122,9 +145,9 @@ async fn import_csv_data(
     file: &Path,
     table: &str,
     table_columns: &[String],
+    show_progress: bool,
 ) -> Result<u64> {
     use csv::ReaderBuilder;
-    use indicatif::{ProgressBar, ProgressStyle};
 
     let file_handle =
         File::open(file).with_context(|| format!("Failed to open CSV file: {}", file.display()))?;
@@ -139,9 +162,11 @@ async fn import_csv_data(
         .with_context(|| "Failed to read CSV headers")?;
     let csv_columns: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
 
-    println!("📋 CSV columns: {}", csv_columns.join(", "));
-    if !table_columns.is_empty() {
-        println!("📋 Table columns: {}", table_columns.join(", "));
+    if show_progress {
+        println!("📋 CSV columns: {}", csv_columns.join(", "));
+        if !table_columns.is_empty() {
+            println!("📋 Table columns: {}", table_columns.join(", "));
+        }
     }
 
     // Count total rows for progress
@@ -153,14 +178,10 @@ async fn import_csv_data(
         .has_headers(true)
         .from_reader(file_handle);
 
-    let pb = ProgressBar::new(total_rows);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "Importing CSV [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} rows ({eta})",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
+    let pb = make_bar(
+        total_rows,
+        "Importing CSV [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} rows ({eta})",
+        show_progress,
     );
 
     let mut imported_count = 0;
@@ -216,8 +237,8 @@ async fn import_json_data(
     file: &Path,
     table: &str,
     _table_columns: &[String],
+    show_progress: bool,
 ) -> Result<u64> {
-    use indicatif::{ProgressBar, ProgressStyle};
     use std::fs;
 
     let file_content = fs::read_to_string(file)
@@ -237,14 +258,14 @@ async fn import_json_data(
         }
     };
 
-    println!("📋 Found {} JSON objects to import", objects.len());
+    if show_progress {
+        println!("📋 Found {} JSON objects to import", objects.len());
+    }
 
-    let pb = ProgressBar::new(objects.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("Importing JSON [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} objects ({eta})")
-            .unwrap()
-            .progress_chars("=>-"),
+    let pb = make_bar(
+        objects.len() as u64,
+        "Importing JSON [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} objects ({eta})",
+        show_progress,
     );
 
     let mut imported_count = 0;
@@ -292,6 +313,26 @@ async fn import_json_data(
 
     pb.finish_with_message(format!("Imported {imported_count} objects from JSON"));
     Ok(imported_count)
+}
+
+/// Build an import progress bar honoring the #284 quiet/tty contract.
+///
+/// Returns a hidden bar when `show` is false (quiet mode or non-TTY). The
+/// `ProgressStyle::template(...)` result is handled without `unwrap()`/`expect()`:
+/// on a template error we fall back to indicatif's default bar style so the
+/// import still runs (the bar is cosmetic).
+#[cfg(feature = "state_machine")]
+fn make_bar(total: u64, template: &str, show: bool) -> indicatif::ProgressBar {
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    if !show {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(total);
+    if let Ok(style) = ProgressStyle::default_bar().template(template) {
+        pb.set_style(style.progress_chars("=>-"));
+    }
+    pb
 }
 
 /// Execute a batch of INSERT statements
