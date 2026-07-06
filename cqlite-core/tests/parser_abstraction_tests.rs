@@ -126,8 +126,9 @@ fn test_parser_factory() {
     let hp = ParserFactory::recommend_backend(UseCase::HighPerformance);
     assert_eq!(hp, ParserBackend::Nom);
 
+    // Every use case now maps to nom, the single built-in backend (#1639).
     let prod = ParserFactory::recommend_backend(UseCase::Production);
-    assert_eq!(prod, ParserBackend::Auto);
+    assert_eq!(prod, ParserBackend::Nom);
 }
 
 #[test]
@@ -150,7 +151,10 @@ fn test_configuration_system() {
     assert!(fast.has_feature(&ConfigFeature::Streaming));
 
     let strict = ParserConfig::strict();
-    assert!(strict.has_feature(&ConfigFeature::SyntaxHighlighting));
+    assert!(strict.has_feature(&ConfigFeature::ErrorRecovery));
+    // The ANTLR-only SyntaxHighlighting feature was dropped from the strict
+    // preset when the stub backend was removed (#1639); nom does not support it.
+    assert!(!strict.has_feature(&ConfigFeature::SyntaxHighlighting));
 }
 
 #[test]

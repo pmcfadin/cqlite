@@ -13,7 +13,7 @@ fn main() {
     use cqlite_core::cql::{CqlStatement, ParserBackend, ParserConfig, ParserFactory};
 
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        // Create Nom parser (ANTLR doesn't support mutations yet)
+        // Create the nom parser (the single built-in backend).
         let config = ParserConfig::default().with_backend(ParserBackend::Nom);
         let parser = ParserFactory::create(config).expect("Failed to create parser");
 
