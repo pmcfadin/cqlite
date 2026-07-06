@@ -858,6 +858,13 @@ _delta_shell_targets() {
 # so run_delta_node_tests can run jest WITHOUT a cargo build. FALSE otherwise →
 # run_delta REFUSES a node-__test__ delta (fail-closed: --delta must never build with
 # cargo nor pass vacuously). Pure check; exposed via the --delta-node-ready hook.
+# NOTE: this probe is existence-only (it does not check the .node's mtime/hash
+# against the anchor or current tree) — a pre-anchor stale .node could in
+# principle serve a vacuous jest pass IF the anchor full gate itself skipped
+# node-bindings. This is acceptable ONLY because --delta separately refuses the
+# whole re-cert on any src change (including bindings/node/src/**), so in the
+# normal flow the module on disk is always >= the anchor commit; it is not a
+# correctness gap this check needs to close on its own.
 _delta_node_build_ready() {
   command -v node >/dev/null 2>&1 || return 1
   command -v npm  >/dev/null 2>&1 || return 1

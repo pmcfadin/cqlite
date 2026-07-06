@@ -20,8 +20,11 @@
 #    "pr":"<url>|null","duration_s":<int>,"reason":"<string, required if blocked>"}
 #
 #   finalized — claimed an issue, drove it through gate/review/merge-on-green,
-#               flow-finalized it. issue + pr MUST be set. Counts toward
-#               MAX_ISSUES. Resets the crash-loop breaker.
+#               flow-finalized it. issue + pr MUST be set (both non-null,
+#               non-missing) — a "finalized" marker with a null/missing issue
+#               or pr is judged ABNORMAL (counts toward BREAKER_N, does NOT
+#               count toward MAX_ISSUES) rather than trusted at face value.
+#               Otherwise counts toward MAX_ISSUES. Resets the breaker.
 #   no-work   — rehydrated from the board, nothing Ready (or nothing to
 #               resume). issue/pr may be null. Does NOT count toward
 #               MAX_ISSUES; triggers a BACKOFF_NOWORK_SECS sleep so the loop
@@ -30,7 +33,11 @@
 #               the owner (design-call finding, scope question, HOLD order,
 #               unmet requirement). "reason" MUST be set. Does NOT count
 #               toward MAX_ISSUES. Resets the breaker; the issue is
-#               remembered (LAST_BLOCKED_ISSUE) but never auto-retried.
+#               remembered (LAST_BLOCKED_ISSUE). If the SAME issue reports
+#               "blocked" on two consecutive iterations, the supervisor treats
+#               the queue as head-blocked and STOPS cleanly (high-priority
+#               notify, exit 0) rather than looping until MAX_HOURS — it is
+#               retried exactly once, never auto-retried indefinitely.
 #
 # Any other outcome value, a marker missing required fields, a nonzero worker
 # exit code, OR no marker file present when the worker process exits => the
@@ -136,14 +143,33 @@ print(v if v is not None else "")
   fi
 }
 
-json_or_null() { [[ -n "$1" ]] && printf '"%s"' "$1" || printf 'null'; }
+# json_or_null <value>: quotes+escapes a string field for embedding into the
+# JSONL journal, or emits a bare `null` when empty. A quote/backslash/newline
+# in an untrusted field (pr URL, blocked "reason" text) must never be allowed
+# to corrupt journal JSON — printf '"%s"' alone does not escape those chars.
+# Preferred path: python3 json.dumps (already a project dependency, same as
+# marker_field's jq-absent fallback). Degraded fallback (python3 somehow
+# absent): strip to a conservative safe charset so the line still parses,
+# rather than emitting broken JSON.
+json_or_null() {
+  local v="$1"
+  [[ -n "$v" ]] || { printf 'null'; return 0; }
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$v" 2>/dev/null && return 0
+  fi
+  printf '"%s"' "$(printf '%s' "$v" | tr -cd 'A-Za-z0-9:/._#?=&-')"
+}
 num_or_null() { [[ "$1" =~ ^[0-9]+$ ]] && printf '%s' "$1" || printf 'null'; }
 
+# journal_line <iter> <outcome> <issue> <pr> <duration_s> <exit_code> [reason]
+# `reason` is optional (only "blocked" iterations pass one); both `pr` and
+# `reason` are free-form worker-controlled text and go through json_or_null so
+# a stray quote/backslash/newline can never corrupt the JSONL line.
 journal_line() {
   mkdir -p "$LOG_DIR"
   local jf="${JOURNAL_FILE:-$LOG_DIR/journal-$(date -u +%Y-%m-%d).jsonl}"
-  printf '{"ts":"%s","iter":%d,"outcome":"%s","issue":%s,"pr":%s,"duration_s":%d,"exit_code":%d}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$(num_or_null "$3")" "$(json_or_null "$4")" "$5" "$6" >>"$jf"
+  printf '{"ts":"%s","iter":%d,"outcome":"%s","issue":%s,"pr":%s,"duration_s":%d,"exit_code":%d,"reason":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$(num_or_null "$3")" "$(json_or_null "$4")" "$5" "$6" "$(json_or_null "${7:-}")" >>"$jf"
 }
 
 # ---------------------------------------------------------------------------
@@ -163,7 +189,16 @@ acquire_lock() {
     exit 1
   fi
   log "reclaiming stale lock $SUPERVISOR_LOCK (holder pid $holder_pid not alive)"
-  rm -rf "$SUPERVISOR_LOCK"
+  # Atomic reclaim (rename-then-remove), not rm-then-mkdir: two supervisors
+  # racing a dead-pid lock both taking the rm-then-mkdir path could both end up
+  # believing they won. `mv` on the same filesystem is atomic, so only ONE
+  # racer's mv can succeed against a given stale directory name; that racer
+  # removes the renamed-aside copy and falls through to its own mkdir below.
+  # The loser's mv fails (the name is already gone), so it falls through to the
+  # normal mkdir-fails path and exits loudly instead of silently co-running.
+  if mv "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null; then
+    rm -rf "$SUPERVISOR_LOCK.stale.$$"
+  fi
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
     echo $$ >"$SUPERVISOR_LOCK/pid"
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
@@ -295,10 +330,19 @@ run_iteration() {
 
   case "$outcome" in
     finalized)
-      CONSECUTIVE_ABNORMAL=0
-      ISSUES_DONE=$((ISSUES_DONE + 1))
-      journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc"
-      notify "info" "worker-supervisor: finalized issue $issue" "pr=$pr duration_s=$duration"
+      if [[ -z "$issue" || -z "$pr" ]]; then
+        # F5: contract requires BOTH issue and pr on "finalized" — a marker
+        # claiming success with either missing/null is untrustworthy and must
+        # not be counted as a done issue nor reset the breaker.
+        journal_line "$ITER" "abnormal" "$issue" "$pr" "$duration" "$rc"
+        log "iteration $ITER abnormal (finalized marker missing issue/pr: issue='$issue' pr='$pr')"
+        trip_breaker_or_continue
+      else
+        CONSECUTIVE_ABNORMAL=0
+        ISSUES_DONE=$((ISSUES_DONE + 1))
+        journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc"
+        notify "info" "worker-supervisor: finalized issue $issue" "pr=$pr duration_s=$duration"
+      fi
       ;;
     no-work)
       CONSECUTIVE_ABNORMAL=0
@@ -308,10 +352,19 @@ run_iteration() {
       ;;
     blocked)
       CONSECUTIVE_ABNORMAL=0
+      journal_line "$ITER" "blocked" "$issue" "$pr" "$duration" "$rc" "$reason"
+      if [[ -n "$issue" && "$issue" == "$LAST_BLOCKED_ISSUE" ]]; then
+        # F2: the SAME issue blocked on two consecutive iterations means the
+        # queue is head-blocked — looping would just reset the breaker every
+        # time and burn wall-clock budget until MAX_HOURS with no progress.
+        # Stop cleanly and page the owner instead.
+        notify "high" "worker-supervisor: issue $issue persistently blocked" "issue #$issue persistently blocked — queue is head-blocked, needs owner"
+        log "issue $issue blocked on two consecutive iterations; queue is head-blocked, stopping"
+        finalize_exit "head-blocked" 0
+      fi
       LAST_BLOCKED_ISSUE="$issue"
-      journal_line "$ITER" "blocked" "$issue" "$pr" "$duration" "$rc"
       notify "info" "worker-supervisor: blocked on issue $issue" "${reason:-no reason given}"
-      log "remembered blocked issue $LAST_BLOCKED_ISSUE (not auto-retried)"
+      log "remembered blocked issue $LAST_BLOCKED_ISSUE (not auto-retried this run)"
       ;;
     *)
       journal_line "$ITER" "abnormal" "$issue" "$pr" "$duration" "$rc"

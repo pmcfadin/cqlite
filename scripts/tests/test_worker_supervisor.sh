@@ -100,6 +100,55 @@ EOF
   chmod +x "$path"
 }
 
+# F2 regression: writes outcome=blocked with a fixed issue number on every
+# call (never finalizes) — used to prove the supervisor stops after the SAME
+# issue reports blocked on two consecutive iterations, rather than looping.
+write_blocked_same_issue_stub() {
+  local path="$1" issue="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"\$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":$issue,"pr":null,"duration_s":1,"reason":"needs owner decision"}
+JSON
+EOF
+  chmod +x "$path"
+}
+
+# F5 regression: writes outcome=finalized with issue set but pr MISSING
+# entirely (not just null) — the marker contract requires BOTH issue and pr
+# on "finalized"; a marker missing either must be judged abnormal.
+write_finalize_missing_pr_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":42,"duration_s":1}
+JSON
+EOF
+  chmod +x "$path"
+}
+
+# F3 regression: writes outcome=blocked with a "reason" containing a double
+# quote and an embedded literal newline (via printf %b), to prove the journal
+# line stays valid JSON end-to-end (marker_field's python3 read handles the
+# marker side; journal_line's json_or_null handles the journal-write side).
+write_blocked_nasty_reason_stub() {
+  local path="$1"
+  cat >"$path" <<'PYEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$MARKER_FILE" <<'PY'
+import json, sys
+d = {"outcome": "blocked", "issue": 55, "pr": None, "duration_s": 1,
+     "reason": 'has a "quote" and\na newline'}
+open(sys.argv[1], "w").write(json.dumps(d))
+PY
+PYEOF
+  chmod +x "$path"
+}
+
 # Fails loudly (sentinel + exit 1) if the marker file is already present at
 # start (proves the supervisor removed a stale marker before spawning).
 write_stale_check_stub() {
@@ -358,6 +407,106 @@ test_stale_marker_removed() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 8 (F2 regression): the SAME issue reports "blocked" on two consecutive
+# iterations → supervisor stops after the second with a head-blocked notify,
+# clean exit, and never reaches MAX_HOURS/MAX_ISSUES.
+# ---------------------------------------------------------------------------
+test_repeated_blocked_head_of_queue_stops() {
+  local d jf rc bcount hb_notifies
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 7
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  bcount=$(jline_count "$jf" '"outcome":"blocked"')
+  hb_notifies=$(grep -c '^error|.*persistently blocked' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$bcount" -eq 2 ]] && grep -q '"reason":"head-blocked"' "$jf" && [[ "$hb_notifies" -ge 1 ]]; then
+    pass "F2: same issue blocked twice in a row stops cleanly with head-blocked notify"
+  else
+    fail "F2: rc=$rc blocked_iters=$bcount head_blocked_notifies=$hb_notifies (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 9 (F5 regression): a "finalized" marker missing "pr" is judged
+# abnormal — ISSUES_DONE must not advance, and it must count toward the
+# crash-loop breaker (proven here by tripping BREAKER_N=1 immediately).
+# ---------------------------------------------------------------------------
+test_finalized_missing_pr_is_abnormal() {
+  local d jf rc fcount acount
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_finalize_missing_pr_stub "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  if [[ "$rc" -ne 0 && "$fcount" -eq 0 && "$acount" -eq 1 ]] && grep -q '"reason":"breaker"' "$jf"; then
+    pass "F5: finalized marker missing pr is judged abnormal, not counted done"
+  else
+    fail "F5: rc=$rc finalized=$fcount abnormal=$acount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 10 (F3 regression): a "reason" containing a double-quote and an
+# embedded newline must still produce a journal line that parses as valid
+# JSON — proves journal_line's json_or_null escaping (not just printf %s).
+# ---------------------------------------------------------------------------
+test_journal_escapes_nasty_reason() {
+  local d jf rc line all_valid
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_blocked_nasty_reason_stub "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ ! -f "$jf" ]]; then
+    fail "F3: no journal file written ($jf)"
+    return
+  fi
+  all_valid="yes"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    printf '%s' "$line" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' 2>/dev/null || all_valid="no"
+  done <"$jf"
+  if [[ "$rc" -eq 0 && "$all_valid" == "yes" ]] && grep -q '"outcome":"blocked"' "$jf"; then
+    pass "F3: reason with embedded quote+newline still yields valid JSON journal lines"
+  else
+    fail "F3: rc=$rc all_valid=$all_valid (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
+# atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
+# of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
+# requires two processes hitting the reclaim window at the exact same instant
+# — any test harness recreation of that is inherently sleep/timing-dependent
+# and would be flaky by construction (the class of test this suite explicitly
+# avoids per its <30s/no-sleep-loop design goal). Covered by code inspection
+# instead: `mv` on the same filesystem is atomic (POSIX rename(2)), so of two
+# racers only one `mv "$LOCK" "$LOCK.stale.$$"` can succeed against a given
+# stale directory name; the loser's `mv` fails (source already gone) and it
+# falls through to its own `mkdir "$LOCK"`, which fails against the winner's
+# fresh lock, hitting the existing loud "failed to acquire lock" exit path.
+# No test function here by design — see comment in acquire_lock() itself.
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 echo "=== worker-supervisor test suite ==="
@@ -368,5 +517,8 @@ test_preflight_load_hold
 test_nowork_not_counted
 test_single_instance_lock
 test_stale_marker_removed
+test_repeated_blocked_head_of_queue_stops
+test_finalized_missing_pr_is_abnormal
+test_journal_escapes_nasty_reason
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
