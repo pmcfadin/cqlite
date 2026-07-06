@@ -667,8 +667,7 @@ fn differential_compact_matches_reference_on_ttl_corpus() {
         .iter()
         .map(|c| (c.name.clone(), ldt_by_name[&c.name] - i64::from(c.ttl)))
         .collect();
-    let name_by_ts: HashMap<i64, String> =
-        corpus.iter().map(|c| (c.ts, c.name.clone())).collect();
+    let name_by_ts: HashMap<i64, String> = corpus.iter().map(|c| (c.ts, c.name.clone())).collect();
 
     // Pin now_secs above every short-TTL expiry but below the huge-TTL expiry so
     // every short-TTL cell expires while the huge-TTL cells stay live.
@@ -756,7 +755,10 @@ fn differential_compact_matches_reference_on_ttl_corpus() {
     // retained tombstones; huge-TTL cells stay live.
     let grace_dir = temp.path().join("out_grace");
     let (live_g, tomb_g, absent_g) = run("within-grace", min_creation, &grace_dir);
-    assert!(live_g, "within-grace run must include a surviving live cell");
+    assert!(
+        live_g,
+        "within-grace run must include a surviving live cell"
+    );
     assert!(tomb_g, "within-grace run must include a retained tombstone");
     assert!(
         !absent_g,
