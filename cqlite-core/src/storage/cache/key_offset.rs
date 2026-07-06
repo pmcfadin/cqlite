@@ -83,9 +83,14 @@ impl PartitionLoc {
     }
 }
 
+/// One cache shard: an entry-count-bounded `LruCache` mapping the raw
+/// partition-key bytes to the resolved [`PartitionLoc`], behind a `Mutex` (the
+/// hit path mutates recency, so an `RwLock` would degrade to a `Mutex`).
+type KeyShard = Mutex<LruCache<Box<[u8]>, PartitionLoc>>;
+
 /// A bounded, sharded key→partition-offset cache.
 pub struct KeyOffsetCache {
-    shards: Box<[Mutex<LruCache<Box<[u8]>, PartitionLoc>>]>,
+    shards: Box<[KeyShard]>,
     /// `shards.len() - 1`; `shards.len()` is always a power of two.
     mask: usize,
     /// When `true` this is a genuine no-op cache (honoring
@@ -160,14 +165,12 @@ impl KeyOffsetCache {
     /// Poison-tolerant lock: recover the guard if a prior holder panicked, so a
     /// single panic cannot turn the cache into a panic-for-everyone (design D3).
     #[inline]
-    fn lock(
-        m: &Mutex<LruCache<Box<[u8]>, PartitionLoc>>,
-    ) -> std::sync::MutexGuard<'_, LruCache<Box<[u8]>, PartitionLoc>> {
+    fn lock(m: &KeyShard) -> std::sync::MutexGuard<'_, LruCache<Box<[u8]>, PartitionLoc>> {
         m.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[inline]
-    fn shard_for(&self, key: &[u8]) -> &Mutex<LruCache<Box<[u8]>, PartitionLoc>> {
+    fn shard_for(&self, key: &[u8]) -> &KeyShard {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut h);
         let idx = (h.finish() as usize) & self.mask;
