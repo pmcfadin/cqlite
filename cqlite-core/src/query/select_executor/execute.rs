@@ -15,10 +15,10 @@
 //! and error handling are unchanged.
 
 use super::{
-    build_row_from_scan, classify_partition_lookup, column_info_from_type_str, evaluate_predicates,
-    honest_targeted_path, parse_table_id, partition_key_digest, project_expr_reshapes_row,
-    scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
-    PartitionLookupOutcome, SSTablePredicate,
+    build_row_from_scan, classify_partition_lookup, collect_capped_materialized,
+    column_info_from_type_str, evaluate_predicates, honest_targeted_path, parse_table_id,
+    partition_key_digest, project_expr_reshapes_row, scan_pushdown_cap, select_has_writetime_ttl,
+    sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
@@ -452,8 +452,7 @@ impl SelectExecutor {
 
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
-        let mut results = Vec::new();
-        if context.projection_flags.include_cell_metadata {
+        let results = if context.projection_flags.include_cell_metadata {
             // Issue #962: route a fully-constrained `WHERE pk = ?` WRITETIME/TTL
             // projection through a partition-targeted metadata lookup that prunes
             // SSTables (bloom/BTI) before decoding, instead of full-scanning every
@@ -502,33 +501,27 @@ impl SelectExecutor {
 
             log::info!("Scan (with metadata) returned {} rows", scan_results.len());
 
-            for (key, value, cell_meta) in scan_results {
-                // Issue #1577 (D1): stop building rows once the downstream LIMIT is
-                // satisfied. Counts ACCEPTED rows, so this never drops a matching
-                // row. (The metadata scan itself is already materialized; this
-                // bounds the per-row build/predicate work.)
-                if let Some(cap) = scan_cap {
-                    if results.len() >= cap {
-                        break;
+            // Issue #1577 (D1 + roborev metric-accounting fix): this metadata scan
+            // is ALREADY fully materialized — the storage layer decoded every row
+            // before returning it. `collect_capped_materialized` charges
+            // `context.scan_rows` (→ `QUERY_ROWS_SCANNED`) with the TRUE decoded
+            // count up front, so the metric reflects real scan work, while the
+            // LIMIT/OFFSET `scan_cap` only bounds the per-row build/predicate work.
+            // Counting ACCEPTED rows toward the cap never drops a matching row.
+            collect_capped_materialized(
+                scan_results,
+                scan_cap,
+                predicates,
+                context,
+                |(key, value, cell_meta)| {
+                    let mut row = build_row_from_scan(key, value, projection, schema_opt)?;
+                    // Attach per-cell metadata so evaluate_writetime_ttl can read it.
+                    if !cell_meta.is_empty() {
+                        row.set_cell_metadata(cell_meta);
                     }
-                }
-
-                context.rows_processed += 1;
-                context.scan_rows += 1;
-
-                let Some(mut row) = build_row_from_scan(key, value, projection, schema_opt) else {
-                    continue;
-                };
-
-                // Attach per-cell metadata so evaluate_writetime_ttl can read it.
-                if !cell_meta.is_empty() {
-                    row.set_cell_metadata(cell_meta);
-                }
-
-                if evaluate_predicates(&row, predicates)? {
-                    results.push(row);
-                }
-            }
+                    Some(row)
+                },
+            )?
         } else {
             // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
             // partition-targeted lookup that prunes SSTables via bloom/BTI and only
@@ -642,31 +635,23 @@ impl SelectExecutor {
 
             log::info!("Scan returned {} rows", scan_results.len());
 
-            for (key, value) in scan_results {
-                // Issue #1577 (D1): stop once the downstream LIMIT is satisfied.
-                // Counts ACCEPTED rows, so a suppressed marker / predicate miss
-                // never lets this drop a matching row. Applies to the
-                // partition-targeted results (already partition-bounded); the
-                // full-scan fallback returned early above via `capped_fallback_scan`.
-                if let Some(cap) = scan_cap {
-                    if results.len() >= cap {
-                        break;
-                    }
-                }
-
-                context.rows_processed += 1;
-                context.scan_rows += 1;
-
-                // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
-                let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
-                    continue;
-                };
-
-                if evaluate_predicates(&row, predicates)? {
-                    results.push(row);
-                }
-            }
-        }
+            // Issue #1577 (D1 + roborev metric-accounting fix): these results are
+            // ALREADY materialized — the partition-targeted paths decoded their
+            // (partition-bounded) rows, and the TRULY decode-bounded full-scan
+            // fallback already returned early above via `capped_fallback_scan`.
+            // `collect_capped_materialized` charges `context.scan_rows` with the
+            // full decoded count up front (so `QUERY_ROWS_SCANNED` reflects the
+            // real scan), while the `scan_cap` only bounds per-row build work.
+            // Counting ACCEPTED rows toward the cap (build_row_from_scan returns
+            // None for tombstoned/null rows, Issue #191) never drops a match.
+            collect_capped_materialized(
+                scan_results,
+                scan_cap,
+                predicates,
+                context,
+                |(key, value)| build_row_from_scan(key, value, projection, schema_opt),
+            )?
+        };
 
         Ok(results)
     }

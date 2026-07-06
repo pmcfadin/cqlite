@@ -74,7 +74,7 @@ use tokio::sync::mpsc;
 
 // Issue #1577 (D1): LIMIT/OFFSET pushdown cap helper (the `capped_fallback_scan`
 // method it pairs with is an `impl SelectExecutor` block in the same submodule).
-use limit_pushdown::scan_pushdown_cap;
+use limit_pushdown::{collect_capped_materialized, scan_pushdown_cap};
 use lookup::{
     classify_partition_lookup, honest_targeted_path, sort_rows_by_token, PartitionLookupOutcome,
 };

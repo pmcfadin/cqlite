@@ -332,9 +332,65 @@ fn collect_capped_accepted(
     Ok(out)
 }
 
+/// Collect the ACCEPTED rows from an ALREADY-MATERIALIZED scan, applying an
+/// optional LIMIT+OFFSET `cap` (issue #1577; roborev metric-accounting fix).
+///
+/// The storage layer decoded EVERY entry before returning `rows`, so this
+/// charges `context.scan_rows` — the sole source of the `QUERY_ROWS_SCANNED`
+/// metric — with the TRUE decoded count (`rows.len()`) UP FRONT. The `cap` only
+/// bounds the per-row BUILD/predicate work (`context.rows_processed`) and the
+/// size of the returned window; it must NOT shrink the scan-work metric, or the
+/// metric would under-report the scan the storage layer actually performed.
+///
+/// This is deliberately distinct from the TRULY decode-bounded full-scan
+/// fallback ([`SelectExecutor::capped_fallback_scan`]), which stops its bounded
+/// stream early and so legitimately charges `scan_rows` only for the rows it
+/// actually decoded.
+///
+/// `build` maps a materialized entry to an optional [`QueryRow`] (`None` = a
+/// suppressed marker / tombstone, per [`build_row_from_scan`]); the metadata
+/// caller uses it to attach per-cell metadata BEFORE predicate evaluation. A row
+/// that `build` suppresses or [`evaluate_predicates`] rejects is skipped and
+/// never counted toward `cap`, so the cap means "enough ACCEPTED rows" and can
+/// never under-deliver a match.
+pub(super) fn collect_capped_materialized<T>(
+    rows: Vec<T>,
+    cap: Option<usize>,
+    predicates: &[SSTablePredicate],
+    context: &mut ExecutionContext,
+    mut build: impl FnMut(T) -> Option<QueryRow>,
+) -> Result<Vec<QueryRow>> {
+    // Metric accuracy (issue #1577): the WHOLE scan was materialized/decoded, so
+    // charge the full decoded count regardless of the downstream cap. Charging
+    // per-iteration inside the capped loop below would stop at the cap and make
+    // `QUERY_ROWS_SCANNED` under-report to at most `LIMIT + OFFSET`.
+    let total = rows.len();
+    context.scan_rows += total as u64;
+
+    let mut out = Vec::with_capacity(cap.map_or(total, |c| c.min(total)));
+    for entry in rows {
+        if let Some(c) = cap {
+            if out.len() >= c {
+                break;
+            }
+        }
+        context.rows_processed += 1;
+        let Some(row) = build(entry) else {
+            continue;
+        };
+        if evaluate_predicates(&row, predicates)? {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_capped_accepted, scan_pushdown_cap, ExecutionContext};
+    use super::{
+        build_row_from_scan, collect_capped_accepted, collect_capped_materialized,
+        scan_pushdown_cap, ExecutionContext,
+    };
     use crate::query::select_ast::{
         ColumnRef, ComparisonExpression, ComparisonOperator, ComparisonRightSide, OrderByClause,
         OrderByItem, SelectClause, SelectExpression, SortDirection, WhereExpression,
@@ -592,5 +648,114 @@ mod tests {
 
         assert!(out.is_empty(), "cap 0 accepts no rows");
         assert_eq!(ctx.scan_rows, 0, "cap 0 examines no rows");
+    }
+
+    // ── Materialized-scan metric accounting (issue #1577 roborev finding) ───────
+    //
+    // The metadata / partition-targeted scan paths receive an ALREADY-MATERIALIZED
+    // `Vec` — the storage layer decoded EVERY row before returning it. The old
+    // per-row `scan_rows += 1` inside the capped loop `break`s at the cap, so
+    // `QUERY_ROWS_SCANNED` under-reported to at most `LIMIT + OFFSET` even though
+    // the whole scan was decoded. `collect_capped_materialized` charges the FULL
+    // decoded count up front; these tests pin that the metric reflects real scan
+    // work, NOT the cap, while results + per-row build work stay correctly capped.
+
+    #[test]
+    fn materialized_charges_full_decoded_count_not_the_cap() {
+        // 5 live rows + 1 suppressed marker = 6 rows the storage layer decoded.
+        let materialized = vec![
+            live(b"k0", "a"),
+            marker(b"k0m"), // suppressed by build_row_from_scan
+            live(b"k1", "b"),
+            live(b"k2", "c"),
+            live(b"k3", "d"),
+            live(b"k4", "e"),
+        ];
+        let decoded = materialized.len() as u64;
+        let preds: Vec<SSTablePredicate> = Vec::new();
+        let mut ctx = exec_context();
+
+        // A LIMIT+OFFSET cap far below the decoded count.
+        let out =
+            collect_capped_materialized(materialized, Some(3), &preds, &mut ctx, |(key, value)| {
+                build_row_from_scan(key, value, &[], None)
+            })
+            .expect("materialized collect must not error");
+
+        // Results + per-row build work stay CAPPED (the fix must not change output
+        // or LIMIT/OFFSET semantics).
+        let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
+        assert_eq!(
+            keys,
+            vec![b"k0".to_vec(), b"k1".to_vec(), b"k2".to_vec()],
+            "cap must still bound the accepted-row window to the first `cap` rows"
+        );
+        assert_eq!(
+            ctx.rows_processed, 4,
+            "per-row BUILD work is bounded by the cap (k0, marker, k1, k2 examined)"
+        );
+
+        // The metric must reflect the FULL decoded scan (6), NOT the cap (3) and
+        // NOT the capped-examination count (4) — this is the roborev fix.
+        assert_eq!(
+            ctx.scan_rows, decoded,
+            "QUERY_ROWS_SCANNED must charge the full materialized decode count, not \
+             the LIMIT+OFFSET cap"
+        );
+        assert!(
+            ctx.scan_rows > out.len() as u64,
+            "materialized scan-work metric must exceed the returned/capped row count"
+        );
+    }
+
+    #[test]
+    fn materialized_metadata_build_suppression_still_counts_full_scan() {
+        // Mirror the metadata path: the `build` closure may attach per-cell
+        // metadata and may suppress a marker (returning None). A suppressed row is
+        // still part of the decoded scan, so it must remain counted in scan_rows.
+        let materialized = vec![live(b"k0", "a"), marker(b"k0m"), live(b"k1", "b")];
+        let decoded = materialized.len() as u64;
+        let preds: Vec<SSTablePredicate> = Vec::new();
+        let mut ctx = exec_context();
+
+        let out = collect_capped_materialized(
+            materialized,
+            Some(1),
+            &preds,
+            &mut ctx,
+            // Metadata-shaped closure (build may return None for a suppressed row).
+            |(key, value)| build_row_from_scan(key, value, &[], None),
+        )
+        .expect("materialized collect must not error");
+
+        assert_eq!(out.len(), 1, "cap 1 returns exactly one accepted row");
+        assert_eq!(
+            ctx.scan_rows, decoded,
+            "a marker suppressed by build is still a decoded row and stays counted"
+        );
+    }
+
+    #[test]
+    fn materialized_uncapped_counts_and_returns_all_accepted() {
+        // With no cap (scan_cap == None) the full-count accounting must equal the
+        // legacy per-row behaviour: every decoded row counted, every live row
+        // returned.
+        let materialized = vec![live(b"k0", "a"), marker(b"k0m"), live(b"k1", "b")];
+        let decoded = materialized.len() as u64;
+        let preds: Vec<SSTablePredicate> = Vec::new();
+        let mut ctx = exec_context();
+
+        let out =
+            collect_capped_materialized(materialized, None, &preds, &mut ctx, |(key, value)| {
+                build_row_from_scan(key, value, &[], None)
+            })
+            .expect("materialized collect must not error");
+
+        assert_eq!(out.len(), 2, "both live rows returned when uncapped");
+        assert_eq!(ctx.scan_rows, decoded, "every decoded row counted once");
+        assert_eq!(
+            ctx.rows_processed, decoded,
+            "every decoded row build-examined"
+        );
     }
 }
