@@ -333,6 +333,76 @@ async fn stats_block_cache_disabled_yields_no_caching() {
     );
 }
 
+/// Issue #1568 (roborev F2): the DIRECT reader path `SSTableReader::open` (which
+/// bypasses `SSTableManager`) must honor `block_cache.enabled == false`
+/// identically to the manager path. Previously `open` always minted an enabled
+/// cache sized from `block_cache.max_size`, ignoring the disable toggle. With
+/// caching disabled the reader now gets a genuine no-op cache: reads still return
+/// every row, but the cache reports a zero budget and never populates (zero
+/// residency, zero entries) even across repeated scans — mirroring the
+/// manager-path `stats_block_cache_disabled_yields_no_caching`.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn direct_reader_open_honors_block_cache_disabled() {
+    let Some(db) = resolve_or_skip("test_basic", "simple_table") else {
+        return;
+    };
+    let tid = TableId::new("test_basic.simple_table");
+
+    // Control: with caching ENABLED (default) the SAME direct-open path caches
+    // decompressed chunks after a scan. This proves the fixture is compressible
+    // and the direct path caches when enabled, so the disabled assertion below is
+    // meaningful (not vacuously true on an uncached fixture).
+    let enabled =
+        Arc::new(open_reader_with_budget(&db, Config::default().memory.block_cache.max_size).await);
+    let enabled_rows = scan_count(&enabled, &tid).await;
+    assert!(enabled_rows > 0, "fixture present but scan returned 0 rows");
+    assert!(
+        enabled.chunk_cache().resident_bytes() > 0,
+        "control: enabled direct-open cache must populate after a scan"
+    );
+
+    // With caching DISABLED, open via the SAME direct `SSTableReader::open` path.
+    let mut config = Config::default();
+    config.memory.block_cache.enabled = false;
+    let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
+    let disabled = Arc::new(
+        SSTableReader::open(&db, &config, platform)
+            .await
+            .expect("open fixture"),
+    );
+
+    // The reader got a genuine no-op cache, NOT an enabled one sized from
+    // block_cache.max_size (a disabled cache reports a zero budget).
+    assert_eq!(
+        disabled.chunk_cache().budget_bytes(),
+        0,
+        "block_cache.enabled=false must yield a disabled (zero-budget) cache on the direct reader path"
+    );
+
+    // Reads still succeed AND never populate the cache, even when repeated.
+    let rows1 = scan_count(&disabled, &tid).await;
+    let rows2 = scan_count(&disabled, &tid).await;
+    assert_eq!(
+        rows1, enabled_rows,
+        "disabled-cache reader must still return every row"
+    );
+    assert_eq!(
+        rows2, enabled_rows,
+        "repeated read on the disabled-cache reader must also return every row"
+    );
+    assert_eq!(
+        disabled.chunk_cache().resident_bytes(),
+        0,
+        "disabled block cache must never populate on the direct reader path (residency stays 0 after repeated reads)"
+    );
+    assert_eq!(
+        disabled.chunk_cache().len(),
+        0,
+        "disabled block cache must hold zero entries after repeated reads"
+    );
+}
+
 /// Spec: "stats() surface shape is unchanged" — `MemoryStats` keeps its public
 /// field names/types and the `block_cache_hit_rate()` accessor (semver). A
 /// compile-time shape assertion: renaming/removing any field or the accessor
