@@ -8,19 +8,12 @@
 //! - Type system correctly identifies Counter type
 
 use cqlite_core::{
-    platform::Platform,
-    schema::{
-        registry::{SchemaRegistry, SchemaRegistryConfig},
-        Column, KeyColumn, TableSchema,
-    },
-    storage::sstable::schema_aware_reader::SchemaAwareReader,
+    schema::{Column, KeyColumn, TableSchema},
     types::Value,
-    Config,
 };
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// Get the test datasets root from environment or default location
 fn get_test_datasets_root() -> PathBuf {
@@ -34,25 +27,6 @@ fn get_test_datasets_root() -> PathBuf {
             // Canonicalize to get absolute path
             path.canonicalize().unwrap_or(path)
         })
-}
-
-/// Find a Data.db file in the given table directory
-fn find_data_file(table_dir: &PathBuf) -> Option<PathBuf> {
-    if let Ok(entries) = std::fs::read_dir(table_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("db")
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.ends_with("-Data.db"))
-                    .unwrap_or(false)
-            {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 /// Create schema for test_basic.counters table
@@ -132,67 +106,6 @@ fn test_counter_table_exists() {
     assert!(counter_table_path.is_dir(), "Should be a directory");
 }
 
-/// Test that SchemaAwareReader can open Counter SSTable
-#[tokio::test]
-#[ignore] // Run with: cargo test --test counter_type_integration_test -- --ignored
-async fn test_counter_sstable_schema_aware_reader_init() {
-    let datasets_root = get_test_datasets_root();
-    let test_table_dir =
-        datasets_root.join("sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9");
-
-    let data_file = find_data_file(&test_table_dir).unwrap_or_else(|| {
-        panic!(
-            "Test requires full SSTable dataset: No Data.db file found in {:?}",
-            test_table_dir
-        )
-    });
-
-    let config = Config::default();
-    let platform = Arc::new(Platform::new(&config).await.unwrap());
-    let schema = create_counters_table_schema();
-    let registry_config = SchemaRegistryConfig::default();
-    let registry = Arc::new(
-        SchemaRegistry::new(registry_config, platform.clone(), config.clone())
-            .await
-            .unwrap(),
-    );
-
-    let reader = SchemaAwareReader::new(&data_file, schema, registry, &config, platform)
-        .await
-        .unwrap();
-
-    println!(
-        "SchemaAwareReader successfully created for Counter table: {}",
-        reader.table_name()
-    );
-    println!("Schema: {:?}", reader.schema());
-
-    // Verify schema contains Counter type columns
-    let like_count_col = reader
-        .schema()
-        .columns
-        .iter()
-        .find(|c| c.name == "like_count");
-    assert!(like_count_col.is_some(), "like_count column should exist");
-    assert_eq!(
-        like_count_col.unwrap().data_type,
-        "counter",
-        "like_count should be counter type"
-    );
-
-    let view_count_col = reader
-        .schema()
-        .columns
-        .iter()
-        .find(|c| c.name == "view_count");
-    assert!(view_count_col.is_some(), "view_count column should exist");
-    assert_eq!(
-        view_count_col.unwrap().data_type,
-        "counter",
-        "view_count should be counter type"
-    );
-}
-
 /// Test that schema validation accepts Counter type
 #[test]
 fn test_counter_schema_validation() {
@@ -217,14 +130,6 @@ fn test_counter_schema_validation() {
     assert!(counter_names.contains(&"share_count"));
     assert!(counter_names.contains(&"total_interactions"));
     assert!(counter_names.contains(&"view_count"));
-
-    // Schema validation should pass
-    let result = SchemaAwareReader::validate_schema_completeness(&schema);
-    assert!(
-        result.is_ok(),
-        "Counter schema should pass validation: {:?}",
-        result.err()
-    );
 }
 
 /// Test that Counter values are parsed correctly from binary data

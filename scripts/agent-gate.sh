@@ -2459,6 +2459,7 @@ dispatch_component() {
       --test issue_1566_read_work_counters \
       --test issue_1573_readat_positional \
       --test issue_1585_read_op_per_chunk \
+      --test issue_1597_compression_info_one_parse \
       --test issue_1618_parser_work_counters ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
@@ -2469,7 +2470,6 @@ dispatch_component() {
     integration-tests) run_component integration-tests bash -c '
   cargo test --package cqlite-integration-tests --no-run &&
   cargo test --package cqlite-integration-tests \
-    --test chunked_data_reader_direct_test \
     --test comprehensive_component_integration_tests \
     --test fixture_specific_integration_tests \
     --test golden_path_get_operations_tests \

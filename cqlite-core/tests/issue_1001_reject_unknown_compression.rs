@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cqlite_core::storage::sstable::compression::{CompressionAlgorithm, CompressionInfo};
+use cqlite_core::storage::sstable::compression::CompressionAlgorithm;
 use cqlite_core::storage::sstable::compression_info::{
     is_supported_compressor_name, CompressionInfo as MetaCompressionInfo,
 };
@@ -90,26 +90,6 @@ fn synthetic_canonical_parse_rejects_unknown_algorithm_fail_fast() {
     // No row scan is even reachable: parse returns Err, so nothing downstream runs.
     let err = MetaCompressionInfo::parse(&blob)
         .expect_err("parse must FAIL-FAST on an unsupported compressor, not fall back to None");
-
-    assert!(
-        matches!(err, Error::UnsupportedFormat(_)),
-        "expected Error::UnsupportedFormat, got: {err:?}"
-    );
-    assert!(
-        err.to_string().contains(BOGUS_NAME),
-        "error text must name the exact offending algorithm `{BOGUS_NAME}`; got: {err}"
-    );
-}
-
-/// The legacy binary parser (`compression::CompressionInfo::parse_binary`, used by the
-/// `reader/compression.rs` discovery path) must also reject unknown names fail-fast.
-#[test]
-fn synthetic_legacy_parse_binary_rejects_unknown_algorithm_fail_fast() {
-    // The legacy parser requires >= 20 bytes; the blob above is well over that.
-    let blob = make_compression_info_blob(BOGUS_NAME, 16384, i32::MAX as u32, 32768, &[0, 8200]);
-
-    let err = CompressionInfo::parse_binary(&blob)
-        .expect_err("parse_binary must FAIL-FAST on an unsupported compressor");
 
     assert!(
         matches!(err, Error::UnsupportedFormat(_)),

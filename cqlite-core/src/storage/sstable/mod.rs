@@ -5,7 +5,6 @@ pub mod bti;
 pub mod bulletproof_reader;
 pub mod chunk_decompressor;
 pub mod chunk_reader;
-pub mod chunked_data_reader;
 pub mod compression;
 pub mod compression_info;
 pub mod directory;
@@ -32,8 +31,6 @@ pub mod work_counters;
 #[cfg(feature = "zstd")]
 pub mod zstd_frame;
 pub use reader::SSTableReader;
-pub mod schema_aware_reader;
-pub use schema_aware_reader::SchemaAwareReader;
 /// Explicit directory refresh (issue #1749): re-scan + atomic diff-and-swap of
 /// the held reader set. Not `state_machine`-gated — meaningful for minimal builds.
 pub mod refresh;
@@ -77,8 +74,6 @@ mod s3_verification_test;
 /// S4 verification tests for Statistics.db/CompressionInfo.db/Filter.db (epic #622, issue #626).
 #[cfg(test)]
 mod s4_verification_test;
-#[cfg(test)]
-mod schema_aware_reader_test;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

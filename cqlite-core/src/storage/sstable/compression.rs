@@ -1,7 +1,6 @@
 //! Compression support for SSTable storage
 
 use crate::{error::Error, Result};
-use std::io::Read;
 // use async_trait::async_trait; // Commented out - unused
 
 /// Compression algorithms supported
@@ -82,35 +81,6 @@ impl From<&str> for CompressionAlgorithm {
     fn from(s: &str) -> Self {
         Self::from_name_opt(s).unwrap_or(CompressionAlgorithm::None)
     }
-}
-
-/// Configuration for chunked decompression
-#[derive(Debug, Clone)]
-pub struct ChunkedDecompressionConfig {
-    /// Maximum memory limit for decompression buffer (default: 32MB)
-    pub max_memory_mb: usize,
-    /// Chunk size for streaming reads (default: 1MB)
-    pub chunk_size: usize,
-    /// Maximum decompressed output size to prevent memory bombs
-    pub max_output_size: usize,
-}
-
-impl Default for ChunkedDecompressionConfig {
-    fn default() -> Self {
-        Self {
-            max_memory_mb: 32,                  // 32MB limit, well below 64MB
-            chunk_size: 1024 * 1024,            // 1MB chunks
-            max_output_size: 128 * 1024 * 1024, // 128MB max output to be conservative
-        }
-    }
-}
-
-/// Streaming decompression context for handling large blocks
-pub struct StreamingDecompressor {
-    algorithm: CompressionAlgorithm,
-    config: ChunkedDecompressionConfig,
-    bytes_processed: usize,
-    bytes_output: usize,
 }
 
 /// Validates that decompressed size does not exceed safety limits
@@ -270,19 +240,6 @@ impl Compression {
         }
     }
 
-    /// Create a streaming decompressor for large blocks
-    pub fn create_streaming_decompressor(
-        &self,
-        config: ChunkedDecompressionConfig,
-    ) -> StreamingDecompressor {
-        StreamingDecompressor {
-            algorithm: self.algorithm,
-            config,
-            bytes_processed: 0,
-            bytes_output: 0,
-        }
-    }
-
     /// Decompress data using traditional method (for small blocks)
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
         // A5 read-work counter (DECOMPRESS_CALLS; consumers B1/E3): one per chunk
@@ -433,402 +390,6 @@ impl Compression {
     /// Get compression algorithm
     pub fn algorithm(&self) -> &CompressionAlgorithm {
         &self.algorithm
-    }
-
-    /// Check if we should use streaming decompression based on size
-    pub fn should_use_streaming(
-        &self,
-        compressed_size: usize,
-        config: &ChunkedDecompressionConfig,
-    ) -> bool {
-        compressed_size > config.max_memory_mb * 1024 * 1024 / 4 // Use streaming if compressed > 1/4 of memory limit
-    }
-}
-
-impl StreamingDecompressor {
-    /// Decompress data in chunks with memory limit enforcement
-    pub async fn decompress_streaming<R: Read + Send>(
-        &mut self,
-        reader: R,
-        expected_size: Option<usize>,
-    ) -> Result<Vec<u8>> {
-        let memory_limit_bytes = self.config.max_memory_mb * 1024 * 1024;
-
-        // Pre-allocate output buffer if we know the expected size
-        let mut output = if let Some(size) = expected_size {
-            if size > self.config.max_output_size {
-                return Err(Error::storage(format!(
-                    "Expected decompressed size {} exceeds limit {}",
-                    size, self.config.max_output_size
-                )));
-            }
-            Vec::with_capacity(size.min(memory_limit_bytes / 2))
-        } else {
-            Vec::with_capacity(self.config.chunk_size)
-        };
-
-        match self.algorithm {
-            CompressionAlgorithm::None => {
-                // For uncompressed data, just copy in chunks
-                self.copy_chunks_with_limit(reader, &mut output, memory_limit_bytes)
-                    .await?;
-            }
-            CompressionAlgorithm::Lz4 => {
-                self.decompress_lz4_streaming(reader, &mut output, memory_limit_bytes)
-                    .await?;
-            }
-            CompressionAlgorithm::Snappy => {
-                self.decompress_snappy_streaming(reader, &mut output, memory_limit_bytes)
-                    .await?;
-            }
-            CompressionAlgorithm::Deflate => {
-                self.decompress_deflate_streaming(reader, &mut output, memory_limit_bytes)
-                    .await?;
-            }
-            CompressionAlgorithm::Zstd => {
-                self.decompress_zstd_streaming(reader, &mut output, memory_limit_bytes)
-                    .await?;
-            }
-        }
-
-        self.bytes_output = output.len();
-        Ok(output)
-    }
-
-    /// Copy uncompressed data in chunks
-    async fn copy_chunks_with_limit<R: Read>(
-        &mut self,
-        mut reader: R,
-        output: &mut Vec<u8>,
-        memory_limit: usize,
-    ) -> Result<()> {
-        let mut buffer = vec![0u8; self.config.chunk_size];
-
-        loop {
-            let bytes_read = reader
-                .read(&mut buffer)
-                .map_err(|e| Error::storage(format!("Failed to read chunk: {}", e)))?;
-
-            if bytes_read == 0 {
-                break; // EOF
-            }
-
-            // Check memory limits
-            if output.len() + bytes_read > memory_limit {
-                return Err(Error::storage(format!(
-                    "Memory limit exceeded: {} bytes (limit: {} bytes)",
-                    output.len() + bytes_read,
-                    memory_limit
-                )));
-            }
-
-            output.extend_from_slice(&buffer[..bytes_read]);
-            self.bytes_processed += bytes_read;
-
-            // Yield control periodically for large operations
-            if self.bytes_processed % (8 * 1024 * 1024) == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Streaming LZ4 decompression with proper frame handling
-    async fn decompress_lz4_streaming<R: Read>(
-        &mut self,
-        reader: R,
-        output: &mut Vec<u8>,
-        memory_limit: usize,
-    ) -> Result<()> {
-        #[cfg(feature = "lz4")]
-        {
-            // For LZ4, we need to handle the size-prepended format used by Cassandra
-            let mut buf_reader = std::io::BufReader::new(reader);
-            let mut size_bytes = [0u8; 4];
-            use std::io::Read;
-
-            buf_reader
-                .read_exact(&mut size_bytes)
-                .map_err(|e| Error::storage(format!("Failed to read LZ4 size header: {}", e)))?;
-
-            let expected_size = u32::from_le_bytes(size_bytes) as usize;
-
-            if expected_size > memory_limit {
-                return Err(Error::storage(format!(
-                    "LZ4 expected size {} exceeds memory limit {}",
-                    expected_size, memory_limit
-                )));
-            }
-
-            // Read compressed data in chunks and decompress
-            let mut compressed_buffer = Vec::new();
-            let mut chunk_buffer = vec![0u8; self.config.chunk_size];
-
-            loop {
-                let bytes_read = buf_reader.read(&mut chunk_buffer).map_err(|e| {
-                    Error::storage(format!("Failed to read LZ4 compressed chunk: {}", e))
-                })?;
-
-                if bytes_read == 0 {
-                    break;
-                }
-
-                compressed_buffer.extend_from_slice(&chunk_buffer[..bytes_read]);
-                self.bytes_processed += bytes_read;
-
-                // Yield control periodically
-                if self.bytes_processed % (4 * 1024 * 1024) == 0 {
-                    tokio::task::yield_now().await;
-                }
-            }
-
-            // Decompress the complete buffer
-            use lz4_flex::decompress;
-            let decompressed = decompress(&compressed_buffer, expected_size)
-                .map_err(|e| Error::storage(format!("LZ4 decompression failed: {}", e)))?;
-
-            output.extend_from_slice(&decompressed);
-            Ok(())
-        }
-        #[cfg(not(feature = "lz4"))]
-        {
-            Err(Error::storage("LZ4 compression not available".to_string()))
-        }
-    }
-
-    /// Streaming Snappy decompression
-    async fn decompress_snappy_streaming<R: Read>(
-        &mut self,
-        reader: R,
-        output: &mut Vec<u8>,
-        memory_limit: usize,
-    ) -> Result<()> {
-        #[cfg(feature = "snappy")]
-        {
-            use std::io::BufReader;
-
-            // Cassandra 5.0's `SnappyCompressor` emits a RAW Snappy block (no
-            // stream framing, no length prefix) — the SAME single authoritative
-            // format that `compress` and the chunk `decompress` path use
-            // (no-heuristics, issue #1588; this closes #1862). The previous
-            // `snap::read::FrameDecoder` decoded the DIFFERENT *framed* Snappy
-            // format, so the public streaming decompressor could not read bytes
-            // produced by `CompressionAlgorithm::Snappy`. Raw Snappy is not
-            // self-delimiting and carries no length prefix, so the whole
-            // compressed block must be read before it can be decoded — decode it
-            // through the same `snappy_decompress_raw` helper as the chunk path.
-            //
-            // SECURITY (issue #1588): bound BOTH allocations before they happen so
-            // a huge/malicious reader cannot exceed the streaming memory budget or
-            // OOM before the guards run:
-            //  1. Cap the COMPRESSED read. Any Snappy block that legitimately
-            //     decodes to <= `memory_limit` bytes cannot be larger than the
-            //     maximum Snappy encoding of `memory_limit` bytes
-            //     (`snap::raw::max_compress_len`). A larger input cannot produce
-            //     in-budget output, so we refuse to buffer it (read `cap + 1` via
-            //     `take` to detect overrun without reading unbounded input).
-            //  2. Reject a decompression bomb using the advertised uncompressed
-            //     length (`snap::raw::decompress_len`, the raw block's varint
-            //     prefix) BEFORE allocating the output buffer.
-            let max_compressed = snap::raw::max_compress_len(memory_limit);
-            if max_compressed == 0 {
-                return Err(Error::storage(format!(
-                    "Snappy streaming memory limit {} too large to bound compressed input",
-                    memory_limit
-                )));
-            }
-            let read_cap = max_compressed
-                .checked_add(1)
-                .ok_or_else(|| Error::storage("Snappy compressed read cap overflow".to_string()))?;
-            let mut buf_reader = BufReader::new(reader).take(read_cap as u64);
-            let mut compressed = Vec::new();
-            buf_reader.read_to_end(&mut compressed).map_err(|e| {
-                Error::storage(format!("Failed to read Snappy compressed data: {}", e))
-            })?;
-            if compressed.len() > max_compressed {
-                return Err(Error::storage(format!(
-                    "Snappy compressed input exceeds bound {} bytes (memory limit: {} bytes)",
-                    max_compressed, memory_limit
-                )));
-            }
-            self.bytes_processed += compressed.len();
-
-            // Pre-allocation bomb guard: reject before allocating the output buffer.
-            // Bound by the MINIMUM of every relevant limit — the streaming memory
-            // budget AND the configured output cap (issue #1588). A `max_memory_mb`
-            // set above `max_output_size` must not be allowed to allocate past the
-            // intended output cap. `snappy_decompress_raw` additionally enforces the
-            // hard `MAX_DECOMPRESSED_SIZE` ceiling at the shared choke point.
-            let advertised = snap::raw::decompress_len(&compressed)
-                .map_err(|e| Error::storage(format!("Snappy (raw) length decode failed: {}", e)))?;
-            let effective_limit = memory_limit.min(self.config.max_output_size);
-            let projected = output.len().checked_add(advertised);
-            if projected.is_none_or(|total| total > effective_limit) {
-                return Err(Error::storage(format!(
-                    "Decompression bomb protection: advertised Snappy size {} exceeds limit {} bytes",
-                    advertised, effective_limit
-                )));
-            }
-
-            // Belt-and-suspenders: enforce against the ACTUAL decoded size (the
-            // advertised length is attacker-controlled); `snappy_decompress_raw`
-            // additionally caps at MAX_DECOMPRESSED_SIZE.
-            let decompressed = snappy_decompress_raw(&compressed, &mut 0)?;
-
-            if output.len() + decompressed.len() > memory_limit {
-                return Err(Error::storage(format!(
-                    "Memory limit exceeded during Snappy decompression: {} bytes (limit: {} bytes)",
-                    output.len() + decompressed.len(),
-                    memory_limit
-                )));
-            }
-
-            output.extend_from_slice(&decompressed);
-            // Yield once after a potentially large decode so we do not starve the
-            // runtime (the read+decode above is a single bounded operation).
-            tokio::task::yield_now().await;
-
-            Ok(())
-        }
-        #[cfg(not(feature = "snappy"))]
-        {
-            let _ = (reader, output, memory_limit);
-            Err(Error::storage(
-                "Snappy compression not available".to_string(),
-            ))
-        }
-    }
-
-    /// Streaming Deflate decompression
-    #[allow(clippy::ptr_arg)] // output.extend_from_slice() requires &mut Vec<u8>
-    async fn decompress_deflate_streaming<R: Read>(
-        &mut self,
-        #[cfg_attr(not(feature = "deflate"), allow(unused_variables))] reader: R,
-        #[cfg_attr(not(feature = "deflate"), allow(unused_variables))] output: &mut Vec<u8>,
-        #[cfg_attr(not(feature = "deflate"), allow(unused_variables))] memory_limit: usize,
-    ) -> Result<()> {
-        #[cfg(feature = "deflate")]
-        {
-            use flate2::read::ZlibDecoder;
-            use std::io::BufReader;
-
-            // Cassandra's DeflateCompressor emits ZLIB-wrapped streams (header
-            // 0x78 0x9c + DEFLATE body + Adler-32 trailer), NOT raw DEFLATE and
-            // with NO 4-byte size prefix. Decode with ZlibDecoder. (#1082)
-            let buf_reader = BufReader::new(reader);
-            let mut decoder = ZlibDecoder::new(buf_reader);
-            let mut chunk_buffer = vec![0u8; self.config.chunk_size];
-
-            loop {
-                let bytes_read = decoder.read(&mut chunk_buffer).map_err(|e| {
-                    Error::storage(format!("Deflate streaming decompression failed: {}", e))
-                })?;
-
-                if bytes_read == 0 {
-                    break; // EOF
-                }
-
-                // Check memory limits
-                if output.len() + bytes_read > memory_limit {
-                    return Err(Error::storage(format!(
-                        "Memory limit exceeded during Deflate decompression: {} bytes (limit: {} bytes)",
-                        output.len() + bytes_read,
-                        memory_limit
-                    )));
-                }
-
-                output.extend_from_slice(&chunk_buffer[..bytes_read]);
-                self.bytes_processed += bytes_read;
-
-                // Yield control for large operations
-                if self.bytes_processed % (4 * 1024 * 1024) == 0 {
-                    tokio::task::yield_now().await;
-                }
-            }
-
-            Ok(())
-        }
-        #[cfg(not(feature = "deflate"))]
-        {
-            Err(Error::storage(
-                "Deflate compression not available".to_string(),
-            ))
-        }
-    }
-
-    /// Streaming Zstd decompression
-    #[allow(clippy::ptr_arg)] // output.extend_from_slice() requires &mut Vec<u8>
-    async fn decompress_zstd_streaming<R: Read>(
-        &mut self,
-        #[cfg_attr(not(feature = "zstd"), allow(unused_variables))] reader: R,
-        #[cfg_attr(not(feature = "zstd"), allow(unused_variables))] output: &mut Vec<u8>,
-        #[cfg_attr(not(feature = "zstd"), allow(unused_variables))] memory_limit: usize,
-    ) -> Result<()> {
-        #[cfg(feature = "zstd")]
-        {
-            use std::io::BufReader;
-
-            let buf_reader = BufReader::new(reader);
-            let mut decoder = zstd::stream::read::Decoder::new(buf_reader)
-                .map_err(|e| Error::storage(format!("Failed to create Zstd decoder: {}", e)))?;
-            let mut chunk_buffer = vec![0u8; self.config.chunk_size];
-
-            loop {
-                let bytes_read = decoder.read(&mut chunk_buffer).map_err(|e| {
-                    Error::storage(format!("Zstd streaming decompression failed: {}", e))
-                })?;
-
-                if bytes_read == 0 {
-                    break; // EOF
-                }
-
-                // Check memory limits
-                if output.len() + bytes_read > memory_limit {
-                    return Err(Error::storage(format!(
-                        "Memory limit exceeded during Zstd decompression: {} bytes (limit: {} bytes)",
-                        output.len() + bytes_read,
-                        memory_limit
-                    )));
-                }
-
-                output.extend_from_slice(&chunk_buffer[..bytes_read]);
-                self.bytes_processed += bytes_read;
-
-                // Yield control for large operations
-                if self.bytes_processed % (4 * 1024 * 1024) == 0 {
-                    tokio::task::yield_now().await;
-                }
-            }
-
-            Ok(())
-        }
-        #[cfg(not(feature = "zstd"))]
-        {
-            Err(Error::storage("Zstd compression not available".to_string()))
-        }
-    }
-
-    /// Get decompression statistics
-    pub fn stats(&self) -> (usize, usize) {
-        (self.bytes_processed, self.bytes_output)
-    }
-
-    /// Reset decompressor state for reuse
-    pub fn reset(&mut self) {
-        self.bytes_processed = 0;
-        self.bytes_output = 0;
-    }
-
-    /// Get compression ratio estimate
-    pub fn estimated_ratio(&self) -> f64 {
-        match self.algorithm {
-            CompressionAlgorithm::None => 1.0,
-            CompressionAlgorithm::Lz4 => 0.6,    // ~40% compression
-            CompressionAlgorithm::Snappy => 0.5, // ~50% compression
-            CompressionAlgorithm::Deflate => 0.3, // ~70% compression
-            CompressionAlgorithm::Zstd => 0.25,  // ~75% compression
-        }
     }
 
     /// Select optimal compression algorithm based on data characteristics
@@ -994,16 +555,27 @@ fn calculate_repetition_score(data: &[u8]) -> f64 {
     (byte_repetition_score * 0.6 + pattern_repetition_score * 0.4).min(1.0)
 }
 
-/// Normalize Cassandra compression algorithm names to standard names
-fn normalize_algorithm_name(raw_name: &str) -> String {
-    match raw_name {
-        "LZ4Compressor" => "LZ4".to_string(),
-        "SnappyCompressor" => "SNAPPY".to_string(),
-        "DeflateCompressor" => "DEFLATE".to_string(),
-        "ZstdCompressor" => "ZSTD".to_string(),
-        "NoCompressor" | "NullCompressor" => "NONE".to_string(),
-        // If it's already normalized or unknown, return as-is
-        other => other.to_string(),
+/// The compression algorithm a reader uses to decompress a `Data.db`'s chunks.
+///
+/// Reduced to a plain algorithm field (issue #1597 / G1): the reader derives the
+/// algorithm from the single authoritative `CompressionInfo.db` parse and every
+/// decompression site funnels through [`Compression::decompress`] via
+/// [`CompressionReader::algorithm`]. The former streaming half (`read_streaming`,
+/// `read`, `with_block_size`, `block_size`, and the `buffer`/`block_size` fields)
+/// had zero consumers and was deleted.
+pub struct CompressionReader {
+    algorithm: CompressionAlgorithm,
+}
+
+impl CompressionReader {
+    /// Create a compression reader for the given algorithm.
+    pub fn new(algorithm: CompressionAlgorithm) -> Self {
+        Self { algorithm }
+    }
+
+    /// Get the compression algorithm.
+    pub fn algorithm(&self) -> &CompressionAlgorithm {
+        &self.algorithm
     }
 }
 
@@ -1094,143 +666,6 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
-    /// Finding 2 (issue #1588; closes #1862): the public streaming Snappy
-    /// decompressor must decode the SAME single authoritative raw Snappy format
-    /// that `compress` (and the chunk `decompress` path) use. Previously it used
-    /// `snap::read::FrameDecoder` (the DIFFERENT framed format), so bytes produced
-    /// by `CompressionAlgorithm::Snappy` were unreadable through streaming.
-    /// Round-trip: compress raw -> streaming-decompress -> byte-identical.
-    #[cfg(feature = "snappy")]
-    #[tokio::test]
-    async fn test_snappy_streaming_roundtrip_raw() {
-        use std::io::Cursor;
-        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
-        let data = b"streaming raw snappy round-trip payload for issue 1862. ".repeat(64);
-
-        let compressed = compression.compress(&data).unwrap();
-
-        let mut decompressor =
-            compression.create_streaming_decompressor(ChunkedDecompressionConfig::default());
-        let out = decompressor
-            .decompress_streaming(Cursor::new(compressed), Some(data.len()))
-            .await
-            .expect("streaming decode of raw Snappy must succeed");
-        assert_eq!(
-            out, data,
-            "streaming Snappy must decode raw compress() output byte-for-byte"
-        );
-    }
-
-    /// Encode a Snappy raw-block length prefix (LEB128 varint) for `n`.
-    #[cfg(feature = "snappy")]
-    fn snappy_len_prefix(mut n: u64) -> Vec<u8> {
-        let mut out = Vec::new();
-        loop {
-            let mut b = (n & 0x7f) as u8;
-            n >>= 7;
-            if n != 0 {
-                b |= 0x80;
-            }
-            out.push(b);
-            if n == 0 {
-                break;
-            }
-        }
-        out
-    }
-
-    /// SECURITY (issue #1588): a streaming Snappy block whose ADVERTISED
-    /// uncompressed length exceeds the memory budget is rejected BEFORE the
-    /// output buffer is allocated (no OOM). The crafted input is tiny (only a
-    /// length prefix + a stub), so it passes the compressed read cap and reaches
-    /// the pre-allocation length guard.
-    #[cfg(feature = "snappy")]
-    #[tokio::test]
-    async fn test_snappy_streaming_advertised_len_bomb_rejected() {
-        use std::io::Cursor;
-
-        // 1MB budget; advertise 100MB uncompressed.
-        let config = ChunkedDecompressionConfig {
-            max_memory_mb: 1,
-            chunk_size: 1024,
-            max_output_size: 128 * 1024 * 1024,
-        };
-        let mut input = snappy_len_prefix(100 * 1024 * 1024);
-        input.push(0x00); // stub tag byte; guard fires before any decode
-
-        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
-        let mut decompressor = compression.create_streaming_decompressor(config);
-        // `None` expected_size so the caller-side pre-check does not short-circuit.
-        let err = decompressor
-            .decompress_streaming(Cursor::new(input), None)
-            .await
-            .expect_err("advertised-size bomb must be rejected");
-        assert!(
-            err.to_string().contains("Decompression bomb protection"),
-            "expected pre-allocation bomb error, got: {err}"
-        );
-    }
-
-    /// SECURITY (issue #1588): when `max_memory_mb` is configured ABOVE
-    /// `max_output_size`, the advertised-size guard must still bound to the
-    /// MINIMUM of the two (the output cap), so a block that fits the memory
-    /// budget but exceeds the output cap is rejected before allocating.
-    #[cfg(feature = "snappy")]
-    #[tokio::test]
-    async fn test_snappy_streaming_output_cap_bounds_below_memory_limit() {
-        use std::io::Cursor;
-
-        // 100MB memory budget, but only a 1MB output cap. Advertise 50MB: within
-        // the memory budget yet over the output cap -> must be rejected.
-        let config = ChunkedDecompressionConfig {
-            max_memory_mb: 100,
-            chunk_size: 1024,
-            max_output_size: 1024 * 1024,
-        };
-        let mut input = snappy_len_prefix(50 * 1024 * 1024);
-        input.push(0x00); // stub tag byte; guard fires before any decode
-
-        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
-        let mut decompressor = compression.create_streaming_decompressor(config);
-        let err = decompressor
-            .decompress_streaming(Cursor::new(input), None)
-            .await
-            .expect_err("advertised size over output cap must be rejected");
-        assert!(
-            err.to_string().contains("Decompression bomb protection"),
-            "expected output-cap-bounded bomb error, got: {err}"
-        );
-    }
-
-    /// SECURITY (issue #1588): a COMPRESSED input larger than the max Snappy
-    /// encoding of the memory budget cannot legitimately decode in-budget, so the
-    /// read is capped and the oversized input errors without buffering it all.
-    #[cfg(feature = "snappy")]
-    #[tokio::test]
-    async fn test_snappy_streaming_oversized_compressed_rejected() {
-        use std::io::Cursor;
-
-        let config = ChunkedDecompressionConfig {
-            max_memory_mb: 1,
-            chunk_size: 1024,
-            max_output_size: 128 * 1024 * 1024,
-        };
-        // 4MB of bytes, well past max_compress_len(1MB) (~1.2MB).
-        let oversized = vec![0u8; 4 * 1024 * 1024];
-
-        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
-        let mut decompressor = compression.create_streaming_decompressor(config);
-        let err = decompressor
-            .decompress_streaming(Cursor::new(oversized), None)
-            .await
-            .expect_err("over-cap compressed input must be rejected");
-        assert!(
-            err.to_string()
-                .contains("Snappy compressed input exceeds bound"),
-            "expected compressed read-cap error, got: {err}"
-        );
-    }
-
     /// A legitimate RAW Snappy chunk decodes to the known-good bytes in EXACTLY
     /// one decode attempt (issue #1588 decision #14: single-attempt + byte-identity).
     #[cfg(feature = "snappy")]
@@ -1250,6 +685,24 @@ mod tests {
             attempts, 1,
             "exactly one decode attempt (no format guessing)"
         );
+    }
+
+    /// Encode a Snappy raw-block length prefix (LEB128 varint) for `n`.
+    #[cfg(feature = "snappy")]
+    fn snappy_len_prefix(mut n: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if n == 0 {
+                break;
+            }
+        }
+        out
     }
 
     /// SECURITY (issue #1588): the SHARED `snappy_decompress_raw` helper — the
@@ -1300,123 +753,11 @@ mod tests {
 
     #[test]
     fn test_compression_reader() {
-        let mut reader = CompressionReader::new(CompressionAlgorithm::None);
-        let data = b"test data";
-
-        let result = reader.read(data).unwrap();
-        assert_eq!(result, data);
-        assert_eq!(reader.algorithm(), &CompressionAlgorithm::None);
-        assert_eq!(reader.block_size(), 65536);
-    }
-
-    #[test]
-    fn test_compression_reader_with_block_size() {
-        let reader = CompressionReader::with_block_size(CompressionAlgorithm::None, 32768);
-        assert_eq!(reader.block_size(), 32768);
-    }
-
-    #[test]
-    fn test_compression_info_binary_parsing() {
-        use crate::testing::{list_tables, resolve_table_to_sstable_path};
-        use std::collections::HashMap;
-        use std::fs;
-        use std::path::Path;
-
-        // Discovery function to find CompressionInfo.db files
-        fn find_compressioninfo_files(table_dir: &Path) -> Vec<std::path::PathBuf> {
-            if let Ok(dir) = fs::read_dir(table_dir) {
-                dir.filter_map(|entry| entry.ok())
-                    .map(|e| e.path())
-                    .filter(|p| p.is_file())
-                    .filter(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.ends_with("-CompressionInfo.db"))
-                            .unwrap_or(false)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        }
-
-        // Discover compressed tables dynamically from canonical datasets
-        let mut by_algo: HashMap<String, std::path::PathBuf> = HashMap::new();
-        for table in list_tables(None).unwrap_or_default() {
-            let table_dir = match resolve_table_to_sstable_path(&table.keyspace, &table.table) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            for ci_path in find_compressioninfo_files(&table_dir) {
-                // Parse CompressionInfo to get algorithm from real data
-                if let Ok(data) = std::fs::read(&ci_path) {
-                    if let Ok(info) = CompressionInfo::parse_binary(&data) {
-                        let algo = info.algorithm.clone();
-                        by_algo.entry(algo).or_insert(ci_path.clone());
-                        // Stop when we collected one per algorithm (LZ4/Snappy/Deflate)
-                        if by_algo.len() >= 3 {
-                            break;
-                        }
-                    }
-                }
-            }
-            if by_algo.len() >= 3 {
-                break;
-            }
-        }
-
-        if by_algo.is_empty() {
-            // Skip test if no compressed tables available - this is acceptable for test environments
-            println!(
-                "⚠️ No compressed tables found in canonical datasets - skipping binary parsing validation"
-            );
-            return;
-        }
-
-        // Test each discovered compression algorithm
-        for (algo, ci_path) in by_algo {
-            let data = std::fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
-            let info =
-                CompressionInfo::parse_binary(&data).expect("Failed to parse CompressionInfo.db");
-
-            // Validate real data structure
-            assert_eq!(info.algorithm, algo);
-            // Some real datasets might have zero chunk_length - handle gracefully
-            if info.chunk_length == 0 {
-                println!(
-                    "⚠️ Found CompressionInfo with zero chunk_length for {} - skipping validation",
-                    algo
-                );
-                continue;
-            }
-            assert!(info.chunk_length > 0);
-            assert!(info.data_length > 0);
-            assert!(!info.chunks.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_compression_info_json_parsing() {
-        let json_data = r#"{
-            "algorithm": "SNAPPY",
-            "parameters": {"level": "6"},
-            "chunk_length": 65536,
-            "data_length": 2097152,
-            "chunks": [
-                {"offset": 0, "compressed_length": 32000, "uncompressed_length": 65536},
-                {"offset": 32000, "compressed_length": 31500, "uncompressed_length": 65536}
-            ]
-        }"#;
-
-        let info = CompressionInfo::parse(json_data.as_bytes()).unwrap();
-        assert_eq!(info.algorithm, "SNAPPY");
-        assert_eq!(info.chunk_length, 65536);
-        assert_eq!(info.data_length, 2097152);
-        assert_eq!(info.chunk_count(), 2);
-        assert_eq!(info.compressed_size(), 63500);
-        assert!(info.compression_ratio() < 1.0);
-        assert_eq!(info.get_algorithm(), CompressionAlgorithm::Snappy);
+        // CompressionReader is now a plain algorithm field (issue #1597 / G1): it
+        // carries the algorithm the reader derived from CompressionInfo.db, which
+        // the decompression sites feed to `Compression::new`.
+        let reader = CompressionReader::new(CompressionAlgorithm::Snappy);
+        assert_eq!(reader.algorithm(), &CompressionAlgorithm::Snappy);
     }
 
     #[test]
@@ -1456,19 +797,6 @@ mod tests {
         if cfg!(feature = "snappy") {
             assert!(compression.decompress(invalid_data).is_err());
         }
-    }
-
-    #[test]
-    fn test_compression_streaming() {
-        let mut reader = CompressionReader::new(CompressionAlgorithm::None);
-        let chunks = vec![
-            b"chunk1".as_slice(),
-            b"chunk2".as_slice(),
-            b"chunk3".as_slice(),
-        ];
-
-        let result = reader.read_streaming(&chunks).unwrap();
-        assert_eq!(result, b"chunk1chunk2chunk3");
     }
 
     #[test]
@@ -1582,292 +910,4 @@ mod tests {
 
     // Note: Algorithm selection test temporarily disabled due to compilation issues
     // The functionality is tested via integration tests
-}
-
-/// Compression reader for streaming decompression
-#[allow(dead_code)]
-pub struct CompressionReader {
-    algorithm: CompressionAlgorithm,
-    buffer: Vec<u8>,
-    block_size: usize,
-}
-
-impl CompressionReader {
-    /// Create a new compression reader
-    pub fn new(algorithm: CompressionAlgorithm) -> Self {
-        Self {
-            algorithm,
-            buffer: Vec::new(),
-            block_size: 65536, // Default 64KB blocks
-        }
-    }
-
-    /// Create a new compression reader with specific block size
-    pub fn with_block_size(algorithm: CompressionAlgorithm, block_size: usize) -> Self {
-        Self {
-            algorithm,
-            buffer: Vec::new(),
-            block_size,
-        }
-    }
-
-    /// Read and decompress data
-    pub fn read(&mut self, compressed_data: &[u8]) -> Result<Vec<u8>> {
-        let compression = Compression::new(self.algorithm)?;
-        compression.decompress(compressed_data)
-    }
-
-    /// Read and decompress data in streaming fashion
-    pub fn read_streaming(&mut self, compressed_chunks: &[&[u8]]) -> Result<Vec<u8>> {
-        let mut result = Vec::new();
-
-        for chunk in compressed_chunks {
-            let decompressed = self.read(chunk)?;
-            result.extend_from_slice(&decompressed);
-        }
-
-        Ok(result)
-    }
-
-    /// Get the compression algorithm
-    pub fn algorithm(&self) -> &CompressionAlgorithm {
-        &self.algorithm
-    }
-
-    /// Get the block size
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-}
-
-/// CompressionInfo.db metadata parser for Cassandra SSTable compression info
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CompressionInfo {
-    /// Compression algorithm name
-    pub algorithm: String,
-    /// Compression parameters
-    pub parameters: std::collections::HashMap<String, String>,
-    /// Chunk length (block size)
-    pub chunk_length: u32,
-    /// Data length (uncompressed)
-    pub data_length: u64,
-    /// Compressed chunks information
-    pub chunks: Vec<ChunkInfo>,
-}
-
-/// Information about a compressed chunk
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChunkInfo {
-    /// Offset in the compressed file
-    pub offset: u64,
-    /// Compressed length
-    pub compressed_length: u32,
-    /// Uncompressed length
-    pub uncompressed_length: u32,
-}
-
-impl CompressionInfo {
-    /// Parse CompressionInfo.db file content
-    pub fn parse(data: &[u8]) -> Result<Self> {
-        use serde_json;
-
-        // CompressionInfo.db is typically JSON format in newer Cassandra versions
-        let info: CompressionInfo = serde_json::from_slice(data)
-            .map_err(|e| Error::storage(format!("Failed to parse CompressionInfo.db: {}", e)))?;
-
-        Ok(info)
-    }
-
-    /// Parse legacy binary CompressionInfo.db format (Cassandra 5.0 format)
-    pub fn parse_binary(data: &[u8]) -> Result<Self> {
-        // Cassandra 5.0 binary format parsing based on actual file structure
-        // From hex dump: 00 0d 4c 5a 34 43 6f 6d 70 72 65 73 73 6f 72 00
-        // - 00 0d = 13 bytes for algorithm name "LZ4Compressor"
-        // - 4c 5a 34 ... = "LZ4Compressor"
-        // - 00 = null terminator
-        // - Then chunk size and data info
-
-        if data.len() < 20 {
-            return Err(Error::storage("CompressionInfo.db too short".to_string()));
-        }
-
-        let mut offset = 0;
-
-        // Read algorithm name length (2 bytes big-endian)
-        // Based on hex analysis: 00 0d = 13 bytes for "LZ4Compressor"
-        let algo_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-        offset += 2;
-
-        if offset + algo_len > data.len() {
-            return Err(Error::storage(
-                "Invalid algorithm name length in CompressionInfo.db".to_string(),
-            ));
-        }
-
-        // Read algorithm name (e.g. "LZ4Compressor")
-        let raw_algorithm = String::from_utf8(data[offset..offset + algo_len].to_vec())
-            .map_err(|e| Error::storage(format!("Invalid UTF-8 in algorithm name: {}", e)))?;
-
-        // Fail-fast on unknown/unsupported compressors (issue #1001). This legacy binary
-        // parser must not let an unrecognized name slip through to `get_algorithm()`, which
-        // would silently map it to `CompressionAlgorithm::None` and treat compressed bytes
-        // as raw. No content-based guessing is performed (no-heuristics mandate, issue #28).
-        if !crate::storage::sstable::compression_info::is_supported_compressor_name(&raw_algorithm)
-        {
-            return Err(Error::UnsupportedFormat(format!(
-                "Unsupported compression algorithm '{}' in CompressionInfo.db. \
-                 CQLite only supports: {}. Cannot decompress this SSTable.",
-                raw_algorithm,
-                crate::storage::sstable::compression_info::SUPPORTED_COMPRESSOR_NAMES.join(", ")
-            )));
-        }
-
-        // Normalize algorithm name: "LZ4Compressor" -> "LZ4", "SnappyCompressor" -> "SNAPPY", etc.
-        let algorithm = normalize_algorithm_name(&raw_algorithm);
-        offset += algo_len;
-
-        // Based on hex dump analysis:
-        // 00 0d 4c 5a 34 43 6f 6d 70 72 65 73 73 6f 72 00 = "LZ4Compressor" + null
-        // 00 00 00 00 00 40 00 = chunk length: 0x4000 = 16384 bytes (16KB)
-        // 7f ff ff ff = data length: 0x7fffffff (max int, or placeholder)
-        // 00 00 00 00 00 00 1c 40 = some metadata
-        // 00 00 00 01 = number of chunks: 1
-        // 00 00 00 00 00 00 00 00 = chunk offset: 0
-
-        // Skip null terminator if present
-        if offset < data.len() && data[offset] == 0 {
-            offset += 1;
-        }
-
-        // Read chunk length (u32)
-        if offset + 4 > data.len() {
-            return Err(Error::storage(
-                "CompressionInfo.db too short for chunk_length".to_string(),
-            ));
-        }
-        let chunk_length = u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        // Read data length (u64)
-        if offset + 8 > data.len() {
-            return Err(Error::storage(
-                "CompressionInfo.db too short for data_length".to_string(),
-            ));
-        }
-        let data_length = u64::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]);
-        offset += 8;
-
-        // Read number of chunks (u32)
-        if offset + 4 > data.len() {
-            return Err(Error::storage(
-                "CompressionInfo.db too short for chunk_count".to_string(),
-            ));
-        }
-        let chunk_count = u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        // Read chunk information
-        let mut chunks = Vec::new();
-        for i in 0..chunk_count {
-            if offset + 16 > data.len() {
-                return Err(Error::storage(format!(
-                    "CompressionInfo.db too short for chunk info: chunk {}, offset {}, data len {}",
-                    i,
-                    offset,
-                    data.len()
-                )));
-            }
-
-            // Based on test data format: the test is creating 8-byte offsets + 4-byte lengths
-            // But we'll adapt to what the test actually provides
-
-            // Chunk offset (u64)
-            let chunk_offset = u64::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]);
-            offset += 8;
-
-            // Compressed length (u32)
-            let compressed_length = u32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            offset += 4;
-
-            // Uncompressed length (u32)
-            let uncompressed_length = u32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            offset += 4;
-
-            chunks.push(ChunkInfo {
-                offset: chunk_offset,
-                compressed_length,
-                uncompressed_length,
-            });
-        }
-
-        Ok(CompressionInfo {
-            algorithm,
-            parameters: std::collections::HashMap::new(),
-            chunk_length,
-            data_length,
-            chunks,
-        })
-    }
-
-    /// Get compression algorithm enum from string
-    pub fn get_algorithm(&self) -> CompressionAlgorithm {
-        CompressionAlgorithm::from(self.algorithm.as_str())
-    }
-
-    /// Get total number of chunks
-    pub fn chunk_count(&self) -> usize {
-        self.chunks.len()
-    }
-
-    /// Get total compressed size
-    pub fn compressed_size(&self) -> u64 {
-        self.chunks.iter().map(|c| c.compressed_length as u64).sum()
-    }
-
-    /// Get compression ratio
-    pub fn compression_ratio(&self) -> f64 {
-        if self.data_length > 0 {
-            self.compressed_size() as f64 / self.data_length as f64
-        } else {
-            1.0
-        }
-    }
 }

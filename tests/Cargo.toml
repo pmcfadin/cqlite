@@ -127,12 +127,6 @@ path = "cassandra5_smoke_test.rs"
 name = "cassandra5_simple_test"
 path = "cassandra5_simple_test.rs"
 
-# Revived orphan tests (issue #514) — use dynamic UUID discovery so they
-# work across dataset versions without hardcoded directory names.
-[[test]]
-name = "chunked_data_reader_direct_test"
-path = "chunked_data_reader_direct_test.rs"
-
 [[test]]
 name = "comprehensive_component_integration_tests"
 path = "comprehensive_component_integration_tests.rs"

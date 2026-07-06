@@ -417,7 +417,7 @@ impl SSTableReader {
                 log::debug!(
                     "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Schema found"
                 );
-                // Modern formats should use SchemaAwareReader with proper comparators
+                // Modern formats should use schema-aware decode (registered schema) with proper comparators
                 // NOTE: Only V5_0NewBig and V5_0Bti use true 'oa' format with VInt encoding
                 // V5_0DataFormat uses compressed legacy format and should NOT reach this code path
                 match self.header.cassandra_version {
