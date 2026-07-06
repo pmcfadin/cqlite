@@ -366,6 +366,98 @@ mod tests {
         (trie, root as usize)
     }
 
+    /// A `Rows.db` PayloadOnly leaf carrying an OPEN range-tombstone marker
+    /// (`FLAG_OPEN_MARKER` set, payloadBits = `1 | 8 = 9`): a 1-byte SizedInts
+    /// Data.db position followed by a NON-live MODERN DA `DeletionTime`
+    /// (`markedForDeleteAt` i64 BE, `localDeletionTime` u32 BE — see
+    /// `decode_da_deletion_time`). `markedForDeleteAt`'s leading byte is `0x00`
+    /// (not the `0x80` LIVE sentinel), so this always decodes to
+    /// `open_marker.is_some()`.
+    fn row_leaf_with_open_marker(pos: u8) -> Vec<u8> {
+        assert!(pos <= 127, "use a 1-byte SizedInts position");
+        let mut v = vec![0x09u8, pos]; // ordinal=0, payloadBits=9 (FLAG_OPEN_MARKER set)
+        v.extend_from_slice(&1_000i64.to_be_bytes()); // markedForDeleteAt (non-live)
+        v.extend_from_slice(&500u32.to_be_bytes()); // localDeletionTime
+        v
+    }
+
+    /// Like [`make_trie`] but the leaf at `marker_index` carries an OPEN
+    /// range-tombstone marker ([`row_leaf_with_open_marker`]); every other leaf
+    /// is marker-free ([`row_leaf`]). Used to pin the floor-block-ONLY
+    /// narrowing intent (rust-reviewer follow-up, issue #1647): the caller's
+    /// open-marker correctness guard (`data_access::bti::bti_clustering_row_window`)
+    /// inspects ONLY the returned floor block's `open_marker`, never every block
+    /// in the partition.
+    fn make_trie_with_marker(seps: &[u8], marker_index: usize) -> (Vec<u8>, usize) {
+        let mut trie = Vec::new();
+        let mut leaf_offsets = Vec::new();
+        for (i, _) in seps.iter().enumerate() {
+            leaf_offsets.push(trie.len() as u64);
+            if i == marker_index {
+                trie.extend_from_slice(&row_leaf_with_open_marker((i + 1) as u8));
+            } else {
+                trie.extend_from_slice(&row_leaf((i + 1) as u8));
+            }
+        }
+        let root = trie.len() as u64;
+        trie.push(0x50); // Sparse8
+        trie.push(seps.len() as u8); // count
+        for &s in seps {
+            trie.push(s);
+        }
+        for &off in &leaf_offsets {
+            trie.push((root - off) as u8);
+        }
+        (trie, root as usize)
+    }
+
+    /// Build a Rows.db-style trie with MULTI-BYTE (composite) separators
+    /// sharing a common first byte, spanning TWO trie levels: `sep0=[0x10,0x05]`
+    /// -> pos 1, `sep1=[0x10,0x0A]` -> pos 2 (both under first byte `0x10`, via
+    /// an intermediate Sparse8 node), `sep2=[0x20,0x03]` -> pos 3 (under first
+    /// byte `0x20`, via an intermediate Single8 node). Exercises the prefix-floor
+    /// walk's multi-byte descent plus a genuine 2-hop `go_max`/`go_min` traversal
+    /// through an intermediate (non-leaf) node — the single-byte [`make_trie`]
+    /// above only ever has ONE level, so `go_max`/`go_min` land on a leaf in one
+    /// hop. Returns `(trie_bytes, root_offset)`.
+    fn make_composite_trie() -> (Vec<u8>, usize) {
+        let mut trie = Vec::new();
+        let leaf1 = trie.len() as u64; // sep0=[0x10,0x05] -> pos 1
+        trie.extend_from_slice(&row_leaf(1));
+        let leaf2 = trie.len() as u64; // sep1=[0x10,0x0A] -> pos 2
+        trie.extend_from_slice(&row_leaf(2));
+        let leaf3 = trie.len() as u64; // sep2=[0x20,0x03] -> pos 3
+        trie.extend_from_slice(&row_leaf(3));
+
+        // Intermediate A: Sparse8 (no payload) routing second byte {0x05, 0x0A}
+        // under first byte 0x10.
+        let node_a = trie.len() as u64;
+        trie.push(0x50); // Sparse8, payload_flags=0
+        trie.push(0x02); // count=2
+        trie.push(0x05);
+        trie.push(0x0A);
+        trie.push((node_a - leaf1) as u8);
+        trie.push((node_a - leaf2) as u8);
+
+        // Intermediate B: Single8 (no payload) routing second byte 0x03 under
+        // first byte 0x20.
+        let node_b = trie.len() as u64;
+        trie.push(0x20); // Single8, payload_flags=0
+        trie.push(0x03); // transition byte
+        trie.push((node_b - leaf3) as u8);
+
+        // Root: Sparse8 (no payload) routing first byte {0x10, 0x20}.
+        let root = trie.len() as u64;
+        trie.push(0x50);
+        trie.push(0x02);
+        trie.push(0x10);
+        trie.push(0x20);
+        trie.push((root - node_a) as u8);
+        trie.push((root - node_b) as u8);
+
+        (trie, root as usize)
+    }
+
     /// The floor walk equals the maximum stored separator `<= key` (or `None`
     /// below the first separator), for EVERY boundary class.
     #[test]
@@ -521,5 +613,126 @@ mod tests {
         // Out-of-bounds root errors, no panic.
         assert!(rows_floor_block(&trie, trie.len() + 100, &[0x10]).is_err());
         assert!(rows_strict_ceiling_block(&[], 0, &[0x10]).is_err());
+    }
+
+    /// Pin the floor-block-ONLY narrowing intent (rust-reviewer follow-up, issue
+    /// #1647): the clustering-window correctness guard in
+    /// `data_access::bti::bti_clustering_row_window` inspects ONLY the returned
+    /// floor block's `open_marker` — it never scans every block in the
+    /// partition. Confirmed against Cassandra
+    /// `SSTableIterator.ForwardIndexedReader.setForSlice` (which reads
+    /// `separatorFloor(...).openDeletion` exclusively) and
+    /// `BtiFormatPartitionWriter` (which stores a CUMULATIVE `startOpenMarker`
+    /// per block, so the floor block's own marker already reflects any deletion
+    /// open at the window start — a marker recorded on an EARLIER block is
+    /// carried forward onto every later block it still covers, so there is
+    /// nothing left to observe on a block that is not the floor).
+    #[test]
+    fn floor_block_open_marker_is_the_only_signal_the_guard_needs() {
+        let seps = [0x10u8, 0x20, 0x30];
+        // The MIDDLE block (sep=0x20) carries the open marker; sep=0x10/0x30
+        // do not.
+        let (trie, root) = make_trie_with_marker(&seps, 1);
+
+        // (a) A query whose floor IS the marker-carrying block observes
+        // `open_marker.is_some()` — exactly the signal the guard's
+        // fallback-to-`Ok(None)` branch keys off.
+        let floor_on_marker_block = rows_floor_block(&trie, root, &[0x25]).unwrap().unwrap();
+        assert_eq!(
+            floor_on_marker_block.data_offset, 2,
+            "floor(0x25) must be the sep=0x20 block"
+        );
+        assert!(
+            floor_on_marker_block.open_marker.is_some(),
+            "the floor-block-only guard needs open_marker to survive on the \
+             block it actually returns"
+        );
+
+        // (b) A query whose floor is a DIFFERENT (non-floor-for-this-query)
+        // block — even though the marker-carrying block still exists later in
+        // the same partition — observes `open_marker.is_none()`: the marker on
+        // a block that ISN'T the floor never leaks into the returned entry, so
+        // the guard does NOT fall back and the window still narrows.
+        let floor_before_marker_block = rows_floor_block(&trie, root, &[0x15]).unwrap().unwrap();
+        assert_eq!(
+            floor_before_marker_block.data_offset, 1,
+            "floor(0x15) must be the sep=0x10 block"
+        );
+        assert!(
+            floor_before_marker_block.open_marker.is_none(),
+            "a marker on a NON-floor block must not leak into the returned \
+             floor entry (the guard must not spuriously fall back)"
+        );
+    }
+
+    /// Multi-byte (composite) separator coverage (rust-reviewer follow-up,
+    /// issue #1647): [`make_trie`] above only ever emits single-byte
+    /// separators via a one-level Sparse8 root, so `go_max`/`go_min` always
+    /// land on a leaf in a single hop. This pins the SAME floor/ceiling
+    /// equivalence oracle over [`make_composite_trie`]'s two-level, multi-byte
+    /// separators, which forces a genuine multi-byte prefix-follow PLUS a
+    /// real 2-hop `go_max_payload`/`go_min_payload` descent through an
+    /// intermediate (non-leaf) node for the `[0x18]` probe.
+    #[test]
+    fn floor_and_ceiling_multi_byte_separators() {
+        let (trie, root) = make_composite_trie();
+        let all = iterate_rows_in_bti_trie(&trie, root).unwrap();
+        assert_eq!(
+            all.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            vec![vec![0x10, 0x05], vec![0x10, 0x0A], vec![0x20, 0x03]],
+            "composite trie must yield the 3 multi-byte separators in byte order"
+        );
+
+        let floor_oracle = |key: &[u8]| -> Option<u64> {
+            all.iter()
+                .filter(|(sep, _)| sep.as_slice() <= key)
+                .next_back()
+                .map(|(_, e)| e.data_offset)
+        };
+        let ceil_oracle = |key: &[u8]| -> Option<u64> {
+            all.iter()
+                .find(|(sep, _)| sep.as_slice() > key)
+                .map(|(_, e)| e.data_offset)
+        };
+
+        // Exact matches on both bytes, between-separator probes (including one
+        // sharing only the first byte, `0x18`, which forces a multi-hop
+        // go_max/go_min descent through the intermediate node), before-first,
+        // after-last, and deeper-than-any-leaf-key probes.
+        let probes: &[&[u8]] = &[
+            &[0x00],
+            &[0x10],
+            &[0x10, 0x00],
+            &[0x10, 0x05],
+            &[0x10, 0x07],
+            &[0x10, 0x0A],
+            &[0x10, 0xFF],
+            &[0x18],
+            &[0x20],
+            &[0x20, 0x00],
+            &[0x20, 0x03],
+            &[0x20, 0x03, 0x00],
+            &[0x20, 0xFF],
+            &[0xFF],
+            &[],
+        ];
+        for key in probes {
+            let floor = rows_floor_block(&trie, root, key)
+                .unwrap()
+                .map(|e| e.data_offset);
+            assert_eq!(
+                floor,
+                floor_oracle(key),
+                "floor mismatch for composite key {key:02x?}"
+            );
+            let ceil = rows_strict_ceiling_block(&trie, root, key)
+                .unwrap()
+                .map(|e| e.data_offset);
+            assert_eq!(
+                ceil,
+                ceil_oracle(key),
+                "ceiling mismatch for composite key {key:02x?}"
+            );
+        }
     }
 }
