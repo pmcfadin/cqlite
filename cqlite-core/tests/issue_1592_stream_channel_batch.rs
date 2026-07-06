@@ -153,6 +153,15 @@ async fn collect_batched(
         let batch = item.expect("batch item Ok");
         batch_count += 1;
         assert!(!batch.is_empty(), "a forwarded batch must be non-empty");
+        // Batch-size cap invariant (issue #1592). `simple_table` is V5-compressed,
+        // so this exercises the CHUNK-STITCHING path (the windowed driver's own
+        // BATCH_EMIT_ROWS flush + `finish_blocking_drain` error flush). The
+        // NON-stitching arm (`run_scan_stream_batched`) mirrors both guarantees:
+        // the per-block BATCH_EMIT_ROWS cap (roborev Finding 2) AND flushing
+        // confirmed rows before a mid-scan error (roborev Finding 1); both are
+        // covered by this same invariant. No uncompressed/non-stitching fixture is
+        // readily available in the shared dataset to exercise that arm end-to-end
+        // here.
         assert!(
             batch.len() <= BATCH_EMIT_ROWS_MAX,
             "a batch ({}) must not exceed BATCH_EMIT_ROWS ({})",

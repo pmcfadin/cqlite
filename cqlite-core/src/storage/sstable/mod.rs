@@ -2024,6 +2024,14 @@ impl SSTableManager {
                         }
                     }
                     Err(e) => {
+                        // Flush already-received Ok rows BEFORE surfacing the
+                        // error, to match the per-row `scan_stream` guarantee
+                        // that confirmed rows are delivered ahead of a terminal
+                        // error (issue #1143 / #1592). Dropping them here would
+                        // silently lose up to BATCH_EMIT_ROWS-1 rows.
+                        if !batch.is_empty() {
+                            let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
+                        }
                         let _ = tx.send(Err(e)).await;
                         return;
                     }
@@ -2675,6 +2683,63 @@ mod tests {
         assert_eq!(
             agg.capacity_bytes, expected_capacity,
             "aggregate must sum each distinct reader's key-cache capacity exactly once"
+        );
+    }
+
+    /// Issue #1592 (roborev Finding 1): a MID-STREAM error must NOT drop the
+    /// already-received `Ok` rows accumulated in the pending batch. `rechunk_into_batches`
+    /// (the zero/multi-generation + `tombstones` forwarder) must flush the pending
+    /// rows BEFORE forwarding the terminal `Err`, matching the per-row `scan_stream`
+    /// guarantee (issue #1143) that confirmed rows are delivered ahead of the error.
+    #[tokio::test]
+    async fn rechunk_flushes_pending_rows_before_midstream_error() {
+        use reader::scan_stream_windowed::BATCH_EMIT_ROWS;
+
+        // Feed FEWER than BATCH_EMIT_ROWS Ok rows (so nothing auto-flushes and they
+        // all sit in the pending batch), then a mid-stream Err.
+        let pending = 3usize;
+        assert!(pending < BATCH_EMIT_ROWS);
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel::<Result<(RowKey, ScanRow)>>(16);
+        for i in 0..pending {
+            let key = RowKey(vec![i as u8]);
+            let row = ScanRow::RawRow(vec![i as u8]);
+            in_tx.send(Ok((key, row))).await.unwrap();
+        }
+        in_tx
+            .send(Err(crate::Error::Corruption("boom".to_string())))
+            .await
+            .unwrap();
+        drop(in_tx); // close the source
+
+        let mut out = SSTableManager::rechunk_into_batches(in_rx, 64);
+
+        // First item: the flushed pending batch with ALL confirmed rows, in order.
+        let first = out
+            .recv()
+            .await
+            .expect("expected a pending batch before the error");
+        let batch = first.expect("pending batch must be Ok, not the error");
+        assert_eq!(
+            batch.len(),
+            pending,
+            "all confirmed rows must survive the error"
+        );
+        assert!(
+            batch.len() <= BATCH_EMIT_ROWS,
+            "batch must respect the BATCH_EMIT_ROWS bound"
+        );
+        for (i, (key, _row)) in batch.iter().enumerate() {
+            assert_eq!(key.0, vec![i as u8], "rows must arrive in order");
+        }
+
+        // Second item: the terminal error, AFTER the confirmed rows.
+        let second = out.recv().await.expect("expected the terminal error item");
+        assert!(second.is_err(), "second item must be the forwarded error");
+
+        // Stream then ends.
+        assert!(
+            out.recv().await.is_none(),
+            "no items after the terminal error"
         );
     }
 }

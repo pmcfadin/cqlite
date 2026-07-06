@@ -512,13 +512,44 @@ impl SSTableReader {
             )
             .await
         } else {
-            // Non-stitching formats read block-by-block; emit one BATCH per block
-            // (its surviving entries), so only one block's entries are live at a
-            // time and the consumer is woken once per block rather than per row.
-            while let Some(block) = self.read_next_block(&cursor).await? {
+            // Non-stitching formats read block-by-block; emit surviving entries
+            // in BATCH_EMIT_ROWS-capped batches (issue #1592). A block with more
+            // than BATCH_EMIT_ROWS surviving entries is split across multiple
+            // batches so every emitted batch respects `batch.len() <=
+            // BATCH_EMIT_ROWS` (the resident-row budget behind the channel cap);
+            // the remainder carries over to the next block so we still wake the
+            // consumer at most once per full batch.
+            //
+            // Confirmed rows from successfully-parsed prior blocks live in `batch`
+            // until it fills. If a LATER block's read/parse errors mid-scan, flush
+            // those confirmed rows to the consumer BEFORE surfacing the terminal
+            // error — matching both the per-row `run_scan_stream` contract (each row
+            // is sent the instant it is parsed) and the stitching path's
+            // `flush_pending` (issue #1143 / #1592, roborev Finding 1). Propagating
+            // the error via `?` here would silently drop up to BATCH_EMIT_ROWS-1
+            // confirmed rows.
+            let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
+            loop {
+                let block = match self.read_next_block(&cursor).await {
+                    Ok(Some(block)) => block,
+                    Ok(None) => break,
+                    Err(e) => {
+                        if !batch.is_empty() {
+                            let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
+                        }
+                        return Err(e);
+                    }
+                };
                 let entries =
-                    self.parse_block_entries_with_schema(&block, schema.as_ref(), true)?;
-                let mut batch: Vec<(RowKey, ScanRow)> = Vec::new();
+                    match self.parse_block_entries_with_schema(&block, schema.as_ref(), true) {
+                        Ok(entries) => entries,
+                        Err(e) => {
+                            if !batch.is_empty() {
+                                let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
+                            }
+                            return Err(e);
+                        }
+                    };
                 for (entry_table_id, entry_key, entry_value) in entries {
                     if !table_ids_match(&entry_table_id, &table_id) {
                         continue;
@@ -537,10 +568,16 @@ impl SSTableReader {
                         continue;
                     }
                     batch.push((entry_key, entry_value));
+                    if batch.len() >= BATCH_EMIT_ROWS {
+                        if tx.send(Ok(std::mem::take(&mut batch))).await.is_err() {
+                            return Ok(()); // consumer dropped
+                        }
+                        batch.reserve(BATCH_EMIT_ROWS);
+                    }
                 }
-                if !batch.is_empty() && tx.send(Ok(batch)).await.is_err() {
-                    return Ok(()); // consumer dropped
-                }
+            }
+            if !batch.is_empty() && tx.send(Ok(batch)).await.is_err() {
+                return Ok(()); // consumer dropped
             }
             Ok(())
         }
