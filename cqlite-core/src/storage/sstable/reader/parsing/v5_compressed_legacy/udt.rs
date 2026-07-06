@@ -1185,6 +1185,8 @@ impl V5CompressedLegacyParser {
     /// Issue #221: This is critical for proper parsing - complex columns have
     /// a different format: [complex_deletion_time?] [cell_count] [cells...]
     pub(super) fn is_complex_column(data_type: &str) -> bool {
+        // Issue #1618 (H5): measure the per-column type normalization work (J1 flips to 0).
+        crate::storage::sstable::read_work_counters::record_type_normalize();
         let dt = data_type.to_lowercase();
         // Non-frozen collections start directly with list/set/map (CQL syntax)
         // or org.apache.cassandra.db.marshal.ListType/SetType/MapType (internal syntax)

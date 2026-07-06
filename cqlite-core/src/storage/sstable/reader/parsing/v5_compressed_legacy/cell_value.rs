@@ -212,6 +212,19 @@ impl V5CompressedLegacyParser {
             ));
         }
 
+        // Normalize the declared type name to lowercase ONCE, here — after the
+        // tombstone early-return (which never inspects the type) and BEFORE the
+        // empty/live split below. The schema may provide "TEXT", "INT", etc.
+        // (uppercase) while the match arms use lowercase, so a NON-tombstone cell
+        // always needs this normalization; doing it once removes the redundant
+        // per-cell `to_lowercase()` the empty path used to allocate separately.
+        // Issue #1618 (H5, roborev undercount fix): record the work-counter at
+        // this single site so it covers the empty-cell path too (previously the
+        // empty path allocated a `to_lowercase()` that went uncounted, so a future
+        // J1 `== 0` assertion could pass while the hot-path allocation still ran).
+        crate::storage::sstable::read_work_counters::record_type_normalize();
+        let normalized_type = column.data_type.to_lowercase();
+
         // Handle empty cells (no value bytes to read)
         if !has_value {
             log::debug!(
@@ -224,7 +237,7 @@ impl V5CompressedLegacyParser {
             // text/ascii/varchar is `Text("")`. Mirrors the clustering-key EMPTY
             // handling above; fixed-width types should not normally carry an empty
             // value, so treat that as NULL with a warning.
-            let empty_value = match column.data_type.to_lowercase().as_str() {
+            let empty_value = match normalized_type.as_str() {
                 "text" | "varchar" | "ascii" => Value::Text(String::new()),
                 "blob" => Value::Blob(Vec::new()),
                 _ => {
@@ -242,10 +255,9 @@ impl V5CompressedLegacyParser {
         // At this point, we have a live cell with value data
         // The value parsing logic below is unchanged from the original implementation
 
-        // Parse based on column type (data_type is a String with CQL type name)
-        // CRITICAL: Normalize type name to lowercase for case-insensitive matching
-        // Schema may provide "TEXT", "INT", etc. (uppercase) while match arms use lowercase
-        let normalized_type = column.data_type.to_lowercase();
+        // Parse based on column type (data_type is a String with CQL type name).
+        // `normalized_type` was computed (and counted) once above, before the
+        // empty/live split — the match arms use its lowercase form.
         let value = match normalized_type.as_str() {
             "boolean" => {
                 // Boolean: [0x08][u8 value]

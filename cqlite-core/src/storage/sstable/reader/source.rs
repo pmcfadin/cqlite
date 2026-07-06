@@ -198,6 +198,15 @@ pub(crate) struct ScanCursor {
     pub(crate) chunk_index: AtomicUsize,
 }
 
+// Struct-size regression guard (issue #1616, Epic H/H3; see
+// docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)). One
+// `ScanCursor` is allocated per concurrent full scan (issue #815), so its
+// footprint is on the read hot path. Measured 16 bytes today (Arc pointer +
+// AtomicUsize) on 64-bit targets. Update this pin DELIBERATELY, never silently:
+// any change — growth or shrink — must be a reviewed edit here.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<ScanCursor>() == 16);
+
 impl ScanCursor {
     /// Wrap a freshly-minted source as a scan cursor positioned at chunk 0.
     pub(crate) fn new(source: BlockSource) -> Self {

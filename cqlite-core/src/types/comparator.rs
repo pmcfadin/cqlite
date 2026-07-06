@@ -68,6 +68,16 @@ pub enum ComparatorType {
     Custom(String),
 }
 
+// Struct-size regression guard (issue #1616, Epic H/H3; see
+// docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)).
+// `ComparatorType` is constructed per column during schema-aware decode and
+// clustering-key comparison on the read hot path; its widest variant (`Udt`)
+// sets the layout. Measured 72 bytes today on 64-bit targets. Update this pin
+// DELIBERATELY, never silently: any change — growth or shrink — must be a
+// reviewed edit here.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<ComparatorType>() == 72);
+
 impl ComparatorType {
     /// Create a ComparatorType from a CqlType
     pub fn from_cql_type(cql_type: &CqlType) -> Result<Self> {

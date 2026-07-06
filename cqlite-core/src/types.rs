@@ -88,6 +88,11 @@ pub enum Value {
 // bytes today; Epic E #1517 E1 shrinks the three inlined rare variants (Decimal,
 // Duration, the widest inline payload) toward <= 40. If Value grows past this,
 // the build fails — measure and tighten, do not just bump.
+//
+// Epic H/H3 (issue #1616) deliberately does NOT duplicate this `Value` pin —
+// the parser-side struct-size guards live next to their own types
+// (ComparatorType, ParseStep, ScanCursor, and the BTI SizedPointer/Transition/
+// PayloadRef). This assertion remains the single owner of the `Value` layout.
 const _: () = assert!(std::mem::size_of::<Value>() <= 88);
 
 /// Ordered interned cells of a single decoded row (issue #1334).
