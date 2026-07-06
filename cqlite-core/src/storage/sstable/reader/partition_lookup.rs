@@ -101,9 +101,66 @@ impl SSTableReader {
     ///
     /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
     pub fn lookup_partition_via_bti_trie(&self, partition_key: &[u8]) -> Result<Option<u64>> {
+        use crate::storage::sstable::bti::encode_partition_key_for_bti_trie;
+
+        // Not a BTI reader — no trie to consult (no descent, no encode, no count).
+        if self.bti_partitions_db.is_none() {
+            return Ok(None);
+        }
+
+        // Issue #1574 (C3) single walk: reuse the prune's resolution for the seek —
+        // a pure function of the immutable trie + key. Checked BEFORE the encode so
+        // a memo hit costs neither a trie descent NOR a Murmur3 key hash. A
+        // stale/absent slot simply misses and re-walks. The presence-oracle
+        // observability is preserved: a memo hit still records the presence decision.
+        if let Some(resolved) = self.bti_lookup_memo_get(partition_key) {
+            Self::emit_bti_presence_counters(resolved.is_some());
+            return Ok(resolved);
+        }
+
+        // Issue #1575 (C4): encode ONCE here (Murmur3 hash + byte-comparable
+        // encoding, `KEY_HASH_CALLS`). The multi-candidate prune path instead calls
+        // `lookup_partition_via_bti_trie_encoded` with a single hoisted encoding so N
+        // candidate generations share ONE hash rather than re-hashing per candidate.
+        let encoded = encode_partition_key_for_bti_trie(partition_key);
+        self.bti_trie_resolve(partition_key, &encoded)
+    }
+
+    /// Resolve a BTI partition using a PRE-ENCODED byte-comparable key, so the
+    /// Murmur3 hash + encoding is computed once per read and reused across every
+    /// candidate SSTable's prune instead of being recomputed per candidate
+    /// (issue #1575 / C4). `encoded` MUST equal
+    /// `encode_partition_key_for_bti_trie(partition_key)`; the caller
+    /// (`SSTableManager`'s candidate prune) computes it exactly once. Semantics are
+    /// otherwise identical to [`lookup_partition_via_bti_trie`]: same same-key memo,
+    /// same presence-oracle observability, same resolved offset. A non-BTI reader
+    /// returns `Ok(None)` (the `encoded` argument is simply unused).
+    pub fn lookup_partition_via_bti_trie_encoded(
+        &self,
+        partition_key: &[u8],
+        encoded: &[u8; 9],
+    ) -> Result<Option<u64>> {
+        if self.bti_partitions_db.is_none() {
+            return Ok(None);
+        }
+        if let Some(resolved) = self.bti_lookup_memo_get(partition_key) {
+            Self::emit_bti_presence_counters(resolved.is_some());
+            return Ok(resolved);
+        }
+        self.bti_trie_resolve(partition_key, encoded)
+    }
+
+    /// Shared BTI trie descent for a pre-encoded key — the body behind both
+    /// [`lookup_partition_via_bti_trie`] and
+    /// [`lookup_partition_via_bti_trie_encoded`]. The caller has already confirmed
+    /// this is a BTI reader and consulted the same-key memo; this records the single
+    /// `TRIE_WALKS`, walks the resident trie buffer with the pre-encoded key, emits
+    /// the presence-oracle counters, and stores the memo. It never re-encodes the
+    /// key (no `KEY_HASH_CALLS`), which is the property C4 hoists.
+    fn bti_trie_resolve(&self, partition_key: &[u8], encoded: &[u8; 9]) -> Result<Option<u64>> {
         use crate::observability::{self as obs, catalog};
         use crate::storage::sstable::bti::{
-            lookup_raw_key_in_bti_partitions_slice, resolve_rows_db_entry, BtiPartitionLocation,
+            lookup_partition_in_bti_slice, resolve_rows_db_entry, BtiPartitionLocation,
         };
 
         let span = tracing::debug_span!(
@@ -113,20 +170,9 @@ impl SSTableReader {
         let _entered = span.enter();
 
         let Some(partitions_db) = &self.bti_partitions_db else {
-            // Not a BTI reader — no trie to consult (no descent, no count).
+            // Not a BTI reader — no trie to descend (defensive; caller pre-checks).
             return Ok(None);
         };
-
-        // Issue #1574 (C3) single walk: a single-candidate point read descends the
-        // SAME trie for the SAME key twice (candidate prune then seek). Reuse the
-        // prune's resolution — a pure function of the immutable trie + key — so the
-        // seek returns without a second descent (`TRIE_WALKS` stays 1 per read). A
-        // stale/absent slot simply misses and re-walks. The presence-oracle
-        // observability is preserved: a memo hit still records the presence decision.
-        if let Some(resolved) = self.bti_lookup_memo_get(partition_key) {
-            Self::emit_bti_presence_counters(resolved.is_some());
-            return Ok(resolved);
-        }
 
         // A5 read-work counter (TRIE_WALKS; consumers C3/C4): one per real trie
         // descent — counted only once we have a `Partitions.db` to descend, so a
@@ -135,16 +181,16 @@ impl SSTableReader {
         crate::storage::sstable::read_work_counters::record_trie_walk();
 
         // Issue #1574 (C3): walk the resident `Arc<Vec<u8>>` trie buffer in place —
-        // no per-lookup whole-file copy (the former `Cursor` + `read_exact`).
+        // no per-lookup whole-file copy. Issue #1575 (C4): with the PRE-ENCODED key,
+        // so the encode is not repeated per candidate.
         let lookup =
-            lookup_raw_key_in_bti_partitions_slice(partitions_db.as_slice(), partition_key)
-                .map_err(|e| {
-                    Error::corruption(format!(
-                        "BTI Partitions.db trie lookup failed for partition key (len={}): {}",
-                        partition_key.len(),
-                        e
-                    ))
-                });
+            lookup_partition_in_bti_slice(partitions_db.as_slice(), encoded).map_err(|e| {
+                Error::corruption(format!(
+                    "BTI Partitions.db trie lookup failed for partition key (len={}): {}",
+                    partition_key.len(),
+                    e
+                ))
+            });
         let lookup = match lookup {
             Ok(v) => v,
             Err(e) => {
@@ -462,6 +508,38 @@ impl SSTableReader {
             }
             None => true,
         }
+    }
+
+    /// `true` when this reader was opened on a BTI ("da") SSTable (its
+    /// `Partitions.db` trie is resident). Used by the candidate-prune loop to decide
+    /// whether to hoist the BTI key encoding once per read (issue #1575 / C4).
+    pub fn is_bti(&self) -> bool {
+        self.bti_partitions_db.is_some()
+    }
+
+    /// Candidate-prune presence check using a PRE-ENCODED BTI byte-comparable key,
+    /// so a multi-generation `WHERE pk = ?` read hashes+encodes the key ONCE (the
+    /// encoding is identical for every candidate) instead of once per candidate
+    /// (issue #1575 / C4).
+    ///
+    /// `encoded` MUST equal `encode_partition_key_for_bti_trie(partition_key)`,
+    /// computed once by the caller. For a BTI reader this consults the trie with the
+    /// pre-encoded key (no re-hash); for a BIG reader (no `Partitions.db`) it falls
+    /// back to the raw-key [`might_contain_partition`] path (the bloom filter is
+    /// keyed on the raw key — there is no BTI encoding to hoist), so a mixed or
+    /// non-BTI candidate set stays correct. Semantics match
+    /// [`might_contain_partition`]: `false` is definitive absence; a BTI trie hit may
+    /// be a safe prefix-collision false positive re-verified by the partition scan;
+    /// any trie parse error is treated conservatively as "maybe present".
+    pub fn might_contain_partition_encoded(&self, partition_key: &[u8], encoded: &[u8; 9]) -> bool {
+        if self.bti_partitions_db.is_some() {
+            return matches!(
+                self.lookup_partition_via_bti_trie_encoded(partition_key, encoded),
+                Ok(Some(_)) | Err(_)
+            );
+        }
+        // BIG: no BTI encoding to hoist — the bloom filter hashes the raw key.
+        self.might_contain_partition(partition_key)
     }
 
     /// Enhanced partition lookup using schema-driven key digest computation

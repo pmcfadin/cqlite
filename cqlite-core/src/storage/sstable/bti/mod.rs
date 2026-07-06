@@ -25,8 +25,10 @@ pub use parser::{
     PartitionsParser, RowsParser, FLAG_HAS_HASH_BYTE, FLAG_OPEN_MARKER,
 };
 // Crate-internal zero-copy slice walker (rust-reviewer #1574): consumed only by
-// the SSTable reader, so kept off cqlite-core's public semver surface.
-pub(crate) use parser::lookup_raw_key_in_bti_partitions_slice;
+// the SSTable reader, so kept off cqlite-core's public semver surface. The
+// pre-encoded `lookup_partition_in_bti_slice` variant lets the reader hoist the
+// key hash+encoding out of the candidate-prune loop (issue #1575 / C4).
+pub(crate) use parser::{lookup_partition_in_bti_slice, lookup_raw_key_in_bti_partitions_slice};
 
 use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;

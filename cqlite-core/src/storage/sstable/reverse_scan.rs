@@ -17,9 +17,7 @@
 
 #![cfg(not(feature = "tombstones"))]
 
-use std::sync::Arc;
-
-use super::{reader, SSTableManager};
+use super::SSTableManager;
 use crate::schema::TableSchema;
 use crate::types::{ScanRow, TableId};
 use crate::{Result, RowKey};
@@ -44,11 +42,8 @@ impl SSTableManager {
         // covers ONLY the single-generation case: with several generations the same
         // (partition, clustering) row may appear in more than one, and reconciling
         // them is the in-memory-sort path's job (cross-generation last-write-wins).
-        let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
-            .iter()
-            .filter(|r| r.might_contain_partition(partition_key))
-            .cloned()
-            .collect();
+        // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
+        let candidates = Self::prune_candidates(&reader_list, partition_key);
         if candidates.len() != 1 {
             return Ok(None);
         }
