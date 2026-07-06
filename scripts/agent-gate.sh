@@ -31,7 +31,11 @@
 #                      reallocated per partition — issue #1333) and
 #                      --test issue_1589_window_drain_bytes (the scan/compaction
 #                      windows advance a cursor + compact once per refill instead
-#                      of front-draining per partition — issue #1589); same gate.
+#                      of front-draining per partition — issue #1589); and the F3
+#                      I/O-offload guards --test issue_1593_io_offload_thread (an
+#                      mmap-backed scan's blocking raw chunk read runs off the async
+#                      worker pool) + --test issue_1593_mmap_scan_parity (that
+#                      scheduling change is data-transparent — issue #1593); same gate.
 #   work-counters-guard cargo test -p cqlite-core --features cli-helpers,work-counters
 #                      the read/parser work-counter wiring-evidence tests
 #                      (issue_1566/1573/1585 read-work counters + issue_1618 parser
@@ -2455,7 +2459,9 @@ dispatch_component() {
       --features cli-helpers,scan-offload-probe \
       --test issue_1143_scan_offload_thread \
       --test issue_1333_scan_scratch_reuse \
-      --test issue_1589_window_drain_bytes ;;
+      --test issue_1589_window_drain_bytes \
+      --test issue_1593_io_offload_thread \
+      --test issue_1593_mmap_scan_parity ;;
     work-counters-guard) run_component work-counters-guard cargo test --package cqlite-core \
       --features cli-helpers,work-counters \
       --test issue_1566_read_work_counters \

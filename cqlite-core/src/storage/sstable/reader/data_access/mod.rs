@@ -806,14 +806,30 @@ impl SSTableReader {
         &self,
         cursor: &ScanCursor,
     ) -> Result<Option<Vec<u8>>> {
+        self.read_next_block_parts(&cursor.file, &cursor.chunk_index)
+            .await
+    }
+
+    /// Read the next block from an explicit `(file, chunk_index)` pair rather than
+    /// a whole [`ScanCursor`] (issue #1593, F3).
+    ///
+    /// The windowed scan's `spawn_blocking` I/O loop for synchronously-faulting
+    /// backends (mmap / `O_DIRECT`) owns `Arc` clones of these two fields, not the
+    /// borrowed cursor, so it calls this directly. All other read state
+    /// (compression info, CRC digest, version, header size) lives on `&self`.
+    pub(in crate::storage::sstable::reader) async fn read_next_block_parts(
+        &self,
+        file: &std::sync::Arc<tokio::sync::Mutex<super::source::BlockSource>>,
+        chunk_index: &std::sync::atomic::AtomicUsize,
+    ) -> Result<Option<Vec<u8>>> {
         use super::block_io;
         block_io::read_next_block(
-            &cursor.file,
+            file,
             &self.header.cassandra_version,
             &self.config,
             &self.compression_info,
             self.crc_reader.as_deref(),
-            &cursor.chunk_index,
+            chunk_index,
             self.actual_header_size as u64,
         )
         .await

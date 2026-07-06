@@ -21,6 +21,11 @@ use std::thread::ThreadId;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static LAST_PARSE_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
+/// The [`ThreadId`] on which the scan's raw chunk READ last ran (issue #1593,
+/// F3). For a synchronously-faulting backend (mmap page fault / `O_DIRECT`
+/// `pread`) the read must run on a `spawn_blocking` thread, NOT an async worker;
+/// a guard test compares this against the enumerated async-worker set.
+static LAST_IO_READ_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
 /// Number of times the per-partition scratch buffer GREW its backing store
 /// during the armed scan (issue #1333). With the scratch hoisted out of the
 /// per-partition loop and `.clear()`-reused this is a small bounded count
@@ -33,6 +38,9 @@ static SCRATCH_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 /// count. Call from a test before driving a scan.
 pub fn arm() {
     if let Ok(mut g) = LAST_PARSE_THREAD.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = LAST_IO_READ_THREAD.lock() {
         *g = None;
     }
     SCRATCH_ALLOCS.store(0, Ordering::SeqCst);
@@ -57,6 +65,24 @@ pub(super) fn record_parse_thread() {
 /// The [`ThreadId`] recorded by the most recent parse, if any.
 pub fn recorded_parse_thread() -> Option<ThreadId> {
     LAST_PARSE_THREAD.lock().ok().and_then(|g| *g)
+}
+
+/// Record the current thread as the raw-chunk READ thread, if armed. Called from
+/// the windowed scan's I/O feed loop once per scan after the first chunk read
+/// (issue #1593, F3). For a synchronously-faulting backend this must be a
+/// `spawn_blocking` thread, not an async worker.
+pub(super) fn record_io_read_thread() {
+    if ARMED.load(Ordering::Relaxed) {
+        if let Ok(mut g) = LAST_IO_READ_THREAD.lock() {
+            *g = Some(std::thread::current().id());
+        }
+    }
+}
+
+/// The [`ThreadId`] on which the scan's raw chunk read last ran, if any (issue
+/// #1593, F3).
+pub fn recorded_io_read_thread() -> Option<ThreadId> {
+    LAST_IO_READ_THREAD.lock().ok().and_then(|g| *g)
 }
 
 /// Record that the per-partition scratch buffer's capacity changed from
