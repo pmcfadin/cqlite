@@ -1246,6 +1246,15 @@ mod tests {
     }
 }
 
+// Plan-cache HIT path lock-hygiene coverage (issue #1595, spec Requirement 2:
+// "Plan-cache hit path uses a shared (read) lock"). Kept in its own file to
+// avoid growing this already-oversized module; declared here (a descendant of
+// `engine`) so it can read the private `plan_cache`/`select_plan_cache` fields
+// and the `pub` `hit_count` atomic directly, with no new public accessor.
+#[cfg(test)]
+#[path = "engine_lock_hygiene_tests.rs"]
+mod engine_lock_hygiene_tests;
+
 #[cfg(test)]
 #[cfg(feature = "experimental")]
 mod plan_cache_tests {
