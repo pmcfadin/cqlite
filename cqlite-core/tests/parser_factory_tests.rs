@@ -26,7 +26,8 @@ fn test_parser_factory_public_api() {
     assert!(!info.supported_backends.is_empty());
     assert_eq!(info.default_backend, "auto");
     assert!(info.supported_backends.contains(&"nom".to_string()));
-    assert!(info.supported_backends.contains(&"antlr".to_string()));
+    // nom is the only built-in backend after the ANTLR stub removal (#1639).
+    assert!(!info.supported_backends.contains(&"antlr".to_string()));
 }
 
 #[test]
@@ -48,7 +49,6 @@ fn test_parser_factory_error_conditions() {
 
     // Test backend availability checking
     assert!(ParserFactory::is_backend_available(&ParserBackend::Nom));
-    assert!(ParserFactory::is_backend_available(&ParserBackend::Antlr));
     assert!(ParserFactory::is_backend_available(&ParserBackend::Auto));
     assert!(!ParserFactory::is_backend_available(
         &ParserBackend::Custom("nonexistent".to_string())
@@ -69,20 +69,16 @@ fn test_parser_factory_configuration_validation() {
     let result = ParserFactory::create(timeout_config);
     assert!(result.is_ok());
 
-    // Test configuration with valid features
+    // Test configuration with nom-supported features
     let feature_config = ParserConfig::default()
         .with_feature(ParserFeature::ErrorRecovery)
-        .with_feature(ParserFeature::SyntaxHighlighting);
+        .with_feature(ParserFeature::Caching);
     let result = ParserFactory::create(feature_config);
     assert!(result.is_ok());
 
-    // Test configuration validation for different backends
+    // Test configuration validation for the available backends
     let nom_config = ParserConfig::default().with_backend(ParserBackend::Nom);
     let result = ParserFactory::create(nom_config);
-    assert!(result.is_ok());
-
-    let antlr_config = ParserConfig::default().with_backend(ParserBackend::Antlr);
-    let result = ParserFactory::create(antlr_config);
     assert!(result.is_ok());
 
     let auto_config = ParserConfig::default().with_backend(ParserBackend::Auto);
@@ -90,60 +86,57 @@ fn test_parser_factory_configuration_validation() {
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_use_case_recommendations() {
-    // Test use case recommendation logic
+#[tokio::test]
+async fn test_use_case_recommendations() {
+    // After the ANTLR stub removal (#1639) every use case maps to nom, and
+    // every use case must produce a parser that actually parses valid CQL.
+    let use_cases = [
+        UseCase::HighPerformance,
+        UseCase::Development,
+        UseCase::Production,
+        UseCase::Embedded,
+        UseCase::Interactive,
+        UseCase::Batch,
+    ];
 
-    assert_eq!(
-        ParserFactory::recommend_backend(UseCase::HighPerformance),
-        ParserBackend::Nom
-    );
-    assert_eq!(
-        ParserFactory::recommend_backend(UseCase::Development),
-        ParserBackend::Antlr
-    );
-    assert_eq!(
-        ParserFactory::recommend_backend(UseCase::Production),
-        ParserBackend::Auto
-    );
-    assert_eq!(
-        ParserFactory::recommend_backend(UseCase::Embedded),
-        ParserBackend::Nom
-    );
-    assert_eq!(
-        ParserFactory::recommend_backend(UseCase::Interactive),
-        ParserBackend::Antlr
-    );
-    assert_eq!(
-        ParserFactory::recommend_backend(UseCase::Batch),
-        ParserBackend::Nom
-    );
+    for use_case in use_cases {
+        assert_eq!(
+            ParserFactory::recommend_backend(use_case.clone()),
+            ParserBackend::Nom,
+            "use case {:?} should recommend nom",
+            use_case
+        );
 
-    // Test use case parser creation
-    let high_perf_parser = ParserFactory::create_for_use_case(UseCase::HighPerformance);
-    assert!(high_perf_parser.is_ok());
+        let parser = ParserFactory::create_for_use_case(use_case.clone())
+            .unwrap_or_else(|e| panic!("create_for_use_case({:?}) failed: {}", use_case, e));
+        assert_eq!(parser.backend_info().name, "nom", "use case {:?}", use_case);
 
-    let dev_parser = ParserFactory::create_for_use_case(UseCase::Development);
-    assert!(dev_parser.is_ok());
-
-    let prod_parser = ParserFactory::create_for_use_case(UseCase::Production);
-    assert!(prod_parser.is_ok());
-
-    let embedded_parser = ParserFactory::create_for_use_case(UseCase::Embedded);
-    assert!(embedded_parser.is_ok());
-
-    // Test Interactive use case (may have timeout/backend compatibility issues)
-    let interactive_result = ParserFactory::create_for_use_case(UseCase::Interactive);
-    if let Err(error) = interactive_result {
-        // If interactive fails, verify it's due to expected configuration issues
-        println!("Interactive parser creation failed (expected): {}", error);
+        let statement = parser
+            .parse("CREATE TABLE ks.t (id uuid PRIMARY KEY)")
+            .await
+            .unwrap_or_else(|e| panic!("parse failed for {:?}: {}", use_case, e));
+        assert!(matches!(
+            statement,
+            cqlite_core::cql::ast::CqlStatement::CreateTable(_)
+        ));
     }
+}
 
-    let batch_result = ParserFactory::create_for_use_case(UseCase::Batch);
-    if let Err(error) = batch_result {
-        // If batch fails, verify it's due to expected configuration issues
-        println!("Batch parser creation failed (expected): {}", error);
-    }
+#[tokio::test]
+async fn test_strict_validation_config_parses() {
+    // Regression for #1639: strict_validation used to route to the ANTLR stub,
+    // failing every parse. It must now succeed with the nom backend.
+    let config = ParserConfig::default().with_strict_validation(true);
+    let parser = ParserFactory::create(config).expect("strict config should create a parser");
+    assert_eq!(parser.backend_info().name, "nom");
+    let statement = parser
+        .parse("CREATE TABLE ks.t (id uuid PRIMARY KEY)")
+        .await
+        .expect("strict-validation parse should succeed");
+    assert!(matches!(
+        statement,
+        cqlite_core::cql::ast::CqlStatement::CreateTable(_)
+    ));
 }
 
 #[test]
@@ -170,11 +163,10 @@ fn test_available_backends_info() {
     let backends = ParserFactory::get_available_backends();
     assert!(!backends.is_empty());
 
-    // Should have at least nom and antlr backend info
+    // nom is the only built-in backend after the ANTLR stub removal (#1639).
     let backend_names: Vec<String> = backends.iter().map(|b| b.name.clone()).collect();
-    assert!(
-        backend_names.contains(&"nom".to_string()) || backend_names.contains(&"antlr".to_string())
-    );
+    assert!(backend_names.contains(&"nom".to_string()));
+    assert!(!backend_names.contains(&"antlr".to_string()));
 
     // Each backend should have proper info
     for backend_info in backends {
@@ -255,9 +247,7 @@ fn test_complex_configuration_scenarios() {
     assert!(result.is_ok());
 
     // Test configuration with strict validation
-    let strict_config = ParserConfig::strict()
-        .with_backend(ParserBackend::Antlr)
-        .with_timeout(Duration::from_secs(120));
+    let strict_config = ParserConfig::strict().with_timeout(Duration::from_secs(120));
 
     let result = ParserFactory::create(strict_config);
     assert!(result.is_ok());

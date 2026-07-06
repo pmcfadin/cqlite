@@ -56,7 +56,7 @@ fn test_parser_error_creation_all_types() {
     assert_eq!(backend_err.category(), &ErrorCategory::Backend);
 
     // Test backend error with position
-    let backend_pos = ParserError::backend_at("antlr", "Grammar error", pos.clone());
+    let backend_pos = ParserError::backend_at("custom", "Grammar error", pos.clone());
     assert!(matches!(
         backend_pos,
         ParserError::BackendError {
@@ -137,7 +137,7 @@ fn test_error_recovery_suggestions() {
     assert!(suggestions[1].contains("feature"));
 
     // Test backend error suggestions
-    let backend_err = ParserError::backend("antlr", "Grammar not loaded");
+    let backend_err = ParserError::backend("custom", "Grammar not loaded");
     let suggestions = backend_err.recovery_suggestions();
     assert!(!suggestions.is_empty());
     assert!(suggestions[0].contains("backend"));
@@ -497,7 +497,7 @@ fn test_complex_error_scenarios() {
 
     // Test backend error with position
     let positioned_backend = ParserError::backend_at(
-        "antlr4",
+        "custom",
         "Rule 'selectStatement' failed at alternative 3",
         pos.clone(),
     );
@@ -505,7 +505,7 @@ fn test_complex_error_scenarios() {
         backend: ref b,
         position: Some(_),
         ..
-    } if b == "antlr4"));
+    } if b == "custom"));
 
     // Test internal error with cause chain
     let caused_internal = ParserError::internal_with_cause(

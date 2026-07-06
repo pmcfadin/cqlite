@@ -13,10 +13,10 @@
 //!
 //! See `docs/architecture/parser-overview.md` for the complete architecture overview.
 //!
-//! ## Available Backends
+//! ## Backend
 //!
-//! - **Nom**: High-performance parser combinator implementation (recommended)
-//! - **ANTLR**: Grammar-based parsing (placeholder for future development)
+//! - **Nom**: High-performance parser combinator implementation (the only
+//!   built-in backend).
 //!
 //! ## Usage
 //!
@@ -33,7 +33,6 @@ pub mod error;
 pub mod traits;
 pub mod visitor;
 
-pub mod antlr_backend;
 pub mod nom_backend;
 
 #[cfg(feature = "write-support")]
@@ -71,7 +70,6 @@ pub use visitor::{
 #[allow(deprecated)]
 pub use schema_integration::parse_cql_schema_compat;
 
-pub use antlr_backend::AntlrParser;
 pub use nom_backend::NomParser;
 
 pub use crate::error::Result as CqlResult;

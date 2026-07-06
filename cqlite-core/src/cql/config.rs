@@ -59,13 +59,13 @@ pub struct ParserConfig {
 /// Parser backend selection
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ParserBackend {
-    /// Use nom parser (fast, streaming)
+    /// Use nom parser (fast, streaming) — the only built-in backend.
     Nom,
 
-    /// Use ANTLR parser (full-featured, better error recovery)
-    Antlr,
-
-    /// Auto-select best backend based on input characteristics
+    /// Auto-select the best backend based on input characteristics.
+    ///
+    /// Currently always resolves to [`ParserBackend::Nom`], the single
+    /// built-in backend.
     Auto,
 
     /// Custom backend (for extensions)
@@ -326,14 +326,13 @@ impl ParserConfig {
     /// Create a strict configuration with maximum validation
     pub fn strict() -> Self {
         Self {
-            backend: ParserBackend::Antlr,
+            backend: ParserBackend::Nom,
             strict_validation: true,
             allow_experimental: false,
             features: vec![
                 ParserFeature::ErrorRecovery,
                 ParserFeature::OnlineValidation,
                 ParserFeature::Profiling,
-                ParserFeature::SyntaxHighlighting,
             ],
             error_handling: ErrorHandlingSettings {
                 max_errors: 1,
@@ -353,8 +352,6 @@ impl ParserConfig {
             allow_experimental: true,
             features: vec![
                 ParserFeature::ErrorRecovery,
-                ParserFeature::SyntaxHighlighting,
-                ParserFeature::CodeCompletion,
                 ParserFeature::AstTransformation,
                 ParserFeature::OnlineValidation,
                 ParserFeature::Profiling,
@@ -436,7 +433,9 @@ impl ParserConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
-        if self.timeout.as_secs() == 0 {
+        // Use `is_zero()` rather than `as_secs() == 0` so legitimate sub-second
+        // timeouts (e.g. the 100ms interactive preset) are accepted.
+        if self.timeout.is_zero() {
             return Err("Timeout must be greater than 0".to_string());
         }
         if self.max_expression_depth == 0 {
@@ -467,11 +466,6 @@ impl ParserConfig {
         if self.has_feature(&ParserFeature::Parallel) && self.performance.worker_threads == 1 {
             return Err("Parallel parsing requires at least 2 worker threads. Use ParserConfig::fast() for automatic thread count adjustment.".to_string());
         }
-        if self.has_feature(&ParserFeature::Streaming)
-            && matches!(self.backend, ParserBackend::Antlr)
-        {
-            return Err("Streaming is not supported with ANTLR backend".to_string());
-        }
 
         Ok(())
     }
@@ -498,7 +492,7 @@ mod tests {
         assert!(fast.validate().is_ok());
 
         let strict = ParserConfig::strict();
-        assert!(matches!(strict.backend, ParserBackend::Antlr));
+        assert!(matches!(strict.backend, ParserBackend::Nom));
         assert!(strict.strict_validation);
         assert!(strict.validate().is_ok());
 
@@ -521,6 +515,14 @@ mod tests {
     }
 
     #[test]
+    fn test_sub_second_timeout_is_valid() {
+        // Regression (#1639): a 100ms timeout (used by the interactive preset)
+        // must validate — the old `as_secs() == 0` check wrongly rejected it.
+        let config = ParserConfig::default().with_timeout(Duration::from_millis(100));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn test_feature_management() {
         let mut config = ParserConfig::default();
         assert!(!config.has_feature(&ParserFeature::Streaming));
@@ -540,11 +542,10 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_not_allowed_with_antlr() {
+    fn test_streaming_allowed_with_nom() {
+        // The nom backend fully supports streaming, so enabling it on a strict
+        // (nom-backed) config must validate cleanly.
         let config = ParserConfig::strict().with_feature(ParserFeature::Streaming);
-        let err = config
-            .validate()
-            .expect_err("streaming should be incompatible with ANTLR backend");
-        assert!(err.contains("Streaming is not supported with ANTLR backend"));
+        assert!(config.validate().is_ok());
     }
 }

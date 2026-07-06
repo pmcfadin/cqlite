@@ -1110,7 +1110,7 @@ pub fn parse_cql_schema(cql: &str) -> Result<TableSchema> {
 /// the legacy nom-based parser.
 pub fn parse_cql_schema_with_visitor(cql: &str) -> Result<TableSchema> {
     // Note: This is a demonstration function. In a complete implementation,
-    // you would first parse the CQL into an AST using a parser (nom or ANTLR),
+    // you would first parse the CQL into an AST using the nom parser,
     // then use the visitor pattern to convert it to TableSchema.
     //
     // For now, this uses the existing nom parser for demonstration purposes.

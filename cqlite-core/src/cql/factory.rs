@@ -7,7 +7,6 @@ use crate::error::{Error, Result};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::{
-    antlr_backend::AntlrParser,
     config::{ParserBackend, ParserConfig},
     nom_backend::NomParser,
     traits::{CqlParser, CqlParserFactory, FactoryInfo, ParserBackendInfo},
@@ -33,7 +32,6 @@ impl ParserFactory {
 
         match config.backend.clone() {
             ParserBackend::Nom => Ok(Arc::new(NomParser::new(config)?)),
-            ParserBackend::Antlr => Ok(Arc::new(AntlrParser::new(config)?)),
             ParserBackend::Auto => unreachable!("Auto resolved above"),
             ParserBackend::Custom(name) => Err(Error::configuration(format!(
                 "Custom parser '{}' not available",
@@ -42,44 +40,40 @@ impl ParserFactory {
         }
     }
 
-    /// Select the best backend given the feature set in `config`.
+    /// Select the backend for an `Auto` configuration.
     ///
-    /// ANTLR is preferred when features require rich diagnostics or
-    /// tooling support; otherwise nom is used.
-    fn select_optimal_backend(config: &ParserConfig) -> ParserBackend {
-        use super::config::ParserFeature;
-
-        let needs_antlr = config.has_feature(&ParserFeature::ErrorRecovery)
-            || config.has_feature(&ParserFeature::SyntaxHighlighting)
-            || config.has_feature(&ParserFeature::CodeCompletion)
-            || config.strict_validation;
-
-        if needs_antlr {
-            ParserBackend::Antlr
-        } else {
-            ParserBackend::Nom
-        }
+    /// nom is the only built-in backend, so `Auto` always resolves to it.
+    fn select_optimal_backend(_config: &ParserConfig) -> ParserBackend {
+        ParserBackend::Nom
     }
 
     /// Get information about available backends.
     pub fn get_available_backends() -> Vec<ParserBackendInfo> {
-        vec![NomParser::backend_info(), AntlrParser::backend_info()]
+        vec![NomParser::backend_info()]
     }
 
     /// Check whether the given backend can be instantiated.
+    ///
+    /// nom is the only built-in backend; `Auto` resolves to it. Custom backends
+    /// are never available through this factory.
     pub fn is_backend_available(backend: &ParserBackend) -> bool {
         match backend {
-            ParserBackend::Nom | ParserBackend::Antlr | ParserBackend::Auto => true,
+            ParserBackend::Nom | ParserBackend::Auto => true,
             ParserBackend::Custom(_) => false,
         }
     }
 
     /// Recommend a backend for a high-level use case.
+    ///
+    /// Every use case maps to the single built-in nom backend.
     pub fn recommend_backend(use_case: UseCase) -> ParserBackend {
         match use_case {
-            UseCase::HighPerformance | UseCase::Embedded | UseCase::Batch => ParserBackend::Nom,
-            UseCase::Development | UseCase::Interactive => ParserBackend::Antlr,
-            UseCase::Production => ParserBackend::Auto,
+            UseCase::HighPerformance
+            | UseCase::Embedded
+            | UseCase::Batch
+            | UseCase::Development
+            | UseCase::Interactive
+            | UseCase::Production => ParserBackend::Nom,
         }
     }
 
@@ -100,8 +94,6 @@ impl ParserFactory {
             UseCase::Embedded => ParserConfig::minimal().with_backend(backend),
             UseCase::Interactive => ParserConfig::development()
                 .with_backend(backend)
-                .with_feature(ParserFeature::CodeCompletion)
-                .with_feature(ParserFeature::SyntaxHighlighting)
                 .with_timeout(Duration::from_millis(100)),
             UseCase::Batch => ParserConfig::fast()
                 .with_backend(backend)
@@ -125,7 +117,7 @@ impl CqlParserFactory for ParserFactory {
     fn factory_info(&self) -> FactoryInfo {
         FactoryInfo {
             name: "DefaultParserFactory".to_string(),
-            supported_backends: vec!["nom".to_string(), "antlr".to_string()],
+            supported_backends: vec!["nom".to_string()],
             default_backend: "auto".to_string(),
         }
     }
@@ -297,7 +289,7 @@ pub mod benchmarks {
     /// Run benchmarks on all available parser backends.
     pub async fn benchmark_parsers(config: BenchmarkConfig) -> Vec<BenchmarkResult> {
         let mut results = Vec::new();
-        for backend in [ParserBackend::Nom, ParserBackend::Antlr] {
+        for backend in [ParserBackend::Nom] {
             if ParserFactory::is_backend_available(&backend) {
                 results.push(benchmark_backend(backend, &config).await);
             }
@@ -377,25 +369,56 @@ mod tests {
 
     #[test]
     fn test_backend_recommendation() {
-        assert_eq!(
-            ParserFactory::recommend_backend(UseCase::HighPerformance),
-            ParserBackend::Nom
-        );
-        assert_eq!(
-            ParserFactory::recommend_backend(UseCase::Development),
-            ParserBackend::Antlr
-        );
+        // Every use case now maps to the single built-in nom backend.
+        for use_case in [
+            UseCase::HighPerformance,
+            UseCase::Development,
+            UseCase::Production,
+            UseCase::Embedded,
+            UseCase::Interactive,
+            UseCase::Batch,
+        ] {
+            assert_eq!(
+                ParserFactory::recommend_backend(use_case),
+                ParserBackend::Nom
+            );
+        }
     }
 
     #[test]
     fn test_auto_backend_selection() {
+        // `Auto` always resolves to nom, regardless of features or strictness.
         let config = ParserConfig::fast();
-        let backend = ParserFactory::select_optimal_backend(&config);
-        assert_eq!(backend, ParserBackend::Nom);
+        assert_eq!(
+            ParserFactory::select_optimal_backend(&config),
+            ParserBackend::Nom
+        );
 
         let config = ParserConfig::strict();
-        let backend = ParserFactory::select_optimal_backend(&config);
-        assert_eq!(backend, ParserBackend::Antlr);
+        assert_eq!(
+            ParserFactory::select_optimal_backend(&config),
+            ParserBackend::Nom
+        );
+    }
+
+    #[test]
+    fn test_create_for_every_use_case_succeeds() {
+        // Regression for issue #1639: a non-functional stub backend used to be
+        // handed out for Development/Interactive and whenever strict_validation
+        // was set, making every parse fail. Every use case must now yield a
+        // working nom parser.
+        for use_case in [
+            UseCase::HighPerformance,
+            UseCase::Development,
+            UseCase::Production,
+            UseCase::Embedded,
+            UseCase::Interactive,
+            UseCase::Batch,
+        ] {
+            let parser = ParserFactory::create_for_use_case(use_case.clone())
+                .unwrap_or_else(|e| panic!("create failed for {:?}: {}", use_case, e));
+            assert_eq!(parser.backend_info().name, "nom", "use case {:?}", use_case);
+        }
     }
 
     #[test]

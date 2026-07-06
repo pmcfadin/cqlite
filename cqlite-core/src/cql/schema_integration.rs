@@ -52,7 +52,7 @@ impl SchemaParserConfig {
     /// Create a strict configuration with maximum validation
     pub fn strict() -> Self {
         Self {
-            backend: ParserBackend::Antlr,
+            backend: ParserBackend::Nom,
             strict_validation: true,
             allow_experimental: false,
             timeout_secs: 60,
@@ -119,7 +119,7 @@ pub async fn parse_cql_schema_fast(cql: &str) -> Result<TableSchema> {
     parse_cql_schema_enhanced(cql, Some(SchemaParserConfig::fast())).await
 }
 
-/// Parse a CQL CREATE TABLE statement using the strict (ANTLR, full validation) preset.
+/// Parse a CQL CREATE TABLE statement using the strict (nom, full validation) preset.
 pub async fn parse_cql_schema_strict(cql: &str) -> Result<TableSchema> {
     parse_cql_schema_enhanced(cql, Some(SchemaParserConfig::strict())).await
 }
@@ -286,7 +286,7 @@ mod tests {
         assert!(!fast_config.strict_validation);
 
         let strict_config = SchemaParserConfig::strict();
-        assert!(matches!(strict_config.backend, ParserBackend::Antlr));
+        assert!(matches!(strict_config.backend, ParserBackend::Nom));
         assert!(strict_config.strict_validation);
     }
 

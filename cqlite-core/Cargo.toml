@@ -331,7 +331,6 @@ legacy-heuristics = []
 ci_zero_tolerance = []
 
 # M1 testing remediation feature flags
-antlr = []            # CQL/ANTLR parser work (M2+)
 state_machine = []    # query/state orchestration (M2+)
 events = []           # validation/event recording (M2+)
 tombstones = []       # tombstone/GC logic (M3+)

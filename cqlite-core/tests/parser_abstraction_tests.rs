@@ -150,7 +150,10 @@ fn test_configuration_system() {
     assert!(fast.has_feature(&ConfigFeature::Streaming));
 
     let strict = ParserConfig::strict();
-    assert!(strict.has_feature(&ConfigFeature::SyntaxHighlighting));
+    assert!(strict.has_feature(&ConfigFeature::ErrorRecovery));
+    // The ANTLR-only SyntaxHighlighting feature was dropped from the strict
+    // preset when the stub backend was removed (#1639); nom does not support it.
+    assert!(!strict.has_feature(&ConfigFeature::SyntaxHighlighting));
 }
 
 #[test]
