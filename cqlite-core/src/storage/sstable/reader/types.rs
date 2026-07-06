@@ -1,8 +1,6 @@
 //! Public types for SSTable reader
 
-use rustc_hash::FxHashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -13,8 +11,7 @@ use crate::{
     parser::SSTableParser,
     platform::Platform,
     schema::{TableSchema, UdtRegistry},
-    types::TableId,
-    Config, RowKey, ScanRow,
+    Config, RowKey,
 };
 
 use super::super::{
@@ -215,19 +212,6 @@ pub struct BlockMeta {
     pub entry_count: u32,
 }
 
-/// Cached block data
-#[derive(Debug, Clone)]
-pub struct CachedBlock {
-    /// Block metadata
-    pub meta: BlockMeta,
-    /// Decompressed block data
-    pub data: Vec<u8>,
-    /// Parsed entries (lazy-loaded)
-    pub entries: Option<Vec<(TableId, RowKey, ScanRow)>>,
-    /// Last access time for LRU eviction
-    pub last_access: std::time::Instant,
-}
-
 /// SSTable reader for efficient data access
 #[allow(dead_code)]
 pub struct SSTableReader {
@@ -266,10 +250,6 @@ pub struct SSTableReader {
     pub(crate) bloom_filter: Option<BloomFilter>,
     /// Compression reader
     pub(crate) compression_reader: Option<CompressionReader>,
-    /// Block metadata cache (issue #1590, E8: `FxHashMap` — u64-offset key).
-    pub(crate) block_meta_cache: FxHashMap<u64, BlockMeta>,
-    /// Block data cache (LRU) (issue #1590, E8: `FxHashMap` — u64-offset key).
-    pub(crate) block_cache: FxHashMap<u64, CachedBlock>,
     /// Reader configuration
     pub(crate) config: SSTableReaderConfig,
     /// The full [`Config`] this reader was opened with.
@@ -283,10 +263,6 @@ pub struct SSTableReader {
     pub(crate) platform: Arc<Platform>,
     /// Statistics
     pub(crate) stats: SSTableReaderStats,
-    /// Cache hit counter for accurate metrics tracking
-    pub(crate) cache_hits: AtomicU64,
-    /// Cache miss counter for accurate metrics tracking
-    pub(crate) cache_misses: AtomicU64,
     /// Tombstone merger for deletion handling
     #[cfg(feature = "tombstones")]
     pub(crate) tombstone_merger: TombstoneMerger,

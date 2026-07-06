@@ -144,7 +144,8 @@ async fn small_config_budget_forces_eviction_and_bounds_residency() {
     let tid = TableId::new("test_basic.simple_table");
 
     // Learn the full decompressed footprint with a generous (default) budget.
-    let big = Arc::new(open_reader_with_budget(&db, Config::default().memory.block_cache.max_size).await);
+    let big =
+        Arc::new(open_reader_with_budget(&db, Config::default().memory.block_cache.max_size).await);
     let big_rows = scan_count(&big, &tid).await;
     let footprint = big.chunk_cache().resident_bytes();
     assert!(big_rows > 0, "fixture present but scan returned 0 rows");
@@ -187,9 +188,15 @@ async fn small_config_budget_forces_eviction_and_bounds_residency() {
 
 /// Spec: "Repeated cached read yields a non-zero reported hit rate" +
 /// "Reported occupancy tracks real resident bytes" — open a multi-chunk fixture
-/// through the PUBLIC `Database` API, issue the identical read twice, and assert
-/// `Database::stats().memory_stats` reflects the REAL B1 cache (hit rate > 0.0,
-/// occupancy > 0). On pre-change code the hit rate is a structural `0.0`.
+/// through the PUBLIC `Database` API and issue the IDENTICAL point-lookup read
+/// twice so the second is served from the shared B1 decompressed-chunk cache,
+/// then assert `Database::stats().memory_stats` reflects the REAL B1 cache (hit
+/// rate > 0.0, occupancy > 0). On pre-change code the hit rate is a structural
+/// `0.0`.
+///
+/// A point lookup (`WHERE id = <uuid>`) is used because that read path routes
+/// through the cache-consulting `get_cached_data` site; it is a public
+/// `Database::execute` query end to end.
 ///
 /// Gated on `cli-helpers`: the fixture is loaded through the public one-shot
 /// ingestion API (`cqlite_core::ingestion::ingest`), which is `cli-helpers`-
@@ -205,19 +212,27 @@ async fn stats_block_cache_hit_rate_and_occupancy_are_real() {
         return;
     };
 
-    let sql = "SELECT * FROM test_basic.simple_table";
-    let first = db.execute(sql).await.expect("first read");
+    // Learn a present partition key from a full scan (never a 0-row pass).
+    let scan = db
+        .execute("SELECT * FROM test_basic.simple_table")
+        .await
+        .expect("scan for a key");
     assert!(
-        !first.rows.is_empty(),
-        "fixture present but query returned 0 rows"
+        !scan.rows.is_empty(),
+        "fixture present but scan returned 0 rows"
     );
+    let id = scan
+        .rows
+        .iter()
+        .find_map(|r| r.get("id").and_then(uuid_literal))
+        .expect("a row with a UUID id");
+
+    let q = format!("SELECT * FROM test_basic.simple_table WHERE id = {id}");
+    let first = db.execute(&q).await.expect("cold point read");
+    assert_eq!(first.rows.len(), 1, "point read must find exactly one row");
     // Identical read again → served from the shared B1 decompressed-chunk cache.
-    let second = db.execute(sql).await.expect("repeat read");
-    assert_eq!(
-        second.rows.len(),
-        first.rows.len(),
-        "repeat read must return the identical row set"
-    );
+    let second = db.execute(&q).await.expect("warm point read");
+    assert_eq!(second.rows.len(), 1, "repeat point read must be identical");
 
     let stats = db.stats().await.expect("stats");
     assert!(
@@ -254,11 +269,7 @@ fn memory_stats_semver_shape_preserved() {
 /// the shared corpus is never mutated. Uses the public one-shot ingestion API
 /// (`cqlite_core::ingestion::ingest`) with the table's schema.
 #[cfg(feature = "cli-helpers")]
-async fn open_fixture_db(
-    ks: &str,
-    tbl: &str,
-    schema_file: &str,
-) -> Option<cqlite_core::Database> {
+async fn open_fixture_db(ks: &str, tbl: &str, schema_file: &str) -> Option<cqlite_core::Database> {
     use cqlite_core::ingestion::{ingest, IngestionConfig};
 
     let root = datasets_root()?;
@@ -300,5 +311,22 @@ fn copy_dir(src: &Path, dst: &Path) {
         } else {
             std::fs::copy(&from, &to).expect("copy file");
         }
+    }
+}
+
+#[cfg(feature = "cli-helpers")]
+fn uuid_literal(v: &cqlite_core::types::Value) -> Option<String> {
+    if let cqlite_core::types::Value::Uuid(b) = v {
+        let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        Some(format!(
+            "{}-{}-{}-{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..32]
+        ))
+    } else {
+        None
     }
 }

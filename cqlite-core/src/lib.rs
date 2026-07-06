@@ -58,7 +58,9 @@ pub mod testing;
 pub mod fuzz_support;
 
 // NOTE: memory_safety_runner moved to tools/memory-safety-runner (Issue #245)
-// NOTE: memory_safety_tests disabled - MemTable removed in Issue #175
+// NOTE: the orphaned memory_safety_tests module (never compiled since MemTable
+// was removed in Issue #175) was deleted in Issue #1568 — it exercised the
+// now-deleted MemoryManager cache core.
 
 // Test-only heap-allocation probe (issue #1590, E8). Installed as the global
 // allocator for `cqlite-core`'s unit-test binary so a test can count the heap
@@ -197,9 +199,6 @@ impl Database {
         // Initialize platform abstraction layer
         let platform = Arc::new(Platform::new(&config).await?);
 
-        // Initialize memory manager
-        let memory = Arc::new(MemoryManager::new(&config)?);
-
         // Initialize storage engine (no schema registry for simple open)
         let storage = Arc::new(
             StorageEngine::open(
@@ -211,6 +210,11 @@ impl Database {
             )
             .await?,
         );
+
+        // Initialize the memory-stats shell over the storage engine's live B1
+        // decompressed-chunk cache (issue #1568), so `stats()` reports real cache
+        // numbers rather than the deleted always-zero counters.
+        let memory = Arc::new(MemoryManager::with_chunk_cache(storage.chunk_cache()));
 
         // Initialize schema manager
         #[cfg(feature = "state_machine")]
@@ -325,9 +329,6 @@ impl Database {
         // Initialize platform abstraction layer
         let platform = Arc::new(Platform::new(&config).await?);
 
-        // Initialize memory manager
-        let memory = Arc::new(MemoryManager::new(&config)?);
-
         // Initialize storage engine with pre-discovered SSTables and schema registry
         let storage = Arc::new(
             StorageEngine::open_with_sstables(
@@ -339,6 +340,9 @@ impl Database {
             )
             .await?,
         );
+
+        // Memory-stats shell over the storage engine's live B1 chunk cache (#1568).
+        let memory = Arc::new(MemoryManager::with_chunk_cache(storage.chunk_cache()));
 
         // Initialize schema manager - use registry if provided, otherwise create empty
         let schema = if let Some(registry_rwlock) = schema_registry {

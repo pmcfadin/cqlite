@@ -192,8 +192,11 @@ class TestConfigFromDict:
 
         assert "max_memory" in memory
         assert "block_cache" in memory
-        assert "row_cache" in memory
-        assert "query_cache" in memory
+        # Issue #1568 (Epic B/B2): the decorative row_cache/query_cache/allocator
+        # knobs were removed; block_cache.max_size is the single real cache knob.
+        assert "row_cache" not in memory
+        assert "query_cache" not in memory
+        assert "allocator" not in memory
 
     def test_config_storage_section(self):
         """Config storage section should have expected fields."""

@@ -10,7 +10,6 @@
 
 // Submodules
 mod block_io;
-mod cache;
 /// Per-element / per-cell compaction read contract (epic #899, Phase A).
 pub mod compaction_row;
 mod component_loading;
@@ -56,8 +55,8 @@ pub mod window_cursor;
 
 // Re-export public types
 pub use types::{
-    BlockMeta, CachedBlock, IntegrityCheckResult, IntegrityStatus, SSTableReader,
-    SSTableReaderConfig, SSTableReaderHealthMetrics, SSTableReaderStats,
+    BlockMeta, IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderConfig,
+    SSTableReaderHealthMetrics, SSTableReaderStats,
 };
 // Re-export the within-partition clustering-slice push-down spec (Issue #954).
 pub use data_access::ClusteringSlice;
@@ -79,9 +78,8 @@ use header::{
     calculate_actual_header_size, extract_generation_from_path, parse_header_with_version_detection,
 };
 
-use rustc_hash::FxHashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -763,14 +761,10 @@ impl SSTableReader {
             index,
             bloom_filter,
             compression_reader,
-            block_meta_cache: FxHashMap::default(),
-            block_cache: FxHashMap::default(),
             config: reader_config,
             open_config,
             platform,
             stats,
-            cache_hits: AtomicU64::new(0),
-            cache_misses: AtomicU64::new(0),
             #[cfg(feature = "tombstones")]
             tombstone_merger: TombstoneMerger::new(),
             generation,
@@ -1178,22 +1172,11 @@ impl SSTableReader {
     }
 
     /// Close the reader and release resources
-    pub async fn close(mut self) -> Result<()> {
+    pub async fn close(self) -> Result<()> {
         debug!("Closing SSTable reader for {:?}", self.file_path);
-
-        // Clear caches and log cache statistics
-        let cache_entries = self.block_cache.len();
-        let meta_entries = self.block_meta_cache.len();
-
-        self.block_cache.clear();
-        self.block_meta_cache.clear();
-
-        debug!(
-            "Cleared {} block cache entries and {} metadata entries",
-            cache_entries, meta_entries
-        );
-
-        // File will be closed automatically when dropped
+        // File will be closed automatically when dropped. The shared B1
+        // decompressed-chunk cache is reference-counted and outlives one reader
+        // (issue #1568: the per-reader block cache that was cleared here is gone).
         Ok(())
     }
 

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (config schema):** `MemoryConfig` collapsed to a single real caching
+  knob — `block_cache.max_size`, wired as the shared decompressed-chunk cache's
+  byte budget (Epic B / B2, #1568). The decorative `MemoryConfig.row_cache`,
+  `MemoryConfig.query_cache`, and `MemoryConfig.allocator` fields and the
+  never-selected `CachePolicy::Lfu` / `CachePolicy::Arc` variants (all wired to
+  nothing at runtime) were removed. A config that still names any removed field
+  or variant now **fails closed** on deserialization (`deny_unknown_fields` /
+  unknown enum variant) rather than being silently ignored. `Database::stats()
+  .memory_stats` keeps its shape but its block-cache numbers are now the real
+  cache's hits/misses/occupancy (a repeated cached read yields a non-zero
+  `block_cache_hit_rate()` instead of a structural `0.0`).
+
 ## [v0.13.0] - 2026-07-05
 
 _The performance release._ Read-path constant-factor wins (Epic E, C2), Node

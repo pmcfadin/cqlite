@@ -529,9 +529,9 @@ impl Database {
             }
 
             if let Some(enabled) = opts.cache_enabled {
+                // Issue #1568: the decorative row_cache/query_cache config knobs
+                // were deleted; the block/chunk cache is the single real cache.
                 config.memory.block_cache.enabled = enabled;
-                config.memory.row_cache.enabled = enabled;
-                config.memory.query_cache.enabled = enabled;
             }
 
             if let Some(ac) = opts.auto_compaction {

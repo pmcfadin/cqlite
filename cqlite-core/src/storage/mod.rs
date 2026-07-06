@@ -518,6 +518,14 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// The shared, bytes-bounded B1 decompressed-chunk cache owned by the
+    /// SSTable manager (issue #1567/#1568). Cloned (`Arc`) so the memory-stats
+    /// shell can report the live cache's real hit/miss/occupancy numbers through
+    /// `Database::stats().memory_stats`.
+    pub(crate) fn chunk_cache(&self) -> Arc<crate::storage::cache::DecompressedChunkCache> {
+        Arc::clone(&self.sstables.chunk_cache)
+    }
+
     /// Get storage statistics
     ///
     /// NOTE: Issue #176 removed compaction stats (compaction.rs deleted).
