@@ -57,6 +57,13 @@ pub(crate) fn zstd_dictionary_rejection(
 /// non-zstd byte run, or a header too short to decide; the normal decode path
 /// then handles those. This is pure frame-header parsing per the spec — NOT a
 /// byte-pattern heuristic (no-heuristics mandate, issue #28).
+///
+/// Known sub-case: a frame with `Dictionary_ID_flag == 0` uses an out-of-band
+/// dictionary (the `Dictionary_ID` is omitted from the frame header per RFC 8878
+/// §3.1.1.1.1), so this returns `None` for it; such frames are still handled
+/// fail-closed by the `CompressionInfo.db` dictionary-option metadata path
+/// (`zstd_dictionary_option`) and, absent that, error out during decode — never
+/// returning wrong rows.
 pub(crate) fn zstd_frame_dictionary_id(frame: &[u8]) -> Option<u32> {
     if frame.len() < 5 || frame[0..4] != ZSTD_MAGIC_LE {
         return None;
