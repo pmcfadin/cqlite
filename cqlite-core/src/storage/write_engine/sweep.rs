@@ -593,4 +593,127 @@ mod tests {
             "the recompacted output must contain all 20 rows"
         );
     }
+
+    // ── issue #1959 (rust-reviewer Low 3): publication-barrier fsync faults ──────
+    //
+    // The directory durability barrier runs at two publication points inside
+    // `finalize_merge_async`: step 2b (after the non-TOC renames, before the TOC
+    // rename) and step 2c (after the TOC rename, before the inputs are deleted).
+    // A real EIO/ENOSPC on either fsync must roll back cleanly. These tests arm
+    // the `#[cfg(test)]` fault seam at each point and assert the invariant holds:
+    //   (a) the input SSTables stay intact and readable,
+    //   (b) no orphan output component and no visible-but-not-durable output TOC
+    //       survive (and the `.compaction-tmp-*` dir is dropped), and
+    //   (c) finalize returns `Error::Storage`.
+
+    /// Which publication-barrier directory fsync to fault.
+    #[derive(Clone, Copy)]
+    enum FsyncFaultPoint {
+        /// Step 2b: after the non-TOC renames, before the TOC rename.
+        BeforeToc,
+        /// Step 2c: after the TOC rename, before the inputs are deleted.
+        AfterToc,
+    }
+
+    fn drive_compaction_with_fsync_fault(point: FsyncFaultPoint) {
+        use crate::error::Error;
+        use crate::storage::write_engine::compaction::{
+            FAIL_COMPACTION_DIR_FSYNC_AFTER_TOC, FAIL_COMPACTION_DIR_FSYNC_BEFORE_TOC,
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let dir = sstable_dir(&temp_dir);
+        let data_dir = temp_dir.path().join("data");
+
+        // Four complete, published input generations (5 distinct rows each).
+        let mut engine = WriteEngine::new(config_for(&temp_dir)).unwrap();
+        let pre_paths = flush_n_sstables_sync(&mut engine, 4);
+        assert_eq!(pre_paths.len(), 4);
+
+        let count_suffix = |suffix: &str| -> usize {
+            dir_names(&dir)
+                .iter()
+                .filter(|n| n.ends_with(suffix))
+                .count()
+        };
+        assert_eq!(count_suffix("-big-Data.db"), 4, "sanity: 4 input Data.db");
+        assert_eq!(count_suffix("-big-TOC.txt"), 4, "sanity: 4 input TOCs");
+
+        // Arm the fsync fault at the requested publication point.
+        match point {
+            FsyncFaultPoint::BeforeToc => {
+                FAIL_COMPACTION_DIR_FSYNC_BEFORE_TOC.with(|f| f.set(true))
+            }
+            FsyncFaultPoint::AfterToc => FAIL_COMPACTION_DIR_FSYNC_AFTER_TOC.with(|f| f.set(true)),
+        }
+        let policy = crate::storage::write_engine::STCSPolicy::new(4, 32, 0.5, 1.5, 0).unwrap();
+        engine.set_merge_policy(Box::new(policy)).unwrap();
+        let result = engine.maintenance_step(Duration::from_secs(60));
+        // Disarm BOTH flags unconditionally so a failed assertion below cannot
+        // leak the injection into another test on this thread.
+        FAIL_COMPACTION_DIR_FSYNC_BEFORE_TOC.with(|f| f.set(false));
+        FAIL_COMPACTION_DIR_FSYNC_AFTER_TOC.with(|f| f.set(false));
+
+        // (c) finalize returns Error::Storage carrying the injected marker.
+        let err = result.expect_err("the injected publication fsync fault must fail finalize");
+        assert!(
+            matches!(&err, Error::Storage(msg) if msg.contains("injected directory fsync fault")),
+            "expected Error::Storage from the injected fsync fault, got: {err:?}"
+        );
+
+        // (a) The inputs are intact and still readable (never renamed away/deleted).
+        for p in &pre_paths {
+            assert!(
+                p.exists(),
+                "input {:?} must survive a rolled-back finalize",
+                p
+            );
+        }
+        let total: usize = pre_paths.iter().map(|p| live_row_count(p, &schema)).sum();
+        assert_eq!(
+            total, 20,
+            "all 20 input rows must still read back after the rollback"
+        );
+
+        // (b) The rollback removed every renamed file — including the TOC on the
+        // 2c path — so only the four input generations remain (no orphan output
+        // component, no visible output TOC), and the tmp dir is gone.
+        assert_eq!(
+            count_suffix("-big-Data.db"),
+            4,
+            "rollback must leave exactly the 4 input Data.db (no orphan output component)"
+        );
+        assert_eq!(
+            count_suffix("-big-TOC.txt"),
+            4,
+            "rollback must leave exactly the 4 input TOCs — no visible output TOC may survive"
+        );
+        let leftover_tmp: Vec<_> = std::fs::read_dir(&data_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".compaction-tmp-")
+            })
+            .collect();
+        assert!(
+            leftover_tmp.is_empty(),
+            "rollback must drop the .compaction-tmp-* dir, found {:?}",
+            leftover_tmp.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+
+        drop(engine);
+    }
+
+    #[test]
+    fn publish_fsync_fault_before_toc_rolls_back_intact() {
+        drive_compaction_with_fsync_fault(FsyncFaultPoint::BeforeToc);
+    }
+
+    #[test]
+    fn publish_fsync_fault_after_toc_rolls_back_intact() {
+        drive_compaction_with_fsync_fault(FsyncFaultPoint::AfterToc);
+    }
 }

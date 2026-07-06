@@ -1287,6 +1287,13 @@ mod plan_cache_tests {
         (engine, temp_dir)
     }
 
+    /// Register the table schema used by the plan-cache tests.
+    ///
+    /// The write path was removed in Issue #175, so this only issues the
+    /// `CREATE TABLE` DDL — no row inserts. The plan-cache assertions below
+    /// depend solely on query *planning* (cache population/eviction on simple
+    /// `WHERE id = ?` point lookups routed through the legacy executor), not on
+    /// any stored rows, so an empty table exercises the current behavior exactly.
     async fn create_sample_table(engine: &QueryEngine) {
         engine
             .execute(
@@ -1295,19 +1302,6 @@ mod plan_cache_tests {
                     value TEXT
                 )",
             )
-            .await
-            .unwrap();
-
-        engine
-            .execute("INSERT INTO plan_cache_test (id, value) VALUES (1, 'one')")
-            .await
-            .unwrap();
-        engine
-            .execute("INSERT INTO plan_cache_test (id, value) VALUES (2, 'two')")
-            .await
-            .unwrap();
-        engine
-            .execute("INSERT INTO plan_cache_test (id, value) VALUES (3, 'three')")
             .await
             .unwrap();
     }

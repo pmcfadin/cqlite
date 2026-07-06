@@ -375,6 +375,103 @@ fn compaction_3_sstables_mechanics() {
     // _temp_dir kept alive until end of scope to preserve files.
 }
 
+// ── Test 1b: Publication durability barrier (issue #1959) ────────────────────
+
+/// Crash-safety invariant for the compaction publication (issue #1959):
+/// after finalize, the published SSTable directory must fsync its dirents so
+/// "TOC.txt visible ⇒ every component it names is present and complete" holds
+/// across a power loss. Directory fsync cannot be observed directly without a
+/// power cut, so this asserts the behavioral contract the fsync exists to
+/// guarantee AND exercises the finalize path that performs the two directory
+/// fsyncs (a fsync failure would abort finalize, so a completed compaction with
+/// every TOC-named component present is the observable post-condition):
+///
+///   1. the published SSTable directory exists,
+///   2. TOC.txt (the publication barrier) exists, and
+///   3. EVERY component listed in TOC.txt exists on disk and is non-empty —
+///      i.e. the TOC never references a component that is absent/zero-length.
+///
+/// It does NOT assert byte layout: a directory fsync changes no file bytes, so
+/// the dedicated compaction byte-parity tests (e.g. issue #1017) remain the
+/// authority that the published bytes are unchanged.
+#[test]
+fn compaction_publish_all_toc_components_present_and_nonempty() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let (_temp_dir, _data_dir, sstable_dir) = write_three_sstables_and_compact(&rt);
+
+    // (1) The published SSTable directory exists.
+    assert!(
+        sstable_dir.is_dir(),
+        "published SSTable directory must exist: {:?}",
+        sstable_dir
+    );
+
+    // Locate the single published TOC.txt (publication barrier).
+    let toc_path = std::fs::read_dir(&sstable_dir)
+        .expect("read published sstable dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().ends_with("-TOC.txt"))
+                .unwrap_or(false)
+        })
+        .expect("(2) published TOC.txt must exist after compaction");
+    assert!(
+        std::fs::metadata(&toc_path).expect("stat TOC.txt").len() > 0,
+        "TOC.txt must be non-empty"
+    );
+
+    // (3) Every component named in TOC.txt must exist on disk and be non-empty.
+    // Actual filenames are descriptor-prefixed (e.g. `nb-N-big-Data.db`), while
+    // TOC lines are bare component names (`Data.db`), so match by suffix.
+    let toc_contents = std::fs::read_to_string(&toc_path).expect("read TOC.txt");
+    let dir_entries: Vec<std::path::PathBuf> = std::fs::read_dir(&sstable_dir)
+        .expect("read published sstable dir for component check")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+
+    let mut checked = 0usize;
+    for line in toc_contents.lines() {
+        let component = line.trim();
+        if component.is_empty() {
+            continue;
+        }
+        let found = dir_entries.iter().find(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().ends_with(&format!("-{}", component)))
+                .unwrap_or(false)
+        });
+        let path = found.unwrap_or_else(|| {
+            panic!(
+                "TOC lists component {component:?} but no matching file exists in {sstable_dir:?} \
+                 — the publication barrier must never reference an absent component"
+            )
+        });
+        let len = std::fs::metadata(path)
+            .unwrap_or_else(|e| panic!("stat {path:?}: {e}"))
+            .len();
+        assert!(
+            len > 0,
+            "TOC-listed component {component:?} ({path:?}) must be non-empty; \
+             a visible TOC must imply every component it names is complete"
+        );
+        checked += 1;
+    }
+    // A BIG compaction output lists at least Data/Statistics/Digest/TOC.
+    assert!(
+        checked >= 4,
+        "expected the compaction TOC to list several components, listed {checked}"
+    );
+
+    // _temp_dir kept alive until end of scope to preserve files.
+}
+
 // ── Test 2: Read-back correctness ────────────────────────────────────────────
 
 /// Read-back correctness test: after compaction, reopen via SSTableManager and

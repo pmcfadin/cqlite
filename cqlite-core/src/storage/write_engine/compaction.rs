@@ -30,6 +30,34 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+// Test-only publication-barrier fsync fault seams (issue #1959).
+//
+// These let a test force the directory durability `fsync` to fail at each of
+// the two publication points inside `finalize_merge_async`, exercising the
+// rollback branches that a real EIO/ENOSPC on the directory handle would hit:
+//
+//   * `FAIL_COMPACTION_DIR_FSYNC_BEFORE_TOC` — fault the fsync performed AFTER
+//     the non-TOC component renames but BEFORE the TOC rename (step 2b). A
+//     failure here must roll back the already-renamed components and abort with
+//     `Error::Storage`, so no partially-published set is left behind and the
+//     inputs stay intact.
+//   * `FAIL_COMPACTION_DIR_FSYNC_AFTER_TOC` — fault the fsync performed AFTER
+//     the TOC rename but BEFORE the inputs are deleted (step 2c). A failure here
+//     must roll back the whole published set (INCLUDING the just-renamed TOC) so
+//     no visible-but-not-durable TOC survives, and the inputs — still the only
+//     durable copy — are never deleted.
+//
+// Like `FAIL_COMPACTION_BEFORE_RENAME` these are `thread_local` so parallel
+// tests cannot see each other's injection; the driving test polls the finalizer
+// synchronously on the same thread that set the flag.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_COMPACTION_DIR_FSYNC_BEFORE_TOC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    pub(crate) static FAIL_COMPACTION_DIR_FSYNC_AFTER_TOC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 impl WriteEngine {
     /// Start a new merge operation (M5.2 helper, Issue #474)
     ///
@@ -371,9 +399,18 @@ impl WriteEngine {
         // `data_dir`, the rename is within the same filesystem (POSIX atomic).
         // We rename TOC.txt last because it is the publication barrier.
         let sstable_dir = &merge.sstable_dir;
+        // The configured data root — the top of the leaf→data-root ancestor
+        // chain fsynced at publication (issue #1959, symmetry with the flush
+        // barrier). Cloned so it does not alias the `&mut self` borrows below.
+        let data_root = self.config.data_dir.clone();
 
         // Ensure the final SSTable directory exists (it normally does, but handle
         // the edge case where it was created by start_merge only in the tmp path).
+        // This defensive `create_dir_all` can materialize `sstable_dir` (and even
+        // an ancestor) whose PARENT dirent is not otherwise fsynced by this path;
+        // the leaf→data-root chain fsync at publication (steps 2b/2c below) makes
+        // every ancestor dirent durable, so the newly created directory cannot be
+        // lost on a crash after the inputs are deleted (issue #1959).
         std::fs::create_dir_all(sstable_dir).map_err(|e| {
             Error::Storage(format!(
                 "Failed to create SSTable directory {:?}: {}",
@@ -427,44 +464,126 @@ impl WriteEngine {
         if let Some(ref ci_path) = tmp_info.compression_info_path {
             renames.push(make_rename(ci_path)?);
         }
-        // TOC.txt is last (publication barrier)
-        renames.push(make_rename(&tmp_info.toc_path)?);
+        // TOC.txt is the publication barrier: rename it LAST and — per the
+        // crash-safety invariant — only AFTER the non-TOC component dirents are
+        // durable (issue #1959). Keep it OUT of the `renames` list so the
+        // intervening directory fsync can be sequenced between the components and
+        // the TOC.
+        let toc_rename = make_rename(&tmp_info.toc_path)?;
 
         // Perform the renames. On failure, remove any already-renamed files so
         // we don't leave a half-published SSTable, then return the error.
         // Time the rename/publication-barrier phase (issue #1037).
         let finalize_start = Instant::now();
-        let mut renamed: Vec<PathBuf> = Vec::with_capacity(renames.len());
-        let mut rename_error: Option<Error> = None;
+        let mut renamed: Vec<PathBuf> = Vec::with_capacity(renames.len() + 1);
 
-        for (src, dst) in &renames {
-            match std::fs::rename(src, dst) {
-                Ok(()) => {
-                    log::debug!(
-                        "Renamed {:?} → {:?}",
-                        src.file_name().unwrap_or_default(),
-                        dst.file_name().unwrap_or_default()
-                    );
-                    renamed.push(dst.clone());
-                }
-                Err(e) => {
-                    rename_error = Some(Error::Storage(format!(
-                        "Atomic rename of {:?} to {:?} failed (rolling back, inputs intact): {}",
-                        src, dst, e
-                    )));
-                    break;
-                }
-            }
-        }
-
-        if let Some(err) = rename_error {
-            // Roll back already-renamed files (best effort)
-            for dst in &renamed {
+        // Best-effort rollback: undo the renames done so far and drop the tmp dir.
+        let rollback = |renamed: &[PathBuf], tmp_dir: &std::path::Path| {
+            for dst in renamed {
                 let _ = std::fs::remove_file(dst);
             }
-            // Clean up tmp directory
-            let _ = std::fs::remove_dir_all(&merge.tmp_dir);
-            return Err(err);
+            let _ = std::fs::remove_dir_all(tmp_dir);
+        };
+
+        // Fsync the full leaf→data-root ancestor chain of the published SSTable
+        // directory (issue #1959). This mirrors the flush durability barrier
+        // (`durability::finalize_flush_durability`), which fsyncs the same chain
+        // via `dirs_to_sync`: not just the leaf `sstable_dir` (its component
+        // dirents) but every ancestor up to the data root, so the leaf's own
+        // entry in its parent — potentially just created by the defensive
+        // `create_dir_all` above — is durable too. Each `sync_directory` is a
+        // no-op on non-Unix (the Unix-only invariant, matching the flush path).
+        let fsync_publish_chain = || -> Result<()> {
+            for dir in super::durability::dirs_to_sync(sstable_dir, &data_root) {
+                super::durability::sync_directory(&dir)?;
+            }
+            Ok(())
+        };
+
+        // Step 2a: rename every NON-TOC component into the final directory.
+        for (src, dst) in &renames {
+            if let Err(e) = std::fs::rename(src, dst) {
+                let err = Error::Storage(format!(
+                    "Atomic rename of {:?} to {:?} failed (rolling back, inputs intact): {}",
+                    src, dst, e
+                ));
+                rollback(&renamed, &merge.tmp_dir);
+                return Err(err);
+            }
+            log::debug!(
+                "Renamed {:?} → {:?}",
+                src.file_name().unwrap_or_default(),
+                dst.file_name().unwrap_or_default()
+            );
+            renamed.push(dst.clone());
+        }
+
+        // Step 2b: directory durability barrier BEFORE publishing the TOC
+        // (issue #1959). Component *contents* were fsynced in `writer.finish()`,
+        // but the renames only altered dirents; fsync the destination directory
+        // (and its ancestors) so every non-TOC component's dirent is durable
+        // before the TOC — the barrier readers scan for — is renamed in.
+        // Sequencing the fsync here means the TOC dirent can only become durable
+        // AFTER the components it names, so a crash can never expose a visible
+        // TOC that references a not-yet-durable component. NOTE: this invariant
+        // holds on Unix only — `sync_directory` is a no-op on non-Unix, where the
+        // per-file fsyncs are the durability guarantee (issue #1392 / #1959).
+        #[cfg(test)]
+        if FAIL_COMPACTION_DIR_FSYNC_BEFORE_TOC.with(|f| f.get()) {
+            rollback(&renamed, &merge.tmp_dir);
+            return Err(Error::Storage(
+                "injected directory fsync fault before TOC rename (test seam, issue #1959)"
+                    .to_string(),
+            ));
+        }
+        if let Err(e) = fsync_publish_chain() {
+            rollback(&renamed, &merge.tmp_dir);
+            return Err(e);
+        }
+
+        // Step 2c: publish by renaming TOC.txt last, then fsync the LEAF
+        // directory AGAIN so the TOC dirent itself is durable BEFORE the input
+        // SSTables (the only other durable copy of this data) are deleted below.
+        // Without this second fsync, a crash after the inputs are removed but
+        // before the TOC dirent reached the device would lose the SSTable
+        // entirely (issue #1959). Same Unix-only scope as step 2b: a no-op on
+        // non-Unix, where the per-file fsyncs are the durability guarantee.
+        //
+        // ASYMMETRY vs step 2b (issue #1959): 2b fsyncs the FULL leaf→data-root
+        // chain because the non-TOC renames + the defensive `create_dir_all` can
+        // touch ancestor dirents that must be durable before publication; between
+        // 2b and 2c the ONLY dirent that changed is the TOC entry in the LEAF
+        // `sstable_dir` (the TOC rename). The ancestor dirents were already made
+        // durable by 2b, so re-fsyncing the whole chain here is redundant I/O —
+        // fsyncing only the leaf is sufficient to make the TOC dirent durable.
+        {
+            let (src, dst) = &toc_rename;
+            if let Err(e) = std::fs::rename(src, dst) {
+                let err = Error::Storage(format!(
+                    "Atomic rename of {:?} to {:?} failed (rolling back, inputs intact): {}",
+                    src, dst, e
+                ));
+                rollback(&renamed, &merge.tmp_dir);
+                return Err(err);
+            }
+            renamed.push(dst.clone());
+        }
+        #[cfg(test)]
+        if FAIL_COMPACTION_DIR_FSYNC_AFTER_TOC.with(|f| f.get()) {
+            // Roll back the WHOLE published set, including the just-renamed TOC,
+            // so no visible-but-not-durable TOC survives; the inputs are never
+            // deleted (they remain the sole durable copy).
+            rollback(&renamed, &merge.tmp_dir);
+            return Err(Error::Storage(
+                "injected directory fsync fault after TOC rename (test seam, issue #1959)"
+                    .to_string(),
+            ));
+        }
+        // Leaf-only (see the step 2c asymmetry note above): only the TOC dirent in
+        // `sstable_dir` changed since the full-chain fsync at 2b.
+        if let Err(e) = super::durability::sync_directory(sstable_dir) {
+            rollback(&renamed, &merge.tmp_dir);
+            return Err(e);
         }
 
         // Finalize/rename latency in seconds (issue #1037): the atomic

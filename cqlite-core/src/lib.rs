@@ -662,15 +662,11 @@ impl Database {
     /// [`storage::write_engine::WriteEngine::close`], which is the actual
     /// memtable-to-SSTable durability boundary (issue #1693).
     pub async fn close(self) -> Result<()> {
-        // Stop background tasks
+        // Stop background tasks. There is nothing to flush: the WAL/MemTable write
+        // path was removed in Issue #175, so `StorageEngine::flush` is an
+        // always-erroring stub. Calling it here made `close()` fail unconditionally
+        // under the `experimental` feature; the shutdown above is the full teardown.
         self.storage.shutdown().await?;
-
-        // Flush any remaining data (only with experimental feature)
-        #[cfg(feature = "experimental")]
-        {
-            self.storage.flush().await?;
-        }
-
         Ok(())
     }
 
@@ -775,50 +771,10 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    #[tokio::test]
-    #[cfg(all(
-        feature = "legacy-heuristics",
-        feature = "state_machine",
-        feature = "experimental"
-    ))]
-    async fn test_database_basic_operations() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::test_config();
-
-        let db = Database::open(temp_dir.path(), config).await.unwrap();
-
-        // Create table
-        let result = db
-            .execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
-            .await
-            .unwrap();
-        assert_eq!(result.rows_affected, 0);
-
-        // Insert data
-        let result = db
-            .execute("INSERT INTO users (id, name) VALUES (1, 'Alice')")
-            .await
-            .unwrap();
-
-        #[cfg(debug_assertions)]
-        log::debug!(
-            "Test INSERT assertion - rows_affected: {}",
-            result.rows_affected
-        );
-
-        assert_eq!(result.rows_affected, 1);
-
-        // Query data - Re-enabled for QA debugging
-        let result = db
-            .execute("SELECT * FROM users WHERE id = 1")
-            .await
-            .unwrap();
-
-        #[cfg(debug_assertions)]
-        log::debug!("Test SELECT assertion - rows.len(): {}", result.rows.len());
-
-        assert_eq!(result.rows.len(), 1, "SELECT should return 1 row");
-
-        db.close().await.unwrap();
-    }
+    // NOTE: `test_database_basic_operations` (CREATE TABLE → INSERT → SELECT) was
+    // removed in Issue #1880. It asserted the row-count of data inserted via the
+    // write path, which was deleted in Issue #175 (`execute` on an INSERT now
+    // returns `UnsupportedFormat`), so the test could only ever panic under
+    // `--all-features`. Read-path SELECT coverage lives in the real-SSTable
+    // integration/parity tests; open/close lifecycle is covered above.
 }
