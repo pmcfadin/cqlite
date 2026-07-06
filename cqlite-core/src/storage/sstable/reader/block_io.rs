@@ -1115,7 +1115,15 @@ mod tests {
     /// is attempted (the function returns the compressed bytes only after the CRC
     /// verifies, so a corrupt chunk never reaches the caller's decompressor).
     /// Guardrail #1411: CRC-then-decompress ordering.
+    ///
+    /// This test does not assert on READ_CALLS, but each successful
+    /// `read_compressed_chunk_at` here calls `record_read()` and thus MUTATES the
+    /// process-global counter. Any test that reads OR mutates READ_CALLS must be
+    /// `#[serial]` (issue #1946/#2006): without it this sibling could increment the
+    /// counter concurrently with `..._records_one_read_per_chunk` and flake its
+    /// post-`reset` delta assertion.
     #[test]
+    #[serial_test::serial]
     fn read_compressed_chunk_at_verifies_crc_before_returning() {
         use crate::storage::sstable::compression_info::CompressionInfo;
 
@@ -1177,6 +1185,10 @@ mod tests {
     /// Counters are a shared process-global, so this test serializes on the
     /// `serial_test` mutex (the counter-test convention; issue #1071) — a stale
     /// value from a parallel test cannot satisfy an assertion after the `reset`.
+    /// INVARIANT (issue #1946/#2006): EVERY test in this binary that reads OR
+    /// mutates READ_CALLS (i.e. calls `record_read()` via `read_compressed_chunk_at`
+    /// / `read_nb_format_chunk_data`, or `rwc::read_calls()`/`rwc::reset()`) must be
+    /// `#[serial]`, or its increments contaminate this delta assertion.
     #[test]
     #[serial_test::serial]
     fn read_compressed_chunk_at_records_one_read_per_chunk() {
