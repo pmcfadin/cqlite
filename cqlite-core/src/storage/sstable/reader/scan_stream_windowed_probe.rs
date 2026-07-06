@@ -67,8 +67,8 @@ pub fn recorded_parse_thread() -> Option<ThreadId> {
     LAST_PARSE_THREAD.lock().ok().and_then(|g| *g)
 }
 
-/// Record the current thread as the raw-chunk READ thread, if armed. Called from
-/// the windowed scan's I/O feed loop once per scan after the first chunk read
+/// Record the current thread as the raw-chunk READ thread, if armed. Called
+/// once per scan, at the start of the feed loop (before the first chunk read)
 /// (issue #1593, F3). For a synchronously-faulting backend this must be a
 /// `spawn_blocking` thread, not an async worker.
 pub(super) fn record_io_read_thread() {
