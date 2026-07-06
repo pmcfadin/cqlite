@@ -7,9 +7,8 @@
 //! ([`iterate_partition_locations_in_bti_file`]) drop the key and allocate
 //! **nothing per node**.
 //!
-//! This file installs a process-global counting allocator (its own test binary,
-//! so no parallel test pollutes the count) and proves, over a synthetic 500-leaf
-//! `Partitions.db` trie, that:
+//! This file installs a process-global counting allocator and proves, over a
+//! synthetic 500-leaf `Partitions.db` trie, that:
 //!
 //!   * the OWNED path allocates ~one key `Vec` per result (O(results)); and
 //!   * the OFFSET-ONLY path allocates a small CONSTANT independent of the leaf
@@ -19,11 +18,22 @@
 //! It also asserts byte-identical equivalence between the two paths (identical
 //! ordered `BtiPartitionLocation` sequences) on the synthetic trie AND on the
 //! real `test_da` `Partitions.db` fixtures.
+//!
+//! `#[global_allocator]` counts allocations from **every** thread in the
+//! process, not just the current test's. This file has two `#[test]`s, and
+//! under the default multi-threaded test runner they can run concurrently in
+//! the SAME process — so the second test's file I/O / Vec growth could
+//! allocate inside the first test's counting window and inflate
+//! `offset_allocs`, flaking the `<= MAX_OFFSET_ONLY_ALLOCS` bound. `TEST_LOCK`
+//! serializes the two test bodies (each holds it for its FULL body, not just
+//! the counting window) so the measurement is race-free by construction, not
+//! by luck.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use cqlite_core::storage::sstable::bti::{
     iterate_partition_locations_in_bti_file, iterate_partitions_in_bti_file, BtiPartitionLocation,
@@ -50,6 +60,12 @@ unsafe impl GlobalAlloc for CountingAlloc {
 
 #[global_allocator]
 static GLOBAL: CountingAlloc = CountingAlloc;
+
+/// Serializes the two `#[test]`s in this file so neither's allocations can
+/// pollute the other's counting window (see the module doc comment). Poisoned
+/// (panicked-while-held) is treated as still-lockable — a prior test's panic
+/// must not spuriously fail an unrelated test via lock poisoning.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// A `Partitions.db` PayloadOnly leaf: `[0x08(payloadBits=8), hash, position]`.
 /// `position = -1` (0xFF) → `DataOffset(0)`; a `PayloadOnly` leaf has no children,
@@ -126,6 +142,10 @@ const MAX_OFFSET_ONLY_ALLOCS: usize = 64;
 
 #[test]
 fn offset_only_dfs_allocates_constant_not_per_leaf() {
+    // Hold for the WHOLE body: the counting window below must not race against
+    // the other test in this file (see module doc comment).
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     const LEAVES_PER_BRANCH: usize = 250; // 500 leaves, 503 nodes total.
     const RESULTS: usize = 2 * LEAVES_PER_BRANCH;
 
@@ -193,6 +213,12 @@ fn offset_only_dfs_allocates_constant_not_per_leaf() {
 /// absent so it never blocks CI running without test data.
 #[test]
 fn offset_only_matches_owned_on_real_test_da_fixtures() {
+    // Hold for the WHOLE body: this test's own allocations (file reads, Vec
+    // growth) must not run concurrently with the other test's counting window
+    // (see module doc comment). This test does not itself measure allocation
+    // counts, so simply excluding overlap with the other test's window suffices.
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let Some(root) = std::env::var("CQLITE_DATASETS_ROOT").ok().map(PathBuf::from) else {
         eprintln!("SKIP: CQLITE_DATASETS_ROOT not set; needs real BTI fixtures");
         return;
