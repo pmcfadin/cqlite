@@ -34,6 +34,12 @@ impl V5CompressedLegacyParser {
         // marshal string, decoded structurally rather than guessed. `None` on the
         // header-empty synthetic path and on internal recursive calls.
         header_type: Option<&str>,
+        // J1 (issue #1635): the precomputed per-column dispatch tag (from
+        // `ColumnToParse.kind`, resolved ONCE per block). `Some` on the hot per-cell
+        // scan loop → dispatch on it with NO per-cell `to_lowercase`. `None` on the
+        // rare recursive frozen-inner / in-crate test callers → resolve it locally
+        // from `column.data_type` (bounded, off the per-cell scan hot path).
+        kind: Option<&CellKind>,
         _reader: &crate::storage::sstable::reader::types::SSTableReader,
     ) -> Result<(Value, Option<i64>, Option<CellExpiration>, usize)> {
         // Cell flag constants (from Cassandra 5.0 Cell.Serializer)
@@ -212,18 +218,22 @@ impl V5CompressedLegacyParser {
             ));
         }
 
-        // Normalize the declared type name to lowercase ONCE, here — after the
-        // tombstone early-return (which never inspects the type) and BEFORE the
-        // empty/live split below. The schema may provide "TEXT", "INT", etc.
-        // (uppercase) while the match arms use lowercase, so a NON-tombstone cell
-        // always needs this normalization; doing it once removes the redundant
-        // per-cell `to_lowercase()` the empty path used to allocate separately.
-        // Issue #1618 (H5, roborev undercount fix): record the work-counter at
-        // this single site so it covers the empty-cell path too (previously the
-        // empty path allocated a `to_lowercase()` that went uncounted, so a future
-        // J1 `== 0` assertion could pass while the hot-path allocation still ran).
-        crate::storage::sstable::read_work_counters::record_type_normalize();
-        let normalized_type = column.data_type.to_lowercase();
+        // J1 (issue #1635): dispatch on the PRECOMPUTED per-column tag. The hot
+        // per-cell scan loop passes `Some(&ctp.kind)` (resolved once per block in
+        // `RowColumnResolution::build`), so the per-cell `column.data_type
+        // .to_lowercase()` + string-ladder walk is gone — no per-cell normalization,
+        // no per-cell allocation. `None` (recursive frozen-inner / in-crate tests)
+        // resolves the tag locally from the declared type; that path is bounded and
+        // off the per-cell scan hot path, so it neither regresses throughput nor the
+        // `TYPE_NORMALIZE_CALLS` gauge (which measures the per-cell decode path).
+        let resolved_kind: CellKind;
+        let kind: &CellKind = match kind {
+            Some(k) => k,
+            None => {
+                resolved_kind = CellKind::from_type(&column.data_type);
+                &resolved_kind
+            }
+        };
 
         // Handle empty cells (no value bytes to read)
         if !has_value {
@@ -236,10 +246,13 @@ impl V5CompressedLegacyParser {
             // An empty `blob` is `Blob([])` (sstabledump renders `"0x"`), an empty
             // text/ascii/varchar is `Text("")`. Mirrors the clustering-key EMPTY
             // handling above; fixed-width types should not normally carry an empty
-            // value, so treat that as NULL with a warning.
-            let empty_value = match normalized_type.as_str() {
-                "text" | "varchar" | "ascii" => Value::Text(String::new()),
-                "blob" => Value::Blob(Vec::new()),
+            // value, so treat that as NULL with a warning. Dispatched on the
+            // precomputed tag (Text ⇔ text/varchar/ascii, Blob ⇔ literal blob;
+            // every other declared type → NULL), byte-identical to the pre-J1
+            // `match normalized_type.as_str()` empty arm.
+            let empty_value = match kind {
+                CellKind::Text => Value::Text(String::new()),
+                CellKind::Blob => Value::Blob(Vec::new()),
                 _ => {
                     log::warn!(
                         "V5CompressedLegacy: EMPTY value for cell '{}' (type {}), treating as NULL",
@@ -252,14 +265,53 @@ impl V5CompressedLegacyParser {
             return Ok((empty_value, cell_timestamp, cell_expiration, offset));
         }
 
-        // At this point, we have a live cell with value data
-        // The value parsing logic below is unchanged from the original implementation
+        // VInt-length-prefixed blob decode. Shared by the literal `blob` type
+        // (`CellKind::Blob`) and the `CellKind::Complex` default fall-through
+        // (unknown/`varint`), which decoded identically pre-J1 (both hit the single
+        // `_ =>` blob arm). Extracted to one closure so the two dispatch sites do not
+        // duplicate the decode. Advances the shared `offset` cursor.
+        let decode_vint_blob = |offset: &mut usize| -> Result<Value> {
+            if *offset >= data.len() {
+                return Err(Error::corruption(format!(
+                    "Cell '{}': unexpected end at blob length (type: {})",
+                    column.name, column.data_type
+                )));
+            }
+            // Parse blob length as unsigned VInt (can be > 255 bytes).
+            let (remaining, blob_len) = parse_vuint(&data[*offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Cell '{}': failed to parse blob length as VInt: {:?}",
+                    column.name, e
+                ))
+            })?;
+            let blob_len = blob_len as usize;
+            let bytes_consumed = data[*offset..].len() - remaining.len();
+            *offset += bytes_consumed;
 
-        // Parse based on column type (data_type is a String with CQL type name).
-        // `normalized_type` was computed (and counted) once above, before the
-        // empty/live split — the match arms use its lowercase form.
-        let value = match normalized_type.as_str() {
-            "boolean" => {
+            if *offset + blob_len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Cell '{}': need {} bytes for blob, only {} available (type: {})",
+                    column.name,
+                    blob_len,
+                    data.len() - *offset,
+                    column.data_type
+                )));
+            }
+
+            let blob_bytes = data[*offset..*offset + blob_len].to_vec();
+            *offset += blob_len;
+            Ok(Value::Blob(blob_bytes))
+        };
+
+        // At this point, we have a live cell with value data.
+        // Dispatch the decode on the precomputed `CellKind` (jump table). The scalar
+        // arms map 1:1 onto the pre-J1 string-match arms; the frozen/tuple/collection/
+        // marshal-UDT/default ladder is retained verbatim inside `CellKind::Complex`
+        // (the thin adapter Epic J2 collapses), using the tag's already-lowercased
+        // declared type as `type_str` — exactly the pre-J1 `normalized_type`.
+        let value = match kind {
+            CellKind::Blob => decode_vint_blob(&mut offset)?,
+            CellKind::Boolean => {
                 // Boolean: [0x08][u8 value]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -272,7 +324,7 @@ impl V5CompressedLegacyParser {
                 Value::Boolean(bool_byte != 0)
             }
 
-            "int" => {
+            CellKind::Int => {
                 // Integer (i32): fixed-width 4 bytes (no length prefix in Cassandra 5.0)
                 if offset + 4 > data.len() {
                     return Err(Error::corruption(format!(
@@ -291,7 +343,7 @@ impl V5CompressedLegacyParser {
                 Value::Integer(int_val)
             }
 
-            "text" | "varchar" | "ascii" => {
+            CellKind::Text => {
                 // Text: [VInt len][text bytes]
                 // V5CompressedLegacy uses VInt length encoding for variable-length types
                 let (remaining, text_len) = parse_vuint(&data[offset..]).map_err(|e| {
@@ -325,7 +377,7 @@ impl V5CompressedLegacyParser {
                 Value::Text(text)
             }
 
-            "uuid" | "timeuuid" => {
+            CellKind::Uuid => {
                 // UUID/TimeUUID: fixed-width 16 bytes (no length prefix in Cassandra 5.0 writer)
                 if offset + 16 > data.len() {
                     return Err(Error::corruption(format!(
@@ -343,7 +395,7 @@ impl V5CompressedLegacyParser {
                 Value::Uuid(uuid_bytes)
             }
 
-            "decimal" => {
+            CellKind::Decimal => {
                 // Decimal: [VInt total_len][i32 scale][unscaled bytes]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -392,7 +444,7 @@ impl V5CompressedLegacyParser {
                 Value::Decimal { scale, unscaled }
             }
 
-            "bigint" => {
+            CellKind::BigInt => {
                 // BigInt: fixed-width 8 bytes (no length prefix in Cassandra 5.0)
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
@@ -415,7 +467,7 @@ impl V5CompressedLegacyParser {
                 Value::BigInt(val)
             }
 
-            "counter" => {
+            CellKind::Counter => {
                 // Counter cells can arrive in two formats:
                 //
                 // 1. Real Cassandra CounterContext: [VInt length][header_size:i16][indices][shards]
@@ -507,7 +559,7 @@ impl V5CompressedLegacyParser {
                 }
             }
 
-            "double" => {
+            CellKind::Double => {
                 // Double: 8 bytes, f64 big-endian (NO length prefix)
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
@@ -530,7 +582,7 @@ impl V5CompressedLegacyParser {
                 Value::Float(val)
             }
 
-            "timestamp" => {
+            CellKind::Timestamp => {
                 // Timestamp: 8 bytes, i64 milliseconds big-endian (NO length prefix, per Cassandra spec)
                 if offset + 8 > data.len() {
                     return Err(Error::corruption(format!(
@@ -553,7 +605,7 @@ impl V5CompressedLegacyParser {
                 Value::Timestamp(millis)
             }
 
-            "date" => {
+            CellKind::Date => {
                 // Date: [VInt len=4][i32 BE days]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -599,7 +651,7 @@ impl V5CompressedLegacyParser {
                 Value::Date(days_since_epoch)
             }
 
-            "duration" => {
+            CellKind::Duration => {
                 // Duration: [VInt len][months VInt][days VInt][nanos VInt]
                 // Format: Variable-length encoding with 3 VInt components
                 if offset >= data.len() {
@@ -691,7 +743,7 @@ impl V5CompressedLegacyParser {
                 }
             }
 
-            "float" => {
+            CellKind::Float => {
                 // Float: 4 bytes, f32 big-endian (NO length prefix, fixed size)
                 if offset + 4 > data.len() {
                     return Err(Error::corruption(format!(
@@ -711,7 +763,7 @@ impl V5CompressedLegacyParser {
                 Value::Float(val as f64) // Convert f32 to f64 for storage
             }
 
-            "smallint" | "short" => {
+            CellKind::SmallInt => {
                 // SmallInt: [VInt len=2][i16 BE]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -750,7 +802,7 @@ impl V5CompressedLegacyParser {
                 Value::SmallInt(val)
             }
 
-            "tinyint" | "byte" => {
+            CellKind::TinyInt => {
                 // TinyInt: [VInt len=1][i8]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -789,7 +841,7 @@ impl V5CompressedLegacyParser {
                 Value::TinyInt(val)
             }
 
-            "time" => {
+            CellKind::Time => {
                 // Time: [VInt len=8][i64 BE nanoseconds since midnight]
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -833,7 +885,7 @@ impl V5CompressedLegacyParser {
                 Value::Time(nanos)
             }
 
-            "inet" => {
+            CellKind::Inet => {
                 // Inet: [VInt len][address bytes] (len is 4 for IPv4, 16 for IPv6)
                 if offset >= data.len() {
                     return Err(Error::corruption(format!(
@@ -873,343 +925,324 @@ impl V5CompressedLegacyParser {
                 Value::Inet(bytes)
             }
 
-            // Complex types: frozen, tuple, UDT
-            type_str if type_str.starts_with("frozen<") => {
-                // Frozen types: unwrap inner type and route to appropriate parser
-                let inner_type = self.extract_frozen_inner_type(type_str)?;
+            // Complex types: frozen, tuple, non-frozen collection, marshal-UDT, and
+            // any unnamed/default type (e.g. `varint`). J1 (issue #1635): the DISPATCH
+            // is per-column via this single `CellKind::Complex` arm; the retained
+            // prefix ladder (Epic J2 collapses it) uses the tag's already-lowercased
+            // declared type as `type_str` — exactly the pre-J1 `normalized_type`, so
+            // there is NO per-cell `to_lowercase`. The ladder ordering is unchanged.
+            CellKind::Complex(lowered) => {
+                let type_str: &str = lowered;
+                if type_str.starts_with("frozen<") {
+                    // Frozen types: unwrap inner type and route to appropriate parser
+                    let inner_type = self.extract_frozen_inner_type(type_str)?;
 
-                log::debug!(
-                    "V5CompressedLegacy: Parsing frozen type '{}' -> inner type '{}'",
-                    type_str,
-                    inner_type
-                );
-
-                // Issue #1340: extract the AUTHORITATIVE marshal element type(s)
-                // from the on-disk SerializationHeader marshal type (`header_type`).
-                // When an element is a `frozen<UDT>`, threading the marshal type lets
-                // it decode to a typed `Value::Frozen(Value::Udt)` registry-free
-                // (precedence: header marshal → registry → Blob, no byte-pattern
-                // inference — no-heuristics #28). Extracted once per frozen cell
-                // (before the element loop); the result borrows from `header_type`,
-                // so the per-element loop is allocation-free.
-                let marshal_elems = header_type.and_then(Self::extract_marshal_collection_elements);
-                // Shared for list & set (both are `Sequence`): the borrowed element
-                // marshal type, or `None` for a map / absent / mismatched marshal.
-                let sequence_marshal_elem = match &marshal_elems {
-                    Some(MarshalCollectionElements::Sequence(m)) => Some(*m),
-                    _ => None,
-                };
-
-                // Route to appropriate frozen collection parser
-                let (inner_value, new_offset) = if inner_type.starts_with("list<") {
-                    let schema_elem = self.extract_collection_element_type(&inner_type, "list")?;
-                    let element_type =
-                        Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
-                    self.parse_frozen_list_value(data, offset, element_type, column, _reader)?
-                } else if inner_type.starts_with("set<") {
-                    let schema_elem = self.extract_collection_element_type(&inner_type, "set")?;
-                    let element_type =
-                        Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
-                    self.parse_frozen_set_value(data, offset, element_type, column, _reader)?
-                } else if inner_type.starts_with("map<") {
-                    let (schema_key, schema_val) = self.extract_map_types(&inner_type)?;
-                    let (marshal_key, marshal_val) = match &marshal_elems {
-                        Some(MarshalCollectionElements::Map(k, v)) => (Some(*k), Some(*v)),
-                        _ => (None, None),
-                    };
-                    let key_type = Self::prefer_udt_marshal_element(marshal_key, &schema_key);
-                    let value_type = Self::prefer_udt_marshal_element(marshal_val, &schema_val);
-                    self.parse_frozen_map_value(
-                        data, offset, key_type, value_type, column, _reader,
-                    )?
-                } else if Self::is_udt_type(&column.data_type) {
-                    // Frozen UDT - parse using UDT parser
-                    // The column.data_type contains the full Cassandra type string including UserType
                     log::debug!(
-                        "V5CompressedLegacy: Parsing frozen UDT column '{}' type='{}'",
-                        column.name,
-                        column.data_type
+                        "V5CompressedLegacy: Parsing frozen type '{}' -> inner type '{}'",
+                        type_str,
+                        inner_type
                     );
 
-                    // Parse UDT definition from the type string
-                    let udt_def = Self::parse_udt_type_definition(&column.data_type)?;
+                    // Issue #1340: extract the AUTHORITATIVE marshal element type(s)
+                    // from the on-disk SerializationHeader marshal type (`header_type`).
+                    // When an element is a `frozen<UDT>`, threading the marshal type lets
+                    // it decode to a typed `Value::Frozen(Value::Udt)` registry-free
+                    // (precedence: header marshal → registry → Blob, no byte-pattern
+                    // inference — no-heuristics #28). Extracted once per frozen cell
+                    // (before the element loop); the result borrows from `header_type`,
+                    // so the per-element loop is allocation-free.
+                    let marshal_elems =
+                        header_type.and_then(Self::extract_marshal_collection_elements);
+                    // Shared for list & set (both are `Sequence`): the borrowed element
+                    // marshal type, or `None` for a map / absent / mismatched marshal.
+                    let sequence_marshal_elem = match &marshal_elems {
+                        Some(MarshalCollectionElements::Sequence(m)) => Some(*m),
+                        _ => None,
+                    };
 
-                    // First read the VInt-prefixed blob length
-                    let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
-                        Error::corruption(format!(
-                            "Frozen UDT '{}': failed to parse blob length: {:?}",
-                            column.name, e
-                        ))
-                    })?;
-                    if blob_len_raw > MAX_CELL_VALUE_LENGTH {
-                        return Err(Error::corruption(format!(
-                            "Frozen UDT '{}': blob_len {} exceeds maximum {}",
-                            column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
-                        )));
-                    }
-                    let blob_len = blob_len_raw as usize;
-                    let bytes_consumed = data[offset..].len() - remaining.len();
-                    offset += bytes_consumed;
-
-                    if offset + blob_len > data.len() {
-                        return Err(Error::corruption(format!(
-                            "Frozen UDT '{}': need {} bytes but only {} available",
+                    // Route to appropriate frozen collection parser
+                    let (inner_value, new_offset) = if inner_type.starts_with("list<") {
+                        let schema_elem =
+                            self.extract_collection_element_type(&inner_type, "list")?;
+                        let element_type =
+                            Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
+                        self.parse_frozen_list_value(data, offset, element_type, column, _reader)?
+                    } else if inner_type.starts_with("set<") {
+                        let schema_elem =
+                            self.extract_collection_element_type(&inner_type, "set")?;
+                        let element_type =
+                            Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
+                        self.parse_frozen_set_value(data, offset, element_type, column, _reader)?
+                    } else if inner_type.starts_with("map<") {
+                        let (schema_key, schema_val) = self.extract_map_types(&inner_type)?;
+                        let (marshal_key, marshal_val) = match &marshal_elems {
+                            Some(MarshalCollectionElements::Map(k, v)) => (Some(*k), Some(*v)),
+                            _ => (None, None),
+                        };
+                        let key_type = Self::prefer_udt_marshal_element(marshal_key, &schema_key);
+                        let value_type = Self::prefer_udt_marshal_element(marshal_val, &schema_val);
+                        self.parse_frozen_map_value(
+                            data, offset, key_type, value_type, column, _reader,
+                        )?
+                    } else if Self::is_udt_type(&column.data_type) {
+                        // Frozen UDT - parse using UDT parser
+                        // The column.data_type contains the full Cassandra type string including UserType
+                        log::debug!(
+                            "V5CompressedLegacy: Parsing frozen UDT column '{}' type='{}'",
                             column.name,
-                            blob_len,
-                            data.len() - offset
-                        )));
-                    }
+                            column.data_type
+                        );
 
-                    // Parse UDT value from the blob
-                    let udt_data = &data[offset..offset + blob_len];
-                    let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
-                    offset += blob_len;
+                        // Parse UDT definition from the type string
+                        let udt_def = Self::parse_udt_type_definition(&column.data_type)?;
 
-                    (udt_value, offset)
-                } else if let Some(udt_def) = self
-                    .udt_registry
-                    .as_ref()
-                    .and_then(|reg| reg.get_udt(&self.keyspace, &inner_type).cloned())
-                {
-                    // frozen<short_udt_name>: look up the concrete UDT definition in the
-                    // registry (Issue #502).  This handles type strings like
-                    // `frozen<person>` where "person" is a registered UDT rather than a
-                    // collection or a full marshal-format UserType string.
-                    log::debug!(
+                        // First read the VInt-prefixed blob length
+                        let (remaining, blob_len_raw) =
+                            parse_vuint(&data[offset..]).map_err(|e| {
+                                Error::corruption(format!(
+                                    "Frozen UDT '{}': failed to parse blob length: {:?}",
+                                    column.name, e
+                                ))
+                            })?;
+                        if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+                            return Err(Error::corruption(format!(
+                                "Frozen UDT '{}': blob_len {} exceeds maximum {}",
+                                column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+                            )));
+                        }
+                        let blob_len = blob_len_raw as usize;
+                        let bytes_consumed = data[offset..].len() - remaining.len();
+                        offset += bytes_consumed;
+
+                        if offset + blob_len > data.len() {
+                            return Err(Error::corruption(format!(
+                                "Frozen UDT '{}': need {} bytes but only {} available",
+                                column.name,
+                                blob_len,
+                                data.len() - offset
+                            )));
+                        }
+
+                        // Parse UDT value from the blob
+                        let udt_data = &data[offset..offset + blob_len];
+                        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+                        offset += blob_len;
+
+                        (udt_value, offset)
+                    } else if let Some(udt_def) = self
+                        .udt_registry
+                        .as_ref()
+                        .and_then(|reg| reg.get_udt(&self.keyspace, &inner_type).cloned())
+                    {
+                        // frozen<short_udt_name>: look up the concrete UDT definition in the
+                        // registry (Issue #502).  This handles type strings like
+                        // `frozen<person>` where "person" is a registered UDT rather than a
+                        // collection or a full marshal-format UserType string.
+                        log::debug!(
                         "V5CompressedLegacy: Resolving frozen UDT '{}' via registry for column '{}'",
                         inner_type,
                         column.name,
                     );
 
-                    // Read VUInt-prefixed blob length (same framing as tuple and
-                    // marshal-format UDT cells).
-                    let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
-                        Error::corruption(format!(
+                        // Read VUInt-prefixed blob length (same framing as tuple and
+                        // marshal-format UDT cells).
+                        let (remaining, blob_len_raw) =
+                            parse_vuint(&data[offset..]).map_err(|e| {
+                                Error::corruption(format!(
                             "Frozen UDT '{}' (column '{}'): failed to parse blob length: {:?}",
                             inner_type, column.name, e
                         ))
-                    })?;
-                    if blob_len_raw > MAX_CELL_VALUE_LENGTH {
-                        return Err(Error::corruption(format!(
-                            "Frozen UDT '{}' (column '{}'): blob_len {} exceeds maximum {}",
-                            inner_type, column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
-                        )));
-                    }
-                    let blob_len = blob_len_raw as usize;
-                    let len_bytes_consumed = data[offset..].len() - remaining.len();
-                    offset += len_bytes_consumed;
+                            })?;
+                        if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+                            return Err(Error::corruption(format!(
+                                "Frozen UDT '{}' (column '{}'): blob_len {} exceeds maximum {}",
+                                inner_type, column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+                            )));
+                        }
+                        let blob_len = blob_len_raw as usize;
+                        let len_bytes_consumed = data[offset..].len() - remaining.len();
+                        offset += len_bytes_consumed;
 
-                    if offset + blob_len > data.len() {
-                        return Err(Error::corruption(format!(
+                        if offset + blob_len > data.len() {
+                            return Err(Error::corruption(format!(
                             "Frozen UDT '{}' (column '{}'): need {} bytes but only {} available",
                             inner_type,
                             column.name,
                             blob_len,
                             data.len() - offset
                         )));
-                    }
+                        }
 
-                    let udt_data = &data[offset..offset + blob_len];
-                    let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
-                    offset += blob_len;
+                        let udt_data = &data[offset..offset + blob_len];
+                        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+                        offset += blob_len;
 
-                    (udt_value, offset)
-                } else if let Some(ht) =
-                    header_type.filter(|ht| Self::marshal_is_top_level_frozen_udt(ht))
-                {
-                    // Issue #1080: NO UdtRegistry is wired and the supplied schema
-                    // short form `frozen<person_type>` carries no field defs, but
-                    // the AUTHORITATIVE on-disk SerializationHeader marshal type for
-                    // this column is the full
-                    // `FrozenType(UserType(ks,hexname,field:Type,...))`. Decode the
-                    // UDT STRUCTURALLY from that header type (no guessing, issue #28)
-                    // rather than dropping the column (which also broke the Err→break
-                    // loop, silently losing all trailing columns).
-                    self.decode_frozen_udt_from_header_type(data, offset, ht, column)?
-                } else {
-                    // Detect bare identifiers that look like unregistered UDT names.
-                    // A bare identifier has no '<' (not a container or tuple) and does not
-                    // match any known CQL primitive type.  If we reach this branch with
-                    // such an identifier it means the UDT was not in the registry — return
-                    // an actionable schema error rather than silently producing a Blob.
-                    //
-                    // Legitimate fall-through types handled below:
-                    //   • tuple<...>  (contains '<')
-                    //   • known primitives: int, text, uuid, boolean, blob, float, double,
-                    //     decimal, varint, bigint, counter, timestamp, date, time, duration,
-                    //     inet, smallint, tinyint, varchar, ascii, timeuuid
-                    const KNOWN_PRIMITIVES: &[&str] = &[
-                        "int",
-                        "bigint",
-                        "counter",
-                        "smallint",
-                        "tinyint",
-                        "text",
-                        "varchar",
-                        "ascii",
-                        "uuid",
-                        "timeuuid",
-                        "boolean",
-                        "blob",
-                        "float",
-                        "double",
-                        "decimal",
-                        "varint",
-                        "timestamp",
-                        "date",
-                        "time",
-                        "duration",
-                        "inet",
-                    ];
-                    let is_container = inner_type.contains('<');
-                    let is_primitive = KNOWN_PRIMITIVES.contains(&inner_type.as_str());
-                    if !is_container && !is_primitive {
-                        // Bare identifier that is neither a container nor a primitive —
-                        // this is an unregistered UDT name.
-                        return Err(Error::schema(format!(
+                        (udt_value, offset)
+                    } else if let Some(ht) =
+                        header_type.filter(|ht| Self::marshal_is_top_level_frozen_udt(ht))
+                    {
+                        // Issue #1080: NO UdtRegistry is wired and the supplied schema
+                        // short form `frozen<person_type>` carries no field defs, but
+                        // the AUTHORITATIVE on-disk SerializationHeader marshal type for
+                        // this column is the full
+                        // `FrozenType(UserType(ks,hexname,field:Type,...))`. Decode the
+                        // UDT STRUCTURALLY from that header type (no guessing, issue #28)
+                        // rather than dropping the column (which also broke the Err→break
+                        // loop, silently losing all trailing columns).
+                        self.decode_frozen_udt_from_header_type(data, offset, ht, column)?
+                    } else {
+                        // Detect bare identifiers that look like unregistered UDT names.
+                        // A bare identifier has no '<' (not a container or tuple) and does not
+                        // match any known CQL primitive type.  If we reach this branch with
+                        // such an identifier it means the UDT was not in the registry — return
+                        // an actionable schema error rather than silently producing a Blob.
+                        //
+                        // Legitimate fall-through types handled below:
+                        //   • tuple<...>  (contains '<')
+                        //   • known primitives: int, text, uuid, boolean, blob, float, double,
+                        //     decimal, varint, bigint, counter, timestamp, date, time, duration,
+                        //     inet, smallint, tinyint, varchar, ascii, timeuuid
+                        const KNOWN_PRIMITIVES: &[&str] = &[
+                            "int",
+                            "bigint",
+                            "counter",
+                            "smallint",
+                            "tinyint",
+                            "text",
+                            "varchar",
+                            "ascii",
+                            "uuid",
+                            "timeuuid",
+                            "boolean",
+                            "blob",
+                            "float",
+                            "double",
+                            "decimal",
+                            "varint",
+                            "timestamp",
+                            "date",
+                            "time",
+                            "duration",
+                            "inet",
+                        ];
+                        let is_container = inner_type.contains('<');
+                        let is_primitive = KNOWN_PRIMITIVES.contains(&inner_type.as_str());
+                        if !is_container && !is_primitive {
+                            // Bare identifier that is neither a container nor a primitive —
+                            // this is an unregistered UDT name.
+                            return Err(Error::schema(format!(
                             "frozen<{inner}>: UDT '{inner}' not found in registry for keyspace '{}'; \
                              register it before reading",
                             self.keyspace,
                             inner = inner_type,
                         )));
-                    }
-                    // Non-collection / primitive frozen type — recurse normally.
-                    // The recursive call now returns 4 elements; we only need value + offset.
-                    let mut inner_column = column.clone();
-                    inner_column.data_type = inner_type.clone();
-                    let (inner_val, _inner_ts, _inner_exp, inner_off) = self
-                        .parse_cell_value_schema_order(
-                            data,
-                            offset,
-                            &inner_column,
-                            None,
-                            _reader,
-                        )?;
-                    (inner_val, inner_off)
-                };
+                        }
+                        // Non-collection / primitive frozen type — recurse normally.
+                        // The recursive call now returns 4 elements; we only need value + offset.
+                        let mut inner_column = column.clone();
+                        inner_column.data_type = inner_type.clone();
+                        let (inner_val, _inner_ts, _inner_exp, inner_off) = self
+                            .parse_cell_value_schema_order(
+                                data,
+                                offset,
+                                &inner_column,
+                                None,
+                                // Frozen-inner recursion: resolve the tag locally from
+                                // `inner_column.data_type` (bounded, off the per-cell scan
+                                // hot path).
+                                None,
+                                _reader,
+                            )?;
+                        (inner_val, inner_off)
+                    };
 
-                offset = new_offset;
+                    offset = new_offset;
 
-                // Wrap in Frozen
-                Value::Frozen(Box::new(inner_value))
-            }
-
-            type_str if type_str.starts_with("tuple<") => {
-                // Tuple types: parse fixed number of elements
-                self.parse_tuple_value(data, &mut offset, type_str, column, _reader)?
-            }
-
-            // Non-frozen collections: list, set, map
-            // TODO(Issue #162, Task 3): Multi-cell collection parsing
-            //
-            // Collections in V5CompressedLegacy are stored as MULTIPLE CELLS with path identifiers,
-            // NOT as single blob values. The current single-cell parser cannot handle this.
-            //
-            // Format (from sstabledump analysis):
-            //   {"name": "scores", "deletion_info": {...}},  // Collection tombstone
-            //   {"name": "scores", "path": ["uuid1"], "value": 23},  // Element 1
-            //   {"name": "scores", "path": ["uuid2"], "value": 99},  // Element 2
-            //
-            // Required implementation:
-            //   1. Parse cell path (clustering key bytes) for each collection element
-            //   2. Detect collection tombstone cell (has deletion_info, no path/value)
-            //   3. Read N element cells (each with path + value)
-            //   4. Aggregate elements into Value::List/Set/Map based on column type
-            //   5. Handle different path encodings:
-            //      - list<T>: path is UUID bytes (timeuuid for ordering)
-            //      - set<T>: path is serialized element value (key), value is empty
-            //      - map<K,V>: path is serialized key, value is serialized value
-            //
-            // This is a fundamental architectural change requiring cell-level parsing
-            // before column-level aggregation. For now, return stub to unblock downstream work.
-            type_str
-                if type_str.starts_with("list<")
+                    // Wrap in Frozen
+                    Value::Frozen(Box::new(inner_value))
+                } else if type_str.starts_with("tuple<") {
+                    // Tuple types: parse fixed number of elements
+                    self.parse_tuple_value(data, &mut offset, type_str, column, _reader)?
+                }
+                // Non-frozen collections: list, set, map
+                // TODO(Issue #162, Task 3): Multi-cell collection parsing
+                //
+                // Collections in V5CompressedLegacy are stored as MULTIPLE CELLS with path identifiers,
+                // NOT as single blob values. The current single-cell parser cannot handle this.
+                //
+                // Format (from sstabledump analysis):
+                //   {"name": "scores", "deletion_info": {...}},  // Collection tombstone
+                //   {"name": "scores", "path": ["uuid1"], "value": 23},  // Element 1
+                //   {"name": "scores", "path": ["uuid2"], "value": 99},  // Element 2
+                //
+                // Required implementation:
+                //   1. Parse cell path (clustering key bytes) for each collection element
+                //   2. Detect collection tombstone cell (has deletion_info, no path/value)
+                //   3. Read N element cells (each with path + value)
+                //   4. Aggregate elements into Value::List/Set/Map based on column type
+                //   5. Handle different path encodings:
+                //      - list<T>: path is UUID bytes (timeuuid for ordering)
+                //      - set<T>: path is serialized element value (key), value is empty
+                //      - map<K,V>: path is serialized key, value is serialized value
+                //
+                // This is a fundamental architectural change requiring cell-level parsing
+                // before column-level aggregation. For now, return stub to unblock downstream work.
+                else if type_str.starts_with("list<")
                     || type_str.starts_with("set<")
-                    || type_str.starts_with("map<") =>
-            {
-                warn!(
+                    || type_str.starts_with("map<")
+                {
+                    warn!(
                     "V5CompressedLegacy: Non-frozen collection '{}' type '{}' requires multi-cell parsing (not yet implemented). \
                      Collections are stored as multiple cells with path identifiers, requiring cell-level aggregation. \
                      Returning empty collection as placeholder. See Issue #162 Task 3 for implementation plan.",
                     column.name, column.data_type
                 );
 
-                // Return empty collection based on type
-                if type_str.starts_with("list<") {
-                    Value::List(Vec::new())
-                } else if type_str.starts_with("set<") {
-                    Value::Set(Vec::new())
-                } else {
-                    Value::Map(Vec::new())
+                    // Return empty collection based on type
+                    if type_str.starts_with("list<") {
+                        Value::List(Vec::new())
+                    } else if type_str.starts_with("set<") {
+                        Value::Set(Vec::new())
+                    } else {
+                        Value::Map(Vec::new())
+                    }
                 }
-            }
-
-            // Issue #1080 / roborev job 1363: marshal-form frozen UDT. When the
-            // schema is DERIVED FROM the on-disk header (rather than supplied as a
-            // CQL short form), `column.data_type` is the authoritative marshal
-            // string `org.apache.cassandra.db.marshal.FrozenType(...UserType...)`,
-            // which does NOT start with CQL `frozen<` and so misses the arm above.
-            // Decode it structurally from that marshal type (same authoritative
-            // path as the supplied-schema header fallback) instead of blobbing it.
-            // `marshal_is_top_level_frozen_udt` accepts ONLY a top-level
-            // `FrozenType(UserType(...))` (NOT a frozen collection that contains a
-            // UDT, e.g. `FrozenType(ListType(UserType(...)))` — roborev 1365), and a
-            // non-frozen top-level UDT is routed to the complex branch by
-            // `is_complex_column`, so reaching here means a single-cell frozen UDT
-            // → wrap in `Value::Frozen` (consistent with the CQL `frozen<` arm).
-            _ if Self::marshal_is_top_level_frozen_udt(&column.data_type) => {
-                let (udt_value, new_offset) = self.decode_frozen_udt_from_header_type(
-                    data,
-                    offset,
-                    &column.data_type,
-                    column,
-                )?;
-                offset = new_offset;
-                Value::Frozen(Box::new(udt_value))
-            }
-
-            // TODO(Issue #162): UDT parsing requires schema registry access
-            // For now, UDTs fall through to blob. Future implementation will:
-            // - Extract UDT name from type_str
-            // - Look up UDT definition in schema registry
-            // - Parse fields according to UDT schema
-            // - Return Value::Udt(UdtValue)
-
-            // Default: treat as VInt-length-prefixed blob
-            // CRITICAL: V5CompressedLegacy format uses VInt encoding for blob/bytes lengths,
-            // NOT simple u8 length prefix. This allows blobs > 255 bytes.
-            _ => {
-                if offset >= data.len() {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': unexpected end at blob length (type: {})",
-                        column.name, column.data_type
-                    )));
+                // Issue #1080 / roborev job 1363: marshal-form frozen UDT. When the
+                // schema is DERIVED FROM the on-disk header (rather than supplied as a
+                // CQL short form), `column.data_type` is the authoritative marshal
+                // string `org.apache.cassandra.db.marshal.FrozenType(...UserType...)`,
+                // which does NOT start with CQL `frozen<` and so misses the arm above.
+                // Decode it structurally from that marshal type (same authoritative
+                // path as the supplied-schema header fallback) instead of blobbing it.
+                // `marshal_is_top_level_frozen_udt` accepts ONLY a top-level
+                // `FrozenType(UserType(...))` (NOT a frozen collection that contains a
+                // UDT, e.g. `FrozenType(ListType(UserType(...)))` — roborev 1365), and a
+                // non-frozen top-level UDT is routed to the complex branch by
+                // `is_complex_column`, so reaching here means a single-cell frozen UDT
+                // → wrap in `Value::Frozen` (consistent with the CQL `frozen<` arm).
+                else if Self::marshal_is_top_level_frozen_udt(&column.data_type) {
+                    let (udt_value, new_offset) = self.decode_frozen_udt_from_header_type(
+                        data,
+                        offset,
+                        &column.data_type,
+                        column,
+                    )?;
+                    offset = new_offset;
+                    Value::Frozen(Box::new(udt_value))
                 }
+                // TODO(Issue #162): UDT parsing requires schema registry access
+                // For now, UDTs fall through to blob. Future implementation will:
+                // - Extract UDT name from type_str
+                // - Look up UDT definition in schema registry
+                // - Parse fields according to UDT schema
+                // - Return Value::Udt(UdtValue)
 
-                // Parse blob length as unsigned VInt (can be > 255 bytes)
-                let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
-                    Error::corruption(format!(
-                        "Cell '{}': failed to parse blob length as VInt: {:?}",
-                        column.name, e
-                    ))
-                })?;
-                let blob_len = blob_len as usize;
-                let bytes_consumed = data[offset..].len() - remaining.len();
-                offset += bytes_consumed;
-
-                if offset + blob_len > data.len() {
-                    return Err(Error::corruption(format!(
-                        "Cell '{}': need {} bytes for blob, only {} available (type: {})",
-                        column.name,
-                        blob_len,
-                        data.len() - offset,
-                        column.data_type
-                    )));
+                // Default: treat as VInt-length-prefixed blob (unknown/`varint`).
+                // Shares the `decode_vint_blob` closure with the literal-`blob`
+                // `CellKind::Blob` arm — identical decode pre-J1 (both hit `_ =>`).
+                else {
+                    decode_vint_blob(&mut offset)?
                 }
-
-                let blob_bytes = data[offset..offset + blob_len].to_vec();
-                offset += blob_len;
-                Value::Blob(blob_bytes)
             }
         };
 

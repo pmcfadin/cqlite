@@ -76,11 +76,15 @@
 //! zero-in-release pattern as the A5 counters above:
 //!
 //! - [`record_type_normalize`] / [`type_normalize_calls`] — **`TYPE_NORMALIZE_CALLS`**:
-//!   one per `data_type.to_lowercase()` in the per-cell decode path — the value-parse
-//!   normalization (`v5_compressed_legacy/cell_value.rs`) and the per-column
-//!   complex-check (`v5_compressed_legacy/udt.rs::is_complex_column`). Consumer **J1**
-//!   (zero `to_lowercase` per cell): flips its assertion to `== 0` once the type name
-//!   is normalized once at schema-load, not per cell.
+//!   the per-cell decode-path type-normalization gauge. **J1 (issue #1635) delivered**:
+//!   dispatch is now resolved ONCE per column at `RowColumnResolution::build`
+//!   (cached on `ColumnToParse.kind`/`is_complex`), so the per-cell `to_lowercase`
+//!   sites — the value-parse normalization (`v5_compressed_legacy/cell_value.rs`) and
+//!   the per-row complex-check (`v5_compressed_legacy/udt.rs::is_complex_column`) —
+//!   are gone. A full fixture scan therefore records `0` (on `main`/pre-J1 it was
+//!   ≥2/cell). No production site calls [`record_type_normalize`] anymore; the counter
+//!   is retained as a regression tripwire — any reintroduced per-cell normalization
+//!   must record it, flipping the J1 `== 0` assertions red.
 //! - [`record_partition_header_try_parse`] / [`partition_header_try_parses`] —
 //!   **`PARTITION_HEADER_TRY_PARSES`**: one per speculative partition-header parse
 //!   (`v5_compressed_legacy/row_framing.rs::parse_partition_header_full`, the single
@@ -372,12 +376,14 @@ pub fn record_chunk_path_alloc() {
 }
 
 /// Record one `data_type.to_lowercase()` in the per-cell decode path
-/// (`TYPE_NORMALIZE_CALLS`; consumer J1, Issue #1618).
+/// (`TYPE_NORMALIZE_CALLS`; consumer J1, Issue #1618 / #1635).
 ///
-/// Called unconditionally at each per-cell type-name normalization site (the
-/// value-parse normalization in `v5_compressed_legacy/cell_value.rs` and the
-/// per-column complex-check `is_complex_column` in `v5_compressed_legacy/udt.rs`);
-/// the body compiles to a no-op in a release build (design.md Decision 1).
+/// **J1 (issue #1635) removed every per-cell caller**: dispatch is resolved once per
+/// column at bind time, so the value-parse normalization and the per-row
+/// `is_complex_column` check no longer run per cell and no production site calls this.
+/// It is kept (unconditional, zero-overhead in release per design.md Decision 1) as a
+/// regression tripwire — any future per-cell normalization must call it, which would
+/// flip the J1 `TYPE_NORMALIZE_CALLS == 0` scan assertions red.
 #[inline(always)]
 pub fn record_type_normalize() {
     #[cfg(any(test, feature = "work-counters"))]

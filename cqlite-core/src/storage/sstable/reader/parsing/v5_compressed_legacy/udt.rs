@@ -1185,8 +1185,11 @@ impl V5CompressedLegacyParser {
     /// Issue #221: This is critical for proper parsing - complex columns have
     /// a different format: [complex_deletion_time?] [cell_count] [cells...]
     pub(super) fn is_complex_column(data_type: &str) -> bool {
-        // Issue #1618 (H5): measure the per-column type normalization work (J1 flips to 0).
-        crate::storage::sstable::read_work_counters::record_type_normalize();
+        // J1 (issue #1635): this is now called ONCE per column at
+        // `RowColumnResolution::build` time (its result cached on
+        // `ColumnToParse.is_complex`), NOT per cell. The per-cell-loop
+        // `TYPE_NORMALIZE_CALLS` gauge is therefore no longer recorded here — the
+        // per-cell decode path performs zero type normalizations after J1.
         let dt = data_type.to_lowercase();
         // Non-frozen collections start directly with list/set/map (CQL syntax)
         // or org.apache.cassandra.db.marshal.ListType/SetType/MapType (internal syntax)
