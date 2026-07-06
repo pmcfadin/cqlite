@@ -58,6 +58,7 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    remote_sha="$(git -C <repo-root> ls-remote --heads origin "issue-<N>-<slug>" | awk '{print $1}')"
    local_sha="$(git -C "$wt" rev-parse HEAD)"
    [ "$remote_sha" = "$local_sha" ] || echo "Lost the race — back off and take the next item."
+   scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes refs/heartbeats/<machine> (#2089)
    ```
    All spec work happens in that worktree only after the claim holds.
 4. **Propose** with OpenSpec (use the `opsx:propose` skill / `openspec new change <slug>`): author
@@ -76,3 +77,7 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    gh issue edit <N> --remove-label status:ready --add-label status:spec-review
    ```
    Do not start `flow-implement`. Approval is the owner's seam.
+7. **Drop the spec render after approval (issue #2085).** The inline render exists only to get the owner's
+   Seam-1 approval — once approved, **do not retain the verbatim spec/design body** in the session window.
+   Every downstream agent re-reads it fresh from `openspec/changes/<slug>/` (the `spec-auditor`/C audit
+   re-reads `specs/**` anyway), so keeping the render is pure inter-issue accretion. Render → approve → drop.

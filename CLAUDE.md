@@ -64,6 +64,7 @@ frontmatter model may be inaccessible):
 | Agent | Purpose |
 |-------|---------|
 | `flow-lead` | Delivery lead/PM — drives the flow-* pipeline, sequences the specialists |
+| `flow-closer` | Per-issue endgame owner — runs the ONE full gate of record → C → final roborev → merge-on-green → finalize in its own disposable context (issue #2084) |
 | `sstable-developer` | SSTable implementation, format debugging |
 | `rust-reviewer` | Read-only Rust code review, quality enforcement |
 | `test-validator` | Test execution, sstabledump parity, failure triage |
@@ -87,6 +88,16 @@ frontmatter model may be inaccessible):
 # parquet/arrow stay linted. Coverage of the excluded features moves to nightly:
 # CQLITE_CLIPPY_FULL=1 runs the full `--workspace --all-targets --all-features`
 # matrix, which .github/workflows/gate.yml (nightly deep-check) sets.
+#
+# Missing-fixtures fail-closed (issue #2078): the FULL gate FAILs CLOSED when the
+# fetched validation corpus (test_basic/...) is absent, even though a fresh
+# worktree's committed byte-parity reference *-Data.db files keep the raw Data.db
+# count > 0 (previously a false PASS via SKIP). Opt-out:
+# AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores the lenient SKIP and stamps a
+# machine-checkable `missing-fixtures: OPT-OUT (...)` line in the SUMMARY, so an
+# intentional opt-out is visible in the pasted artifact; absent the opt-out, a
+# FAIL stamps `missing-fixtures: FAIL-CLOSED (#2078)` with the remedy: bash
+# test-data/scripts/fetch-datasets.sh. --lite/--only are unchanged (lenient).
 scripts/agent-gate.sh
 
 # FAST ITERATION gate (issue #1821) - NOT the gate of record.
@@ -103,186 +114,51 @@ scripts/agent-gate.sh
 scripts/agent-gate.sh --lite
 
 # TEST/DOCS-ONLY DELTA RE-CERTIFICATION (issue #1892) - NOT the gate of record.
-# After a full-gate PASS at commit X, if the ONLY changes since X are files the
-# re-cert can EXECUTE — rust cargo test code (.rs under tests/ dirs,
-# *_test(s).rs), python binding tests (bindings/python/tests/, run by the #1893
-# python tier), and/or docs (*.md anywhere; TOP-LEVEL docs/, website/) —
-# re-certify the X..Y diff with --delta instead of forcing a whole new full
-# gate. It FAILs CLOSED: ANYTHING else in the X..Y diff (src, scripts,
-# workflows, Cargo.*, config, test-data — and also node __test__/ files and
-# scripts/tests/*.sh, which --delta's components never execute) REFUSES the
-# re-cert and a fresh full gate is required. On pass it runs ONLY file-size +
-# fmt + the diff's changed test targets and emits a DISTINCT
-# "==== AGENT-GATE DELTA SUMMARY ====" block (MODE: delta) that names the gate
-# of record (the full PASS at X) + the anchor run-id, so it can NEVER be pasted
-# as a full SUMMARY. Record BOTH the anchor's full SUMMARY and this DELTA block
-# in the PR. Standing backstop: the nightly gate.yml deep-check re-runs the
-# FULL gate on main. Recovery default: .agent-gate-delta-summary.txt.
+# After a full-gate PASS at commit X, if the diff X..Y touches ONLY files the
+# re-cert can EXECUTE (rust cargo test code, python binding tests, Node.js
+# __test__/ tests run against an ALREADY-BUILT native module, scripts/tests/*.sh
+# self-tests, and/or docs — issue #2081 moved node/shell from refused to
+# executed), re-certify with --delta instead of forcing a whole new full gate.
+# It FAILs CLOSED on anything else (src, scripts, workflows, Cargo.*, config,
+# test-data, or an unbuilt node module — it NEVER builds with cargo and never
+# passes vacuously) and forces a fresh full gate. Emits a DISTINCT
+# "==== AGENT-GATE DELTA SUMMARY ====" block (MODE: delta) naming the gate of
+# record (the full PASS at X) + the anchor run-id, so it can NEVER be pasted as
+# a full SUMMARY. Record BOTH the anchor's full SUMMARY and this DELTA block in
+# the PR. Standing backstop: the nightly gate.yml deep-check re-runs the FULL
+# gate on main. Recovery default: .agent-gate-delta-summary.txt. Deep mechanics
+# + the delta-executors: line: docs/development/gate-ops.md.
 scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <full-gate-run-id>
 #   # or, to read the anchor run-id from the recorded full SUMMARY:
 scripts/agent-gate.sh --delta <anchor-sha> --anchor-summary-file <path-to-full-SUMMARY>
 
-# Capture the gate ROBUSTLY (issue #1175). The SUMMARY block is the only
-# artifact that counts. The foreground redirect never buffers — prefer it:
-bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
-# Under tee / a pty / background capture, a leaked build-server or test daemon
-# can hold the gate's stdout pipe open and truncate (even fully lose) a streamed
-# SUMMARY even though the gate exited 0. RECOVERY (no need to parse stdout): pick
-# the path in advance and read it — it is ALWAYS the complete block.
+# The DEFAULT gate invocation — summary-file redirect, NOT raw stdout (issues
+# #1175, #2079). The SUMMARY block is the only gate text an agent retains; the
+# raw gate log (thousands of lines) must NEVER be read into a persistent agent
+# context. So the REQUIRED form everywhere — full gate AND each --lite round — is
+# a pre-chosen summary file + a redirect, then cat the file:
 AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
-cat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated
+cat /tmp/gate-summary.txt   # complete SUMMARY block; gate.log is never read into context
+# This is the default because it is also robust: under tee / a pty / background
+# capture, a leaked build-server or test daemon can hold the gate's stdout pipe
+# open and truncate (even fully lose) a streamed SUMMARY even though the gate
+# exited 0 — the file is complete regardless. Prefer run_in_background (or a long
+# timeout) so a subagent never idle-waits and gets watchdog-killed (#1855).
 # If you did not set AGENT_GATE_SUMMARY_FILE, the gate writes the same complete
-# block to the documented default $PWD/.agent-gate-summary.txt (gitignored); cat
-# that if your stream is missing the `==== END AGENT-GATE SUMMARY ====` marker.
+# block to the documented default $PWD/.agent-gate-summary.txt (gitignored;
+# --lite: .agent-gate-lite-summary.txt); cat that instead.
 # CONCURRENCY: that default is per-checkout; if you run multiple gates concurrently
 # IN THE SAME CHECKOUT, give each a unique AGENT_GATE_SUMMARY_FILE or they clobber
-# each other's recovery artifact (separate worktrees are already isolated).
-# Fast self-test of the emission/recovery path:
+# each other's artifact (separate worktrees are already isolated).
+# Fast self-test of the emission path:
 bash scripts/tests/test_agent_gate_summary.sh
-
-### Shared Compiler Cache (sccache)
-
-The gate uses **sccache** (Mozilla's shared compiler cache) to eliminate duplicated compilation across worktrees. Each worktree is **independent** (owns its `target/` dir, no lock contention), but reuses cached compilation artifacts from any prior worktree, giving **25.6% wall-clock speedup on fresh-worktree scenarios** (measured in issue #1822).
-
-**Setup** (one-time per machine):
-```bash
-# macOS:
-brew install sccache
-
-# Linux:
-cargo install sccache
-
-# Or download a release binary: https://github.com/mozilla/sccache/releases
 ```
 
-**Configuration** (optional; auto-detects on first use):
-The gate auto-enables sccache if it's on `$PATH`. To customize:
-```bash
-# Set cache location (default: ~/.cache/sccache on Linux, ~/Library/Caches/Mozilla.sccache on macOS)
-export SCCACHE_DIR=/custom/cache/path
+Every SUMMARY block (full and `--lite`) carries a machine-checkable `accelerators:` line (sccache/nextest/lane-parallelism state) — treat degradation shown there as actionable, not scrollback noise.
 
-# Set size limit (default 10 GiB; raise for multi-worktree teams)
-export SCCACHE_CACHE_SIZE=50G
-
-# Disable sccache for a single gate run (if needed for diagnostics)
-CQLITE_DISABLE_SCCACHE=1 bash scripts/agent-gate.sh
-
-# Disable sccache permanently (not recommended)
-export CQLITE_DISABLE_SCCACHE=1
-```
-
-**Rationale: sccache vs shared `CARGO_TARGET_DIR`** (issue #1822):
-- **sccache (chosen):** Each worktree has its own `target/` dir (parallel gates do not contend for the build lock); the shared object cache deduplicates `rustc` invocations. Empirically: 7 concurrent worktree gates run in parallel, all benefiting from the cache.
-- **Shared `CARGO_TARGET_DIR` (rejected):** `cargo` takes an exclusive build lock on the shared target dir, so concurrent gates serialize (throughput bottleneck), thrashing the cache with different feature sets (each gate component uses different flags / features).
-
-**Cache management**:
-```bash
-# View cache stats (shows hit rate, size, cache location)
-sccache --show-stats
-
-# Zero stats for measurement
-sccache --zero-stats
-
-# Stop the background server (if needed for diagnostics)
-sccache --stop-server
-
-# Start the server explicitly (normally auto-starts)
-sccache --start-server
-```
-
-### Accelerator degradation is LOUD, not silent (issue #1848)
-
-Every optional accelerator the gate depends on — **sccache** (cross-worktree
-compile cache), **cargo-nextest** (parallel core-tests), and **parallel component
-lanes** (needs bash ≥4.3 for `wait -n`) — is auto-detected. When one is **missing**
-the gate now emits a **loud `WARN:` line on STDERR** with the one-line install
-command, so a machine can never silently run ~3x slower again (the 2026-07-03/04
-field failures: sccache and nextest both un-installed for weeks, and stock macOS
-bash 3.2 serializing the lanes — all inert wins with no signal):
-
-```
-agent-gate: WARN: sccache not installed — cross-worktree compile caching DISABLED (~25.6% slower fresh builds); install: brew install sccache (#1848)
-agent-gate: WARN: cargo-nextest not installed — core-tests fall back to serial 'cargo test' (much slower long pole); install: brew install cargo-nextest (#1848)
-agent-gate: WARN: bash <4.3 lacks 'wait -n' — gate components run SERIALLY (no parallel lanes; AGENT_GATE_JOBS=1); install: brew install bash (#1848)
-```
-
-Every SUMMARY block (full **and** `--lite`) carries a **machine-checkable
-`accelerators:` line**, so degradation is visible in the pasted block, not just
-scrollback:
-
-```
-accelerators: sccache=on nextest=absent lanes=serial
-```
-
-State values: `on` (detected & used) · `absent` (missing → WARN) · `off`
-(intentionally disabled via `CQLITE_DISABLE_SCCACHE=1` / `CQLITE_DISABLE_NEXTEST=1`
-/ `AGENT_GATE_JOBS=1`; **no WARN**) · `lanes=serial` (degraded by bash <4.3). An
-intentional opt-out is `off`, never `absent`, and never warns. Self-test coverage:
-`scripts/tests/test_agent_gate_summary.sh` (cases 9a/9b assert the `off`/`absent`
-markers and the WARN).
-
-### Disk hygiene for multi-worktree gates (issue #1848)
-
-Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
-worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
-removes a finished issue's worktree; additionally prune stale worktrees' `target/`
-dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
-10-core machine).
-
-**macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
-reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed
-blocks. If free space does not recover after deleting build artifacts, check and
-thin snapshots:
+Deep gate operations (sccache tuning, concurrency-cap internals, disk hygiene, parallelism knobs, `--delta` mechanics): `docs/development/gate-ops.md`.
 
 ```bash
-tmutil listlocalsnapshots /                 # any snapshot pins freed blocks
-tmutil thinlocalsnapshots / 40000000000 4   # thin to reclaim (field: 9.1Gi -> 72Gi)
-```
-
-### Gate Parallelism and nextest (issue #1737)
-
-The gate runs **~75% faster** than v0.12.0 on warm machines via two levers:
-
-1. **nextest for core-tests** (the 67% execution floor): `cargo-nextest` parallelizes across test binaries + CPU cores; `core-tests` runs under nextest with an additional `cargo test --doc` pass (nextest skips doctests). Auto-detected; falls back to `cargo test` when unavailable.
-
-2. **Capped 2-lane component parallelism** (issue #1737): a **serial MAIN cargo lane** (shared target, no NEW feature-thrash) runs concurrently with a **SIDE lane** that runs python-bindings and node-bindings in isolated `CARGO_TARGET_DIR`s (kills the cross-lane build-lock / feature-cache-invalidation that would balloon binding times under a naive shared-target pool). Concurrency is capped by `AGENT_GATE_JOBS` (default `min(4, ncpu/2)`), composing safely with #1825's machine-wide bound. Each component records its verdict to a file; the parent reconstructs the SUMMARY in canonical order after lanes drain, so interleaved output never corrupts the machine-checkable block.
-
-**Environment knobs** (all optional; auto-configured):
-
-```bash
-# nextest parallelism for core-tests (auto-detected on PATH)
-CQLITE_DISABLE_NEXTEST=1 bash scripts/agent-gate.sh      # force plain cargo test
-
-# Component concurrency cap (default: min(4, ncpu/2))
-AGENT_GATE_JOBS=1 bash scripts/agent-gate.sh              # sequential (legacy behavior)
-AGENT_GATE_JOBS=8 bash scripts/agent-gate.sh              # increase cap (with caution)
-
-# Live Docker parity tests (issue #911, default: skip for static-golden mandate)
-CQLITE_SKIP_DOCKER_TESTS=0 bash scripts/agent-gate.sh     # include live Cassandra sstabledump tests
-#   (normally skipped; still run in nightly Docker CI lanes; adds ~30s non-determinism when Docker is present)
-```
-
-**Graceful fallback**: absent `cargo-nextest`, no `/bin/bash wait -n` (macOS stock 3.2), or `AGENT_GATE_JOBS=1` → gate degrades gracefully to the historical sequential run without loss of coverage.
-
-### Machine-wide full-gate concurrency cap (issue #1825)
-
-Running many sessions/worktrees at once used to let ~15 full gates hit the CPU at once (load 30–60) and SIGKILL gates mid-`core-tests`. The FULL `agent-gate.sh` run now takes a **cross-process bounded semaphore**: at most **N** full gates execute machine-wide at once; excess invocations **queue** (block) for a slot — printing `waiting for gate slot (N in use)…` once — and then proceed. **They never fail from the cap**; non-interactive callers block cleanly.
-
-- **`--lite` and `--only` runs are EXEMPT** (never queued): `--lite` is cheap, and `--only` PARTIAL runs are used by nested tooling self-tests (capping them could self-deadlock the queue).
-- **N** defaults to `max(2, floor((ncpu-2)/4))`; override with `CQLITE_GATE_MAX_CONCURRENCY`.
-- **SIGKILL-safe stale-slot reaping**: each slot is an `fcntl.flock` held by a background daemon (`scripts/lib/gate_slot_daemon.py`) whose lock fd is NOT inherited by the gate's `cargo`/`nextest` children, so a killed gate releases its slot within one poll — no permanent leak/deadlock.
-- Works **across worktrees** (shared slot dir) and composes with `AGENT_GATE_JOBS` (per-gate) + `sccache`. The cap bounds the *worst case*; those cut average load / per-compile time.
-
-```bash
-CQLITE_GATE_MAX_CONCURRENCY=4 bash scripts/agent-gate.sh   # raise N on a big box
-CQLITE_GATE_SLOTS_DIR=/path bash scripts/agent-gate.sh     # slot dir (default $TMPDIR/cqlite-gate-slots)
-CQLITE_GATE_POLL_SECS=1 bash scripts/agent-gate.sh         # queue/liveness poll (default 2s)
-CQLITE_GATE_DISABLE_CAP=1 bash scripts/agent-gate.sh       # force-disable the cap
-```
-
-The cap fails **open** (disabled, loud stderr note) when `python3`/the daemon is unavailable — the gate is never un-runnable because of the cap. Self-test: `scripts/tests/test_gate_concurrency_cap.sh` (wired into `tooling-tests`).
-
-
 # Build
 cargo build
 
@@ -743,15 +619,16 @@ bash test-data/scripts/fetch-datasets.sh
 
 ## Agent-team conventions
 - Implementers commit after each meaningful unit of work so roborev reviews land while context is fresh.
-- **Tiered gate loop (issue #1821): iterate on `--lite`, run the FULL gate ONCE before merge.** The implement loop is `implement → lite (each fix round) → conditional internal rust-reviewer review → lite → FULL gate ONCE before merge → roborev → CI → merge`. Use `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min) on every fix round; it is the fast iteration loop, **NOT the gate of record**. `--lite` NEVER replaces the full gate: run the full `scripts/agent-gate.sh` exactly ONCE before merge and it must PASS — its `==== AGENT-GATE SUMMARY ====` block is the only run that counts.
-- **Test/docs-only delta re-certification (issue #1892): a post-gate polish round that touches ONLY executable tests/docs re-certifies with `--delta`, not a whole new full gate.** After a full-gate PASS at commit `X`, if the diff `X..Y` touches ONLY what the re-cert can EXECUTE — rust cargo test code (`.rs` under `tests/` dirs, `*_test(s).rs`), python binding tests (`bindings/python/tests/`, run by the #1893 python tier), and/or docs (`*.md` anywhere; TOP-LEVEL `docs/`, `website/`) — run `scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>` (or `--anchor-summary-file <path to X's full SUMMARY>`). It FAILs CLOSED — **anything** else in `X..Y` (src, scripts, workflows, `Cargo.*`, config, test-data — and also node `__test__/` files and `scripts/tests/*.sh`, which `--delta`'s components never execute) REFUSES the re-cert and forces a fresh full gate. On pass it runs file-size + fmt + the diff's changed test targets and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block (MODE: delta). **Record BOTH artifacts in the PR:** the anchor's full SUMMARY (the gate of record) AND the `X..Y` DELTA block. The delta is NOT the gate of record and can never substitute for the full gate on a production change. The standing backstop is the nightly `.github/workflows/gate.yml` deep-check, which re-runs the FULL gate on `main` (owner condition, 2026-07-04). This closes the re-gate loophole where every roborev round on a Low test-robustness finding forced another 15–25 min full gate (e.g. #1853 burned 3 full gates and #1921 burned 2 on test/docs-only polish rounds).
-- **Conditional review-first**: do an internal `rust-reviewer` pass BEFORE the first FULL gate when the diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface — catching those findings pre-full-gate avoids a wasted 12-25 min full-gate cycle per roborev round. Skip the review-first pass for mechanical/localized diffs.
-- Clear roborev findings (run /roborev-fix) before handing an issue off.
+- **The implement loop (issues #1821/#2084/#2086/#2087/#2088) — ONE coherent design, review before gate, gate once at the end:** `implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lite-green diff (review-first, DEFAULT) → fix (lite re-cert + diff-scoped targets, NEVER a full gate) → open PR → flow-closer {FULL gate ONCE → C → final roborev → merge-on-green → finalize}`. Use `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min) on every fix round; it is the fast iteration loop, **NOT the gate of record**. Review runs BEFORE the first full gate (#2086) so the ONE full gate certifies already-reviewed code exactly once, immediately pre-merge (#2087); `--lite` NEVER replaces it. The full gate, C, the final roborev pass, and the merge all run inside the disposable **`flow-closer`** subagent (#2084) — the lead's context receives only its terminal packet (verdict, PR URL, summary-file path, ≤10 lines residual), never gate stdout or review churn. Its `==== AGENT-GATE SUMMARY ====` block is the only run that counts.
+- **Gate invocation is the summary-file redirect by DEFAULT, never raw stdout (issue #2079).** Every gate — full and each `--lite` round — runs as `AGENT_GATE_SUMMARY_FILE=<path> bash scripts/agent-gate.sh [--lite] > gate.log 2>&1 < /dev/null` then `cat <path>`. Never read raw gate stdout / `gate.log` into a persistent context; the SUMMARY block is the only gate text an agent retains.
+- **Test/docs-only delta re-certification (issue #1892): a post-gate polish round that touches ONLY executable tests/docs re-certifies with `--delta`, not a whole new full gate.** After a full-gate PASS at commit `X`, if the diff `X..Y` touches ONLY what the re-cert can EXECUTE — rust cargo test code (`.rs` under `tests/` dirs, `*_test(s).rs`), python binding tests (`bindings/python/tests/`, run by the #1893 python tier), Node.js binding tests (`bindings/node/__test__/*`, run against an ALREADY-BUILT native module), shell self-tests (`scripts/tests/*.sh`), and/or docs (`*.md` anywhere; TOP-LEVEL `docs/`, `website/`) — run `scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>` (or `--anchor-summary-file <path to X's full SUMMARY>`). It FAILs CLOSED — **anything** else in `X..Y` (src, scripts, workflows, `Cargo.*`, config, test-data, or an unbuilt node module, since issue #2081 moved node `__test__/` files and `scripts/tests/*.sh` from refused to executed) REFUSES the re-cert and forces a fresh full gate. On pass it runs file-size + fmt + the diff's changed test targets and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block (MODE: delta) carrying a `delta-executors:` line naming which executors ran. **Record BOTH artifacts in the PR:** the anchor's full SUMMARY (the gate of record) AND the `X..Y` DELTA block. The delta is NOT the gate of record and can never substitute for the full gate on a production change. The standing backstop is the nightly `.github/workflows/gate.yml` deep-check, which re-runs the FULL gate on `main` (owner condition, 2026-07-04). This closes the re-gate loophole where every roborev round on a Low test-robustness finding forced another 15–25 min full gate (e.g. #1853 burned 3 full gates and #1921 burned 2 on test/docs-only polish rounds). Deep `--delta` mechanics: `docs/development/gate-ops.md`.
+- **Review-first is the DEFAULT (issue #2086):** run `rust-reviewer` + roborev on the lite-green diff BEFORE the first full gate, so review discovers fixable problems before we pay for the 12-25 min gate. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single call site AND no new surface — the narrow inverse of the old conditional). When in doubt, review.
+- **roborev findings are severity-triaged, blocker vs nit (issue #2088; rubric: `docs/development/roborev-severity.md`).** **Blockers** are fixed pre-merge — each re-triggers `fix → --lite gate (blast-radius-scoped, + any diff-relevant parity/integration target) → re-review` (issue #2087; NEVER a full gate per round). **Nits** never trigger a re-verify round: all nits from one PR's roborev pass are batched into ONE linked follow-up issue (labeled, referencing the PR) opened at merge time. When in doubt, blocker (the pre-merge full gate + CI backstop is not a net for a mis-graded blocker).
 - Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing another teammate's files.
 - An issue is "done" only when tests pass, coverage meets threshold, roborev is clean, and both the spec-auditor and coverage-reviewer sign off.
 
 ### Pre-roborev self-check (common findings to pre-empt)
-`roborev_findings` is the #1 recurring delivery cost (telemetry retro). Before reporting an implementation done, scan your diff for these recurring finding classes and fix them up front — every one avoided is a review round saved. Full guidance: https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/.
+`roborev_findings` is the #1 recurring delivery cost (telemetry retro). Before reporting an implementation done, scan your diff for these recurring finding classes and fix them up front — every one avoided is a review round saved. Full guidance: https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/. Findings are classified blocker vs nit per `docs/development/roborev-severity.md`; **every class listed below is BLOCKER-severity by definition** (correctness, data-parity, safety, no-heuristics, wiring-evidence, security) — fix them, they cannot ride to a nit follow-up.
 - **GitHub Actions command injection** — never interpolate `${{ inputs.* }}` / `${{ steps.*.outputs.* }}` directly into a `run:` shell (worst in a step holding secrets). Allowlist-validate the value fail-closed *before* any secret step, then pass it via a quoted env var (`-Pversion="$VAR"`), not inline `${{ }}`.
 - **clippy `manual_range_contains`** — `x >= a && x <= b` fails under `-D warnings`. Write `(a..=b).contains(&x)`.
 - **Integer overflow / saturation** — decoding into `i128`/fixed width and saturating (decimal unscaled values, scale math) loses data. Use `num_bigint::BigInt` (already a dep); bound the computation by comparing signs/adjusted-exponents *before* any large power-of-ten — never materialize `10^scale` with an unbounded exponent (DoS/OOM).
@@ -768,10 +645,11 @@ bash test-data/scripts/fetch-datasets.sh
 
 ### Delivery pipeline (flow-lead)
 - The delivery lead is the **`flow-lead`** manager agent (the repo's default agent; `claude --agent flow-lead`). It orchestrates — it spawns and sequences the specialists (`sstable-developer`, `rust-reviewer`, `spec-auditor`/C, `test-validator`, `coverage-reviewer`) + roborev + `agent-gate.sh` — and does not write production code itself.
-- Pipeline verbs (skills): `flow-groom` → `flow-activate` (Seam 1: spec approval) → `flow-implement` (gate → C → roborev → PR) → `flow-address` → `flow-finalize` (archive + cleanup + close); `flow-board` surfaces the single next thing. Full doctrine: https://pmcfadin.github.io/cqlite/agents-developing/delivery-pipeline/.
-- **Tiered gate inside `flow-implement` (issue #1821).** The implement/fix loop runs `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min) on EACH fix round, does a **conditional internal `rust-reviewer` review-first** pass before the first FULL gate (when the diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface; skip for mechanical/localized diffs), then runs the FULL `scripts/agent-gate.sh` exactly ONCE before merge — its `==== AGENT-GATE SUMMARY ====` block is the only run that counts. Loop: `implement → lite (each round) → conditional review-first → lite → FULL gate ONCE → roborev → CI → merge`. **`--lite` NEVER replaces the full gate.** Rationale + measurement plan: `process_improvements.md`. **Post-gate polish rounds (issue #1892):** once the FULL gate has PASSed at `X`, a roborev/address round whose diff `X..Y` is test/docs-ONLY re-certifies with `scripts/agent-gate.sh --delta X --anchor-run-id <run-id>` (fail-closed on any production change) rather than repeating the full gate — record BOTH the anchor full SUMMARY and the DELTA block in the PR; the nightly `gate.yml` deep-check is the standing backstop.
+- Pipeline verbs (skills): `flow-groom` → `flow-activate` (Seam 1: spec approval) → `flow-implement` (implement → review-first → open PR → `flow-closer`: gate → C → roborev → merge → finalize) → `flow-address` → `flow-finalize` (archive + cleanup + close); `flow-board` surfaces the single next thing. Full doctrine: https://pmcfadin.github.io/cqlite/agents-developing/delivery-pipeline/.
+- **The implement loop inside `flow-implement` (issues #1821/#2084/#2086/#2087/#2088).** `implement (TDD) → lite (each round, summary-file redirect) → rust-reviewer + roborev on the lite-green diff (review-first, DEFAULT) → fix (lite re-cert + diff-scoped targets, never a full gate) → open PR → **`flow-closer`** {FULL gate ONCE → C → final roborev → merge-on-green → finalize}`. Review runs before the first full gate (#2086); the ONE full gate of record runs once, immediately pre-merge, inside the disposable `flow-closer` subagent (#2084) which returns only a terminal packet so gate stdout / roborev churn never accretes in the lead session. roborev findings triaged blocker/nit (#2088, `docs/development/roborev-severity.md`): blockers fixed pre-merge with `--lite` re-cert (#2087), nits batched into one follow-up issue. **`--lite` NEVER replaces the full gate** — its `==== AGENT-GATE SUMMARY ====` block is the only run that counts. Rationale + measurement plan: `process_improvements.md`. **Post-gate polish rounds (issue #1892):** once the FULL gate has PASSed at `X`, a roborev/address round whose diff `X..Y` is test/docs-ONLY re-certifies with `scripts/agent-gate.sh --delta X --anchor-run-id <run-id>` (fail-closed on any production change) rather than repeating the full gate — record BOTH the anchor full SUMMARY and the DELTA block in the PR; the nightly `gate.yml` deep-check is the standing backstop.
+- **Inter-issue reset (issue #2085).** The lead is the only long-lived agent, so it compacts between issues: after each `flow-finalize` it carries ZERO prior-issue history (board renders, gate summaries, roborev findings, PR bodies, Seam-1 spec renders are dropped), re-hydrates the NEXT item from the **board alone**, and stays re-runnable from board + disk state at any point. Durable cross-issue lessons route to `MEMORY.md` / `process_improvements.md`, never the live window. Seam-1 spec bodies are NOT retained after approval — `spec-auditor` re-reads them from `openspec/changes/<slug>/`.
 - **1:1:1:1**: one issue ↔ one worktree/branch `issue-<N>-<slug>` ↔ one OpenSpec change `<slug>` ↔ one PR. The GitHub Project board `Status` field is the source of truth (one `P0`–`P3` per issue); `status:*` labels are decorative, NOT a dispatch source (Path A, #1886).
-- **Coordination & concurrency (Path A, #1886):** the GitHub Project board `Status` field is the **sole dispatch authority**; `status:*` labels are decorative/non-authoritative and MUST NOT be used to select or claim work. A session claims by **pushing the `issue-<N>-<slug>` branch to origin** (the cross-machine lock — assignee `@me` is identical for one user on two machines) + assignee + `Status=In Progress`, then re-reads. Newly created issues auto-land at `Status=Backlog` (Project built-in "item added → Backlog"). Default model is **one lead → subagents**; multiple independent sessions MUST use the claim protocol; never run N bare leads without it. **One worker per machine (#1930):** exactly one flow-lead worker runs per machine as the sole machine-load authority — it fans out to subagents but **serializes the full `agent-gate.sh` (concurrency = 1)** (the #1825 cap stops SIGKILL, not tail-latency flakes) and pre-claims by checking for **any** `issue-<N>-*` branch (any slug, not just its own). Cross-*machine* concurrency stays coordinated by the origin branch lock. `flow-board` reaps abandoned `In Progress` claims. **If the board is unreachable (`project` scope/auth), STOP and fix auth — do NOT dispatch from labels** (empty Ready = no work ready, not a cue to dredge labels). See the delivery-pipeline doc.
+- **Coordination & concurrency (Path A, #1886):** the GitHub Project board `Status` field is the **sole dispatch authority**; `status:*` labels are decorative/non-authoritative and MUST NOT be used to select or claim work. A session claims by **pushing the `issue-<N>-<slug>` branch to origin** (the cross-machine lock — assignee `@me` is identical for one user on two machines) + assignee + `Status=In Progress`, then re-reads. Newly created issues auto-land at `Status=Backlog` (Project built-in "item added → Backlog"). Default model is **one lead → subagents**; multiple independent sessions MUST use the claim protocol; never run N bare leads without it. **One worker per machine (#1930):** exactly one flow-lead worker runs per machine as the sole machine-load authority — it fans out to subagents but **serializes the full `agent-gate.sh` (concurrency = 1)** (the #1825 cap stops SIGKILL, not tail-latency flakes) and pre-claims by checking for **any** `issue-<N>-*` branch (any slug, not just its own). Cross-*machine* concurrency stays coordinated by the origin branch lock. The claiming session also maintains a liveness **heartbeat** (`scripts/flow/claim-heartbeat.sh beat <N>` — a cheap origin git ref, never a GitHub API call — refreshed at claim time and every stage transition) that `flow-board` uses for **deterministic reaping** (age > 4h AND no open PR), replacing the old "no recent commits" guess (issue #2089). For unattended/overnight runs, the **worker supervisor** (`scripts/local/worker-supervisor.sh`, issue #2090) recycles one worker process per issue (hard context bound = process exit; the worker writes a `.worker-last-iteration.json` marker then EXITs, never a second issue per session) with flock single-instance + preflight (load/disk/leftover-process/stop-file) + crash-loop breaker + budgets + ntfy notifications — see `docs/development/fleet-runbook.md`. **If the board is unreachable (`project` scope/auth), STOP and fix auth — do NOT dispatch from labels** (empty Ready = no work ready, not a cue to dredge labels). See the delivery-pipeline doc.
 - When spawning a subagent, pass an explicit accessible model (e.g. opus) — the pinned frontmatter model is not always accessible.
 - **Self-improvement loop (telemetry + retro).** The pipeline measures itself: `flow-finalize` stamps one record per completed issue into the append-only ledger `docs/reports/delivery-telemetry.jsonl` (schema `docs/reports/delivery-telemetry.schema.json`) via `scripts/delivery-telemetry.py record` — authoritative data only (GitHub timestamps → cycle time + phase durations; run-observed counters for claim collisions, rebases, gate pass/fail, roborev findings, rework; a counter not observed is an error, never a fabricated `0`). On a cadence the manager runs `delivery-telemetry.py retro` to rank recorded failures by a documented weighted tally (deterministic, not inferred) and file a deduped `flow-meta` improvement issue. The `delivery-telemetry` agent-gate component (SKIP-aware) covers the tool. Doctrine: `docs/development/pm-operating-loop.md`.
 

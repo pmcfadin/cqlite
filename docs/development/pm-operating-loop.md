@@ -8,7 +8,7 @@ Two roles. One board. The manager orchestrates; the workers do everything else.
 |---|---|---|
 | Writes code / claims / merges? | **Never by hand** (runs the merge-on-green poller for the fleet) | Yes — owns the issue end-to-end |
 | Board | Controls **Ready** (what + order); reconciles; reaps | Reads Ready; claims the oldest unlocked item |
-| Lifecycle | none | full **1:1:1:1**: claim → implement → gate → C → roborev → PR → **arm merge-on-green → cleanup** |
+| Lifecycle | none | full **1:1:1:1**: claim → implement → lite → **review-first** (rust-reviewer + roborev) → open PR → **`flow-closer`** {FULL gate ONCE → C → final roborev → **merge-on-green**} → cleanup |
 | Communication | signed **issue comments** (work orders) + Ready ordering | reads manager comments before acting; obeys the latest order |
 | Tempo | sets it via Ready throughput, WIP cap, and ordering | runs flat-out on its claimed issue |
 
@@ -39,22 +39,25 @@ ORDER: k                # queue rank when several are Ready at once
 3. **Route — spec-first for new work**: design-driven / any new feature → run **`flow-activate` FIRST**
    (produces the OpenSpec proposal/design/specs/tasks, STOPS at Seam 1 for owner spec approval); no code
    until the spec is approved. Oracle-driven bug (Cassandra/sstabledump truth + pinned test) → straight to implement.
-4. **Run to completion** (`flow-implement`) via subagents (worker orchestrates; `sstable-developer` model:opus
-   implements + runs the gate). **Out-of-scope bug found** → a subagent files a new detailed issue (never fix
-   it inline / never grow the diff); if it **blocks** completion, comment "blocked on #<new>" on your issue,
-   pause, and surface to the manager (it sequences via `HOLD`/Ready) — fix it only as its own 1:1:1:1 claim.
-5. **Terminal state — arm merge-on-green, then STOP.** The worker's terminal state for an issue is
-   **PR-open + `agent-gate.sh` PASS + spec-auditor C PASS (design) + roborev clean** (with any `HOLD`
-   cleared). At that point re-check for an open `HOLD` (if `HOLD: merge after #N`, the merge-on-green
-   mechanism stays gated behind #N — the manager sequences it), rebase on current `origin/main` and resolve
-   any conflict in your own worktree, then **arm the merge-on-green mechanism (below) and end your turn.**
-   Do **NOT** poll the PR's own external CI in a yield/wake loop (repeated `ScheduleWakeup` cycles) waiting
-   for the cross-platform matrix — once the work is done that is pure token bleed, and it is prohibited.
-6. **Merge-on-green lands it; finalize follows the merge.** The armed mechanism lands the PR when its
-   defined green signal passes; the merge event triggers `flow-finalize` (archive any OpenSpec change,
-   **stamp the telemetry ledger**, remove the worktree, delete the origin claim branch, close the issue
-   with a traceable comment). Board → Done (built-in). Finalize is driven by the merge event, not by a CI
-   busy-wait.
+4. **Implement + review-first, then open the PR** (`flow-implement`) via subagents (worker orchestrates;
+   `sstable-developer` model:opus implements TDD, iterating on `scripts/agent-gate.sh --lite` — it NEVER
+   runs the full gate, #1855). On the lite-green diff, run **review-first by default** (rust-reviewer +
+   roborev BEFORE any full gate, #2086); triage findings blocker/nit per `docs/development/roborev-severity.md`
+   (#2088) — blockers fixed with `--lite` re-cert (#2087), nits batched into one follow-up issue — then open
+   the PR. **Out-of-scope bug found** → a subagent files a new detailed issue (never fix it inline / never
+   grow the diff); if it **blocks** completion, comment "blocked on #<new>" on your issue, pause, and surface
+   to the manager (it sequences via `HOLD`/Ready) — fix it only as its own 1:1:1:1 claim.
+5. **`flow-closer` runs the endgame (#2084) and merges on green.** `flow-implement` spawns a disposable
+   per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via `run_in_background`
+   + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall watchdog), the
+   **C** intent audit (design), and the final roborev pass, then — with any `HOLD: merge after #N` obeyed —
+   merges on green (`gh pr merge --squash --delete-branch`) and returns only a terminal packet. Any src
+   change after the full gate INVALIDATES it — the closer re-runs the gate if a fix or rebase postdates it.
+   No worker CI busy-wait (`ScheduleWakeup`-polling a PR's own CI is prohibited).
+6. **Finalize follows the merge.** The merge event triggers `flow-finalize` (archive any OpenSpec change,
+   **stamp the telemetry ledger** with the roborev blocker/nit split, remove the worktree, delete the origin
+   claim branch + clear the heartbeat, close the issue with a traceable comment). Board → Done (built-in).
+   The lead then **resets** — zero prior-issue carryover, next item re-hydrated from the board alone (#2085).
 
 ## Merge-on-green (how a green PR lands — no worker CI busy-wait)
 

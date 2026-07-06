@@ -4,14 +4,17 @@
 # anchor..HEAD that touches ONLY what the re-cert can EXECUTE — rust cargo test
 # code (AUTHORITATIVE: a .rs file that IS a Cargo `--test` target scoped-tests
 # runs, discovered via cargo metadata — NOT globs; roborev job 3327), python
-# binding tests (bindings/python/tests/, run by the #1893 python tier), and/or
-# docs (markdown ONLY: *.md anywhere; non-md files under docs/ or website/ are
-# REFUSED) — may re-certify with file-size + fmt +
-# the changed test targets; ANYTHING else in the diff FAILs closed (a fresh full
-# gate is required), including a .rs that is NOT a --test target (nested helper
-# mods, src *_test(s).rs, scripts/*.rs, the workspace-excluded fuzz/ crate), node
-# __test__/ files, and scripts/tests/*.sh, which --delta's components never
-# execute (roborev jobs 1452 / 3327). Because the allow decision is now cargo
+# binding tests (bindings/python/tests/, run by the #1893 python tier), docs
+# (markdown ONLY: *.md anywhere; non-md files under docs/ or website/ are REFUSED),
+# node jest tests (bindings/node/__test__/, executed by run_delta_node_tests — issue
+# #2081), and shell self-tests (scripts/tests/*.sh, executed by
+# run_delta_shell_selftests — issue #2081) — may re-certify with file-size + fmt +
+# the changed test targets + those executors; ANYTHING else in the diff FAILs closed
+# (a fresh full gate is required), including a .rs that is NOT a --test target (nested
+# helper mods, src *_test(s).rs, scripts/*.rs, the workspace-excluded fuzz/ crate) and
+# src/Cargo.*/workflows/config/test-data. A node __test__/ delta additionally REFUSES
+# up front when the native module is not built (--delta never builds with cargo —
+# issue #2081). Because the allow decision is now cargo
 # metadata-backed, the ALLOW cases below use REAL existing --test target files
 # (invented paths cargo does not know would correctly REFUSE). The delta run
 # emits a DISTINCT "==== AGENT-GATE DELTA SUMMARY ====" block (MODE: delta) that
@@ -166,13 +169,15 @@ else
   bad "no-metadata-parser: *.md should ALLOW without metadata (got '$no_meta_md')"
 fi
 
-# 2b. NON-EXECUTABLE test classes → REFUSE (roborev job 1452): --delta's
-#     components (file-size, fmt, scoped-tests) never run node jest or the shell
-#     self-tests, so an ALLOW here would yield a PASS DELTA block for an
-#     untested change. Both must fail closed to the full gate.
-assert_verdict "node-test-file-refuses" REFUSE \
+# 2b. node jest tests + shell self-tests → ALLOW (issue #2081): --delta now EXECUTES
+#     them (run_delta_node_tests against the already-built native module;
+#     run_delta_shell_selftests runs the changed scripts/tests/*.sh verbatim), so a
+#     node-test-only or shell-selftest-only polish round re-certifies with --delta
+#     instead of a whole new full gate. (The node executor REFUSES up front if the
+#     native module is not built — see the node-build-gate cases below.)
+assert_verdict "node-test-file-allows" ALLOW \
   "bindings/node/__test__/database.test.js"
-assert_verdict "shell-selftest-refuses" REFUSE \
+assert_verdict "shell-selftest-allows" ALLOW \
   "scripts/tests/test_agent_gate_summary.sh"
 
 # 3. docs-only → ALLOW. The doc allowlist is MARKDOWN ONLY (*.md anywhere,
@@ -476,6 +481,91 @@ if [ "$rn_ok" = 1 ]; then
   fi
 else
   skip "rename-refuses: could not set up temp git repo (git unavailable)"
+fi
+
+# 11. ISSUE #2081: --delta EXECUTES node __test__/ + scripts/tests/*.sh.
+# 11a. Classification: both new classes ALLOW; a mixed diff with ANY production file
+#      still REFUSES (fail-closed unchanged).
+assert_verdict "node-only-allows"   ALLOW "bindings/node/__test__/database.test.js"
+assert_verdict "shell-only-allows"  ALLOW "scripts/tests/test_agent_gate_summary.sh"
+mixed_verdict=$(printf '%s\n' "scripts/tests/test_x.sh" "cqlite-core/src/lib.rs" \
+  | bash "$GATE" --delta-classify 2>/dev/null | grep -E '^VERDICT: ' | sed 's/^VERDICT: //')
+if [ "$mixed_verdict" = REFUSE ]; then
+  ok "node/shell + src mixed diff still REFUSES (fail-closed unchanged)"
+else
+  bad "mixed shell+src diff should REFUSE (got '$mixed_verdict')"
+fi
+
+# 11b. Shell self-test EXECUTOR runs the changed scripts (issue #2081). Drive the
+#      SAME executor run_delta uses (via the hidden --delta-run-shell hook) against a
+#      committed fixture that drops a sentinel — proving it actually RAN — and a
+#      variant that exits non-zero to exercise the FAIL path. Hermetic (no cargo/git).
+probe="scripts/tests/fixtures/delta_shell_probe.sh"
+sentinel="$tmp/shell-probe-ran"
+rm -f "$sentinel"
+shell_out=$(printf '%s\n' "$probe" \
+  | DELTA_SHELL_PROBE_SENTINEL="$sentinel" bash "$GATE" --delta-run-shell 2>/dev/null)
+if [ -f "$sentinel" ] && printf '%s\n' "$shell_out" | grep -qxF "shell-selftest: $probe PASS"; then
+  ok "shell-executor: changed scripts/tests/*.sh was EXECUTED (sentinel written) and reported PASS"
+else
+  bad "shell-executor: fixture did not run or did not report PASS"
+  echo "------- out -------"; printf '%s\n' "$shell_out"; echo "sentinel: $(test -f "$sentinel" && echo present || echo absent)"; echo "-------------------"
+fi
+if printf '%s\n' "$probe" | DELTA_SHELL_PROBE_FAIL=1 bash "$GATE" --delta-run-shell >/dev/null 2>&1; then
+  bad "shell-executor: a failing self-test script should make the executor exit non-zero"
+else
+  ok "shell-executor: a failing self-test script makes the executor FAIL (non-zero exit)"
+fi
+# A non-scripts/tests/*.sh path passed to the executor is a no-op (not matched).
+noop_out=$(printf '%s\n' "docs/x.md" | bash "$GATE" --delta-run-shell 2>/dev/null)
+if printf '%s\n' "$noop_out" | grep -qxF "shell-selftest: (none)"; then
+  ok "shell-executor: non-scripts/tests path is a no-op (nothing executed)"
+else
+  bad "shell-executor: expected '(none)' for a non-shell path (got '$noop_out')"
+fi
+
+# 11c. Node-build GATE (issue #2081, the load-bearing design point): --delta ALLOWS
+#      node __test__/ ONLY when the native module is already built — it must NEVER
+#      build with cargo. The hidden --delta-node-ready hook exposes the SAME decision
+#      run_delta's up-front refusal consumes.
+node_ready=$(bash "$GATE" --delta-node-ready 2>/dev/null | head -1)
+case "$node_ready" in
+  READY|NOT-READY) ok "node-ready: hook reports a definite build state ($node_ready)" ;;
+  *) bad "node-ready: unexpected build-state token '$node_ready'" ;;
+esac
+# 11d. Node-build REFUSAL end-to-end (fail-closed): in an ISOLATED git repo with a
+#      node-__test__-only diff and NO built native module, run_delta must REFUSE
+#      (before any executor / cargo), naming the not-built reason — never a vacuous
+#      green. Mirrors the rename-refuses harness (copies agent-gate.sh into a temp repo).
+nd_repo="$tmp/node-refuse-repo"
+mkdir -p "$nd_repo/scripts" "$nd_repo/bindings/node/__test__"
+cp "$GATE" "$nd_repo/scripts/agent-gate.sh"
+(
+  cd "$nd_repo" \
+    && git init -q \
+    && git config user.email t@cqlite.test && git config user.name cqlite-test \
+    && printf 'test("x", () => {});\n' > bindings/node/__test__/probe.test.js \
+    && git add -A && git commit -qm anchor
+) >/dev/null 2>&1 && nd_ok=1 || nd_ok=0
+if [ "$nd_ok" = 1 ]; then
+  nd_anchor=$(cd "$nd_repo" && git rev-parse HEAD 2>/dev/null)
+  ( cd "$nd_repo" && printf 'test("x", () => { expect(1).toBe(1); });\n' > bindings/node/__test__/probe.test.js \
+    && git commit -qam edit ) >/dev/null 2>&1
+  nd_out="$tmp/node-refuse.log"
+  # No *.node under the temp repo's bindings/node → _delta_node_build_ready is FALSE.
+  ( cd "$nd_repo" && bash scripts/agent-gate.sh --delta "$nd_anchor" ) >"$nd_out" 2>&1
+  nd_rc=$?
+  if [ "$nd_rc" -ne 0 ] \
+    && grep -q "^RESULT: REFUSED" "$nd_out" \
+    && grep -qi "native module is not built" "$nd_out" \
+    && ! grep -q "^RESULT: PASS" "$nd_out"; then
+    ok "node-build-refuse: a node __test__ delta with an UNBUILT module REFUSES (fail-closed, no cargo)"
+  else
+    bad "node-build-refuse: expected RESULT: REFUSED naming the unbuilt module (rc=$nd_rc)"
+    echo "------- captured -------"; cat "$nd_out" 2>/dev/null; echo "------------------------"
+  fi
+else
+  skip "node-build-refuse: could not set up temp git repo (git unavailable)"
 fi
 
 echo "----"

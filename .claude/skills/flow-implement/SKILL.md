@@ -1,15 +1,28 @@
 ---
 name: flow-implement
-description: Implement an approved issue — spawn the specialist team (sstable-developer TDD → agent-gate → spec-auditor C → rust-reviewer/test-validator → roborev) in the issue's worktree, then push the branch and open a PR. Third stage of the CQLite delivery pipeline. Requires owner approval of the spec (design-driven) first; opens but does NOT merge the PR by default. Use when the owner says "implement #N".
+description: Implement an approved issue — spawn sstable-developer (TDD) in the issue's worktree, run rust-reviewer + roborev on the lite-green diff BEFORE any full gate (review-first is default), open the PR, then hand the endgame (the ONE full gate → C → final roborev → merge-on-green → finalize) to a disposable flow-closer agent so gate/review churn never accretes in the lead session. Third stage of the CQLite delivery pipeline. Requires owner approval of the spec (design-driven) first. Use when the owner says "implement #N".
 ---
 
-# flow-implement — build it, run the quality stages, open a PR
+# flow-implement — build it, review it, open a PR, hand off the endgame
 
 You are the CQLite delivery lead. The owner has approved the spec (design-driven) or the issue is an
-oracle-driven bug ready to fix. Drive the team to a review-ready PR. **Do not merge by default.**
+oracle-driven bug ready to fix. Drive the team to a **reviewed, PR-open** state, then spawn `flow-closer`
+to run the terminal stages in its own disposable context.
 
 Input: issue `#N`. Worktree `.claude/worktrees/issue-<N>-<slug>`, branch `issue-<N>-<slug>`,
 OpenSpec change `<slug>` (design-driven only).
+
+## The loop (one design, read it end-to-end)
+
+`implement (TDD) → lite (each round) → rust-reviewer + roborev on the lite-green diff (review-first,
+DEFAULT) → fix (lite re-cert, scoped targets — never a full gate) → open PR → flow-closer {FULL gate
+ONCE → C → final roborev → merge-on-green → finalize}`
+
+Review runs **before** the first full gate (issue #2086), so the ONE full gate of record certifies
+already-reviewed code exactly once, immediately pre-merge (issue #2087). Roborev fix rounds re-certify with
+`--lite` + diff-scoped targets, never a full gate. The full gate, the C audit, the final roborev pass, and
+the merge all run inside `flow-closer` (issue #2084) — the lead's context receives only its terminal packet,
+never gate stdout or review churn.
 
 ## Steps
 
@@ -37,7 +50,9 @@ OpenSpec change `<slug>` (design-driven only).
    wt=".claude/worktrees/issue-<N>-<slug>"
    git -C <repo-root> fetch origin -q
    if git -C <repo-root> worktree list | grep -q "$wt"; then
-     :  # design-driven: worktree + pushed claim already exist (from flow-activate)
+     # design-driven: worktree + pushed claim already exist (from flow-activate).
+     # Implementation starting IS a stage transition — refresh the heartbeat (#2089).
+     scripts/flow/claim-heartbeat.sh beat <N>
    else
      # oracle-driven: claim now. Refuse if another machine already holds the lock.
      if git -C <repo-root> ls-remote --heads origin "issue-<N>-*" | grep -q .; then
@@ -53,6 +68,7 @@ OpenSpec change `<slug>` (design-driven only).
      git -C <repo-root> fetch origin -q
      [ "$(git -C <repo-root> ls-remote --heads origin "issue-<N>-<slug>" | awk '{print $1}')" \
        = "$(git -C "$wt" rev-parse HEAD)" ] || { echo "Lost the race — back off."; exit 0; }
+     scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
    fi
    ```
 3. **Test data.** Worktrees lack the gitignored `Data.db` binaries — run the gate and tests with
@@ -62,58 +78,51 @@ OpenSpec change `<slug>` (design-driven only).
    `sstable-developer` (explicit `model: opus` — pinned models are inaccessible) to implement test-first in
    the worktree. For parallelizable subtasks spawn several; sequence dependents. Use `test-validator` for
    gate/failure triage and `Explore` for code search — keep raw file contents out of your context. The
-   implementer runs the **fix-round loop below, in order**, and returns only a short summary + the LITE
-   block (NOT the full SUMMARY) each round:
+   implementer runs the **fix-round loop below, in order**. **Capped return contract (issue #2080):** each
+   round it returns EXACTLY the `==== AGENT-GATE LITE SUMMARY ====` block (~15 lines) + **≤5 lines of prose**
+   (what changed, what's next) — never raw lite/gate output, full test logs, or diffs; it references file
+   paths instead.
    1. Make the next test-first change.
-   2. **Run `scripts/agent-gate.sh --lite`** (fmt + file-size + FULL-workspace clippy + blast-radius-scoped
-      tests, ~1-5 min). It is the FAST ITERATION gate, NOT the gate of record; it emits a distinct
-      `==== AGENT-GATE LITE SUMMARY ====` block that must NEVER be pasted as the full SUMMARY.
+   2. **Run `scripts/agent-gate.sh --lite` with the summary-file redirect** (issue #2079 — never stream raw
+      gate stdout into a persistent context):
+      ```bash
+      AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
+        scripts/agent-gate.sh --lite > lite-<N>.log 2>&1 < /dev/null
+      cat /tmp/lite-<N>.txt   # the complete LITE block (default recovery: .agent-gate-lite-summary.txt)
+      ```
+      Lite runs fmt + file-size + FULL-workspace clippy + blast-radius-scoped tests (~1-5 min). It is the
+      FAST ITERATION gate, NOT the gate of record; its distinct `MODE: lite` block must NEVER be pasted as
+      the full SUMMARY.
    3. If lite FAILs, fix and go to step 2. Repeat until lite is PASS and the change is complete.
-   Do NOT run the full `scripts/agent-gate.sh` during the fix-round loop — that is step 6.
-5. **Conditional internal review-first (issue #1821) — BEFORE the first full gate.** If the diff changes a
-   `pub` item, touches >1 call site of a changed symbol, or adds a new surface, run an internal
-   `rust-reviewer` pass (explicit `model: opus`) now and address its findings — this catches structural
-   findings before a 12-25 min full-gate cycle is spent. **Skip this step** for mechanical/localized diffs.
-   Re-run `scripts/agent-gate.sh --lite` after any review-driven change.
-6. **Gate (correctness) — YOU (the lead) run the FULL `scripts/agent-gate.sh` EXACTLY ONCE before merge.**
-   **Division of labor (issue #1855):** the implementer subagent's job ends at commit + push + report with
-   `--lite`/targeted-test evidence — it MUST NEVER invoke the full gate. The LEAD runs the full gate and
-   roborev, because a subagent idle-waiting on a 12-20 min gate gets killed by the 600s stall watchdog and
-   the dying agent takes its child gate process down with it (3 implementers lost this way 2026-07-03/04).
-   After the fix-round loop converges (and step 5, if applicable), run the FULL gate in the worktree; it
-   must be PASS. **`--lite` NEVER replaces this** — the full `==== AGENT-GATE SUMMARY ====` block is the
-   ONLY run that counts. Loop shape: `implement → lite (each round) → conditional review-first → lite →
-   FULL gate ONCE → roborev → CI → merge`. Paste the AGENT-GATE SUMMARY block. A known-flaky lane (e.g.
-   `test_flush_throughput`, py3.9) that passes on re-run is not a failure — note it.
-   - **Queued gate ≠ hung gate.** Under load the full gate may **queue for a #1825 slot** (prints
-     `waiting for gate slot (N in use)…` once) then run 15-20 min — total wall time can exceed 20 min. Use a
-     long Bash `timeout` or `run_in_background`; check for that `waiting for gate slot` line before assuming a
-     hang. The default 2-min Bash timeout truncates a queued gate. If you must watch it, poll the summary
-     file with a cheap `grep` at <5-min intervals — never a silent wait.
-   - **Gate PASS ≠ CI green** (L2, flow-meta #1310). The local gate does NOT run every CI lane (it uses
-     pre-existing datasets and a subset of `--test` targets). When the change touches a **regenerate path,
-     a fixture parser, or a fail-closed CI guard**, reproduce the **actual CI lane** locally before relying
-     on the gate — regenerate sources from the live container → corpus gen → the lane's exact target (e.g.
-     `compression-corruption-parity` = regenerate + require-fixtures; `parity-manifest` =
-     `cargo test -p cassandra-parity --test corpus_audit_tests`). #1236 and #1199 both passed the gate then
-     failed CI on lanes the gate never ran. (#1269 reconciles the gate's component set with the CI lanes.)
-   - **Never gate a non-deterministically-regenerated source on a whole-file byte identity** — the BTI trie
-     (`Partitions.db`/`Rows.db`) and `Statistics.db` are not byte-reproducible across regen runs. Gate the
-     **semantic verdict** (the parity test), keep the empty/missing-verdict authoring check fail-closed
-     (validation playbook, L1). Per-component binding is tracked in #1294.
-7. **C — intent audit** (design-driven). Spawn `spec-auditor` (explicit model) anchored to
-   `openspec/changes/<slug>/specs/**`. Verdict must be PASS — every requirement `satisfied` with a
-   public-surface test as evidence. `unmet`/uncovered/unjustified-`partial` → route the fix back (loop).
-8. **Review.** roborev: `/roborev-review-branch --base origin/main` until clean (fix mechanical findings
-   in the loop; escalate genuine decisions to the owner). Add `rust-reviewer` / `coverage-reviewer` /
-   `test-validator` as the change warrants. (If a roborev round drives a code change, re-run
-   `scripts/agent-gate.sh --lite` to iterate, then the FULL gate once more before merge.)
-9. **Open the PR.** The claim branch is already on origin (pushed in step 2); this push sends the
-   implementation commits. Use a closing keyword (`Closes #<N>`) so merge auto-closes the issue:
+   Do NOT run the full `scripts/agent-gate.sh` during the fix-round loop — that is the `flow-closer`'s single
+   gate of record (step 7).
+5. **Review-first — DEFAULT, BEFORE the first full gate (issues #2086/#2087/#2088).** On the **lite-green**
+   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev
+   (`/roborev-review-branch --base origin/main`, machine-configured agent) NOW — before any full gate — so
+   the ONE full gate certifies already-reviewed code. **Skip review-first ONLY for a genuinely mechanical
+   diff:** no `pub`-item change AND a single call site AND no new surface (the narrow inverse of the old
+   conditional). When in doubt, review.
+   - **Triage every finding per `docs/development/roborev-severity.md`.** **Blockers** (correctness,
+     data-parity, no-heuristics violations, safety/unwrap-panic paths, wiring-evidence gaps, security, any
+     stated acceptance criterion) are fixed now — each re-triggers `fix → --lite re-cert → re-review`.
+     **Nits** (style/naming, comment/doc polish, test-robustness suggestions with no failing scenario) are
+     **batched into ONE linked follow-up issue** (labeled, referencing the PR) opened at merge time and NEVER
+     trigger a re-verify round. When in doubt, blocker.
+   - **Scoped re-cert, never a full gate here (issue #2087).** A blocker fix that touches src re-certifies
+     with `scripts/agent-gate.sh --lite` (blast-radius-scoped tests) + any diff-relevant parity/integration
+     `--test` target — NOT a full gate. The single full gate of record runs once, immediately pre-merge, in
+     the `flow-closer` (step 7). Lite re-certs are never the gate of record (their `MODE: lite` marker
+     enforces that).
+   - Add `coverage-reviewer` / `test-validator` as the change warrants. Escalate a genuine **design-call**
+     finding to the owner (NEEDS-YOU) rather than deciding it.
+6. **Open the PR** (reviewed, lite-green code). The claim branch is already on origin (pushed in step 2);
+   this push sends the implementation commits. Use a closing keyword (`Closes #<N>`) so merge auto-closes
+   the issue, then refresh the heartbeat (#2089):
    ```bash
    gh issue edit <N> --remove-label status:in-progress --add-label status:in-review
    git -C <worktree> push -u origin issue-<N>-<slug>
    gh pr create --base main --head issue-<N>-<slug> --fill   # ensure body has "Closes #<N>"
+   scripts/flow/claim-heartbeat.sh beat <N>                  # PR-open stage transition
    # Board → In Review fires via GitHub's "Pull request linked to issue" built-in. Belt-and-suspenders:
    # run the flow-board detection snippet first (switches to the project-capable account), then
    # gh project item-edit ... Status=In Review when have_project=1; else the label above + loud ⚠️ warning.
@@ -123,28 +132,26 @@ OpenSpec change `<slug>` (design-driven only).
    exhausted, fall back to `gh api` REST: PR create → `repos/OWNER/REPO/pulls`, comment →
    `repos/OWNER/REPO/issues/N/comments`, merge → `repos/OWNER/REPO/pulls/N/merge`. Never stall a pipeline
    step on a single exhausted bucket.
-10. **Terminal state — arm merge-on-green, then STOP.** The worker's terminal state for an issue is
-   **PR-open + `agent-gate.sh` PASS + (design-driven) spec-auditor C PASS + roborev clean**. At that point
-   you arm the merge-on-green mechanism and **end your turn** — there is no human merge click, and you do
-   NOT poll the PR's own external CI. Steps:
-   - **Check the manager's orders**: read the issue's `🧭 MANAGER <!-- MGR:... -->` comments. If the
-     latest order is `HOLD: merge after #N`, keep merge-on-green **gated behind #N** (the manager sequences
-     it); obey `ORDER`.
-   - Rebase on current `origin/main`; resolve any conflict in your own worktree.
-   - **Arm merge-on-green and END your turn — do NOT busy-poll CI.** Do not schedule repeated
-     `ScheduleWakeup` cycles to watch the PR's cross-platform CI matrix after the work is done; that is the
-     token bleed this doctrine forbids. Landing on green is delegated:
-     - **Primary today — the manager-owned poller.** `main` has no required status checks (`contexts=[]`),
-       so `gh pr merge --auto` would merge instantly against an empty check set (forbidden). Hand the PR
-       off to the manager-owned poller/merge-engine, which gates on an explicit lane set and lands it on
-       green. Log that you armed the poller path.
-     - **Once required status checks are configured on `main`** — arm `gh pr merge --auto --squash
-       --delete-branch` (GitHub lands it natively when the required checks pass, zero tokens). Log that path.
-   - **`flow-finalize <N>`** runs on the merge event (archive any OpenSpec change, stamp the telemetry
-     ledger, remove the worktree, delete the origin claim lock, close the issue with a traceable comment) —
-     triggered by the merge, not by a CI busy-wait.
-   Escalate to the owner (do NOT arm merge-on-green) only for: an unresolved roborev finding that's a
-   genuine design call, a scope/product question, or anything outside this issue. Report the terminal state
-   + gate/C/roborev summary + which merge-on-green path you armed.
-   (`ScheduleWakeup` remains valid for genuinely external, harness-untracked state — just not for polling a
-   PR's own CI after the work is complete.)
+7. **Hand the endgame to `flow-closer` — the disposable per-issue closer (issue #2084).** Spawn
+   `flow-closer` (explicit `model: opus`) once, passing `#N`, the worktree/branch, routing, the OpenSpec
+   `<slug>` (design only), the open PR number, and `CQLITE_DATASETS_ROOT`. It owns the terminal stages in
+   its **own** context so gate stdout, the C audit, and roborev churn never accrete in yours:
+   1. Runs THE full `scripts/agent-gate.sh` **exactly once** — the ONLY gate of record — via
+      `Bash run_in_background` with the summary-file pattern (issue #2079). **It NEVER idle-waits** on the
+      gate: a subagent that idle-waits on a 12-25 min gate is killed by the 600s stall watchdog and orphans
+      the gate process (#1855). The harness re-invokes it on gate exit; it reads the SUMMARY from the file.
+   2. Spawns `spec-auditor` for **C** PASS (design-routed): every requirement `satisfied` with a
+      public-surface test; `unmet`/uncovered/unjustified-`partial` blocks merge.
+   3. Runs a **final roborev confirmation pass** (should be clean-on-arrival after step 5's review-first).
+      Triage per `docs/development/roborev-severity.md`: mechanical blockers fixed inline by the closer;
+      src-design blockers respawn a fresh `sstable-developer`; nits batched into the follow-up issue.
+      **Any src change after the full gate INVALIDATES it** — the gate of record must postdate the final
+      src change AND the final rebase, so the closer re-runs the full gate if either happened.
+   4. Merges on green (`gh pr merge --squash --delete-branch`, worker-merges-own-PR model) — obeying any
+      open `HOLD: merge after #N` — then runs `flow-finalize`.
+   5. Returns ONLY a terminal packet: `{verdict, PR URL, summary-file path, C, roborev, ≤10 lines
+      residual}`. Escalations (design-call finding, unmet requirement, scope/product question, work outside
+      the issue) come back as `verdict: blocked` for the owner's NEEDS-YOU list — the closer holds the merge.
+8. **Report.** Relay the closer's terminal packet — verdict, PR URL, the gate-of-record summary-file path,
+   the C/roborev line, and any residual — to the owner. **Never read the raw gate log or roborev transcript
+   into your context**; the terminal packet is all you retain (that is the whole reason the closer exists).

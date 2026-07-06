@@ -29,6 +29,10 @@ Thumbs.db
 *.log
 logs/
 
+# worker-supervisor runtime state (issue #2090)
+/.worker-stop
+/.worker-last-iteration.json
+
 # Test data
 test-data/sstables/
 test-data/output/

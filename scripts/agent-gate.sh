@@ -638,11 +638,13 @@ classify_scoped_plan() {
 #     validates them, so a blanket docs/ or website/ allow would break the
 #     fail-closed promise (roborev job 3325). The old blanket `docs/*` and
 #     `website/*` globs were removed for exactly this reason.
+# Also EXECUTED (issue #2081): node jest files (`bindings/node/__test__/*`, run by
+# run_delta_node_tests against the already-built native module — run_delta REFUSES up
+# front if it is not built, never building with cargo) and shell self-tests
+# (`scripts/tests/*.sh`, executed verbatim by run_delta_shell_selftests).
 # Deliberately REFUSED (require the full gate — --delta cannot execute them):
-# node jest files (`__test__/` — scoped-tests only compile-checks cqlite-node,
-# it never runs jest), shell self-tests (`scripts/tests/*.sh` — no gate component
-# in the delta subset runs them; only the full gate's tooling-tests does), and any
-# `.rs` that is not a Cargo `--test` target. The caller precomputes the
+# any `.rs` that is not a Cargo `--test` target, plus everything outside the allowed
+# classes above (src, Cargo.*, workflows, config, test-data). The caller precomputes the
 # allowed-.rs set ONCE per delta run (via _delta_rs_target_paths, which calls cargo
 # metadata a single time) into _DELTA_RS_ALLOWED_SET; this function consults that
 # cached set for `.rs` paths — never invoking cargo per file. Defined before the
@@ -700,6 +702,12 @@ _delta_is_allowed_path() {
       printf '%s\n' "$_DELTA_RS_ALLOWED_SET" | grep -qxF "$1" && return 0
       return 1
       ;;
+    # node jest tests (issue #2081) — run by run_delta_node_tests against the
+    # ALREADY-BUILT native module. ALLOWED here; run_delta REFUSES up front if the
+    # module is not built (fail-closed — --delta never builds with cargo).
+    bindings/node/__test__/*) return 0 ;;
+    # shell self-tests (issue #2081) — executed verbatim by run_delta_shell_selftests.
+    scripts/tests/*.sh) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -755,6 +763,135 @@ _delta_python_tier_gap() {
   return 0
 }
 
+# ---- issue #2078: FULL-gate fail-closed on an absent dataset corpus ------------
+# The dataset preflight (far below) counts ALL *-Data.db under
+# $CQLITE_DATASETS_ROOT/sstables. A FRESH worktree already carries ~19 tiny
+# FORCE-ADDED byte-parity reference *-Data.db (test_compactionparity/,
+# test_writeparity/, ...), so that count is > 0 even when the FETCHED validation
+# corpus is ABSENT. The main dataset components (core-tests, smoke, python-bindings)
+# scan the fetched corpus (test_basic/...); when it is missing they SKIP internally
+# and the gate SKIP-then-PASSes — a green SUMMARY validating ZERO dataset-backed
+# correctness. The FULL gate must instead FAIL CLOSED. --lite (returns before the
+# preflight) and --only (kept lenient by the historical DATA_COUNT==0 check) are
+# UNCHANGED.
+CANONICAL_FIXTURE_KEYSPACE="test_basic"
+# Stamped into the SUMMARY when the opt-out (AGENT_GATE_ALLOW_MISSING_FIXTURES=1)
+# restores SKIP, so an intentional opt-out is visible in the pasted block.
+MISSING_FIXTURES_MARKER=""
+
+# _missing_fixtures_marker: the machine-checkable OPT-OUT line stamped into the
+# SUMMARY. Single-sourced so the real preflight and the hidden --preflight-fixtures
+# hook print identical text.
+_missing_fixtures_marker() {
+  printf '%s' "missing-fixtures: OPT-OUT (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — canonical corpus '$CANONICAL_FIXTURE_KEYSPACE' absent under $CQLITE_DATASETS_ROOT/sstables; dataset-dependent components SKIP; this run does NOT validate dataset-backed correctness (#2078)"
+}
+
+# _fixture_status: PURE decision for the FULL-gate canonical-corpus guard. Echoes
+# exactly one token: OK (corpus present, or not the full gate → no-op), OPTOUT
+# (corpus absent + AGENT_GATE_ALLOW_MISSING_FIXTURES=1 → restore SKIP + marker), or
+# FAIL (corpus absent, no opt-out → the full gate must FAIL CLOSED). No side effects,
+# so the hidden --preflight-fixtures hook asserts the SAME decision
+# apply_fixture_preflight consumes (single-source; no drift).
+_fixture_status() {
+  # Only the FULL gate is strict: --only stays lenient, --lite already returned.
+  [ -z "$ONLY" ] || { echo OK; return 0; }
+  [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  local n
+  n=$(find "$CQLITE_DATASETS_ROOT/sstables/$CANONICAL_FIXTURE_KEYSPACE" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
+  [ "${n:-0}" -gt 0 ] && { echo OK; return 0; }
+  [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && { echo OPTOUT; return 0; }
+  echo FAIL
+}
+
+# apply_fixture_preflight: EFFECTFUL FULL-gate canonical-corpus guard (issue #2078).
+# Consumes _fixture_status. OK → no-op (byte-identical to pre-#2078). OPTOUT → set
+# MISSING_FIXTURES_MARKER + a loud WARN, then return (lenient SKIP restored). FAIL →
+# emit a FAIL SUMMARY with a one-line remedy and exit 1 (the full gate fails closed).
+# Called only at runtime (after emit_summary is defined + the startup sentinel is
+# written), so the FAIL branch may safely emit + exit.
+apply_fixture_preflight() {
+  case "$(_fixture_status)" in
+    OK) return 0 ;;
+    OPTOUT)
+      MISSING_FIXTURES_MARKER="$(_missing_fixtures_marker)"
+      echo "agent-gate: WARN: canonical dataset corpus ($CANONICAL_FIXTURE_KEYSPACE) absent — AGENT_GATE_ALLOW_MISSING_FIXTURES=1 set; dataset coverage SKIPPED, marker stamped in the SUMMARY (#2078)" >&2
+      return 0 ;;
+    *)
+      echo "agent-gate: FAIL: canonical dataset corpus absent — no *-Data.db under $CQLITE_DATASETS_ROOT/sstables/$CANONICAL_FIXTURE_KEYSPACE (#2078)" >&2
+      echo "agent-gate: only committed byte-parity references are present; the FETCHED validation corpus is missing, so dataset components would SKIP and the gate would falsely PASS." >&2
+      echo "agent-gate: remedy: bash test-data/scripts/fetch-datasets.sh  (or point CQLITE_DATASETS_ROOT at a checkout that has it)" >&2
+      echo "agent-gate: intentional opt-out (SKIP, stamped in the SUMMARY): AGENT_GATE_ALLOW_MISSING_FIXTURES=1" >&2
+      emit_summary FAIL \
+        "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
+        "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
+        "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
+      exit 1 ;;
+  esac
+}
+
+# ---- issue #2081: --delta executes node __test__/ + scripts/tests/*.sh ---------
+# --delta re-cert (issue #1892) fail-closed on node jest files + shell self-tests
+# purely because its components could not EXECUTE them. It now can: these helpers
+# classify + run them so a node-test-only or shell-selftest-only polish round after a
+# full-gate PASS re-certifies with --delta instead of forcing a whole new full gate.
+
+# _delta_node_targets / _delta_shell_targets: read repo-relative paths on stdin,
+# print the subset that is a node jest test / a shell self-test. Case globs are
+# string matches (`*` spans '/'), so nested paths match too.
+_delta_node_targets() {
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in bindings/node/__test__/*) printf '%s\n' "$f" ;; esac
+  done
+}
+_delta_shell_targets() {
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in scripts/tests/*.sh) printf '%s\n' "$f" ;; esac
+  done
+}
+
+# _delta_node_build_ready (issue #2081): TRUE (0) iff node+npm are on PATH AND the
+# napi native module is already BUILT (a platform *.node exists in bindings/node/),
+# so run_delta_node_tests can run jest WITHOUT a cargo build. FALSE otherwise →
+# run_delta REFUSES a node-__test__ delta (fail-closed: --delta must never build with
+# cargo nor pass vacuously). Pure check; exposed via the --delta-node-ready hook.
+# NOTE: this probe is existence-only (it does not check the .node's mtime/hash
+# against the anchor or current tree) — a pre-anchor stale .node could in
+# principle serve a vacuous jest pass IF the anchor full gate itself skipped
+# node-bindings. This is acceptable ONLY because --delta separately refuses the
+# whole re-cert on any src change (including bindings/node/src/**), so in the
+# normal flow the module on disk is always >= the anchor commit; it is not a
+# correctness gap this check needs to close on its own.
+_delta_node_build_ready() {
+  command -v node >/dev/null 2>&1 || return 1
+  command -v npm  >/dev/null 2>&1 || return 1
+  local nd
+  nd=$(find "$REPO_ROOT/bindings/node" -maxdepth 1 -name '*.node' 2>/dev/null | head -1)
+  [ -n "$nd" ]
+}
+
+# _run_shell_selftest_files <path...> (issue #2081): execute each repo-relative
+# scripts/tests/*.sh self-test via `bash <repo-root>/<path>`. Echoes
+# "shell-selftest: <path> PASS|FAIL" per script; returns 0 iff ALL passed. Shared by
+# run_delta_shell_selftests and the hidden --delta-run-shell hook (single-source).
+_run_shell_selftest_files() {
+  local rc=0 f log
+  for f in "$@"; do
+    [ -n "$f" ] || continue
+    log=$(mktemp "${TMPDIR:-/tmp}/agent-gate-shellst.XXXXXX")
+    if bash "$REPO_ROOT/$f" >"$log" 2>&1; then
+      echo "shell-selftest: $f PASS"
+    else
+      echo "shell-selftest: $f FAIL"; tail -30 "$log"; rc=1
+    fi
+    rm -f "$log"
+  done
+  return "$rc"
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -784,6 +921,9 @@ DELTA=0
 DELTA_ANCHOR=""
 DELTA_ANCHOR_RUN_ID=""
 DELTA_ANCHOR_SUMMARY_FILE=""
+# Names of the executors that RAN a --delta re-cert, for the DELTA SUMMARY's
+# `delta-executors:` line (issue #2081). Populated by run_delta after run_scoped_tests.
+DELTA_EXECUTORS=""
 # Optional base-ref override (issue #1892): run_file_size and run_scoped_tests
 # resolve their diff base from this when set, instead of merge-base with main.
 # --delta points it at the anchor commit so the ratchet + scoping cover exactly
@@ -839,6 +979,24 @@ case "${1:-}" in
   # _delta_python_tier_gap decision run_delta consumes, so the self-test asserts the
   # real fail-closed behavior hermetically (no cargo/maturin/git).
   --delta-python-gap) _delta_python_tier_gap "${2:-}" && echo GAP || echo OK; exit 0 ;;
+  # Hidden self-test hook (issue #2078): print the FULL-gate canonical-corpus
+  # decision (OK|OPTOUT|FAIL) from _fixture_status; on OPTOUT also print the marker
+  # line stamped into the SUMMARY. Pure — the FAIL emit + exit lives in
+  # apply_fixture_preflight (exercised by the real gate run).
+  --preflight-fixtures)
+    _pf_st=$(_fixture_status); echo "STATUS: $_pf_st"
+    [ "$_pf_st" = OPTOUT ] && echo "$(_missing_fixtures_marker)"
+    exit 0 ;;
+  # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
+  # the shell-selftest executor so scripts/tests assert the SAME logic run_delta uses.
+  --delta-node-ready) _delta_node_build_ready && echo READY || echo NOT-READY; exit 0 ;;
+  --delta-run-shell)
+    _drs_changed=$(cat)
+    _drs_targets=$(printf '%s\n' "$_drs_changed" | _delta_shell_targets)
+    _drs_arr=()
+    while IFS= read -r _drs_f; do [ -n "$_drs_f" ] && _drs_arr+=("$_drs_f"); done <<<"$_drs_targets"
+    if [ "${#_drs_arr[@]}" -gt 0 ]; then _run_shell_selftest_files "${_drs_arr[@]}"; exit $?; fi
+    echo "shell-selftest: (none)"; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -1083,6 +1241,11 @@ if [ "$SELFTEST" -eq 1 ]; then
   for i in "${!NAMES[@]}"; do
     meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
+  # #2078: when the opt-out is engaged, drive the visible missing-fixtures marker
+  # through the real emit path so the self-test can assert it lands in the block.
+  if [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ "$(_fixture_status)" = OPTOUT ]; then
+    meta+=("$(_missing_fixtures_marker)")
+  fi
   emit_summary PASS "${meta[@]}"
   # Even the selftest must not exit 0 if it could not write its summary file —
   # the whole point of the selftest is to prove the recovery artifact is produced.
@@ -1934,6 +2097,68 @@ run_lite() {
   esac
 }
 
+# run_delta_node_tests <newline-allowed-paths> (issue #2081): run the changed
+# bindings/node/__test__ jest tests against the ALREADY-BUILT native module. No-op
+# when no node test changed. Scopes jest to the changed *.test.js by basename; a
+# changed non-*.test.js helper/setup runs the WHOLE suite. Appends a node-tests
+# verdict to NAMES; a jest failure sets OVERALL=FAIL. Build-readiness is enforced by
+# run_delta's up-front node-build refusal, so this only runs when node is ready.
+run_delta_node_tests() {
+  local allowed="$1" targets f start end status n_targets whole=0
+  targets=$(printf '%s\n' "$allowed" | _delta_node_targets)
+  [ -n "$(printf '%s' "$targets" | awk 'NF')" ] || return 0
+  local -a filters=()
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      *.test.js) filters+=("$(basename "$f")") ;;
+      *) whole=1 ;;
+    esac
+  done <<<"$targets"
+  n_targets=$(printf '%s\n' "$targets" | awk 'NF' | wc -l | tr -d ' ')
+  echo ">>> [node-tests] jest on $n_targets changed bindings/node/__test__ file(s) (already-built module; no cargo build)"
+  start=$(date +%s)
+  local log jest_filter=""
+  log=$(mktemp "${TMPDIR:-/tmp}/agent-gate-nodedelta.XXXXXX")
+  [ "$whole" -eq 0 ] && jest_filter="${filters[*]}"
+  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" JEST_FILTER="$jest_filter" bash -c '
+      set -uo pipefail
+      cd "'"$REPO_ROOT"'/bindings/node"
+      # Regenerate the JS loader from the ALREADY-BUILT .node (no cargo build).
+      node scripts/generate-loader.mjs >/dev/null 2>&1 || true
+      # shellcheck disable=SC2086  # intentional word-split: multiple jest path filters
+      if [ -n "${JEST_FILTER:-}" ]; then npx jest $JEST_FILTER; else npx jest; fi' >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL; OVERALL=FAIL
+    echo "--- [node-tests] FAILED; last 40 lines ---"; tail -40 "$log"; echo "--- end of node-tests output ---"
+  fi
+  rm -f "$log"
+  end=$(date +%s)
+  NAMES+=("node-tests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }node-tests($n_targets)"
+  echo ">>> [node-tests] $status ($((end - start))s)"
+}
+
+# run_delta_shell_selftests <newline-allowed-paths> (issue #2081): execute the changed
+# scripts/tests/*.sh self-test scripts verbatim. No-op when none changed. Appends a
+# shell-selftests verdict to NAMES; a failing script sets OVERALL=FAIL.
+run_delta_shell_selftests() {
+  local allowed="$1" targets f start end status n_targets
+  targets=$(printf '%s\n' "$allowed" | _delta_shell_targets)
+  [ -n "$(printf '%s' "$targets" | awk 'NF')" ] || return 0
+  local -a tarr=()
+  while IFS= read -r f; do [ -n "$f" ] && tarr+=("$f"); done <<<"$targets"
+  n_targets=${#tarr[@]}
+  echo ">>> [shell-selftests] executing $n_targets changed scripts/tests/*.sh"
+  start=$(date +%s)
+  if _run_shell_selftest_files "${tarr[@]}"; then status=PASS; else status=FAIL; OVERALL=FAIL; fi
+  end=$(date +%s)
+  NAMES+=("shell-selftests"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  DELTA_EXECUTORS="${DELTA_EXECUTORS:+$DELTA_EXECUTORS }shell-selftests($n_targets)"
+  echo ">>> [shell-selftests] $status ($((end - start))s)"
+}
+
 # run_delta <anchor> (issue #1892): TEST/DOCS-ONLY RE-CERTIFICATION. Verifies the
 # diff anchor..HEAD (committed + working tree) touches ONLY test/docs files —
 # FAIL-CLOSED, naming any offending production file — then re-certifies with
@@ -2080,15 +2305,38 @@ run_delta() {
     echo "    A fresh FULL gate is required: scripts/agent-gate.sh" >&2
     echo "    --delta re-certifies ONLY what it can EXECUTE: rust files that ARE a Cargo" >&2
     echo "    --test target (authoritative via cargo metadata, not globs), python binding" >&2
-    echo "    tests (bindings/python/tests/), and docs (*.md anywhere). A .rs that is not a" >&2
-    echo "    --test target (nested helper mods, src *_test(s).rs, scripts/*.rs, the excluded" >&2
-    echo "    fuzz/ crate), node __test__/, and shell scripts/tests require the full gate." >&2
+    echo "    tests (bindings/python/tests/), docs (*.md anywhere), node jest tests" >&2
+    echo "    (bindings/node/__test__/), and shell self-tests (scripts/tests/*.sh). A .rs" >&2
+    echo "    that is not a --test target (nested helper mods, src *_test(s).rs," >&2
+    echo "    scripts/*.rs, the excluded fuzz/ crate) and any other file require the full gate." >&2
     emit_summary REFUSED \
       "${anchor_meta[@]}" \
-      "delta-scope: file-size fmt scoped-tests (NOT RUN — refused before execution)" \
+      "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
       "$(accelerators_line)" \
       "${file_meta[@]}" \
-      "refusal: $n_offending file(s) --delta cannot re-certify — a full gate is required (--delta executes only rust files that ARE a Cargo --test target [authoritative, not glob-based], bindings/python/tests, and *.md docs; non-target .rs + node __test__/ + scripts/tests need the full gate)"
+      "refusal: $n_offending file(s) --delta cannot re-certify — a full gate is required (--delta executes only rust files that ARE a Cargo --test target [authoritative, not glob-based], bindings/python/tests, *.md docs, bindings/node/__test__/ jest tests, and scripts/tests/*.sh; everything else needs the full gate)"
+    [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
+    exit 1
+  fi
+
+  # FAIL-CLOSED (issue #2081): --delta ALLOWS bindings/node/__test__/* on the premise
+  # that run_delta_node_tests runs jest against the ALREADY-BUILT native module.
+  # --delta must NEVER build with cargo, so if node test files are in scope but the
+  # module is not built (or node/npm is unavailable), the changed node tests cannot be
+  # re-certified — a PASS DELTA block would be a vacuous green. Refuse up front (before
+  # any executor) so it stays hermetic.
+  local node_targets
+  node_targets=$(printf '%s\n' "$allowed" | _delta_node_targets)
+  if [ -n "$(printf '%s' "$node_targets" | awk 'NF')" ] && ! _delta_node_build_ready; then
+    echo "--- [delta] REFUSED: bindings/node/__test__/* changed but the node native module is not built (or node/npm unavailable)." >&2
+    echo "    --delta never builds with cargo; build it first (cd bindings/node && npm run build)" >&2
+    echo "    or run a fresh FULL gate: scripts/agent-gate.sh" >&2
+    emit_summary REFUSED \
+      "${anchor_meta[@]}" \
+      "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
+      "$(accelerators_line)" \
+      "${file_meta[@]}" \
+      "refusal: node bindings/node/__test__/* changed but the native module is not built (--delta never builds with cargo) — run 'cd bindings/node && npm run build' or a full gate (scripts/agent-gate.sh)"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
     exit 1
   fi
@@ -2103,6 +2351,12 @@ run_delta() {
   run_file_size
   run_component fmt cargo fmt --all --check
   run_scoped_tests
+  # Executors that always ran (rust/python scoped tests), plus the #2081 node + shell
+  # executors (each a no-op unless its file class changed). DELTA_EXECUTORS feeds the
+  # DELTA SUMMARY's `delta-executors:` line so the block names what re-certified.
+  DELTA_EXECUTORS="scoped-tests(rust/python)"
+  run_delta_node_tests "$allowed"
+  run_delta_shell_selftests "$allowed"
 
   # Reconstruct file-size + fmt verdicts from their result files (so a fmt or
   # file-size FAIL fails the delta and shows in the block), then append the
@@ -2167,6 +2421,9 @@ run_delta() {
   declare -a SUMMARY_META=()
   SUMMARY_META+=("${anchor_meta[@]}")
   SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (test/docs-only re-cert; clippy/core/write/cli/bindings/parity/smoke NOT run — see gate-of-record)")
+  # #2081: name the executors that actually RAN this re-cert (scoped-tests always; the
+  # node/shell executors only when their file class changed).
+  SUMMARY_META+=("delta-executors: ${DELTA_EXECUTORS:-scoped-tests(rust/python)} (executors that RAN this re-cert)")
   # Python-tier verdict marker (issue #1893, roborev job 1450): a python-test-only
   # delta diff routes scoped-tests to the maturin+pytest tier, and its verdict —
   # especially a SKIP (offline/toolchain), where the block could otherwise read
@@ -2401,7 +2658,18 @@ selected_needs_datasets() {
 DATA_COUNT="(preflight skipped — no dataset-dependent component selected)"
 if selected_needs_datasets; then
   DATA_COUNT=$(find "$CQLITE_DATASETS_ROOT/sstables" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$DATA_COUNT" -eq 0 ]; then
+  # FULL-gate canonical-corpus guard (issue #2078): fail closed when the FETCHED
+  # validation corpus (test_basic/…) is absent, even though the committed byte-parity
+  # references keep DATA_COUNT > 0 in a fresh worktree. A no-op for --only (kept
+  # lenient by the DATA_COUNT==0 check below) and --lite (already returned). Honors
+  # AGENT_GATE_ALLOW_MISSING_FIXTURES=1 (restores SKIP + stamps MISSING_FIXTURES_MARKER
+  # into the SUMMARY). May emit a FAIL SUMMARY and exit 1.
+  apply_fixture_preflight
+  # Historical hard preflight: zero Data.db at all is an error. For the FULL gate this
+  # is already handled by apply_fixture_preflight above (an empty root has no
+  # test_basic corpus either), so restrict it to --only — that way the opt-out can
+  # restore SKIP on an empty-root FULL gate while --only stays byte-identical (test 5b).
+  if [ "$DATA_COUNT" -eq 0 ] && [ -n "$ONLY" ]; then
     echo "agent-gate: no Data.db files under $CQLITE_DATASETS_ROOT/sstables" >&2
     echo "agent-gate: fetch them first: bash test-data/scripts/fetch-datasets.sh" >&2
     # Overwrite the caller-known recovery file with a FAIL block stamped with this
@@ -2685,6 +2953,9 @@ if selected_needs_datasets; then
 else
   SUMMARY_META+=("datasets: $DATA_COUNT")
 fi
+# #2078: stamp the opt-out marker so an intentional AGENT_GATE_ALLOW_MISSING_FIXTURES=1
+# run is visible in the pasted SUMMARY block (empty otherwise → no line).
+[ -n "$MISSING_FIXTURES_MARKER" ] && SUMMARY_META+=("$MISSING_FIXTURES_MARKER")
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 if [ -n "$ONLY" ]; then

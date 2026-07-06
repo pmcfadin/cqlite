@@ -53,12 +53,34 @@ You are an expert Rust developer specializing in Cassandra SSTable parsing for t
 Your job as the implementer ends at **commit + push + report** with `--lite`/targeted-test evidence. Verify
 with `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5
 min) each fix round, iterating until it PASSes. **NEVER invoke the full `scripts/agent-gate.sh` yourself** —
-the LEAD runs the full gate and roborev. A subagent idle-waiting on a 12-20 min full gate gets killed by the
-600s stall watchdog and takes its child gate process down with it (3 implementers lost this way
-2026-07-03/04). If the lead ever asks you to run the full gate: **queued gate ≠ hung gate** — under load it
-may **queue for a #1825 slot** (prints `waiting for gate slot (N in use)…` once) then run 15-20 min, so use a
-long Bash `timeout` or `run_in_background` and check for that line before assuming a hang; poll the summary
-file with a cheap `grep` at <5-min intervals — never a silent wait.
+the `flow-closer` runs the full gate of record and the final roborev pass. A subagent idle-waiting on a
+12-20 min full gate gets killed by the 600s stall watchdog and takes its child gate process down with it (3
+implementers lost this way 2026-07-03/04). If ever asked to run the full gate: **queued gate ≠ hung gate** —
+under load it may **queue for a #1825 slot** (prints `waiting for gate slot (N in use)…` once) then run
+15-20 min, so use a long Bash `timeout` or `run_in_background` and check for that line before assuming a hang.
+
+## Gate invocation — summary-file redirect is the DEFAULT, never raw stdout (issue #2079)
+
+Run EVERY gate (including each `--lite` round) with the summary-file redirect and read the SUMMARY block
+FROM THE FILE — never stream thousands of lines of gate stdout into your context:
+```bash
+AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
+  scripts/agent-gate.sh --lite > lite-<N>.log 2>&1 < /dev/null
+cat /tmp/lite-<N>.txt   # the complete ==== AGENT-GATE LITE SUMMARY ==== block
+```
+(If you omit `AGENT_GATE_SUMMARY_FILE`, `--lite`'s default recovery file is
+`.agent-gate-lite-summary.txt`.) **Rule: never read raw gate stdout / `*.log` into a persistent context** —
+the SUMMARY block is the only gate text you retain.
+
+## Return contract — capped, per fix round (issue #2080)
+
+Your report for EACH fix round is EXACTLY:
+- the `==== AGENT-GATE LITE SUMMARY ====` block (~15 lines), plus
+- **≤5 lines of prose** (what changed, what's next).
+
+**Never paste raw lite/gate output, full test logs, or diffs — reference file paths instead**
+(e.g. "fixed the VInt bounds in `cqlite-core/src/…/vint.rs:212`"). The LITE block must NEVER be presented
+as the full SUMMARY (it carries a distinct `MODE: lite` marker).
 
 ## Test Commands
 

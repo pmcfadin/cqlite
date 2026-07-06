@@ -52,6 +52,8 @@
     "gate": { "enum": ["pass", "fail"], "description": "Run-observed: final agent-gate.sh outcome." },
     "gate_runs": { "type": "integer", "minimum": 1, "description": "Run-observed: number of agent-gate.sh runs through (and including) the first PASS — runs stop at the first pass, so failed rounds = gate_runs-1 for a terminal pass and gate_runs for a terminal fail. Do not re-run the gate after a pass." },
     "roborev_findings": { "type": "integer", "minimum": 0, "description": "Run-observed: count of roborev findings raised." },
+    "roborev_blockers": { "type": "integer", "minimum": 0, "description": "Run-observed, OPTIONAL (issue #2088): count of BLOCKER-severity roborev findings — see docs/development/roborev-severity.md. Present only when the reviewer of record classified findings by severity; absence means severity was not observed (authoritative-only, never zero-filled). MUST appear together with roborev_nits (both-or-neither); when both are present, roborev_blockers + roborev_nits MUST equal roborev_findings — enforced by delivery-telemetry.py's cross-field check (outside this schema's minimal validator)." },
+    "roborev_nits": { "type": "integer", "minimum": 0, "description": "Run-observed, OPTIONAL (issue #2088): count of NIT-severity roborev findings — see docs/development/roborev-severity.md. MUST appear together with roborev_blockers (both-or-neither); the sum constraint with roborev_findings is documented on roborev_blockers." },
     "rework": { "type": "integer", "minimum": 0, "description": "Run-observed: re-open / re-review count." },
     "stamped_at": { "type": "string", "format": "date-time", "description": "Wall-clock when finalize wrote this record (observed at write time)." }
   }

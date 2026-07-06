@@ -81,24 +81,56 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    git ls-remote --heads origin "issue-*"
    ```
    Each `issue-<N>-<slug>` branch on origin is an active claim.
+3a. **Fleet view (issue #2089).** For each `In Progress` item, join the claim against the shared
+   heartbeat refs — a cheap origin git ref, never a GitHub API call — to show which machine holds it and
+   whether it is alive:
+   ```bash
+   scripts/flow/claim-heartbeat.sh list
+   ```
+   This renders one line per machine: `machine  issue  ts  age` (e.g. `mbp-2  #2083  2026-07-06T18:03:11Z
+   12m`). Join on `issue` against the board's `In Progress` rows and render alongside worktrees/claims:
+   `#N (slug)  machine  heartbeat-age`. An `In Progress` item with **no** heartbeat row at all (never
+   beat, or its ref was already cleared) is itself a signal — treat its claim-branch commit freshness as
+   the only evidence until a beat appears. Ref layout + age-bucket semantics are documented in
+   `scripts/flow/claim-heartbeat.sh`'s header — this skill only consumes `list`, never reimplements the
+   parsing.
 4. **Reconcile + reap.** Cross-check the board against GitHub-side state:
    - **Drift:** a PR that is **merged** (or its issue closed) while the item is still `In Progress`
      (or `In Review`) → flag for transition to `Done` (the server-side automation should do this; if it
      hasn't, set it: `gh project item-edit ... --field Status --single-select-option-id <Done>` or flip
      the `status:*` label). Also flag an approved spec still `Ready`/`status:spec-review`.
-   - **Abandoned claim (reaper):** an item that is `In Progress` whose `issue-<N>-*` origin branch has
-     **no recent commits** — the claiming session likely died and leaked a stuck item. Check freshness:
+   - **Abandoned claim (reaper) — deterministic rule (issue #2089).** This REPLACES the old "no recent
+     commits" guesswork, which false-positived on long no-commit implementation phases and
+     false-negatived on a push-then-idle machine. The rule now has two conditions, both required:
      ```bash
-     # newest commit date on the claim branch (origin); compare to "now - 24h" or your stale window
-     git log -1 --format=%cI "origin/issue-<N>-<slug>" 2>/dev/null
+     # 1. heartbeat age for the claiming machine, from the fleet view (step 3a):
+     scripts/flow/claim-heartbeat.sh list   # age column for the issue's machine
+     # 2. no open PR for the issue:
+     gh pr list --state open --search "issue-<N>" --json number --jq 'length'
      ```
-     Surface each stale `In Progress` claim as **STALLED — reclaim or finish** (another machine can
-     `git fetch` the branch to resume; or `flow-finalize`/abandon to release it). Do not silently steal a
-     claim — surface it for the owner.
+     Reap **only when**: heartbeat age > **4 hours** (the documented threshold —
+     `scripts/flow/claim-heartbeat.sh`'s header is the single source of truth for this number; do not
+     hardcode a different value here) **AND** there is no open PR for the issue. A fresh heartbeat with no
+     PR yet is normal mid-implementation, not abandoned; a stale heartbeat with an open PR is a
+     review-wait, not abandoned — neither alone triggers a reap.
+     - **Reap = comment + clear, never delete work.** When both conditions hold:
+       1. Post a traceable comment on the issue: which machine's claim is being reaped, the observed
+          heartbeat age, and that no PR was open.
+       2. Clear the assignee.
+       3. Set board `Status` → `Ready`.
+       4. Clear the dead machine's heartbeat ref: `scripts/flow/claim-heartbeat.sh clear <machine>`.
+       5. **NEVER delete the `issue-<N>-*` claim branch if it carries commits.** The branch is preserved
+          on origin exactly as-is; picking the issue back up means resuming that branch (`git fetch` +
+          continue), not starting a fresh `flow-activate`. Only a branch with zero commits beyond its
+          base (never actually started) is a candidate for removal, and even then prefer leaving it for
+          the owner to clear explicitly.
+     - An item with a fresh heartbeat (age ≤ 4h) or an open PR is **not** reaped — surface it as
+       in-progress/in-review as normal. Do not silently steal a live claim.
 5. **Surface ONE next thing.** Pick the furthest-along item waiting on the owner — in order: a
    green-CI PR to merge (Seam 2), a committed spec to approve (Seam 1), an addressing PR with replies,
-   then a STALLED claim to reclaim. Drive that one (render the spec inline / show the PR), or — if
-   nothing waits — offer a short **claim-aware** pick-list: only items whose **board `Status=Ready`** AND
+   then an item just reaped by step 4 (now `Status=Ready`, ready to reclaim). Drive that one (render the
+   spec inline / show the PR), or — if nothing waits — offer a short **claim-aware** pick-list: only items
+   whose **board `Status=Ready`** AND
    have **no** `issue-<N>-*` branch on origin (already-claimed items are not offered) to `flow-activate`,
    highest priority first. Selection is by **board `Status` only** — never by `status:ready` label.
    **An empty board Ready column means no work is ready → say so and STOP.** Do NOT fall back to the
