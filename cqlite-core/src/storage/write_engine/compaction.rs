@@ -541,13 +541,21 @@ impl WriteEngine {
             return Err(e);
         }
 
-        // Step 2c: publish by renaming TOC.txt last, then fsync the directory
-        // chain AGAIN so the TOC dirent itself is durable BEFORE the input
+        // Step 2c: publish by renaming TOC.txt last, then fsync the LEAF
+        // directory AGAIN so the TOC dirent itself is durable BEFORE the input
         // SSTables (the only other durable copy of this data) are deleted below.
         // Without this second fsync, a crash after the inputs are removed but
         // before the TOC dirent reached the device would lose the SSTable
         // entirely (issue #1959). Same Unix-only scope as step 2b: a no-op on
         // non-Unix, where the per-file fsyncs are the durability guarantee.
+        //
+        // ASYMMETRY vs step 2b (issue #1959): 2b fsyncs the FULL leaf→data-root
+        // chain because the non-TOC renames + the defensive `create_dir_all` can
+        // touch ancestor dirents that must be durable before publication; between
+        // 2b and 2c the ONLY dirent that changed is the TOC entry in the LEAF
+        // `sstable_dir` (the TOC rename). The ancestor dirents were already made
+        // durable by 2b, so re-fsyncing the whole chain here is redundant I/O —
+        // fsyncing only the leaf is sufficient to make the TOC dirent durable.
         {
             let (src, dst) = &toc_rename;
             if let Err(e) = std::fs::rename(src, dst) {
@@ -571,7 +579,9 @@ impl WriteEngine {
                     .to_string(),
             ));
         }
-        if let Err(e) = fsync_publish_chain() {
+        // Leaf-only (see the step 2c asymmetry note above): only the TOC dirent in
+        // `sstable_dir` changed since the full-chain fsync at 2b.
+        if let Err(e) = super::durability::sync_directory(sstable_dir) {
             rollback(&renamed, &merge.tmp_dir);
             return Err(e);
         }

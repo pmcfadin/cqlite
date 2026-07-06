@@ -286,6 +286,25 @@ impl SSTableWriter {
         // Unix-scoped: directory fsync is a documented no-op on non-Unix (issue
         // #1392 / #1959), where the per-file fsyncs remain the durability guarantee
         // and the parent dirents are not separately persisted.
+        //
+        // Why LEAF-ONLY here (vs the full leaf→data-root chain, issue #1959):
+        // unlike the background compaction finalize — which fsyncs the whole
+        // ancestor chain because it DELETES the merge inputs and must first make
+        // the leaf's own parent dirent durable — the two callers that reach this
+        // code never leave the freshly created leaf dir as the sole durable copy
+        // of live data at a point where its parent dirent isn't yet durable:
+        //   (a) FLUSH re-fsyncs the full leaf→data-root chain immediately after
+        //       `finish()` returns, in `finalize_flush_durability`
+        //       (`dirs_to_sync(sstable_dir, data_dir)`), BEFORE it truncates the
+        //       WAL — so until that full-chain fsync completes the WAL stays the
+        //       durable replay copy of these mutations.
+        //   (b) The ONE-SHOT merge (`compact_sstables_with_registry`) writes
+        //       directly into a caller-owned output dir and deletes NO merge inputs
+        //       (only the provably fully-expired, overlap-safe `dropped_whole` set,
+        //       reclaimed AFTER `finish()`), so every input carrying live data
+        //       stays on disk — the output is never the sole durable copy, and a
+        //       crash before its parent dirent is durable loses only a re-derivable
+        //       merge result, never live data.
         crate::storage::write_engine::durability::sync_directory(sstable_dir)?;
 
         // Data.db bytes written by this SSTable writer (issue #1036). Counts
