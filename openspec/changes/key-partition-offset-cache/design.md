@@ -94,3 +94,15 @@ probe → `INDEX_PROBES == 0`, the exact analogue of the BTI assertion.
     `(offset,size)` (parity on a hit).
 - **Eviction correctness after wiring:** covered by the unit eviction test (post-eviction lookup
   falls back to a fresh resolution — the wiring calls the real resolver on a miss).
+
+## Deferred / Non-goals
+
+- **Global bounded cache keyed on `(sstable_id, key)` (Cassandra's key-cache model).** The per-reader
+  design (Decision 2) has no global ceiling, so the worst-case aggregate resident memory is
+  `N_open_readers × DEFAULT_KEY_CACHE_ENTRIES × ~80 B/entry`. B4 bounds this pragmatically by keeping
+  the per-reader cap small (4096 entries → `~40 readers × 4096 × ~80 B ≈ 13 MB`, well within the
+  `<128MB` budget; allocation is occupancy-proportional so idle readers cost ~nothing). A single
+  process-wide bounded LRU keyed on `(sstable_id, key)` would bound the aggregate *independent* of the
+  open-reader count (exactly Cassandra's key cache), but it reintroduces a cross-SSTable key namespace
+  and manager-level invalidation — a larger architectural change beyond B4's audit-approved per-reader
+  scope. Deferred to a follow-up issue.

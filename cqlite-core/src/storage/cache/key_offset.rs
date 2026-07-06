@@ -56,12 +56,45 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-/// Default per-cache entry capacity. Entries are tiny (key bytes + a 12-byte
-/// value), and each shard's bucket array grows only with actual occupancy
-/// (unbounded `LruCache` + manual eviction), so an idle/empty reader's cache
-/// costs ~nothing even at this generous count — the memory footprint tracks the
-/// keys actually resolved, not the configured capacity.
-pub const DEFAULT_KEY_CACHE_ENTRIES: usize = 65_536;
+/// Default **per-reader** key-cache entry capacity.
+///
+/// This cache is per-reader (design D2): each open SSTable reader owns one, so
+/// the resident memory that matters for the `<128MB` budget is the **aggregate**
+/// across every concurrently-open reader — `N_readers × DEFAULT_KEY_CACHE_ENTRIES
+/// × bytes_per_entry` in the worst (fully-occupied) case. There is no global
+/// ceiling across readers, so this per-reader cap must be chosen so a generous
+/// open-reader count stays comfortably within budget.
+///
+/// # Aggregate-footprint math (worst / fully-occupied case)
+///
+/// - `bytes_per_entry ≈ 80 B`: an entry is a `Box<[u8]>` key (a typical UUID PK
+///   is 16 key bytes + the 16-byte fat-pointer + heap-allocation header), the
+///   [`PartitionLoc`] value (12 B), and one `LruCache` intrusive-list node
+///   (`HashMap` bucket slot + two `NonNull` sibling links). Rounding generously
+///   to ~80 B/entry covers allocator rounding and the map's load-factor slack.
+/// - Per-reader worst case: `4096 × 80 B ≈ 320 KB` fully occupied.
+/// - Aggregate for a point-read-heavy workload with ~40 open generations:
+///   `40 readers × 4096 entries × 80 B ≈ 13.1 MB` — well within the `<128MB`
+///   budget (leaving the vast majority of it for B1's decompressed-chunk cache
+///   and the working set). Even a very generous ~128 open readers is
+///   `128 × 4096 × 80 B ≈ 42 MB`, still within budget.
+///
+/// The previous value (`65_536`) reasoned only about the empty/idle case
+/// (occupancy-proportional allocation makes an idle reader ~free) and could,
+/// fully occupied across many readers, breach the budget
+/// (`40 × 65_536 × 80 B ≈ 210 MB`). 4096 hot keys per reader is ample for
+/// point-read locality, so the perf win is preserved while the aggregate is
+/// bounded.
+///
+/// Each shard's bucket array still grows only with actual occupancy (unbounded
+/// `LruCache` + manual eviction), so an idle/empty reader's cache costs
+/// ~nothing; the cap bounds only the fully-occupied worst case.
+///
+/// A single **global bounded cache** keyed on `(sstable_id, key)` (Cassandra's
+/// key-cache model) would bound the aggregate regardless of reader count and is
+/// noted as a deferred future optimization (see `design.md` "Deferred"); it is a
+/// larger architectural change beyond B4's audit-approved per-reader scope.
+pub const DEFAULT_KEY_CACHE_ENTRIES: usize = 4_096;
 
 /// Default shard count (power of two), mirroring [`DecompressedChunkCache`]'s
 /// `DEFAULT_SHARDS`.

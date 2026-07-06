@@ -338,6 +338,18 @@ fn build_chunk_cache(config: &Config) -> Arc<crate::storage::cache::Decompressed
 /// tiny entries; when disabled it is a genuine no-op cache so the point-read path
 /// bypasses key caching entirely rather than the toggle being decorative. Capacity
 /// is a small constant, not a new config knob (the audit forbids a decorative one).
+///
+/// **Aggregate memory** (`<128MB` budget): this cache is per-reader (design D2),
+/// so with no global ceiling the worst-case resident footprint is
+/// `N_open_readers × DEFAULT_KEY_CACHE_ENTRIES × ~80 B/entry`. The per-reader cap
+/// is deliberately small (4096) so a generous open-reader count stays within
+/// budget: e.g. ~40 open generations, fully occupied, is
+/// `40 × 4096 × ~80 B ≈ 13 MB`. Allocation is occupancy-proportional, so idle
+/// readers cost ~nothing; the cap bounds only the fully-occupied case. See
+/// [`DEFAULT_KEY_CACHE_ENTRIES`](crate::storage::cache::DEFAULT_KEY_CACHE_ENTRIES)
+/// for the full derivation. A single global bounded cache keyed on
+/// `(sstable_id, key)` would bound the aggregate regardless of reader count and
+/// is a deferred future optimization (see `design.md` "Deferred").
 pub(crate) fn build_key_offset_cache(
     config: &Config,
 ) -> Arc<crate::storage::cache::KeyOffsetCache> {
