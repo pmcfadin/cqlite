@@ -395,47 +395,6 @@ pub fn encode_vint_zigzag(value: i64) -> Vec<u8> {
     }
 }
 
-/// Parse unsigned VInt32 for Cassandra value lengths
-///
-/// Matches org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt32()
-/// Used for variable-width type value lengths (text, blob, decimal, etc.)
-///
-/// Encoding format:
-/// - Leading 1-bits indicate number of extra bytes
-/// - Pattern: [n ones][0][data bits]
-/// - Example: 0xxxxxxx = 1 byte, 10xxxxxx xxxxxxxx = 2 bytes
-///
-/// # Arguments
-///
-/// * `input` - Input byte slice
-///
-/// # Returns
-///
-/// Tuple of (remaining_bytes, decoded_u32_value)
-pub fn parse_unsigned_vint32(input: &[u8]) -> IResult<&[u8], u32> {
-    // Issue #1638 (J4): thin adapter over the one canonical `decode_unsigned`.
-    // Keep the u32-specific width cap (a value length may not exceed 4 extra
-    // bytes) as a cheap pre-check, then delegate the bit-assembly.
-    let first = *input.first().ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof))
-    })?;
-    if first.leading_ones() as usize > 4 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-    let (value, consumed) = decode_unsigned(input)
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof)))?;
-    let value = u32::try_from(value).map_err(|_| {
-        nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        ))
-    })?;
-    Ok((&input[consumed..], value))
-}
-
 /// Parse unsigned VInt64 for Cassandra timestamps
 ///
 /// Matches org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt()
@@ -575,8 +534,8 @@ pub fn encode_vuint(value: u64) -> Vec<u8> {
 /// `encode_vint`; flipping one side would corrupt the pair. These call
 /// [`parse_vint_length_signed`]:
 /// - Legacy/schema/registry collection counts in `parser/types/collections.rs`,
-///   plus `parser/types/{primitives,udt}` and `parser/optimized_complex_types`
-///   (all paired with `serialize_cql_value` in `parser/types/mod.rs`).
+///   plus `parser/types/{primitives,udt}` (all paired with `serialize_cql_value`
+///   in `parser/types/mod.rs`).
 /// - `parser/statistics.rs` (self-encoded round-trip; the production Statistics.db
 ///   read path is `enhanced_statistics_parser`, not these functions).
 /// - `parser/header.rs` standard body (paired with `serialize_sstable_header`
