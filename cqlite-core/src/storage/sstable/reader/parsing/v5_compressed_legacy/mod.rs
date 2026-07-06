@@ -308,6 +308,14 @@ impl<'a> RowColumnResolution<'a> {
         self.clustering.get(i)
     }
 
+    /// Number of interned clustering-key name handles (issue #1642). Used to
+    /// size the per-row cell `Vec` capacity hint: clustering-key cells are
+    /// pushed FIRST, before the data columns, so a clustered table would
+    /// otherwise reallocate once past the data-column-only hint.
+    pub(super) fn clustering_len(&self) -> usize {
+        self.clustering.len()
+    }
+
     /// The pre-resolved on-disk column ordering for a row of the given kind.
     pub(super) fn columns_for(&self, is_static: bool) -> &[ColumnToParse<'a>] {
         if is_static {

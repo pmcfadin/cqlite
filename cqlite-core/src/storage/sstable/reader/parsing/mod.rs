@@ -633,8 +633,12 @@ impl SSTableReader {
 
         // Issue #1334: return the single `ScanRow` row carrier the read path
         // consumes (previously this path returned a `Value::Udt` stand-in because
-        // no row carrier existed). Names become interned `Arc<str>` handles; the
-        // emit-time alphabetical ordering matches the other scan producers.
+        // no row carrier existed). Names become interned `Arc<str>` handles.
+        // Issue #1642 (K3): the PRIMARY V5 decoder emits cells positionally in
+        // serialization-header (schema) column order. This is a COLD schema-less
+        // fallback that collects into an unordered `HashMap`, so it sorts here to
+        // get a deterministic emit order (SORTED, not header order). Both are
+        // deterministic; order is not user-visible (consumers are name-keyed).
         let mut row_cells: RowCells = columns
             .into_iter()
             .map(|(name, value)| (std::sync::Arc::from(name.as_str()), value))

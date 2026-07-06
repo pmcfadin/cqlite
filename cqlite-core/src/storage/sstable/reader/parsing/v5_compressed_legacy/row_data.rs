@@ -60,9 +60,13 @@ impl V5CompressedLegacyParser {
         // alphabetically re-sorts each row. The interned column-name handle
         // (issue #1334) is a schema-owned `Arc<str>` shared across every cell/row,
         // so populating a cell with its name stays an `Arc::clone` refcount bump,
-        // NOT a per-cell heap `String` allocation. Pre-sized to the on-disk column
-        // count so the common case does not reallocate.
-        let mut cells: RowCells = Vec::with_capacity(resolution.columns_for(false).len());
+        // NOT a per-cell heap `String` allocation. Pre-sized to the on-disk data
+        // column count PLUS the clustering-key count so the common case does not
+        // reallocate — clustering-key cells are pushed FIRST (below), before the
+        // data columns, so sizing to data columns alone reallocates on a clustered
+        // table (issue #1642).
+        let mut cells: RowCells =
+            Vec::with_capacity(resolution.columns_for(false).len() + resolution.clustering_len());
         // Parallel per-cell write metadata map (populated alongside `cells`).
         // Only allocated when the caller actually needs WRITETIME/TTL metadata
         // (i.e. `want_cell_metadata == true`).  On the normal read path this stays
