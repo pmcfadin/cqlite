@@ -1,7 +1,7 @@
 # Default agent for this repo when no workflow-specific agent is set.
-agent = 'codex'
+agent = 'claude-code'
 # Default model for this repo when no workflow-specific model is set.
-model = 'gpt-5.5'
+model = 'opus'
 # Backup agent for this repo if the primary agent fails.
 backup_agent = ''
 # Backup model for this repo if the primary model fails.
@@ -38,7 +38,7 @@ snapshot_dir = ''
 post_commit_review = 'branch'
 reuse_review_session_lookback = 3
 # Agent override for standard review in this repo.
-review_agent = 'codex'
+review_agent = 'claude-code'
 # Agent override for fast review in this repo.
 review_agent_fast = ''
 # Agent override for standard review in this repo.
@@ -62,7 +62,7 @@ refine_agent_thorough = ''
 # Agent override for maximum refine in this repo.
 refine_agent_maximum = ''
 # Model override for standard review in this repo.
-review_model = 'gpt-5.5'
+review_model = 'opus'
 # Model override for fast review in this repo.
 review_model_fast = ''
 # Model override for standard review in this repo.
