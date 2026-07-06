@@ -45,6 +45,13 @@
 //!   descent (`lookup_partition_via_bti_trie`). Consumers **C3** (single-walk point
 //!   lookup) and **C4** (hoist the trie rehash out of the loop): both must prove a
 //!   point lookup descends the trie exactly once.
+//! - [`record_key_hash`] / [`key_hash_calls`] — **`KEY_HASH_CALLS`**: one per
+//!   Murmur3 hash + BTI byte-comparable encoding of a query partition key
+//!   (`encode_partition_key_for_bti_trie`). Consumer **C4** (hoist per-candidate
+//!   rehashing): a multi-generation `WHERE pk = ?` point read must hash+encode the
+//!   query key exactly ONCE per read (the encoding is identical for every candidate
+//!   SSTable), not once per candidate. On `main`/pre-C4 the candidate-prune loop
+//!   re-encoded per candidate (N hashes for N generations); after C4 it is 1.
 //! - [`record_decompress`] / [`decompress_calls`] — **`DECOMPRESS_CALLS`**: one per
 //!   compression-chunk decompress (`Compressor::decompress`). Consumers **B1**
 //!   (chunk cache — a cache hit must skip the decompress) and **E3** (copy-chain —
@@ -162,6 +169,11 @@ struct Counters {
     /// open must parse `CompressionInfo.db` exactly once (was 2 — a legacy
     /// `parse_binary` plus the modern `parse`).
     compression_info_parses: AtomicU64,
+    /// Query-key Murmur3 hash + BTI byte-comparable encodings (`KEY_HASH_CALLS`,
+    /// Issue #1575 / C4) — one per `encode_partition_key_for_bti_trie`. Consumer C4:
+    /// a multi-candidate point read hashes+encodes the key ONCE (hoisted out of the
+    /// candidate-prune loop), not once per candidate generation.
+    key_hash_calls: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -180,6 +192,7 @@ impl Counters {
             bti_pointer_decodes: AtomicU64::new(0),
             row_sort_invocations: AtomicU64::new(0),
             compression_info_parses: AtomicU64::new(0),
+            key_hash_calls: AtomicU64::new(0),
         }
     }
 
@@ -232,6 +245,10 @@ impl Counters {
         self.compression_info_parses.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_key_hash(&self) {
+        self.key_hash_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -280,6 +297,10 @@ impl Counters {
         self.compression_info_parses.load(Ordering::Relaxed)
     }
 
+    fn key_hash_calls(&self) -> u64 {
+        self.key_hash_calls.load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
@@ -293,6 +314,7 @@ impl Counters {
         self.bti_pointer_decodes.store(0, Ordering::Relaxed);
         self.row_sort_invocations.store(0, Ordering::Relaxed);
         self.compression_info_parses.store(0, Ordering::Relaxed);
+        self.key_hash_calls.store(0, Ordering::Relaxed);
     }
 }
 
@@ -449,6 +471,20 @@ pub fn record_compression_info_parse() {
     COUNTERS.record_compression_info_parse();
 }
 
+/// Record one query-key Murmur3 hash + BTI byte-comparable encoding
+/// (`KEY_HASH_CALLS`; consumer C4, Issue #1575).
+///
+/// Called unconditionally at the single BTI key-encoding site
+/// (`bti::parser::partitions::encode_partition_key_for_bti_trie`, which computes the
+/// Murmur3 token); the body compiles to a no-op in a release build (design.md
+/// Decision 1). C4 hoists this out of the candidate-prune loop so a multi-generation
+/// point read records exactly 1 (not one per candidate).
+#[inline(always)]
+pub fn record_key_hash() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_key_hash();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -528,6 +564,13 @@ pub fn row_sort_invocations() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn compression_info_parses() -> u64 {
     COUNTERS.compression_info_parses()
+}
+
+/// Number of query-key Murmur3 hash + BTI encodings since the last [`reset`]
+/// (`KEY_HASH_CALLS`, Issue #1575 / C4).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn key_hash_calls() -> u64 {
+    COUNTERS.key_hash_calls()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
@@ -639,6 +682,9 @@ mod tests {
         for _ in 0..12 {
             c.record_compression_info_parse();
         }
+        for _ in 0..13 {
+            c.record_key_hash();
+        }
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
@@ -652,6 +698,7 @@ mod tests {
         assert_eq!(c.bti_pointer_decodes(), 10);
         assert_eq!(c.row_sort_invocations(), 11);
         assert_eq!(c.compression_info_parses(), 12);
+        assert_eq!(c.key_hash_calls(), 13);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
@@ -666,6 +713,7 @@ mod tests {
         assert_eq!(c.bti_pointer_decodes(), 0);
         assert_eq!(c.row_sort_invocations(), 0);
         assert_eq!(c.compression_info_parses(), 0);
+        assert_eq!(c.key_hash_calls(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms
