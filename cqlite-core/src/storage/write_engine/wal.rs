@@ -516,7 +516,11 @@ struct PreRowTombstoneMutation {
     table: TableId,
     partition_key: PartitionKey,
     clustering_key: Option<ClusteringKey>,
-    operations: Vec<CellOperation>,
+    // Layout (C) predates #1538, so its on-disk `WriteWithTtl` is the 3-field
+    // shape. Decode ops through the pre-#1538 mirror (which keeps the post-#921
+    // `Delete { column, local_deletion_time }` shape this layout carries), NOT
+    // the current 4-field `CellOperation`, which would positionally misalign.
+    operations: Vec<PreCellLdtWriteTtlCellOperation>,
     timestamp_micros: i64,
     ttl_seconds: Option<u32>,
     partition_tombstone: Option<PartitionTombstone>,
@@ -530,7 +534,7 @@ impl From<PreRowTombstoneMutation> for Mutation {
             table: m.table,
             partition_key: m.partition_key,
             clustering_key: m.clustering_key,
-            operations: m.operations,
+            operations: m.operations.into_iter().map(CellOperation::from).collect(),
             timestamp_micros: m.timestamp_micros,
             ttl_seconds: m.ttl_seconds,
             partition_tombstone: m.partition_tombstone,
@@ -563,7 +567,11 @@ struct PreCellWriteTimestampsMutation {
     table: TableId,
     partition_key: PartitionKey,
     clustering_key: Option<ClusteringKey>,
-    operations: Vec<CellOperation>,
+    // Layout (D) predates #1538, so its on-disk `WriteWithTtl` is the 3-field
+    // shape. Decode ops through the pre-#1538 mirror (which keeps the post-#921
+    // `Delete { column, local_deletion_time }` shape this layout carries), NOT
+    // the current 4-field `CellOperation`, which would positionally misalign.
+    operations: Vec<PreCellLdtWriteTtlCellOperation>,
     timestamp_micros: i64,
     ttl_seconds: Option<u32>,
     partition_tombstone: Option<PartitionTombstone>,
@@ -578,7 +586,7 @@ impl From<PreCellWriteTimestampsMutation> for Mutation {
             table: m.table,
             partition_key: m.partition_key,
             clustering_key: m.clustering_key,
-            operations: m.operations,
+            operations: m.operations.into_iter().map(CellOperation::from).collect(),
             timestamp_micros: m.timestamp_micros,
             ttl_seconds: m.ttl_seconds,
             partition_tombstone: m.partition_tombstone,
@@ -2749,6 +2757,200 @@ mod tests {
                 // The Delete's post-#921 per-cell LDT must survive — a pre-#921
                 // LegacyCellOperation mirror would have corrupted this.
                 assert_eq!(*local_deletion_time, Some(1_710_000_000));
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wal_decodes_layout_c_pre_1538_write_with_ttl_no_row_tombstone() {
+        // Layout (C): post-#921 / pre-#932 (and therefore also pre-#1538). The
+        // mutation-level `local_deletion_time` trailing field is PRESENT, but the
+        // record predates #932's trailing `row_tombstone` AND #1018's trailing
+        // `cell_write_timestamps`, so NEITHER trailing field exists on disk. Its
+        // `WriteWithTtl` op is the pre-#1538 3-field shape, while its `Delete`
+        // carries the post-#921 `local_deletion_time`. Serialized here with the
+        // production (C) mirror, which now IS this exact era shape (3-field
+        // `WriteWithTtl` ops via `PreCellLdtWriteTtlCellOperation`, no trailing
+        // row-tombstone / cell-write-timestamps).
+        let era_c = PreRowTombstoneMutation {
+            table: TableId::new("ks", "tbl"),
+            partition_key: PartitionKey::single("id", Value::Integer(21)),
+            clustering_key: None,
+            operations: vec![
+                PreCellLdtWriteTtlCellOperation::WriteWithTtl {
+                    column: "session".to_string(),
+                    value: Value::Text("cee".to_string()),
+                    ttl_seconds: 900,
+                },
+                PreCellLdtWriteTtlCellOperation::Delete {
+                    column: "dropped_col".to_string(),
+                    local_deletion_time: Some(1_650_000_000),
+                },
+            ],
+            timestamp_micros: 1_650_000_000_000_000,
+            ttl_seconds: None,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+            local_deletion_time: Some(1_650_000_001),
+        };
+
+        // Bytes as written by a post-#921/pre-#932 binary.
+        let era_c_bytes = bincode::serialize(&era_c).unwrap();
+
+        // Sanity: the current `Mutation` layout cannot FAITHFULLY decode these
+        // bytes. The pre-#1538 3-field `WriteWithTtl` (first in the list) has no
+        // per-op `local_deletion_time` byte, so a current decode misaligns and can
+        // never recover the two-op mutation faithfully. This is what makes the
+        // silent-corruption gap real, and forces a compat mirror to run.
+        let current_attempt = bincode::deserialize::<Mutation>(&era_c_bytes);
+        let current_recovers_faithfully = matches!(
+            &current_attempt,
+            Ok(m) if m.operations.len() == 2
+                && matches!(&m.operations[0],
+                    CellOperation::WriteWithTtl { column, ttl_seconds, .. }
+                    if column == "session" && *ttl_seconds == 900)
+                && matches!(&m.operations[1],
+                    CellOperation::Delete { column, local_deletion_time }
+                    if column == "dropped_col" && *local_deletion_time == Some(1_650_000_000))
+        );
+        assert!(
+            !current_recovers_faithfully,
+            "current layout must NOT faithfully decode a layout (C) record; \
+             otherwise a pre-#1538 WriteWithTtl would decode-but-wrong (silent \
+             corruption gap)"
+        );
+
+        // The (C) mirror must recover the record: the pre-#1538 `WriteWithTtl`
+        // upgraded to `local_deletion_time: None`, the `Delete`'s post-#921 LDT
+        // preserved, mutation LDT preserved, and — critically for ladder ordering
+        // — NO trailing `row_tombstone` / `cell_write_timestamps` (both None),
+        // proving the record landed on (C), not the more-trailing-field (D)/(E)
+        // mirrors.
+        let decoded = decode_mutation(&era_c_bytes).expect("layout (C) record must decode");
+        assert_eq!(decoded.timestamp_micros, 1_650_000_000_000_000);
+        assert_eq!(decoded.local_deletion_time, Some(1_650_000_001));
+        assert_eq!(decoded.row_tombstone, None);
+        assert_eq!(decoded.cell_write_timestamps, None);
+        assert_eq!(decoded.operations.len(), 2);
+        match &decoded.operations[0] {
+            CellOperation::WriteWithTtl {
+                column,
+                value,
+                ttl_seconds,
+                local_deletion_time,
+            } => {
+                assert_eq!(column, "session");
+                assert_eq!(value, &Value::Text("cee".to_string()));
+                assert_eq!(*ttl_seconds, 900);
+                assert_eq!(*local_deletion_time, None);
+            }
+            other => panic!("expected WriteWithTtl, got {other:?}"),
+        }
+        match &decoded.operations[1] {
+            CellOperation::Delete {
+                column,
+                local_deletion_time,
+            } => {
+                assert_eq!(column, "dropped_col");
+                assert_eq!(*local_deletion_time, Some(1_650_000_000));
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wal_decodes_layout_d_pre_1538_write_with_ttl_with_row_tombstone() {
+        // Layout (D): post-#932 / pre-#1018 (and therefore also pre-#1538). The
+        // mutation-level `local_deletion_time` AND the #932 trailing
+        // `row_tombstone` are PRESENT, but the record predates #1018's trailing
+        // `cell_write_timestamps` (absent on disk). Its `WriteWithTtl` op is the
+        // pre-#1538 3-field shape, while its `Delete` carries the post-#921
+        // `local_deletion_time`. Serialized here with the production (D) mirror,
+        // which now IS this exact era shape (3-field `WriteWithTtl` ops, trailing
+        // `row_tombstone` but no `cell_write_timestamps`).
+        let era_d = PreCellWriteTimestampsMutation {
+            table: TableId::new("ks", "tbl"),
+            partition_key: PartitionKey::single("id", Value::Integer(23)),
+            clustering_key: None,
+            operations: vec![
+                PreCellLdtWriteTtlCellOperation::WriteWithTtl {
+                    column: "session".to_string(),
+                    value: Value::Text("dee".to_string()),
+                    ttl_seconds: 1800,
+                },
+                PreCellLdtWriteTtlCellOperation::Delete {
+                    column: "dropped_col".to_string(),
+                    local_deletion_time: Some(1_680_000_000),
+                },
+            ],
+            timestamp_micros: 1_680_000_000_000_000,
+            ttl_seconds: None,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+            local_deletion_time: Some(1_680_000_001),
+            row_tombstone: Some((1_680_000_002_000_000, 1_680_000_002)),
+        };
+
+        // Bytes as written by a post-#932/pre-#1018 binary.
+        let era_d_bytes = bincode::serialize(&era_d).unwrap();
+
+        // Sanity: the current `Mutation` layout cannot FAITHFULLY decode these
+        // bytes — the pre-#1538 3-field `WriteWithTtl` (first op) misaligns the
+        // decode (silent-corruption gap).
+        let current_attempt = bincode::deserialize::<Mutation>(&era_d_bytes);
+        let current_recovers_faithfully = matches!(
+            &current_attempt,
+            Ok(m) if m.operations.len() == 2
+                && matches!(&m.operations[0],
+                    CellOperation::WriteWithTtl { column, ttl_seconds, .. }
+                    if column == "session" && *ttl_seconds == 1800)
+                && matches!(&m.operations[1],
+                    CellOperation::Delete { column, local_deletion_time }
+                    if column == "dropped_col" && *local_deletion_time == Some(1_680_000_000))
+                && m.row_tombstone == Some((1_680_000_002_000_000, 1_680_000_002))
+        );
+        assert!(
+            !current_recovers_faithfully,
+            "current layout must NOT faithfully decode a layout (D) record; \
+             otherwise a pre-#1538 WriteWithTtl would decode-but-wrong (silent \
+             corruption gap)"
+        );
+
+        // The (D) mirror must recover the record: `WriteWithTtl` LDT upgraded to
+        // None, `Delete` LDT preserved, mutation LDT preserved, the #932
+        // `row_tombstone` preserved, and — proving it landed on (D) not (E) — NO
+        // trailing `cell_write_timestamps` (None).
+        let decoded = decode_mutation(&era_d_bytes).expect("layout (D) record must decode");
+        assert_eq!(decoded.timestamp_micros, 1_680_000_000_000_000);
+        assert_eq!(decoded.local_deletion_time, Some(1_680_000_001));
+        assert_eq!(
+            decoded.row_tombstone,
+            Some((1_680_000_002_000_000, 1_680_000_002))
+        );
+        assert_eq!(decoded.cell_write_timestamps, None);
+        assert_eq!(decoded.operations.len(), 2);
+        match &decoded.operations[0] {
+            CellOperation::WriteWithTtl {
+                column,
+                value,
+                ttl_seconds,
+                local_deletion_time,
+            } => {
+                assert_eq!(column, "session");
+                assert_eq!(value, &Value::Text("dee".to_string()));
+                assert_eq!(*ttl_seconds, 1800);
+                assert_eq!(*local_deletion_time, None);
+            }
+            other => panic!("expected WriteWithTtl, got {other:?}"),
+        }
+        match &decoded.operations[1] {
+            CellOperation::Delete {
+                column,
+                local_deletion_time,
+            } => {
+                assert_eq!(column, "dropped_col");
+                assert_eq!(*local_deletion_time, Some(1_680_000_000));
             }
             other => panic!("expected Delete, got {other:?}"),
         }
