@@ -332,10 +332,10 @@ pub struct SSTableReader {
     ///
     /// `Some` for BTI SSTables (Partitions.db is tiny — a single small trie),
     /// `None` for BIG-format SSTables. The BTI point-lookup path
-    /// (`lookup_partition_via_bti_trie` / `bti_point_lookup`) wraps these bytes in
-    /// a `std::io::Cursor` per lookup and walks the trie to resolve the
-    /// uncompressed Data.db offset for a partition key — an O(log n) point lookup
-    /// instead of the sequential scan used when no index is available.
+    /// (`lookup_partition_via_bti_trie` / `bti_point_lookup`) walks these bytes in
+    /// place (a borrowed `&[u8]` view of this buffer — no per-lookup copy, issue
+    /// #1574 C3) to resolve the uncompressed Data.db offset for a partition key —
+    /// an O(log n) point lookup instead of the sequential scan used with no index.
     pub(crate) bti_partitions_db: Option<Arc<Vec<u8>>>,
     /// Raw bytes of the sibling BTI `*-Rows.db` within-partition row-index trie,
     /// when this reader was opened on a BTI ("da") SSTable (issue #909, #910).
@@ -377,4 +377,16 @@ pub struct SSTableReader {
     /// Only ever populated for BTI readers; BIG readers use the sorted `Index.db`
     /// entries directly.
     pub(crate) bti_partition_offsets: std::sync::OnceLock<Vec<u64>>,
+    /// Single-slot same-key memo of the most recent BTI partition resolution
+    /// (issue #1574, audit C3). A single-candidate `WHERE pk = ?` point read
+    /// descends the `Partitions.db` trie twice — once for the candidate prune
+    /// (`might_contain_partition`) and once for the seek — for the SAME key. The
+    /// resolved uncompressed `Data.db` offset (`Some(off)`) or authoritative
+    /// absence (`None`) is a pure function of the immutable trie + key, so the
+    /// prune stores it here and the seek reuses it without a second descent
+    /// (`TRIE_WALKS` stays 1 per point read). A stale slot (a different key, or a
+    /// concurrent read) simply misses and re-walks — never a wrong result. Best
+    /// effort: a poisoned lock is treated as a miss. This is NOT a cross-lookup
+    /// key/offset cache (that is Epic B/B4); it is bounded to one entry.
+    pub(crate) bti_lookup_memo: std::sync::Mutex<Option<(Box<[u8]>, Option<u64>)>>,
 }

@@ -234,22 +234,12 @@ fn find_next_child_offset(
     node_offset: usize,
     search_byte: u8,
 ) -> BtiResult<Option<usize>> {
-    if node_offset >= trie_data.len() {
-        return Err(Error::Parse(format!(
-            "BTI node offset {node_offset} out of bounds (trie_data.len={})",
-            trie_data.len()
-        )));
-    }
-
-    let bti_node = parse_bti_node_for_traversal(trie_data, node_offset)?;
-
-    match bti_node.find_child(search_byte) {
-        Some(ptr) => {
-            let child = ptr.distance as usize; // distance stores the absolute child offset
-            Ok(Some(child))
-        }
-        None => Ok(None),
-    }
+    // Issue #1574 (C3): resolve ONLY the child pointer for `search_byte` in place,
+    // instead of materializing the node's full child table via
+    // `parse_bti_node_for_traversal` just to follow one byte. The in-place decode
+    // produces bit-identical child offsets (same `saturating_sub` arithmetic and
+    // Dense delta-0 sentinel) and the same structural-error semantics.
+    super::slice_walk::find_child_offset(trie_data, node_offset, search_byte)
 }
 
 /// Read the `BtiPartitionLocation` from the payload attached to the BTI node

@@ -58,6 +58,7 @@ mod node_decode;
 mod partitions;
 mod reader;
 mod rows;
+mod slice_walk;
 mod traversal;
 
 // Public surface — re-exported unchanged so `bti::parser::X` paths keep working.
@@ -76,4 +77,5 @@ pub use rows::{
     select_row_index_blocks_for_range, BtiRowIndexEntry, BtiRowIndexEntryWithKey,
     BtiRowIndexHeader, FLAG_OPEN_MARKER,
 };
+pub use slice_walk::{lookup_partition_in_bti_slice, lookup_raw_key_in_bti_partitions_slice};
 pub use traversal::iterate_partitions_in_bti_file;
