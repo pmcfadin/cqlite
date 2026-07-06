@@ -58,6 +58,7 @@ mod node_decode;
 mod partitions;
 mod reader;
 mod rows;
+mod slice_walk;
 mod traversal;
 
 // Public surface — re-exported unchanged so `bti::parser::X` paths keep working.
@@ -76,4 +77,10 @@ pub use rows::{
     select_row_index_blocks_for_range, BtiRowIndexEntry, BtiRowIndexEntryWithKey,
     BtiRowIndexHeader, FLAG_OPEN_MARKER,
 };
+// Crate-internal only: the zero-copy slice walker's sole consumers are the
+// SSTable reader (partition_lookup / data_access::bti). Kept off the public
+// semver surface (rust-reviewer #1574). `lookup_partition_in_bti_slice` stays
+// `pub(crate)` at its canonical module path (used by its sibling + tests), with
+// no re-export since nothing outside `slice_walk` consumes it.
+pub(crate) use slice_walk::lookup_raw_key_in_bti_partitions_slice;
 pub use traversal::iterate_partitions_in_bti_file;

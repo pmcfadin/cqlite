@@ -103,7 +103,7 @@ impl SSTableReader {
     pub fn lookup_partition_via_bti_trie(&self, partition_key: &[u8]) -> Result<Option<u64>> {
         use crate::observability::{self as obs, catalog};
         use crate::storage::sstable::bti::{
-            lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry, BtiPartitionLocation,
+            lookup_raw_key_in_bti_partitions_slice, resolve_rows_db_entry, BtiPartitionLocation,
         };
 
         let span = tracing::debug_span!(
@@ -117,23 +117,34 @@ impl SSTableReader {
             return Ok(None);
         };
 
+        // Issue #1574 (C3) single walk: a single-candidate point read descends the
+        // SAME trie for the SAME key twice (candidate prune then seek). Reuse the
+        // prune's resolution — a pure function of the immutable trie + key — so the
+        // seek returns without a second descent (`TRIE_WALKS` stays 1 per read). A
+        // stale/absent slot simply misses and re-walks. The presence-oracle
+        // observability is preserved: a memo hit still records the presence decision.
+        if let Some(resolved) = self.bti_lookup_memo_get(partition_key) {
+            Self::emit_bti_presence_counters(resolved.is_some());
+            return Ok(resolved);
+        }
+
         // A5 read-work counter (TRIE_WALKS; consumers C3/C4): one per real trie
         // descent — counted only once we have a `Partitions.db` to descend, so a
         // non-BTI reader that returned above never bumps it. No-op in release
         // (design.md Decision 1/2).
         crate::storage::sstable::read_work_counters::record_trie_walk();
 
-        let lookup = lookup_raw_key_in_bti_partitions_db(
-            &mut std::io::Cursor::new(partitions_db.as_slice()),
-            partition_key,
-        )
-        .map_err(|e| {
-            Error::corruption(format!(
-                "BTI Partitions.db trie lookup failed for partition key (len={}): {}",
-                partition_key.len(),
-                e
-            ))
-        });
+        // Issue #1574 (C3): walk the resident `Arc<Vec<u8>>` trie buffer in place —
+        // no per-lookup whole-file copy (the former `Cursor` + `read_exact`).
+        let lookup =
+            lookup_raw_key_in_bti_partitions_slice(partitions_db.as_slice(), partition_key)
+                .map_err(|e| {
+                    Error::corruption(format!(
+                        "BTI Partitions.db trie lookup failed for partition key (len={}): {}",
+                        partition_key.len(),
+                        e
+                    ))
+                });
         let lookup = match lookup {
             Ok(v) => v,
             Err(e) => {
@@ -182,6 +193,7 @@ impl SSTableReader {
                     partition_key.len(),
                     off
                 );
+                self.bti_lookup_memo_store(partition_key, Some(off));
                 Ok(Some(off))
             }
             Some(BtiPartitionLocation::RowsOffset(rows_offset)) => {
@@ -241,6 +253,7 @@ impl SSTableReader {
                     header.data_position,
                     header.block_count
                 );
+                self.bti_lookup_memo_store(partition_key, Some(header.data_position));
                 Ok(Some(header.data_position))
             }
             None => {
@@ -253,6 +266,7 @@ impl SSTableReader {
                         (catalog::attr::SSTABLE_FORMAT, "bti".into()),
                     ],
                 );
+                self.bti_lookup_memo_store(partition_key, None);
                 Ok(None)
             }
         }

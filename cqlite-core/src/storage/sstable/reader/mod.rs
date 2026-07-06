@@ -10,6 +10,7 @@
 
 // Submodules
 mod block_io;
+mod bti_lookup_memo;
 /// Per-element / per-cell compaction read contract (epic #899, Phase A).
 pub mod compaction_row;
 mod component_loading;
@@ -787,6 +788,7 @@ impl SSTableReader {
             chunk_cache,
             chunk_cache_id,
             bti_partition_offsets: std::sync::OnceLock::new(),
+            bti_lookup_memo: std::sync::Mutex::new(None),
         })
     }
 
