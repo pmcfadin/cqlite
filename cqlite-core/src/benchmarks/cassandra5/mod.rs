@@ -479,8 +479,22 @@ pub mod utils {
             self.peak_mb - self.baseline_mb
         }
 
+        /// Average memory used *above* the construction-time baseline, in MB.
+        ///
+        /// Each sample contributes `max(0, sample - baseline)`: a reading below
+        /// the baseline (routine page reclaim / the allocator returning pages)
+        /// counts as *zero* usage-above-baseline rather than negative usage. So,
+        /// exactly like [`peak_usage_mb`](Self::peak_usage_mb), this metric is
+        /// non-negative by construction and never goes negative under normal RSS
+        /// fluctuation. For the signed (possibly negative) smallest delta, use
+        /// [`min_usage_mb`](Self::min_usage_mb).
         pub fn average_usage_mb(&self) -> f64 {
-            let sum: f64 = self.samples.iter().map(|&s| s - self.baseline_mb).sum();
+            let sum: f64 = self
+                .samples
+                .iter()
+                .map(|&s| (s - self.baseline_mb).max(0.0))
+                .sum();
+            // `samples` always holds at least the baseline, so len() >= 1.
             sum / self.samples.len() as f64
         }
 
@@ -499,6 +513,27 @@ pub mod utils {
         /// Number of recorded samples (the baseline counts as the first one).
         pub fn sample_count(&self) -> usize {
             self.samples.len()
+        }
+    }
+
+    #[cfg(test)]
+    impl MemoryMonitor {
+        /// Test-only: build a monitor with an explicit baseline, bypassing the
+        /// live RSS read so tests can deterministically drive samples that dip
+        /// below the baseline.
+        pub(crate) fn with_baseline(baseline_mb: f64) -> Self {
+            Self {
+                baseline_mb,
+                peak_mb: baseline_mb,
+                samples: vec![baseline_mb],
+            }
+        }
+
+        /// Test-only: record a raw RSS reading (MB) as if `sample()` had
+        /// observed it, without touching the OS.
+        pub(crate) fn record_raw_sample(&mut self, mb: f64) {
+            self.samples.push(mb);
+            self.peak_mb = self.peak_mb.max(mb);
         }
     }
 
@@ -669,12 +704,13 @@ mod tests {
         let peak = monitor.peak_usage_mb();
         assert!(peak >= 0.0, "peak usage must be non-negative, got {peak}");
 
-        // The average delta must lie within [min, max] of the observed deltas
-        // by construction (the mean of a set is bounded by its extremes). This
-        // makes NO monotonic-RSS or wall-clock assumption: RSS can dip below the
-        // baseline (page reclaim), so avg/min may be negative — only the
-        // ordering min <= avg <= peak is invariant. A regression that miscounts
-        // or misweights samples in average_usage_mb() would break this ordering.
+        // The average usage must lie within [min, peak] of the observed deltas
+        // by construction. This makes NO monotonic-RSS or wall-clock assumption:
+        // RSS can dip below the baseline (page reclaim), so `min` may be
+        // negative, but `average_usage_mb()` clamps each per-sample delta at 0
+        // (see #1539) so `avg` is always non-negative — only the ordering
+        // min <= avg <= peak is invariant. A regression that miscounts or
+        // misweights samples in average_usage_mb() would break this ordering.
         let avg = monitor.average_usage_mb();
         let min = monitor.min_usage_mb();
         assert!(
@@ -684,6 +720,32 @@ mod tests {
         assert!(
             avg <= peak,
             "average delta {avg} must be <= peak delta {peak}"
+        );
+    }
+
+    #[test]
+    fn test_average_usage_never_negative_below_baseline() {
+        // Simulate process RSS dipping well below the construction-time baseline
+        // (routine page reclaim / the allocator returning pages back to the OS).
+        // On the pre-#1539 math — Σ(sample - baseline)/n with no clamp — the
+        // average goes negative and this assertion FAILS; after clamping each
+        // per-sample "usage above baseline" at 0 it holds by construction.
+        let mut monitor = utils::MemoryMonitor::with_baseline(100.0);
+        monitor.record_raw_sample(10.0); // 90 MB below baseline
+        monitor.record_raw_sample(20.0); // 80 MB below baseline
+
+        let avg = monitor.average_usage_mb();
+        assert!(
+            avg >= 0.0,
+            "average usage above baseline must never be negative, got {avg}"
+        );
+
+        // The signed minimum delta is still allowed to be negative — it is the
+        // honest "how far below baseline did we dip" metric, distinct from the
+        // clamped average.
+        assert!(
+            monitor.min_usage_mb() < 0.0,
+            "min_usage_mb should stay signed and report the dip below baseline"
         );
     }
 
