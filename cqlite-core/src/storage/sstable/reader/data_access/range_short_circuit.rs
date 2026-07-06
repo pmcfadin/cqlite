@@ -32,6 +32,20 @@
 //! oracle — or an empty endpoint), the check conservatively reports "cannot rule
 //! out" (`false`) and the normal presence path runs unchanged. It can therefore only
 //! ever turn a would-be miss into a cheaper miss; it can never manufacture one.
+//!
+//! ## Precondition: Murmur3 partitioner
+//!
+//! The token ordering above uses [`cassandra_murmur3_token`], so this short-circuit
+//! is correct ONLY for SSTables sorted by Cassandra's `Murmur3Partitioner` — the sole
+//! partitioner CQLite targets (Cassandra 5.0; see the version floor in `CLAUDE.md`).
+//! Under any other partitioner the on-disk partition order would follow a different
+//! token function, so tokenizing the query key and the `Summary.db` endpoints with
+//! Murmur3 could place a present key outside `[first_key, last_key]` and manufacture a
+//! false miss on this absence fast path. This is NOT a new assumption — it is exactly
+//! the invariant that
+//! [`sort_by_token_order`](super::model::sort_by_token_order) (and the write engine's
+//! `DecoratedKey::cmp`) already rely on; it is documented here because the comparison
+//! now gates an authoritative-absence return rather than only ordering results.
 
 use super::super::SSTableReader;
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
@@ -45,6 +59,9 @@ impl SSTableReader {
     /// (`Summary.db` absent, e.g. a BTI reader) or an endpoint is empty. See the
     /// module docs for the no-false-miss contract: the comparison is in Cassandra
     /// token order (Murmur3 token, unsigned-byte tiebreak), inclusive at both ends.
+    ///
+    /// Precondition: the SSTable is sorted by Cassandra's `Murmur3Partitioner` (the
+    /// only partitioner CQLite targets — Cassandra 5.0). See the module docs.
     pub fn partition_key_out_of_range(&self, key: &[u8]) -> bool {
         let Some(summary) = self.summary_reader.as_ref() else {
             // No Summary.db → no authoritative bound (BTI readers, or a BIG reader

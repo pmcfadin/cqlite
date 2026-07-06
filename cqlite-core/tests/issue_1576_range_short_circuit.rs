@@ -22,6 +22,18 @@
 //!   key records ZERO short-circuits and reaches the real presence path
 //!   (`INDEX_PROBES >= 1`) — proving in-range reads are unchanged.
 //!
+//! ## Composite (multi-column) partition key (`test_basic/multi_partition_table`, BIG)
+//!
+//! For a composite partition key `((tenant_id, user_id), …)` the no-false-miss
+//! correctness reduces to a single encoding invariant: the raw partition-key bytes the
+//! reader tokenizes (`RowKey::as_bytes()` / the raw `Index.db` key) must be
+//! BYTE-IDENTICAL to the composite-framed `first_key`/`last_key` stored in `Summary.db`
+//! (`[len:u16 BE][value][0x00]` per component). If they diverged, the new
+//! absence-returning fast path would SILENTLY mask the mismatch. The composite test
+//! therefore mirrors the single-column no-false-miss assertions on a multi-column key:
+//! `partition_key_out_of_range` returns `false` for EVERY present key including both
+//! boundary keys, and `true` only for a provably out-of-range composite key.
+//!
 //! Compiled only with `--features work-counters` (the counter getters/`reset` live
 //! behind it). Requires `CQLITE_DATASETS_ROOT`; each test self-skips (never fails)
 //! when its fixture is absent.
@@ -148,6 +160,40 @@ fn find_in_range_absent_key(
         let t = cassandra_murmur3_token(&k);
         if t > min_token && t < max_token && !present.iter().any(|p| p.as_slice() == k) {
             return Some(k.to_vec());
+        }
+    }
+    None
+}
+
+/// Frame two 16-byte UUID components as a Cassandra composite partition key:
+/// `[len:u16 BE][bytes][0x00]` per component. Matches `partition_key_codec` and the
+/// on-disk `first_key`/`last_key` encoding for `((uuid, uuid), …)`.
+fn composite_two_uuids(a: &[u8; 16], b: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 * (2 + 16 + 1));
+    for comp in [a, b] {
+        out.extend_from_slice(&(comp.len() as u16).to_be_bytes());
+        out.extend_from_slice(comp);
+        out.push(0x00);
+    }
+    out
+}
+
+/// Deterministically build a WELL-FORMED composite partition key (two UUID
+/// components, `[len:u16][bytes][0x00]` framed) whose Murmur3 token sorts strictly
+/// OUTSIDE `[min_token, max_token]` — a provably out-of-range composite key. Returns
+/// `None` only if the fixture's token range covers essentially the whole ring.
+fn find_out_of_range_composite_key(min_token: i64, max_token: i64) -> Option<Vec<u8>> {
+    for i in 0u64..1_000_000 {
+        let mut a = [0u8; 16];
+        let mut b = [0u8; 16];
+        a[..8].copy_from_slice(&i.to_le_bytes());
+        a[8..].copy_from_slice(&i.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());
+        b[..8].copy_from_slice(&i.wrapping_mul(0xD1B5_4A32_D192_ED03).to_le_bytes());
+        b[8..].copy_from_slice(&i.wrapping_add(0x1234_5678).to_le_bytes());
+        let key = composite_two_uuids(&a, &b);
+        let t = cassandra_murmur3_token(&key);
+        if t < min_token || t > max_token {
+            return Some(key);
         }
     }
     None
@@ -332,5 +378,99 @@ async fn big_out_of_range_short_circuits_zero_presence_work() {
         "C5: an in-range present key must reach the real Index.db probe (normal path unchanged); \
          got {}",
         rwc::index_probes()
+    );
+}
+
+/// Composite (multi-column) partition key no-false-miss (issue #1576, roborev Low).
+///
+/// `test_basic/multi_partition_table` has a COMPOSITE partition key
+/// `((tenant_id, user_id), …)`, so the raw partition-key bytes are composite-framed
+/// (`[len:u16 BE][value][0x00]` per component). This asserts the load-bearing encoding
+/// invariant the range short-circuit reduces to for composite keys: the raw `Index.db`
+/// keys are byte-identical to the `Summary.db` `first_key`/`last_key`, so
+/// `partition_key_out_of_range` returns `false` for EVERY present key — including both
+/// boundaries (inclusive) — and `true` only for a provably out-of-range composite key.
+/// Without this the new absence fast path would silently mask a composite-encoding
+/// mismatch.
+#[tokio::test]
+#[serial]
+async fn big_composite_pk_range_predicate_no_false_miss() {
+    let Some(data_db) = find_data_db("test_basic", "multi_partition_table") else {
+        eprintln!(
+            "Skipping (C5/BIG composite predicate): test_basic/multi_partition_table Data.db \
+             not present"
+        );
+        return;
+    };
+    let platform = platform().await;
+    let Some(keys) = learn_all_raw_keys(&data_db, platform.clone()).await else {
+        eprintln!("Skipping (C5/BIG composite predicate): could not learn raw keys (no Index.db)");
+        return;
+    };
+    let Some(summary) = open_summary(&data_db, platform.clone()).await else {
+        eprintln!("Skipping (C5/BIG composite predicate): no Summary.db");
+        return;
+    };
+
+    // Min/max present composite partition keys in Cassandra token order.
+    let min_key = keys
+        .iter()
+        .min_by(|a, b| order_key(a).cmp(&order_key(b)))
+        .expect("min key")
+        .clone();
+    let max_key = keys
+        .iter()
+        .max_by(|a, b| order_key(a).cmp(&order_key(b)))
+        .expect("max key")
+        .clone();
+
+    // Load-bearing invariant: the composite-framed Summary bound is BYTE-IDENTICAL to
+    // the min/max-token raw Index.db keys. If composite framing diverged between the
+    // two sources, the absence fast path would manufacture a false miss.
+    assert_eq!(
+        summary.get_first_key(),
+        min_key.as_slice(),
+        "C5: Summary first_key must equal the min-token present composite partition key \
+         (byte-identical framing)"
+    );
+    assert_eq!(
+        summary.get_last_key(),
+        max_key.as_slice(),
+        "C5: Summary last_key must equal the max-token present composite partition key \
+         (byte-identical framing)"
+    );
+
+    let config = cqlite_core::Config::default();
+    let reader = SSTableReader::open(&data_db, &config, platform)
+        .await
+        .expect("open BIG composite reader");
+
+    // No present composite key is ever ruled out — including the two boundaries.
+    for k in &keys {
+        assert!(
+            !reader.partition_key_out_of_range(k),
+            "C5: a present composite partition key must NEVER be reported out of range (false miss)"
+        );
+    }
+    assert!(
+        !reader.partition_key_out_of_range(&min_key),
+        "C5: the composite first_key boundary is IN range (inclusive)"
+    );
+    assert!(
+        !reader.partition_key_out_of_range(&max_key),
+        "C5: the composite last_key boundary is IN range (inclusive)"
+    );
+
+    let min_token = cassandra_murmur3_token(&min_key);
+    let max_token = cassandra_murmur3_token(&max_key);
+
+    // A well-formed composite key whose token sorts outside [first,last] IS ruled out.
+    let Some(oor) = find_out_of_range_composite_key(min_token, max_token) else {
+        eprintln!("Skipping out-of-range assertion: fixture token range covers the ring");
+        return;
+    };
+    assert!(
+        reader.partition_key_out_of_range(&oor),
+        "C5: a composite key whose token sorts outside [first,last] must be ruled out of range"
     );
 }
