@@ -87,6 +87,11 @@ impl From<&str> for CompressionAlgorithm {
 ///
 /// # Security
 /// Prevents decompression bomb attacks by rejecting sizes > 128MB
+///
+/// Only the LZ4 small-block decompress path consumes this (the Snappy/Deflate/Zstd
+/// paths bound inline via `MAX_DECOMPRESSED_SIZE`), so it is gated to its sole caller
+/// to stay dead-code-free under single-feature builds (issue #1873).
+#[cfg(feature = "lz4")]
 fn validate_decompression_size(uncompressed_size: usize) -> Result<()> {
     if uncompressed_size > MAX_DECOMPRESSED_SIZE {
         return Err(Error::storage(format!(
