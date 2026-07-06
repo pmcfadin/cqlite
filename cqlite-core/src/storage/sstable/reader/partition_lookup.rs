@@ -272,54 +272,6 @@ impl SSTableReader {
         }
     }
 
-    /// Emit the BTI presence-oracle observability counters (`READ_BLOOM_CHECKS`
-    /// and `READ_PARTITION_LOOKUP`) for a resolved BTI partition lookup, keyed on
-    /// whether the key was found. Used by the C3 single-walk memo-hit path so a
-    /// reused resolution records the same presence decision a fresh descent does
-    /// (only the `TRIE_WALKS` descent is skipped, not the presence accounting).
-    fn emit_bti_presence_counters(found: bool) {
-        use crate::observability::{self as obs, catalog};
-        let result = if found { "hit" } else { "miss" };
-        obs::add_counter(
-            catalog::READ_BLOOM_CHECKS,
-            1,
-            &[
-                (catalog::attr::RESULT, result.into()),
-                (catalog::attr::SSTABLE_FORMAT, "bti".into()),
-            ],
-        );
-        obs::add_counter(
-            catalog::READ_PARTITION_LOOKUP,
-            1,
-            &[
-                (catalog::attr::RESULT, result.into()),
-                (catalog::attr::LOOKUP_ROUTE, "bti_trie".into()),
-                (catalog::attr::SSTABLE_FORMAT, "bti".into()),
-            ],
-        );
-    }
-
-    /// C3 same-key memo read: returns `Some(resolved)` when the most recent BTI
-    /// resolution was for this exact `partition_key` (so the caller can skip a
-    /// second trie descent), or `None` on a miss / different key / poisoned lock.
-    /// The memoized value is a pure function of the immutable trie + key.
-    fn bti_lookup_memo_get(&self, partition_key: &[u8]) -> Option<Option<u64>> {
-        let guard = self.bti_lookup_memo.lock().ok()?;
-        match guard.as_ref() {
-            Some((k, resolved)) if k.as_ref() == partition_key => Some(*resolved),
-            _ => None,
-        }
-    }
-
-    /// C3 same-key memo write: record this key's resolved offset for reuse by the
-    /// immediately-following seek. Best effort — a poisoned lock is a no-op (the
-    /// seek just re-walks, still correct).
-    fn bti_lookup_memo_store(&self, partition_key: &[u8], resolved: Option<u64>) {
-        if let Ok(mut guard) = self.bti_lookup_memo.lock() {
-            *guard = Some((Box::from(partition_key), resolved));
-        }
-    }
-
     /// Authoritatively resolve the UNCOMPRESSED `Data.db` offset of the partition
     /// that immediately FOLLOWS the partition starting at `target_offset`, used to
     /// bound the within-SSTable seek's decompression window to exactly one

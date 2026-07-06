@@ -10,6 +10,7 @@
 
 // Submodules
 mod block_io;
+mod bti_lookup_memo;
 /// Per-element / per-cell compaction read contract (epic #899, Phase A).
 pub mod compaction_row;
 mod component_loading;
