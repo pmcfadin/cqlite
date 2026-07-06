@@ -472,6 +472,7 @@ jobs:
             --test issue_992_ttl_tombstone_parity \
             --test issue_992_range_boundary_grammar \
             --test issue_993_wide_partition_promoted_index_parity \
+            --test issue_1578_scan_stream_stitch_table_id_regression \
             --test issue_819_differential_compaction \
             --test issue_933_range_tombstone_compaction \
             --test issue_694_writetime_ttl_parity \
@@ -664,6 +665,22 @@ jobs:
             -- --nocapture
           BASH
 
+      # Issue #1578 Finding 2: corpus-backed regression proving the
+      # scan_stream_windowed stitching branch no longer filters by
+      # table_ids_match. Uses the same test_big.wide_partition corpus fixture as
+      # the wide-partition promoted-index parity step above; needs cli-helpers
+      # (for the `ingestion` module) beyond that step's plain write-support.
+      - name: Run stitched scan_stream table_id regression test
+        id: stitch_table_id_regression
+        continue-on-error: true
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full stitched scan_stream table_id regression" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --package cqlite-core --features write-support,cli-helpers \
+            --test issue_1578_scan_stream_stitch_table_id_regression \
+            -- --nocapture
+          BASH
+
       - name: Run differential-compaction self-consistency tests
         id: differential_compaction_parity
         continue-on-error: true
@@ -720,6 +737,7 @@ jobs:
           - Static-row / clustering-bound parity (issue #991): ${{ steps.static_clustering_parity.outcome }}
           - TTL / tombstone / range-marker parity (issue #992): ${{ steps.ttl_tombstone_range_parity.outcome }}
           - Wide-partition promoted-index parity (issue #993): ${{ steps.wide_partition_promoted_index_parity.outcome }}
+          - Stitched scan_stream table_id regression (issue #1578): ${{ steps.stitch_table_id_regression.outcome }}
           - Differential-compaction self-consistency (issues #819/#933/#992): ${{ steps.differential_compaction_parity.outcome }}
           - WRITETIME / TTL / local-deletion-time parity (issue #694): ${{ steps.writetime_ttl_parity.outcome }}
           - V5CompressedLegacy compression / row-count parity: ${{ steps.v5_compressed_legacy_parity.outcome }}
@@ -766,7 +784,7 @@ jobs:
           retention-days: 14
 
       - name: Comment on PR (Success)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success' && steps.compression_info_parity.outcome == 'success' && steps.compression_info_strict_parity.outcome == 'success' && steps.filter_db_parity.outcome == 'success' && steps.repaired_metadata_parity.outcome == 'success' && steps.row_framing_parity.outcome == 'success' && steps.static_clustering_parity.outcome == 'success' && steps.ttl_tombstone_range_parity.outcome == 'success' && steps.wide_partition_promoted_index_parity.outcome == 'success' && steps.differential_compaction_parity.outcome == 'success' && steps.writetime_ttl_parity.outcome == 'success' && steps.v5_compressed_legacy_parity.outcome == 'success'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success' && steps.compression_info_parity.outcome == 'success' && steps.compression_info_strict_parity.outcome == 'success' && steps.filter_db_parity.outcome == 'success' && steps.repaired_metadata_parity.outcome == 'success' && steps.row_framing_parity.outcome == 'success' && steps.static_clustering_parity.outcome == 'success' && steps.ttl_tombstone_range_parity.outcome == 'success' && steps.wide_partition_promoted_index_parity.outcome == 'success' && steps.stitch_table_id_regression.outcome == 'success' && steps.differential_compaction_parity.outcome == 'success' && steps.writetime_ttl_parity.outcome == 'success' && steps.v5_compressed_legacy_parity.outcome == 'success'
         uses: actions/github-script@v8
         with:
           script: |
@@ -789,6 +807,7 @@ jobs:
             - Static-row / clustering-bound parity (issue #991): success
             - TTL / tombstone / range-marker parity (issue #992): success
             - Wide-partition promoted-index parity (issue #993): success
+            - Stitched scan_stream table_id regression (issue #1578): success
             - Differential-compaction parity (issues #819/#933/#992): success
             - WRITETIME / TTL / local-deletion-time parity (issue #694): success
             - V5CompressedLegacy compression / row-count parity: success
@@ -803,7 +822,7 @@ jobs:
             });
 
       - name: Comment on PR (Failure)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.compression_info_strict_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success' || steps.row_framing_parity.outcome != 'success' || steps.static_clustering_parity.outcome != 'success' || steps.ttl_tombstone_range_parity.outcome != 'success' || steps.wide_partition_promoted_index_parity.outcome != 'success' || steps.differential_compaction_parity.outcome != 'success' || steps.writetime_ttl_parity.outcome != 'success' || steps.v5_compressed_legacy_parity.outcome != 'success')
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.compression_info_strict_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success' || steps.row_framing_parity.outcome != 'success' || steps.static_clustering_parity.outcome != 'success' || steps.ttl_tombstone_range_parity.outcome != 'success' || steps.wide_partition_promoted_index_parity.outcome != 'success' || steps.stitch_table_id_regression.outcome != 'success' || steps.differential_compaction_parity.outcome != 'success' || steps.writetime_ttl_parity.outcome != 'success' || steps.v5_compressed_legacy_parity.outcome != 'success')
         uses: actions/github-script@v8
         with:
           script: |
@@ -826,6 +845,7 @@ jobs:
             - Static-row / clustering-bound parity (issue #991): ${{ steps.static_clustering_parity.outcome }}
             - TTL / tombstone / range-marker parity (issue #992): ${{ steps.ttl_tombstone_range_parity.outcome }}
             - Wide-partition promoted-index parity (issue #993): ${{ steps.wide_partition_promoted_index_parity.outcome }}
+            - Stitched scan_stream table_id regression (issue #1578): ${{ steps.stitch_table_id_regression.outcome }}
             - Differential-compaction parity (issues #819/#933/#992): ${{ steps.differential_compaction_parity.outcome }}
             - WRITETIME / TTL / local-deletion-time parity (issue #694): ${{ steps.writetime_ttl_parity.outcome }}
             - V5CompressedLegacy compression / row-count parity: ${{ steps.v5_compressed_legacy_parity.outcome }}
@@ -849,6 +869,7 @@ jobs:
             cargo test --package cqlite-core --features write-support --test issue_991_static_clustering_parity -- --nocapture
             cargo test --package cqlite-core --features write-support --test issue_992_ttl_tombstone_parity --test issue_992_range_boundary_grammar -- --nocapture
             cargo test --package cqlite-core --features write-support --test issue_993_wide_partition_promoted_index_parity -- --nocapture
+            cargo test --package cqlite-core --features write-support,cli-helpers --test issue_1578_scan_stream_stitch_table_id_regression -- --nocapture
             cargo test --package cqlite-core --features write-support --test issue_819_differential_compaction --test issue_933_range_tombstone_compaction -- --nocapture
             cargo test --package cqlite-core --features write-support,cli-helpers --test issue_694_writetime_ttl_parity -- --nocapture
             cargo test --package cqlite-core --features write-support --test v5_compressed_legacy_parity_test --test v5_compressed_legacy_row_count_parity -- --nocapture
@@ -880,6 +901,7 @@ jobs:
             steps.static_clustering_parity.outcome != 'success' ||
             steps.ttl_tombstone_range_parity.outcome != 'success' ||
             steps.wide_partition_promoted_index_parity.outcome != 'success' ||
+            steps.stitch_table_id_regression.outcome != 'success' ||
             steps.differential_compaction_parity.outcome != 'success' ||
             steps.writetime_ttl_parity.outcome != 'success' ||
             steps.v5_compressed_legacy_parity.outcome != 'success'
@@ -903,6 +925,7 @@ jobs:
           echo "Static-row / clustering-bound parity: ${{ steps.static_clustering_parity.outcome }}"
           echo "TTL / tombstone / range-marker parity: ${{ steps.ttl_tombstone_range_parity.outcome }}"
           echo "Wide-partition promoted-index parity: ${{ steps.wide_partition_promoted_index_parity.outcome }}"
+          echo "Stitched scan_stream table_id regression: ${{ steps.stitch_table_id_regression.outcome }}"
           echo "Differential-compaction self-consistency: ${{ steps.differential_compaction_parity.outcome }}"
           echo "WRITETIME / TTL / local-deletion-time parity: ${{ steps.writetime_ttl_parity.outcome }}"
           echo "V5CompressedLegacy compression / row-count parity: ${{ steps.v5_compressed_legacy_parity.outcome }}"
