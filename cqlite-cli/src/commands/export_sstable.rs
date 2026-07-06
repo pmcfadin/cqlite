@@ -7,7 +7,7 @@
 #![allow(deprecated)]
 
 #[cfg(feature = "state_machine")]
-use super::schema_load::load_schema_file;
+use super::schema_load::load_schema_file_with_status;
 #[cfg(feature = "state_machine")]
 use super::support::RealDataParser;
 #[cfg(feature = "state_machine")]
@@ -40,8 +40,9 @@ pub async fn export_sstable(
     // and when stdout is not a TTY.
     let show_progress = !quiet && std::io::stdout().is_terminal();
 
-    // Load schema with auto-detection
-    let schema = load_schema_file(schema_path, false, None)?;
+    // Load schema with auto-detection. Issue #1506 / #284: schema-loading status
+    // is gated behind `show_progress` so `--quiet` (and non-TTY stdout) suppress it.
+    let schema = load_schema_file_with_status(schema_path, false, None, show_progress)?;
 
     let config = cqlite_core::Config::default();
     let platform = Arc::new(cqlite_core::platform::Platform::new(&config).await?);

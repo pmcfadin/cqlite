@@ -136,6 +136,44 @@ fn test_read_sstable_quiet_suppresses_progress_preamble() {
     );
 }
 
+/// FINDING 2 (roborev, Low): `read-sstable --quiet --verbose` must NOT write the
+/// verbose SSTable statistics block to stderr — quiet wins over verbose for status
+/// output. Fails before the fix (the block is gated only on `verbose`) and passes
+/// after (`verbose && show_status`).
+#[test]
+fn test_read_sstable_quiet_verbose_suppresses_stats_block() {
+    let Some(data_db) = find_simple_table_data_db() else {
+        eprintln!("SKIP: no simple_table Data.db under datasets root");
+        return;
+    };
+
+    let output = run_cli_command(&[
+        "--quiet",
+        "read-sstable",
+        data_db.to_str().unwrap(),
+        "--verbose",
+        "--format",
+        "json",
+        "--limit",
+        "1",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "read-sstable --quiet --verbose should succeed. stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("SSTable Statistics")
+            && !stderr.contains("Total entries:")
+            && !stderr.contains("Compression ratio:"),
+        "read-sstable --quiet --verbose must suppress the verbose statistics block \
+         on stderr (quiet wins over verbose). Got:\n{stderr}"
+    );
+}
+
 #[test]
 fn test_import_quiet_suppresses_progress_preamble() {
     // Requires a valid data-dir + schema so the Database opens; the import
@@ -175,4 +213,72 @@ fn test_import_quiet_suppresses_progress_preamble() {
             && !stdout.contains("Import completed"),
         "import --quiet must emit no progress/status preamble on stdout. Got:\n{stdout}"
     );
+}
+
+// ============================================================================
+// (3) FINDING 1: export_sstable(quiet=true) suppresses schema-loading status
+// ============================================================================
+//
+// `export_sstable` is an internal library API with no CLI subcommand, so it
+// cannot be driven as a subprocess; and its schema-loading status is emitted via
+// `println!`, which Rust's test harness captures on a per-test thread-local
+// buffer (never on the process fd), so an in-process stdout-fd capture cannot
+// observe it. This regression is therefore locked down with a source-guard in
+// the same idiom as the `.template(` guard above: the handler must route schema
+// loading through the quiet-aware `load_schema_file_with_status(...)` gated on
+// its `show_progress` flag, and must NOT call the unconditional
+// `load_schema_file(...)` (which prints "Loading schema…" regardless of quiet).
+// Fails on `main` (unconditional call) and passes after the fix.
+
+#[test]
+fn test_export_sstable_schema_load_is_quiet_aware() {
+    let path = crate_root().join("src/commands/export_sstable.rs");
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let collapsed = src.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Must use the quiet-aware loader gated on the handler's show_progress flag.
+    assert!(
+        collapsed.contains("load_schema_file_with_status(schema_path, false, None, show_progress)"),
+        "export_sstable must load its schema via \
+         load_schema_file_with_status(schema_path, false, None, show_progress) so schema \
+         status is suppressed under --quiet (#1506/#284)."
+    );
+
+    // Must NOT call the unconditional loader (which prints schema status regardless).
+    assert!(
+        !collapsed.contains("load_schema_file(schema_path"),
+        "export_sstable must not call the unconditional load_schema_file(...) \
+         (it prints schema-loading status even under --quiet); use \
+         load_schema_file_with_status(...) gated on show_progress instead."
+    );
+}
+
+/// The quiet-aware loader must actually gate every status `println!` behind its
+/// `show_status` flag (guards against a future edit that reintroduces an
+/// unconditional print inside the helper). Fails on `main` (no such helper /
+/// unconditional prints) and passes after the fix.
+#[test]
+fn test_schema_loader_gates_status_behind_show_status() {
+    let path = crate_root().join("src/commands/schema_load.rs");
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let collapsed = src.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        src.contains("fn load_schema_file_with_status(") && src.contains("show_status: bool"),
+        "schema_load must expose a load_schema_file_with_status(..., show_status: bool) helper (#1506)."
+    );
+
+    // Every schema-status println! must sit directly under an `if show_status {`
+    // guard so it is suppressed when the caller passes show_status=false.
+    for status in [
+        "if show_status { println!(\"📋 Loading schema",
+        "if show_status { println!(\"📝 Parsing JSON schema",
+        "if show_status { println!(\"📝 Parsing CQL schema",
+    ] {
+        assert!(
+            collapsed.contains(status),
+            "schema-loading status must be gated behind `if show_status` in \
+             schema_load.rs (#1506); missing guarded form for: {status}"
+        );
+    }
 }

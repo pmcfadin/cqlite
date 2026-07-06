@@ -75,8 +75,10 @@ pub async fn execute_read_sstable_command(
     let total_entries = entries.len();
     pb.finish_with_message(format!("✅ Read {} entries", total_entries));
 
-    // Show basic stats if verbose
-    if verbose {
+    // Show basic stats if verbose. Issue #1506 / #284: the verbose statistics
+    // block is status chatter on stderr, so `--quiet` wins over `--verbose` and
+    // suppresses it (gated behind `show_status`).
+    if verbose && show_status {
         let stats = reader.stats().await?;
         eprintln!("\n📊 SSTable Statistics:");
         eprintln!("  Total entries: {}", stats.entry_count);
