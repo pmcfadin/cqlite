@@ -1020,4 +1020,80 @@ mod tests {
         config.storage.bloom_filter_fp_rate = -1.0; // Should be ignored when bloom filters disabled
         assert!(config.validate().is_ok());
     }
+
+    // ---- issue #1568 (Epic B / B2): dead-cache config collapse ----
+
+    /// Spec: "A config using a removed knob is rejected." The pre-change
+    /// `MemoryConfig` shape (`row_cache` / `query_cache` / `allocator` alongside
+    /// `block_cache`) must FAIL CLOSED after the collapse — those keys are gone,
+    /// and `#[serde(deny_unknown_fields)]` rejects them instead of silently
+    /// ignoring them (which would suggest they still have effect).
+    #[test]
+    fn removed_memory_knobs_fail_closed() {
+        // The full OLD memory-config shape: valid on pre-change code (RED),
+        // rejected after the collapse (GREEN).
+        let old_shape = serde_json::json!({
+            "max_memory": 1_073_741_824u64,
+            "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
+            "row_cache":   { "enabled": true, "max_size": 134_217_728u64, "policy": "Lru" },
+            "query_cache": { "enabled": true, "max_size": 67_108_864u64,  "policy": "Lru" },
+            "allocator":   { "use_custom": false, "small_pool_size": 1u64, "large_pool_size": 2u64 }
+        });
+        assert!(
+            serde_json::from_value::<MemoryConfig>(old_shape).is_err(),
+            "a MemoryConfig naming removed knobs (row_cache/query_cache/allocator) must fail closed"
+        );
+
+        // Each removed knob, added to the retained-only base, is rejected.
+        for removed in ["row_cache", "query_cache", "allocator"] {
+            let mut v = serde_json::json!({
+                "max_memory": 1_073_741_824u64,
+                "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
+            });
+            v.as_object_mut()
+                .unwrap()
+                .insert(removed.to_string(), serde_json::json!({ "enabled": true }));
+            assert!(
+                serde_json::from_value::<MemoryConfig>(v).is_err(),
+                "a MemoryConfig naming the removed `{removed}` knob must fail closed"
+            );
+        }
+    }
+
+    /// Spec: "A config using a removed knob is rejected" (CachePolicy variants).
+    /// The never-selected `Lfu` / `Arc` variants are gone, so a cache config
+    /// naming them fails to deserialize (unknown variant) rather than silently
+    /// mapping to some default.
+    #[test]
+    fn removed_cache_policy_variants_fail_closed() {
+        for variant in ["Lfu", "Arc"] {
+            let v = serde_json::json!({ "enabled": true, "max_size": 1u64, "policy": variant });
+            assert!(
+                serde_json::from_value::<CacheConfig>(v).is_err(),
+                "a CacheConfig naming the removed CachePolicy::{variant} variant must fail closed"
+            );
+        }
+        // The retained `Lru` variant still deserializes.
+        let ok = serde_json::json!({ "enabled": true, "max_size": 1u64, "policy": "Lru" });
+        assert!(serde_json::from_value::<CacheConfig>(ok).is_ok());
+    }
+
+    /// Spec: "The retained budget knob still deserializes and validates." A
+    /// config specifying only `max_memory` and `block_cache` deserializes, passes
+    /// `Config::validate()`, and its `block_cache.max_size` is the retained knob.
+    #[test]
+    fn retained_budget_knob_deserializes_and_validates() {
+        let mem: MemoryConfig = serde_json::from_value(serde_json::json!({
+            "max_memory": 1_073_741_824u64,
+            "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
+        }))
+        .expect("retained-only MemoryConfig must deserialize");
+        assert_eq!(mem.block_cache.max_size, 268_435_456);
+
+        // A default Config (which now carries only the collapsed MemoryConfig)
+        // still validates, and the block-cache budget is the wired knob.
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+        assert!(config.memory.block_cache.max_size > 0);
+    }
 }
