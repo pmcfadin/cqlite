@@ -18,9 +18,14 @@
 //!    (the slow-but-correct oracle). This is the correctness guard on the new path.
 //!
 //! The `SCAN_FOR_KEY_CALLS` / decompress counters are process-global, so every
-//! counter-observing test serializes on the `serial_test` mutex (the existing
-//! counter-test convention). Tests SKIP (never fail) when the binary fixture is
-//! absent; a present fixture that yields 0 rows stays a hard failure.
+//! test that TOUCHES them — whether it reads a delta (tests 1-2) OR merely
+//! mutates the counter as a side effect (the scan-fallback tests 5-6, whose
+//! `get()` on a dropped key increments `SCAN_FOR_KEY_CALLS`) — carries `#[serial]`
+//! so the whole set serializes on the `serial_test` mutex. `#[serial]` only
+//! serializes serial-annotated tests among themselves, so a NON-serial mutator
+//! left in this binary would race the delta assertions under nextest parallelism
+//! and flake them (issue #1946). Tests SKIP (never fail) when the binary fixture
+//! is absent; a present fixture that yields 0 rows stays a hard failure.
 //!
 //! ```bash
 //! CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
@@ -408,6 +413,7 @@ fn copy_component_set(data_db: &Path, dst_dir: &Path) -> PathBuf {
 }
 
 #[tokio::test]
+#[serial]
 async fn truncated_index_get_falls_back_to_scan() {
     let Some(dd) = big_data_db() else {
         eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
@@ -595,6 +601,7 @@ fn entry_end_offsets(buf: &[u8]) -> Option<Vec<usize>> {
 }
 
 #[tokio::test]
+#[serial]
 async fn boundary_truncated_index_get_falls_back_to_scan() {
     let Some(dd) = big_data_db() else {
         eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
