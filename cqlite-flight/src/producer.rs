@@ -28,6 +28,7 @@ use cqlite_core::types::{DataType, RowCells, ScanRow, Value};
 use cqlite_core::RowKey;
 
 use crate::agg::{AggError, AggPlan};
+use crate::cancel::CancelFlag;
 use crate::filter::ScanSpec;
 use crate::ticket::Aggregation;
 
@@ -62,6 +63,11 @@ pub enum ProducerError {
     /// The aggregation spec was invalid (bad column, Sum on non-numeric, …).
     #[error("invalid aggregation: {0}")]
     Aggregation(#[from] AggError),
+    /// The merge was cancelled cooperatively (issue #1473) — e.g. the `do_get`
+    /// client disconnected mid-stream, dropping the driving future. Maps to a
+    /// clean gRPC `Aborted` status; no partial result is returned.
+    #[error("merge cancelled")]
+    Cancelled,
     /// The resolved SSTable directory escaped the data directory — e.g. via a
     /// symlink inside the data dir (issue #1430). Charset validation already
     /// blocks `../`/absolute fields; this is the canonicalization backstop.
@@ -362,8 +368,23 @@ impl MergeProducer {
 
     /// Merge `source`'s SSTables and return the resulting Arrow batches.
     pub fn produce(&self, source: &dyn SstableSource) -> Result<Vec<RecordBatch>, ProducerError> {
+        self.produce_cancellable(source, &CancelFlag::new())
+    }
+
+    /// Like [`Self::produce`], but cooperatively cancellable (issue #1473): the
+    /// merge loop polls `cancel` between partition steps and aborts early with
+    /// [`ProducerError::Cancelled`] when it is set. Used by `do_get` so a client
+    /// disconnect (which drops the driving future and cancels the flag) stops the
+    /// CPU-bound merge instead of letting it run to completion on a blocking-pool
+    /// thread.
+    pub fn produce_cancellable(
+        &self,
+        source: &dyn SstableSource,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
         let paths = source.data_paths()?;
-        self.produce_from_paths(paths)
+        let paths = self.prune_paths(paths)?;
+        self.merge_paths(paths, cancel)
     }
 
     /// Merge the given SSTable `Data.db` paths and return Arrow batches.
@@ -378,7 +399,7 @@ impl MergeProducer {
         paths: Vec<PathBuf>,
     ) -> Result<Vec<RecordBatch>, ProducerError> {
         let paths = self.prune_paths(paths)?;
-        self.merge_paths(paths)
+        self.merge_paths(paths, &CancelFlag::new())
     }
 
     /// Prune `paths` to those whose token span overlaps the spec's token range.
@@ -417,9 +438,13 @@ impl MergeProducer {
     /// which feeds the SAME surviving rows (token-pruned, predicate-filtered,
     /// tombstone-suppressed, LWW-reconciled) into the accumulator and emits
     /// PARTIAL rows. Without one, it emits full rows in `batch_size` chunks.
-    fn merge_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<RecordBatch>, ProducerError> {
+    fn merge_paths(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
         if let Some(plan) = &self.agg {
-            return self.aggregate_paths(plan, paths);
+            return self.aggregate_paths(plan, paths, cancel);
         }
 
         let mut batches = Vec::new();
@@ -433,6 +458,12 @@ impl MergeProducer {
         while let MergeStep::Partition { key, rows } =
             merger.step().map_err(ProducerError::Merge)?
         {
+            // Cooperative cancellation (issue #1473): checked at the top of every
+            // partition step, so a cancel (e.g. client disconnect) stops the merge
+            // within one partition rather than draining every remaining partition.
+            if cancel.is_cancelled() {
+                return Err(ProducerError::Cancelled);
+            }
             // Token-range filter: drop whole partitions outside the split's range.
             if let Some(token) = &self.spec.token {
                 if !token.contains(key.token) {
@@ -479,6 +510,7 @@ impl MergeProducer {
         &self,
         plan: &AggPlan,
         paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
     ) -> Result<Vec<RecordBatch>, ProducerError> {
         // Aggregate POST-reconciliation so partials match a SELECT's row set.
         let mut state = plan.new_state();
@@ -488,6 +520,10 @@ impl MergeProducer {
             while let MergeStep::Partition { key, rows } =
                 merger.step().map_err(ProducerError::Merge)?
             {
+                // Cooperative cancellation (issue #1473): see `merge_paths`.
+                if cancel.is_cancelled() {
+                    return Err(ProducerError::Cancelled);
+                }
                 if let Some(token) = &self.spec.token {
                     if !token.contains(key.token) {
                         continue;
@@ -552,7 +588,7 @@ impl MergeProducer {
         &self,
         paths: Vec<PathBuf>,
     ) -> Result<Vec<RecordBatch>, ProducerError> {
-        self.merge_paths(paths)
+        self.merge_paths(paths, &CancelFlag::new())
     }
 
     fn flush_buffer(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
@@ -695,7 +731,50 @@ mod tests {
     use crate::testutil::{
         build_sstables, delete_row, make_snapshot, simple_schema, total_rows, write_row, KS, TBL,
     };
+    use crate::cancel::CancelFlag;
     use cqlite_core::schema::{ClusteringColumn, Column};
+
+    /// Issue #1473: the merge loop must observe cooperative cancellation and
+    /// abort with [`ProducerError::Cancelled`] instead of draining every
+    /// partition. A `do_get` client that disconnects mid-stream drops the
+    /// driving future, which cancels the flag; the CPU-bound merge must then
+    /// stop rather than run to completion and pin a blocking-pool thread.
+    ///
+    /// Fails to compile on `main` (no `produce_cancellable`/`CancelFlag` and no
+    /// `Cancelled` variant exist there) — i.e. it fails on current main.
+    #[test]
+    fn merge_aborts_when_cancel_flag_is_set() {
+        let schema = simple_schema();
+        // Several partitions across two SSTables so an un-cancelled merge has
+        // real per-partition work (multiple merge steps) to do.
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100), write_row(2, "b", 20, 100)],
+                vec![write_row(3, "c", 30, 100), write_row(4, "d", 40, 100)],
+            ],
+        );
+        let producer = MergeProducer::new(schema, 8192).unwrap();
+
+        // Baseline: an un-cancelled merge produces every partition's row.
+        let fresh = CancelFlag::new();
+        let batches = producer
+            .produce_cancellable(&DirSource::new(&dir), &fresh)
+            .expect("un-cancelled merge succeeds");
+        assert_eq!(total_rows(&batches), 4, "all four partitions produced");
+
+        // Cancelled: the loop aborts at the first partition step (a bounded 0
+        // partitions of work), returning Cancelled rather than the full result.
+        let cancelled = CancelFlag::new();
+        cancelled.cancel();
+        let err = producer
+            .produce_cancellable(&DirSource::new(&dir), &cancelled)
+            .expect_err("cancelled merge aborts");
+        assert!(
+            matches!(err, ProducerError::Cancelled),
+            "expected ProducerError::Cancelled, got {err:?}"
+        );
+    }
 
     #[test]
     fn pushdown_capability_aligns_with_json_to_value() {
