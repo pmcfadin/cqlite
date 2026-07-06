@@ -40,7 +40,8 @@
 #                      the read/parser work-counter wiring-evidence tests
 #                      (issue_1566/1573/1585 read-work counters + issue_1618 parser
 #                      work counters + issue_1570 key-offset-cache INDEX_PROBES/
-#                      TRIE_WALKS wiring + issue_1575 candidate-key hash hoist). The
+#                      TRIE_WALKS wiring + issue_1575 candidate-key hash hoist +
+#                      issue_1576 first/last-key range short-circuit). The
 #                      counter bodies/getters are feature-gated
 #                      behind `work-counters`, so the default core-tests run can't
 #                      execute them — without this component the wiring evidence
@@ -2471,7 +2472,8 @@ dispatch_component() {
       --test issue_1618_parser_work_counters \
       --test issue_1642_positional_row_emit \
       --test issue_1570_key_offset_cache \
-      --test issue_1575_candidate_key_hash_hoist ;;
+      --test issue_1575_candidate_key_hash_hoist \
+      --test issue_1576_range_short_circuit ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
       --test issue_1582_byte_bounded_result_budget ;;
