@@ -289,6 +289,42 @@ class TestStreamingBasic:
             list(db.execute_streaming("SELEKT * FORM users"))
 
 
+class TestStreamingIteratorAfterClose:
+    """Issue #1462: a StreamingIterator that outlives Database.close() must
+    raise a clean RuntimeError from __next__, never drive a torn-down engine
+    (undefined behavior / possible FFI panic).
+
+    On main (before the fix) the iterator held no reference to the parent's
+    closed state, so next() after close() was undefined — these tests pin the
+    clean-error contract.
+    """
+
+    _TABLE = "test_basic.simple_table"
+
+    def test_iterator_after_close_raises(self, db):
+        """next() on an iterator whose parent DB was closed raises RuntimeError."""
+        it = db.execute_streaming(f"SELECT * FROM {self._TABLE}")
+        # Pull one row while the DB is still open.
+        first = next(it)
+        assert isinstance(first, cqlite.Row)
+
+        db.close()
+
+        with pytest.raises(RuntimeError, match="Database is closed"):
+            next(it)
+
+    def test_iterator_loop_after_close_raises(self, db):
+        """Resuming a for-loop after close() raises RuntimeError, not a panic."""
+        it = db.execute_streaming(f"SELECT * FROM {self._TABLE}")
+        pulled = 0
+        with pytest.raises(RuntimeError, match="Database is closed"):
+            for _row in it:
+                pulled += 1
+                if pulled == 1:
+                    db.close()
+        assert pulled == 1
+
+
 class TestStreamingWithConfig:
     """Test execute_streaming() with custom StreamingConfig."""
 

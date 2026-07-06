@@ -11,6 +11,7 @@ use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::{runtime_init_to_py_err, to_py_err};
@@ -616,24 +617,44 @@ pub struct StreamingIterator {
     /// the first `__next__` from the iterator's `metadata.columns` and reused by
     /// every streamed row so column names are interned once (issue #1445).
     row_shape: Mutex<Option<RowShape>>,
+    /// The parent `Database`'s closed flag, shared by `Arc` (issue #1462).
+    ///
+    /// This is the *exact same* atomic the parent `Database` flips in
+    /// `close()`, so a `db.close()` that outlives this iterator is observed
+    /// atomically with zero extra bookkeeping. `__next__` loads it first and
+    /// raises a clean `RuntimeError` before touching the (now torn-down) core
+    /// engine, preventing undefined behavior / FFI panics.
+    parent_closed: Arc<AtomicBool>,
 }
 
 impl StreamingIterator {
     /// Create a new streaming iterator from a core QueryResultIterator with no
     /// observability span (used where instrumentation is not wired).
+    ///
+    /// No parent `Database` context is available here, so a fresh
+    /// never-closed flag is used (issue #1462).
     pub fn new(iter: cqlite_core::query::result::QueryResultIterator) -> Self {
-        Self::with_span(iter, tracing::Span::none())
+        Self::with_span(
+            iter,
+            tracing::Span::none(),
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     /// Create a streaming iterator that records into `span` as rows are yielded.
+    ///
+    /// `parent_closed` is the parent `Database`'s shared closed flag (issue
+    /// #1462); `__next__` observes it to fail cleanly after `close()`.
     pub fn with_span(
         iter: cqlite_core::query::result::QueryResultIterator,
         span: tracing::Span,
+        parent_closed: Arc<AtomicBool>,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(iter)),
             span: Mutex::new(Some(span)),
             row_shape: Mutex::new(None),
+            parent_closed,
         }
     }
 
@@ -707,6 +728,16 @@ impl StreamingIterator {
     ///
     /// Raises StopIteration when no more rows are available.
     fn __next__(&self, py: Python<'_>) -> PyResult<Py<Row>> {
+        // Fail closed if the parent Database was closed while this iterator was
+        // still alive (issue #1462). A cheap atomic load BEFORE locking `inner`
+        // or entering `block_on`, so we never drive a torn-down engine. The span
+        // is intentionally left for Drop to finalize idempotently.
+        if self.parent_closed.load(Ordering::SeqCst) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Database is closed",
+            ));
+        }
+
         // Release the GIL while blocking on the buffer refill (issue #1441).
         //
         // The blocking work — acquiring the iterator lock and driving

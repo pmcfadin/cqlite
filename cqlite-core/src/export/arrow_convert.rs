@@ -85,6 +85,29 @@ pub enum ArrowConvertError {
     InvalidValue(String),
 }
 
+/// Convert an accumulated collection-element count to an Arrow 32-bit offset,
+/// failing closed instead of silently wrapping.
+///
+/// Arrow `List`/`Map` offset buffers are `i32`-backed. A plain `usize as i32`
+/// cast wraps to a **negative** value once the flattened element count of a
+/// row group crosses `i32::MAX` (2,147,483,647) — exactly the wide-partition
+/// case — producing non-monotonic offsets that either panic
+/// `OffsetBuffer::new` (monotonicity assert, on a library data path) or yield
+/// a structurally corrupt array. This returns
+/// [`ArrowConvertError::InvalidValue`] at that boundary instead. See issue
+/// #1486. Normal-size collections take the identical fast path.
+#[inline]
+fn checked_offset(len: usize) -> Result<i32, ArrowConvertError> {
+    i32::try_from(len).map_err(|_| {
+        ArrowConvertError::InvalidValue(format!(
+            "collection offset {} exceeds i32::MAX ({}); Arrow List/Map offsets \
+             are 32-bit — split the row group (fewer rows) or export via LargeList",
+            len,
+            i32::MAX
+        ))
+    })
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -780,11 +803,11 @@ pub(crate) fn build_typed_value_array(
                         for item in items {
                             flat_elements.push(Some(item));
                         }
-                        offsets.push(flat_elements.len() as i32);
+                        offsets.push(checked_offset(flat_elements.len())?);
                     }
                     Some(Value::Null) | None => {
                         null_bitmap.push(false);
-                        offsets.push(flat_elements.len() as i32);
+                        offsets.push(checked_offset(flat_elements.len())?);
                     }
                     Some(other) => {
                         return Err(ArrowConvertError::InvalidValue(format!(
@@ -849,11 +872,11 @@ pub(crate) fn build_typed_value_array(
                             flat_keys.push(Some(k));
                             flat_vals.push(Some(val));
                         }
-                        offsets.push(flat_keys.len() as i32);
+                        offsets.push(checked_offset(flat_keys.len())?);
                     }
                     Some(Value::Null) | None => {
                         null_bitmap.push(false);
-                        offsets.push(flat_keys.len() as i32);
+                        offsets.push(checked_offset(flat_keys.len())?);
                     }
                     Some(other) => {
                         return Err(ArrowConvertError::InvalidValue(format!(
@@ -1793,11 +1816,11 @@ fn build_list_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
                 for item in items {
                     values.push(Some(ValueFormatter::format_value(item)));
                 }
-                offsets.push(values.len() as i32);
+                offsets.push(checked_offset(values.len())?);
             }
             Some(Value::Null) | None => {
                 null_bitmap.push(false);
-                offsets.push(values.len() as i32);
+                offsets.push(checked_offset(values.len())?);
             }
             Some(other) => {
                 return Err(ArrowConvertError::InvalidValue(format!(
@@ -1836,11 +1859,11 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
                     keys.push(Some(ValueFormatter::format_value(k)));
                     values.push(Some(ValueFormatter::format_value(v)));
                 }
-                offsets.push(keys.len() as i32);
+                offsets.push(checked_offset(keys.len())?);
             }
             Some(Value::Null) | None => {
                 null_bitmap.push(false);
-                offsets.push(keys.len() as i32);
+                offsets.push(checked_offset(keys.len())?);
             }
             Some(other) => {
                 return Err(ArrowConvertError::InvalidValue(format!(
@@ -2318,5 +2341,66 @@ mod tests {
         let batch = rows_to_record_batch(&columns, &rows).expect("counter accepts Counter");
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.column(0).null_count(), 0);
+    }
+
+    /// (11) Issue #1486: `checked_offset` at the `i32::MAX` boundary fails
+    /// closed instead of wrapping negative. Materializing >2^31 real elements
+    /// is infeasible, so we drive the offset-building helper directly — the
+    /// exact path every List/Map offset push now goes through. On main the
+    /// sites used `len() as i32`, which wraps to a negative offset (no `Err`);
+    /// this asserts the boundary now returns `Err`.
+    #[test]
+    fn checked_offset_past_i32_max_is_error() {
+        // At the ceiling: i32::MAX still fits.
+        assert_eq!(
+            super::checked_offset(i32::MAX as usize).ok(),
+            Some(i32::MAX)
+        );
+        // One past the ceiling must fail closed (would wrap to i32::MIN as i32).
+        assert!(matches!(
+            super::checked_offset(i32::MAX as usize + 1),
+            Err(ArrowConvertError::InvalidValue(_))
+        ));
+    }
+
+    /// (11b) Normal-size collections behave identically: small counts map
+    /// straight through to their `i32` value.
+    #[test]
+    fn checked_offset_normal_sizes_are_identity() {
+        assert_eq!(super::checked_offset(0).ok(), Some(0));
+        assert_eq!(super::checked_offset(1).ok(), Some(1));
+        assert_eq!(super::checked_offset(1_000_000).ok(), Some(1_000_000));
+    }
+
+    /// (11c) End-to-end regression guard: a real, normal-size List/Map still
+    /// builds unchanged through the checked offset path.
+    #[test]
+    fn normal_collections_still_build_through_checked_offsets() {
+        let list_cols = vec![col(
+            "l",
+            DataType::List,
+            Some(CqlType::List(Box::new(CqlType::Int))),
+        )];
+        let list_rows = vec![
+            row_one("l", Value::List(vec![Value::Integer(1), Value::Integer(2)])),
+            row_one("l", Value::Null),
+        ];
+        let batch = rows_to_record_batch(&list_cols, &list_rows).expect("list must build");
+        assert_eq!(batch.num_rows(), 2);
+
+        let map_cols = vec![col(
+            "m",
+            DataType::Map,
+            Some(CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::Int),
+            )),
+        )];
+        let map_rows = vec![row_one(
+            "m",
+            Value::Map(vec![(Value::Text("k".into()), Value::Integer(9))]),
+        )];
+        let batch = rows_to_record_batch(&map_cols, &map_rows).expect("map must build");
+        assert_eq!(batch.num_rows(), 1);
     }
 }

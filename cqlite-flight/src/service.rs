@@ -34,6 +34,7 @@ use tonic::{Request, Response, Status, Streaming};
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
 use tracing::Instrument;
 
+use crate::cancel::CancelFlag;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
@@ -68,6 +69,9 @@ impl From<ProducerError> for Status {
             // A canonicalization escape (issue #1430) is treated as a missing
             // resource so the server never confirms a path outside the data dir.
             ProducerError::UnsafePath { .. } => Status::not_found(msg),
+            // Cooperative cancellation (issue #1473): a clean, expected abort
+            // (client disconnected mid-stream), not a server fault.
+            ProducerError::Cancelled => Status::aborted(msg),
             ProducerError::Discovery { .. }
             | ProducerError::Merge(_)
             | ProducerError::Convert(_)
@@ -383,9 +387,27 @@ impl CqliteFlightService {
         // async runtime so it cannot stall the gRPC reactor. A missing table
         // directory surfaces as `not_found`; an existing table with no SSTables
         // yields an empty result (schema only).
-        let batches = tokio::task::spawn_blocking(move || producer.produce(&source))
-            .await
-            .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
+        //
+        // Cancellation (issue #1473): `spawn_blocking` is NOT cancelled when this
+        // future is dropped, so a client that disconnects mid-`do_get` would
+        // otherwise leave the merge running to completion, pinning a blocking-pool
+        // thread. We hold a `CancelGuard` across the `.await`: if the future is
+        // dropped (client gone) the guard cancels the flag, and the merge loop —
+        // which polls it between partition steps — aborts early with `Aborted`.
+        // On success we disarm the guard (the merge is done; nothing to cancel).
+        // The merge fully materializes its batches BEFORE the response stream is
+        // built, so the future-drop during this `.await` is the meaningful
+        // cancellation point; wrapping the post-materialization stream would have
+        // nothing left to cancel.
+        let cancel = CancelFlag::new();
+        let mut guard = cancel.drop_guard();
+        let merge_cancel = cancel.clone();
+        let batches = tokio::task::spawn_blocking(move || {
+            producer.produce_cancellable(&source, &merge_cancel)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
+        guard.disarm();
 
         // Attribute rows + in-memory payload bytes to this RPC. `get_array_memory_size`
         // is the buffer footprint of the batch (pre-IPC framing) — a bounded, cheap
