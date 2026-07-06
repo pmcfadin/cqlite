@@ -417,6 +417,11 @@ impl SSTableReader {
             return Ok(ScanRow::Marker(Value::Null));
         }
 
+        // Issue #1642 tripwire honesty: this schema-less fallback performs a per-row
+        // cell sort (the recovered cells arrive in no guaranteed order). Record it so
+        // `ROW_SORT_INVOCATIONS` honestly counts EVERY per-row sort — the primary V5
+        // decoder (which the K3 scan assertions exercise) still records 0.
+        crate::storage::sstable::read_work_counters::record_row_sort();
         row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
         Ok(ScanRow::Row(row_cells))
     }
@@ -643,6 +648,11 @@ impl SSTableReader {
             .into_iter()
             .map(|(name, value)| (std::sync::Arc::from(name.as_str()), value))
             .collect();
+        // Issue #1642 tripwire honesty: this cold schema-less fallback collects into
+        // an unordered `HashMap`, so it sorts here for a deterministic emit order.
+        // Record it so `ROW_SORT_INVOCATIONS` honestly counts EVERY per-row sort — the
+        // primary V5 decoder (which the K3 scan assertions exercise) still records 0.
+        crate::storage::sstable::read_work_counters::record_row_sort();
         row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
         Ok(ScanRow::Row(row_cells))
     }

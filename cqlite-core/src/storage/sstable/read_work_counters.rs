@@ -110,10 +110,15 @@
 //!   former `block_emit`/`block_emit_windowed` sort sites into). **K3 (issue #1642)
 //!   delivered**: the decoder now emits cells positionally in serialization-header
 //!   column order (deterministic by CONSTRUCTION), so `build_display_row` performs
-//!   NO per-row sort and a full scan records `0` (on `main`/pre-K3 it was one per
-//!   returned live row). No production site calls [`record_row_sort`] anymore; the
-//!   counter is retained as a regression tripwire — any reintroduced per-row cell
-//!   sort must record it, flipping the K3 `== 0` scan assertions red.
+//!   NO per-row sort and a full scan of standard fixtures through the primary
+//!   decoder records `0` (on `main`/pre-K3 it was one per returned live row). The
+//!   only remaining callers are the two cold schema-less fallbacks in
+//!   `reader/parsing/mod.rs` (`extract_value_from_parsed_row_fallback` and
+//!   `extract_value_from_parsed_row_with_schema`), which sort recovered cells for a
+//!   deterministic emit order and DO record it — so the counter honestly counts
+//!   EVERY per-row cell sort. The primary V5 decoder path records `0`; the counter
+//!   is a regression tripwire — any reintroduced per-row cell sort on the primary
+//!   path must record it, flipping the K3 `== 0` scan assertions red.
 
 // The atomics, the process-global, the struct methods, the getters, and `reset`
 // exist ONLY in test/feature builds — a release build links none of them, which is
@@ -470,11 +475,15 @@ pub fn record_bti_pointer_decode() {
 /// Record one per-row cell `sort_by` (`ROW_SORT_INVOCATIONS`; consumer K3,
 /// Issue #1618 / #1642).
 ///
-/// **K3 (issue #1642) removed the caller**: the decoder emits cells positionally
-/// in serialization-header column order, so `build_display_row` no longer sorts and
-/// no production site calls this. It is kept (unconditional, zero-overhead in
-/// release per design.md Decision 1) as a regression tripwire — any future per-row
-/// cell sort must call it, which would flip the K3 `ROW_SORT_INVOCATIONS == 0` scan
+/// **K3 (issue #1642) removed the primary-path caller**: the decoder emits cells
+/// positionally in serialization-header column order, so `build_display_row` no
+/// longer sorts. The only remaining callers are the two cold schema-less fallbacks
+/// in `reader/parsing/mod.rs`, which sort recovered cells for a deterministic emit
+/// order and DO call this — so `ROW_SORT_INVOCATIONS` honestly counts EVERY per-row
+/// cell sort. It is kept (unconditional, zero-overhead in release per design.md
+/// Decision 1) as a regression tripwire — the K3 scan assertions exercise the
+/// primary V5 decoder (which records `0`), so any future per-row cell sort on that
+/// path must call this, which would flip the K3 `ROW_SORT_INVOCATIONS == 0` scan
 /// assertions red.
 #[inline(always)]
 pub fn record_row_sort() {
