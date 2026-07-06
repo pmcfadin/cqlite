@@ -19,7 +19,7 @@
 //! | date              | `Date32`                              | Signed days since 1970-01-01      |
 //! | time              | `Time64(Nanosecond)`                  | Nanos since midnight              |
 //! | decimal           | `Decimal128(38, DECIMAL_FIXED_SCALE)` | Rescaled; see strategy below      |
-//! | varint            | `Decimal128(38, 0)` or `Utf8`         | `Utf8` fallback on overflow       |
+//! | varint            | `Decimal128(38, 0)`                   | Err on >38-digit overflow (fail-closed, never Utf8) |
 //! | duration          | `Utf8` (CQL text form)                | Parquet crate v53 NYI MonthDayNano|
 //! | uuid/timeuuid     | `FixedSizeBinary(16)` + UUID ext      | Arrow UUID extension metadata     |
 //! | inet              | `Utf8`                                | Canonical textual form (deliberate)|

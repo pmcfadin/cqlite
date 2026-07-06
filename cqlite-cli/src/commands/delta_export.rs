@@ -58,6 +58,41 @@ impl DeltaExportResult {
     }
 }
 
+/// Enforce delta-export's single bare-`CREATE TABLE` schema contract (issue #1489).
+///
+/// delta-export requires a schema file containing exactly one bare `CREATE TABLE`
+/// statement — no `CREATE KEYSPACE` / `USE` preamble and no trailing statements.
+/// Without this guard a leading preamble fails with an opaque raw nom `{:?}` debug
+/// dump, and statements *after* the `CREATE TABLE` are silently discarded. Both are
+/// fail-open surprises. For CQL schema files we detect >1 top-level statement up
+/// front (via `split_cql_statements`) and emit a clear, targeted error. JSON schema
+/// documents are exempt: they are validated by the JSON loader, not this contract.
+#[cfg(feature = "delta-export")]
+fn ensure_bare_create_table_schema(
+    schema_path: &std::path::Path,
+    content: &str,
+) -> anyhow::Result<()> {
+    let is_cql = matches!(
+        schema_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("cql") | Some("sql") | None
+    );
+    if !is_cql {
+        return Ok(());
+    }
+
+    let statements = cqlite_core::schema::cql_parser::split_cql_statements(content);
+    if statements.len() > 1 {
+        return Err(anyhow::anyhow!(
+            "delta-export requires a bare CREATE TABLE (no CREATE KEYSPACE / USE preamble)"
+        ));
+    }
+    Ok(())
+}
+
 /// Run the `delta-export` subcommand.
 ///
 /// This function is the `#[cfg(feature = "delta-export")]` path.  When the
@@ -106,6 +141,18 @@ pub async fn handle_delta_export(
     // -----------------------------------------------------------------------
     // Load schema (errors at schema-derivation time, before any I/O)
     // -----------------------------------------------------------------------
+    // Enforce the single bare-CREATE-TABLE contract before loading (issue #1489):
+    // a leading CREATE KEYSPACE / USE preamble would otherwise fail with an opaque
+    // nom debug dump, and trailing statements would be silently dropped.
+    let schema_src = std::fs::read_to_string(&args.schema).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read schema file: {}: {}",
+            args.schema.display(),
+            e
+        )
+    })?;
+    ensure_bare_create_table_schema(&args.schema, &schema_src)?;
+
     let schema = crate::commands::load_schema_file(&args.schema, false, None)?;
 
     // -----------------------------------------------------------------------
@@ -301,4 +348,61 @@ pub async fn handle_delta_export(
         execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
         element_tombstone_warnings,
     })
+}
+
+#[cfg(all(test, feature = "delta-export"))]
+mod bare_create_table_schema_tests {
+    use super::ensure_bare_create_table_schema;
+    use std::path::Path;
+
+    const BARE: &str = "CREATE TABLE ks.t (id uuid PRIMARY KEY, name text);";
+    const LEADING_PREAMBLE: &str = "CREATE KEYSPACE ks WITH replication = \
+        {'class': 'SimpleStrategy', 'replication_factor': 1}; \
+        USE ks; \
+        CREATE TABLE ks.t (id uuid PRIMARY KEY, name text);";
+    const TRAILING_STATEMENT: &str = "CREATE TABLE ks.t (id uuid PRIMARY KEY, name text); \
+        CREATE INDEX ON ks.t (name);";
+
+    /// A single bare CREATE TABLE is accepted.
+    #[test]
+    fn bare_create_table_is_accepted() {
+        ensure_bare_create_table_schema(Path::new("schema.cql"), BARE)
+            .expect("a bare CREATE TABLE must be accepted");
+    }
+
+    /// A leading CREATE KEYSPACE / USE preamble must yield a clear, targeted
+    /// error naming the bare-CREATE-TABLE contract — not a raw nom debug dump.
+    /// On main this reached parse_cql_schema and produced a generic
+    /// "Failed to parse CQL schema: {:?}" nom error.
+    #[test]
+    fn leading_preamble_names_the_bare_create_table_contract() {
+        let err = ensure_bare_create_table_schema(Path::new("schema.cql"), LEADING_PREAMBLE)
+            .expect_err("a leading CREATE KEYSPACE / USE preamble must be rejected");
+        assert!(
+            err.to_string().contains("bare CREATE TABLE"),
+            "error must name the bare-CREATE-TABLE contract, got: {err}"
+        );
+    }
+
+    /// Statements *after* the CREATE TABLE must error rather than being silently
+    /// dropped. On main these were discarded (parse_cql_schema ignored the
+    /// remaining input) and the export silently succeeded.
+    #[test]
+    fn trailing_statement_names_the_bare_create_table_contract() {
+        let err = ensure_bare_create_table_schema(Path::new("schema.cql"), TRAILING_STATEMENT)
+            .expect_err("a trailing statement must be rejected");
+        assert!(
+            err.to_string().contains("bare CREATE TABLE"),
+            "error must name the bare-CREATE-TABLE contract, got: {err}"
+        );
+    }
+
+    /// JSON schema documents are exempt from the single-statement contract
+    /// (they are validated by the JSON loader, not this guard).
+    #[test]
+    fn json_schema_is_exempt() {
+        // Content that would trip the CQL guard, but with a .json extension.
+        ensure_bare_create_table_schema(Path::new("schema.json"), LEADING_PREAMBLE)
+            .expect("JSON schema files are exempt from the CQL single-statement contract");
+    }
 }
