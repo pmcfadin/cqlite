@@ -28,8 +28,13 @@ use super::partitions::{encode_partition_key_for_bti_trie, walk_bti_trie, BtiPar
 /// Returns:
 /// - `Ok(Some(child_offset))` — a transition for `search_byte` exists.
 /// - `Ok(None)` — no such transition (key not in this subtree).
-/// - `Err(_)` — the node is out of bounds or structurally truncated (identical to
-///   the failure [`super::node_decode::parse_bti_node`] would report).
+/// - `Err(_)` — the node is out of bounds or structurally truncated. This mirrors
+///   the failure [`super::node_decode::parse_bti_node`] would report, with one
+///   intentional divergence: a PayloadOnly node (ordinal 0) with `payload_flags == 0`
+///   returns `Ok(None)` here ("a leaf has no children" — semantically correct) where
+///   `parse_bti_node` reports `Err`. That case is unreachable in practice because
+///   leaves are handled by the `is_leaf` branch in [`super::partitions`] before
+///   `find_child_offset` is ever called.
 ///
 /// This is the allocation-free analogue of `parse_bti_node(...).find_child(byte)`
 /// and produces bit-identical child offsets (same `saturating_sub` arithmetic and
@@ -232,7 +237,7 @@ fn dense_child(
 /// root-offset footer). This is the zero-copy analogue of
 /// [`super::partitions::lookup_partition_in_bti_file`] and returns the identical
 /// [`BtiPartitionLocation`].
-pub fn lookup_partition_in_bti_slice(
+pub(crate) fn lookup_partition_in_bti_slice(
     file_bytes: &[u8],
     encoded_key: &[u8],
 ) -> BtiResult<Option<BtiPartitionLocation>> {
@@ -265,7 +270,7 @@ pub fn lookup_partition_in_bti_slice(
 /// `Murmur3Partitioner` byte-comparable encoding, WITHOUT copying the trie.
 ///
 /// Zero-copy analogue of [`super::partitions::lookup_raw_key_in_bti_partitions_db`].
-pub fn lookup_raw_key_in_bti_partitions_slice(
+pub(crate) fn lookup_raw_key_in_bti_partitions_slice(
     file_bytes: &[u8],
     raw_key_bytes: &[u8],
 ) -> BtiResult<Option<BtiPartitionLocation>> {
