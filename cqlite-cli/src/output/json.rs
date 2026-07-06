@@ -552,8 +552,7 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert("a".to_string(), serde_json::json!(1));
         map.insert("a".to_string(), serde_json::json!(2));
-        let expected =
-            serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
+        let expected = serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
 
         assert_eq!(
             json_str, expected,

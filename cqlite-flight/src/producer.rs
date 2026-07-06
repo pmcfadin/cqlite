@@ -728,10 +728,10 @@ fn flat_data_type(cql: &CqlType) -> DataType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancel::CancelFlag;
     use crate::testutil::{
         build_sstables, delete_row, make_snapshot, simple_schema, total_rows, write_row, KS, TBL,
     };
-    use crate::cancel::CancelFlag;
     use cqlite_core::schema::{ClusteringColumn, Column};
 
     /// Issue #1473: the merge loop must observe cooperative cancellation and

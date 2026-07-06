@@ -402,10 +402,11 @@ impl CqliteFlightService {
         let cancel = CancelFlag::new();
         let mut guard = cancel.drop_guard();
         let merge_cancel = cancel.clone();
-        let batches =
-            tokio::task::spawn_blocking(move || producer.produce_cancellable(&source, &merge_cancel))
-                .await
-                .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
+        let batches = tokio::task::spawn_blocking(move || {
+            producer.produce_cancellable(&source, &merge_cancel)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
         guard.disarm();
 
         // Attribute rows + in-memory payload bytes to this RPC. `get_array_memory_size`
