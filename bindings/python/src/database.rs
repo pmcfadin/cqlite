@@ -423,6 +423,8 @@ impl Database {
     /// * `path` - Destination file path (created or truncated)
     /// * `row_group_size` - Rows per Parquet row group (default: 10000)
     /// * `compression` - "snappy" (default), "zstd", or "none"
+    /// * `config` - Optional StreamingConfig for buffer/chunk sizes during the
+    ///   underlying streaming scan (defaults to the engine default when unset)
     ///
     /// # Returns
     ///
@@ -446,7 +448,7 @@ impl Database {
     /// )
     /// print(f"Exported {rows} row(s)")
     /// ```
-    #[pyo3(signature = (query, path, *, row_group_size=10000, compression="snappy"))]
+    #[pyo3(signature = (query, path, *, row_group_size=10000, compression="snappy", config=None))]
     pub fn export_parquet(
         &self,
         py: Python<'_>,
@@ -454,6 +456,7 @@ impl Database {
         path: &str,
         row_group_size: usize,
         compression: &str,
+        config: Option<&StreamingConfig>,
     ) -> PyResult<u64> {
         use cqlite_core::export::parquet::{
             ParquetCompression, ParquetExportOptions, StreamingParquetWriter,
@@ -486,6 +489,9 @@ impl Database {
         let db = self.inner();
         let query_owned = query.to_string();
         let path_owned = PathBuf::from(path);
+        // Resolve the streaming config while we still hold the GIL (the pyclass
+        // ref cannot cross `allow_threads`); default when unset (issue #1463).
+        let core_config = config.map(|c| c.to_core()).unwrap_or_default();
 
         // Release the GIL for the whole export (query + file writing).
         // Errors are split so each maps to the right Python exception:
@@ -493,10 +499,7 @@ impl Database {
         let result: Result<u64, PyErr> = py.allow_threads(|| {
             block_on(async {
                 let mut iter = db
-                    .execute_streaming(
-                        &query_owned,
-                        cqlite_core::query::result::StreamingConfig::default(),
-                    )
+                    .execute_streaming(&query_owned, core_config)
                     .await
                     .map_err(to_py_err)?;
 

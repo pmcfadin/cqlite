@@ -446,6 +446,20 @@ CREATE TABLE IF NOT EXISTS t (
 """
 
 
+# Same single-table shape, a TIMESTAMP column, for the far-future exactness proof.
+_TIMESTAMP_SCHEMA = """\
+CREATE KEYSPACE IF NOT EXISTS temporal_exact
+  WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+
+USE temporal_exact;
+
+CREATE TABLE IF NOT EXISTS t (
+    id  INT PRIMARY KEY,
+    wts TIMESTAMP
+);
+"""
+
+
 class TestTemporalExactness:
     """Prove values the OLD (M4 §5.2) lossy path corrupted are now preserved."""
 
@@ -492,6 +506,61 @@ class TestTemporalExactness:
         assert value == sub_us_nanos, f"expected exact {sub_us_nanos}, got {value}"
         assert value != old_lossy_nanos, (
             "sub-µs nanoseconds must NOT be truncated (regression to M4 §5.2)"
+        )
+
+    def test_far_future_timestamp_us_exact(self, tmp_path):
+        """A far-future TIMESTAMP converts to datetime microsecond-exactly (#1463).
+
+        The value 253_402_214_399_123 ms is in year 9999 with a 123 ms
+        (123_000 µs) fractional-second component. The old conversion routed
+        ``seconds + micros/1e6`` through an f64 whose ULP at that magnitude is
+        ~61 µs, so ``fromtimestamp`` read back 122_986 µs instead of 123_000 —
+        a silent microsecond error. Building the datetime as
+        ``epoch(0, utc) + timedelta(milliseconds=millis)`` (integer-exact) makes
+        the conversion lossless, so this asserts the exact expected datetime.
+        """
+        millis = 253_402_214_399_123  # year 9999, .123 s the f64 path corrupted
+        utc = datetime.timezone.utc
+        expected = datetime.datetime.fromtimestamp(0, tz=utc) + datetime.timedelta(
+            milliseconds=millis
+        )
+        assert expected.microsecond == 123_000  # sanity: what exactness must yield
+
+        schema = tmp_path / "schema.cql"
+        schema.write_text(_TIMESTAMP_SCHEMA)
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        write_dir = tmp_path / "wd"
+
+        db = cqlite.open(
+            str(data_dir),
+            schema=str(schema),
+            writable=True,
+            write_dir=str(write_dir),
+        )
+        try:
+            db.execute(
+                f"INSERT INTO temporal_exact.t (id, wts) VALUES (1, {millis})"
+            )
+            path = db.flush_run()
+            assert path and Path(path).exists(), "flush must produce a real Data.db"
+        finally:
+            db.close()
+
+        with cqlite.open(str(write_dir / "data"), schema=str(schema)) as rd:
+            rows = [
+                row.to_dict()
+                for row in rd.execute("SELECT wts FROM temporal_exact.t")
+            ]
+
+        assert len(rows) == 1, f"exactly one row expected, got {rows}"
+        value = rows[0]["wts"]
+        assert isinstance(value, datetime.datetime), f"expected datetime, got {type(value)}"
+        assert value.tzinfo == utc, "timestamp must stay UTC-aware"
+        # The load-bearing assertion: exact to the microsecond (fails on f64 path).
+        assert value == expected, f"expected {expected!r}, got {value!r}"
+        assert value.microsecond == 123_000, (
+            f"microsecond must be exact 123000, got {value.microsecond}"
         )
 
     def test_duration_exact_months_days_nanos(self, db):

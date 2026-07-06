@@ -160,17 +160,24 @@ fn timestamp_to_datetime(py: Python<'_>, millis: i64) -> PyResult<PyObject> {
     let dt_class = datetime.getattr("datetime")?;
     let timezone = datetime.getattr("timezone")?;
     let utc = timezone.getattr("utc")?;
+    let timedelta = datetime.getattr("timedelta")?;
 
-    // Convert milliseconds to seconds and microseconds
-    // Use Euclidean division/remainder to correctly handle negative timestamps
-    let seconds = millis.div_euclid(1000);
-    let micros = millis.rem_euclid(1000) * 1000;
+    // Build the datetime integer-exactly: epoch(0, tz=utc) + timedelta(milliseconds=millis).
+    //
+    // Routing `millis` through an f64 (as the old `fromtimestamp` path did) loses
+    // microsecond exactness for far-future/far-past timestamps because such values
+    // exceed the 53-bit mantissa. Passing `millis` to `timedelta(milliseconds=...)`
+    // as a Python int keeps the conversion exact, and `timedelta` normalizes the
+    // value to days/seconds/microseconds with correct handling of negatives — which
+    // preserves the pre-epoch/negative correctness of Issue #341 without the
+    // Euclidean-division dance.
+    let epoch = dt_class.call_method1("fromtimestamp", (0i64, utc))?;
 
-    // Use fromtimestamp with UTC timezone
-    let dt = dt_class.call_method1(
-        "fromtimestamp",
-        (seconds as f64 + micros as f64 / 1_000_000.0, utc),
-    )?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("milliseconds", millis)?;
+    let td = timedelta.call((), Some(&kwargs))?;
+
+    let dt = epoch.call_method1("__add__", (td,))?;
     Ok(dt.into_pyobject(py)?.into_any().unbind())
 }
 

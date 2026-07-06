@@ -139,6 +139,46 @@ class TestExportParquetScalars:
             assert table.num_rows == rows
 
 
+class TestExportParquetStreamingConfig:
+    """export_parquet must accept and thread a StreamingConfig (#1463)."""
+
+    QUERY = "SELECT * FROM test_basic.simple_table"
+
+    def test_export_parquet_respects_config(self, db, tmp_path):
+        """A non-default StreamingConfig is accepted and produces the same rows.
+
+        Before #1463 ``export_parquet`` hard-coded ``StreamingConfig::default()``
+        and rejected a ``config=`` keyword entirely (TypeError). This proves the
+        param is now accepted and threaded through the streaming scan without
+        changing the result: a small non-default buffer/chunk config exports the
+        identical row count to the default path.
+        """
+        expected = len(db.execute(self.QUERY).rows)
+        assert expected > 0, "fixture must have rows for a meaningful assertion"
+
+        cfg = cqlite.StreamingConfig(buffer_size=8, chunk_size=3)
+        out = tmp_path / "cfg.parquet"
+        rows = db.export_parquet(self.QUERY, str(out), config=cfg)
+
+        assert rows == expected, "config path must export the same rows as default"
+        _assert_parquet_magic(out)
+
+        # Row count is identical to the default (no-config) export.
+        out_default = tmp_path / "default.parquet"
+        default_rows = db.export_parquet(self.QUERY, str(out_default))
+        assert rows == default_rows
+
+        if HAVE_PYARROW:
+            assert pq.read_table(out).num_rows == expected
+
+    def test_export_parquet_config_none_matches_default(self, db, tmp_path):
+        """Passing config=None is identical to omitting it (default behavior)."""
+        out = tmp_path / "none.parquet"
+        rows = db.export_parquet(self.QUERY, str(out), config=None)
+        assert rows == len(db.execute(self.QUERY).rows)
+        _assert_parquet_magic(out)
+
+
 class TestExportParquetCollections:
     """Collections table export (test_collections.collection_table)."""
 
