@@ -16,6 +16,24 @@
 //!     pins the exact contract the demotion leans on: LIMIT bypasses the
 //!     secondary row-count valve only, never the byte ceiling.
 //!
+//! ## Roborev follow-up: pinning the demotion at NON-TRIVIAL scale
+//!
+//! The tests above use a 4-row fixture, which cannot by itself distinguish "the
+//! row-count valve is exempted" from "4 rows happens to fit under any reasonable
+//! byte budget regardless". Two more tests repeat the same shape over a
+//! few-thousand-row fixture (the existing write-engine generator, same pattern as
+//! `issue_1578_aggregate_o1_memory.rs`'s `open_with_n_rows`):
+//!
+//!   * `large_limit_returns_all_rows_at_scale` — a huge `LIMIT` (far above the row
+//!     count) with a tiny `max_result_rows` (10) but a GENEROUS `max_result_bytes`
+//!     succeeds and returns EXACTLY the fixture's row count — proving a huge LIMIT
+//!     at scale is not silently truncated by the (exempted) row-count valve, and
+//!     the returned count is bounded by the actual matching rows (no over-return).
+//!   * `tight_byte_budget_still_trips_at_scale` — the SAME huge `LIMIT` over the
+//!     SAME fixture, but with the byte budget dropped to a few bytes, still trips
+//!     `Error::ResultTooLarge` — proving the byte guard (the PRIMARY guard, issue
+//!     #1582) stays live at non-trivial row counts, not merely at 4 rows.
+//!
 //! Run:
 //!   cargo test --package cqlite-core \
 //!     --features write-support,cli-helpers,state_machine \
@@ -176,6 +194,81 @@ async fn explicit_limit_does_not_exempt_byte_budget() {
     match err {
         Error::ResultTooLarge { budget_bytes, .. } => {
             assert_eq!(budget_bytes, 4, "byte budget must be the one we configured");
+        }
+        other => panic!("expected Error::ResultTooLarge, got: {other:?}"),
+    }
+}
+
+/// Row count for the at-scale companion tests: a "few thousand" rows, per the
+/// roborev ask — large enough that a size-proportional row-count valve or a
+/// silently truncated LIMIT would be unmistakable, small enough to build fast in
+/// a test.
+const SCALE_ROWS: i32 = 3000;
+
+/// Roborev follow-up: a HUGE `LIMIT` (far above `SCALE_ROWS`) with a stingy
+/// `max_result_rows` but a GENEROUS `max_result_bytes` succeeds and returns
+/// EXACTLY the fixture's row count at non-trivial scale — the row-count valve's
+/// exemption is not an artifact of the earlier 4-row fixture, and the returned
+/// count is bounded by the actual matching rows (no truncation, no over-return).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_limit_returns_all_rows_at_scale() {
+    // max_result_rows=10 would trip immediately without the LIMIT exemption
+    // (SCALE_ROWS far exceeds it); max_result_bytes is generous (64 MiB) so only
+    // the exemption itself is under test, not an incidentally-tight byte budget.
+    let (db, _tmp) = open_with_caps(SCALE_ROWS, 10, Some(64 * 1024 * 1024)).await;
+
+    let result = db
+        .execute(&format!("SELECT * FROM {KS}.{TBL} LIMIT 1500000"))
+        .await
+        .expect(
+            "Issue #1578: a huge LIMIT over a few-thousand-row table with a \
+             generous byte budget must succeed despite a stingy max_result_rows \
+             — the row-count valve is exempted for an explicit LIMIT at scale, \
+             not just for a 4-row fixture",
+        );
+    assert_eq!(
+        result.rows.len(),
+        SCALE_ROWS as usize,
+        "LIMIT 1_500_000 over a {SCALE_ROWS}-row table must return EXACTLY \
+         {SCALE_ROWS} rows — bounded by the actual matching rows, neither \
+         truncated nor duplicated"
+    );
+}
+
+/// Roborev follow-up: the SAME huge-LIMIT query over the SAME
+/// non-trivial-scale fixture, but with the byte budget dropped to a few bytes,
+/// STILL trips `Error::ResultTooLarge` — the byte guard (issue #1582's primary
+/// guard) remains a live safety net at scale, not merely at 4 rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tight_byte_budget_still_trips_at_scale() {
+    // max_result_rows is generous (far above SCALE_ROWS) so only the byte
+    // budget can trip; max_result_bytes is a handful of bytes, far below what
+    // SCALE_ROWS worth of (id, v) int pairs need.
+    let (db, _tmp) = open_with_caps(SCALE_ROWS, 1_000_000, Some(16)).await;
+
+    let err = db
+        .execute(&format!("SELECT * FROM {KS}.{TBL} LIMIT 1500000"))
+        .await
+        .err()
+        .expect(
+            "Issue #1578: a huge LIMIT over a few-thousand-row table with a \
+             tiny max_result_bytes must still trip the byte guard — LIMIT \
+             exempts only the row-count valve, never the byte ceiling, at any \
+             scale",
+        );
+    match err {
+        Error::ResultTooLarge {
+            budget_bytes, rows, ..
+        } => {
+            assert_eq!(
+                budget_bytes, 16,
+                "byte budget must be the one we configured"
+            );
+            assert!(
+                rows > 0,
+                "the byte guard must report a non-trivial row count at trip time \
+                 (got {rows}), confirming it evaluated the actual scaled result"
+            );
         }
         other => panic!("expected Error::ResultTooLarge, got: {other:?}"),
     }

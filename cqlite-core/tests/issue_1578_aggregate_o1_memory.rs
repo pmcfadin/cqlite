@@ -9,8 +9,39 @@
 //! On `main`/pre-D2 `COUNT(*)` over N rows buffered all N (`buffered_rows() == N`),
 //! so this guard flips red as the fixture grows. After D2 the fold buffers ZERO
 //! rows regardless of table size, so `buffered_rows()` stays `0` and is FLAT
-//! between a small and a large fixture. A companion `SELECT *` (which genuinely
-//! materializes) proves the probe is actually wired.
+//! between a small and a large fixture.
+//!
+//! ## Roborev follow-up: bounding the vacuity of `buffered_rows() == 0`
+//! (STATED VARIANT: behavioral pin, no production changes — see below)
+//!
+//! `count_star_buffers_o1_rows` proves the aggregate does NOT buffer rows, but by
+//! itself does not prove the query took `try_execute_global_aggregate` (the fold)
+//! specifically — a silent reroute to some OTHER codepath that also never calls
+//! `record_buffered_rows` would pass the same assertion. There is no existing
+//! test-visible observable that distinguishes "the fold ran" from "some other path
+//! ran and also never touched the probe" (the fold and the buffered
+//! `execute_aggregation` intentionally record the SAME honest `AccessPath`, and
+//! adding a fold-specific counter is production code, out of scope for this
+//! test-only round). So this file pins the claim BEHAVIORALLY instead:
+//! [`probe_is_wired_via_group_by_aggregate`] forces the classifier's GROUP BY
+//! reject branch (`!group_by_columns.is_empty()`) back onto the buffered path and
+//! asserts the probe fires there with the real row count.
+//!
+//! A tempting SECOND companion was attempted (forcing the classifier's OTHER
+//! reject branch, `PartitionLookupOutcome::Targeted`, via `WHERE id = ?` on the
+//! sole primary key) but turned out to be UNREACHABLE via the public SQL surface
+//! — see the comment above `probe_is_wired_via_group_by_aggregate` for why.
+//!
+//! Since the buffered path (`execute_aggregation`) is the ONLY caller of
+//! `record_buffered_rows`, and the GROUP BY companion proves it fires with the
+//! CORRECT row count when the classifier rejects the fold, a
+//! `count_star_buffers_o1_rows` reading of `0` over a NON-EMPTY table is strong
+//! evidence the fold ran (had `execute_aggregation` run instead, it would have
+//! recorded the real row count, exactly as that companion demonstrates) — not a
+//! coincidental zero from an unrelated reroute. The residual gap (a hypothetical
+//! SECOND codepath that also never touches the probe, distinct from both the fold
+//! and the buffered path) is NOT ruled out by a counter-only guard — closing it
+//! fully would need production instrumentation, out of scope here.
 //!
 //! The counter getter + reset live behind the `work-counters` feature; the counter
 //! is a shared process-global, so every test here serializes on a shared mutex.
@@ -135,9 +166,10 @@ async fn count_star_buffers_o1_rows() {
     );
 }
 
-/// Sanity: the probe is genuinely wired — a materializing `SELECT *` DOES buffer
-/// its rows, so a zero from the aggregate path above is a real O(1) result, not a
-/// dead counter.
+/// Companion 1 (see module doc): the probe is genuinely wired to the buffered
+/// path via the GROUP BY classifier-reject branch — a materializing `GROUP BY`
+/// aggregate DOES buffer its rows, so a zero from the global-aggregate path
+/// above is a real O(1) result, not a dead counter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn probe_is_wired_via_group_by_aggregate() {
@@ -158,3 +190,18 @@ async fn probe_is_wired_via_group_by_aggregate() {
          O(1) assertion above is vacuous"
     );
 }
+
+// A tempting SECOND companion — `SELECT COUNT(*) FROM tbl WHERE id = ?` on the
+// sole PRIMARY KEY column, which `try_execute_global_aggregate` explicitly
+// excludes from the fold as a partition-TARGETED lookup — turns out to be
+// UNREACHABLE via the public SQL surface: `M2SelectValidator` (a pre-existing,
+// unrelated legacy validator that runs upstream of the modern optimizer/
+// executor) rejects ANY combination of a partition/primary-key equality WHERE
+// with an aggregate outright (`UnsupportedQuery("... M2 supports: SELECT with
+// partition/primary key equality and optional LIMIT ...")`), before the query
+// ever reaches `select_optimizer`/`select_executor`. So that classifier branch
+// cannot be exercised behaviorally through `Database::execute` without also
+// routing around M2 — out of scope for this test-only round. The GROUP BY
+// companion above (`probe_is_wired_via_group_by_aggregate`) is therefore the
+// ONE reachable behavioral pin; see the module doc for the vacuity bound it
+// establishes on its own.
