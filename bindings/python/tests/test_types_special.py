@@ -214,6 +214,62 @@ class TestInetConversion:
                 assert parsed == value
 
 
+class TestMalformedInet:
+    """Malformed INET (length != 4/16) must raise a typed error (issue #1453).
+
+    A CQL ``inet`` is authoritatively 4 (IPv4) or 16 (IPv6) bytes; any other
+    length is corrupt data. The Python binding previously *silently returned the
+    raw bytes* for a bad length, hiding the corruption and diverging from the Node
+    binding (which throws). Both bindings now surface the SAME class of outcome —
+    a typed CQLite error naming the bad length — matching the no-heuristics
+    mandate (no invented passthrough).
+
+    These drive :func:`cqlite._inet_from_bytes` — the internal test helper that
+    runs the exact production conversion path (``value::inet_to_py``) — so no
+    on-disk fixture holding a corrupt inet cell is required.
+    """
+
+    def test_valid_ipv4_still_renders(self):
+        """A 4-byte input still renders an IPv4Address (unchanged behavior)."""
+        value = cqlite._inet_from_bytes(bytes([192, 168, 1, 1]))
+        assert isinstance(value, ipaddress.IPv4Address)
+        assert str(value) == "192.168.1.1"
+
+    def test_valid_ipv6_still_renders(self):
+        """A 16-byte input still renders an IPv6Address (unchanged behavior)."""
+        raw = bytes(
+            [
+                0x20, 0x01, 0x0D, 0xB8, 0x85, 0xA3, 0x00, 0x00,
+                0x00, 0x00, 0x8A, 0x2E, 0x03, 0x70, 0x73, 0x34,
+            ]
+        )
+        value = cqlite._inet_from_bytes(raw)
+        assert isinstance(value, ipaddress.IPv6Address)
+        assert value == ipaddress.IPv6Address("2001:db8:85a3::8a2e:370:7334")
+
+    @pytest.mark.parametrize("bad_len", [0, 1, 3, 5, 6, 8, 15, 17, 32])
+    def test_malformed_inet_raises(self, bad_len):
+        """A length that is neither 4 nor 16 raises a typed CQLite error instead
+        of silently returning ``bytes`` (the pre-#1453 bug)."""
+        raw = bytes(bad_len)  # `bad_len` zero bytes
+        with pytest.raises(cqlite.ParseError) as excinfo:
+            cqlite._inet_from_bytes(raw)
+        # Message names the offending length and mirrors the Node binding verbatim.
+        assert f"Invalid inet address length: {bad_len} (expected 4 or 16)" in str(
+            excinfo.value
+        )
+
+    def test_malformed_inet_is_cqlite_error(self):
+        """The raised type is a CQLite error (ParseError subclasses CqliteError),
+        never a bare ``bytes`` return — the cross-binding parity guarantee."""
+        result_is_error = False
+        try:
+            cqlite._inet_from_bytes(bytes(5))
+        except cqlite.CqliteError:
+            result_is_error = True
+        assert result_is_error, "malformed inet must raise CqliteError, not return bytes"
+
+
 class TestDecimalConversion:
     """Test CQL DECIMAL to Python decimal.Decimal conversion."""
 

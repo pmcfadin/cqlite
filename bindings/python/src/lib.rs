@@ -73,6 +73,21 @@ fn _decimal_from_parts(py: Python<'_>, scale: i32, unscaled: Vec<u8>) -> PyResul
     value::decimal_to_pydecimal(py, scale, &unscaled)
 }
 
+/// Test-support: render a CQL INET from its raw bytes through the exact
+/// production conversion (`value::inet_to_py`).
+///
+/// Lets the pytest suite exercise the malformed-inet typed-error path (issue
+/// #1453) directly: 4-byte / 16-byte inputs must render an
+/// `ipaddress.IPv4Address` / `IPv6Address`, while any other length must raise a
+/// typed CQLite error (matching the Node binding) rather than silently returning
+/// raw `bytes` — without needing an on-disk fixture holding a corrupt inet cell.
+/// Not part of the stable public API; the leading underscore marks it internal
+/// test support.
+#[pyfunction]
+fn _inet_from_bytes(py: Python<'_>, bytes: Vec<u8>) -> PyResult<PyObject> {
+    value::inet_to_py(py, &bytes)
+}
+
 /// Python module for CQLite.
 #[pymodule]
 fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -86,6 +101,10 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Test-support: direct DECIMAL rendering path for the corrupt-guard tests
     // (issue #1741). See the fn doc comment.
     m.add_function(wrap_pyfunction!(_decimal_from_parts, m)?)?;
+
+    // Test-support: direct INET rendering path for the malformed-inet typed-error
+    // test (issue #1453). See the fn doc comment.
+    m.add_function(wrap_pyfunction!(_inet_from_bytes, m)?)?;
 
     // Register exception types
     error::register_exceptions(m)?;

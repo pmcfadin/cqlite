@@ -541,7 +541,17 @@ fn udt_to_py(py: Python<'_>, udt: &cqlite_core::UdtValue) -> PyResult<PyObject> 
 }
 
 /// Convert inet bytes to Python ipaddress.IPv4Address or IPv6Address.
-fn inet_to_py(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
+///
+/// A CQL `inet` value is authoritatively 4 (IPv4) or 16 (IPv6) bytes. Any other
+/// length is malformed/corrupt data. Per the no-heuristics mandate (issue #28) we
+/// do NOT invent a passthrough (the old behavior silently returned the raw
+/// `bytes`, hiding bad data and diverging from the Node binding, which raises).
+/// Both bindings now surface a typed error naming the bad length (issue #1453).
+///
+/// The error class is `ParseError` (a malformed-scalar decode). NOTE: reconcile
+/// with #1451's authoritative error table if/when it lands — that issue may
+/// assign a different class to the malformed-scalar variant.
+pub(crate) fn inet_to_py(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
     let ipaddress = py.import("ipaddress")?;
     match bytes.len() {
         4 => {
@@ -558,9 +568,12 @@ fn inet_to_py(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
             let addr = ipv6_class.call1((py_bytes,))?;
             Ok(addr.into_any().unbind())
         }
-        _ => {
-            // Fallback: Return raw bytes for invalid/unknown length
-            Ok(PyBytes::new(py, bytes).into_any().unbind())
+        n => {
+            // Malformed length -> typed error (matches the Node binding), never a
+            // silent raw-bytes passthrough. Message mirrors Node's verbatim.
+            Err(crate::error::ParseError::new_err(format!(
+                "Invalid inet address length: {n} (expected 4 or 16)"
+            )))
         }
     }
 }

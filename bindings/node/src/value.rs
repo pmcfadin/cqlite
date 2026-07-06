@@ -408,25 +408,30 @@ fn duration_to_object(env: &Env, months: i32, days: i32, nanos: i64) -> Result<J
     Ok(obj.into_unknown())
 }
 
-/// Convert inet bytes to IP address string.
-fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
-    let ip_str = match bytes.len() {
-        4 => {
-            let ip = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-            ip.to_string()
-        }
+/// Format inet bytes into an IP-address string, or return a typed error message
+/// for a malformed length.
+///
+/// A CQL `inet` value is authoritatively 4 (IPv4) or 16 (IPv6) bytes; any other
+/// length is corrupt data. Per the no-heuristics mandate (issue #28) we surface a
+/// typed error naming the bad length rather than inventing a passthrough — this
+/// is the reference behavior the Python binding was aligned to (issue #1453).
+///
+/// Pure (no napi `Env`) so it is unit-testable; `inet_to_string_js` wraps it.
+fn inet_bytes_to_string(bytes: &[u8]) -> std::result::Result<String, String> {
+    match bytes.len() {
+        4 => Ok(std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string()),
         16 => {
             let mut arr = [0u8; 16];
             arr.copy_from_slice(bytes);
-            std::net::Ipv6Addr::from(arr).to_string()
+            Ok(std::net::Ipv6Addr::from(arr).to_string())
         }
-        _ => {
-            return Err(napi::Error::from_reason(format!(
-                "Invalid inet address length: {} (expected 4 or 16)",
-                bytes.len()
-            )))
-        }
-    };
+        n => Err(format!("Invalid inet address length: {n} (expected 4 or 16)")),
+    }
+}
+
+/// Convert inet bytes to IP address string.
+fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
+    let ip_str = inet_bytes_to_string(bytes).map_err(napi::Error::from_reason)?;
     env.create_string(&ip_str).map(|s| s.into_unknown())
 }
 
@@ -678,6 +683,43 @@ mod tests {
         // For -123: 256 - 123 = 133 = 0x85
         let unscaled = vec![0x85]; // -123 as two's complement byte
         assert_eq!(decimal_to_string(2, &unscaled), "-1.23");
+    }
+
+    #[test]
+    fn test_inet_bytes_to_string_ipv4() {
+        assert_eq!(
+            inet_bytes_to_string(&[192, 168, 1, 1]),
+            Ok("192.168.1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_inet_bytes_to_string_ipv6() {
+        let raw = [
+            0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70,
+            0x73, 0x34,
+        ];
+        assert_eq!(
+            inet_bytes_to_string(&raw),
+            Ok("2001:db8:85a3::8a2e:370:7334".to_string())
+        );
+    }
+
+    /// Issue #1453: a malformed inet (length != 4/16) yields a typed error naming
+    /// the bad length — never a silent passthrough. This is the reference outcome
+    /// the Python binding was aligned to (both bindings now fail the same way).
+    #[test]
+    fn test_inet_bytes_to_string_malformed_lengths_error() {
+        for bad_len in [0usize, 1, 3, 5, 6, 8, 15, 17, 32] {
+            let raw = vec![0u8; bad_len];
+            assert_eq!(
+                inet_bytes_to_string(&raw),
+                Err(format!(
+                    "Invalid inet address length: {bad_len} (expected 4 or 16)"
+                )),
+                "length {bad_len} must be a typed error"
+            );
+        }
     }
 
     // Issue #1448: prove the constructor-caching invariant without a live JS

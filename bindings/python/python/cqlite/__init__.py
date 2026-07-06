@@ -7,6 +7,8 @@ from cqlite._cqlite import (
     _built_with_panic_abort,
     # Test-support: direct DECIMAL rendering path (issue #1741)
     _decimal_from_parts,
+    # Test-support: direct INET rendering path (issue #1453)
+    _inet_from_bytes,
     # Exception types
     CqliteError,
     SchemaError,
@@ -45,6 +47,8 @@ __all__ = [
     "_built_with_panic_abort",
     # Test-support: direct DECIMAL rendering path (issue #1741)
     "_decimal_from_parts",
+    # Test-support: direct INET rendering path (issue #1453)
+    "_inet_from_bytes",
     # Exception types
     "CqliteError",
     "SchemaError",
