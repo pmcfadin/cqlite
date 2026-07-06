@@ -122,9 +122,25 @@ fn module_decl_name(line: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-/// If `line` is `pub use M::...;`, return `M`.
+/// If `line` is a `pub use …M::...;` facade re-export, return `M`.
+///
+/// Normalizes the leading path prefixes so that `pub use M::…`,
+/// `pub use self::M::…`, `pub use crate::parser::M::…`, and
+/// `pub use crate::…::parser::M::…` all resolve to module `M` (issue #1637,
+/// guard-robustness): a re-export written with an explicit `self::`/`crate::`
+/// prefix must not register the facade under `self`/`crate` and thereby falsely
+/// orphan a genuinely wired module.
 fn reexport_module_name(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("pub use ")?;
+    let rest = line.strip_prefix("pub use ")?.trim();
+    // Strip a leading `self::`.
+    let rest = rest.strip_prefix("self::").unwrap_or(rest);
+    // If the path routes through `…parser::`, the module is the segment right
+    // after the last `parser::` (covers `crate::parser::M` and
+    // `crate::<...>::parser::M`).
+    let rest = match rest.rfind("parser::") {
+        Some(pos) => &rest[pos + "parser::".len()..],
+        None => rest,
+    };
     let module = rest.split("::").next()?.trim();
     if module.is_empty() || module.contains(' ') || module.contains('{') {
         return None;
@@ -167,10 +183,16 @@ fn every_parser_module_has_a_caller() {
         collect_rs_files(&root.join(d), &mut files);
     }
 
-    // Pre-read every candidate file once.
+    // Pre-read every candidate file once, stripping comments and string
+    // literals so a `<module>::` mention that survives only in a comment/string
+    // does not falsely count as a caller (issue #1637, guard-robustness).
     let sources: Vec<(PathBuf, String)> = files
         .into_iter()
-        .filter_map(|p| fs::read_to_string(&p).ok().map(|s| (p, s)))
+        .filter_map(|p| {
+            fs::read_to_string(&p)
+                .ok()
+                .map(|s| (p, strip_comments_and_strings(&s)))
+        })
         .collect();
 
     let mut orphaned = Vec::new();
@@ -202,6 +224,98 @@ fn every_parser_module_has_a_caller() {
     );
 }
 
+/// Strip Rust line comments (`// … EOL`), block comments (`/* … */`), and
+/// double-quoted string literals from `text`, replacing every removed byte with
+/// a space (newlines preserved) so token boundaries stay intact. This ensures a
+/// `<module>::` mention that survives ONLY inside a doc comment or a string
+/// literal does NOT falsely count as wiring (issue #1637, guard-robustness).
+///
+/// Char literals / lifetimes (`'a`) are left as code: neither can contain a `::`
+/// path segment, so they can never create a false wiring match, and treating
+/// `'` as ordinary code sidesteps the char-vs-lifetime ambiguity. Raw strings
+/// are not special-cased (none in the scanned sources contain a `::` path).
+fn strip_comments_and_strings(text: &str) -> String {
+    enum State {
+        Code,
+        LineComment,
+        BlockComment,
+        Str,
+    }
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut state = State::Code;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        match state {
+            State::Code => {
+                if b == b'/' && next == Some(b'/') {
+                    state = State::LineComment;
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else if b == b'/' && next == Some(b'*') {
+                    state = State::BlockComment;
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else if b == b'"' {
+                    state = State::Str;
+                    out.push(b' ');
+                    i += 1;
+                } else {
+                    // Non-ASCII bytes are copied verbatim; our delimiters are all
+                    // ASCII, so a multibyte char is never split (output stays
+                    // valid UTF-8).
+                    out.push(b);
+                    i += 1;
+                }
+            }
+            State::LineComment => {
+                if b == b'\n' {
+                    state = State::Code;
+                    out.push(b'\n');
+                } else {
+                    out.push(b' ');
+                }
+                i += 1;
+            }
+            State::BlockComment => {
+                if b == b'*' && next == Some(b'/') {
+                    state = State::Code;
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else {
+                    out.push(if b == b'\n' { b'\n' } else { b' ' });
+                    i += 1;
+                }
+            }
+            State::Str => {
+                if b == b'\\' {
+                    // Blank the escape and the escaped byte together.
+                    out.push(b' ');
+                    if next.is_some() {
+                        out.push(b' ');
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                } else if b == b'"' {
+                    state = State::Code;
+                    out.push(b' ');
+                    i += 1;
+                } else {
+                    out.push(if b == b'\n' { b'\n' } else { b' ' });
+                    i += 1;
+                }
+            }
+        }
+    }
+    String::from_utf8(out).expect("stripped output is valid UTF-8")
+}
+
 /// True if `text` uses `needle` (`<module>::`) as a path segment, i.e. the char
 /// immediately before it is not an identifier char (so `foo_module::` does not
 /// match `module::`).
@@ -220,4 +334,60 @@ fn path_reference(text: &str, needle: &str) -> bool {
         from = idx + 1;
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Self-checks for the guard's own robustness (issue #1637, guard-robustness).
+// These keep the guard from silently degrading into a tautology.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn comment_or_string_only_mention_is_not_wiring() {
+    let src = "\
+//! doc: see foo::bar for details
+// line comment foo::baz
+/* block foo::qux
+   still foo::quux */
+let s = \"foo::in_a_string\";
+let e = \"esc \\\" foo::after_escape\";
+";
+    let stripped = strip_comments_and_strings(src);
+    assert!(
+        !path_reference(&stripped, "foo::"),
+        "a `foo::` mention appearing ONLY in comments/strings must NOT count as wiring; \
+         stripped text was: {stripped:?}"
+    );
+}
+
+#[test]
+fn real_code_path_reference_still_counts_as_wiring() {
+    let src = "let x = foo::bar(); // foo::comment\n";
+    let stripped = strip_comments_and_strings(src);
+    assert!(
+        path_reference(&stripped, "foo::"),
+        "a genuine `foo::` code reference must still count as wiring"
+    );
+}
+
+#[test]
+fn reexport_prefixes_normalize_to_module_name() {
+    // Bare form (current tree) still recognized.
+    assert_eq!(
+        reexport_module_name("pub use binary::Foo;").as_deref(),
+        Some("binary")
+    );
+    assert_eq!(
+        reexport_module_name("pub use self::binary::Foo;").as_deref(),
+        Some("binary")
+    );
+    assert_eq!(
+        reexport_module_name("pub use crate::parser::binary::Foo;").as_deref(),
+        Some("binary")
+    );
+    assert_eq!(
+        reexport_module_name("pub use crate::storage::parser::binary::Foo;").as_deref(),
+        Some("binary")
+    );
+    // Non-`pub use` lines are not re-exports.
+    assert_eq!(reexport_module_name("mod binary;"), None);
 }
