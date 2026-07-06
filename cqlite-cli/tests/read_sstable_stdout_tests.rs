@@ -16,7 +16,7 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Decorative markers that must NEVER appear on stdout (they belong on stderr).
 /// This is the exact chatter class the issue calls out (e.g. `📖 Reading …`,
@@ -75,7 +75,7 @@ fn find_simple_table_data_file() -> Option<PathBuf> {
 }
 
 /// Run `read-sstable` with the given format/limit, returning (stdout, stderr).
-fn run_read_sstable(data_file: &PathBuf, format: &str, limit: usize) -> (String, String) {
+fn run_read_sstable(data_file: &Path, format: &str, limit: usize) -> (String, String) {
     let output = Command::cargo_bin("cqlite")
         .expect("cqlite binary should be built for integration tests")
         .arg("read-sstable")
@@ -130,6 +130,19 @@ fn test_read_sstable_json_stdout_is_clean_json() {
     assert!(
         parsed.is_array(),
         "read-sstable --format json should emit a JSON array, got: {stdout}"
+    );
+    // A present-but-empty fixture would emit `[]`, which is a valid JSON array
+    // and would silently pass `is_array()` — the project's "0-rows-when-present
+    // is a false pass" hazard. Since we only reach here when the fixture IS
+    // present (the skip path returns early above), require ≥1 decoded entry,
+    // consistent with the CSV test's non-empty payload check.
+    let entries = parsed
+        .as_array()
+        .expect("parsed JSON is an array (asserted above)");
+    assert!(
+        !entries.is_empty(),
+        "present simple_table fixture must yield ≥1 JSON entry, not an empty \
+         array (0-rows-when-present is a false pass, issue #1483); stdout:\n{stdout}"
     );
 }
 
