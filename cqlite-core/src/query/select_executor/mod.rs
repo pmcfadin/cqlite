@@ -1928,18 +1928,13 @@ mod tests {
     ///   * with NaN present, the decorated output is order-IDENTICAL to a direct
     ///     reference sort over the same keys and comparator (ASC and DESC) — the
     ///     core preservation guarantee; and
-    ///   * over a NaN-free float input (where the comparator IS a total order),
-    ///     finite keys are correctly ordered and signed zeros (-0.0 vs +0.0, which
-    ///     compare Equal) keep input order (stable).
+    ///   * over a NaN-free float input, finite keys are correctly ordered and the
+    ///     signed zeros are ORDERED (-0.0 < +0.0) per Cassandra/Java.
     ///
-    /// NOTE (pre-existing gaps, out of scope for #1587): `compare_values_ordering`
-    /// compares floats via `f64::partial_cmp` (NaN → Equal, -0.0 == +0.0). So it
-    /// does NOT reproduce Cassandra/Java float ordering (NaN sorted LAST,
-    /// -0.0 < +0.0), and — because a NaN key makes the comparator a NON-total
-    /// order — a NaN in the input leaves even the finite keys in an unspecified
-    /// order. This test therefore pins the ordering the decorate-sort ACTUALLY
-    /// preserves, not the (currently absent) Java semantics. Making ORDER BY match
-    /// Cassandra float ordering is a separate behavior change; reported separately.
+    /// As of issues #1870/#2010, `compare_values_ordering` uses the Cassandra/Java
+    /// `Double.compare` TOTAL order (`crate::float_cmp`): NaN sorts LAST (all NaN
+    /// bit-patterns equal) and -0.0 < +0.0. The comparator is therefore a total
+    /// order even with NaN present, so ORDER BY reproduces Cassandra's float order.
     #[tokio::test]
     async fn execute_sort_preserves_float_nan_signed_zero_ordering() {
         let executor = create_test_executor().await;
@@ -2009,11 +2004,10 @@ mod tests {
             );
         }
 
-        // --- Part B: NaN-free input → the comparator is a total order, so the
-        // decorate-sort must produce correct finite ordering and stable signed
-        // zeros. Tags 2 (-0.0) and 4 (+0.0) compare Equal (must keep input order).
+        // --- Part B: NaN-free input → correct finite ordering with the signed
+        // zeros ORDERED (-0.0 < +0.0, Cassandra/Java), not treated as equal.
         let no_nan: [(u8, f64); 5] = [(0, 2.0), (2, -0.0), (3, 1.0), (4, 0.0), (5, -1.0)];
-        // Ascending: -1.0, then -0.0 (tag 2) then +0.0 (tag 4) [stable tie], 1.0, 2.0.
+        // Ascending: -1.0, then -0.0 (tag 2) < +0.0 (tag 4), 1.0, 2.0.
         let asc = executor
             .execute_sort(
                 make_rows(&no_nan),
@@ -2026,7 +2020,8 @@ mod tests {
             vec![5, 2, 4, 3, 0],
             "ascending float order with stable signed zeros"
         );
-        // Descending: 2.0, 1.0, then -0.0/+0.0 (stable tie: 2 before 4), -1.0.
+        // Descending: 2.0, 1.0, then +0.0 (tag 4) > -0.0 (tag 2), -1.0.
+        // Cassandra/Java orders -0.0 < +0.0, so descending places +0.0 first.
         let desc = executor
             .execute_sort(
                 make_rows(&no_nan),
@@ -2036,8 +2031,8 @@ mod tests {
             .expect("sort must succeed");
         assert_eq!(
             tags(&desc),
-            vec![0, 3, 2, 4, 5],
-            "descending float order with stable signed zeros"
+            vec![0, 3, 4, 2, 5],
+            "descending float order with -0.0 < +0.0 (Cassandra/Java)"
         );
     }
 

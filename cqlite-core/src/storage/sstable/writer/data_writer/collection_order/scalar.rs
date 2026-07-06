@@ -124,29 +124,30 @@ fn reorder_timestamp_bytes(input: u64) -> u64 {
 }
 
 /// Java `Float.compare` total order for two `f32`, matching Cassandra
-/// `FloatType.compare` (issue #1275). Unlike Rust's `f32::total_cmp`, Java treats
-/// EVERY NaN (any payload/sign) as greater than every non-NaN value (NaN sorts
-/// last) and does NOT distinguish NaN bit-patterns; it also orders `-0.0 < +0.0`.
+/// `FloatType.compare` (issue #1275): EVERY NaN sorts last (all NaN
+/// bit-patterns equal) and `-0.0 < +0.0`.
+///
+/// Single source of truth: this DELEGATES to the crate-wide canonical
+/// comparator [`crate::float_cmp::cassandra_float_cmp`] (issues #1870/#2010).
+/// The delegation is byte-neutral: `cassandra_float_cmp` implements the SAME
+/// `Float.compare` semantics as the prior explicit Java-compare code here
+/// (compare non-NaN numerically with `-0.0 < +0.0`; sort EVERY NaN last and
+/// treat all NaN bit-patterns as equal), so the SET/MAP element byte order that
+/// has byte-parity coverage is preserved.
+///
+/// Note: `f32::total_cmp` is NOT a drop-in substitute — it sorts NEGATIVE NaN
+/// FIRST and orders NaN by bit pattern (not all-NaN-equal, not NaN-last), which
+/// would diverge from Cassandra. The canonical comparator is used precisely
+/// because it matches Java, not `total_cmp`. See float_cmp.rs.
 pub(super) fn compare_f32_java(x: f32, y: f32) -> Ordering {
-    match (x.is_nan(), y.is_nan()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        // Neither is NaN: total_cmp gives the numeric order with -0.0 < +0.0.
-        (false, false) => x.total_cmp(&y),
-    }
+    crate::float_cmp::cassandra_float_cmp(x, y)
 }
 
 /// Java `Double.compare` total order for two `f64`, matching Cassandra
 /// `DoubleType.compare` (issue #1275). See [`compare_f32_java`] for the NaN /
-/// signed-zero rules.
+/// signed-zero rules and the delegation rationale.
 pub(super) fn compare_f64_java(x: f64, y: f64) -> Ordering {
-    match (x.is_nan(), y.is_nan()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => x.total_cmp(&y),
-    }
+    crate::float_cmp::cassandra_double_cmp(x, y)
 }
 
 /// Scale-aware numeric comparison of two `decimal` values, matching Cassandra

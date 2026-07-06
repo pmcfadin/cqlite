@@ -630,13 +630,15 @@ impl QueryExecutor {
 
     /// Compare two values
     fn compare_values(&self, a: &Value, b: &Value) -> Result<Ordering> {
+        use crate::float_cmp::cassandra_double_cmp as dcmp;
+        use crate::float_cmp::cassandra_float_cmp as fcmp;
         match (a, b) {
             (Value::Integer(a), Value::Integer(b)) => Ok(a.cmp(b)),
-            (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
+            (Value::Float(a), Value::Float(b)) => Ok(dcmp(*a, *b)), // Cassandra order #1870/#2010
+            (Value::Float32(a), Value::Float32(b)) => Ok(fcmp(*a, *b)), // Cassandra order #1870/#2010
             (Value::Text(a), Value::Text(b)) => Ok(a.cmp(b)),
             (Value::Boolean(a), Value::Boolean(b)) => Ok(a.cmp(b)),
-            // UUID comparison: byte-wise (same as Cassandra's ordering).
-            // Covers both UUID and TIMEUUID columns — both are stored as Value::Uuid.
+            // UUID/TIMEUUID (both Value::Uuid): byte-wise, as Cassandra orders.
             (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
             (Value::Null, Value::Null) => Ok(Ordering::Equal),
             (Value::Null, _) => Ok(Ordering::Less),
@@ -901,6 +903,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result, Ordering::Less);
+
+        // Issue #1870/#2010: ORDER BY on a float(f32) column must order via the
+        // Cassandra total comparator, not collapse to Equal (missing arm bug).
+        assert_eq!(
+            executor
+                .compare_values(&Value::Float32(1.0), &Value::Float32(2.0))
+                .unwrap(),
+            Ordering::Less
+        );
+        // Signed zeros are distinct; NaN sorts last and equals itself.
+        assert_eq!(
+            executor
+                .compare_values(&Value::Float32(-0.0), &Value::Float32(0.0))
+                .unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            executor
+                .compare_values(&Value::Float32(f32::NAN), &Value::Float32(1.0))
+                .unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            executor
+                .compare_values(&Value::Float32(f32::NAN), &Value::Float32(f32::NAN))
+                .unwrap(),
+            Ordering::Equal
+        );
     }
 
     #[tokio::test]

@@ -536,7 +536,7 @@ impl PartitionKey {
 ///
 /// Stores the clustering key as a list of (column name, value) pairs.
 /// The order must match the schema's clustering key definition.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClusteringKey {
     /// Column name and value pairs (in schema order)
     pub columns: Vec<(String, Value)>,
@@ -641,6 +641,20 @@ impl Ord for ClusteringKey {
 impl PartialOrd for ClusteringKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+// PartialEq is defined in terms of `Ord`, NOT derived. A derived `PartialEq`
+// would use `Value`'s IEEE-754 `PartialEq` (where `-0.0 == +0.0` and
+// `NaN != NaN`), which is inconsistent with `Ord`/`Eq` (issues #1870/#2010:
+// clustering comparison now uses the Cassandra/Java total order, where `-0.0`
+// and `+0.0` are distinct and `NaN == NaN`). Delegating to `cmp` keeps
+// PartialEq consistent with Ord/Eq (Rust contract) AND matches Cassandra row
+// identity for signed-zero and NaN clustering values. (`ClusteringKey` does
+// not derive `Hash`, so there is no eq/hash contract to uphold here.)
+impl PartialEq for ClusteringKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -809,8 +823,14 @@ fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         (Integer(a), Integer(b)) => Ok(a.cmp(b)),
         (BigInt(a), BigInt(b)) => Ok(a.cmp(b)),
         (Counter(a), Counter(b)) => Ok(a.cmp(b)),
-        (Float32(a), Float32(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
-        (Float(a), Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
+        // Cassandra/Java total order (NaN last, -0.0 < +0.0) — NOT IEEE
+        // partial_cmp. This feeds ClusteringKey's `Ord`/`compare` (memtable
+        // BTreeMap key order + compaction merge), which requires a TOTAL order:
+        // a non-total order would let NaN compare Equal to everything
+        // (transitivity violation) and collapse -0.0/+0.0. See float_cmp.rs and
+        // issues #1870/#2010. Must agree with the reader's Value::partial_cmp.
+        (Float32(a), Float32(b)) => Ok(crate::float_cmp::cassandra_float_cmp(*a, *b)),
+        (Float(a), Float(b)) => Ok(crate::float_cmp::cassandra_double_cmp(*a, *b)),
         (Text(a), Text(b)) => Ok(a.cmp(b)),
         (Blob(a), Blob(b)) => Ok(a.cmp(b)),
         (Timestamp(a), Timestamp(b)) => Ok(a.cmp(b)),
@@ -1065,6 +1085,38 @@ mod tests {
         let ordering = ck1.compare(&ck2, &schema).unwrap();
         // DESC ordering reverses the comparison
         assert_eq!(ordering, Ordering::Greater);
+    }
+
+    // --- Issues #1870/#2010: PartialEq for ClusteringKey must be consistent
+    // with Ord/Eq (Cassandra total order), NOT IEEE-754 float equality. ---
+
+    #[test]
+    fn test_clustering_key_partial_eq_consistent_with_ord() {
+        // Signed zeros are DISTINCT under the Cassandra total order, so
+        // -0.0 must NOT equal +0.0 (a derived IEEE PartialEq would merge them).
+        let neg_zero = ClusteringKey::single("f", Value::Float(-0.0));
+        let pos_zero = ClusteringKey::single("f", Value::Float(0.0));
+        assert_eq!(neg_zero.cmp(&pos_zero), Ordering::Less);
+        assert_ne!(neg_zero, pos_zero);
+        assert_eq!(
+            neg_zero == pos_zero,
+            neg_zero.cmp(&pos_zero) == Ordering::Equal
+        );
+
+        // NaN is EQUAL to itself under the total order (a derived IEEE
+        // PartialEq would report NaN != NaN).
+        let nan_a = ClusteringKey::single("f", Value::Float(f64::NAN));
+        let nan_b = ClusteringKey::single("f", Value::Float(f64::NAN));
+        assert_eq!(nan_a.cmp(&nan_b), Ordering::Equal);
+        assert_eq!(nan_a, nan_b);
+
+        // Same invariants for the 32-bit float variant.
+        let f32_neg_zero = ClusteringKey::single("f", Value::Float32(-0.0));
+        let f32_pos_zero = ClusteringKey::single("f", Value::Float32(0.0));
+        assert_ne!(f32_neg_zero, f32_pos_zero);
+        let f32_nan_a = ClusteringKey::single("f", Value::Float32(f32::NAN));
+        let f32_nan_b = ClusteringKey::single("f", Value::Float32(f32::NAN));
+        assert_eq!(f32_nan_a, f32_nan_b);
     }
 
     // --- Issue #849: clustering reversal must not flip null/empty ordering ---

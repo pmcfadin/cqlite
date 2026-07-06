@@ -1043,8 +1043,22 @@ impl Value {
     }
 }
 
+/// Ordering for `Value`.
+///
+/// NOTE (contract split, #1870/#2010): this `PartialOrd` INTENTIONALLY diverges
+/// from the derived `PartialEq`. For `float`/`double` it uses the Cassandra/Java
+/// total order (`-0.0 < +0.0`, and every `NaN` sorts last and compares Equal to
+/// every other `NaN`), whereas `PartialEq` keeps IEEE semantics (`-0.0 == +0.0`,
+/// `NaN != NaN`). This is deliberate: ordering (ORDER BY / MIN / MAX / clustering
+/// order) must be a TOTAL order, while equality (GROUP BY) stays IEEE. As a
+/// result `partial_cmp` may report `Equal` where `eq` reports `false` (two NaNs)
+/// and vice-versa (`-0.0`/`+0.0`). If an `impl Ord for Value` is ever added it
+/// MUST reuse this comparator (never derive from `PartialEq`) and callers must
+/// not assume the `PartialOrd`/`PartialEq` consistency the std traits normally
+/// imply.
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use crate::float_cmp::{cassandra_double_cmp as dcmp, cassandra_float_cmp as fcmp};
         use std::cmp::Ordering;
         match (self, other) {
             (Value::Null, Value::Null) => Some(Ordering::Equal),
@@ -1055,7 +1069,7 @@ impl PartialOrd for Value {
             (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
             (Value::Counter(a), Value::Counter(b)) => a.partial_cmp(b),
-            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+            (Value::Float(a), Value::Float(b)) => Some(dcmp(*a, *b)),
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
             (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
@@ -1064,8 +1078,7 @@ impl PartialOrd for Value {
             (Value::Uuid(a), Value::Uuid(b)) => a.partial_cmp(b),
             (Value::TinyInt(a), Value::TinyInt(b)) => a.partial_cmp(b),
             (Value::SmallInt(a), Value::SmallInt(b)) => a.partial_cmp(b),
-            (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b),
-
+            (Value::Float32(a), Value::Float32(b)) => Some(fcmp(*a, *b)),
             (Value::Inet(a), Value::Inet(b)) => a.partial_cmp(b),
 
             // For complex types, compare by string representation

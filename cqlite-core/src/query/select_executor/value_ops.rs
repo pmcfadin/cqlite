@@ -49,10 +49,12 @@ pub(super) fn compare_values_ordering(a: &Value, b: &Value) -> std::cmp::Orderin
 /// non-matching variants because it stringifies and would produce surprising
 /// orderings (e.g. `Text("9")` < `Text("10")` lexicographically).
 pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
-    use std::cmp::Ordering;
     if same_numeric_family(a, b) {
         if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
-            return Ok(x.partial_cmp(&y).unwrap_or(Ordering::Equal));
+            // Cassandra/Java `Double.compare` total order: NaN last, -0.0 < +0.0
+            // (issues #1870, #2010). Never `partial_cmp().unwrap_or(Equal)`,
+            // which collapses NaN and signed zeros to Equal.
+            return Ok(crate::float_cmp::cassandra_double_cmp(x, y));
         }
     }
     if std::mem::discriminant(a) == std::mem::discriminant(b) {
@@ -194,6 +196,114 @@ mod tests {
         assert_eq!(
             try_compare_values(&Value::Integer(5), &Value::Integer(5)).unwrap(),
             Ordering::Equal
+        );
+    }
+
+    /// The query ordering comparator (used by ORDER BY / MIN / MAX) must match
+    /// Cassandra/Java `Double.compare`: NaN last, -0.0 < +0.0 (issues #1870/#2010).
+    #[test]
+    fn compare_values_ordering_double_matches_cassandra() {
+        use std::cmp::Ordering;
+        let f = Value::Float; // f64 → CQL `double`
+        assert_eq!(
+            compare_values_ordering(&f(f64::NAN), &f(f64::INFINITY)),
+            Ordering::Greater,
+            "NaN sorts after +Infinity"
+        );
+        assert_eq!(
+            compare_values_ordering(&f(f64::NAN), &f(f64::NAN)),
+            Ordering::Equal,
+            "two NaNs compare equal"
+        );
+        assert_eq!(
+            compare_values_ordering(&f(-0.0), &f(0.0)),
+            Ordering::Less,
+            "-0.0 < +0.0"
+        );
+        assert_eq!(compare_values_ordering(&f(1.0), &f(2.0)), Ordering::Less);
+    }
+
+    /// Sorting `Value::Float` keys yields the Cassandra oracle order
+    /// `[-Inf, -0.0, +0.0, 1.0, +Inf, NaN, NaN]`.
+    #[test]
+    fn order_by_double_sort_matches_oracle() {
+        let mut v = vec![
+            Value::Float(1.0),
+            Value::Float(f64::NAN),
+            Value::Float(-0.0),
+            Value::Float(0.0),
+            Value::Float(f64::NEG_INFINITY),
+            Value::Float(f64::INFINITY),
+            Value::Float(f64::NAN),
+        ];
+        v.sort_by(compare_values_ordering);
+        let f = |i: usize| match v[i] {
+            Value::Float(x) => x,
+            _ => unreachable!(),
+        };
+        assert_eq!(f(0), f64::NEG_INFINITY);
+        assert!(f(1) == 0.0 && f(1).is_sign_negative(), "index 1 = -0.0");
+        assert!(f(2) == 0.0 && f(2).is_sign_positive(), "index 2 = +0.0");
+        assert_eq!(f(3), 1.0);
+        assert_eq!(f(4), f64::INFINITY);
+        assert!(f(5).is_nan() && f(6).is_nan(), "NaNs sort last");
+    }
+
+    /// `Value::Float32` (CQL `float`) shares the same ordering semantics.
+    #[test]
+    fn order_by_float32_sort_matches_oracle() {
+        let mut v = vec![
+            Value::Float32(f32::NAN),
+            Value::Float32(0.0),
+            Value::Float32(-0.0),
+            Value::Float32(f32::INFINITY),
+        ];
+        v.sort_by(compare_values_ordering);
+        let f = |i: usize| match v[i] {
+            Value::Float32(x) => x,
+            _ => unreachable!(),
+        };
+        assert!(f(0) == 0.0 && f(0).is_sign_negative(), "index 0 = -0.0");
+        assert!(f(1) == 0.0 && f(1).is_sign_positive(), "index 1 = +0.0");
+        assert_eq!(f(2), f32::INFINITY);
+        assert!(f(3).is_nan(), "NaN sorts last");
+    }
+
+    /// MIN/MAX (aggregation uses `compare_values_ordering`): MIN over signed
+    /// zeros selects -0.0; NaN never wins MIN but is the MAX.
+    #[test]
+    fn min_max_double_matches_cassandra() {
+        let data = [
+            Value::Float(f64::NAN),
+            Value::Float(3.0),
+            Value::Float(-0.0),
+            Value::Float(0.0),
+            Value::Float(-2.0),
+        ];
+        let min = data
+            .iter()
+            .min_by(|a, b| compare_values_ordering(a, b))
+            .unwrap();
+        assert!(matches!(min, Value::Float(x) if *x == -2.0), "MIN = -2.0");
+
+        let max = data
+            .iter()
+            .max_by(|a, b| compare_values_ordering(a, b))
+            .unwrap();
+        assert!(
+            matches!(max, Value::Float(x) if x.is_nan()),
+            "MAX = NaN (sorts last)"
+        );
+
+        // MIN over just the signed zeros picks -0.0.
+        let zeros = [Value::Float(0.0), Value::Float(-0.0)];
+        let zmin = zeros
+            .iter()
+            .min_by(|a, b| compare_values_ordering(a, b))
+            .unwrap();
+        assert!(
+            matches!(zmin, Value::Float(x) if *x == 0.0 && x.is_sign_negative()),
+            "MIN of {{-0.0, +0.0}} = -0.0"
         );
     }
 }
