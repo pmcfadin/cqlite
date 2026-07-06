@@ -809,8 +809,14 @@ fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         (Integer(a), Integer(b)) => Ok(a.cmp(b)),
         (BigInt(a), BigInt(b)) => Ok(a.cmp(b)),
         (Counter(a), Counter(b)) => Ok(a.cmp(b)),
-        (Float32(a), Float32(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
-        (Float(a), Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
+        // Cassandra/Java total order (NaN last, -0.0 < +0.0) — NOT IEEE
+        // partial_cmp. This feeds ClusteringKey's `Ord`/`compare` (memtable
+        // BTreeMap key order + compaction merge), which requires a TOTAL order:
+        // a non-total order would let NaN compare Equal to everything
+        // (transitivity violation) and collapse -0.0/+0.0. See float_cmp.rs and
+        // issues #1870/#2010. Must agree with the reader's Value::partial_cmp.
+        (Float32(a), Float32(b)) => Ok(crate::float_cmp::cassandra_float_cmp(*a, *b)),
+        (Float(a), Float(b)) => Ok(crate::float_cmp::cassandra_double_cmp(*a, *b)),
         (Text(a), Text(b)) => Ok(a.cmp(b)),
         (Blob(a), Blob(b)) => Ok(a.cmp(b)),
         (Timestamp(a), Timestamp(b)) => Ok(a.cmp(b)),

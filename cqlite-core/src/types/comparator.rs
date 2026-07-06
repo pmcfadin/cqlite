@@ -472,8 +472,12 @@ impl ComparatorType {
 
     fn compare_float32(&self, left: &Value, right: &Value) -> Result<Ordering> {
         match (left, right) {
+            // Cassandra/Java total order (NaN last, -0.0 < +0.0), NOT IEEE
+            // partial_cmp — this is the schema-aware clustering-key read hot
+            // path and must agree with the writer's ClusteringKey ordering.
+            // See float_cmp.rs and issues #1870/#2010.
             (Value::Float32(l), Value::Float32(r)) => {
-                Ok(l.partial_cmp(r).unwrap_or(Ordering::Equal))
+                Ok(crate::float_cmp::cassandra_float_cmp(*l, *r))
             }
             _ => Err(Error::Schema(
                 "Type mismatch: expected float32 values".to_string(),
@@ -483,7 +487,9 @@ impl ComparatorType {
 
     fn compare_float(&self, left: &Value, right: &Value) -> Result<Ordering> {
         match (left.as_f64(), right.as_f64()) {
-            (Some(l), Some(r)) => Ok(l.partial_cmp(&r).unwrap_or(Ordering::Equal)),
+            // Cassandra/Java total order (NaN last, -0.0 < +0.0), NOT IEEE
+            // partial_cmp. See compare_float32 / float_cmp.rs (#1870/#2010).
+            (Some(l), Some(r)) => Ok(crate::float_cmp::cassandra_double_cmp(l, r)),
             _ => Err(Error::Schema(
                 "Type mismatch: expected float values".to_string(),
             )),
