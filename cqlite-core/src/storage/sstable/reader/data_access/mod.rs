@@ -38,6 +38,10 @@ mod chunk_cache_wiring_tests;
 mod big_point;
 mod compaction;
 mod model;
+// First/last-key range short-circuit (issue #1576, C5): an authoritative
+// `[first_key, last_key]` bound check that answers out-of-range point reads as
+// absence before any bloom/Index.db/trie work.
+mod range_short_circuit;
 mod sequential;
 
 // Public surface re-export (unchanged: `reader::mod` re-exports
@@ -201,6 +205,17 @@ impl SSTableReader {
         key: &RowKey,
         fully_qualified_match: bool,
     ) -> Result<Option<ScanRow>> {
+        // Issue #1576 (C5): O(1) authoritative range short-circuit. If the query key
+        // sorts outside this SSTable's [first_key, last_key] bound (Summary.db, in
+        // Cassandra token order — no heuristics), the partition is definitely absent;
+        // return absence BEFORE any bloom check, Index.db probe, or BTI trie descent.
+        // Inclusive bound (== first/last stays in range), so it never drops a present
+        // partition. A no-op when no authoritative bound exists (BTI/no Summary).
+        if self.partition_key_out_of_range(key.as_bytes()) {
+            crate::storage::sstable::read_work_counters::record_range_short_circuit();
+            return Ok(None);
+        }
+
         // Issue #831 / #909: BTI ("da") readers resolve partitions via the
         // Partitions.db trie (O(log n)), never via Index.db (absent for BTI) or
         // the sequential scan. The trie is the AUTHORITATIVE presence oracle for a

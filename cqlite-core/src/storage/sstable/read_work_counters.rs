@@ -52,6 +52,14 @@
 //!   query key exactly ONCE per read (the encoding is identical for every candidate
 //!   SSTable), not once per candidate. On `main`/pre-C4 the candidate-prune loop
 //!   re-encoded per candidate (N hashes for N generations); after C4 it is 1.
+//! - [`record_range_short_circuit`] / [`range_short_circuits`] —
+//!   **`RANGE_SHORT_CIRCUITS`**: one per point read answered as authoritative
+//!   absence from the SSTable's `[first_key, last_key]` bound (parsed from
+//!   Summary.db) BEFORE any bloom check, `Index.db` probe, or BTI trie descent.
+//!   Consumer **C5** (first/last-key range short-circuit): an out-of-range point
+//!   read performs zero presence work (`INDEX_PROBES == 0`, `scan_for_key`
+//!   untouched) and records exactly one short-circuit; an in-range read records
+//!   zero so the normal presence path runs unchanged (no false miss).
 //! - [`record_decompress`] / [`decompress_calls`] — **`DECOMPRESS_CALLS`**: one per
 //!   compression-chunk decompress (`Compressor::decompress`). Consumers **B1**
 //!   (chunk cache — a cache hit must skip the decompress) and **E3** (copy-chain —
@@ -190,6 +198,14 @@ struct Counters {
     /// a multi-candidate point read hashes+encodes the key ONCE (hoisted out of the
     /// candidate-prune loop), not once per candidate generation.
     key_hash_calls: AtomicU64,
+    /// First/last-key range short-circuits (`RANGE_SHORT_CIRCUITS`, Issue #1576 /
+    /// C5) — one per point read the reader answered as authoritative absence from
+    /// the SSTable's `[first_key, last_key]` bound BEFORE any bloom check, Index.db
+    /// probe, or BTI trie descent. Consumer C5: an out-of-range point read performs
+    /// zero presence work (`INDEX_PROBES == 0`, no `scan_for_key`) and records
+    /// exactly one short-circuit; an in-range read records zero (the bound never
+    /// fires, so the normal presence path runs).
+    range_short_circuits: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -210,6 +226,7 @@ impl Counters {
             compression_info_parses: AtomicU64::new(0),
             index_probes: AtomicU64::new(0),
             key_hash_calls: AtomicU64::new(0),
+            range_short_circuits: AtomicU64::new(0),
         }
     }
 
@@ -270,6 +287,10 @@ impl Counters {
         self.key_hash_calls.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_range_short_circuit(&self) {
+        self.range_short_circuits.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -326,6 +347,10 @@ impl Counters {
         self.key_hash_calls.load(Ordering::Relaxed)
     }
 
+    fn range_short_circuits(&self) -> u64 {
+        self.range_short_circuits.load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
@@ -341,6 +366,7 @@ impl Counters {
         self.compression_info_parses.store(0, Ordering::Relaxed);
         self.index_probes.store(0, Ordering::Relaxed);
         self.key_hash_calls.store(0, Ordering::Relaxed);
+        self.range_short_circuits.store(0, Ordering::Relaxed);
     }
 }
 
@@ -530,6 +556,22 @@ pub fn record_key_hash() {
     COUNTERS.record_key_hash();
 }
 
+/// Record one first/last-key range short-circuit (`RANGE_SHORT_CIRCUITS`; consumer
+/// C5, Issue #1576).
+///
+/// Called unconditionally at the single point-read range-check site
+/// (`SSTableReader::get_with_resolution`, gated on
+/// [`partition_key_out_of_range`](super::reader::SSTableReader::partition_key_out_of_range));
+/// the body compiles to a no-op in a release build (design.md Decision 1). Fires
+/// only when the queried partition key sorts outside the SSTable's authoritative
+/// `[first_key, last_key]` bound, so the read returns absence WITHOUT any bloom
+/// check, `Index.db` probe, or BTI trie descent.
+#[inline(always)]
+pub fn record_range_short_circuit() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_range_short_circuit();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -623,6 +665,13 @@ pub fn index_probes() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn key_hash_calls() -> u64 {
     COUNTERS.key_hash_calls()
+}
+
+/// Number of first/last-key range short-circuits since the last [`reset`]
+/// (`RANGE_SHORT_CIRCUITS`, Issue #1576 / C5).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn range_short_circuits() -> u64 {
+    COUNTERS.range_short_circuits()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
