@@ -39,6 +39,12 @@ use crate::storage::write_engine::reconcile_rules;
 
 use super::{CellData, ComplexDeletion, KWayMerger, MergeEntry, PurgeCounts, RowData};
 
+// Issue #1537: parity coverage that TTL expiry applies to complex/collection/UDT
+// elements (not only simple cells). Kept in its own file so `reconcile.rs` stays
+// within the campsite size target.
+#[cfg(test)]
+mod ttl_complex_tests;
+
 /// Per-cell reconcile key: `(column, cell_path)` so each element of a multi-cell
 /// column reconciles independently (epic #899). Simple cells have
 /// `cell_path == None`.
@@ -378,11 +384,19 @@ impl ReconcileState {
     /// from the value's byte shape). `now_secs` is the compaction's pinned
     /// evaluation instant (`None` disables expiry: a strict no-op).
     ///
-    /// A cell that is ALREADY a tombstone (`is_cell_tombstone`) is left
-    /// untouched (it has no live value to expire). A complex ELEMENT
-    /// (`is_complex_element`) is intentionally NOT expired here: element-level
-    /// expiry needs per-path handling and is out of scope for #1382 (simple
-    /// cells only); it falls through unchanged.
+    /// A cell that is ALREADY a tombstone (`is_cell_tombstone`, which also covers
+    /// an `is_deleted` complex-element tombstone) is left untouched — it has no
+    /// live value to expire.
+    ///
+    /// COMPLEX / COLLECTION / UDT ELEMENTS (#1537): an expiring ELEMENT of a
+    /// non-frozen complex column (`is_complex_element`) is expired here too, not
+    /// just simple cells (the #1382 scope gap — F2). Cassandra
+    /// `AbstractCell.purge(DeletionPurger, nowInSec)` treats an expired expiring
+    /// cell UNIFORMLY whether simple or complex: it converts it to
+    /// `BufferCell.tombstone(column, timestamp(), localDeletionTime(), path())` —
+    /// PRESERVING the element's cell path. So an expired element becomes an
+    /// element-level tombstone at the SAME path, carrying its own IS_DELETED flag
+    /// (epic #899), which the per-element writer emits as an element tombstone.
     ///
     /// LDT NORMALIZATION (#921 finding 2): on-disk `localDeletionTime` is an
     /// UNSIGNED 32-bit GC-clock second count carried as a wrapped `i32`;
@@ -393,9 +407,9 @@ impl ReconcileState {
             return; // Expiry disabled — strict no-op.
         };
         for cell in &mut self.surviving {
-            // Only simple LIVE expiring cells are candidates. A cell tombstone
-            // has no live value; a complex element is out of scope (#1382).
-            if cell.is_complex_element || KWayMerger::is_cell_tombstone(cell) {
+            // An existing tombstone (simple cell tombstone OR a complex-element
+            // tombstone via `is_deleted`) has no live value to expire.
+            if KWayMerger::is_cell_tombstone(cell) {
                 continue;
             }
             let (Some(_ttl), Some(ldt)) = (cell.ttl, cell.local_deletion_time) else {
@@ -404,25 +418,36 @@ impl ReconcileState {
             // Expired iff the expiry instant (unsigned GC-clock seconds) is
             // strictly before the pinned "now" — matching Cassandra's
             // `localDeletionTime < now` liveness check for an expiring cell.
-            if i64::from(ldt as u32) < now {
-                // Convert the expired live cell into a cell tombstone whose
-                // `localDeletionTime` IS the expiry instant and whose
-                // `markedForDeleteAt` is the cell's own write timestamp
-                // (unchanged). Step 3c then purges it exactly like any other
-                // cell tombstone once its LDT is < gcBefore and the overlap
-                // gate allows. `ttl` is cleared: a tombstone carries no TTL.
-                cell.value = crate::types::Value::Tombstone(crate::types::TombstoneInfo {
-                    deletion_time: cell.timestamp,
-                    tombstone_type: crate::types::TombstoneType::CellTombstone,
-                    local_deletion_time: i64::from(ldt as u32),
-                    ttl: None,
-                    range_start: None,
-                    range_end: None,
-                });
-                cell.ttl = None;
-                // Keep `cell.local_deletion_time` = the expiry instant so
-                // `cell_effective_ldt` and the writer preserve it verbatim.
+            if i64::from(ldt as u32) >= now {
+                continue; // Not yet expired.
             }
+            // Convert the expired live cell into a (cell / complex-element)
+            // tombstone whose `localDeletionTime` IS the expiry instant and whose
+            // `markedForDeleteAt` is the cell's own write timestamp (unchanged) —
+            // Cassandra `BufferCell.tombstone(column, timestamp(), localDeletionTime(),
+            // path())`. Step 3c then purges it exactly like any other cell
+            // tombstone once its LDT is < gcBefore and the overlap gate allows.
+            // `ttl` is cleared: a tombstone carries no TTL.
+            cell.value = crate::types::Value::Tombstone(crate::types::TombstoneInfo {
+                deletion_time: cell.timestamp,
+                tombstone_type: crate::types::TombstoneType::CellTombstone,
+                local_deletion_time: i64::from(ldt as u32),
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            });
+            cell.ttl = None;
+            // A complex ELEMENT additionally carries its deletion via the
+            // authoritative IS_DELETED flag (epic #899). Set it so the per-element
+            // writer emits an element tombstone (preserving the element's
+            // cell_path, Cassandra `path()`) rather than a live element, and so the
+            // gc-grace purge's `cell.is_deleted` branch (Step 3c (a)) treats it as
+            // a purgeable complex-element tombstone. The cell path is untouched.
+            if cell.is_complex_element {
+                cell.is_deleted = true;
+            }
+            // Keep `cell.local_deletion_time` = the expiry instant so
+            // `cell_effective_ldt` and the writer preserve it verbatim.
         }
     }
 
