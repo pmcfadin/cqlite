@@ -23,9 +23,24 @@
 //!   masked) so the hit path locks exactly ONE shard, never a process-wide lock —
 //!   B1's concurrency rule. Each shard's `LruCache::new(NonZeroUsize)` evicts LRU by
 //!   count on its own; entries are uniform and tiny so no byte accounting is needed.
-//! - **Positive-only** (D4): only *present*-key resolutions are stored, so the cache
-//!   can never fabricate a hit for an absent key — it simply misses and the caller
-//!   re-resolves (authoritative absence).
+//! - **Resolution-hit only, never a MISS** (D4): the cache stores only a location a
+//!   lookup actually resolved, never a definitive MISS, so it can never fabricate a
+//!   hit for a key the underlying structure did not resolve. Both read paths preserve
+//!   the correctness guardrail (a cache hit returns the SAME location a fresh lookup
+//!   would, so any downstream check reaches the identical conclusion), but "resolved"
+//!   means something slightly different for each:
+//!     - **BIG = confirmed-resolution-only**: only a confirmed `Some` from the
+//!       `Index.db` raw-key lookup is inserted, so an absent key is never cached and
+//!       the cache simply misses (authoritative absence).
+//!     - **BTI = trie-hit-including-candidates**: any trie HIT is cached, which
+//!       includes prefix-collision candidates — an offset that may belong to a
+//!       different or even absent key — so an absent key CAN receive a cache entry
+//!       pointing at its candidate offset. This is not a correctness bug: the caller
+//!       (`bti_point_lookup`) re-verifies the key bytes at the resolved offset, and a
+//!       cache hit returns the SAME candidate offset a fresh descent returns, so
+//!       re-verification reaches the identical conclusion (mirrors the C3
+//!       `bti_lookup_memo`, which likewise stores `Some(offset)` for a candidate). A
+//!       trie MISS is never cached.
 //! - **Poison-tolerant** (D3): every lock uses `lock().unwrap_or_else(|e|
 //!   e.into_inner())` so one panicking thread cannot wedge the cache. No
 //!   `unwrap()`/`expect()`.

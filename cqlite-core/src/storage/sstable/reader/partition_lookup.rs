@@ -154,11 +154,14 @@ impl SSTableReader {
         // B4 key→partition-offset cache (issue #1570): a repeated point read of the
         // same present key returns the cached offset WITHOUT a second trie descent,
         // so `TRIE_WALKS` stays 0 on the hit — even across interleaved keys, which
-        // the single-entry C3 memo below cannot cover. Positive-only, so an absent
-        // key is never cached and never fabricates a hit; the cached offset is the
-        // exact offset a fresh descent resolves (correctness guardrail). Emit the
-        // presence counters (found = true) so a cache-served lookup records the same
-        // presence decision a fresh descent does.
+        // the single-entry C3 memo below cannot cover. Trie-hit-only (prefix-collision
+        // candidates included; the caller re-verifies the key bytes at the resolved
+        // offset), never a trie MISS: so an absent key CAN be cached at its candidate
+        // offset, but the cached offset is the exact offset a fresh descent resolves,
+        // so re-verification reaches the identical conclusion (correctness guardrail;
+        // mirrors the C3 `bti_lookup_memo`). Emit the presence counters (found = true)
+        // so a cache-served lookup records the same presence decision a fresh descent
+        // does.
         if let Some(loc) = self.key_offset_cache.get(partition_key) {
             Self::emit_bti_presence_counters(true);
             return Ok(Some(loc.data_offset));
@@ -241,8 +244,9 @@ impl SSTableReader {
                     off
                 );
                 self.bti_lookup_memo_store(partition_key, Some(off));
-                // B4: cache this present-key resolution so a later interleaved
-                // read of the same key skips the trie descent (issue #1570).
+                // B4: cache this trie-hit resolution (a prefix-collision candidate,
+                // re-verified by the caller downstream) so a later interleaved read of
+                // the same key skips the trie descent (issue #1570).
                 self.key_offset_cache.insert(
                     partition_key,
                     crate::storage::cache::PartitionLoc::offset_only(off),
