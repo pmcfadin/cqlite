@@ -51,12 +51,20 @@ pub struct SSTableStatistics {
     pub timestamp_stats: TimestampStatistics,
     /// Column-level statistics
     pub column_stats: Vec<ColumnStatistics>,
-    /// Table-level aggregated statistics
-    pub table_stats: TableStatistics,
-    /// Partition size distribution
-    pub partition_stats: PartitionStatistics,
-    /// Compression statistics
-    pub compression_stats: CompressionStatistics,
+    /// Table-level aggregated statistics, or `None` when NOT authoritatively
+    /// parsed from `Statistics.db` (issue #1653). The enhanced (nb) parser does
+    /// not decode these table-level metrics, so it is honestly `None` rather than
+    /// a fabricated all-zero `TableStatistics`; the legacy parser populates
+    /// `Some(..)`.
+    pub table_stats: Option<TableStatistics>,
+    /// Partition size distribution, or `None` when NOT authoritatively parsed from
+    /// `Statistics.db` (issue #1653 — the enhanced parser previously fabricated an
+    /// all-zero `PartitionStatistics`).
+    pub partition_stats: Option<PartitionStatistics>,
+    /// Compression statistics, or `None` when NOT authoritatively parsed from
+    /// `Statistics.db` (issue #1653 — the enhanced parser previously fabricated a
+    /// `CompressionStatistics` with `algorithm: "unknown"` and all-zero metrics).
+    pub compression_stats: Option<CompressionStatistics>,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
     /// SerializationHeader columns (Issue #163)
@@ -101,18 +109,33 @@ pub struct RowStatistics {
 pub struct TimestampStatistics {
     /// Minimum timestamp in the SSTable (microseconds since epoch)
     pub min_timestamp: i64,
-    /// Maximum timestamp in the SSTable (microseconds since epoch)
-    pub max_timestamp: i64,
+    /// Maximum timestamp in the SSTable (microseconds since epoch), or `None`
+    /// when it is NOT authoritatively available from `Statistics.db` (issue
+    /// #1653). The enhanced (nb) parser leaves this `None` until the best-effort
+    /// STATS post-pass recovers the real `maxTimestamp` (#1729); a `None` here is
+    /// an honest "unavailable", NOT a fabricated placeholder (it previously
+    /// aliased `min_timestamp`/`i64::MIN`, both of which lied about the max). A
+    /// consumer that needs a real maximum MUST treat `None` as unavailable and
+    /// fail closed (see `write_engine::merge::fully_expired`).
+    pub max_timestamp: Option<i64>,
     /// Minimum deletion time (for tombstones)
     pub min_deletion_time: i64,
-    /// Maximum deletion time (for tombstones)
+    /// Maximum deletion time (for tombstones). Genuinely decoded from STATS by the
+    /// best-effort post-pass (#1073/#1011); before it runs the enhanced parser
+    /// uses the authoritative `NO_DELETION_TIME` (`i64::MAX`) "no deletions
+    /// recorded" value, so a post-pass failure fails CLOSED (never classified
+    /// fully-expired) rather than the old `= min_deletion_time` lie (issue #1653).
     pub max_deletion_time: i64,
     /// Minimum TTL value
     pub min_ttl: Option<i64>,
-    /// Maximum TTL value
+    /// Maximum TTL value, or `None` when not authoritatively available (issue
+    /// #1653 — the enhanced parser previously aliased this to `min_ttl`, a lie).
     pub max_ttl: Option<i64>,
-    /// Number of rows with TTL
-    pub rows_with_ttl: u64,
+    /// Number of rows with TTL, or `None` when not authoritatively available from
+    /// `Statistics.db` (issue #1653). The enhanced (nb) parser does not decode a
+    /// per-SSTable rows-with-TTL count, so it is honestly `None` rather than a
+    /// fabricated `0` (which claimed "no rows have a TTL").
+    pub rows_with_ttl: Option<u64>,
 }
 
 /// Per-column statistics for query optimization
@@ -252,9 +275,11 @@ pub fn parse_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> 
             row_stats,
             timestamp_stats,
             column_stats,
-            table_stats,
-            partition_stats,
-            compression_stats,
+            // Legacy format genuinely parses these sections, so they are `Some(..)`
+            // (issue #1653): only the enhanced (nb) parser leaves them `None`.
+            table_stats: Some(table_stats),
+            partition_stats: Some(partition_stats),
+            compression_stats: Some(compression_stats),
             metadata,
             serialization_header_columns: vec![], // Not available in legacy format
             serialization_header_partition_keys: vec![],
@@ -415,12 +440,15 @@ pub fn parse_timestamp_statistics(input: &[u8]) -> IResult<&[u8], TimestampStati
         input,
         TimestampStatistics {
             min_timestamp,
-            max_timestamp,
+            // Legacy format genuinely parses `max_timestamp` and `rows_with_ttl`
+            // from fixed-width fields, so they are `Some(..)` (issue #1653); the
+            // enhanced parser leaves them `None` when unavailable.
+            max_timestamp: Some(max_timestamp),
             min_deletion_time,
             max_deletion_time,
             min_ttl,
             max_ttl,
-            rows_with_ttl,
+            rows_with_ttl: Some(rows_with_ttl),
         },
     ))
 }
@@ -668,9 +696,16 @@ impl StatisticsAnalyzer {
             total_rows: stats.row_stats.total_rows,
             // `None` when not authoritatively available; see `live_data_percentage`.
             live_data_percentage: Self::live_data_percentage(stats),
-            compression_efficiency: stats.compression_stats.ratio * 100.0,
+            // `None` when compression stats were not authoritatively parsed
+            // (issue #1653) rather than a fabricated `0% × 100`.
+            compression_efficiency: stats.compression_stats.as_ref().map(|c| c.ratio * 100.0),
             timestamp_range_days: Self::calculate_timestamp_range_days(stats),
-            largest_partition_mb: stats.partition_stats.max_partition_size as f64 / 1_048_576.0,
+            // `None` when partition stats were not authoritatively parsed
+            // (issue #1653) rather than a fabricated `0 MB`.
+            largest_partition_mb: stats
+                .partition_stats
+                .as_ref()
+                .map(|p| p.max_partition_size as f64 / 1_048_576.0),
             data_efficiency,
             query_performance_hints,
             storage_recommendations,
@@ -708,9 +743,20 @@ impl StatisticsAnalyzer {
         if stats.row_stats.live_rows == 0 || stats.row_stats.total_rows == 0 {
             return None;
         }
+        // Data efficiency blends the live ratio with compression and partition
+        // efficiency. When either compression or partition statistics were NOT
+        // authoritatively parsed (issue #1653 — the enhanced nb parser leaves them
+        // `None`) the blend cannot be computed honestly, so return `None` rather
+        // than substituting a fabricated default (no-heuristics mandate #28).
+        let (Some(compression), Some(partition)) = (
+            stats.compression_stats.as_ref(),
+            stats.partition_stats.as_ref(),
+        ) else {
+            return None;
+        };
         let live_ratio = stats.row_stats.live_rows as f64 / stats.row_stats.total_rows as f64;
-        let compression_ratio = stats.compression_stats.ratio;
-        let partition_efficiency = 1.0 - (stats.partition_stats.large_partition_percentage / 100.0);
+        let compression_ratio = compression.ratio;
+        let partition_efficiency = 1.0 - (partition.large_partition_percentage / 100.0);
 
         Some((live_ratio + compression_ratio + partition_efficiency) / 3.0 * 100.0)
     }
@@ -718,8 +764,14 @@ impl StatisticsAnalyzer {
     fn generate_query_hints(stats: &SSTableStatistics) -> Vec<String> {
         let mut hints = Vec::new();
 
-        if stats.partition_stats.large_partition_percentage > 10.0 {
-            hints.push("Consider reviewing partition key design - high percentage of large partitions detected".to_string());
+        // Partition/compression hints only fire when those statistics were
+        // authoritatively parsed (issue #1653): a `None` (enhanced nb parser)
+        // means "unavailable", so we emit no hint rather than one derived from a
+        // fabricated default. No heuristic (#28).
+        if let Some(partition) = stats.partition_stats.as_ref() {
+            if partition.large_partition_percentage > 10.0 {
+                hints.push("Consider reviewing partition key design - high percentage of large partitions detected".to_string());
+            }
         }
 
         // The "high tombstone ratio" hint compares tombstones against the live
@@ -734,8 +786,10 @@ impl StatisticsAnalyzer {
             hints.push("High tombstone ratio - consider running compaction".to_string());
         }
 
-        if stats.table_stats.compression_ratio < 0.5 {
-            hints.push("Low compression ratio - data may not be well-suited for current compression algorithm".to_string());
+        if let Some(table) = stats.table_stats.as_ref() {
+            if table.compression_ratio < 0.5 {
+                hints.push("Low compression ratio - data may not be well-suited for current compression algorithm".to_string());
+            }
         }
 
         hints
@@ -744,9 +798,14 @@ impl StatisticsAnalyzer {
     fn generate_storage_recommendations(stats: &SSTableStatistics) -> Vec<String> {
         let mut recommendations = Vec::new();
 
-        if stats.table_stats.disk_size > 1_073_741_824 {
-            recommendations
-                .push("Large SSTable detected - consider more frequent compaction".to_string());
+        // Only recommend on an authoritatively-parsed disk size (issue #1653): a
+        // `None` `table_stats` (enhanced nb parser) is "unavailable", not a
+        // measured tiny SSTable.
+        if let Some(table) = stats.table_stats.as_ref() {
+            if table.disk_size > 1_073_741_824 {
+                recommendations
+                    .push("Large SSTable detected - consider more frequent compaction".to_string());
+            }
         }
 
         // `avg_rows_per_partition == 0.0` is the documented #1325 unavailable
@@ -781,27 +840,34 @@ impl StatisticsAnalyzer {
             score -= tombstone_ratio * 30.0;
         }
 
-        // Deduct for poor compression
-        if stats.compression_stats.ratio < 0.5 {
-            score -= 20.0;
+        // Deduct for poor compression / large partitions ONLY when those
+        // statistics were authoritatively parsed (issue #1653). A `None`
+        // (enhanced nb parser) is "unavailable", so we do not deduct from a
+        // fabricated default — the score reflects only what is known. No
+        // heuristic (#28).
+        if let Some(compression) = stats.compression_stats.as_ref() {
+            if compression.ratio < 0.5 {
+                score -= 20.0;
+            }
         }
 
-        // Deduct for large partitions
-        score -= stats.partition_stats.large_partition_percentage;
+        if let Some(partition) = stats.partition_stats.as_ref() {
+            score -= partition.large_partition_percentage;
+        }
 
         score.max(0.0)
     }
 
     fn calculate_timestamp_range_days(stats: &SSTableStatistics) -> f64 {
-        // Fail-closed (#1729): the enhanced parser marks an unavailable
-        // authoritative maxTimestamp with the `i64::MIN` sentinel. When the max
-        // is unavailable — or is somehow below the min — we cannot compute a
-        // real range, so report 0.0 rather than an underflowing/garbage span.
-        let max = stats.timestamp_stats.max_timestamp;
+        // Fail-closed (#1729/#1653): `max_timestamp` is `None` when the
+        // authoritative maxTimestamp is unavailable. When the max is unavailable —
+        // or is somehow below the min — we cannot compute a real range, so report
+        // 0.0 rather than an underflowing/garbage span.
         let min = stats.timestamp_stats.min_timestamp;
-        if max == i64::MIN || max < min {
-            return 0.0;
-        }
+        let max = match stats.timestamp_stats.max_timestamp {
+            Some(max) if max >= min => max,
+            _ => return 0.0,
+        };
         // `max >= min` here, so the difference is non-negative and cannot
         // overflow i64 for realistic timestamps; use a checked subtraction to
         // stay defensive against pathological inputs.
@@ -818,9 +884,15 @@ pub struct StatisticsSummary {
     /// authoritatively available (the #1325 `live_rows == 0` sentinel; see
     /// `StatisticsAnalyzer::live_data_percentage` and #1352).
     pub live_data_percentage: Option<f64>,
-    pub compression_efficiency: f64,
+    /// Compression efficiency (ratio × 100), or `None` when compression
+    /// statistics are not authoritatively available (issue #1653 — the enhanced
+    /// nb parser does not decode them; see `SSTableStatistics::compression_stats`).
+    pub compression_efficiency: Option<f64>,
     pub timestamp_range_days: f64,
-    pub largest_partition_mb: f64,
+    /// Largest partition size in MB, or `None` when partition statistics are not
+    /// authoritatively available (issue #1653; see
+    /// `SSTableStatistics::partition_stats`).
+    pub largest_partition_mb: Option<f64>,
     /// Blended data-efficiency score, or `None` when the live-row ratio is not
     /// authoritatively available (the #1325 `live_rows == 0` sentinel, or
     /// `total_rows == 0`); see `StatisticsAnalyzer::calculate_data_efficiency`
@@ -1083,7 +1155,9 @@ mod tests {
         stats.row_stats.total_rows = 0;
         stats.row_stats.avg_rows_per_partition = 0.0;
         // Keep disk_size small so the "large SSTable" recommendation does not fire.
-        stats.table_stats.disk_size = 1024;
+        if let Some(t) = stats.table_stats.as_mut() {
+            t.disk_size = 1024;
+        }
 
         let summary = StatisticsAnalyzer::analyze(&stats);
 
@@ -1105,7 +1179,9 @@ mod tests {
         stats.row_stats.total_rows = 8; // real authoritative count
         stats.row_stats.partition_count = 4;
         stats.row_stats.avg_rows_per_partition = 2.0; // real, genuinely low (< 10)
-        stats.table_stats.disk_size = 1024;
+        if let Some(t) = stats.table_stats.as_mut() {
+            t.disk_size = 1024;
+        }
 
         let summary = StatisticsAnalyzer::analyze(&stats);
 
@@ -1124,7 +1200,9 @@ mod tests {
     fn test_granularity_recommendation_absent_when_avg_rows_real_and_high() {
         let mut stats = create_test_statistics();
         stats.row_stats.total_rows = 1000; // real; default avg is 20.0 (>= 10)
-        stats.table_stats.disk_size = 1024;
+        if let Some(t) = stats.table_stats.as_mut() {
+            t.disk_size = 1024;
+        }
 
         let summary = StatisticsAnalyzer::analyze(&stats);
 
@@ -1148,7 +1226,9 @@ mod tests {
         stats.row_stats.total_rows = 8; // real authoritative count
         stats.row_stats.partition_count = 0; // but no partitions -> avg is sentinel
         stats.row_stats.avg_rows_per_partition = 0.0;
-        stats.table_stats.disk_size = 1024;
+        if let Some(t) = stats.table_stats.as_mut() {
+            t.disk_size = 1024;
+        }
 
         // The shared availability helper must report unavailable.
         assert!(
@@ -1248,12 +1328,13 @@ mod tests {
         let (remaining, ts_stats) = result.unwrap();
         assert!(remaining.is_empty());
         assert_eq!(ts_stats.min_timestamp, 1000000);
-        assert_eq!(ts_stats.max_timestamp, 2000000);
+        // Legacy parse genuinely reads these → `Some(..)` (issue #1653).
+        assert_eq!(ts_stats.max_timestamp, Some(2000000));
         assert_eq!(ts_stats.min_deletion_time, 0);
         assert_eq!(ts_stats.max_deletion_time, 0);
         assert!(ts_stats.min_ttl.is_none());
         assert!(ts_stats.max_ttl.is_none());
-        assert_eq!(ts_stats.rows_with_ttl, 0);
+        assert_eq!(ts_stats.rows_with_ttl, Some(0));
     }
 
     #[test]
@@ -1276,7 +1357,7 @@ mod tests {
         let (_, ts_stats) = result.unwrap();
         assert_eq!(ts_stats.min_ttl, Some(3600));
         assert_eq!(ts_stats.max_ttl, Some(86400));
-        assert_eq!(ts_stats.rows_with_ttl, 250);
+        assert_eq!(ts_stats.rows_with_ttl, Some(250));
     }
 
     #[test]
@@ -1633,9 +1714,22 @@ mod tests {
         assert_eq!(stats.header.version, 1);
         assert_eq!(stats.row_stats.total_rows, 1000);
         assert_eq!(stats.timestamp_stats.min_timestamp, 1000000);
-        assert_eq!(stats.table_stats.disk_size, 1024 * 1024);
-        assert_eq!(stats.partition_stats.avg_partition_size, 20480.0);
-        assert_eq!(stats.compression_stats.algorithm, "LZ4");
+        // Legacy parse genuinely populates these → `Some(..)` (issue #1653).
+        assert_eq!(
+            stats.table_stats.as_ref().map(|t| t.disk_size),
+            Some(1024 * 1024)
+        );
+        assert_eq!(
+            stats.partition_stats.as_ref().map(|p| p.avg_partition_size),
+            Some(20480.0)
+        );
+        assert_eq!(
+            stats
+                .compression_stats
+                .as_ref()
+                .map(|c| c.algorithm.as_str()),
+            Some("LZ4")
+        );
         assert_eq!(stats.metadata.len(), 0);
     }
 
@@ -1702,7 +1796,13 @@ mod tests {
         let (remaining, stats) = result.unwrap();
         // Should have consumed all except the extra trailing data
         assert_eq!(remaining, b"extra_data");
-        assert_eq!(stats.compression_stats.algorithm, "Snappy");
+        assert_eq!(
+            stats
+                .compression_stats
+                .as_ref()
+                .map(|c| c.algorithm.as_str()),
+            Some("Snappy")
+        );
     }
 
     fn create_test_statistics() -> SSTableStatistics {
@@ -1727,15 +1827,15 @@ mod tests {
             },
             timestamp_stats: TimestampStatistics {
                 min_timestamp: 1000000,
-                max_timestamp: 2000000,
+                max_timestamp: Some(2000000),
                 min_deletion_time: 0,
                 max_deletion_time: 0,
                 min_ttl: None,
                 max_ttl: None,
-                rows_with_ttl: 0,
+                rows_with_ttl: Some(0),
             },
             column_stats: vec![],
-            table_stats: TableStatistics {
+            table_stats: Some(TableStatistics {
                 disk_size: 1024 * 1024,
                 uncompressed_size: 2048 * 1024,
                 compressed_size: 1024 * 1024,
@@ -1745,15 +1845,15 @@ mod tests {
                 index_size: 1024,
                 bloom_filter_size: 512,
                 level_count: 1,
-            },
-            partition_stats: PartitionStatistics {
+            }),
+            partition_stats: Some(PartitionStatistics {
                 avg_partition_size: 20480.0,
                 min_partition_size: 1024,
                 max_partition_size: 1048576,
                 size_histogram: vec![],
                 large_partition_percentage: 5.0,
-            },
-            compression_stats: CompressionStatistics {
+            }),
+            compression_stats: Some(CompressionStatistics {
                 algorithm: "LZ4".to_string(),
                 original_size: 2048 * 1024,
                 compressed_size: 1024 * 1024,
@@ -1761,7 +1861,7 @@ mod tests {
                 compression_speed: 100.0,
                 decompression_speed: 200.0,
                 compressed_blocks: 100,
-            },
+            }),
             metadata: HashMap::new(),
             serialization_header_columns: vec![],
             serialization_header_partition_keys: vec![],

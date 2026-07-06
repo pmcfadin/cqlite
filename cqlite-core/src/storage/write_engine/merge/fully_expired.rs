@@ -50,10 +50,10 @@ pub(super) fn is_fully_expired(stats: &TimestampStatistics, gc_before_secs: i64)
 /// would compare below any overlap bound and wrongly permit a drop). Returning
 /// `None` here forces the overlap gate to FAIL CLOSED (retain the candidate).
 fn authoritative_max_timestamp(stats: &TimestampStatistics) -> Option<i64> {
-    match stats.max_timestamp {
-        i64::MIN => None,
-        v => Some(v),
-    }
+    // `max_timestamp` is already `Option` (issue #1653): `Some` only when the
+    // authoritative maximum was decoded, `None` when unavailable. Propagate it
+    // directly — a `None` forces the overlap gate to FAIL CLOSED.
+    stats.max_timestamp
 }
 
 /// Read a candidate SSTable's `TimestampStatistics` from its sibling
@@ -311,7 +311,7 @@ mod tests {
 
     /// Construct a `TimestampStatistics` with the two fields the drop decision
     /// consults set explicitly; the rest are irrelevant.
-    fn ts_stats(max_deletion_time: i64, max_timestamp: i64) -> TimestampStatistics {
+    fn ts_stats(max_deletion_time: i64, max_timestamp: Option<i64>) -> TimestampStatistics {
         TimestampStatistics {
             min_timestamp: 0,
             max_timestamp,
@@ -319,7 +319,7 @@ mod tests {
             max_deletion_time,
             min_ttl: None,
             max_ttl: None,
-            rows_with_ttl: 0,
+            rows_with_ttl: None,
         }
     }
 
@@ -327,21 +327,21 @@ mod tests {
     /// fully expired.
     #[test]
     fn is_fully_expired_true_when_max_ldt_below_gc_before() {
-        assert!(is_fully_expired(&ts_stats(900, 0), 1_000));
+        assert!(is_fully_expired(&ts_stats(900, Some(0)), 1_000));
     }
 
     /// R1: `max_deletion_time` at or above `gcBefore` is NOT fully expired (the
     /// strict `<` predicate retains the boundary, matching Cassandra).
     #[test]
     fn is_fully_expired_false_at_or_above_gc_before() {
-        assert!(!is_fully_expired(&ts_stats(1_000, 0), 1_000));
-        assert!(!is_fully_expired(&ts_stats(1_500, 0), 1_000));
+        assert!(!is_fully_expired(&ts_stats(1_000, Some(0)), 1_000));
+        assert!(!is_fully_expired(&ts_stats(1_500, Some(0)), 1_000));
     }
 
     /// R1: the LIVE / NO_DELETION_TIME sentinel (`i64::MAX`) is never expired.
     #[test]
     fn is_fully_expired_false_for_live_sentinel() {
-        assert!(!is_fully_expired(&ts_stats(i64::MAX, 0), 1_000));
+        assert!(!is_fully_expired(&ts_stats(i64::MAX, Some(0)), 1_000));
     }
 
     /// Write a synthetic Statistics.db beside a zero-byte Data.db, returning the
@@ -524,21 +524,22 @@ mod tests {
     #[test]
     fn overlap_gate_fails_closed_on_unavailable_max_timestamp() {
         let cand: PathBuf = PathBuf::from("nb-1-big-Data.db");
-        // Fully expired (LDT 500 < 1_000) but max_timestamp is the #1729 unavailable
-        // sentinel (i64::MIN). A naive `sentinel < bound` comparison would wrongly
-        // permit a drop; the authoritative accessor forces a retain.
-        let stats = ts_stats(500, i64::MIN);
+        // Fully expired (LDT 500 < 1_000) but max_timestamp is unavailable
+        // (`None`, issue #1653/#1729). A naive "unavailable compares below bound"
+        // would wrongly permit a drop; the authoritative accessor forces a retain.
+        let stats = ts_stats(500, None);
         let input_stats = [(&cand, Some(stats))];
         // Concrete, above-sentinel outside bound (5_000).
         let dropped = classify_drop_set(&input_stats, Some(5_000), 1_000);
         assert!(
             dropped.is_empty(),
-            "an UNAVAILABLE (i64::MIN) max_timestamp must fail closed: retain, never drop (#1729 F2)"
+            "an UNAVAILABLE (None) max_timestamp must fail closed: retain, never drop (#1729 F2/#1653)"
         );
 
         // Control: the SAME candidate with a real, below-bound max_timestamp IS
-        // droppable, proving it is the sentinel (not some other field) that retains.
-        let live_max = ts_stats(500, 4_000);
+        // droppable, proving it is the unavailable case (not some other field)
+        // that retains.
+        let live_max = ts_stats(500, Some(4_000));
         let input_stats_live = [(&cand, Some(live_max))];
         assert_eq!(
             classify_drop_set(&input_stats_live, Some(5_000), 1_000),
@@ -547,17 +548,17 @@ mod tests {
         );
     }
 
-    /// The [`authoritative_max_timestamp`] accessor mirrors #1729: `None` for the
-    /// `i64::MIN` sentinel, `Some(v)` otherwise (incl. concrete negatives).
+    /// The [`authoritative_max_timestamp`] accessor mirrors #1729/#1653: `None`
+    /// when the max is unavailable, `Some(v)` otherwise (incl. concrete negatives).
     #[test]
     fn authoritative_max_timestamp_maps_sentinel_to_none() {
-        assert_eq!(authoritative_max_timestamp(&ts_stats(0, i64::MIN)), None);
+        assert_eq!(authoritative_max_timestamp(&ts_stats(0, None)), None);
         assert_eq!(
-            authoritative_max_timestamp(&ts_stats(0, 8_000)),
+            authoritative_max_timestamp(&ts_stats(0, Some(8_000))),
             Some(8_000)
         );
         assert_eq!(
-            authoritative_max_timestamp(&ts_stats(0, i64::MIN + 1)),
+            authoritative_max_timestamp(&ts_stats(0, Some(i64::MIN + 1))),
             Some(i64::MIN + 1)
         );
     }

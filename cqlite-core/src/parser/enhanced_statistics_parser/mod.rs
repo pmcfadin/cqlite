@@ -110,9 +110,6 @@ pub fn parse_nb_format_statistics_data(
 ) -> Result<(
     RowStatistics,
     TimestampStatistics,
-    TableStatistics,
-    PartitionStatistics,
-    CompressionStatistics,
     Vec<super::header::ColumnInfo>,
     Vec<super::header::ColumnInfo>,
     Vec<super::header::ColumnInfo>,
@@ -224,59 +221,41 @@ pub fn parse_nb_format_statistics_data(
 
             let timestamp_stats = TimestampStatistics {
                 min_timestamp,
-                // Fail-closed placeholder. The authoritative `maxTimestamp` is
-                // recovered from STATS field 4 by the best-effort post-pass in
-                // `parse_enhanced_statistics_file` (issue #1729). The inner
-                // EncodingStats parser does not reach field 4, so until the
-                // post-pass runs we use `i64::MIN` — Cassandra's "no max write
-                // timestamp recorded" sentinel — NOT the old `min_timestamp`
-                // placeholder (which silently reported the MIN as the max).
-                // A consumer that sees `i64::MIN` must treat the max as
-                // unavailable (do not proceed as if a real max were known).
-                max_timestamp: i64::MIN,
+                // `None` = maxTimestamp NOT yet authoritatively available (issue
+                // #1653). The real `maxTimestamp` is recovered from STATS field 4
+                // by the best-effort post-pass in `parse_enhanced_statistics_file`
+                // (issue #1729), which sets `Some(..)`. The inner EncodingStats
+                // parser does not reach field 4, so it stays `None` here — an
+                // honest "unavailable", NOT the old `i64::MIN` sentinel or the even
+                // older `min_timestamp` alias (both lied about the max). A consumer
+                // that needs a real max must treat `None` as unavailable.
+                max_timestamp: None,
                 min_deletion_time,
-                max_deletion_time: min_deletion_time,
+                // Genuinely parsed by the STATS post-pass (#1073/#1011), which
+                // overwrites this below. Until then use the authoritative
+                // `NO_DELETION_TIME` (`i64::MAX`) "no deletions recorded" value so a
+                // post-pass failure fails CLOSED (never classified fully-expired),
+                // NOT the old `= min_deletion_time` placeholder which reported the
+                // MIN as the max (issue #1653).
+                max_deletion_time: i64::MAX,
                 min_ttl,
-                max_ttl: min_ttl,
-                rows_with_ttl: 0,
+                // `None` = maxTTL not authoritatively available (issue #1653). The
+                // enhanced parser does not decode a per-SSTable max TTL, so it is
+                // honestly `None`, NOT the old `= min_ttl` alias (which lied).
+                max_ttl: None,
+                // `None` = rows-with-TTL count not authoritatively available (issue
+                // #1653), NOT a fabricated `0` (which claimed "no rows have a TTL").
+                rows_with_ttl: None,
             };
 
-            let table_stats = TableStatistics {
-                disk_size: 0,
-                uncompressed_size: 0,
-                compressed_size: 0,
-                compression_ratio: 1.0,
-                block_count: 0,
-                avg_block_size: 0.0,
-                index_size: 0,
-                bloom_filter_size: 0,
-                level_count: 0,
-            };
-
-            let partition_stats = PartitionStatistics {
-                avg_partition_size: 0.0,
-                min_partition_size: 0,
-                max_partition_size: 0,
-                large_partition_percentage: 0.0,
-                size_histogram: vec![],
-            };
-
-            let compression_stats = CompressionStatistics {
-                algorithm: "unknown".to_string(),
-                original_size: 0,
-                compressed_size: 0,
-                ratio: 1.0,
-                compression_speed: 0.0,
-                decompression_speed: 0.0,
-                compressed_blocks: 0,
-            };
-
+            // Table/partition/compression statistics are NOT decoded by the
+            // enhanced (nb) parser. They are left `None` on `SSTableStatistics`
+            // (built by the caller) rather than fabricated with all-zero /
+            // "unknown" placeholders that were type-indistinguishable from real
+            // values (issue #1653; no-heuristics/no-fabrication mandate #28).
             Ok((
                 row_stats,
                 timestamp_stats,
-                table_stats,
-                partition_stats,
-                compression_stats,
                 partition_columns,
                 clustering_columns,
                 regular_columns,
@@ -327,16 +306,7 @@ pub fn parse_enhanced_statistics_file<'a>(
     let result = parse_nb_format_statistics_data(remaining, &header, input, gates);
 
     match result {
-        Ok((
-            row_stats,
-            mut timestamp_stats,
-            table_stats,
-            partition_stats,
-            compression_stats,
-            partition_columns,
-            clustering_columns,
-            columns,
-        )) => {
+        Ok((row_stats, mut timestamp_stats, partition_columns, clustering_columns, columns)) => {
             log::debug!(
                 "Successfully parsed Statistics.db serialization header: {} partition keys, {} clustering keys, {} regular columns",
                 partition_columns.len(),
@@ -353,17 +323,21 @@ pub fn parse_enhanced_statistics_file<'a>(
             // additive — a Statistics.db that parses today must keep parsing, so
             // an Err here is logged and the placeholders are kept. When
             // maxTimestamp is unavailable (extras.max_timestamp == None, i.e.
-            // Cassandra's Long.MIN_VALUE sentinel) we deliberately leave the
-            // `i64::MIN` fail-closed sentinel in place rather than substituting
-            // the min — consumers requiring a real max must not proceed.
+            // Cassandra's Long.MIN_VALUE sentinel) we deliberately leave
+            // `max_timestamp == None` in place (issue #1653) rather than
+            // substituting the min — consumers requiring a real max must not
+            // proceed.
             let tombstone_drop_times =
                 match crate::parser::repair_metadata::parse_stats_extras(input, gates) {
                     Ok(extras) => {
                         // Only set max_deletion_time. Do NOT touch min_deletion_time
                         // (the EncodingStats min baseline consumed elsewhere).
                         timestamp_stats.max_deletion_time = extras.max_local_deletion_time;
+                        // `extras.max_timestamp` is already `Option`: `Some` only
+                        // when the authoritative max was decoded (#1729). Propagate
+                        // it directly — `None` stays `None` (issue #1653).
                         if let Some(max_ts) = extras.max_timestamp {
-                            timestamp_stats.max_timestamp = max_ts;
+                            timestamp_stats.max_timestamp = Some(max_ts);
                         }
                         extras.tombstone_drop_times
                     }
@@ -381,9 +355,12 @@ pub fn parse_enhanced_statistics_file<'a>(
                 row_stats,
                 timestamp_stats,
                 column_stats: vec![],
-                table_stats,
-                partition_stats,
-                compression_stats,
+                // NOT decoded by the enhanced (nb) parser → honestly `None`
+                // rather than fabricated all-zero / "unknown" placeholders
+                // (issue #1653; no-heuristics mandate #28).
+                table_stats: None,
+                partition_stats: None,
+                compression_stats: None,
                 metadata: std::collections::HashMap::new(),
                 serialization_header_columns: columns,
                 serialization_header_partition_keys: partition_columns,
@@ -499,5 +476,113 @@ mod tests {
         let invalid_data = vec![0xFF; 10];
         let result = parse_statistics_with_fallback(&invalid_data, None);
         assert!(result.is_err(), "Invalid data should fail to parse");
+    }
+
+    /// Locate a real nb `Statistics.db` fixture under `CQLITE_DATASETS_ROOT`.
+    /// Returns `None` (test skips) when the dataset binaries are absent.
+    #[cfg(test)]
+    fn real_nb_statistics_db() -> Option<Vec<u8>> {
+        let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+        let path = std::path::PathBuf::from(root).join(
+            "sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9/\
+             nb-1-big-Statistics.db",
+        );
+        if !path.exists() {
+            eprintln!("dataset Statistics.db absent, skipping: {path:?}");
+            return None;
+        }
+        std::fs::read(&path).ok()
+    }
+
+    /// Issue #1653 (a): when the parser does NOT authoritatively reach a field,
+    /// the fabricated placeholder must be gone — the value is honestly `None`, NOT
+    /// the old `max_timestamp == min_timestamp` / `i64::MIN` sentinel.
+    ///
+    /// The INNER parser (`parse_nb_format_statistics_data`) decodes only the
+    /// EncodingStats block and never reaches STATS field 4 (max timestamp) or a
+    /// per-SSTable max-TTL / rows-with-TTL count, so those stay `None`. This is
+    /// exactly the "parser doesn't populate it" case the issue's TDD test targets
+    /// (which FAILED on main, where `max_timestamp` aliased the min).
+    #[test]
+    fn inner_parser_leaves_unavailable_timestamp_fields_none() {
+        let Some(bytes) = real_nb_statistics_db() else {
+            return;
+        };
+        let (remaining, header) =
+            parse_nb_format_header(&bytes).expect("nb header must parse on a real fixture");
+        let (_row, ts_stats, _pk, _ck, _cols) =
+            parse_nb_format_statistics_data(remaining, &header, &bytes, None)
+                .expect("inner EncodingStats parse must succeed on a real fixture");
+
+        // A real time-series SSTable records write timestamps, so its min is a
+        // real (non-sentinel) value — proving the fixture is meaningful.
+        assert_ne!(
+            ts_stats.min_timestamp,
+            i64::MIN,
+            "fixture must carry a real min_timestamp"
+        );
+        // The headline (#1653): the inner parser does not reach the authoritative
+        // max, so it is honestly `None` — NOT a fabricated `Some(min)`/sentinel.
+        assert_eq!(
+            ts_stats.max_timestamp, None,
+            "inner parser must leave max_timestamp None (not fabricated as min); issue #1653"
+        );
+        assert_eq!(
+            ts_stats.max_ttl, None,
+            "inner parser must leave max_ttl None (not fabricated as min_ttl); issue #1653"
+        );
+        assert_eq!(
+            ts_stats.rows_with_ttl, None,
+            "inner parser must leave rows_with_ttl None (not fabricated as 0); issue #1653"
+        );
+    }
+
+    /// Issue #1653 (a, cont.): the full enhanced parse must NOT fabricate the
+    /// wholly-unparsed table/partition/compression statistics — they are honestly
+    /// `None`, never an all-zero / `algorithm: "unknown"` block.
+    #[test]
+    fn enhanced_parse_leaves_unparsed_stat_blocks_none() {
+        let Some(bytes) = real_nb_statistics_db() else {
+            return;
+        };
+        let (_remaining, stats) = parse_enhanced_statistics_file(&bytes, None)
+            .expect("enhanced parse must succeed on a real fixture");
+
+        assert!(
+            stats.table_stats.is_none(),
+            "enhanced nb parser must not fabricate table_stats; issue #1653"
+        );
+        assert!(
+            stats.partition_stats.is_none(),
+            "enhanced nb parser must not fabricate partition_stats; issue #1653"
+        );
+        assert!(
+            stats.compression_stats.is_none(),
+            "enhanced nb parser must not fabricate compression_stats; issue #1653"
+        );
+    }
+
+    /// Issue #1653 (b): a genuinely-present statistic still yields
+    /// `Some(real_value)`. The best-effort STATS post-pass in
+    /// `parse_enhanced_statistics_file` recovers the authoritative `maxTimestamp`
+    /// (#1729) for a real time-series SSTable, so `max_timestamp` is `Some` and is
+    /// a real max `>= min` — proving the change did not break genuine decoding.
+    #[test]
+    fn enhanced_parse_recovers_real_max_timestamp_as_some() {
+        let Some(bytes) = real_nb_statistics_db() else {
+            return;
+        };
+        let (_remaining, stats) = parse_enhanced_statistics_file(&bytes, None)
+            .expect("enhanced parse must succeed on a real fixture");
+
+        let min = stats.timestamp_stats.min_timestamp;
+        let max = stats
+            .timestamp_stats
+            .max_timestamp
+            .expect("a real time-series nb SSTable must expose an authoritative maxTimestamp");
+        assert!(
+            max >= min,
+            "recovered max_timestamp ({max}) must be a real max >= min ({min})"
+        );
     }
 }
