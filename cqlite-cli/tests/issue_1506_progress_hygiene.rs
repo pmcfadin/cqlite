@@ -205,6 +205,17 @@ fn test_import_quiet_suppresses_progress_preamble() {
 
     let _ = fs::remove_file(&tmp);
 
+    // Assert the command actually reached (and completed) the import path before
+    // checking for absence of the preamble. `import_data` returns Ok even when
+    // individual inserts warn (read-only db), so a success exit means we ran the
+    // import — without this, an early command failure (which also emits no
+    // preamble) would pass the suppression checks vacuously (#1506 roborev Low).
+    assert!(
+        output.status.success(),
+        "import --quiet should reach the import path and exit successfully. stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("Importing data from:")
