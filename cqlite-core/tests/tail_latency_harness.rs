@@ -196,6 +196,51 @@ fn mixed_p99_bounded_by_k_times_baseline() {
     );
 }
 
+/// F3 cold-mixed-load gate (issue #1593): point-read p99 under a concurrent
+/// **mmap** background scan must stay within `K` × the scan-free baseline p99.
+///
+/// This is the ratio the F3 offload protects: on the mmap backend the background
+/// scan's reads fault synchronously, so before F3 they blocked the async workers
+/// and convoyed the foreground point reads; after F3 that read loop runs on a
+/// `spawn_blocking` thread and the convoy is bounded. Like the buffered convoy
+/// bound above, this gates on a **ratio** to a same-run baseline (never a
+/// wall-clock absolute), so shared-runner / oversubscribed-CPU noise cannot flap
+/// it. `K` is the same generous convoy headroom constant. The full `agent-gate.sh`
+/// runs components serially (issue #1825), so this is never measured under a
+/// competing gate on the same box. The deterministic thread-identity guard
+/// (`issue_1593_io_offload_thread.rs`) is the primary, timing-free F3 proof; this
+/// ratio bound is the secondary tail watch.
+#[cfg(feature = "cli-helpers")]
+#[serial_test::serial]
+#[test]
+fn cold_mmap_mixed_p99_bounded_by_k_times_baseline() {
+    use fixtures::ReadFixture;
+
+    if !fixtures::fixture_present(&ReadFixture::SIMPLE) {
+        eprintln!("tail_latency test: SIMPLE fixture absent — skipping (fetch datasets)");
+        return;
+    }
+
+    let report =
+        harness::run_mmap(ReadFixture::SIMPLE).expect("mmap harness run on present fixture");
+
+    assert!(report.mixed.p50 <= report.mixed.p99 && report.mixed.p99 <= report.mixed.p999);
+    assert!(
+        report.scan_free.p50 <= report.scan_free.p99
+            && report.scan_free.p99 <= report.scan_free.p999
+    );
+
+    let bound = K * (report.scan_free.p99 as f64);
+    assert!(
+        (report.mixed.p99 as f64) <= bound,
+        "cold mmap mixed p99 {} exceeded K({K}) * scan_free p99 {} = {bound} \
+         (p99_mixed_over_scan_free = {:.2}) — F3 offload regressed?",
+        report.mixed.p99,
+        report.scan_free.p99,
+        report.p99_mixed_over_scan_free
+    );
+}
+
 #[cfg(feature = "cli-helpers")]
 #[serial_test::serial]
 #[test]

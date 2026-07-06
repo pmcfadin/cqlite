@@ -220,9 +220,25 @@ fn uuid_to_literal(bytes: &[u8; 16]) -> String {
 /// the scan thread and the point-read stream for the process lifetime.
 #[cfg(feature = "cli-helpers")]
 pub fn setup(fx: &crate::fixtures::ReadFixture) -> (Arc<Database>, String) {
+    setup_from_db(crate::fixtures::open_read_db(fx).into_shared_db(), fx)
+}
+
+/// Like [`setup`] but over the memory-mapped scan backend (issue #1593, F3): the
+/// mmap cursor faults synchronously, so its scans are the ones F3 must keep off
+/// the async worker pool. Used by the cold-mixed-load tail gate.
+#[cfg(feature = "cli-helpers")]
+pub fn setup_mmap(fx: &crate::fixtures::ReadFixture) -> (Arc<Database>, String) {
+    setup_from_db(crate::fixtures::open_read_db_mmap(fx).into_shared_db(), fx)
+}
+
+/// Learn a present partition key from an already-opened shared `db`, build the
+/// projected point SQL, and run the two honesty guards. Backs both [`setup`]
+/// (buffered) and [`setup_mmap`] (mmap) so the two backends share identical
+/// key-learning and guard logic.
+#[cfg(feature = "cli-helpers")]
+fn setup_from_db(db: Arc<Database>, fx: &crate::fixtures::ReadFixture) -> (Arc<Database>, String) {
     use cqlite_core::Value;
 
-    let db = crate::fixtures::open_read_db(fx).into_shared_db();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -328,6 +344,22 @@ pub fn run_point_read_stream(db: &Arc<Database>, sql: &str, n: usize, warmup: us
 /// actually completed at least one full pass (a wedged scan is a bug, not a pass).
 #[cfg(feature = "cli-helpers")]
 pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
+    run_backend(fx, false)
+}
+
+/// Cold-mixed-load harness over the memory-mapped scan backend (issue #1593, F3).
+/// Identical mixed-load shape to [`run`], but both the background scan and the
+/// point reads run against an mmap-backed `Database`, so the background scan's
+/// reads fault synchronously — the case F3 must keep off the async worker pool.
+/// The reported `p99_mixed_over_scan_free` ratio is the cold-mmap convoy number.
+#[cfg(feature = "cli-helpers")]
+pub fn run_mmap(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
+    run_backend(fx, true)
+}
+
+/// Shared mixed-load driver for [`run`] (buffered) and [`run_mmap`] (mmap).
+#[cfg(feature = "cli-helpers")]
+fn run_backend(fx: crate::fixtures::ReadFixture, mmap: bool) -> Option<HarnessReport> {
     if !crate::fixtures::fixture_present(&fx) {
         eprintln!(
             "tail_latency: fixture {} not present — skipping (fetch: bash test-data/scripts/fetch-datasets.sh)",
@@ -336,7 +368,7 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
         return None;
     }
 
-    let (db, sql) = setup(&fx);
+    let (db, sql) = if mmap { setup_mmap(&fx) } else { setup(&fx) };
 
     // Scan-free baseline first (no background contention).
     let scan_free_lat = run_point_read_stream(&db, &sql, MEASURED_N, WARMUP);
