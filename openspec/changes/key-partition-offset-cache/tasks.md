@@ -3,8 +3,9 @@
 ## 1. TDD tests first (write RED, then implement to green)
 - [ ] 1.1 Unit test (local instance, single shard): eviction order — capacity 2; insert A, insert B,
       access A, insert C → assert B evicted, A + C resident.
-- [ ] 1.2 Unit test: entry-count bound — insert N > capacity distinct keys → resident count never
-      exceeds capacity after each insert.
+- [ ] 1.2 Unit test: byte-budget bound — insert N distinct keys whose combined footprint exceeds the
+      budget → resident byte footprint never exceeds the configured budget after each insert (for
+      fixed-width keys this is equivalently an entry-count bound).
 - [ ] 1.3 Unit test: hit returns the stored `(offset,size)`; a different key never aliases; a
       never-inserted key misses (parity / no-fabrication).
 - [ ] 1.4 Unit test: `disabled()` is a genuine no-op (get misses, insert retains nothing, occupancy
@@ -17,9 +18,11 @@
 ## 2. Implement the cache
 - [ ] 2.1 New `cqlite-core/src/storage/cache/key_offset.rs`: `PartitionLoc { data_offset, data_size }`,
       `KeyOffsetCache` (sharded `Mutex<LruCache<Box<[u8]>, PartitionLoc>>`, power-of-two shards,
-      poison-tolerant lock, `with_capacity` / `with_capacity_and_shards` / `disabled`, `get` / `insert`
-      / `len` / `is_empty` / `capacity` / hit+miss counters). `DEFAULT_KEY_CACHE_ENTRIES`,
-      `DEFAULT_KEY_CACHE_SHARDS`. Declare `pub mod key_offset;` + re-export in `cache/mod.rs`.
+      poison-tolerant lock, byte-budget constructors `with_budget_bytes` / `with_budget_and_shards` /
+      `disabled`, `get` / `insert` / `len` / `is_empty` / `budget_bytes` / hit+miss counters). The
+      per-reader byte budget defaults to `DEFAULT_KEY_CACHE_BYTES` (divided across
+      `DEFAULT_KEY_CACHE_SHARDS`), with byte-based LRU eviction. Declare `pub mod key_offset;` +
+      re-export in `cache/mod.rs`.
 - [ ] 2.2 Add `INDEX_PROBES` to `read_work_counters.rs` (field + `record_index_probe` + `index_probes`
       getter + reset + round-trip test line), same cfg-gated zero-in-release pattern.
 

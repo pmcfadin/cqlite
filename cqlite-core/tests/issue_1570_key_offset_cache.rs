@@ -14,6 +14,11 @@
 //!   and probes `Index.db` ZERO times (`INDEX_PROBES == 0`), returning the SAME
 //!   `(offset,size)` the first probe resolved (parity on a hit).
 //!
+//! Plus the negative (absent-key) counterpart for both formats: a key the SSTable
+//! does NOT contain resolves to authoritative absence on every read and is NEVER
+//! cached (positive-only insert discipline), so a repeated absent lookup still
+//! re-probes `Index.db` / re-walks the trie (`INDEX_PROBES`/`TRIE_WALKS >= 1`).
+//!
 //! Compiled only with `--features work-counters` (the counter getters/`reset` live
 //! behind it). Requires `CQLITE_DATASETS_ROOT`; each test self-skips (never fails)
 //! when its optional fixture is absent. The BTI test is excluded under `tombstones`
@@ -142,6 +147,84 @@ mod big {
         assert_eq!(
             first, second,
             "B4/BIG correctness: a cache hit must return the SAME (offset,size) a fresh probe does"
+        );
+    }
+
+    /// Absent-key wiring evidence (issue #1570 C finding, R3 scenario 3): a
+    /// partition key the SSTable does NOT contain must resolve to authoritative
+    /// absence on EVERY read and must NEVER be cached (the positive-only insert
+    /// discipline never fires for a miss). We prove this at the read-path surface:
+    /// looking the absent key up TWICE returns `Ok(None)` both times, and the
+    /// SECOND lookup still records `INDEX_PROBES >= 1` — had the absent key been
+    /// cached, the second lookup would have short-circuited with `INDEX_PROBES == 0`
+    /// (contrast `big_repeated_index_lookup_skips_probe_and_matches`, where a
+    /// *present* key's re-read observes `== 0`). The `key_offset_cache` field is
+    /// crate-private, so the counter is the public-surface proxy for "no positive
+    /// cache entry was created".
+    #[tokio::test]
+    #[serial]
+    async fn big_absent_key_never_cached_reprobes_index() {
+        let Some(data_db) = find_data_db("test_basic", "simple_table") else {
+            eprintln!("Skipping (B4/BIG absent): test_basic/simple_table Data.db not present");
+            return;
+        };
+        let config = cqlite_core::Config::default();
+        let platform = Arc::new(
+            cqlite_core::platform::Platform::new(&config)
+                .await
+                .expect("platform"),
+        );
+        // Learn a genuinely-present raw key ONLY to confirm this fixture has an
+        // Index.db (so a probe is actually recorded); we then derive an absent key
+        // from it that can never match an exact-bytes Index.db entry.
+        let Some(present) = learn_present_raw_key(&data_db, platform.clone()).await else {
+            eprintln!("Skipping (B4/BIG absent): could not learn a present raw key (no Index.db)");
+            return;
+        };
+        // An exact-match Index.db (raw bytes since #552) can never contain this:
+        // it is a present key with extra suffix bytes, so its length/bytes differ
+        // from every real entry — guaranteed authoritative absence.
+        let mut absent_key = present.clone();
+        absent_key.push(0x00);
+        absent_key.extend_from_slice(b"cqlite-absent-partition-key");
+
+        let reader = SSTableReader::open(&data_db, &config, platform)
+            .await
+            .expect("open BIG reader");
+
+        // First lookup of the absent key: a real Index.db probe that MISSES.
+        rwc::reset();
+        let first = reader
+            .lookup_partition_with_index(&absent_key)
+            .await
+            .expect("first absent index lookup");
+        assert!(
+            first.is_none(),
+            "B4/BIG absent: an absent key must resolve to authoritative absence (Ok(None))"
+        );
+        assert!(
+            rwc::index_probes() >= 1,
+            "B4/BIG absent: the first absent lookup must perform a real Index.db probe; got {}",
+            rwc::index_probes()
+        );
+
+        // Second lookup of the SAME absent key: because a miss is never cached, the
+        // read must re-probe Index.db (INDEX_PROBES >= 1). A positive cache entry
+        // would instead short-circuit here with INDEX_PROBES == 0.
+        rwc::reset();
+        let second = reader
+            .lookup_partition_with_index(&absent_key)
+            .await
+            .expect("second absent index lookup");
+        assert!(
+            second.is_none(),
+            "B4/BIG absent: the repeated absent lookup must still resolve to Ok(None)"
+        );
+        assert!(
+            rwc::index_probes() >= 1,
+            "B4/BIG absent: a repeated absent lookup must RE-PROBE Index.db (INDEX_PROBES >= 1), \
+             proving the absent key was never cached as a hit; got {}",
+            rwc::index_probes()
         );
     }
 
@@ -311,6 +394,113 @@ mod bti {
             )
         };
         Some((sql(&ids[0]), sql(&ids[1])))
+    }
+
+    /// Learn one present `id` UUID plus a deterministically-chosen UUID the fixture
+    /// does NOT contain, and build a projected point-read SQL for each. The absent
+    /// UUID is found by scanning ALL present ids into a set and walking `[0u8;16]`
+    /// upward until a value not in the set is reached (guaranteed to terminate on a
+    /// finite fixture) — so the "absent" key is provably absent, not merely assumed.
+    async fn learn_present_and_absent_sqls(db: &Database, table: &str) -> Option<(String, String)> {
+        let scan = db.execute(&format!("SELECT id FROM {table}")).await.ok()?;
+        let mut ids: Vec<[u8; 16]> = Vec::new();
+        for row in &scan.rows {
+            if let Some(Value::Uuid(b)) = row.values.get("id") {
+                if !ids.contains(b) {
+                    ids.push(*b);
+                }
+            }
+        }
+        let present = *ids.first()?;
+        // Find a UUID not present in the fixture by incrementing from all-zeros.
+        let mut absent = [0u8; 16];
+        while ids.contains(&absent) {
+            for i in (0..16).rev() {
+                if absent[i] == 0xFF {
+                    absent[i] = 0;
+                } else {
+                    absent[i] += 1;
+                    break;
+                }
+            }
+        }
+        let sql = |id: &[u8; 16]| {
+            format!(
+                "SELECT id, name FROM {table} WHERE id = {}",
+                uuid_to_literal(id)
+            )
+        };
+        Some((sql(&present), sql(&absent)))
+    }
+
+    /// Absent-key wiring evidence (issue #1570 C finding, R3 scenario 3): a BTI
+    /// trie-MISS key must resolve to authoritative absence on every read and must
+    /// NEVER be cached. The B4 cache is trie-HIT-only, so an absent key can never
+    /// populate it — the read must re-walk the `Partitions.db` trie each time.
+    /// The single-entry C3 memo WOULD serve a consecutively-repeated absent key
+    /// (it stores the `None` resolution too), so we INTERLEAVE a present key A
+    /// between the two absent reads to displace the memo — leaving the B4 cache as
+    /// the ONLY thing that could skip the descent, which it never does for a miss.
+    /// The re-read of the absent key therefore records `TRIE_WALKS >= 1` (contrast
+    /// the present-key test, which observes `== 0` on the interleaved re-read).
+    #[tokio::test]
+    #[serial]
+    async fn bti_absent_key_never_cached_rewalks_trie() {
+        if find_data_db("test_da", "simple_table").is_none() {
+            eprintln!("Skipping (B4/BTI absent): optional test_da/simple_table not present");
+            return;
+        }
+        let Some(db) = setup("test_da", "da-test.cql").await else {
+            eprintln!("Skipping (B4/BTI absent): could not ingest test_da");
+            return;
+        };
+        let Some((sql_present, sql_absent)) =
+            learn_present_and_absent_sqls(&db, "test_da.simple_table").await
+        else {
+            eprintln!("Skipping (B4/BTI absent): fixture has no keys to derive an absent key from");
+            return;
+        };
+
+        // First read of the absent key: definitive miss (zero rows). This stores the
+        // `None` resolution in the single-entry C3 memo for the absent key.
+        let r_absent = db
+            .execute(&sql_absent)
+            .await
+            .expect("BTI absent point read");
+        assert!(
+            r_absent.rows.is_empty(),
+            "B4/BTI absent: an absent key must return zero rows (authoritative absence)"
+        );
+
+        // Read present key A: the single-entry C3 memo now holds A, not the absent
+        // key — so only the B4 cache could serve the absent key without a descent.
+        let r_present = db
+            .execute(&sql_present)
+            .await
+            .expect("BTI present point read");
+        assert!(
+            !r_present.rows.is_empty(),
+            "B4/BTI absent: interleave key A must be present"
+        );
+
+        // Re-read the absent key with counters reset. The C3 memo holds A and the B4
+        // cache never held the (absent) key, so the read MUST descend the trie again.
+        rwc::reset();
+        assert_eq!(rwc::trie_walks(), 0, "reset must zero TRIE_WALKS");
+        let r_absent2 = db
+            .execute(&sql_absent)
+            .await
+            .expect("BTI repeated absent point read");
+        assert!(
+            r_absent2.rows.is_empty(),
+            "B4/BTI absent: the repeated absent read must still return zero rows"
+        );
+        assert!(
+            rwc::trie_walks() >= 1,
+            "B4/BTI absent: a repeated absent read must RE-WALK the trie (TRIE_WALKS >= 1), \
+             proving the absent key was never cached as a hit; got {}",
+            rwc::trie_walks()
+        );
     }
 
     /// Scenario: a repeated (interleaved) BTI point read performs ZERO trie walks on

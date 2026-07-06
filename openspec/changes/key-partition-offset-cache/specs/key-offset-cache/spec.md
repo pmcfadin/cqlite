@@ -13,12 +13,17 @@ fresh resolution would.
 The system SHALL provide a key→partition-offset cache that stores the resolved location
 `(data_offset, data_size)` for a partition key. The cache key SHALL be the **full raw
 partition-key bytes** (never a lossy hash/digest of them), so a cache hit can never return a
-location belonging to a different key. The cache SHALL be bounded by entry count with a capacity
-that is a constructor parameter (small default), and SHALL be internally **sharded** so that a
-lookup ("hit path") acquires only a per-shard lock and never a single process-wide lock. Recency
-SHALL be updated on access and eviction SHALL be least-recently-used. Locking SHALL be
-poison-tolerant (a thread that panics while holding a shard lock SHALL NOT wedge the cache), and the
-cache SHALL contain no `unwrap()`/`expect()`.
+location belonging to a different key. The cache SHALL be bounded by an approximate **per-reader
+byte budget** (`DEFAULT_KEY_CACHE_BYTES`, a small default; overridable via the `with_budget_bytes`
+constructor), accounting each entry's approximate footprint (key bytes plus the stored location),
+and SHALL be internally **sharded** so that a lookup ("hit path") acquires only a per-shard lock and
+never a single process-wide lock; the total budget is divided across shards. Recency SHALL be
+updated on access and eviction SHALL be **byte-based least-recently-used** — the least-recently-used
+entries in a shard are evicted until the shard is back within its byte share. (For fixed-width
+partition keys the resident entry count is exactly proportional to the byte footprint, so a
+byte-budget bound behaves as an entry-count bound.) Locking SHALL be poison-tolerant (a thread that
+panics while holding a shard lock SHALL NOT wedge the cache), and the cache SHALL contain no
+`unwrap()`/`expect()`.
 
 #### Scenario: A hit returns the stored location
 
@@ -32,13 +37,13 @@ cache SHALL contain no `unwrap()`/`expect()`.
 
 #### Scenario: LRU eviction is deterministic under a single shard
 
-- **WHEN** a single-shard cache with capacity 2 receives inserts and accesses in the order insert A, insert B, access A, insert C
+- **WHEN** a single-shard cache with a byte budget sized to hold exactly two fixed-width entries receives inserts and accesses in the order insert A, insert B, access A, insert C
 - **THEN** B (least recently used) is evicted and A and C remain resident
 
-#### Scenario: Entry count stays within capacity
+#### Scenario: Resident footprint stays within the byte budget
 
-- **WHEN** more distinct keys are inserted than the capacity holds
-- **THEN** the resident entry count never exceeds the configured capacity after each insert
+- **WHEN** more distinct keys are inserted than the byte budget holds
+- **THEN** the resident byte footprint never exceeds the configured budget after each insert (and, for fixed-width keys, the resident entry count never exceeds the equivalent entry count)
 
 ### Requirement: The cache honors the read-cache enabled toggle
 
