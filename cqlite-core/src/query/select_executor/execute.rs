@@ -16,8 +16,9 @@
 
 use super::{
     build_row_from_scan, classify_partition_lookup, column_info_from_type_str, evaluate_predicates,
-    honest_targeted_path, parse_table_id, project_expr_reshapes_row, select_has_writetime_ttl,
-    sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
+    honest_targeted_path, parse_table_id, partition_key_digest, project_expr_reshapes_row,
+    scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
+    PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
@@ -130,6 +131,14 @@ impl SelectExecutor {
             plan.execution_steps.clone()
         };
 
+        // Issue #1577 (D1): decide ONCE — from the plan alone — whether the
+        // SSTable scan may stop early at `LIMIT + OFFSET` accepted rows. `None`
+        // (any Sort/Aggregate/PerPartitionLimit/residual-Filter, DISTINCT, or no
+        // LIMIT) leaves the scan unbounded, exactly as before. Computed here so it
+        // is available inside the step loop below (unused, harmlessly, when the
+        // #1578 global-aggregate fast path takes the scan's place).
+        let scan_cap = scan_pushdown_cap(&execution_steps, &plan.statement.select_clause);
+
         // Issue #1578 (D2): fold a GROUP-BY-free aggregate over a full table scan
         // into an O(1) accumulator instead of buffering the whole table here.
         // Returns None for any plan shape it does not model (GROUP BY, targeted
@@ -156,6 +165,7 @@ impl SelectExecutor {
                                 projection,
                                 plan.statement.order_by.as_ref(),
                                 query_schema.as_deref(),
+                                scan_cap,
                                 &mut context,
                             )
                             .await?;
@@ -376,13 +386,20 @@ impl SelectExecutor {
     /// `evaluate_predicates`, which are shared with the streaming background
     /// task to keep the two execution paths in lockstep.
     ///
-    /// Issue #1582 (D6, narrow subset): this scan NO LONGER applies any
-    /// byte/row budget or LIMIT/OFFSET pushdown itself. It materializes the
-    /// predicate-matching rows and returns them; the single byte/row budget check
-    /// is applied ONCE by [`SelectExecutor::execute`] on the FINAL result, after
-    /// the whole step pipeline. `storage.scan` receives no query-derived row limit
-    /// (its `limit` argument stays `None`), so a `WHERE non_pk = ? LIMIT N` cannot
-    /// silently drop matching rows past the first N raw rows.
+    /// Issue #1582 (D6, narrow subset): the single byte/row budget check is
+    /// applied ONCE by [`SelectExecutor::execute`] on the FINAL result, after the
+    /// whole step pipeline (post LIMIT/OFFSET), never mid-collection here.
+    ///
+    /// Issue #1577 (D1): when the caller determines the plan is LIMIT-pushdown
+    /// safe it passes `scan_cap = Some(limit + offset)` — the number of ACCEPTED
+    /// (post-marker, post-predicate) rows the downstream `Limit` needs. This scan
+    /// then stops after that many accepted rows: the full-scan fallback stops
+    /// DECODING early (via [`capped_fallback_scan`](Self::capped_fallback_scan)'s
+    /// bounded stream), and the partition-targeted paths stop the per-row build
+    /// loop. `scan_cap` is `None` (unbounded, as before) whenever a
+    /// Sort/Aggregate/PerPartitionLimit/residual-Filter step or DISTINCT follows,
+    /// or there is no `LIMIT` — so a `WHERE non_pk = ? LIMIT N` still counts
+    /// ACCEPTED rows, never raw rows, and can never silently drop matches.
     #[cfg_attr(feature = "tombstones", allow(unused_variables))]
     pub(super) async fn execute_sstable_scan(
         &self,
@@ -393,6 +410,8 @@ impl SelectExecutor {
         // Issue #1587 (E5): schema resolved ONCE per query by the caller and
         // shared by reference — no per-scan registry lock + deep clone.
         schema_opt: Option<&TableSchema>,
+        // Issue #1577 (D1): `Some(limit + offset)` when LIMIT pushdown is safe.
+        scan_cap: Option<usize>,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         // FINDING 2 (Issue #955 follow-up): a `token(...)` predicate is evaluated
@@ -484,6 +503,16 @@ impl SelectExecutor {
             log::info!("Scan (with metadata) returned {} rows", scan_results.len());
 
             for (key, value, cell_meta) in scan_results {
+                // Issue #1577 (D1): stop building rows once the downstream LIMIT is
+                // satisfied. Counts ACCEPTED rows, so this never drops a matching
+                // row. (The metadata scan itself is already materialized; this
+                // bounds the per-row build/predicate work.)
+                if let Some(cap) = scan_cap {
+                    if results.len() >= cap {
+                        break;
+                    }
+                }
+
                 context.rows_processed += 1;
                 context.scan_rows += 1;
 
@@ -591,8 +620,19 @@ impl SelectExecutor {
                     // Issue #960: report the honest reason a full scan was chosen.
                     context.access_path = Some(AccessPath::FallbackFullScan { reason });
                     crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
-                    // Issue #1582 (D6, narrow subset): no query-derived row limit
-                    // is pushed into the predicate-unaware `storage.scan` — the sole
+                    // Issue #1577 (D1): when the plan is LIMIT-pushdown safe, stop
+                    // DECODING the table once `cap` rows are accepted. This streams
+                    // (in lockstep with `scan`) and drops the stream at the cap,
+                    // returning the final rows directly — the shared per-row loop
+                    // below is bypassed for this branch.
+                    if let Some(cap) = scan_cap {
+                        return self
+                            .capped_fallback_scan(
+                                table, predicates, projection, schema_opt, cap, context,
+                            )
+                            .await;
+                    }
+                    // Issue #1582 (D6, narrow subset): unbounded full scan; the sole
                     // budget check is applied once on the FINAL result in `execute`.
                     self.storage
                         .scan(table, None, None, None, schema_opt)
@@ -603,6 +643,17 @@ impl SelectExecutor {
             log::info!("Scan returned {} rows", scan_results.len());
 
             for (key, value) in scan_results {
+                // Issue #1577 (D1): stop once the downstream LIMIT is satisfied.
+                // Counts ACCEPTED rows, so a suppressed marker / predicate miss
+                // never lets this drop a matching row. Applies to the
+                // partition-targeted results (already partition-bounded); the
+                // full-scan fallback returned early above via `capped_fallback_scan`.
+                if let Some(cap) = scan_cap {
+                    if results.len() >= cap {
+                        break;
+                    }
+                }
+
                 context.rows_processed += 1;
                 context.scan_rows += 1;
 

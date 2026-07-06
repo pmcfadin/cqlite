@@ -52,7 +52,8 @@
 #                      (issue_1566/1573/1585 read-work counters + issue_1618 parser
 #                      work counters + issue_1570 key-offset-cache INDEX_PROBES/
 #                      TRIE_WALKS wiring + issue_1575 candidate-key hash hoist +
-#                      issue_1576 first/last-key range short-circuit). The
+#                      issue_1576 first/last-key range short-circuit +
+#                      issue_1577 LIMIT decode-stop evidence). The
 #                      counter bodies/getters are feature-gated
 #                      behind `work-counters`, so the default core-tests run can't
 #                      execute them — without this component the wiring evidence
@@ -2859,7 +2860,8 @@ dispatch_component() {
       --test issue_1575_candidate_key_hash_hoist \
       --test issue_1576_range_short_circuit \
       --test issue_1578_aggregate_o1_memory \
-      --test issue_1647_rows_floor_walk ;;
+      --test issue_1647_rows_floor_walk \
+      --test issue_1577_limit_decode_stop ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
       --test issue_1582_byte_bounded_result_budget \
