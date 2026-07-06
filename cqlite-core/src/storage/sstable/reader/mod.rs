@@ -28,6 +28,9 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+// Next-partition (successor) seek-window offset resolution (issue #953 / #951),
+// split out of `partition_lookup` for the campsite source-size rule (#1116).
+mod partition_successor;
 // Positional (`pread`-style) point-read backends (issue #1573, Epic C / C2).
 mod read_at;
 // Concurrency scenarios for the ReadAt point-read migration (issue #1573).
