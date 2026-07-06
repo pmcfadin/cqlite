@@ -123,7 +123,6 @@
 //! NeedMore/Done straddle handling and final-chunk semantics, same
 //! `READ_SCAN_WINDOW_REFILL` counter. The only change is WHERE the CPU runs.
 
-use super::data_access::table_ids_match;
 use super::source::ScanCursor;
 use super::window_cursor::WindowCursor;
 use super::SSTableReader;
@@ -343,7 +342,8 @@ fn finish_blocking_drain(
 /// Inputs the blocking parse half needs that the I/O half resolves once up front
 /// (so the blocking task does not have to touch the async runtime).
 struct WindowParseCtx {
-    table_id: TableId,
+    // Issue #1578: no `table_id` — the stitch path does not filter by it (see the
+    // parse closure in `run_scan_stream_windowed`).
     start_key: Option<RowKey>,
     end_key: Option<RowKey>,
     schema: Option<crate::schema::TableSchema>,
@@ -364,7 +364,8 @@ impl SSTableReader {
     /// Precondition: `cursor`'s file is seeked to the start of the data section.
     pub(super) async fn run_scan_stream_windowed(
         self: Arc<Self>,
-        table_id: TableId,
+        // Issue #1578: unused — the stitch path does not filter by table_id.
+        _table_id: TableId,
         start_key: Option<RowKey>,
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
@@ -385,7 +386,6 @@ impl SSTableReader {
         // the blocking task never touches the async runtime. Schema resolution
         // matches the previous `parse_stitched_stream` resolution exactly.
         let ctx = WindowParseCtx {
-            table_id,
             start_key,
             end_key,
             schema: schema.or_else(|| self.get_table_schema(None)),
@@ -884,14 +884,13 @@ impl SSTableReader {
                 ctx.schema.as_ref(),
                 self,
                 at_final_chunk,
-                &mut |(entry_table_id, key, value, _ts)| {
-                    // Key-range + tombstone filters match the previous
-                    // `parse_stitched_stream`; the `table_ids_match` guard is the
-                    // ADDITIONAL filter the non-stitching `scan_stream` branch
-                    // also applies (a no-op for single-table SSTables).
-                    if !table_ids_match(&entry_table_id, &ctx.table_id) {
-                        return Ok(std::ops::ControlFlow::Continue(()));
-                    }
+                &mut |(_entry_table_id, key, value, _ts)| {
+                    // Issue #1578: this stitching path deliberately does NOT filter
+                    // by `table_ids_match` — it mirrors the authoritative
+                    // materializing `sequential_scan` stitch path, which skips it
+                    // because the nb parser may report header-default table_ids.
+                    // Applying it here dropped EVERY row of an nb SSTable whose parsed
+                    // table_id diverged from the query (e.g. CQLite-written output).
                     if let Some(start) = ctx.start_key.as_ref() {
                         if &key < start {
                             return Ok(std::ops::ControlFlow::Continue(()));

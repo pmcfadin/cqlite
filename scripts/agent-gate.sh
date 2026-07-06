@@ -2495,7 +2495,7 @@ dispatch_component() {
       --test issue_1085_tombstones_full_scan_parity ;;
     scan-offload-guard) run_component scan-offload-guard run_scan_offload_guard_cmd ;;
     work-counters-guard) run_component work-counters-guard cargo test --package cqlite-core \
-      --features cli-helpers,work-counters \
+      --features write-support,cli-helpers,state_machine,work-counters \
       --test issue_1566_read_work_counters \
       --test issue_1573_readat_positional \
       --test issue_1585_read_op_per_chunk \
@@ -2504,10 +2504,14 @@ dispatch_component() {
       --test issue_1642_positional_row_emit \
       --test issue_1570_key_offset_cache \
       --test issue_1575_candidate_key_hash_hoist \
-      --test issue_1576_range_short_circuit ;;
+      --test issue_1576_range_short_circuit \
+      --test issue_1578_aggregate_o1_memory ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
-      --test issue_1582_byte_bounded_result_budget ;;
+      --test issue_1582_byte_bounded_result_budget \
+      --test issue_1578_streaming_aggregate_parity \
+      --test issue_1578_limit_exempts_max_results \
+      --test issue_1578_streaming_aggregate_multigen_parity ;;
     memory-budget) run_component memory-budget cargo test --package cqlite-core \
       --features cli-helpers,dhat-heap \
       --test memory_budget -- --test-threads=1 ;;

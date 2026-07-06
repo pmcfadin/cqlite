@@ -17,6 +17,7 @@
 // CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
 
 pub mod access_path;
+pub mod agg_stream_probe;
 pub mod engine;
 pub(crate) mod engine_stats;
 pub mod executor;

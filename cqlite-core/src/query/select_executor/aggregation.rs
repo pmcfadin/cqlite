@@ -127,6 +127,25 @@ pub(super) enum AggregateValue {
     Max(Value),
 }
 
+/// Build the initial per-aggregate accumulators for one group. Shared by
+/// [`find_or_init_group`] (the buffered GROUP BY path) and the streaming
+/// GROUP-BY-free fold (issue #1578, D2) so the initial state — and thus the
+/// per-row update + finalize semantics — are defined in exactly one place.
+pub(super) fn init_aggregate_accumulators(
+    aggregates: &[AggregateComputation],
+) -> Vec<AggregateValue> {
+    aggregates
+        .iter()
+        .map(|c| match c.function {
+            AggregateType::Count => AggregateValue::Count(0),
+            AggregateType::Sum => AggregateValue::Sum(0.0),
+            AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
+            AggregateType::Min => AggregateValue::Min(Value::Null),
+            AggregateType::Max => AggregateValue::Max(Value::Null),
+        })
+        .collect()
+}
+
 /// Build the GROUP BY key for `row`. With no GROUP BY, all rows hash into a
 /// single `[Null]` bucket (global aggregation).
 pub(super) fn build_group_key(row: &QueryRow, group_by_columns: &[String]) -> Vec<Value> {
@@ -164,16 +183,7 @@ pub(super) fn find_or_init_group(
             }
         }
     }
-    let initial: Vec<_> = aggregates
-        .iter()
-        .map(|c| match c.function {
-            AggregateType::Count => AggregateValue::Count(0),
-            AggregateType::Sum => AggregateValue::Sum(0.0),
-            AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
-            AggregateType::Min => AggregateValue::Min(Value::Null),
-            AggregateType::Max => AggregateValue::Max(Value::Null),
-        })
-        .collect();
+    let initial = init_aggregate_accumulators(aggregates);
     let new_index = state.groups.len();
     state.groups.push((key, initial));
     state.group_index.entry(hash).or_default().push(new_index);

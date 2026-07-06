@@ -48,10 +48,6 @@ mod sequential;
 // `data_access::ClusteringSlice`).
 pub use model::ClusteringSlice;
 
-// Re-export for the sibling `scan_stream_windowed` module, which references
-// `data_access::table_ids_match` (unchanged path).
-pub(in crate::storage::sstable::reader) use model::table_ids_match;
-
 // Re-export the decompress-work counter so the sibling `scan_stream_windowed`
 // module (outside `data_access`) can increment it on the windowed-scan miss path
 // (issue #1567). `model` is a private submodule, so the raw path is not reachable

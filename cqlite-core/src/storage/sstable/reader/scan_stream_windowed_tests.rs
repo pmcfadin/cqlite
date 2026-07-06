@@ -369,10 +369,6 @@ mod fixture_drain {
     /// is pre-filled and its sender dropped so `blocking_recv` never blocks.
     fn drain_count(reader: &SSTableReader, chunks: &[Vec<u8>], io_failed: bool) -> usize {
         let ctx = WindowParseCtx {
-            table_id: TableId::new(format!(
-                "{}.{}",
-                reader.header.keyspace, reader.header.table_name
-            )),
             start_key: None,
             end_key: None,
             schema: reader.get_table_schema(None),
@@ -410,10 +406,6 @@ mod fixture_drain {
     /// Build the same `WindowParseCtx` the I/O half resolves for this fixture.
     fn ctx_for(reader: &SSTableReader) -> WindowParseCtx {
         WindowParseCtx {
-            table_id: TableId::new(format!(
-                "{}.{}",
-                reader.header.keyspace, reader.header.table_name
-            )),
             start_key: None,
             end_key: None,
             schema: reader.get_table_schema(None),
