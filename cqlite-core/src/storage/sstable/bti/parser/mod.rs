@@ -80,9 +80,8 @@ pub use rows::{
 // Crate-internal only: the zero-copy slice walker's sole consumers are the
 // SSTable reader (partition_lookup / data_access::bti). Kept off the public
 // semver surface (rust-reviewer #1574). `lookup_partition_in_bti_slice` takes a
-// pre-encoded byte-comparable key so the reader can hoist the Murmur3 hash +
-// encoding out of the candidate-prune loop (issue #1575 / C4).
-pub(crate) use slice_walk::{
-    lookup_partition_in_bti_slice, lookup_raw_key_in_bti_partitions_slice,
-};
+// PRE-ENCODED byte-comparable key so callers hoist the Murmur3 hash + encoding
+// (issue #1575 / C4): every BTI partition lookup now encodes then walks via this
+// single primitive.
+pub(crate) use slice_walk::lookup_partition_in_bti_slice;
 pub use traversal::iterate_partitions_in_bti_file;

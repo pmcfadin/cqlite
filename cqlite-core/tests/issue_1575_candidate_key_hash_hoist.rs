@@ -4,9 +4,9 @@
 //! # What this proves
 //!
 //! A multi-generation `WHERE pk = ?` point read prunes every candidate SSTable's
-//! `Partitions.db` trie. On `main` the SAME query key was re-encoded (Murmur3 hash
-//! + byte-comparable encoding) once per candidate — an N-generation fan-out paid N
-//! identical hashes. C4 hoists the encode to ONCE per read (the encoding is
+//! `Partitions.db` trie. On `main` the SAME query key was re-encoded (a Murmur3
+//! hash and byte-comparable encoding) once per candidate — an N-generation fan-out
+//! paid N identical hashes. C4 hoists the encode to ONCE per read (the encoding is
 //! independent of which SSTable is being pruned), so `KEY_HASH_CALLS == 1` across
 //! the fan-out. The per-SSTable trie WALK is unchanged (each candidate's trie must
 //! still be consulted); only the redundant per-candidate rehash is removed.
