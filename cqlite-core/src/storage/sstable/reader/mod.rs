@@ -42,7 +42,7 @@ mod registry_schema;
 // Windowed streaming-scan driver (issue #1143); `pub` ONLY under non-default
 // `scan-offload-probe` so the #1143 guard reaches its probe, else private.
 #[cfg(not(feature = "scan-offload-probe"))]
-mod scan_stream_windowed;
+pub(crate) mod scan_stream_windowed;
 #[cfg(feature = "scan-offload-probe")]
 pub mod scan_stream_windowed;
 mod source;
@@ -768,6 +768,24 @@ impl SSTableReader {
         // open-time config BEFORE `open_config` is moved into the struct field.
         let key_offset_cache = super::build_key_offset_cache(&open_config);
 
+        // Cache the immutable `[first_key, last_key]` endpoint tokens ONCE at open
+        // (issue #1576, Epic C/C5 perf finding) so `partition_key_out_of_range`
+        // only hashes the QUERY key on the hot point-read path instead of
+        // re-hashing the two fixed endpoints on every read. Armed only when
+        // Summary.db is present with two non-empty endpoints — the exact condition
+        // the short-circuit itself requires. Uses the same Cassandra Murmur3 token
+        // as the hot path, so the cached values are byte-identical.
+        let endpoint_tokens = summary_reader.as_ref().and_then(|s| {
+            let first = s.get_first_key();
+            let last = s.get_last_key();
+            (!first.is_empty() && !last.is_empty()).then(|| {
+                (
+                    crate::util::cassandra_murmur3::cassandra_murmur3_token(first),
+                    crate::util::cassandra_murmur3::cassandra_murmur3_token(last),
+                )
+            })
+        });
+
         Ok(Self {
             file_path: path.to_path_buf(),
             file,
@@ -788,6 +806,7 @@ impl SSTableReader {
             actual_header_size: header_size,
             index_reader,
             summary_reader,
+            endpoint_tokens,
             statistics_reader,
             schema_registry: None, // Will be set by set_schema_registry() after construction
             schema,

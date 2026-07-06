@@ -71,8 +71,8 @@ pub(crate) fn load_bti_trie_via_footer<R: Read + Seek>(
 /// transition" sentinels (raw delta `0`).  A `Some(ptr)` slot is a real child
 /// and is always emitted — *including* one whose absolute offset is `0` (the
 /// first-written leaf in BTI's bottom-up layout legitimately lives at offset 0).
-/// ([`BtiNode::get_transitions`] returns an empty Vec for Dense nodes and must
-/// NOT be used for traversal.)
+/// (The former `get_transitions` helper returned an empty Vec for Dense nodes
+/// and must NOT be used for traversal — now removed.)
 ///
 /// `Sparse` transitions are returned in their stored order; the parser preserves
 /// the on-disk ascending order, and we sort defensively.

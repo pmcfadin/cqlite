@@ -141,6 +141,18 @@ use tokio::sync::mpsc;
 mod guard;
 use guard::FeedFailureGuard;
 
+// Blocking-pool admission control for windowed scans (issue #1594, Epic F/F4).
+// Always compiled (production `admit()` gates every scan's blocking offload); its
+// test-only limit-override + in-flight probe surface is `pub` ONLY under the
+// non-default `scan-offload-probe` feature, mirroring `probe` below. In a sibling
+// file to keep this driver under the campsite-rule size limit (epic #1116).
+#[cfg(not(feature = "scan-offload-probe"))]
+#[path = "scan_admission.rs"]
+pub(crate) mod scan_admission;
+#[cfg(feature = "scan-offload-probe")]
+#[path = "scan_admission.rs"]
+pub mod scan_admission;
+
 /// Bound on the raw-compressed-chunk channel feeding the blocking parse task.
 ///
 /// This is the I/O-half → parse-half hand-off depth. It must stay small enough
@@ -359,6 +371,16 @@ impl SSTableReader {
         cursor: &ScanCursor,
         tx: &mpsc::Sender<Result<(RowKey, ScanRow)>>,
     ) -> Result<()> {
+        // Admission control (issue #1594, F4) is applied by the CALLER at
+        // top-level scan-OPERATION granularity, NOT here per sub-scan: a direct
+        // scan acquires its permit in `run_scan_stream` (`ScanAdmission::Acquire`),
+        // and a cross-generation fan-out merge acquires ONE permit for the whole
+        // operation and opens each sub-scan `ScanAdmission::Exempt`. So this
+        // windowed sub-scan does NOT admit — a fan-out to `N > cap` generations
+        // would otherwise let `cap` sub-scans hold permits and park in backpressure
+        // while the priming merge blocks forever waiting on the rest (the deadlock
+        // the per-sub-scan design introduced). See `scan_admission`'s module docs.
+
         // Resolve everything the parser needs ONCE, here on the async side, so
         // the blocking task never touches the async runtime. Schema resolution
         // matches the previous `parse_stitched_stream` resolution exactly.

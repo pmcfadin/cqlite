@@ -32,11 +32,7 @@
 //! │
 //! ├── CQL Type Deserialization
 //! │   ├── types.rs             - All CQL primitive types (int, text, uuid, etc.)
-//! │   ├── complex_types.rs     - Collections, UDTs, tuples, frozen types
-//! │   └── optimized_complex_types.rs - M3 performance-optimized parsing
-//! │
-//! ├── Performance Utilities
-//! │   └── zero_copy_parser.rs  - String interning, zero-copy buffers
+//! │   └── complex_types.rs     - Collections, UDTs, tuples, frozen types
 //! │
 //! └── High-Level Interface
 //!     └── binary.rs            - SSTableParser facade
@@ -77,11 +73,6 @@
 //!   date, time, inet, varint, decimal, duration, boolean, float, double, ascii, timeuuid
 //! - [`complex_types`] - Collections (list, set, map), UDTs, tuples, with depth tracking
 //!   for nested types
-//! - [`optimized_complex_types`] - M3 milestone performance optimizations for complex types
-//!
-//! ### Performance
-//! - [`zero_copy_parser`] - Memory optimization utilities: string interning, zero-copy
-//!   buffer management to stay under 128MB memory target
 //!
 //! ### High-Level Interface
 //! - [`binary`] - `SSTableParser` facade providing unified access to parsing functionality
@@ -117,6 +108,7 @@ pub mod binary;
 // Re-export existing modules for backward compatibility
 #[cfg(feature = "benchmarks")]
 pub mod benchmarks;
+#[cfg(feature = "benchmarks")]
 pub mod collection_benchmarks;
 #[cfg(test)]
 pub mod collection_tests;
@@ -144,10 +136,6 @@ mod vint_j4_tests;
 #[cfg(test)]
 mod vint_length_corpus_audit_tests;
 
-// M3 Performance Optimization Modules
-pub mod optimized_complex_types;
-pub mod zero_copy_parser;
-
 // Re-export binary format parser
 pub use binary::{CQLiteParseError, ParseResult, SSTableParser};
 
@@ -160,10 +148,6 @@ pub use header::*;
 pub use statistics::*;
 pub use types::*;
 pub use vint::*;
-
-// Re-export M3 performance modules
-#[cfg(feature = "benchmarks")]
-pub use optimized_complex_types::OptimizedComplexTypeParser;
 
 /// Re-export common result types
 pub use crate::error::Result as CqlResult;

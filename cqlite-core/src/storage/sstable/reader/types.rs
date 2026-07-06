@@ -279,6 +279,19 @@ pub struct SSTableReader {
     pub(crate) index_reader: Option<IndexReader>,
     /// Summary.db reader for token-range iteration and sampling
     pub(crate) summary_reader: Option<SummaryReader>,
+    /// Cached Cassandra Murmur3 tokens of this SSTable's authoritative
+    /// `[first_key, last_key]` partition-key bound (issue #1576, Epic C/C5 perf
+    /// finding). The two endpoint keys come from `Summary.db` and are IMMUTABLE
+    /// for the reader's lifetime, so their tokens are computed ONCE at reader
+    /// open rather than re-hashed on every point read by
+    /// [`partition_key_out_of_range`](SSTableReader::partition_key_out_of_range).
+    /// `Some((first_token, last_token))` only when `Summary.db` was present with
+    /// two non-empty endpoints (the exact condition under which the range
+    /// short-circuit is armed); `None` otherwise (no `Summary.db` — e.g. a BTI
+    /// reader — or a degenerate/empty endpoint), in which case the check
+    /// conservatively cannot rule out and the normal presence path runs. The hot
+    /// path only hashes the QUERY key.
+    pub(crate) endpoint_tokens: Option<(i64, i64)>,
     /// Statistics.db reader for min/max timestamps and metadata
     pub(crate) statistics_reader: Option<StatisticsReader>,
     /// Schema registry for schema-driven operations (modern formats)
