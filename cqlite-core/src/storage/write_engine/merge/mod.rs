@@ -1280,7 +1280,13 @@ pub(crate) fn compute_expiry_ttl_ldt_floor(input_paths: &[PathBuf]) -> Option<i3
             // Reinterpret the on-disk `min_deletion_time` bits as UNSIGNED GC-clock
             // seconds (mirrors `compute_baseline_min`) before subtracting the TTL.
             let min_ldt_unsigned = i64::from(ts_stats.min_deletion_time as u32);
-            let input_floor_i64 = min_ldt_unsigned - max_ttl;
+            // Clamp the floor at 0 before the `as i32` reinterpret. A well-formed
+            // GC-clock creation time (`ldt - ttl`) is always >= 0 — Cassandra never
+            // writes a pre-epoch localDeletionTime — so `max_ttl > min_deletion_time`
+            // (a negative floor) is impossible for real data. The clamp defends the
+            // `as i32` cast against a spurious negative bit pattern should a
+            // malformed input ever violate that pre-epoch assumption.
+            let input_floor_i64 = (min_ldt_unsigned - max_ttl).max(0);
             // Store back as the wrapped i32 GC-clock bit pattern (the DataWriter's
             // delta baseline representation).
             let input_floor = input_floor_i64 as i32;
