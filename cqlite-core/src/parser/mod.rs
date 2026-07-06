@@ -24,7 +24,6 @@
 //! │
 //! ├── Core Binary Parsing
 //! │   ├── vint.rs              - Variable-length integer (VInt) encoding
-//! │   ├── vint_fixed.rs        - Fixed-size integer alternatives
 //! │   └── header.rs            - SSTable header parsing (magic numbers, version detection)
 //! │
 //! ├── Statistics Parsing
@@ -63,8 +62,7 @@
 //! ## Sub-module Reference
 //!
 //! ### Variable-Length Integer Encoding
-//! - [`vint`] - VInt encoding/decoding per Cassandra specification, with corruption detection
-//! - [`vint_fixed`] - Fixed-size integer parsing for when VInt isn't used
+//! - [`vint`] - VInt encoding/decoding per Cassandra specification
 //!
 //! ### SSTable Headers
 //! - [`header`] - SSTable header parsing with version detection (oa/nb/legacy formats)
@@ -141,7 +139,8 @@ pub mod types;
 #[cfg(test)]
 pub mod udt_tests;
 pub mod vint;
-pub mod vint_fixed;
+#[cfg(test)]
+mod vint_j4_tests;
 #[cfg(test)]
 mod vint_length_corpus_audit_tests;
 

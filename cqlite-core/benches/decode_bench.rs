@@ -537,8 +537,47 @@ mod decode_impl {
 }
 
 // ---------------------------------------------------------------------------
+// `decode/vint_decode` — the VInt decode primitive micro-bench (issue #1638,
+// Epic J / J4). Pure public API over `decode_unsigned` / `decode_signed`: no
+// fixture, no reader, so it runs feature-INDEPENDENTLY (registered in BOTH the
+// full and no-op criterion mains below).
+// ---------------------------------------------------------------------------
+pub fn bench_vint_decode(c: &mut criterion::Criterion) {
+    use cqlite_core::parser::vint::{decode_signed, decode_unsigned};
+    use std::hint::black_box;
+
+    // A fixed table of representative unsigned VInt buffers spanning every
+    // encoded width 1..=9 (lengths implied by the leading-ones lead byte).
+    let unsigned_buffers: [&[u8]; 9] = [
+        &[0x7F],                                                    // 1 byte
+        &[0x80, 0x80],                                              // 2 bytes
+        &[0xC0, 0x40, 0x00],                                        // 3 bytes
+        &[0xE0, 0x10, 0x00, 0x00],                                  // 4 bytes
+        &[0xF0, 0x08, 0x00, 0x00, 0x00],                            // 5 bytes
+        &[0xF8, 0x04, 0x00, 0x00, 0x00, 0x00],                      // 6 bytes
+        &[0xFC, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00],                // 7 bytes
+        &[0xFE, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],          // 8 bytes
+        &[0xFF, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],    // 9 bytes
+    ];
+
+    let mut group = c.benchmark_group("decode");
+    group.bench_function("vint_decode", |b| {
+        b.iter(|| {
+            for buf in unsigned_buffers.iter() {
+                let (v, n) = decode_unsigned(black_box(buf)).expect("valid unsigned vint");
+                black_box((v, n));
+                let (s, m) = decode_signed(black_box(buf)).expect("valid signed vint");
+                black_box((s, m));
+            }
+        })
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // criterion_group! / criterion_main! — gated so the target builds an empty but
 // valid main without BOTH cli-helpers and bench-internals (mirrors read.rs).
+// The feature-independent `bench_vint_decode` is registered in BOTH.
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "cli-helpers", feature = "bench-internals"))]
@@ -547,15 +586,16 @@ criterion_group!(
     config = profiling::configure();
     targets = decode_impl::bench_types,
               decode_impl::bench_wide_row_primitives,
-              decode_impl::bench_text_heavy
+              decode_impl::bench_text_heavy,
+              bench_vint_decode
 );
 
 #[cfg(not(all(feature = "cli-helpers", feature = "bench-internals")))]
 fn bench_noop(_c: &mut criterion::Criterion) {
     // Without both cli-helpers and bench-internals there is no reader/shim to
-    // drive; the target still compiles and runs, reporting no measurements.
+    // drive the fixture-backed groups; the target still compiles and runs.
     eprintln!(
-        "decode: requires --features cli-helpers,bench-internals; nothing to measure. \
+        "decode: fixture-backed groups require --features cli-helpers,bench-internals. \
          Run: cargo bench -p cqlite-core --features cli-helpers,bench-internals --bench decode"
     );
 }
@@ -564,7 +604,7 @@ fn bench_noop(_c: &mut criterion::Criterion) {
 criterion_group!(
     name = benches;
     config = profiling::configure();
-    targets = bench_noop
+    targets = bench_noop, bench_vint_decode
 );
 
 criterion_main!(benches);

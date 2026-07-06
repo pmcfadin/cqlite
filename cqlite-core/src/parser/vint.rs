@@ -10,56 +10,76 @@
 //! - Uses ZigZag encoding for signed integers to efficiently encode small negative values
 //! - Maximum 9 bytes total length
 
-use nom::{bytes::complete::take, IResult};
-
-// Type aliases for complex types to reduce complexity warnings
-type VintParseResult<'a> = Result<Option<(usize, i64)>, nom::Err<nom::error::Error<&'a [u8]>>>;
-
-/// Detect ASCII corruption in VInt data
-///
-/// Common corruption patterns:
-/// - ASCII strings like "data", "bin", "node" being parsed as VInt
-/// - All bytes in printable ASCII range (0x20-0x7E)
-/// - Common file extensions or directory names
-#[allow(dead_code)]
-fn detect_ascii_corruption(input: &[u8]) -> bool {
-    if input.len() < 4 {
-        return false;
-    }
-
-    // Check first 4 bytes for common ASCII corruption patterns
-    let bytes = &input[0..4];
-
-    // Common corrupted values we've seen
-    let corrupted_patterns: &[&[u8]] = &[
-        b"data", b"bin", b"node", b"base", b"temp", b"logs", b"meta", b"main", b"root", b"home",
-    ];
-
-    for pattern in corrupted_patterns {
-        if bytes.starts_with(pattern) {
-            return true;
-        }
-    }
-
-    // Check if all bytes look like printable ASCII (likely corruption)
-    let ascii_count = bytes
-        .iter()
-        .filter(|&&b| (0x20..=0x7E).contains(&b))
-        .count();
-    if ascii_count >= 3 {
-        return true;
-    }
-
-    // Check for specific corrupted values we've encountered
-    let value = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    match value {
-        2959239534 | 1684108385 => true, // Known corrupted values: "bin" and "data"
-        _ => false,
-    }
-}
+use nom::IResult;
 
 /// Maximum bytes a VInt can occupy (Cassandra supports up to 9 bytes total)
 pub const MAX_VINT_SIZE: usize = 9;
+
+/// Error returned by the canonical read-side VInt decoders.
+///
+/// The single failure mode is a buffer that is empty, or shorter than the width
+/// the lead byte's leading-ones count declares. There is no fabricated-value or
+/// framing-dependent path (Issue #1624).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VIntError {
+    /// Input ended before the full VInt could be read (covers empty input).
+    Truncated,
+}
+
+/// Decode an UNSIGNED VInt (Cassandra `writeUnsignedVInt`) — the ONE canonical
+/// read-side VInt bit-assembly (Issue #1638, Epic J / J4).
+///
+/// Mirrors the exemplary write-side `storage/serialization/vint.rs`: a single
+/// [`u8::leading_ones`] length computation, continuation bytes loaded with one
+/// [`u64::from_be_bytes`] on a copied array (no per-byte index loop), slice
+/// framing (no `nom::take`), and `#[inline]`. No hardcoded single-byte match
+/// table and no `fixed → zigzag` double-decode fallback.
+///
+/// Returns `(value, bytes_consumed)` where `bytes_consumed == leading_ones + 1`.
+#[inline]
+pub fn decode_unsigned(input: &[u8]) -> Result<(u64, usize), VIntError> {
+    let first = *input.first().ok_or(VIntError::Truncated)?;
+    // A u8 has at most 8 leading ones, so `extra ∈ 0..=8` and `total ∈ 1..=9`
+    // (== MAX_VINT_SIZE). No width can exceed the 9-byte VInt maximum.
+    let extra = first.leading_ones() as usize;
+    let total = extra + 1;
+    if input.len() < total {
+        return Err(VIntError::Truncated);
+    }
+    if extra == 0 {
+        // Single byte: 0xxxxxxx
+        return Ok((first as u64, 1));
+    }
+    // Load the `extra` continuation bytes as the low bits of a u64 via ONE
+    // big-endian read. `rest[..extra]` is in-bounds: `input.len() >= total`.
+    let (_, rest) = input.split_at(1);
+    let mut be = [0u8; 8];
+    be[8 - extra..].copy_from_slice(&rest[..extra]);
+    let tail = u64::from_be_bytes(be);
+    let value = if extra == 8 {
+        // 0xFF lead: no data bits in the first byte; all 8 continuation bytes.
+        tail
+    } else {
+        // Data bits carried in the first byte occupy the low `7 - extra` bits
+        // (extra ∈ 1..=7 ⇒ data_bits_first ∈ 0..=6, so `1 << data_bits_first`
+        // never overflows; extra == 7 ⇒ mask == 0, i.e. the 0xFE no-data case).
+        let data_bits_first = 7 - extra;
+        let mask = (1u64 << data_bits_first) - 1;
+        // extra*8 ≤ 56 and (first & mask) ≤ 6 bits ⇒ ≤ 62 significant bits: no
+        // shift overflow.
+        ((first as u64 & mask) << (extra * 8)) | tail
+    };
+    Ok((value, total))
+}
+
+/// Decode a SIGNED (ZigZag) VInt — [`decode_unsigned`] then ZigZag unmap.
+///
+/// Returns `(value, bytes_consumed)`.
+#[inline]
+pub fn decode_signed(input: &[u8]) -> Result<(i64, usize), VIntError> {
+    let (unsigned, consumed) = decode_unsigned(input)?;
+    Ok((zigzag_decode(unsigned), consumed))
+}
 
 /// Maximum length value accepted by parse_vint_length to prevent overflow attacks.
 /// Set to 1GB as a generous limit that won't cause allocation issues on any platform.
@@ -80,231 +100,19 @@ pub const MAX_VINT_LENGTH: i64 = 1024 * 1024 * 1024; // 1GB safety limit
 ///
 /// Tuple of (remaining_bytes, decoded_value)
 pub fn parse_vint(input: &[u8]) -> IResult<&[u8], i64> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
+    // Issue #1638 (J4): one canonical decoder. `parse_vint` is a thin nom
+    // adapter over `decode_signed` (unsigned leading-ones decode + ZigZag). This
+    // is behavior-identical to the old `parse_vint_fixed → parse_zigzag_vint`
+    // pair: `parse_vint_fixed` WAS exactly `decode_signed`, and its zigzag
+    // fallback only ever fired on truncation (where it also errored), so no
+    // complete-buffer result changes.
+    match decode_signed(input) {
+        Ok((value, consumed)) => Ok((&input[consumed..], value)),
+        Err(_) => Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Eof,
-        )));
+        ))),
     }
-
-    let _first_byte = input[0];
-
-    // Corruption detection: temporarily disabled to avoid false positives in collection data
-    // TODO: Make corruption detection more sophisticated to distinguish between
-    // legitimate string content in collections vs actual VInt corruption
-    // if input.len() >= 8 && detect_ascii_corruption(input) {
-    //     return Err(nom::Err::Error(nom::error::Error::new(
-    //         input,
-    //         nom::error::ErrorKind::Verify,
-    //     )));
-    // }
-
-    // Try the fixed Cassandra-compatible VInt parsing first
-    match crate::parser::vint_fixed::parse_vint_fixed(input) {
-        Ok(result) => Ok(result),
-        Err(_) => {
-            // Fall back to ZigZag encoding for backward compatibility
-            // This handles edge cases and legacy formats
-            parse_zigzag_vint(input)
-        }
-    }
-}
-
-/// Parse VInt using ZigZag encoding (backward compatibility)
-fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    let first_byte = input[0];
-    let (bytes_used, unsigned_value) = if first_byte < 0x80 {
-        // Single byte: 0xxxxxxx (7 data bits)
-        (1, first_byte as u64)
-    } else if first_byte < 0xC0 {
-        // Two bytes: 10xxxxxx xxxxxxxx
-        if input.len() < 2 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Eof,
-            )));
-        }
-        let value = ((first_byte & 0x3F) as u64) << 8 | input[1] as u64;
-        (2, value)
-    } else if first_byte < 0xE0 {
-        // Three bytes: 110xxxxx xxxxxxxx xxxxxxxx
-        if input.len() < 3 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Eof,
-            )));
-        }
-        let value = ((first_byte & 0x1F) as u64) << 16 | (input[1] as u64) << 8 | input[2] as u64;
-        (3, value)
-    } else if first_byte == 0xF0 {
-        // Extended format: 0xF0 followed by EXACTLY 8 continuation bytes (9 total).
-        // Issue #1624: the lead byte must consume a fixed length, not swallow the
-        // entire remaining buffer (which made the consumed length framing-dependent).
-        if input.len() < 9 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Eof,
-            )));
-        }
-        // Read exactly input[1..9] as a big-endian u64.
-        let mut value = 0u64;
-        #[allow(clippy::needless_range_loop)]
-        for i in 1..9 {
-            value = (value << 8) | (input[i] as u64);
-        }
-        (9usize, value)
-    } else if first_byte == 0xFF {
-        // Extended format: 0xFF followed by EXACTLY 8 continuation bytes (9 total).
-        // Issue #1624: same fixed-length framing as the 0xF0 arm.
-        if input.len() < 9 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Eof,
-            )));
-        }
-        // Read exactly input[1..9] as a big-endian u64.
-        let mut value = 0u64;
-        #[allow(clippy::needless_range_loop)]
-        for i in 1..9 {
-            value = (value << 8) | (input[i] as u64);
-        }
-        (9usize, value)
-    } else {
-        // Not a valid ZigZag VInt, let caller try other formats
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        )));
-    };
-
-    let signed_value = zigzag_decode(unsigned_value);
-    let (remaining_input, _) = take(bytes_used)(input)?;
-    Ok((remaining_input, signed_value))
-}
-
-/// Parse VInt using Cassandra-compatible format
-#[allow(dead_code)]
-fn parse_cassandra_vint_format(input: &[u8]) -> VintParseResult<'_> {
-    if input.is_empty() {
-        return Ok(None);
-    }
-
-    let first_byte = input[0];
-
-    // Count leading ones to determine the byte length
-    let leading_ones = first_byte.leading_ones() as usize;
-    let total_length = leading_ones + 1;
-
-    if total_length > 9 || input.len() < total_length {
-        return Ok(None); // Invalid or incomplete
-    }
-
-    // Extract the value based on the format
-    let value = if total_length == 1 {
-        // Single byte format
-        if first_byte & 0x80 == 0x80 {
-            // 1xxxxxxx format: values 0-127
-            (first_byte & 0x7F) as i64
-        } else if first_byte == 0xFF {
-            -1
-        } else if first_byte & 0xC0 == 0xC0 {
-            // 11xxxxxx format: negative values -1 to -63
-            -((first_byte & 0x3F) as i64)
-        } else {
-            // 0xxxxxxx format should not appear in Cassandra VInt
-            return Ok(None);
-        }
-    } else {
-        // Multi-byte format: extract data bits after leading pattern
-        let data_bits = (total_length * 8) - leading_ones - 1;
-        // Extract data from first byte (after leading pattern)
-        let first_data_bits = 8 - leading_ones - 1;
-        let first_data_mask = (1u8 << first_data_bits) - 1;
-        let mut value = (first_byte & first_data_mask) as i64;
-
-        // Add remaining bytes
-        #[allow(clippy::needless_range_loop)]
-        for i in 1..total_length {
-            value = (value << 8) | (input[i] as i64);
-        }
-
-        // Check if this should be interpreted as negative (two's complement)
-        // For Cassandra VInt, we need to handle signed values properly
-        let max_positive = (1i64 << (data_bits - 1)) - 1;
-        if value > max_positive {
-            // Convert from unsigned to signed (two's complement)
-            value -= 1i64 << data_bits;
-        }
-
-        value
-    };
-
-    Ok(Some((total_length, value)))
-}
-
-/// Parse VInt using custom BTI format (Issue #36)
-#[allow(dead_code)]
-fn parse_custom_vint_format(input: &[u8]) -> VintParseResult<'_> {
-    if input.is_empty() {
-        return Ok(None);
-    }
-
-    let first_byte = input[0];
-
-    let (total_length, value) = if first_byte < 0x80 {
-        // Single byte: 0xxxxxxx (7 data bits)
-        let unsigned_value = first_byte & 0x7F;
-        let value = if unsigned_value < 64 {
-            unsigned_value as i64
-        } else {
-            (unsigned_value as i64) - 128
-        };
-        (1, value)
-    } else if first_byte < 0xC0 {
-        // Single byte: 10xxxxxx (0x80-0xBF) -> values 0-63
-        let value = (first_byte & 0x3F) as i64;
-        (1, value)
-    } else if first_byte == 0xFF {
-        // Special case: 0xFF represents -1
-        (1, -1)
-    } else if first_byte >= 0xC0 {
-        if input.len() == 1 {
-            // Single byte negative: 0xC0-0xFE maps to -64 to -2
-            let value = -64 + (first_byte - 0xC0) as i64;
-            (1, value)
-        } else if first_byte == 0xC0 && input.len() >= 2 {
-            // Two-byte format: 0xC0 + value byte
-            let second_byte = input[1];
-            let value = if second_byte <= 0x7F {
-                second_byte as i64
-            } else if second_byte == 0x80 {
-                -128
-            } else {
-                second_byte as i64
-            };
-            (2, value)
-        } else {
-            return Ok(None); // Not supported in this format
-        }
-    } else {
-        return Ok(None);
-    };
-
-    if input.len() < total_length {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    Ok(Some((total_length, value)))
 }
 
 /// Encode using Cassandra-compatible VInt format
@@ -587,16 +395,6 @@ pub fn encode_vint_zigzag(value: i64) -> Vec<u8> {
     }
 }
 
-/// Encode VInt using Cassandra-compatible format for Issue #17 requirements
-pub fn encode_vint_cassandra(value: i64) -> Vec<u8> {
-    crate::parser::vint_fixed::encode_vint_fixed(value)
-}
-
-/// Parse VInt using Cassandra-compatible format for Issue #17 requirements
-pub fn parse_vint_cassandra(input: &[u8]) -> IResult<&[u8], i64> {
-    crate::parser::vint_fixed::parse_vint_fixed(input)
-}
-
 /// Parse unsigned VInt32 for Cassandra value lengths
 ///
 /// Matches org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt32()
@@ -615,41 +413,25 @@ pub fn parse_vint_cassandra(input: &[u8]) -> IResult<&[u8], i64> {
 ///
 /// Tuple of (remaining_bytes, decoded_u32_value)
 pub fn parse_unsigned_vint32(input: &[u8]) -> IResult<&[u8], u32> {
-    if input.is_empty() {
+    // Issue #1638 (J4): thin adapter over the one canonical `decode_unsigned`.
+    // Keep the u32-specific width cap (a value length may not exceed 4 extra
+    // bytes) as a cheap pre-check, then delegate the bit-assembly.
+    let first = *input.first().ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof))
+    })?;
+    if first.leading_ones() as usize > 4 {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Eof,
         )));
     }
-
-    let first_byte = input[0];
-    let num_extra_bytes = first_byte.leading_ones() as usize;
-
-    if num_extra_bytes > 4 || num_extra_bytes + 1 > input.len() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    let value = if num_extra_bytes == 0 {
-        // Single byte: 0xxxxxxx
-        (first_byte & 0x7F) as u32
-    } else {
-        // Multi-byte: extract data bits after leading ones pattern
-        let data_bits_first = 8 - num_extra_bytes - 1;
-        let mask = (1u8 << data_bits_first) - 1;
-        let mut value = (first_byte & mask) as u32;
-
-        for &byte in input.iter().skip(1).take(num_extra_bytes) {
-            value = (value << 8) | (byte as u32);
-        }
-        value
-    };
-
-    let bytes_consumed = num_extra_bytes + 1;
-    let (remaining, _) = take(bytes_consumed)(input)?;
-    Ok((remaining, value))
+    let (value, consumed) = decode_unsigned(input).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof))
+    })?;
+    let value = u32::try_from(value).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge))
+    })?;
+    Ok((&input[consumed..], value))
 }
 
 /// Parse unsigned VInt64 for Cassandra timestamps
@@ -671,48 +453,14 @@ pub fn parse_unsigned_vint32(input: &[u8]) -> IResult<&[u8], u32> {
 ///
 /// Tuple of (remaining_bytes, decoded_u64_value)
 pub fn parse_vuint(input: &[u8]) -> IResult<&[u8], u64> {
-    if input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
+    // Issue #1638 (J4): thin nom adapter over the one canonical `decode_unsigned`.
+    match decode_unsigned(input) {
+        Ok((value, consumed)) => Ok((&input[consumed..], value)),
+        Err(_) => Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Eof,
-        )));
+        ))),
     }
-
-    let first_byte = input[0];
-    let num_extra_bytes = first_byte.leading_ones() as usize;
-
-    if num_extra_bytes > 8 || num_extra_bytes + 1 > input.len() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    let value = if num_extra_bytes == 0 {
-        // Single byte: 0xxxxxxx
-        (first_byte & 0x7F) as u64
-    } else if num_extra_bytes == 8 {
-        // Special case: 8 leading ones (0xFF) means 8 extra bytes follow, no data bits in first byte
-        let mut value = 0u64;
-        for &byte in input.iter().skip(1).take(num_extra_bytes) {
-            value = (value << 8) | (byte as u64);
-        }
-        value
-    } else {
-        // Multi-byte: extract data bits after leading ones pattern
-        let data_bits_first = 8 - num_extra_bytes - 1;
-        let mask = (1u8 << data_bits_first) - 1;
-        let mut value = (first_byte & mask) as u64;
-
-        for &byte in input.iter().skip(1).take(num_extra_bytes) {
-            value = (value << 8) | (byte as u64);
-        }
-        value
-    };
-
-    let bytes_consumed = num_extra_bytes + 1;
-    let (remaining, _) = take(bytes_consumed)(input)?;
-    Ok((remaining, value))
 }
 
 /// Encode an unsigned integer as a variable-length integer
@@ -1225,7 +973,7 @@ mod tests {
         assert!(parse_vint(&[0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_ok());
 
         // Test valid extended formats - should succeed now with backward compatibility
-        // 0xF0 + 7 bytes (8 total) parses via parse_vint_fixed's 5-byte path.
+        // 0xF0 + 7 bytes (8 total) parses via the leading-ones 5-byte framing.
         assert!(parse_vint(&[0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_ok()); // F0 extended format
                                                                                         // Issue #1624: 0xFF + 7 bytes (8 total) is a TRUNCATED 0xFF vint — it
                                                                                         // declares 8 continuation bytes (9 total) but only 7 are present, so it
@@ -1278,24 +1026,6 @@ mod tests {
         assert!(parse_vint(&[0x80]).is_err());
     }
 
-    /// Issue #1624: the `0xF0`/`0xFF` extended arms of `parse_zigzag_vint` must
-    /// consume EXACTLY 9 bytes (lead + 8 continuation), not swallow the whole
-    /// remaining buffer. Truncated input (< 9 bytes) must error.
-    #[test]
-    fn test_parse_zigzag_vint_extended_consumes_exactly_nine_1624() {
-        let (rem, _) = parse_zigzag_vint(&[0xF0, 1, 2, 3, 4, 5, 6, 7, 8, 0xAA, 0xBB])
-            .expect("0xF0 + 8 continuation bytes");
-        assert_eq!(rem, &[0xAA, 0xBB], "0xF0 arm must consume exactly 9 bytes");
-
-        let (rem, _) = parse_zigzag_vint(&[0xFF, 1, 2, 3, 4, 5, 6, 7, 8, 0xAA, 0xBB])
-            .expect("0xFF + 8 continuation bytes");
-        assert_eq!(rem, &[0xAA, 0xBB], "0xFF arm must consume exactly 9 bytes");
-
-        // Truncated: fewer than 9 bytes must error.
-        assert!(parse_zigzag_vint(&[0xF0, 1, 2, 3]).is_err());
-        assert!(parse_zigzag_vint(&[0xFF, 1, 2, 3]).is_err());
-    }
-
     #[test]
     fn test_vint_edge_case_patterns() {
         // Test maximum single-byte value
@@ -1312,22 +1042,15 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_ascii_corruption_patterns() {
-        assert!(detect_ascii_corruption(b"data_payload"));
-        assert!(detect_ascii_corruption(b"node_meta"));
-        assert!(!detect_ascii_corruption(&[0x00, 0x80, 0xFF, 0x10]));
-    }
-
-    #[test]
     fn test_parse_vint_extended_formats() {
-        // 0xF0 with 5 bytes parses via parse_vint_fixed's standard 5-byte path
+        // 0xF0 with 5 bytes parses via the leading-ones framing
         // (0xF0 has leading_ones=4 → 5-byte vint), so parse_vint succeeds.
         let bytes = [0xF0, 0x00, 0x00, 0x00, 0x10];
         let _ = parse_vint(&bytes).expect("0xF0 5-byte vint parses");
 
         // Issue #1624: 0xFF declares 8 continuation bytes (9 total). With only
-        // 4 continuation bytes present this is truncated: parse_vint_fixed errs
-        // (needs 9), and the 0xFF zigzag fallback arm now also requires 9 bytes.
+        // 4 continuation bytes present this is truncated: the leading-ones
+        // decoder needs 9 bytes and returns Err.
         let bytes = [0xFF, 0x00, 0x00, 0x00, 0x05];
         assert!(
             parse_vint(&bytes).is_err(),

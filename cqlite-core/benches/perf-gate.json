@@ -42,6 +42,11 @@
       "_note": "issue #1615 (Epic H) — rows/sec decoding a text/blob-dominated column set (K5/K6)"
     },
     {
+      "id": "decode/vint_decode",
+      "threshold_pct": 10,
+      "_note": "issue #1638 (Epic J / J4) — ns/op of the one canonical VInt decode primitive (decode_unsigned/decode_signed) over widths 1..=9; no base baseline on first landing (entry absent on main → reported as new, not a regression)"
+    },
+    {
       "id": "write/ingest_wal_off",
       "threshold_pct": 10
     },
