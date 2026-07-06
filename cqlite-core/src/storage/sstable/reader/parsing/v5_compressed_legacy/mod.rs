@@ -84,7 +84,7 @@ const MAX_TYPE_NESTING_DEPTH: usize = 10;
 /// always `Some` when `want_cell_metadata == true` and the row contains
 /// collection columns; always `None` when `want_cell_metadata == false`.
 type ParsedRow = (
-    HashMap<Arc<str>, Value>,
+    RowCells,
     Option<HashMap<String, CellWriteMetadata>>,
     Option<RowHeader>,
     usize,
@@ -669,12 +669,29 @@ const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 /// identity; they are NOT row data. A row carrying `HAS_DELETION` is a PURE row
 /// tombstone only when no such data cell survives — otherwise the row deletion
 /// COEXISTS with surviving (strictly-newer) cells and the row displays as live.
-fn row_has_non_key_cell(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) -> bool {
-    cells.keys().any(|name| {
+fn row_has_non_key_cell(cells: &[(Arc<str>, Value)], schema: &TableSchema) -> bool {
+    cells.iter().any(|(name, _)| {
         let name: &str = name;
         !schema.partition_keys.iter().any(|k| k.name == name)
             && !schema.clustering_keys.iter().any(|c| c.name == name)
     })
+}
+
+/// Issue #1642 (K3): merge accumulated static-column cells into a clustering
+/// row's positional cell vector, CLUSTERING-ROW-WINS (a static cell is appended
+/// only when the clustering row does not already carry that column). This is the
+/// ordered-`Vec` analogue of the former `HashMap::entry(..).or_insert_with(..)`
+/// merge: static and regular columns are disjoint in Cassandra, so the membership
+/// check is defensive and the common effect is a concatenation. The static cells
+/// are appended AFTER the clustering row's own cells; the merged order is never
+/// user-visible (the query result is a name-keyed map, issue #1334) — this only
+/// preserves determinism-by-construction.
+fn merge_static_cells(cells: &mut RowCells, static_cells: &RowCells) {
+    for (name, value) in static_cells {
+        if !cells.iter().any(|(existing, _)| existing == name) {
+            cells.push((Arc::clone(name), value.clone()));
+        }
+    }
 }
 
 /// Issue #932/#1741: build the user-facing `ScanRow` display value for a parsed
@@ -685,7 +702,7 @@ fn row_has_non_key_cell(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) 
 /// still carries surviving cells displays as a live `Row` (the deletion shadows
 /// only already-absent older cells). An empty cell set becomes a null marker.
 fn build_display_row(
-    cells: HashMap<Arc<str>, Value>,
+    cells: RowCells,
     row_header_opt: Option<&RowHeader>,
     schema: &TableSchema,
 ) -> ScanRow {
@@ -700,14 +717,12 @@ fn build_display_row(
     } else if cells.is_empty() {
         ScanRow::Marker(Value::Null)
     } else {
-        // Issue #1334: carry the interned `Arc<str>` name handles straight into
-        // the row carrier; emit-time alphabetical ordering preserved exactly.
-        let mut row_cells: RowCells = cells.into_iter().collect();
-        // Issue #1618 (H5): count the per-row cell sort — the shared site #1334
-        // consolidated the former block_emit/block_emit_windowed sorts into (K2/L).
-        crate::storage::sstable::read_work_counters::record_row_sort();
-        row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-        ScanRow::Row(row_cells)
+        // Issue #1642 (K3): the decoder already emits cells positionally, in
+        // serialization-header (schema) column order — determinism comes from
+        // CONSTRUCTION, not a per-row sort. The former per-row `HashMap`
+        // allocation and alphabetical `sort_by` are gone; the interned
+        // `Arc<str>` name handles (#1334) move straight into the carrier.
+        ScanRow::Row(cells)
     }
 }
 
@@ -716,11 +731,16 @@ fn build_display_row(
 /// tombstone is currently OPEN in the partition, so the per-row clone is off the
 /// tombstone-free hot path. Returns fewer values than the clustering arity only
 /// for a malformed/partial row (missing clustering pseudo-cells).
-fn extract_clustering_values(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) -> Vec<Value> {
+fn extract_clustering_values(cells: &[(Arc<str>, Value)], schema: &TableSchema) -> Vec<Value> {
     schema
         .clustering_keys
         .iter()
-        .filter_map(|ck| cells.get(ck.name.as_str()).cloned())
+        .filter_map(|ck| {
+            cells
+                .iter()
+                .find(|(name, _)| name.as_ref() == ck.name.as_str())
+                .map(|(_, v)| v.clone())
+        })
         .collect()
 }
 

@@ -54,11 +54,15 @@ impl V5CompressedLegacyParser {
         resolution: &RowColumnResolution,
         shadow: Option<&PartitionShadow>,
     ) -> Result<ParsedRow> {
-        // Cells map keyed by the interned column-name handle (issue #1334): the
-        // name is a schema-owned `Arc<str>` shared across every cell/row, so
-        // populating a cell with its name is an `Arc::clone` refcount bump, NOT a
-        // per-cell, per-row heap `String` allocation.
-        let mut cells: HashMap<Arc<str>, Value> = HashMap::new();
+        // Issue #1642 (K3): positional cell vector, built directly in
+        // serialization-header (schema) column order. Determinism comes from
+        // CONSTRUCTION — the emit path no longer allocates a per-row `HashMap` nor
+        // alphabetically re-sorts each row. The interned column-name handle
+        // (issue #1334) is a schema-owned `Arc<str>` shared across every cell/row,
+        // so populating a cell with its name stays an `Arc::clone` refcount bump,
+        // NOT a per-cell heap `String` allocation. Pre-sized to the on-disk column
+        // count so the common case does not reallocate.
+        let mut cells: RowCells = Vec::with_capacity(resolution.columns_for(false).len());
         // Parallel per-cell write metadata map (populated alongside `cells`).
         // Only allocated when the caller actually needs WRITETIME/TTL metadata
         // (i.e. `want_cell_metadata == true`).  On the normal read path this stays
@@ -147,7 +151,7 @@ impl V5CompressedLegacyParser {
                 // Issue #1334: reuse the interned clustering-key name handle
                 // (an `Arc::clone`) rather than cloning the schema `String`.
                 if let Some(name) = resolution.clustering_name(i) {
-                    cells.insert(Arc::clone(name), clustering_values[i].clone());
+                    cells.push((Arc::clone(name), clustering_values[i].clone()));
                 }
             }
         }
@@ -566,8 +570,9 @@ impl V5CompressedLegacyParser {
                                 if let Some(ref mut ccm_map) = complex_col_meta {
                                     ccm_map.insert(column.name.clone(), col_meta);
                                 }
-                                // Issue #1334: interned name handle (Arc::clone), no alloc.
-                                cells.insert(Arc::clone(&ctp.name), value);
+                                // Issue #1334/#1642: interned name handle (Arc::clone),
+                                // pushed positionally in schema column order.
+                                cells.push((Arc::clone(&ctp.name), value));
                             }
                         }
                         offset = new_offset;
@@ -733,8 +738,9 @@ impl V5CompressedLegacyParser {
                                     },
                                 );
                             }
-                            // Issue #1334: interned name handle (Arc::clone), no String alloc.
-                            cells.insert(Arc::clone(&ctp.name), value);
+                            // Issue #1334/#1642: interned name handle (Arc::clone),
+                            // pushed positionally in schema column order.
+                            cells.push((Arc::clone(&ctp.name), value));
                         }
                         offset = new_offset;
                     }
@@ -767,8 +773,8 @@ impl V5CompressedLegacyParser {
             columns_in_order.len()
         );
         log::debug!(
-            "V5CompressedLegacy: Cells HashMap keys: {:?}",
-            cells.keys().collect::<Vec<_>>()
+            "V5CompressedLegacy: Cell column names (positional order): {:?}",
+            cells.iter().map(|(name, _)| name).collect::<Vec<_>>()
         );
 
         debug!("V5CompressedLegacy: Parsed total of {} cells", cells.len());

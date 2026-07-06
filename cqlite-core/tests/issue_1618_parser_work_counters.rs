@@ -376,12 +376,15 @@ async fn scan_boundary_peek_does_not_try_parse_per_row() {
     );
 }
 
-/// Scenario (K2/L currency): the shared display-row builder sorts each row's cells
-/// once, so `ROW_SORT_INVOCATIONS` is at least the number of returned live rows.
-/// K2/L (cells arrive pre-sorted) flip this to prove no per-row sort.
+/// Scenario (K3 delivered, issue #1642): the decoder emits each row's cells
+/// positionally in serialization-header column order, so the shared display-row
+/// builder performs NO per-row sort — `ROW_SORT_INVOCATIONS == 0` on a full scan.
+/// This flipped the former `>= rows` currency assertion when K3 landed; the
+/// dedicated wiring-evidence across column shapes lives in
+/// `issue_1642_positional_row_emit.rs`.
 #[tokio::test]
 #[serial]
-async fn scan_sorts_cells_per_row() {
+async fn scan_does_not_sort_cells_per_row() {
     if !fixture_data_present("test_basic", "simple_table") {
         eprintln!("Skipping (H5 wiring): test_basic/simple_table Data.db not present");
         return;
@@ -407,13 +410,11 @@ async fn scan_sorts_cells_per_row() {
 
     let sorts = rwc::row_sort_invocations();
     eprintln!("H5: rows={rows} ROW_SORT_INVOCATIONS={sorts}");
-    // Every returned live row required exactly one per-row cell sort today; markers
-    // (filtered out of the result) require none, so sorts is at least the returned
-    // live-row count.
-    assert!(
-        sorts >= rows,
-        "H5: the display-row builder sorts each live row's cells (>= rows); got \
-         {sorts} for {rows} rows"
+    // K3 (issue #1642): positional emit means zero per-row cell sorts. Any
+    // reintroduced per-row sort must call `record_row_sort` and would flip this red.
+    assert_eq!(
+        sorts, 0,
+        "K3: positional emit performs zero per-row cell sorts; got {sorts} for {rows} rows"
     );
 }
 

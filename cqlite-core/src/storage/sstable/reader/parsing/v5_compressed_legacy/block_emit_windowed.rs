@@ -291,7 +291,8 @@ impl V5CompressedLegacyParser {
                     // values must be merged into each clustering row that follows in the partition.
                     //
                     // We accumulate static cells here and inject them into every clustering row.
-                    let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
+                    // Issue #1642 (K3): positional `RowCells`, matching the decoder emit.
+                    let mut static_cells: RowCells = Vec::new();
                     let mut row_count = 0;
                     loop {
                         // Issue #954: stop at the clustering-slice end bound. The
@@ -452,15 +453,13 @@ impl V5CompressedLegacyParser {
                                             .as_ref()
                                             .is_some_and(|h| sh.row_hidden(h, &[]))
                                     });
-                                    static_cells =
-                                        if static_hidden { HashMap::new() } else { cells };
+                                    static_cells = if static_hidden { Vec::new() } else { cells };
                                     // Do NOT push to results — static rows are not result rows
                                     // Continue to next row/marker in partition
                                 } else {
-                                    // Merge static cells into this clustering row (Issue #480)
-                                    for (k, v) in &static_cells {
-                                        cells.entry(k.clone()).or_insert_with(|| v.clone());
-                                    }
+                                    // Merge static cells into this clustering row (Issue #480;
+                                    // positional, clustering-row-wins, issue #1642).
+                                    merge_static_cells(&mut cells, &static_cells);
 
                                     // Issue #1741: hide rows shadowed by a partition or
                                     // range tombstone, or expired by TTL, matching a
@@ -914,7 +913,8 @@ struct TimestampPolicy<'a> {
     /// Issue #1741 per-partition read-side shadow; `None` for physical reads.
     shadow: Option<PartitionShadow>,
     /// Issue #480 static cells accumulated for merge into each clustering row.
-    static_cells: HashMap<Arc<str>, Value>,
+    /// Issue #1642 (K3): positional `RowCells`, matching the decoder emit.
+    static_cells: RowCells,
 }
 
 impl<'a> TimestampPolicy<'a> {
@@ -924,7 +924,7 @@ impl<'a> TimestampPolicy<'a> {
             table_id: TableId::new(format!("{}.{}", parser.keyspace, parser.table_name)),
             partition_key: RowKey(Vec::new()),
             shadow: None,
-            static_cells: HashMap::new(),
+            static_cells: Vec::new(),
         }
     }
 }
@@ -1023,11 +1023,10 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                             .as_ref()
                             .is_some_and(|h| sh.row_hidden(h, &[]))
                     });
-                    self.static_cells = if static_hidden { HashMap::new() } else { cells };
+                    self.static_cells = if static_hidden { Vec::new() } else { cells };
                 } else {
-                    for (k, v) in &self.static_cells {
-                        cells.entry(k.clone()).or_insert_with(|| v.clone());
-                    }
+                    // Positional, clustering-row-wins merge (issue #1642).
+                    merge_static_cells(&mut cells, &self.static_cells);
 
                     // Issue #1741: hide rows shadowed by a partition/range tombstone
                     // or expired by TTL (matching a Cassandra SELECT). No-op on the

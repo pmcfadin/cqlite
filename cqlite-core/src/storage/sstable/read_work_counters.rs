@@ -105,10 +105,15 @@
 //!   Consumer **L1/L3**: pairs with `BTI_NODES_VISITED` to prove the descent does not
 //!   re-decode nodes.
 //! - [`record_row_sort`] / [`row_sort_invocations`] — **`ROW_SORT_INVOCATIONS`**:
-//!   one per per-row cell `sort_by` at the shared display-row builder
+//!   the per-row cell `sort_by` gauge at the shared display-row builder
 //!   (`v5_compressed_legacy/mod.rs::build_display_row`, which #1334 consolidated the
-//!   former `block_emit`/`block_emit_windowed` sort sites into). Consumer **K2/L**:
-//!   flips to prove cells arrive pre-sorted (no per-row sort).
+//!   former `block_emit`/`block_emit_windowed` sort sites into). **K3 (issue #1642)
+//!   delivered**: the decoder now emits cells positionally in serialization-header
+//!   column order (deterministic by CONSTRUCTION), so `build_display_row` performs
+//!   NO per-row sort and a full scan records `0` (on `main`/pre-K3 it was one per
+//!   returned live row). No production site calls [`record_row_sort`] anymore; the
+//!   counter is retained as a regression tripwire — any reintroduced per-row cell
+//!   sort must record it, flipping the K3 `== 0` scan assertions red.
 
 // The atomics, the process-global, the struct methods, the getters, and `reset`
 // exist ONLY in test/feature builds — a release build links none of them, which is
@@ -462,13 +467,15 @@ pub fn record_bti_pointer_decode() {
     COUNTERS.record_bti_pointer_decode();
 }
 
-/// Record one per-row cell `sort_by` (`ROW_SORT_INVOCATIONS`; consumers K2/L,
-/// Issue #1618).
+/// Record one per-row cell `sort_by` (`ROW_SORT_INVOCATIONS`; consumer K3,
+/// Issue #1618 / #1642).
 ///
-/// Called unconditionally at the shared display-row builder's sort
-/// (`v5_compressed_legacy/mod.rs::build_display_row`, into which #1334 consolidated
-/// the former `block_emit`/`block_emit_windowed` per-row sort sites); the body
-/// compiles to a no-op in a release build.
+/// **K3 (issue #1642) removed the caller**: the decoder emits cells positionally
+/// in serialization-header column order, so `build_display_row` no longer sorts and
+/// no production site calls this. It is kept (unconditional, zero-overhead in
+/// release per design.md Decision 1) as a regression tripwire — any future per-row
+/// cell sort must call it, which would flip the K3 `ROW_SORT_INVOCATIONS == 0` scan
+/// assertions red.
 #[inline(always)]
 pub fn record_row_sort() {
     #[cfg(any(test, feature = "work-counters"))]
