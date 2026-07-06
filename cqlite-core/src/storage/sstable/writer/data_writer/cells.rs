@@ -154,6 +154,12 @@ impl DataWriter {
     ///
     /// CRITICAL: TTL cells MUST NOT use USE_ROW_TIMESTAMP or USE_ROW_TTL flags.
     /// They need explicit timestamp and TTL deltas.
+    ///
+    /// `explicit_ldt` (issue #1538): when `Some`, the cell's `localDeletionTime`
+    /// (Cassandra `localExpirationTime`) is stamped VERBATIM from this authoritative
+    /// per-cell value (e.g. a surviving expiring cell preserved through compaction),
+    /// so the emitted bytes are byte-identical to the source cell. When `None`, the
+    /// LDT is derived from `SystemTime::now() + ttl` (historical fresh-write behavior).
     pub(super) fn write_cell_with_ttl(
         &self,
         buf: &mut Vec<u8>,
@@ -161,6 +167,7 @@ impl DataWriter {
         value: &Value,
         timestamp: i64,
         ttl_seconds: u32,
+        explicit_ldt: Option<i32>,
     ) -> Result<()> {
         // NULL values should not be written as cells
         if matches!(value, Value::Null) {
@@ -170,7 +177,10 @@ impl DataWriter {
             )));
         }
 
-        let local_deletion_time = self.expiring_local_deletion_time(ttl_seconds)?;
+        let local_deletion_time = match explicit_ldt {
+            Some(ldt) => ldt,
+            None => self.expiring_local_deletion_time(ttl_seconds)?,
+        };
 
         // Cell flags - CELL_IS_EXPIRING, NO USE_ROW_TIMESTAMP or USE_ROW_TTL
         let mut flags = CELL_IS_EXPIRING;

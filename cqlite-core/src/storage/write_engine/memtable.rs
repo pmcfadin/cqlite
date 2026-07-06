@@ -337,11 +337,7 @@ impl Memtable {
                 .len()
                 .saturating_add(Self::estimate_value_size(value))
                 .saturating_add(8), // +8 for overhead
-            CellOperation::WriteWithTtl {
-                column,
-                value,
-                ttl_seconds: _,
-            } => {
+            CellOperation::WriteWithTtl { column, value, .. } => {
                 // TTL cells: same as Write + 4 bytes for TTL + 4 bytes for local_deletion_time
                 column
                     .len()

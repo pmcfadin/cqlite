@@ -583,6 +583,7 @@ fn test_write_cell_with_ttl() {
             &Value::Text("test".to_string()),
             timestamp,
             ttl_seconds,
+            None,
         )
         .unwrap();
 
@@ -630,6 +631,7 @@ fn test_row_with_ttl_cells() {
                 column: "name".to_string(),
                 value: Value::Text("Alice".to_string()),
                 ttl_seconds: 7200,
+                local_deletion_time: None,
             },
             CellOperation::Write {
                 column: "age".to_string(),
@@ -679,11 +681,13 @@ fn test_row_with_multiple_ttl_cells() {
                 column: "name".to_string(),
                 value: Value::Text("Alice".to_string()),
                 ttl_seconds: 3600, // 1 hour
+                local_deletion_time: None,
             },
             CellOperation::WriteWithTtl {
                 column: "age".to_string(),
                 value: Value::Integer(30),
                 ttl_seconds: 7200, // 2 hours (different TTL)
+                local_deletion_time: None,
             },
         ],
         1001000,
@@ -723,6 +727,7 @@ fn test_mixed_ttl_and_regular_cells() {
                 column: "age".to_string(),
                 value: Value::Integer(30),
                 ttl_seconds: 7200,
+                local_deletion_time: None,
             },
         ],
         1001000,
@@ -758,6 +763,7 @@ fn test_ttl_zero_special_case() {
             &Value::Text("test".to_string()),
             timestamp,
             ttl_seconds,
+            None,
         )
         .unwrap();
 
@@ -788,7 +794,8 @@ fn test_ttl_cell_with_null_value() {
     let writer = DataWriter::new(stats);
 
     let mut buf = Vec::new();
-    let result = writer.write_cell_with_ttl(&mut buf, "test_col", &Value::Null, 1001000, 3600);
+    let result =
+        writer.write_cell_with_ttl(&mut buf, "test_col", &Value::Null, 1001000, 3600, None);
 
     assert!(result.is_err(), "NULL values should return error");
     assert!(result
@@ -817,6 +824,7 @@ fn test_ttl_cell_local_deletion_time_calculation() {
             &Value::Text("test".to_string()),
             timestamp,
             ttl_seconds,
+            None,
         )
         .unwrap();
 

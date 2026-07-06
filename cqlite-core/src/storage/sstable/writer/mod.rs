@@ -659,17 +659,32 @@ impl SSTableWriter {
                 match op {
                     crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                         ttl_seconds,
+                        local_deletion_time,
                         ..
                     } => {
                         // Track TTL
                         self.stats.update_ttl(*ttl_seconds as i32);
-                        // CRITICAL: TTL cells need local_deletion_time tracked
-                        // local_deletion_time = now + ttl
-                        let now_seconds = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i32)
-                            .unwrap_or(0);
-                        let local_deletion_time = now_seconds.saturating_add(*ttl_seconds as i32);
+                        // CRITICAL: TTL cells need local_deletion_time tracked so the
+                        // per-cell LDT delta (`ldt - min_local_deletion_time`) written
+                        // by `write_cell_with_ttl` never underflows.
+                        //
+                        // Issue #1538: honor the authoritative per-cell LDT VERBATIM
+                        // when present (a surviving expiring cell preserved through
+                        // compaction), exactly as `write_cell_with_ttl` will stamp it,
+                        // so the seeded baseline and the emitted bytes agree. A per-cell
+                        // LDT below the wall-clock-derived value would otherwise
+                        // underflow the unsigned delta. `None` keeps the historical
+                        // `now + ttl` derivation.
+                        let local_deletion_time = match local_deletion_time {
+                            Some(ldt) => *ldt,
+                            None => {
+                                let now_seconds = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i32)
+                                    .unwrap_or(0);
+                                now_seconds.saturating_add(*ttl_seconds as i32)
+                            }
+                        };
                         self.stats.update_local_deletion_time(local_deletion_time);
                     }
                     op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
@@ -1009,16 +1024,28 @@ impl SSTableWriter {
                 match op {
                     crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                         ttl_seconds,
+                        local_deletion_time,
                         ..
                     } => {
                         let ttl = *ttl_seconds as i32;
                         if ttl > 0 {
                             min_ttl = min_ttl.min(ttl);
-                            let now_seconds = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs() as i32)
-                                .unwrap_or(0);
-                            let ldt = now_seconds.saturating_add(ttl);
+                            // Issue #1538: the encoding baseline must match the LDT
+                            // the expiring cell will ACTUALLY be written with, else
+                            // the unsigned delta underflows. An authoritative
+                            // per-cell `local_deletion_time: Some(L)` is emitted with
+                            // `L` verbatim (a surviving expiring cell preserved
+                            // through compaction); `None` derives `now + ttl`.
+                            let ldt = match local_deletion_time {
+                                Some(l) => *l,
+                                None => {
+                                    let now_seconds = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i32)
+                                        .unwrap_or(0);
+                                    now_seconds.saturating_add(ttl)
+                                }
+                            };
                             min_ldt = min_ldt.min(ldt);
                         }
                     }

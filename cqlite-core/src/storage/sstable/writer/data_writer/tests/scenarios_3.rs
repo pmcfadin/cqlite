@@ -499,6 +499,7 @@ fn static_using_ttl_write_byte_parity_1210() {
             column: "s".to_string(),
             value: value.clone(),
             ttl_seconds: ttl,
+            local_deletion_time: None,
         },
         timestamp_micros: timestamp,
         cell_local_deletion_time: 0,

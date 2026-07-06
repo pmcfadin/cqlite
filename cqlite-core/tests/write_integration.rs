@@ -464,6 +464,7 @@ async fn test_ttl_cells() -> Result<()> {
             column: "value".to_string(),
             value: Value::Text("expires in 5 minutes".to_string()),
             ttl_seconds: 300, // 5 minutes
+            local_deletion_time: None,
         }];
         Mutation::new(table_id, pk, None, ops, 1000001, None)
     };
@@ -477,6 +478,7 @@ async fn test_ttl_cells() -> Result<()> {
             column: "value".to_string(),
             value: Value::Text("cell TTL overrides mutation TTL".to_string()),
             ttl_seconds: 60, // 1 minute (overrides mutation TTL)
+            local_deletion_time: None,
         }];
         Mutation::new(table_id, pk, None, ops, 1000002, Some(7200)) // 2 hours mutation TTL
     };
@@ -985,6 +987,7 @@ async fn test_mixed_operations_in_partition() -> Result<()> {
             column: "value".to_string(),
             value: Value::Text("version 2 with TTL".to_string()),
             ttl_seconds: 3600,
+            local_deletion_time: None,
         }],
         1000001,
         None,

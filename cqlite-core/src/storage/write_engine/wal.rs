@@ -305,8 +305,9 @@ fn set_secure_permissions(_file: &File) -> Result<()> {
 /// misaligns.
 ///
 /// This mirror enum reproduces the EXACT pre-#921 variant order and shapes so a
-/// record written by an older binary round-trips. Only `Delete` differs (no
-/// `local_deletion_time`). It MUST stay in lockstep with [`CellOperation`]:
+/// record written by an older binary round-trips. `Delete` differs (no
+/// `local_deletion_time`, pre-#921) and `WriteWithTtl` differs (no per-cell
+/// `local_deletion_time`, pre-#1538). It MUST stay in lockstep with [`CellOperation`]:
 /// variant order is the bincode discriminant, so any reordering / insertion in
 /// the live enum must be reflected here or legacy decoding breaks.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -345,6 +346,8 @@ impl From<LegacyCellOperation> for CellOperation {
     fn from(op: LegacyCellOperation) -> Self {
         match op {
             LegacyCellOperation::Write { column, value } => CellOperation::Write { column, value },
+            // Pre-#1538 expiring cell: no surfaced source LDT, so the writer
+            // derives `now + ttl` (historical behavior).
             LegacyCellOperation::WriteWithTtl {
                 column,
                 value,
@@ -353,6 +356,7 @@ impl From<LegacyCellOperation> for CellOperation {
                 column,
                 value,
                 ttl_seconds,
+                local_deletion_time: None,
             },
             // Pre-#921 cell tombstone: no surfaced source LDT, so the writer
             // derives it from the enclosing mutation (historical behavior).
