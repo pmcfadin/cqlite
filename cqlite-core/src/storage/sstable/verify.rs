@@ -2155,9 +2155,8 @@ mod tests {
             VerifyErrorClass::UnsupportedCompressionFeature
         );
         // …and the unknown/unsupported algorithm path.
-        let unknown_algo = Error::UnsupportedFormat(
-            "Unknown compression algorithm: BogusCompressor".to_string(),
-        );
+        let unknown_algo =
+            Error::UnsupportedFormat("Unknown compression algorithm: BogusCompressor".to_string());
         assert_eq!(
             classify_scan_error_class(&unknown_algo),
             VerifyErrorClass::UnsupportedCompressionFeature
