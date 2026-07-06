@@ -512,6 +512,28 @@ impl StorageEngine {
             .await
     }
 
+    /// Reports whether [`scan_stream`](Self::scan_stream) PRE-MATERIALIZES the
+    /// full reconciled result for this table before returning the channel, rather
+    /// than yielding rows lazily (issue #1577).
+    ///
+    /// A bounded LIMIT consumer uses this to decide its `QUERY_ROWS_SCANNED`
+    /// accounting: when it returns `true` the storage layer has already decoded the
+    /// whole table (no decode-stop is possible and per-received-row counting would
+    /// under-report), so the caller must charge the full decoded row count and take
+    /// a materializing path. Delegates to
+    /// [`SSTableManager::scan_stream_materializes`].
+    ///
+    /// [`SSTableManager::scan_stream_materializes`]: sstable::SSTableManager::scan_stream_materializes
+    pub async fn scan_stream_materializes(
+        &self,
+        table_id: &TableId,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> bool {
+        self.sstables
+            .scan_stream_materializes(table_id, schema)
+            .await
+    }
+
     /// Flush MemTable to SSTable
     ///
     /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).

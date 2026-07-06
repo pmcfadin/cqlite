@@ -102,6 +102,24 @@ impl SelectExecutor {
     /// Full-scan fallback that stops DECODING once `cap` rows have been ACCEPTED
     /// (issue #1577, D1).
     ///
+    /// # Pre-materializing stream branches (roborev round-4)
+    ///
+    /// Some [`scan_stream`](crate::storage::StorageEngine::scan_stream) branches
+    /// PRE-MATERIALIZE the whole reconciled result before returning the channel —
+    /// the `write-support` cross-generation merge (more than one generation + a
+    /// resolved schema, via `merge_generations_for_read`) and the whole-scan
+    /// `tombstones` build. For those the storage layer decodes the ENTIRE table, so
+    /// the lazy per-received-row accounting below would under-report
+    /// `QUERY_ROWS_SCANNED` to ~`cap`. This method asks the storage layer
+    /// ([`scan_stream_materializes`](crate::storage::StorageEngine::scan_stream_materializes),
+    /// which owns the branch condition) up front and, when the stream would
+    /// pre-materialize, routes through the fully-materializing `scan` +
+    /// [`collect_capped_materialized`] (which charges the TRUE decoded count while
+    /// the `cap` bounds `rows_processed` and the returned window). No decode-stop is
+    /// possible in that case, so nothing is lost and results are byte-identical.
+    ///
+    /// The remainder of this method is the GENUINELY-LAZY single-generation path.
+    ///
     /// The fast path consumes the lazy
     /// [`scan_stream`](crate::storage::StorageEngine::scan_stream) — definitionally
     /// in lockstep with the materializing `scan` (same token order, same
@@ -148,6 +166,47 @@ impl SelectExecutor {
         // A `LIMIT 0` (cap == 0) can never accept a row; do not even open a scan.
         if cap == 0 {
             return Ok(Vec::new());
+        }
+
+        // ── Pre-materializing stream branches (issue #1577, roborev round-4) ──────
+        //
+        // The lazy fast path below assumes `scan_stream` is LAZY: it charges
+        // `context.scan_rows` per RECEIVED row and drops the stream at the cap, so
+        // dropping the channel stops the producer decoding the tail. That is TRUE
+        // only for the genuinely-streaming single-generation merge. But some
+        // `scan_stream` branches PRE-MATERIALIZE the entire reconciled result before
+        // handing back the channel — the `write-support` cross-generation merge
+        // (`readers.len() > 1 && schema present`, via `merge_generations_for_read`)
+        // and the whole-scan `tombstones` build. For those the storage layer decodes
+        // the ENTIRE table regardless of the cap, so consuming lazily and charging
+        // per-received-row would report only ~`cap` rows to `QUERY_ROWS_SCANNED`
+        // while the true decode work is the full table — a metric regression.
+        //
+        // Ask the storage layer (which owns the branch condition — no duplicated
+        // storage-internal logic here) whether `scan_stream` would pre-materialize
+        // for this table + schema. If so, route through the fully-materializing
+        // `scan` + the shared `collect_capped_materialized` accountant, which
+        // charges the TRUE decoded count (`materialized.len()`) up front while the
+        // `cap` still bounds `rows_processed` and the returned window. There is no
+        // decode-stop to lose here (the storage already decoded everything), and the
+        // authoritative `scan` yields byte-identical rows, so RESULTS and
+        // LIMIT/OFFSET semantics are unchanged — only the accounting path differs.
+        if self
+            .storage
+            .scan_stream_materializes(table, schema_opt)
+            .await
+        {
+            let materialized = self
+                .storage
+                .scan(table, None, None, None, schema_opt)
+                .await?;
+            return collect_capped_materialized(
+                materialized,
+                Some(cap),
+                predicates,
+                context,
+                |(key, value)| build_row_from_scan(key, value, projection, schema_opt),
+            );
         }
 
         // Metric accuracy (issue #1577, SUGGESTION-3): snapshot the scan counters
@@ -781,6 +840,207 @@ mod tests {
         assert_eq!(
             ctx.rows_processed, decoded,
             "every decoded row build-examined"
+        );
+    }
+
+    // ── Multi-generation pre-materializing accounting (issue #1577 roborev
+    //    round-4 finding) ─────────────────────────────────────────────────────
+    //
+    // ORIGINAL BUG: `capped_fallback_scan`'s "trusted full-cap stream fast path"
+    // assumed `scan_stream` is LAZY and charged `scan_rows` per RECEIVED row,
+    // stopping at the cap. But the `write-support` cross-generation `scan_stream`
+    // branch (>1 generation + schema present) PRE-MATERIALIZES the entire
+    // reconciled result via `merge_generations_for_read` before returning the
+    // channel. So a multi-generation `SELECT ... LIMIT n` decoded the WHOLE table
+    // but `QUERY_ROWS_SCANNED` reported only ~n — a metric regression.
+    //
+    // This test builds a REAL 2-generation table (write path is byte-parity with
+    // Cassandra, M5), calls `capped_fallback_scan` directly with a resolved schema,
+    // and asserts the scan-work metric charges the FULL decoded count (not ~cap)
+    // while the returned window stays correctly capped. It complements the
+    // result-parity coverage in `tests/issue_1577_capped_fallback_branches.rs`
+    // (which cannot observe `context.scan_rows`).
+    #[cfg(feature = "write-support")]
+    #[tokio::test]
+    async fn multi_generation_capped_scan_charges_full_decoded_count() {
+        use crate::query::select_executor::SelectExecutor;
+        use crate::schema::{Column, KeyColumn, SchemaManager, TableSchema};
+        use crate::storage::write_engine::{
+            CellOperation, Mutation, PartitionKey, TableId as WriteTableId, WriteEngine,
+            WriteEngineConfig,
+        };
+        use crate::storage::StorageEngine;
+        use crate::{Config, Platform};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        const KEYSPACE: &str = "test_capped_lib";
+        const TABLE: &str = "items";
+        const N_GENS: i32 = 2;
+        const ROWS_PER_GEN: i32 = 5; // DISTINCT partitions per generation → no overlap.
+        const CAP: usize = 3; // well below the total decoded row count.
+
+        fn items_schema() -> TableSchema {
+            TableSchema {
+                keyspace: KEYSPACE.to_string(),
+                table: TABLE.to_string(),
+                partition_keys: vec![KeyColumn {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    position: 0,
+                }],
+                clustering_keys: vec![],
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "int".to_string(),
+                        nullable: false,
+                        default: None,
+                        is_static: false,
+                    },
+                    Column {
+                        name: "value".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        default: None,
+                        is_static: false,
+                    },
+                ],
+                comments: HashMap::new(),
+                dropped_columns: HashMap::new(),
+            }
+        }
+
+        let tmp = TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("data");
+        let wal_dir = tmp.path().join("wal");
+
+        // Build N_GENS SSTable generations, flushing between each so no compaction
+        // merges them. Each generation gets ROWS_PER_GEN DISTINCT partitions
+        // (`id = gen*100 + i`), so the reconciled table holds exactly
+        // N_GENS * ROWS_PER_GEN rows — no cross-generation overlap.
+        {
+            let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), items_schema());
+            let mut engine = WriteEngine::new(config).expect("write engine");
+            for gen in 1..=N_GENS {
+                for i in 0..ROWS_PER_GEN {
+                    let id = gen * 100 + i;
+                    let m = Mutation::new(
+                        WriteTableId::new(KEYSPACE, TABLE),
+                        PartitionKey::single("id", Value::Integer(id)),
+                        None,
+                        vec![CellOperation::Write {
+                            column: "value".to_string(),
+                            value: Value::Text(format!("v{id}")),
+                        }],
+                        1_000 + id as i64,
+                        None,
+                    );
+                    engine.write_async(m).await.expect("write partition");
+                }
+                engine.flush().await.expect("flush generation");
+            }
+            let table_dir = data_dir.join(KEYSPACE).join(TABLE);
+            for gen in 1..=N_GENS {
+                assert!(
+                    table_dir.join(format!("nb-{gen}-big-Data.db")).exists(),
+                    "generation {gen} must exist on disk (multi-generation required)"
+                );
+            }
+        }
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        let storage = Arc::new(
+            StorageEngine::open(
+                &data_dir,
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .expect("open storage"),
+        );
+
+        let schema = items_schema();
+        let table_id = TableId::new(format!("{KEYSPACE}.{TABLE}"));
+
+        // Guard: the storage layer must report that `scan_stream` PRE-MATERIALIZES
+        // for this multi-generation + schema table — the exact condition the fix
+        // routes on. If this ever became false the test would be vacuous.
+        assert!(
+            storage
+                .scan_stream_materializes(&table_id, Some(&schema))
+                .await,
+            "multi-generation + schema table must pre-materialize scan_stream \
+             (else the round-4 metric bug cannot occur and this test is vacuous)"
+        );
+
+        // Oracle: the authoritative reconciled decode count (what the storage layer
+        // actually decodes) — exact, never `>=`, so a 0/low-rows regression fails.
+        let decoded = storage
+            .scan(&table_id, None, None, None, Some(&schema))
+            .await
+            .expect("oracle scan")
+            .len() as u64;
+        assert_eq!(
+            decoded,
+            (N_GENS * ROWS_PER_GEN) as u64,
+            "distinct partitions across generations → full decoded row count"
+        );
+        assert!(
+            decoded > CAP as u64,
+            "the table must hold more than `cap` rows to expose the metric bug"
+        );
+
+        let schema_mgr = Arc::new(
+            SchemaManager::new_with_storage(Arc::clone(&storage), &config)
+                .await
+                .expect("schema manager"),
+        );
+        let executor = SelectExecutor::new(schema_mgr, Arc::clone(&storage));
+
+        let projection: Vec<String> = Vec::new();
+        let predicates: Vec<SSTablePredicate> = Vec::new();
+        let mut ctx = exec_context();
+        ctx.table_id = table_id.clone();
+
+        let out = executor
+            .capped_fallback_scan(
+                &table_id,
+                &predicates,
+                &projection,
+                Some(&schema),
+                CAP,
+                &mut ctx,
+            )
+            .await
+            .expect("capped fallback scan");
+
+        // RESULTS stay CAPPED — the fix must not change LIMIT/OFFSET semantics.
+        assert_eq!(
+            out.len(),
+            CAP,
+            "the returned window must remain bounded by the cap"
+        );
+        // ROUND-4 FIX: the multi-generation stream pre-materialized the whole table,
+        // so `scan_rows` (→ QUERY_ROWS_SCANNED) must charge the FULL decoded count,
+        // NOT ~cap as the lazy per-received-row fast path did before the fix.
+        assert_eq!(
+            ctx.scan_rows, decoded,
+            "multi-generation capped scan must charge the FULL decoded count to \
+             QUERY_ROWS_SCANNED, not the LIMIT cap"
+        );
+        assert!(
+            ctx.scan_rows > out.len() as u64,
+            "scan-work metric must exceed the capped/returned row count"
+        );
+        // Per-row BUILD work stays bounded by the cap.
+        assert_eq!(
+            ctx.rows_processed, CAP as u64,
+            "per-row build work stays bounded by the cap even though scan_rows is full"
         );
     }
 }

@@ -1721,6 +1721,57 @@ impl SSTableManager {
         list.cloned().unwrap_or_default()
     }
 
+    /// Reports whether [`scan_stream`](Self::scan_stream) PRE-MATERIALIZES the
+    /// full reconciled result for this table before returning the channel, rather
+    /// than yielding rows lazily (issue #1577, roborev round-4).
+    ///
+    /// A bounded LIMIT consumer of `scan_stream` (see
+    /// [`SelectExecutor::capped_fallback_scan`](crate::query)) may drop the stream
+    /// once `cap` rows arrive to stop the producer decoding the tail — but that
+    /// decode-stop win, and the per-received-row `QUERY_ROWS_SCANNED` accounting it
+    /// implies, are ONLY valid when the stream is genuinely lazy. When this returns
+    /// `true`, the storage layer has already decoded EVERY row of the table (the
+    /// channel is just replaying a materialized `Vec`), so the caller must charge
+    /// the FULL decoded row count to the scan-work metric and take a materializing
+    /// accounting path instead.
+    ///
+    /// The condition mirrors EXACTLY the materializing branch `scan_stream` takes,
+    /// so the two can never disagree:
+    /// * the `tombstones` build's `scan_stream` delegates wholesale to the
+    ///   materializing [`scan`](Self::scan) — always `true`;
+    /// * the default (non-`tombstones`) build materializes only the `write-support`
+    ///   cross-generation reconciliation branch, taken when
+    ///   `resolve_table_readers(table).len() > 1 && schema.is_some()`.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_stream_materializes(
+        &self,
+        _table_id: &TableId,
+        _schema: Option<&crate::schema::TableSchema>,
+    ) -> bool {
+        // The `tombstones` build's `scan_stream` forwards a fully-materialized
+        // `scan` result, so a bounded consumer never decode-stops.
+        true
+    }
+
+    /// See the `tombstones` variant above.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_stream_materializes(
+        &self,
+        table_id: &TableId,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> bool {
+        // Only the write-support cross-generation merge branch pre-materializes,
+        // and only when it is actually taken: more than one generation AND a
+        // resolved schema (the exact guard `scan_stream` re-uses from `scan`).
+        #[cfg(feature = "write-support")]
+        if schema.is_some() {
+            return self.resolve_table_readers(table_id).await.len() > 1;
+        }
+        #[cfg(not(feature = "write-support"))]
+        let _ = (table_id, schema);
+        false
+    }
+
     /// Streaming scan (issue #790): merge per-SSTable streams lazily into a
     /// bounded output channel, in key (token) order, without materializing the
     /// whole result.
