@@ -48,6 +48,15 @@
 //! The admission bound is therefore on operation concurrency, not on the total
 //! blocking threads a single multi-generation operation may transiently use.
 //!
+//! # Scope
+//!
+//! Admission covers the LAZY/WINDOWED scan path only. The write-support
+//! multi-generation EAGER-materialize branch (`merge_generations_for_read` in
+//! `storage/sstable/mod.rs`, which drains a `KWayMerger` inside a single
+//! `spawn_blocking`) does NOT pass through admission — it predates F4 and is not
+//! the `spawn_blocking`-windowed target. Do not assume ALL reads are throttled by
+//! this semaphore; wiring that eager path in would be a separate change.
+//!
 //! # Deadlock-freedom
 //!
 //! Admission is per top-level scan OPERATION; a fan-out merge's sub-scans are

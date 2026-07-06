@@ -6,8 +6,9 @@
 //!
 //! ## What this guards (wiring evidence)
 //!
-//! `run_scan_stream_windowed` acquires ONE admission permit before spawning its
-//! `spawn_blocking` work and holds it (RAII) for the whole scan. This guard
+//! The top-level scan operation (`run_scan_stream` / the fan-out merge) acquires
+//! ONE admission permit before spawning its `spawn_blocking` work and holds it
+//! (RAII) for the whole scan. This guard
 //! installs a LOW admission limit `L`, runs `N > L` full scans concurrently with
 //! the `scan-offload-probe` in-flight instrumentation armed, and asserts the
 //! recorded MAXIMUM number of concurrently-admitted scans never exceeds `L`.
@@ -192,7 +193,8 @@ async fn concurrent_scans_never_exceed_admission_limit() {
     assert!(
         max_admitted >= 1,
         "Issue #1594: no scan was ever recorded as admitted — the admission permit \
-         acquisition in run_scan_stream_windowed is not wired"
+         acquisition in the top-level scan operation (run_scan_stream / the fan-out merge) \
+         is not wired"
     );
     // The bound: concurrently-admitted scans never exceeded the installed limit.
     assert!(
