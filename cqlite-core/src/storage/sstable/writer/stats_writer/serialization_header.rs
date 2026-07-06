@@ -10,6 +10,7 @@ use super::{StatisticsWriter, DELETION_TIME_EPOCH, TIMESTAMP_EPOCH, TTL_EPOCH};
 use crate::error::Result;
 use crate::parser::vint::encode_vuint;
 use crate::schema::TableSchema;
+use crate::storage::sstable::writer::data_writer::column_order_key;
 use std::io::Write;
 
 impl StatisticsWriter {
@@ -136,7 +137,16 @@ impl StatisticsWriter {
                 let ck_names: std::collections::HashSet<&str> =
                     s.clustering_keys.iter().map(|k| k.name.as_str()).collect();
 
-                // staticColumns: filter for is_static && not PK/CK, sorted alphabetically
+                // staticColumns: filter for is_static && not PK/CK, in Cassandra's
+                // SerializationHeader column order (issue #2035): SIMPLE columns
+                // before COMPLEX (non-frozen collection / non-frozen UDT), then by
+                // name. This is Cassandra's `ColumnMetadata.comparisonOrder` — the
+                // `isComplex` bit (`1L << 60`) outranks the name — and it MUST match
+                // the DATA writer's on-disk cell order (`column_order_key`), because
+                // the reader resolves each cell's column by this header order. A
+                // plain alphabetical sort desynced any row whose simple column sorts
+                // AFTER a complex column (dropping the collection + mis-decoding the
+                // next simple cell).
                 let mut static_cols: Vec<_> = s
                     .columns
                     .iter()
@@ -146,7 +156,7 @@ impl StatisticsWriter {
                             && !ck_names.contains(c.name.as_str())
                     })
                     .collect();
-                static_cols.sort_by(|a, b| a.name.cmp(&b.name));
+                static_cols.sort_by(|a, b| column_order_key(a).cmp(&column_order_key(b)));
                 buffer.write_all(&encode_vuint(static_cols.len() as u64))?;
                 for col in &static_cols {
                     // Column name: VUInt length + UTF-8 bytes
@@ -158,8 +168,12 @@ impl StatisticsWriter {
                     buffer.write_all(col_marshal.as_bytes())?;
                 }
 
-                // regularColumns: filter for !is_static && not PK/CK, sorted alphabetically
-                // Cassandra's SerializationHeader stores columns in natural order (alphabetical)
+                // regularColumns: filter for !is_static && not PK/CK, in Cassandra's
+                // SerializationHeader column order (issue #2035): SIMPLE columns
+                // before COMPLEX, then by name — Cassandra's
+                // `ColumnMetadata.comparisonOrder` (the `isComplex` bit `1L << 60`
+                // outranks the name). This MUST match the DATA writer's on-disk cell
+                // order (`column_order_key`); see the static-column note above.
                 let mut regular_cols: Vec<_> = s
                     .columns
                     .iter()
@@ -169,7 +183,7 @@ impl StatisticsWriter {
                             && !ck_names.contains(c.name.as_str())
                     })
                     .collect();
-                regular_cols.sort_by(|a, b| a.name.cmp(&b.name));
+                regular_cols.sort_by(|a, b| column_order_key(a).cmp(&column_order_key(b)));
                 buffer.write_all(&encode_vuint(regular_cols.len() as u64))?;
                 for col in &regular_cols {
                     buffer.write_all(&encode_vuint(col.name.len() as u64))?;
