@@ -248,8 +248,16 @@ impl WriteEngine {
         // Two-pass compaction (issue #729): compute output FINAL encoding baselines
         // by reading the minimum values from each input SSTable's Statistics.db.
         // The output baseline must be ≤ all per-partition values from all inputs.
-        let (baseline_min_ts, baseline_min_ldt, baseline_min_ttl) =
+        let (baseline_min_ts, mut baseline_min_ldt, baseline_min_ttl) =
             merge::compute_baseline_min(&input_paths);
+        // Issue #1537: background compaction always runs expiry (Some(now_secs)),
+        // so an expired expiring cell converts to a creation-time (`ldt - ttl`)
+        // tombstone whose LDT sits BELOW the input-derived baseline. Lower the LDT
+        // baseline to a provably-safe floor so the DataWriter's unsigned LDT-delta
+        // never underflows. No-op when no input carries expiring cells.
+        if let Some(floor) = merge::compute_expiry_ttl_ldt_floor(&input_paths) {
+            baseline_min_ldt = baseline_min_ldt.min(floor);
+        }
         writer.pre_seed_encoding_baselines(baseline_min_ts, baseline_min_ldt, baseline_min_ttl);
 
         // Increment generation for next operation

@@ -16,19 +16,27 @@
 //! if (!isLive(nowInSec)) {
 //!     if (purger.shouldPurge(timestamp(), localDeletionTime())) return null;   // purged
 //!     if (isExpiring()) {
-//!         // converts an expired expiring cell to a tombstone PRESERVING path()
-//!         Cell<?> newCell = BufferCell.tombstone(column, timestamp(), localDeletionTime(), path());
-//!         return purger.shouldPurge(timestamp(), localDeletionTime()) ? null : newCell;
+//!         // converts an expired expiring cell to a tombstone PRESERVING path(),
+//!         // with localDeletionTime = localDeletionTime() - ttl() (creation time)
+//!         return BufferCell.tombstone(column, timestamp(), localDeletionTime() - ttl(), path())
+//!                          .purge(purger, nowInSec);
 //!     }
 //! }
 //! return this;
 //! ```
 //!
-//! The crux for #1537 is `path()`: the converted tombstone KEEPS the element's
-//! cell path. So an expired collection element becomes an element-level tombstone
-//! at the SAME path, with `markedForDeleteAt` (the cell's own write timestamp) and
-//! `localDeletionTime` (the expiry instant) unchanged, and no live value. Once
-//! `localDeletionTime < gcBefore` (and the overlap gate allows) it is purged.
+//! Two parity points for #1537:
+//! * `path()`: the converted tombstone KEEPS the element's cell path — an expired
+//!   collection element becomes an element-level tombstone at the SAME path, with
+//!   `markedForDeleteAt` (the cell's own write timestamp) unchanged and no live
+//!   value.
+//! * `localDeletionTime() - ttl()`: the tombstone's `localDeletionTime` is the
+//!   cell's CREATION time (`ldt - ttl`), NOT the expiry instant. CQLite stores the
+//!   on-disk `local_deletion_time` as `now + ttl` (the expiry instant), so the
+//!   parity-correct tombstone value is `ldt - ttl`. gc grace is therefore measured
+//!   from creation: once `ldt - ttl < gcBefore` (and the overlap gate allows) it
+//!   is purged. `Cell.isLive` is `nowInSec < localDeletionTime`, so a cell at
+//!   `now == ldt` is already EXPIRED (strictly-future keep-live).
 //!
 //! ## What these tests exercise
 //!
@@ -100,6 +108,18 @@ fn reconcile(
     gc_before: Option<i64>,
     now: Option<i64>,
 ) -> Vec<CellData> {
+    reconcile_with_purges(cells, row_ts, gc_before, now).0
+}
+
+/// Like [`reconcile`] but also returns the [`PurgeCounts`] the reconcile
+/// accrued, so a test can distinguish a genuine gc/overlap-safe purge (which
+/// increments `cell_tombstones`) from a bare reconciliation drop.
+fn reconcile_with_purges(
+    cells: Vec<CellData>,
+    row_ts: i64,
+    gc_before: Option<i64>,
+    now: Option<i64>,
+) -> (Vec<CellData>, PurgeCounts) {
     let row = MergeEntry::new(0, dk(1), None, row_ts, RowData::Live { cells });
     let mut purges = PurgeCounts::default();
     let merged = KWayMerger::reconcile_cluster_with_overlap_counted(
@@ -111,13 +131,14 @@ fn reconcile(
         now,
         &mut purges,
     );
-    match merged {
+    let out = match merged {
         Some(entry) => match entry.row_data {
             RowData::Live { cells } => cells,
             RowData::Tombstone { .. } => Vec::new(),
         },
         None => Vec::new(),
-    }
+    };
+    (out, purges)
 }
 
 fn complex_element<'a>(cells: &'a [CellData], column: &str) -> Option<&'a CellData> {
@@ -151,9 +172,15 @@ fn map_element_expired_within_grace_becomes_element_tombstone() {
         ),
         survivor("score", 7, 100),
     ];
-    // Expired: now AFTER ldt. Within grace: gcBefore == ldt so `ldt < gcBefore`
-    // is false → the element tombstone is RETAINED.
-    let out = reconcile(cells, 100, Some(i64::from(ldt)), Some(i64::from(ldt) + 10));
+    // Expired: now AFTER ldt. Within grace: the tombstone's effective LDT is the
+    // creation time `ldt - ttl` (parity), so pin gcBefore == `ldt - ttl` — then
+    // `(ldt - ttl) < gcBefore` is false → the element tombstone is RETAINED.
+    let out = reconcile(
+        cells,
+        100,
+        Some(i64::from(ldt) - 60),
+        Some(i64::from(ldt) + 10),
+    );
 
     let elem = complex_element(&out, "props").unwrap_or_else(|| {
         panic!("expired-within-grace element must survive as a tombstone, got {out:?}")
@@ -173,8 +200,9 @@ fn map_element_expired_within_grace_becomes_element_tombstone() {
     assert_eq!(elem.timestamp, 100, "markedForDeleteAt == element write ts");
     assert_eq!(
         elem.local_deletion_time,
-        Some(ldt),
-        "localDeletionTime == expiry instant, preserved"
+        Some(ldt - 60),
+        "localDeletionTime == creation time (ldt - ttl), Cassandra \
+         `AbstractCell.purge` `localDeletionTime() - ttl()`"
     );
     // The live value must NOT survive: it is wrapped as a CellTombstone.
     assert_ne!(
@@ -184,8 +212,9 @@ fn map_element_expired_within_grace_becomes_element_tombstone() {
     );
     assert!(
         matches!(&elem.value, Value::Tombstone(info)
-            if info.tombstone_type == TombstoneType::CellTombstone),
-        "expired element surfaces a CellTombstone value, got {:?}",
+            if info.tombstone_type == TombstoneType::CellTombstone
+                && info.local_deletion_time == i64::from(ldt - 60)),
+        "expired element surfaces a CellTombstone at creation-time LDT (ldt - ttl), got {:?}",
         elem.value
     );
     assert!(
@@ -213,18 +242,26 @@ fn map_element_expired_past_grace_is_purged() {
         ),
         survivor("score", 7, 100),
     ];
-    // Expired AND past grace: gcBefore STRICTLY > ldt → purged (full compaction →
-    // overlap gate +inf allows it).
-    let out = reconcile(
+    // Expired AND past grace: the tombstone's effective LDT is the creation time
+    // `ldt - ttl`, so gcBefore STRICTLY > `ldt - ttl` → purged (full compaction →
+    // overlap gate +inf allows it). Pin gcBefore at the tight creation-time
+    // boundary `ldt - ttl + 1`.
+    let (out, purges) = reconcile_with_purges(
         cells,
         100,
-        Some(i64::from(ldt) + 1),
+        Some(i64::from(ldt) - 60 + 1),
         Some(i64::from(ldt) + 1000),
     );
 
     assert!(
         complex_element(&out, "props").is_none(),
         "expired-past-grace element must be purged entirely, got {out:?}"
+    );
+    // Reviewer finding #4(b): assert this is a REAL gc/overlap-safe purge of a
+    // cell tombstone (issue #1037 counter), not a bare reconciliation drop.
+    assert_eq!(
+        purges.cell_tombstones, 1,
+        "expired-past-grace element must be counted as a purged cell tombstone"
     );
     assert!(
         has_survivor(&out, "score"),
@@ -283,11 +320,22 @@ fn set_member_expired_within_grace_becomes_element_tombstone() {
         expiring_complex_element("tags", b"member1", Value::Null, true, 100, 60, ldt),
         survivor("score", 7, 100),
     ];
-    let out = reconcile(cells, 100, Some(i64::from(ldt)), Some(i64::from(ldt) + 10));
+    // Within grace at the creation-time boundary: gcBefore == `ldt - ttl`.
+    let out = reconcile(
+        cells,
+        100,
+        Some(i64::from(ldt) - 60),
+        Some(i64::from(ldt) + 10),
+    );
 
     let elem = complex_element(&out, "tags")
         .unwrap_or_else(|| panic!("expired SET member must survive as a tombstone, got {out:?}"));
     assert!(elem.is_deleted, "SET member tombstone carries IS_DELETED");
+    assert_eq!(
+        elem.local_deletion_time,
+        Some(ldt - 60),
+        "SET member tombstone localDeletionTime == creation time (ldt - ttl)"
+    );
     assert_eq!(
         elem.cell_path.as_deref(),
         Some(b"member1".as_slice()),
@@ -330,4 +378,57 @@ fn expiry_disabled_leaves_complex_element_live() {
         "value untouched"
     );
     assert_eq!(elem.ttl, Some(60), "ttl untouched");
+}
+
+// ===========================================================================
+// Criterion 6 — off-by-one at `now == ldt` (issue #1537, Fix 2). Cassandra
+// `Cell.isLive(nowInSec)` is `nowInSec < localDeletionTime`, so a cell at
+// `now == ldt` is ALREADY EXPIRED. Before Fix 2 (`ldt >= now` kept it live) it
+// would have stayed a live element; after, it becomes an element tombstone.
+// ===========================================================================
+
+#[test]
+fn element_at_now_equals_ldt_expires() {
+    let ldt: i32 = 1_600_000_000;
+    let ttl: u32 = 60;
+    let cells = vec![
+        expiring_complex_element(
+            "props",
+            b"k1",
+            Value::Text("secret".to_string()),
+            false,
+            100,
+            ttl,
+            ldt,
+        ),
+        survivor("score", 7, 100),
+    ];
+    // now == ldt exactly. Within grace (gcBefore == creation time) so the
+    // resulting tombstone is retained and observable.
+    let out = reconcile(
+        cells,
+        100,
+        Some(i64::from(ldt) - i64::from(ttl)),
+        Some(i64::from(ldt)),
+    );
+
+    let elem = complex_element(&out, "props").unwrap_or_else(|| {
+        panic!("element at now == ldt must expire to a tombstone (isLive is strict <), got {out:?}")
+    });
+    assert!(
+        elem.is_deleted,
+        "at now == ldt the element is expired, not live (Fix 2)"
+    );
+    assert!(
+        matches!(&elem.value, Value::Tombstone(info)
+            if info.tombstone_type == TombstoneType::CellTombstone),
+        "at now == ldt the element surfaces a CellTombstone, got {:?}",
+        elem.value
+    );
+    assert_eq!(
+        elem.local_deletion_time,
+        Some(ldt - ttl as i32),
+        "tombstone localDeletionTime == creation time (ldt - ttl)"
+    );
+    assert!(has_survivor(&out, "score"), "survivor stays live");
 }

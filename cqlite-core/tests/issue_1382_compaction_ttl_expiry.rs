@@ -5,10 +5,13 @@
 //! expire_ttl_cells → purge_gc_grace → build`) must treat an EXPIRED live cell
 //! (an expiring cell whose authoritative on-disk `localDeletionTime` is already
 //! past the pinned evaluation instant `now_secs`) as a tombstone — matching
-//! Cassandra (`ExpiringCell` / `TTLExpiryTest`), which sets the tombstone's
-//! `localDeletionTime` to the expiry instant and keeps `markedForDeleteAt` (the
-//! cell's own write timestamp) unchanged. Once `localDeletionTime < gcBefore`
-//! (and the overlap / max_purgeable gate allows) the cell is purged entirely.
+//! Cassandra `AbstractCell.purge`, which converts the expired cell via
+//! `BufferCell.tombstone(column, timestamp(), localDeletionTime() - ttl(), path())`:
+//! the tombstone's `localDeletionTime` is the CREATION time (`ldt - ttl`), and
+//! `markedForDeleteAt` (the cell's own write timestamp) is unchanged. `Cell.isLive`
+//! is `nowInSec < localDeletionTime`, so a cell at `now == ldt` is already expired.
+//! gc grace is measured from creation: once `(ldt - ttl) < gcBefore` (and the
+//! overlap / max_purgeable gate allows) the cell is purged entirely.
 //!
 //! Every test here drives the REAL public compaction surface
 //! ([`compact_sstables`]) with a PINNED `now_secs`/`gc_before_secs`, then reads
@@ -24,10 +27,11 @@
 //!
 //! ## Acceptance criteria (issue #1382)
 //!
-//!   1. `expired_within_grace_emitted_as_tombstone` — LDT past but `>= gcBefore`:
-//!      output keeps a cell tombstone, NOT the live value.
-//!   2. `expired_past_grace_purged_entirely` — LDT `< gcBefore`: the cell is
-//!      absent from the compacted output entirely (purged).
+//!   1. `expired_within_grace_emitted_as_tombstone` — expired but the tombstone's
+//!      creation-time LDT (`ldt - ttl`) is `>= gcBefore`: output keeps a cell
+//!      tombstone at that creation-time LDT, NOT the live value.
+//!   2. `expired_past_grace_purged_entirely` — creation-time LDT `< gcBefore`: the
+//!      cell is absent from the compacted output entirely (purged).
 //!   3. `live_ttl_cell_survives` — LDT in the future: emitted live with a
 //!      TTL and its value, and its LDT stays in the future (un-expired). The
 //!      compaction writer re-derives a surviving live TTL cell's LDT from the
@@ -289,11 +293,13 @@ fn expired_within_grace_emitted_as_tombstone() {
     assert!(!inputs.is_empty(), "expected an input SSTable");
 
     let ldt = expiring_name_ldt(&inputs, &schema);
-    // Expired: now is AFTER the expiry instant. Within grace: gcBefore <= ldt
-    // (so the tombstone survives the gc-grace purge). Pin gcBefore == ldt so the
-    // strict `ldt < gcBefore` purge test is false — the tombstone is retained.
+    // Expired: now is AFTER the expiry instant. The tombstone's effective LDT is
+    // the CREATION time `ldt - ttl` (parity, `AbstractCell.purge`
+    // `localDeletionTime() - ttl()`), so within grace means gcBefore <= `ldt - ttl`.
+    // Pin gcBefore == `ldt - ttl` so the strict `(ldt - ttl) < gcBefore` purge
+    // test is false — the tombstone is retained. (`write_ttl_row` uses ttl = 60.)
     let now_secs = ldt + 10;
-    let gc_before = Some(ldt); // ldt is NOT < gcBefore → retained (within grace)
+    let gc_before = Some(ldt - 60); // (ldt - ttl) is NOT < gcBefore → within grace
 
     compact(inputs, &out_dir, &schema, gc_before, Some(now_secs), true);
 
@@ -305,10 +311,12 @@ fn expired_within_grace_emitted_as_tombstone() {
     match &cell.value {
         Value::Tombstone(info) => {
             assert_eq!(info.tombstone_type, TombstoneType::CellTombstone);
-            // localDeletionTime == the expiry instant.
+            // localDeletionTime == the CREATION time (ldt - ttl), Cassandra
+            // `AbstractCell.purge` `localDeletionTime() - ttl()`.
             assert_eq!(
-                info.local_deletion_time, ldt,
-                "tombstone LDT == expiry instant"
+                info.local_deletion_time,
+                ldt - 60,
+                "tombstone LDT == creation time (ldt - ttl)"
             );
         }
         other => panic!("expected a CellTombstone, got live value {other:?}"),
@@ -345,10 +353,12 @@ fn expired_past_grace_purged_entirely() {
     );
     let inputs = discover_inputs(&in_dir);
     let ldt = expiring_name_ldt(&inputs, &schema);
-    // Expired AND past grace: gcBefore STRICTLY > ldt → purged. Full compaction
-    // (purge_safe=true) → overlap gate is +inf, so the purge is allowed.
+    // Expired AND past grace: the tombstone's effective LDT is the creation time
+    // `ldt - ttl`, so gcBefore STRICTLY > `ldt - ttl` → purged. Pin the tight
+    // creation-time boundary `ldt - ttl + 1`. Full compaction (purge_safe=true) →
+    // overlap gate is +inf, so the purge is allowed.
     let now_secs = ldt + 1000;
-    let gc_before = Some(ldt + 1); // ldt < gcBefore → purge
+    let gc_before = Some(ldt - 60 + 1); // (ldt - ttl) < gcBefore → purge
 
     compact(inputs, &out_dir, &schema, gc_before, Some(now_secs), true);
 
@@ -573,13 +583,19 @@ struct CorpusCell {
 }
 
 /// Reference TTL reconcile for a single cell given the authoritative on-disk
-/// `ldt` and the pinned `now_secs`/`gc_before`. Mirrors Cassandra: an expiring
-/// cell with `ldt < now` is a tombstone at `ldt`; a tombstone with
-/// `ldt < gcBefore` is purged (full compaction → overlap gate is +inf).
-fn reference_outcome(name: &str, ldt: i64, now_secs: i64, gc_before: i64) -> RefOutcome {
-    if ldt < now_secs {
-        // Expired → tombstone at ldt. Purged iff ldt < gcBefore.
-        if ldt < gc_before {
+/// `ldt` (the expiry instant), its `ttl`, and the pinned `now_secs`/`gc_before`.
+/// Mirrors Cassandra:
+///   * `Cell.isLive(nowInSec)` is `nowInSec < localDeletionTime`, so the cell is
+///     EXPIRED iff `ldt <= now` (a cell at `now == ldt` is already expired).
+///   * `AbstractCell.purge` converts the expired cell to a tombstone whose
+///     `localDeletionTime` is the CREATION time `ldt - ttl`
+///     (`localDeletionTime() - ttl()`), so it is PURGED iff `(ldt - ttl) < gcBefore`
+///     (full compaction → overlap gate is +inf).
+fn reference_outcome(name: &str, ldt: i64, ttl: i64, now_secs: i64, gc_before: i64) -> RefOutcome {
+    if ldt <= now_secs {
+        // Expired → tombstone at the creation time (ldt - ttl). Purged iff that
+        // creation-time LDT is strictly below gcBefore.
+        if ldt - ttl < gc_before {
             RefOutcome::Absent
         } else {
             RefOutcome::Tombstone
@@ -599,7 +615,6 @@ fn differential_compact_matches_reference_on_ttl_corpus() {
     let temp = TempDir::new().unwrap();
     let in_dir = temp.path().join("in");
     let wal_dir = temp.path().join("wal");
-    let out_dir = temp.path().join("out");
 
     // Mix of short TTLs (will be expired) and a huge TTL (stays live), across
     // several partitions.
@@ -642,79 +657,120 @@ fn differential_compact_matches_reference_on_ttl_corpus() {
         "every corpus cell must surface an on-disk localDeletionTime"
     );
 
-    // Pin now_secs above every short-TTL expiry but below the huge-TTL expiry,
-    // and gc_before between two clusters of the short LDTs so we get a mix of
-    // within-grace and past-grace outcomes.
-    let mut short_ldts: Vec<i64> = corpus
+    // The tombstone an expired cell collapses to carries the CREATION-time LDT
+    // (`ldt - ttl`, parity `AbstractCell.purge`) == the flush wall clock, which is
+    // ~equal across the batch and therefore NOT unique per cell. Map a surviving
+    // tombstone back to its corpus cell by its `markedForDeleteAt` (the cell's own
+    // write timestamp, unique per corpus cell = `100 + i`), which the conversion
+    // preserves verbatim.
+    let creation_by_name: HashMap<String, i64> = corpus
         .iter()
-        .filter(|c| c.ttl < 1_000_000)
-        .map(|c| ldt_by_name[&c.name])
+        .map(|c| (c.name.clone(), ldt_by_name[&c.name] - i64::from(c.ttl)))
         .collect();
-    short_ldts.sort_unstable();
-    assert!(short_ldts.len() >= 2, "need at least two short-TTL cells");
-    let max_short = *short_ldts.last().unwrap();
-    let mid = short_ldts[short_ldts.len() / 2];
+    let name_by_ts: HashMap<i64, String> =
+        corpus.iter().map(|c| (c.ts, c.name.clone())).collect();
 
-    let now_secs = max_short + 1_000; // expires every short-TTL cell
-    let gc_before = mid; // some short LDTs < gc_before (purged), some >= (tombstone)
+    // Pin now_secs above every short-TTL expiry but below the huge-TTL expiry so
+    // every short-TTL cell expires while the huge-TTL cells stay live.
+    let short: Vec<&CorpusCell> = corpus.iter().filter(|c| c.ttl < 1_000_000).collect();
+    assert!(short.len() >= 2, "need at least two short-TTL cells");
+    let max_short_ldt = short
+        .iter()
+        .map(|c| ldt_by_name[&c.name])
+        .max()
+        .expect("short-ttl cells present");
+    let now_secs = max_short_ldt + 1_000; // expires every short-TTL cell
 
-    compact(
-        inputs,
-        &out_dir,
-        &schema,
-        Some(gc_before),
-        Some(now_secs),
-        true,
-    );
+    // The tombstone an expired cell collapses to carries the CREATION-time LDT
+    // (`ldt - ttl` == the flush wall clock, per `write_ttl_row`), which is ~equal
+    // across the whole batch — so a SINGLE gc_before purges either all or none of
+    // the expired cells. To exercise within-grace AND past-grace we run TWO
+    // compactions against the same input: one with gc_before at/below every
+    // creation (expired → tombstone), one strictly above (expired → purged). Live
+    // cells survive in both. This keeps the differential faithful: each run's
+    // production output is compared cell-by-cell to `reference_outcome`.
+    let min_creation = *creation_by_name.values().min().expect("a creation time");
+    let max_creation = *creation_by_name.values().max().expect("a creation time");
 
-    // Build the actual outcome map from the compacted output.
-    let out_inputs = discover_inputs(&out_dir);
-    let out_cells = read_name_cells(&out_inputs, &schema, true);
-    let mut actual: HashMap<String, RefOutcome> = HashMap::new();
-    for c in &out_cells {
-        match &c.value {
-            Value::Text(v) => {
-                actual.insert(v.clone(), RefOutcome::Live(v.clone()));
-            }
-            Value::Tombstone(info) if info.tombstone_type == TombstoneType::CellTombstone => {
-                // Map a surviving tombstone back to its corpus cell by its LDT.
-                if let Some(name) = ldt_by_name
-                    .iter()
-                    .find(|(_, &l)| l == info.local_deletion_time)
-                    .map(|(n, _)| n.clone())
-                {
-                    actual.insert(name, RefOutcome::Tombstone);
+    // Map a compacted output directory back to per-cell outcomes.
+    let outcomes = |out_dir: &Path| -> HashMap<String, RefOutcome> {
+        let out_inputs = discover_inputs(out_dir);
+        let out_cells = read_name_cells(&out_inputs, &schema, true);
+        let mut actual: HashMap<String, RefOutcome> = HashMap::new();
+        for c in &out_cells {
+            match &c.value {
+                Value::Text(v) => {
+                    actual.insert(v.clone(), RefOutcome::Live(v.clone()));
                 }
+                Value::Tombstone(info) if info.tombstone_type == TombstoneType::CellTombstone => {
+                    // Map by `markedForDeleteAt` (the cell's own write timestamp,
+                    // unique per corpus cell), which the expiry conversion preserves.
+                    // Assert the tombstone's LDT is the parity-correct creation time.
+                    if let Some(name) = name_by_ts.get(&c.timestamp) {
+                        assert_eq!(
+                            info.local_deletion_time, creation_by_name[name],
+                            "tombstone for {name} must carry creation-time LDT (ldt - ttl)"
+                        );
+                        actual.insert(name.clone(), RefOutcome::Tombstone);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+        actual
+    };
 
-    // Compare against the reference for EVERY corpus cell.
-    let mut saw_live = false;
-    let mut saw_tombstone = false;
-    let mut saw_absent = false;
-    for c in &corpus {
-        let ldt = ldt_by_name[&c.name];
-        let expected = reference_outcome(&c.name, ldt, now_secs, gc_before);
-        let got = actual.get(&c.name).cloned().unwrap_or(RefOutcome::Absent);
-        assert_eq!(
-            got, expected,
-            "cell {} (ldt={ldt}, now={now_secs}, gc_before={gc_before}): \
-             production output != reference TTL merge",
-            c.name
+    // Run one compaction with `gc_before` and assert production == reference for
+    // every corpus cell; return the set of outcomes observed.
+    let run = |run_tag: &str, gc_before: i64, out_dir: &Path| -> (bool, bool, bool) {
+        compact(
+            inputs.clone(),
+            out_dir,
+            &schema,
+            Some(gc_before),
+            Some(now_secs),
+            true,
         );
-        match expected {
-            RefOutcome::Live(_) => saw_live = true,
-            RefOutcome::Tombstone => saw_tombstone = true,
-            RefOutcome::Absent => saw_absent = true,
+        let actual = outcomes(out_dir);
+        let (mut live, mut tomb, mut absent) = (false, false, false);
+        for c in &corpus {
+            let ldt = ldt_by_name[&c.name];
+            let expected = reference_outcome(&c.name, ldt, i64::from(c.ttl), now_secs, gc_before);
+            let got = actual.get(&c.name).cloned().unwrap_or(RefOutcome::Absent);
+            assert_eq!(
+                got, expected,
+                "[{run_tag}] cell {} (ldt={ldt}, now={now_secs}, gc_before={gc_before}): \
+                 production output != reference TTL merge",
+                c.name
+            );
+            match expected {
+                RefOutcome::Live(_) => live = true,
+                RefOutcome::Tombstone => tomb = true,
+                RefOutcome::Absent => absent = true,
+            }
         }
-    }
-    // The corpus MUST exercise all three outcomes or the guard is vacuous.
-    assert!(saw_live, "corpus must include a surviving live cell");
+        (live, tomb, absent)
+    };
+
+    // Within-grace run: gc_before <= every creation → expired cells become
+    // retained tombstones; huge-TTL cells stay live.
+    let grace_dir = temp.path().join("out_grace");
+    let (live_g, tomb_g, absent_g) = run("within-grace", min_creation, &grace_dir);
+    assert!(live_g, "within-grace run must include a surviving live cell");
+    assert!(tomb_g, "within-grace run must include a retained tombstone");
     assert!(
-        saw_tombstone,
-        "corpus must include a within-grace tombstone"
+        !absent_g,
+        "within-grace run must NOT purge any cell (gc_before <= creation)"
     );
-    assert!(saw_absent, "corpus must include a purged (past-grace) cell");
+
+    // Past-grace run: gc_before strictly above every creation → expired cells are
+    // purged entirely; huge-TTL cells stay live.
+    let purge_dir = temp.path().join("out_purge");
+    let (live_p, tomb_p, absent_p) = run("past-grace", max_creation + 1, &purge_dir);
+    assert!(live_p, "past-grace run must include a surviving live cell");
+    assert!(absent_p, "past-grace run must purge the expired cells");
+    assert!(
+        !tomb_p,
+        "past-grace run must retain NO tombstone (gc_before > creation)"
+    );
 }
