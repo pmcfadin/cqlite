@@ -773,13 +773,6 @@ impl Database {
         #[cfg(not(feature = "write-support"))]
         let _ = (writable, write_dir, flush_threshold); // suppress unused warning when feature off
 
-        // Eagerly build (and memoize) the shared async runtime so a resource-
-        // starved host surfaces the failure HERE at open() time as a catchable
-        // napi::Error, rather than deferring it to the first executeNative() /
-        // flushRun() / stream iteration that reaches `block_on` (issue #1438).
-        // Idempotent — later calls reuse the memoized runtime.
-        crate::runtime::try_get_runtime().map_err(runtime_init_error)?;
-
         Ok(Database {
             inner: Arc::new(db),
             closed: AtomicBool::new(false),
