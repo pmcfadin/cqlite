@@ -808,6 +808,9 @@ use partition_shadow::{clustering_reversed_flags, PartitionShadow};
 // #1741: shared partition-header need-more classifier used by both sliding
 // parsers (`block_emit_windowed` + `compaction`) via their `use super::*` glob.
 use row_framing::PartitionHeaderReadiness;
+// #1641 (K2): non-allocating partition-boundary peek result, used to reimplement
+// `peek_is_partition_header` without a per-row header try-parse.
+use row_framing::BoundaryPeek;
 
 #[cfg(test)]
 mod test_support;
@@ -834,6 +837,12 @@ mod regression_1741h_tests;
 
 #[cfg(test)]
 mod regression_1741k_tests;
+
+// Issue #1641 (Epic K, finding K2): drift guard for the non-allocating
+// partition-boundary peek — `peek_partition_boundary == Header` ⟺ the old
+// allocating semantics (`!marker && parse_partition_header_full.is_ok()`).
+#[cfg(test)]
+mod regression_1641_boundary_peek_tests;
 
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
@@ -926,11 +935,17 @@ impl V5CompressedLegacyParser {
         self.min_local_deletion_time != NO_DELETION_TIME
     }
 
-    /// Try to parse partition header at offset WITHOUT consuming it.
+    /// Whether the bytes at `offset` begin a new partition header, WITHOUT
+    /// consuming them.
     ///
-    /// This performs a full parse attempt to determine if the bytes at offset
-    /// represent a valid partition header. This is the NO-HEURISTICS approach:
-    /// we actually try to parse the structure instead of guessing based on byte patterns.
+    /// This is the NO-HEURISTICS approach: we validate the actual structure
+    /// instead of guessing from byte patterns. Issue #1641 (K2) made it
+    /// non-allocating — it delegates to [`peek_partition_boundary`], which shares
+    /// the structural walk of `parse_partition_header_full` (via
+    /// `scan_partition_header`) but copies no key, builds no error string, and
+    /// records no `PARTITION_HEADER_TRY_PARSES`. The boolean result is identical
+    /// to the former allocating implementation (marker pre-check + full-parse
+    /// `is_ok`), proved by the `peek_matches_full_parse` proptest.
     ///
     /// # Arguments
     /// * `data` - Binary data buffer
@@ -942,21 +957,13 @@ impl V5CompressedLegacyParser {
     ///
     /// # Visibility
     /// Exposed for integration testing to validate partition boundary detection
+    ///
+    /// [`peek_partition_boundary`]: Self::peek_partition_boundary
     #[doc(hidden)]
     pub fn peek_is_partition_header(&self, data: &[u8], offset: usize) -> bool {
-        // Issue #229 FIX: Check for END_OF_PARTITION marker FIRST
-        //
-        // The END_OF_PARTITION marker (0x01) can be misinterpreted as a valid partition
-        // header because parse_partition_header doesn't validate flags semantically.
-        // We must explicitly reject END_OF_PARTITION (0x01) and IS_MARKER (0x02) here.
-        if offset < data.len() {
-            let flags = data[offset];
-            if Self::is_end_of_partition(flags) || Self::is_range_tombstone_marker(flags) {
-                return false; // These are markers, not partition headers
-            }
-        }
-
-        // Try to actually parse the partition header
-        self.parse_partition_header(data, offset).is_ok()
+        matches!(
+            self.peek_partition_boundary(data, offset),
+            BoundaryPeek::Header
+        )
     }
 }

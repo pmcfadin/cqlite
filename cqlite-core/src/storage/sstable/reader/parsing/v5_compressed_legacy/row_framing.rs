@@ -28,6 +28,46 @@ pub(super) enum PartitionHeaderReadiness {
     Malformed,
 }
 
+/// Result of the non-allocating partition-BOUNDARY peek (issue #1641, K2).
+///
+/// The post-row emit loop asks "does the next thing begin a new partition
+/// header?" after every row. On `main` that ran the FULL allocating
+/// [`V5CompressedLegacyParser::parse_partition_header_full`] as a trial (throwaway
+/// key `to_vec` + eager `format!` error strings + a `PARTITION_HEADER_TRY_PARSES`
+/// increment) purely to learn a boolean. This enum is returned by
+/// [`V5CompressedLegacyParser::peek_partition_boundary`], which reaches the same
+/// verdict by READING bytes — no allocation, no error strings, no gauge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BoundaryPeek {
+    /// The bytes at the offset are structurally a partition header — i.e. the
+    /// full parser would return `Ok` here. The caller runs the real
+    /// (allocating) parse exactly once, at this confirmed start.
+    Header,
+    /// Definitely NOT a partition header at this offset: the leading byte is an
+    /// END_OF_PARTITION / range-tombstone marker, the key length is zero, or the
+    /// header is structurally invalid (e.g. an illegal oa/da IS_LIVE byte) so the
+    /// full parser would return `Err` on the complete bytes.
+    NotHeader,
+    /// The header — or, for an oa/da deleted partition, its full `DeletionTime` —
+    /// is not entirely present yet (truncated / split across a chunk boundary).
+    /// The caller should request more bytes rather than decide.
+    NeedMoreBytes,
+}
+
+/// Byte-offset layout of a structurally-valid partition header, produced WITHOUT
+/// allocating the key (issue #1641, K2). Shared by the allocating full parser and
+/// the non-allocating boundary peek so their structural rules cannot drift.
+struct PartitionHeaderLayout {
+    /// Range of the partition key bytes within the input buffer (not copied).
+    key_range: std::ops::Range<usize>,
+    /// Offset immediately after the header (start of the first row / marker).
+    next_offset: usize,
+    /// Partition-level deletion `(markedForDeleteAt µs, localDeletionTime s)`, or
+    /// `None` for a live partition. Same contract as
+    /// [`V5CompressedLegacyParser::parse_partition_header_full`].
+    partition_deletion: Option<(i64, i32)>,
+}
+
 impl V5CompressedLegacyParser {
     /// Decide whether the leading partition header in `data` is fully present.
     ///
@@ -679,11 +719,42 @@ impl V5CompressedLegacyParser {
     pub fn parse_partition_header_full(
         &self,
         data: &[u8],
-        mut offset: usize,
+        offset: usize,
     ) -> Result<(RowKey, usize, Option<(i64, i32)>)> {
         // Issue #1618 (H5): count every speculative partition-header parse — the
-        // boundary-peek/try-parse primitive every emit path routes through (K2/K3).
+        // real allocating parse, which runs once per partition at a confirmed
+        // start. The per-row BOUNDARY peek (issue #1641, K2) does NOT come through
+        // here: it uses the non-allocating `peek_partition_boundary`, which shares
+        // the structural walk below via `scan_partition_header` but records no
+        // gauge and copies no key.
         crate::storage::sstable::read_work_counters::record_partition_header_try_parse();
+
+        let layout = self.scan_partition_header(data, offset)?;
+        // The single legitimate key allocation: once per real header parse.
+        let key_bytes = data[layout.key_range].to_vec();
+        Ok((
+            RowKey(key_bytes),
+            layout.next_offset,
+            layout.partition_deletion,
+        ))
+    }
+
+    /// Structural walk of a partition header WITHOUT allocating the key or
+    /// recording the `PARTITION_HEADER_TRY_PARSES` gauge (issue #1641, K2).
+    ///
+    /// This is the single structural authority: [`parse_partition_header_full`]
+    /// wraps it (gauge + key `to_vec`), and [`peek_partition_boundary`] uses it as
+    /// the boundary detector. Every validation and every `Err` message is
+    /// identical to the former inline body of `parse_partition_header_full`, so a
+    /// peek can never accept a header the full parser rejects (no drift).
+    ///
+    /// [`parse_partition_header_full`]: Self::parse_partition_header_full
+    /// [`peek_partition_boundary`]: Self::peek_partition_boundary
+    fn scan_partition_header(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+    ) -> Result<PartitionHeaderLayout> {
         let start_offset = offset;
 
         if offset >= data.len() {
@@ -730,7 +801,10 @@ impl V5CompressedLegacyParser {
                 offset, key_len, data.len()
             )));
         }
-        let key_bytes = data[offset..offset + key_len].to_vec();
+        // Record the key's byte RANGE — no copy here. The allocation happens
+        // once, in `parse_partition_header_full`, at a confirmed header start
+        // (issue #1641, K2); the boundary peek needs no key at all.
+        let key_range = offset..offset + key_len;
         offset += key_len;
 
         // Partition-level DeletionTime deserialization.
@@ -825,9 +899,6 @@ impl V5CompressedLegacyParser {
             }
         }
 
-        // Create RowKey from partition key bytes
-        let row_key = RowKey(key_bytes);
-
         debug!(
             "V5CompressedLegacy: Parsed partition header at offset {}, consumed {} bytes, \
              partition_deletion={:?}",
@@ -836,7 +907,55 @@ impl V5CompressedLegacyParser {
             partition_deletion
         );
 
-        Ok((row_key, offset, partition_deletion))
+        Ok(PartitionHeaderLayout {
+            key_range,
+            next_offset: offset,
+            partition_deletion,
+        })
+    }
+
+    /// Non-allocating partition-BOUNDARY peek (issue #1641, K2).
+    ///
+    /// Answers "do the bytes at `offset` begin a new partition header?" for the
+    /// post-row emit loop WITHOUT allocating a throwaway key, building error
+    /// strings, or incrementing `PARTITION_HEADER_TRY_PARSES`. It reaches the same
+    /// verdict the old allocating `peek_is_partition_header` did — proved by the
+    /// `#[cfg(test)]` proptest (`Header` ⟺ `!marker && parse.is_ok()`).
+    ///
+    /// Algorithm (all non-allocating, no gauge):
+    /// 1. Marker pre-check (issue #229): an END_OF_PARTITION (`0x01`) or
+    ///    range-tombstone (IS_MARKER) leading byte is never a partition header;
+    ///    an offset past the buffer end is `NeedMoreBytes`.
+    /// 2. Completeness gate via the shared #1741 [`partition_header_readiness`]
+    ///    classifier: `Incomplete` → `NeedMoreBytes`, `Malformed` → `NotHeader`.
+    /// 3. Under `Ready` every header byte is present, so a [`scan_partition_header`]
+    ///    failure is a genuine STRUCTURAL rejection (e.g. an illegal oa/da IS_LIVE
+    ///    byte), never truncation: `Ok` → `Header`, `Err` → `NotHeader`.
+    ///
+    /// [`partition_header_readiness`]: Self::partition_header_readiness
+    /// [`scan_partition_header`]: Self::scan_partition_header
+    pub(super) fn peek_partition_boundary(&self, data: &[u8], offset: usize) -> BoundaryPeek {
+        // Step 1: marker / end-of-buffer pre-check.
+        match data.get(offset) {
+            None => return BoundaryPeek::NeedMoreBytes,
+            Some(&flags) => {
+                if Self::is_end_of_partition(flags) || Self::is_range_tombstone_marker(flags) {
+                    return BoundaryPeek::NotHeader;
+                }
+            }
+        }
+
+        // Step 2 + 3: completeness gate, then the strict shared structural scan.
+        // `offset < data.len()` holds (step 1 returned on `None`), so the subslice
+        // is valid and zero-cost.
+        match self.partition_header_readiness(&data[offset..]) {
+            PartitionHeaderReadiness::Incomplete => BoundaryPeek::NeedMoreBytes,
+            PartitionHeaderReadiness::Malformed => BoundaryPeek::NotHeader,
+            PartitionHeaderReadiness::Ready => match self.scan_partition_header(data, offset) {
+                Ok(_) => BoundaryPeek::Header,
+                Err(_) => BoundaryPeek::NotHeader,
+            },
+        }
     }
 
     /// Parse a range tombstone marker in full, returning the decoded bound values,
