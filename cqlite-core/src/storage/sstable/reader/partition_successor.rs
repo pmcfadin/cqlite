@@ -85,7 +85,7 @@ impl SSTableReader {
     /// [`bti_partition_offsets`]: Self::bti_partition_offsets
     fn bti_partition_offsets(&self) -> Result<&[u64]> {
         use crate::storage::sstable::bti::{
-            iterate_partitions_in_bti_file, resolve_rows_db_entry, BtiPartitionLocation,
+            iterate_partition_locations_in_bti_file, resolve_rows_db_entry, BtiPartitionLocation,
         };
 
         if let Some(cached) = self.bti_partition_offsets.get() {
@@ -104,15 +104,18 @@ impl SSTableReader {
         };
 
         let mut cursor = std::io::Cursor::new(partitions_db.as_slice());
-        let entries = iterate_partitions_in_bti_file(&mut cursor).map_err(|e| {
+        // Offset-only enumeration (issue #1649): we need only the partition
+        // locations here, never the reconstructed token keys, so this path
+        // performs zero per-partition key-`Vec` allocations.
+        let locations = iterate_partition_locations_in_bti_file(&mut cursor).map_err(|e| {
             Error::corruption(format!(
                 "BTI Partitions.db trie enumeration failed while resolving the \
                  next-partition seek bound: {e}"
             ))
         })?;
 
-        let mut offsets = Vec::with_capacity(entries.len());
-        for (_token_key, location) in entries {
+        let mut offsets = Vec::with_capacity(locations.len());
+        for location in locations {
             let off = match location {
                 BtiPartitionLocation::DataOffset(off) => off,
                 BtiPartitionLocation::RowsOffset(rows_offset) => {

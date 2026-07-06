@@ -93,4 +93,4 @@ pub(crate) use slice_walk::lookup_partition_in_bti_slice;
 // public semver surface like the slice walker.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) use rows_floor::{rows_floor_block, rows_strict_ceiling_block};
-pub use traversal::iterate_partitions_in_bti_file;
+pub use traversal::{iterate_partition_locations_in_bti_file, iterate_partitions_in_bti_file};
