@@ -109,6 +109,10 @@ criterion = { workspace = true }
 once_cell = { workspace = true }
 tokio-test = { workspace = true }
 rand = { workspace = true }
+# Heap-allocation guard for the bounded-memory query test (issue #1581). Gated
+# behind the `dhat-heap` feature so it never installs a global allocator or runs
+# in the normal gate (mirrors cqlite-core's dhat-heap pattern, issue #1046).
+dhat = "0.3"
 
 # CLI testing dependencies
 assert_cmd = "2.0"
@@ -168,6 +172,13 @@ name = "cli_dml_integration_tests"
 path = "tests/cli_dml_integration_tests.rs"
 required-features = ["write-support"]
 
+# Issue #1581: dhat-gated bounded-memory guard for the streaming query cutover.
+# Installs the dhat global allocator, so it must be its own opt-in test binary.
+[[test]]
+name = "issue_1581_query_stream_memory"
+path = "tests/issue_1581_query_stream_memory.rs"
+required-features = ["dhat-heap"]
+
 [features]
 # M2+ production defaults: Interactive REPL with query engine
 default = ["interactive", "tui", "cli-helpers"]
@@ -176,6 +187,11 @@ tui = ["ratatui", "crossterm"]
 benchmarks = []
 ci_zero_tolerance = []
 integration-tests = []
+# Issue #1581: gates the dhat-based bounded-memory query allocation test
+# (tests/issue_1581_query_stream_memory.rs). Off by default so the dhat global
+# allocator is never installed in a normal build/test; the test opts in via
+# `required-features` and runs under `--features dhat-heap`.
+dhat-heap = ["cli-helpers"]
 # state_machine also enables cqlite-core/parquet: the CLI's Parquet output
 # (gated on state_machine) consumes the core export writer (Epic #682)
 state_machine = ["cqlite-core/state_machine", "cqlite-core/parquet"]
