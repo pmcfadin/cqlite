@@ -310,26 +310,30 @@ async fn assert_row_count_parity(db: &Database, sql: &str) -> usize {
     e
 }
 
-/// Empty-table: CQLite currently returns ZERO rows for a GROUP-BY-free aggregate
-/// over an empty table (an empty aggregate input produces no group), where
-/// Cassandra returns one row (COUNT=0, extrema NULL). That Cassandra divergence is
-/// a pre-existing behavior gap tracked OUTSIDE this memory fix (#1578). The
-/// in-scope guarantee here is that the O(1) fold path preserves that behavior and
-/// stays byte-consistent with the materializing path — both return 0 rows.
+/// Empty-table (issue #2069): a GROUP-BY-free aggregate over an empty table is a
+/// GLOBAL aggregate and returns exactly ONE row in Cassandra — `COUNT` = 0 and
+/// `MIN`/`MAX`/`SUM`/`AVG` = NULL. Both the O(1) fold path and the materializing
+/// path must agree on that single row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streaming_aggregate_empty_table_row_count_parity() {
     let (db, _tmp) = open_with_rows(&[]).await;
     let from = format!("FROM {KS}.{TBL}");
 
-    for agg in [
-        "COUNT(*)", "COUNT(i)", "MIN(i)", "MAX(t)", "SUM(i)", "AVG(i)",
+    // COUNT of empty input is 0; every other aggregate of empty input is NULL.
+    for (agg, expected) in [
+        ("COUNT(*)", Value::BigInt(0)),
+        ("COUNT(i)", Value::BigInt(0)),
+        ("MIN(i)", Value::Null),
+        ("MAX(t)", Value::Null),
+        ("SUM(i)", Value::Null),
+        ("AVG(i)", Value::Null),
     ] {
         let sql = format!("SELECT {agg} {from}");
         assert_eq!(
             assert_row_count_parity(&db, &sql).await,
-            0,
-            "Issue #1578: '{sql}' over an empty table returns 0 rows (current \
-             CQLite semantics; the fold must not diverge from the buffered path)"
+            1,
+            "Issue #2069: '{sql}' over an empty table returns exactly one row"
         );
+        assert_agg(&db, &sql, expected).await;
     }
 }

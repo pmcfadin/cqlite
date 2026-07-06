@@ -2511,7 +2511,8 @@ dispatch_component() {
       --test issue_1582_byte_bounded_result_budget \
       --test issue_1578_streaming_aggregate_parity \
       --test issue_1578_limit_exempts_max_results \
-      --test issue_1578_streaming_aggregate_multigen_parity ;;
+      --test issue_1578_streaming_aggregate_multigen_parity \
+      --test issue_2069_global_aggregate_empty_table ;;
     memory-budget) run_component memory-budget cargo test --package cqlite-core \
       --features cli-helpers,dhat-heap \
       --test memory_budget -- --test-threads=1 ;;
