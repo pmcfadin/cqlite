@@ -2727,9 +2727,10 @@ mod tests {
             Some((1_710_000_002_000_000, 1_710_000_002))
         );
         assert_eq!(
-            decoded.cell_write_timestamps.as_ref().and_then(|m| m
-                .get("session")
-                .copied()),
+            decoded
+                .cell_write_timestamps
+                .as_ref()
+                .and_then(|m| m.get("session").copied()),
             Some(1_710_000_003_000_000)
         );
         assert_eq!(decoded.operations.len(), 2);
