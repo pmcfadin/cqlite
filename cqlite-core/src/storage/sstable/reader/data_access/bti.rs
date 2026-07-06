@@ -295,8 +295,9 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<ClusteringRowWindow>> {
         use crate::storage::sstable::bti::{
-            iterate_rows_for_partition, lookup_raw_key_in_bti_partitions_slice,
-            resolve_rows_db_entry, select_row_index_blocks_for_range, BtiPartitionLocation,
+            encode_partition_key_for_bti_trie, iterate_rows_for_partition,
+            lookup_partition_in_bti_slice, resolve_rows_db_entry,
+            select_row_index_blocks_for_range, BtiPartitionLocation,
         };
 
         let (Some(partitions_db), Some(rows_db)) = (&self.bti_partitions_db, &self.bti_rows_db)
@@ -308,19 +309,21 @@ impl SSTableReader {
         // a per-partition row index we can seek within; a NARROW partition
         // (DataOffset) has none, so decode it in full.
         // Issue #1574 (C3): walk the resident trie buffer in place (no whole-file copy).
-        let rows_offset =
-            match lookup_raw_key_in_bti_partitions_slice(partitions_db.as_slice(), partition_key)
-                .map_err(|e| {
-                    Error::corruption(format!(
-                        "BTI clustering seek: Partitions.db trie lookup failed (key len={}): {}",
-                        partition_key.len(),
-                        e
-                    ))
-                })? {
-                Some(BtiPartitionLocation::RowsOffset(off)) => off as usize,
-                // NARROW partition or absent key: no row index to narrow with.
-                Some(BtiPartitionLocation::DataOffset(_)) | None => return Ok(None),
-            };
+        // Issue #1575 (C4): encode the raw key then walk with the pre-encoded key via
+        // the single `lookup_partition_in_bti_slice` primitive every BTI lookup shares.
+        let encoded = encode_partition_key_for_bti_trie(partition_key);
+        let rows_offset = match lookup_partition_in_bti_slice(partitions_db.as_slice(), &encoded)
+            .map_err(|e| {
+                Error::corruption(format!(
+                    "BTI clustering seek: Partitions.db trie lookup failed (key len={}): {}",
+                    partition_key.len(),
+                    e
+                ))
+            })? {
+            Some(BtiPartitionLocation::RowsOffset(off)) => off as usize,
+            // NARROW partition or absent key: no row index to narrow with.
+            Some(BtiPartitionLocation::DataOffset(_)) | None => return Ok(None),
+        };
 
         // Resolve the per-partition row-index entry and enumerate its blocks in
         // ascending byte-comparable (clustering) order.
