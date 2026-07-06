@@ -35,7 +35,10 @@
 #                      I/O-offload guards --test issue_1593_io_offload_thread (an
 #                      mmap-backed scan's blocking raw chunk read runs off the async
 #                      worker pool) + --test issue_1593_mmap_scan_parity (that
-#                      scheduling change is data-transparent — issue #1593); same gate.
+#                      scheduling change is data-transparent — issue #1593); and the
+#                      F4 admission guard --test issue_1594_scan_admission_bound
+#                      (concurrent windowed scans admitted to the blocking pool
+#                      never exceed the admission limit — issue #1594); same gate.
 #   work-counters-guard cargo test -p cqlite-core --features cli-helpers,work-counters
 #                      the read/parser work-counter wiring-evidence tests
 #                      (issue_1566/1573/1585 read-work counters + issue_1618 parser
@@ -2461,7 +2464,8 @@ dispatch_component() {
       --test issue_1333_scan_scratch_reuse \
       --test issue_1589_window_drain_bytes \
       --test issue_1593_io_offload_thread \
-      --test issue_1593_mmap_scan_parity ;;
+      --test issue_1593_mmap_scan_parity \
+      --test issue_1594_scan_admission_bound ;;
     work-counters-guard) run_component work-counters-guard cargo test --package cqlite-core \
       --features cli-helpers,work-counters \
       --test issue_1566_read_work_counters \

@@ -141,6 +141,18 @@ use tokio::sync::mpsc;
 mod guard;
 use guard::FeedFailureGuard;
 
+// Blocking-pool admission control for windowed scans (issue #1594, Epic F/F4).
+// Always compiled (production `admit()` gates every scan's blocking offload); its
+// test-only limit-override + in-flight probe surface is `pub` ONLY under the
+// non-default `scan-offload-probe` feature, mirroring `probe` below. In a sibling
+// file to keep this driver under the campsite-rule size limit (epic #1116).
+#[cfg(not(feature = "scan-offload-probe"))]
+#[path = "scan_admission.rs"]
+mod scan_admission;
+#[cfg(feature = "scan-offload-probe")]
+#[path = "scan_admission.rs"]
+pub mod scan_admission;
+
 /// Bound on the raw-compressed-chunk channel feeding the blocking parse task.
 ///
 /// This is the I/O-half → parse-half hand-off depth. It must stay small enough
@@ -359,6 +371,16 @@ impl SSTableReader {
         cursor: &ScanCursor,
         tx: &mpsc::Sender<Result<(RowKey, ScanRow)>>,
     ) -> Result<()> {
+        // Admission control (issue #1594, F4): acquire ONE blocking-pool admission
+        // permit BEFORE spawning any `spawn_blocking` work (the parse task below
+        // and, for a faulting backend, the feed task). Held for the whole scan via
+        // this RAII guard; released on EVERY exit — success, error, or
+        // cancellation/drop — so a scan can never leak a slot. When `cap` scans are
+        // already admitted the `cap + 1`-th waits here (natural backpressure), it
+        // never errors. No other permit/lock is held while awaiting admission, so
+        // this single-point, single-permit acquisition cannot deadlock.
+        let _admission = scan_admission::admit().await;
+
         // Resolve everything the parser needs ONCE, here on the async side, so
         // the blocking task never touches the async runtime. Schema resolution
         // matches the previous `parse_stitched_stream` resolution exactly.
