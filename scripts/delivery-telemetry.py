@@ -134,10 +134,41 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
                 _validate(value[key], subschema, f"{path}.{key}" if path else key, errors)
 
 
+def _validate_severity_pair(record: dict, errors: list) -> None:
+    """Cross-field checks for the optional roborev severity split (issue #2088).
+
+    Not expressible in the minimal JSON-Schema subset above (no if/then, no cross-field
+    arithmetic) so it lives here as a targeted extra pass. Rules:
+      - roborev_blockers and roborev_nits must appear together (both or neither) — a lone
+        counter is a user/data error, never silently defaulted (authoritative-only).
+      - when both are present alongside roborev_findings, blockers + nits MUST equal
+        roborev_findings — the severity split must reconcile with the raw count.
+    Guarded with isinstance checks so a wrong-typed field (already flagged by the generic
+    walk above) doesn't also raise a confusing TypeError here.
+    """
+    has_blockers = "roborev_blockers" in record
+    has_nits = "roborev_nits" in record
+    if has_blockers != has_nits:
+        present, missing = ("roborev_blockers", "roborev_nits") if has_blockers else ("roborev_nits", "roborev_blockers")
+        errors.append(f": '{present}' is present without '{missing}' — the roborev "
+                      f"severity split must be recorded together (both or neither)")
+        return
+    if not (has_blockers and has_nits):
+        return
+    blockers, nits = record["roborev_blockers"], record["roborev_nits"]
+    findings = record.get("roborev_findings")
+    ints_ok = all(isinstance(v, int) and not isinstance(v, bool) for v in (blockers, nits, findings))
+    if ints_ok and blockers + nits != findings:
+        errors.append(f": roborev_blockers ({blockers}) + roborev_nits ({nits}) = "
+                      f"{blockers + nits}, but must equal roborev_findings ({findings})")
+
+
 def validate_record(record: dict, schema: dict) -> list:
     """Return a list of human-readable validation errors (empty == valid)."""
     errors: list = []
     _validate(record, schema, "", errors)
+    if isinstance(record, dict):
+        _validate_severity_pair(record, errors)
     return errors
 
 
@@ -239,6 +270,22 @@ def build_record(args, gh_fields: dict) -> dict:
     if args.gate is None:
         raise SystemExit("error: --gate {pass|fail} is required")
 
+    # Optional roborev severity split (issue #2088). Authoritative-only: supply BOTH
+    # --roborev-blockers/--roborev-nits or NEITHER — a lone counter is a user error, never
+    # silently completed with a fabricated 0. When both are given they must reconcile with
+    # --roborev-findings (the split cannot silently drift from the raw count).
+    has_severity = args.roborev_blockers is not None or args.roborev_nits is not None
+    if has_severity and (args.roborev_blockers is None or args.roborev_nits is None):
+        raise SystemExit(
+            "error: --roborev-blockers and --roborev-nits must both be supplied together "
+            "(authoritative-only: a partial severity split is never inferred) — see "
+            "docs/development/roborev-severity.md")
+    if has_severity and args.roborev_blockers + args.roborev_nits != args.roborev_findings:
+        raise SystemExit(
+            f"error: --roborev-blockers ({args.roborev_blockers}) + --roborev-nits "
+            f"({args.roborev_nits}) = {args.roborev_blockers + args.roborev_nits}, but must "
+            f"equal --roborev-findings ({args.roborev_findings})")
+
     # Authoritative timestamps must all be present — a finalize runs only on a merged,
     # closed issue. A null here (e.g. an unmerged PR) is an error, not silent arithmetic
     # on None (which would otherwise raise an opaque AttributeError).
@@ -260,7 +307,7 @@ def build_record(args, gh_fields: dict) -> dict:
         raise SystemExit("error: routing not determinable from labels and not supplied via "
                          "--routing {design|oracle} (authoritative-data-only: never inferred)")
 
-    return {
+    record = {
         "schema": 1,
         "issue": args.issue,
         "slug": args.slug,
@@ -284,6 +331,10 @@ def build_record(args, gh_fields: dict) -> dict:
         "rework": args.rework,
         "stamped_at": _now_iso(),
     }
+    if has_severity:
+        record["roborev_blockers"] = args.roborev_blockers
+        record["roborev_nits"] = args.roborev_nits
+    return record
 
 
 def cmd_record(args) -> int:
@@ -387,25 +438,52 @@ def aggregate(records: list) -> dict:
     MUST validate first — `cmd_retro` does. Fields are indexed directly (not `.get` with a
     default) so an unvalidated record raises rather than contributing a fabricated zero,
     consistent with the authoritative-data-only mandate.
+
+    Severity-aware roborev weighting (issue #2088): when a record carries the optional
+    roborev_blockers/roborev_nits split, the weighted `roborev_findings` tally counts
+    BLOCKERS only (nits are cheap — batched into one follow-up, never a re-verify round —
+    so weighing them the same as a blocker would overstate the pipeline's real cost). A
+    record without severity data degrades gracefully to the prior behavior: the raw
+    roborev_findings count. Nits are still totaled, but reported separately (see
+    `roborev_nits_total` / `roborev_severity_records`) rather than folded into the weighted
+    score, keeping `rank()`'s RETRO_WEIGHTS-keyed categories unchanged and deterministic.
     """
     tally = {k: 0 for k in RETRO_WEIGHTS}
+    nit_total = 0
+    severity_records = 0
     for r in records:
         tally["claim_collisions"] += r["claim_collisions"]
         tally["rebase_events"] += r["rebase_events"]
-        tally["roborev_findings"] += r["roborev_findings"]
         tally["rework"] += r["rework"]
+        has_severity = "roborev_blockers" in r and "roborev_nits" in r
+        if has_severity:
+            tally["roborev_findings"] += r["roborev_blockers"]
+            nit_total += r["roborev_nits"]
+            severity_records += 1
+        else:
+            tally["roborev_findings"] += r["roborev_findings"]
         # Failed gate ROUNDS. By the gate_runs contract (runs stop at the first PASS — see
         # the schema), every run but a terminal pass WAS a failed round, so this is exact,
         # not an inference: terminal pass -> gate_runs-1 failures; terminal fail -> all
         # gate_runs. gate_runs >= 1 by schema; max(0, ...) guards the schema-forbidden 0.
         passed_final = 1 if r["gate"] == "pass" else 0
         tally["gate_failures"] += max(0, r["gate_runs"] - passed_final)
+    # Informational extras, NOT part of the weighted categories: rank() below iterates
+    # RETRO_WEIGHTS (not tally.items()) specifically so these extra keys never need a
+    # matching weight and can never desync rank()'s output.
+    tally["roborev_nits_total"] = nit_total
+    tally["roborev_severity_records"] = severity_records
     return tally
 
 
 def rank(tally: dict) -> list:
-    """Return [(category, count, weight, score)] sorted by score desc, then category."""
-    rows = [(cat, cnt, RETRO_WEIGHTS[cat], cnt * RETRO_WEIGHTS[cat]) for cat, cnt in tally.items()]
+    """Return [(category, count, weight, score)] sorted by score desc, then category.
+
+    Iterates RETRO_WEIGHTS (not tally.items()): `aggregate()` may add informational extra
+    keys (e.g. roborev_nits_total) that carry no weight and must never appear as a ranked
+    category.
+    """
+    rows = [(cat, tally[cat], weight, tally[cat] * weight) for cat, weight in RETRO_WEIGHTS.items()]
     rows.sort(key=lambda r: (-r[3], r[0]))
     return rows
 
@@ -455,6 +533,13 @@ def cmd_retro(args) -> int:
     print(f"  {'category':<18} {'count':>6} {'weight':>7} {'score':>7}")
     for cat, cnt, weight, score in ranked:
         print(f"  {cat:<18} {cnt:>6} {weight:>7} {score:>7}")
+    # roborev severity (issue #2088): reported separately, never folded into the weighted
+    # score — see aggregate()'s docstring. Only printed when at least one record carries
+    # the optional split (degrades silently to nothing for an all-legacy ledger).
+    if tally["roborev_severity_records"]:
+        print(f"  (roborev severity: {tally['roborev_severity_records']} record(s) classified; "
+              f"blockers counted above, {tally['roborev_nits_total']} nit(s) excluded — see "
+              f"docs/development/roborev-severity.md)")
 
     top_cat, top_cnt, _, top_score = ranked[0]
     if top_score == 0:
@@ -528,6 +613,12 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--claim-collisions", dest="claim_collisions", type=int, default=None)
     rec.add_argument("--rebase-events", dest="rebase_events", type=int, default=None)
     rec.add_argument("--roborev-findings", dest="roborev_findings", type=int, default=None)
+    rec.add_argument("--roborev-blockers", dest="roborev_blockers", type=int, default=None,
+                     help="BLOCKER-severity roborev findings (issue #2088); supply together "
+                          "with --roborev-nits, summing to --roborev-findings")
+    rec.add_argument("--roborev-nits", dest="roborev_nits", type=int, default=None,
+                     help="NIT-severity roborev findings (issue #2088); supply together "
+                          "with --roborev-blockers")
     rec.add_argument("--rework", type=int, default=None)
     rec.add_argument("--from-json", dest="from_json", default=None,
                      help="inject GitHub-derived fields from a JSON file (else pull via gh)")

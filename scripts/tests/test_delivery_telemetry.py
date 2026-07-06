@@ -187,6 +187,130 @@ class RecordTests(unittest.TestCase):
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
 
+class RoborevSeverityTests(unittest.TestCase):
+    """issue #2088: optional roborev_blockers/roborev_nits severity split."""
+
+    def test_record_with_valid_severity_pair_is_schema_valid(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "2088", "--pr", "2200", "--slug", "roborev-severity",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "5", "--roborev-blockers", "2", "--roborev-nits", "3",
+                "--rework", "0",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+            self.assertEqual(rec["roborev_blockers"], 2)
+            self.assertEqual(rec["roborev_nits"], 3)
+
+    def test_record_rejects_severity_sum_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit):
+                dt.main([
+                    "record", "--ledger", str(ledger),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "5", "--roborev-blockers", "2", "--roborev-nits", "2",
+                    "--rework", "0",
+                    "--from-json", _from_json_file(tmp),
+                ])
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_rejects_one_of_severity_pair(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit):
+                dt.main([
+                    "record", "--ledger", str(ledger),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "5", "--roborev-blockers", "2",  # nits omitted
+                    "--rework", "0",
+                    "--from-json", _from_json_file(tmp),
+                ])
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_legacy_record_without_severity_still_valid(self):
+        # a record built with no --roborev-blockers/--roborev-nits (the existing 174-record
+        # ledger's shape) must remain schema-valid — severity is additive, never required.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "1", "--pr", "2", "--slug", "x",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            self.assertNotIn("roborev_blockers", rec)
+            self.assertNotIn("roborev_nits", rec)
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+
+    def test_validate_record_rejects_lone_blocker_field_directly(self):
+        # exercise the schema-level cross-field check independent of the CLI (e.g. a
+        # hand-edited or externally-produced ledger line).
+        rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+        rec["roborev_blockers"] = 1
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("roborev_nits" in e for e in errors))
+
+    def test_validate_record_rejects_sum_mismatch_directly(self):
+        rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+        rec["roborev_findings"] = 5
+        rec["roborev_blockers"] = 1
+        rec["roborev_nits"] = 1   # 1+1 != 5
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("must equal roborev_findings" in e for e in errors))
+
+    def test_real_ledger_174_records_valid_under_updated_schema(self):
+        _, errors = dt.load_ledger(dt.DEFAULT_LEDGER, SCHEMA)
+        self.assertEqual(errors, [])
+
+    def test_retro_on_mixed_severity_ledger_prefers_blockers_and_reports_nits(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            lines = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()
+            legacy = json.loads(lines[0])          # roborev_findings=0, no severity
+            severe = json.loads(lines[1])          # roborev_findings=1, fail/gate_runs=2
+            severe["roborev_blockers"] = 4
+            severe["roborev_nits"] = 6
+            severe["roborev_findings"] = 10
+            ledger.write_text(json.dumps(legacy) + "\n" + json.dumps(severe) + "\n")
+
+            records, errors = dt.load_ledger(ledger, SCHEMA)
+            self.assertEqual(errors, [])
+            tally = dt.aggregate(records)
+            # legacy contributes its raw roborev_findings (0); severe contributes blockers
+            # (4), NOT the raw findings count (10) — blockers-preferred weighting.
+            self.assertEqual(tally["roborev_findings"], 0 + 4)
+            self.assertEqual(tally["roborev_nits_total"], 6)
+            self.assertEqual(tally["roborev_severity_records"], 1)
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["retro", "--ledger", str(ledger),
+                              "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("roborev severity: 1 record(s) classified", text)
+            self.assertIn("6 nit(s) excluded", text)
+
+
 class LintTests(unittest.TestCase):
     def test_clean_ledger_passes(self):
         rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
