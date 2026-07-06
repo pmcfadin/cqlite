@@ -2463,6 +2463,7 @@ dispatch_component() {
       --test issue_1585_read_op_per_chunk \
       --test issue_1597_compression_info_one_parse \
       --test issue_1618_parser_work_counters \
+      --test issue_1642_positional_row_emit \
       --test issue_1570_key_offset_cache \
       --test issue_1575_candidate_key_hash_hoist ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \

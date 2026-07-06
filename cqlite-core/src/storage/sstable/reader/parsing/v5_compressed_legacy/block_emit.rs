@@ -105,7 +105,9 @@ impl V5CompressedLegacyParser {
                 PartitionShadow::open(now_secs, partition_deletion, clustering_reversed.clone())
             });
 
-            let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
+            // Issue #1642 (K3): static cells accumulate as a positional `RowCells`
+            // vector, matching the decoder's positional emit. Metadata stays keyed.
+            let mut static_cells: RowCells = Vec::new();
             let mut static_cell_meta: HashMap<String, CellWriteMetadata> = HashMap::new();
             let mut row_count = 0;
 
@@ -174,7 +176,7 @@ impl V5CompressedLegacyParser {
                                     .is_some_and(|h| sh.row_hidden(h, &[]))
                             });
                             if static_hidden {
-                                static_cells = HashMap::new();
+                                static_cells = Vec::new();
                                 static_cell_meta = HashMap::new();
                             } else {
                                 static_cells = cells;
@@ -182,9 +184,8 @@ impl V5CompressedLegacyParser {
                             }
                         } else {
                             // Merge static cells / metadata into clustering row
-                            for (k, v) in &static_cells {
-                                cells.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
+                            // (clustering-row-wins; positional, issue #1642).
+                            merge_static_cells(&mut cells, &static_cells);
                             for (k, v) in &static_cell_meta {
                                 row_cell_meta.entry(k.clone()).or_insert_with(|| v.clone());
                             }
