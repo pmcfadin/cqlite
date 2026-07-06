@@ -14,7 +14,9 @@
 use std::sync::Arc;
 
 use crate::storage::cache::DecompressedChunkCache;
-use crate::{Config, Result, Value};
+#[cfg(feature = "state_machine")]
+use crate::Value;
+use crate::{Config, Result};
 
 /// Memory manager: the retained public stats shell over the real B1 cache.
 ///
@@ -77,6 +79,11 @@ impl MemoryManager {
 /// does not model container overhead (HashMap slots, `Arc`/`String` capacity),
 /// which is why the executor's byte budget sits well below the process memory
 /// target to leave headroom for that overhead.
+///
+/// `state_machine`-gated: its only consumer is the (feature-gated) query engine
+/// (`query::result_budget`), so under a minimal `--no-default-features` build it
+/// would otherwise be dead code.
+#[cfg(feature = "state_machine")]
 pub(crate) fn estimate_value_size(value: &Value) -> usize {
     match value {
         Value::Null => 1,

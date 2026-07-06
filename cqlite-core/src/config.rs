@@ -377,7 +377,7 @@ pub struct QueryConfig {
     ///
     /// While the SELECT executor collects a materialized `Vec<QueryRow>`, it
     /// tracks a running estimate of the result's logical size (via the shared
-    /// [`crate::memory::estimate_value_size`] estimator) and fails with
+    /// `crate::memory::estimate_value_size` estimator) and fails with
     /// [`crate::Error::ResultTooLarge`] once this ceiling is crossed — telling
     /// the caller to add a `LIMIT` or use the streaming API. This is the
     /// correct-unit primary guard; `max_result_rows` remains as a secondary
