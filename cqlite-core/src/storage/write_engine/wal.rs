@@ -773,6 +773,17 @@ impl From<PreCellLdtWriteTtlMutation> for Mutation {
 /// (D), (C), (B), (A). Each maps to the current [`Mutation`]/[`CellOperation`]
 /// with the newer fields upgraded to their historical defaults (`None`).
 fn decode_mutation(bytes: &[u8]) -> std::result::Result<Mutation, bincode::Error> {
+    // RESIDUAL RISK (inherent to the versionless, positional bincode WAL): because
+    // the current-layout decode is tried FIRST and we return on its first `Ok(..)`,
+    // correctness for a pre-version record relies on that current-layout decode
+    // ERRORING rather than succeeding-but-wrong. #1538 widened `WriteWithTtl` 3->4
+    // fields, so a pre-#1538 record's trailing byte can be positionally misread as
+    // the new `Option<i32>` tag; there is no GENERAL guarantee every such record's
+    // trailing bytes form an invalid tag (the mirror tests only prove the realistic
+    // cases, e.g. WriteWithTtl followed by Delete). This is NOT a new bug — the same
+    // succeed-but-wrong hazard already applies to layouts A-D — just a new instance.
+    // The structural mitigation (a per-record version tag / length-prefixed op
+    // envelope) is tracked in issue #2054; do NOT attempt it here.
     match bincode::deserialize::<Mutation>(bytes) {
         Ok(mutation) => Ok(mutation),
         Err(current_err) => {

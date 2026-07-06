@@ -304,8 +304,14 @@ pub enum CellOperation {
         /// `now + ttl`), so the fresh CQL/WAL `USING TTL` write paths that build
         /// a `WriteWithTtl` without a surfaced source LDT are unchanged.
         ///
-        /// `#[serde(default)]` keeps backward compatibility with `WriteWithTtl`
-        /// values serialized before this field existed (e.g. older WAL records).
+        /// `#[serde(default)]` only helps SELF-DESCRIBING formats (e.g. the JSON
+        /// `--mutation` CLI input), where a missing field is defaulted by name.
+        /// It does NOT provide WAL back-compat: the WAL uses bincode, a
+        /// non-self-describing positional format that IGNORES `#[serde(default)]`,
+        /// so upgrade-replay of pre-#1538 `WriteWithTtl` records is handled by the
+        /// pre-#1538 mirror layouts in `wal.rs` (`PreCellLdtWriteTtlMutation` /
+        /// `PreCellLdtWriteTtlCellOperation`), not by this attribute. Do not delete
+        /// those mirrors on the assumption this attribute covers the WAL.
         ///
         /// [`cells_to_cell_operations`]: crate::storage::write_engine::merge
         /// [`CellData::local_deletion_time`]: crate::storage::write_engine::merge::CellData::local_deletion_time
