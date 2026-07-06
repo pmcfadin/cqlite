@@ -162,6 +162,12 @@ struct Counters {
     /// open must parse `CompressionInfo.db` exactly once (was 2 — a legacy
     /// `parse_binary` plus the modern `parse`).
     compression_info_parses: AtomicU64,
+    /// BIG `Index.db` partition probes (`INDEX_PROBES`, Issue #1570 / B4) — one per
+    /// real `index_reader.lookup_partition` in `lookup_partition_with_index`.
+    /// Consumer B4 (key→partition-offset cache): a repeated point read served from
+    /// the cache must skip the `Index.db` probe, so `INDEX_PROBES` stays 0 on a hit —
+    /// the BIG analogue of `TRIE_WALKS == 0` for BTI.
+    index_probes: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -180,6 +186,7 @@ impl Counters {
             bti_pointer_decodes: AtomicU64::new(0),
             row_sort_invocations: AtomicU64::new(0),
             compression_info_parses: AtomicU64::new(0),
+            index_probes: AtomicU64::new(0),
         }
     }
 
@@ -232,6 +239,10 @@ impl Counters {
         self.compression_info_parses.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_index_probe(&self) {
+        self.index_probes.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -280,6 +291,10 @@ impl Counters {
         self.compression_info_parses.load(Ordering::Relaxed)
     }
 
+    fn index_probes(&self) -> u64 {
+        self.index_probes.load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
@@ -293,6 +308,7 @@ impl Counters {
         self.bti_pointer_decodes.store(0, Ordering::Relaxed);
         self.row_sort_invocations.store(0, Ordering::Relaxed);
         self.compression_info_parses.store(0, Ordering::Relaxed);
+        self.index_probes.store(0, Ordering::Relaxed);
     }
 }
 
@@ -449,6 +465,19 @@ pub fn record_compression_info_parse() {
     COUNTERS.record_compression_info_parse();
 }
 
+/// Record one real BIG `Index.db` partition probe (`INDEX_PROBES`; consumer B4,
+/// Issue #1570).
+///
+/// Called unconditionally at the single `index_reader.lookup_partition` probe in
+/// `lookup_partition_with_index`; the body compiles to a no-op in a release build
+/// (design.md Decision 7). A key→partition-offset cache hit returns before the
+/// probe, so a repeated point read records zero probes.
+#[inline(always)]
+pub fn record_index_probe() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_index_probe();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -528,6 +557,13 @@ pub fn row_sort_invocations() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn compression_info_parses() -> u64 {
     COUNTERS.compression_info_parses()
+}
+
+/// Number of BIG `Index.db` partition probes since the last [`reset`]
+/// (`INDEX_PROBES`, Issue #1570).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn index_probes() -> u64 {
+    COUNTERS.index_probes()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
@@ -639,6 +675,9 @@ mod tests {
         for _ in 0..12 {
             c.record_compression_info_parse();
         }
+        for _ in 0..13 {
+            c.record_index_probe();
+        }
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
@@ -652,6 +691,7 @@ mod tests {
         assert_eq!(c.bti_pointer_decodes(), 10);
         assert_eq!(c.row_sort_invocations(), 11);
         assert_eq!(c.compression_info_parses(), 12);
+        assert_eq!(c.index_probes(), 13);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
@@ -666,6 +706,7 @@ mod tests {
         assert_eq!(c.bti_pointer_decodes(), 0);
         assert_eq!(c.row_sort_invocations(), 0);
         assert_eq!(c.compression_info_parses(), 0);
+        assert_eq!(c.index_probes(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms

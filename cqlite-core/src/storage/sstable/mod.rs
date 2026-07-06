@@ -331,6 +331,24 @@ fn build_chunk_cache(config: &Config) -> Arc<crate::storage::cache::Decompressed
     }
 }
 
+/// Build a reader's per-reader key→partition-offset cache (issue #1570, B4),
+/// honoring the same `config.memory.block_cache.enabled` read-cache toggle B2
+/// established (issue #1568). When enabled (the default) the cache holds up to
+/// [`DEFAULT_KEY_CACHE_ENTRIES`](crate::storage::cache::DEFAULT_KEY_CACHE_ENTRIES)
+/// tiny entries; when disabled it is a genuine no-op cache so the point-read path
+/// bypasses key caching entirely rather than the toggle being decorative. Capacity
+/// is a small constant, not a new config knob (the audit forbids a decorative one).
+pub(crate) fn build_key_offset_cache(
+    config: &Config,
+) -> Arc<crate::storage::cache::KeyOffsetCache> {
+    use crate::storage::cache::{KeyOffsetCache, DEFAULT_KEY_CACHE_ENTRIES};
+    if config.memory.block_cache.enabled {
+        Arc::new(KeyOffsetCache::with_capacity(DEFAULT_KEY_CACHE_ENTRIES))
+    } else {
+        Arc::new(KeyOffsetCache::disabled())
+    }
+}
+
 impl SSTableManager {
     /// The shared chunk cache to expose to the memory-stats surface, or `None`
     /// when block caching is disabled (issue #1568).

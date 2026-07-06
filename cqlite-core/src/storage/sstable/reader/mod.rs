@@ -761,6 +761,10 @@ impl SSTableReader {
             h.finish()
         };
 
+        // Per-reader key→partition-offset cache (issue #1570, B4), built from the
+        // open-time config BEFORE `open_config` is moved into the struct field.
+        let key_offset_cache = super::build_key_offset_cache(&open_config);
+
         Ok(Self {
             file_path: path.to_path_buf(),
             file,
@@ -797,6 +801,7 @@ impl SSTableReader {
             chunk_cache_id,
             bti_partition_offsets: std::sync::OnceLock::new(),
             bti_lookup_memo: std::sync::Mutex::new(None),
+            key_offset_cache,
         })
     }
 

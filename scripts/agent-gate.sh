@@ -35,7 +35,8 @@
 #   work-counters-guard cargo test -p cqlite-core --features cli-helpers,work-counters
 #                      the read/parser work-counter wiring-evidence tests
 #                      (issue_1566/1573/1585 read-work counters + issue_1618 parser
-#                      work counters). The counter bodies/getters are feature-gated
+#                      work counters + issue_1570 key-offset-cache INDEX_PROBES/
+#                      TRIE_WALKS wiring). The counter bodies/getters are feature-gated
 #                      behind `work-counters`, so the default core-tests run can't
 #                      execute them — without this component the wiring evidence
 #                      would only run under a manual `--features work-counters`
@@ -2460,7 +2461,8 @@ dispatch_component() {
       --test issue_1573_readat_positional \
       --test issue_1585_read_op_per_chunk \
       --test issue_1597_compression_info_one_parse \
-      --test issue_1618_parser_work_counters ;;
+      --test issue_1618_parser_work_counters \
+      --test issue_1570_key_offset_cache ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
       --test issue_1582_byte_bounded_result_budget ;;

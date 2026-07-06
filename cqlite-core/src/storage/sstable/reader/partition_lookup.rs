@@ -32,7 +32,35 @@ impl SSTableReader {
         let _span = tracing::debug_span!("sstable.partition_lookup.index").entered();
         let format = self.sstable_format_label();
 
+        // B4 key→partition-offset cache (issue #1570): a repeated point read of the
+        // same present key returns the cached location without re-probing Index.db,
+        // so `INDEX_PROBES` stays 0 on the hit. Positive-only, so an absent key is
+        // never cached and never fabricates a hit. The cached location is the exact
+        // `(offset,size)` a fresh probe resolved (correctness guardrail).
+        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+            debug!(
+                "B4 key-cache hit for partition (raw key len={}): offset={}, size={}",
+                partition_key.len(),
+                loc.data_offset,
+                loc.data_size
+            );
+            obs::add_counter(
+                catalog::READ_PARTITION_LOOKUP,
+                1,
+                &[
+                    (catalog::attr::RESULT, "hit".into()),
+                    (catalog::attr::LOOKUP_ROUTE, "index".into()),
+                    (catalog::attr::SSTABLE_FORMAT, format.into()),
+                ],
+            );
+            return Ok(Some((loc.data_offset, loc.data_size)));
+        }
+
         if let Some(index_reader) = &self.index_reader {
+            // A5/B4 read-work counter (`INDEX_PROBES`; consumer B4): one per real
+            // `Index.db` probe. Counted only when a cache miss forces a real probe,
+            // so a B4 cache hit above records nothing. No-op in release.
+            crate::storage::sstable::read_work_counters::record_index_probe();
             // Direct raw-key lookup — O(1) HashMap lookup.
             // Index.db entries are keyed on the raw partition key bytes since #552;
             // no Murmur3 digest computation is needed or correct here.
@@ -49,6 +77,12 @@ impl SSTableReader {
                         (catalog::attr::LOOKUP_ROUTE, "index".into()),
                         (catalog::attr::SSTABLE_FORMAT, format.into()),
                     ],
+                );
+                // B4: cache this present-key resolution so the next point read of
+                // the same key skips the Index.db probe (issue #1570).
+                self.key_offset_cache.insert(
+                    partition_key,
+                    crate::storage::cache::PartitionLoc::new(entry.data_offset, entry.data_size),
                 );
                 return Ok(Some((entry.data_offset, entry.data_size)));
             } else {
@@ -116,6 +150,19 @@ impl SSTableReader {
             // Not a BTI reader — no trie to consult (no descent, no count).
             return Ok(None);
         };
+
+        // B4 key→partition-offset cache (issue #1570): a repeated point read of the
+        // same present key returns the cached offset WITHOUT a second trie descent,
+        // so `TRIE_WALKS` stays 0 on the hit — even across interleaved keys, which
+        // the single-entry C3 memo below cannot cover. Positive-only, so an absent
+        // key is never cached and never fabricates a hit; the cached offset is the
+        // exact offset a fresh descent resolves (correctness guardrail). Emit the
+        // presence counters (found = true) so a cache-served lookup records the same
+        // presence decision a fresh descent does.
+        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+            Self::emit_bti_presence_counters(true);
+            return Ok(Some(loc.data_offset));
+        }
 
         // Issue #1574 (C3) single walk: a single-candidate point read descends the
         // SAME trie for the SAME key twice (candidate prune then seek). Reuse the
@@ -194,6 +241,12 @@ impl SSTableReader {
                     off
                 );
                 self.bti_lookup_memo_store(partition_key, Some(off));
+                // B4: cache this present-key resolution so a later interleaved
+                // read of the same key skips the trie descent (issue #1570).
+                self.key_offset_cache.insert(
+                    partition_key,
+                    crate::storage::cache::PartitionLoc::offset_only(off),
+                );
                 Ok(Some(off))
             }
             Some(BtiPartitionLocation::RowsOffset(rows_offset)) => {
@@ -254,6 +307,11 @@ impl SSTableReader {
                     header.block_count
                 );
                 self.bti_lookup_memo_store(partition_key, Some(header.data_position));
+                // B4: cache this present WIDE-partition resolution (issue #1570).
+                self.key_offset_cache.insert(
+                    partition_key,
+                    crate::storage::cache::PartitionLoc::offset_only(header.data_position),
+                );
                 Ok(Some(header.data_position))
             }
             None => {
