@@ -789,6 +789,11 @@ mod tests {
         for _ in 0..14 {
             c.record_key_hash();
         }
+        // Issue #1576 range short-circuit counter: multiplicity 15, distinct
+        // from every sibling so a mis-wired getter/field cross-up is caught.
+        for _ in 0..15 {
+            c.record_range_short_circuit();
+        }
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
@@ -804,6 +809,7 @@ mod tests {
         assert_eq!(c.compression_info_parses(), 12);
         assert_eq!(c.index_probes(), 13);
         assert_eq!(c.key_hash_calls(), 14);
+        assert_eq!(c.range_short_circuits(), 15);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
@@ -820,6 +826,7 @@ mod tests {
         assert_eq!(c.compression_info_parses(), 0);
         assert_eq!(c.index_probes(), 0);
         assert_eq!(c.key_hash_calls(), 0);
+        assert_eq!(c.range_short_circuits(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms

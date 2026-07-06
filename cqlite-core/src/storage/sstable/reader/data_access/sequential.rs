@@ -164,7 +164,7 @@ impl SSTableReader {
 
         // Index-based path: sort by Murmur3 token order (ascending token, then key bytes).
         // This matches the on-disk physical order (spec §5, Appendix B §313) and the write
-        // engine's PartitionPosition::cmp.  Compute each key's token once before sorting to
+        // engine's DecoratedKey::cmp.  Compute each key's token once before sorting to
         // avoid O(n log n) recomputation inside the comparator.
         sort_by_token_order(&mut results);
         // Limit applied AFTER sort so LIMIT N returns the N token-smallest partitions.

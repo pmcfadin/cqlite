@@ -360,7 +360,7 @@ pub(super) fn bti_lookup_step(
 ///
 /// The authoritative ordering for SSTable partitions is ascending Murmur3 token, with
 /// equal-token ties broken by raw key bytes (lexicographic). This matches the on-disk
-/// physical order (spec §5, Appendix B §313) and the write engine's `PartitionPosition::cmp`.
+/// physical order (spec §5, Appendix B §313) and the write engine's `DecoratedKey::cmp`.
 ///
 /// Computes each key's token once to avoid O(n log n) recomputation inside the comparator.
 pub(super) fn sort_by_token_order(results: &mut Vec<(RowKey, ScanRow)>) {

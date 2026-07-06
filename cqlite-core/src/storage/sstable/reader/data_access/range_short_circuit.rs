@@ -21,7 +21,7 @@
 //! Murmur3 token, ties broken by unsigned-lexicographic key bytes — the exact
 //! ordering the on-disk partitions are sorted by and that
 //! [`sort_by_token_order`](super::model::sort_by_token_order) and the write engine's
-//! `PartitionPosition::cmp` use (spec §5, Appendix B §313). Comparing raw bytes
+//! `DecoratedKey::cmp` use (spec §5, Appendix B §313). Comparing raw bytes
 //! alone would be WRONG (physical order is token order, not byte order) and could
 //! drop a present partition — the exact false-miss footgun the audit warns against.
 //! The bound is INCLUSIVE at both ends: a key equal to `first_key` or `last_key` is
