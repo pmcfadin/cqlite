@@ -18,9 +18,8 @@ use std::time::Instant;
 use cqlite_core::{
     error::{Error, Result},
     platform::Platform,
-    schema::{registry::SchemaRegistry, registry::SchemaRegistryConfig, TableSchema},
-    storage::sstable::{reader::SSTableReader, schema_aware_reader::SchemaAwareReader},
-    types::{RowKey, TableId, Value},
+    storage::sstable::reader::SSTableReader,
+    types::{RowKey, TableId},
     Config,
 };
 use cqlite_tests::discover_table_dir;
@@ -36,8 +35,6 @@ pub struct GoldenPathGetTestFixture {
     platform: Arc<Platform>,
     /// Configuration
     config: Config,
-    /// Schema registry
-    schema_registry: Arc<SchemaRegistry>,
 }
 
 impl GoldenPathGetTestFixture {
@@ -45,9 +42,6 @@ impl GoldenPathGetTestFixture {
     pub async fn new() -> Result<Self> {
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
-        let registry_config = SchemaRegistryConfig::default();
-        let schema_registry =
-            Arc::new(SchemaRegistry::new(registry_config, platform.clone(), config.clone()).await?);
 
         let datasets_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/datasets/sstables");
@@ -56,7 +50,6 @@ impl GoldenPathGetTestFixture {
             datasets_path,
             platform,
             config,
-            schema_registry,
         })
     }
 
@@ -82,45 +75,6 @@ impl GoldenPathGetTestFixture {
         }
 
         SSTableReader::open(&sstable_path, &self.config, self.platform.clone()).await
-    }
-
-    /// Setup schema-aware reader for comprehensive testing
-    async fn setup_schema_aware_reader(&self, _table_name: &str) -> Result<SchemaAwareReader> {
-        let table_dir =
-            discover_table_dir("test_basic", "compression_test_table").ok_or_else(|| {
-                Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "test_basic/compression_test_table not found.",
-                ))
-            })?;
-        let actual_path = table_dir.join("nb-1-big-Data.db");
-
-        if fs::metadata(&actual_path).await.is_err() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Schema-aware test SSTable not found: {actual_path:?}"),
-            )));
-        }
-
-        // Create minimal schema for testing from JSON
-        let schema_json = r#"{
-            "keyspace": "test_keyspace",
-            "table": "compression_test_table",
-            "partition_keys": [{"name": "id", "type": "int", "position": 0}],
-            "clustering_keys": [],
-            "columns": [{"name": "value", "type": "text"}]
-        }"#;
-
-        let schema = TableSchema::from_json(schema_json)?;
-
-        SchemaAwareReader::new(
-            &actual_path,
-            schema,
-            self.schema_registry.clone(),
-            &self.config,
-            self.platform.clone(),
-        )
-        .await
     }
 }
 
@@ -336,46 +290,6 @@ async fn test_golden_path_get_integration_validation() -> Result<()> {
     );
 
     println!("✅ Integration validation completed - all components working together");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_golden_path_schema_aware_get_operations() -> Result<()> {
-    let fixture = GoldenPathGetTestFixture::new().await?;
-
-    // Test with schema-aware reader for type-safe operations
-    match fixture.setup_schema_aware_reader("test_basic").await {
-        Ok(schema_reader) => {
-            // Schema-aware reader expects partition key as &[Value]
-            let partition_key = vec![Value::Integer(1)];
-
-            let start_time = Instant::now();
-            let _result = schema_reader.get(&partition_key, None).await?;
-            let duration = start_time.elapsed();
-
-            // Schema-aware operations should be efficient and type-safe
-            assert!(
-                duration.as_millis() < 20,
-                "Schema-aware get should be efficient: {:?}ms",
-                duration.as_millis()
-            );
-
-            // Verify schema-aware statistics
-            let stats = schema_reader.stats().await?;
-            // Schema parsing operations are tracked (schema_parsed_values is unsigned, always >= 0)
-            assert!(
-                stats.schema_parsed_values == stats.schema_parsed_values,
-                "Schema parsing should track operations"
-            );
-
-            println!("✅ Schema-aware get operations validated");
-        }
-        Err(e) => {
-            println!("ℹ️  Schema-aware reader not available (expected): {e}");
-            // This is acceptable as schema-aware functionality may not be fully implemented
-        }
-    }
-
     Ok(())
 }
 

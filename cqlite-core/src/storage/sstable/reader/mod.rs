@@ -74,7 +74,6 @@ pub use parsing::PublicV5CompressedLegacyParser as V5CompressedLegacyParser;
 pub use compression::extract_sstable_base_name;
 
 // Internal imports from submodules
-use compression::detect_and_initialize_compression;
 use header::{
     calculate_actual_header_size, extract_generation_from_path, parse_header_with_version_detection,
 };
@@ -94,6 +93,7 @@ use crate::{
     platform::Platform,
     schema::TableSchema,
     storage::sstable::{
+        compression::CompressionReader,
         compression_info::CompressionInfo,
         version_gate::{BigVersionGates, VersionGates},
     },
@@ -601,11 +601,19 @@ impl SSTableReader {
                 .await?;
         }
 
-        // Initialize compression reader with improved format detection
-        let compression_reader = detect_and_initialize_compression(&header, path).await?;
-
-        // Load CompressionInfo.db for chunked decompression (if it exists)
+        // Load CompressionInfo.db ONCE for chunked decompression (if it exists).
+        // This is the single authoritative parse per open (issue #1597 / G1); the
+        // component name is derived deterministically from `SsTableDescriptor`
+        // (one `exists()` probe, not the legacy ~25-generation scan).
         let compression_info = Self::load_compression_info_metadata(path, &platform).await?;
+
+        // Derive the compression reader (algorithm only) from that single parsed
+        // result — no second parse. `algorithm_enum()` is fallible only for a name
+        // `parse()` would already have rejected, so no `unwrap`/`expect` is needed.
+        let compression_reader = match &compression_info {
+            Some(info) => Some(CompressionReader::new(info.algorithm_enum()?)),
+            None => None,
+        };
 
         // Load CRC.db per-chunk checksums for uncompressed BIG read-time integrity
         // (issue #1396). Only for uncompressed tables (compression_info None);

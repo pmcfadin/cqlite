@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING (public API):** deleted the dead SSTable reader stacks flagged by the
+  read-path audit (Epic G / G1, #1597). Removed public items:
+  `cqlite_core::storage::sstable::SchemaAwareReader` (and the
+  `schema_aware_reader` module); the `chunked_data_reader` module and
+  `ChunkedDataReader`; `compression::StreamingDecompressor`,
+  `ChunkedDecompressionConfig`, and the duplicate legacy
+  `compression::CompressionInfo` / `ChunkInfo` parser (`parse` / `parse_binary`);
+  and the streaming half of `CompressionReader` (`read`, `read_streaming`,
+  `with_block_size`, `block_size`) — `CompressionReader` is now a plain
+  `{ algorithm }` field with `new()` + `algorithm()`. All were constructed only in
+  tests or had zero production consumers.
+
 ### Changed
 
+- **Reader open path (perf):** `CompressionInfo.db` is now parsed **exactly once**
+  per reader open (was twice — a legacy `parse_binary` plus the modern `parse`),
+  and the compression algorithm is derived from that single authoritative parse.
+  The legacy `detect_and_initialize_compression` path — which also issued ~25
+  speculative `exists()` generation-probe stats per open — is deleted; the
+  component name is derived deterministically from `SsTableDescriptor` (Epic G /
+  G1, #1597). No read result changes (byte-for-byte parity preserved).
 - **BREAKING (config schema):** `MemoryConfig` collapsed to a single real caching
   knob — `block_cache.max_size`, wired as the shared decompressed-chunk cache's
   byte budget (Epic B / B2, #1568). The decorative `MemoryConfig.row_cache`,

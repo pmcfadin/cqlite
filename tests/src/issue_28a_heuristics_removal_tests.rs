@@ -10,7 +10,7 @@ use cqlite_core::{
     error::{Error, Result},
     parser::header::CassandraVersion,
     schema::{Column, KeyColumn, TableSchema},
-    storage::sstable::compression::CompressionInfo,
+    storage::sstable::compression_info::CompressionInfo,
     storage::sstable::row_cell_state_machine::RowCellStateMachine,
     types::ComparatorType,
 };
