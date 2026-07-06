@@ -36,6 +36,114 @@ fn terminal_drain_skipped_iff_io_failed() {
     );
 }
 
+/// Issue #1593 (roborev) — the [`FeedFailureGuard`] semantics the panic-path fix
+/// rests on. An ARMED guard flips `io_failed` to `true` when dropped; a DISARMED
+/// guard leaves it untouched. A refactor that inverts the arm/disarm sense, drops
+/// the `Drop` impl, or forgets to disarm the clean-EOF path flips one of these.
+#[test]
+fn feed_failure_guard_fires_on_drop_iff_armed() {
+    // Armed guard dropped (the panic / early-exit case): io_failed becomes true.
+    let armed_flag = AtomicBool::new(false);
+    {
+        let _g = FeedFailureGuard::armed(&armed_flag);
+        // dropped at end of scope, still armed
+    }
+    assert!(
+        armed_flag.load(Ordering::SeqCst),
+        "Issue #1593: an ARMED FeedFailureGuard must set io_failed=true on drop \
+         (the panic/early-exit path), else the parse half would spuriously \
+         terminal-drain a truncated window"
+    );
+
+    // Disarmed guard dropped (the clean-EOF path): io_failed stays false so the
+    // terminal drain runs exactly as before.
+    let disarmed_flag = AtomicBool::new(false);
+    {
+        let mut g = FeedFailureGuard::armed(&disarmed_flag);
+        g.disarm();
+    }
+    assert!(
+        !disarmed_flag.load(Ordering::SeqCst),
+        "Issue #1593: a DISARMED FeedFailureGuard must leave io_failed false so the \
+         clean-EOF terminal drain still runs (happy path byte-identical)"
+    );
+}
+
+/// Issue #1593 (roborev) — the ORDERING the fix depends on: on a panic the
+/// body-local guard must flip `io_failed` to `true` BEFORE the feed closure's
+/// captured `raw_tx` drops during unwind (body locals drop before a `move`
+/// closure's captured environment). We cannot inject a panic into the real
+/// `read_next_block_parts` feed loop without a production test hook, so this test
+/// reproduces the exact drop-order scenario: a `move` closure that OWNS a sender
+/// analog (which, on drop, records the `io_failed` value it observes) and creates
+/// a body-local armed guard, then panics. If the guard fires before the captured
+/// sender drops — the property the real fix relies on — the sender observes
+/// `io_failed == true`, exactly what the parse half needs to skip the terminal
+/// drain.
+///
+/// INTEGRATION LIMITATION (documented): an end-to-end panic inside the live
+/// `feed_raw_chunks_blocking` `spawn_blocking` closure is not cleanly injectable
+/// without adding a production-only fault hook, so this proves the drop-order
+/// contract on a faithful stand-in rather than the live feed loop. The live wiring
+/// is a single `FeedFailureGuard::armed(&io_failed_feed)` body-local at the top of
+/// that closure (disarmed only on the clean-EOF exit), whose ordering guarantee is
+/// exactly what this test pins.
+#[test]
+fn feed_failure_guard_fires_before_captured_tx_drops_on_panic() {
+    use std::panic::AssertUnwindSafe;
+
+    // Sender analog: on drop, snapshots the io_failed value it can observe. In the
+    // real feed closure this is `raw_tx`, whose close is what the parse half reads.
+    struct RecordingTx<'a> {
+        io_failed: &'a AtomicBool,
+        observed_on_drop: &'a AtomicBool,
+    }
+    impl Drop for RecordingTx<'_> {
+        fn drop(&mut self) {
+            self.observed_on_drop
+                .store(self.io_failed.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+    }
+
+    let io_failed = AtomicBool::new(false);
+    let observed_on_drop = AtomicBool::new(false);
+    // The atomics stay OWNED by this frame so we can read them after the unwind.
+    // `&AtomicBool` is `Copy`, so the `move` closure captures these shared refs by
+    // copy (not the atomics), while `tx` is captured by move so it drops DURING
+    // the closure's unwind.
+    let io_failed_ref: &AtomicBool = &io_failed;
+    let tx = RecordingTx {
+        io_failed: io_failed_ref,
+        observed_on_drop: &observed_on_drop,
+    };
+
+    // A `move` closure capturing `tx` (like the feed closure captures `raw_tx`)
+    // with a BODY-LOCAL armed guard, that panics. AssertUnwindSafe because the
+    // shared &AtomicBool references are not UnwindSafe by default; the test does
+    // not observe any poisoned/half-updated state, only the post-unwind snapshot.
+    let result = std::panic::catch_unwind(AssertUnwindSafe(move || {
+        let _guard = FeedFailureGuard::armed(io_failed_ref);
+        // `tx` is captured by move; keep it live until the panic so its drop
+        // happens during unwind AFTER the body-local guard's drop.
+        let _keep = &tx;
+        panic!("simulated feed-closure panic");
+    }));
+
+    assert!(result.is_err(), "the closure must have panicked");
+    assert!(
+        io_failed.load(Ordering::SeqCst),
+        "Issue #1593: the guard must set io_failed=true during unwind"
+    );
+    assert!(
+        observed_on_drop.load(Ordering::SeqCst),
+        "Issue #1593 REGRESSION: the captured sender (raw_tx analog) observed \
+         io_failed=false when it dropped during unwind — the guard did NOT fire \
+         first. The parse half would then read a spurious CLEAN EOF and emit a \
+         truncated trailing partition. The body-local guard must drop (and set the \
+         flag) BEFORE the captured sender."
+    );
+}
+
 /// Issue #1143 finding 1 (roborev) — the batching in-flight bound is a single
 /// documented CONSTANT, derived purely from the batch sizing knobs, and is
 /// independent of the caller's `buffer_size`. This pins the algebra so a future

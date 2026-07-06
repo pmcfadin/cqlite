@@ -133,6 +133,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+// Panic/early-exit drop-guard for the raw-chunk feed loops (roborev finding,
+// issue #1593). In a sibling file to keep this driver under the campsite-rule
+// size limit (epic #1116); re-exported privately so `use super::*` in the test
+// module resolves it.
+#[path = "scan_stream_windowed_guard.rs"]
+mod guard;
+use guard::FeedFailureGuard;
+
 /// Bound on the raw-compressed-chunk channel feeding the blocking parse task.
 ///
 /// This is the I/O-half → parse-half hand-off depth. It must stay small enough
@@ -494,6 +502,11 @@ impl SSTableReader {
         raw_tx: mpsc::Sender<Vec<u8>>,
         io_failed: &Arc<AtomicBool>,
     ) -> Option<Error> {
+        // Flip `io_failed` on any unwind so a panic in `read_next_block` cannot
+        // masquerade as a clean EOF and make the parse half emit a truncated
+        // trailing partition (roborev finding, issue #1593). Disarmed on the
+        // clean-EOF / consumer-ended exit below so the happy path is unchanged.
+        let mut panic_guard = FeedFailureGuard::armed(io_failed);
         loop {
             match self.read_next_block(cursor).await {
                 Ok(Some(chunk)) => {
@@ -514,6 +527,9 @@ impl SSTableReader {
                 }
             }
         }
+        // Clean EOF (or consumer ended early): leave `io_failed` false so the
+        // parse half runs its terminal drain exactly as before.
+        panic_guard.disarm();
         None
         // `raw_tx` drops here on return, signalling clean EOF to the parse half.
     }
@@ -536,6 +552,19 @@ impl SSTableReader {
         let io_chunk_index = Arc::clone(&cursor.chunk_index);
         let io_failed_feed = Arc::clone(io_failed);
         let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
+            // Panic/early-exit guard (roborev finding, issue #1593). `raw_tx` is
+            // captured (moved) into this closure and drops when the closure
+            // returns OR unwinds; the parse half reads a `raw_tx` close with
+            // `io_failed == false` as a CLEAN EOF and runs its terminal drain. If
+            // this closure PANICS, `raw_tx` drops during unwind while the only
+            // other `io_failed = true` store (the `Err(join_err)` arm below) runs
+            // LATER — so the parse half would spuriously terminal-drain a
+            // truncated window. Arming this guard as a BODY-LOCAL flips
+            // `io_failed = true` on unwind BEFORE the captured `raw_tx` drops
+            // (body locals drop before a move closure's captured environment).
+            // Disarmed on the clean-EOF / consumer-ended exit so the happy path is
+            // byte-identical.
+            let mut panic_guard = FeedFailureGuard::armed(&io_failed_feed);
             // Record the thread this scan's raw reads run on so a guard test can
             // prove it is a spawn_blocking thread, NOT an async worker (F3).
             // Compiled only under the non-default `scan-offload-probe` feature.
@@ -570,6 +599,9 @@ impl SSTableReader {
                     }
                 }
             }
+            // Clean EOF (or consumer ended early): leave `io_failed` false so the
+            // parse half runs its terminal drain exactly as before.
+            panic_guard.disarm();
             None
             // `raw_tx` drops here (moved into the closure), signalling clean EOF.
         });

@@ -106,13 +106,29 @@ fn fixture_dir() -> Option<PathBuf> {
 /// Open the fixture with `use_mmap = true` so its scan uses the memory-mapped
 /// backend whose reads fault synchronously — the exact backend F3 must offload.
 async fn setup_db_mmap() -> Database {
+    let mut core_config = cqlite_core::Config::default();
+    core_config.storage.use_mmap = true;
+    setup_db_with_config(core_config).await
+}
+
+/// Open the fixture requesting the `Direct` (`O_DIRECT` / `F_NOCACHE`) backend,
+/// the OTHER synchronously-faulting backend F3 must offload (issue #1593). If the
+/// test filesystem refuses direct I/O the reader degrades to buffered at open
+/// (`faults_synchronously()` then returns false) — the calling test detects that
+/// via a `None` recorded I/O-read thread and skips rather than asserting on the
+/// buffered path.
+#[cfg(unix)]
+async fn setup_db_direct() -> Database {
+    let mut core_config = cqlite_core::Config::default();
+    core_config.storage.disk_access_mode = cqlite_core::config::DiskAccessMode::Direct;
+    setup_db_with_config(core_config).await
+}
+
+async fn setup_db_with_config(core_config: cqlite_core::Config) -> Database {
     let datasets_root = get_datasets_root().expect("CQLITE_DATASETS_ROOT");
     let schemas_dir = get_schemas_dir().expect("schemas dir");
     let schema_path = schemas_dir.join(SCHEMA_FILE);
     assert!(schema_path.exists(), "schema not found: {schema_path:?}");
-
-    let mut core_config = cqlite_core::Config::default();
-    core_config.storage.use_mmap = true;
 
     let config = IngestionConfig {
         schema_paths: vec![schema_path],
@@ -219,6 +235,86 @@ async fn mmap_scan_io_read_runs_off_async_worker_pool() {
          worker thread {io_read_thread:?} (one of {workers:?}) instead of a spawn_blocking \
          thread. mmap page faults / O_DIRECT preads block the polling thread inside poll_read, \
          so K concurrent cold scans would pin the whole async pool and stall warm point reads. \
+         Route the faulting-backend read loop onto spawn_blocking (F3)."
+    );
+}
+
+/// Companion to the mmap guard: the `Direct` (`O_DIRECT` / `F_NOCACHE`) backend is
+/// the OTHER `faults_synchronously()` backend that shares the identical
+/// `feed_raw_chunks_blocking` `spawn_blocking` feed path (coverage gap, roborev
+/// finding, issue #1593). It must likewise run its raw chunk read OFF the async
+/// worker pool.
+///
+/// UNIX-gated (there is no `O_DIRECT`/`F_NOCACHE` on non-unix). Direct I/O is NOT
+/// reliably provisionable in every test filesystem (tmpfs / overlayfs refuse
+/// `O_DIRECT`), and the reader degrades GRACEFULLY to buffered at open when it is
+/// refused. On that fallback the buffered feed runs inline on the async runtime by
+/// design (it is genuinely async and does NOT fault synchronously), and never
+/// records an I/O-read thread — so a recorded thread of `None` means "Direct was
+/// refused; buffered fallback in effect" and we SKIP (documented, not a silent
+/// omission) rather than asserting on a backend the environment could not provide.
+/// When Direct IS provisioned, the recorded read thread must be OFF the worker set,
+/// exactly like the mmap guard.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)] // keep == WORKER_THREADS
+async fn direct_scan_io_read_runs_off_async_worker_pool() {
+    let Some(_dir) = fixture_dir() else {
+        eprintln!(
+            "Skipping {KEYSPACE}.{TABLE}: no Data.db present (run fetch-datasets.sh). \
+             This guard is non-vacuous only with the real multi-chunk fixture."
+        );
+        return;
+    };
+
+    let workers = worker_thread_ids().await;
+    assert_eq!(
+        workers.len(),
+        WORKER_THREADS,
+        "expected to enumerate {WORKER_THREADS} distinct async worker threads, saw {}",
+        workers.len()
+    );
+
+    let db = setup_db_direct().await;
+    let sql = format!("SELECT * FROM {KEYSPACE}.{TABLE}");
+
+    scan_offload_probe::arm();
+    let rows = drain_one_scan(&db, &sql).await;
+    let io_read_thread = scan_offload_probe::recorded_io_read_thread();
+    scan_offload_probe::disarm();
+
+    // A present fixture must return rows regardless of backend.
+    assert!(
+        rows > 0,
+        "Issue #1593: {KEYSPACE}.{TABLE} is present but the streaming scan returned 0 rows — \
+         guard would be vacuous"
+    );
+
+    // No recorded I/O-read thread => the faulting-backend (spawn_blocking) feed
+    // path did not run: Direct was refused and the reader fell back to buffered
+    // (inline-on-async by design). Document and skip rather than fail — Direct is
+    // not reliably provisionable in every CI filesystem.
+    let Some(io_read_thread) = io_read_thread else {
+        eprintln!(
+            "Skipping Direct-backend offload assertion for {KEYSPACE}.{TABLE}: O_DIRECT/F_NOCACHE \
+             was refused here, so the reader degraded to the buffered (inline-on-async) backend \
+             (no I/O-read thread recorded). The Direct backend shares the identical \
+             feed_raw_chunks_blocking spawn_blocking path proven by the mmap guard \
+             (covered-by-construction); this environment could not exercise it directly."
+        );
+        return;
+    };
+
+    eprintln!(
+        "Issue #1593 Direct-backend I/O-offload guard: rows={rows} io_read_thread={io_read_thread:?} \
+         async_workers={workers:?}"
+    );
+
+    assert!(
+        !workers.contains(&io_read_thread),
+        "Issue #1593 REGRESSION: the Direct-backed windowed scan's raw chunk read ran on async \
+         worker thread {io_read_thread:?} (one of {workers:?}) instead of a spawn_blocking \
+         thread. O_DIRECT/F_NOCACHE preads block the polling thread inside poll_read, so K \
+         concurrent cold scans would pin the whole async pool and stall warm point reads. \
          Route the faulting-backend read loop onto spawn_blocking (F3)."
     );
 }
