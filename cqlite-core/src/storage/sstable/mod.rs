@@ -40,6 +40,7 @@ pub mod row_cell_state_machine;
 /// Cross-SSTable scan ordering: k-way merge in Cassandra token order (issue #1580).
 mod scan_merge;
 pub mod statistics_reader;
+pub mod stream_merge_probe; // Multi-generation streaming-merge resident-rows probe (issue #1579, D3).
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
 pub mod validation;
@@ -2045,6 +2046,10 @@ impl SSTableManager {
                              (materialized for streaming)",
                             merged.len()
                         );
+                        // Issue #1579 (D3): the eager path holds the WHOLE reconciled
+                        // table resident before dribbling — record that as the resident
+                        // high-water mark so the memory guard observes O(table).
+                        stream_merge_probe::record_resident(merged.len() as u64);
                         let (tx, rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
                         tokio::spawn(async move {
                             for entry in merged {
