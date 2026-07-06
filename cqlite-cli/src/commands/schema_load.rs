@@ -10,16 +10,39 @@ use cqlite_core::schema::{
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Load schema from JSON or CQL file
+/// Load schema from JSON or CQL file.
+///
+/// Emits the "Loading schema…" status lines on stdout (legacy behavior). Handlers
+/// honoring the #284 quiet/tty contract should call
+/// [`load_schema_file_with_status`] instead so the status can be suppressed under
+/// `--quiet` / non-TTY.
 pub(crate) fn load_schema_file(
+    schema_path: &Path,
+    auto_detect: bool,
+    cassandra_version: Option<&str>,
+) -> Result<TableSchema> {
+    load_schema_file_with_status(schema_path, auto_detect, cassandra_version, true)
+}
+
+/// Like [`load_schema_file`], but suppresses the "Loading schema…" status lines
+/// when `show_status` is `false`.
+///
+/// Issue #1506 / #284: schema-loading status is non-essential chatter; a handler
+/// running under `--quiet` (or with a non-TTY stdout) passes `show_status = false`
+/// so no status is printed. The actual schema-loading behavior is unchanged — only
+/// the status-message emission is gated.
+pub(crate) fn load_schema_file_with_status(
     schema_path: &Path,
     _auto_detect: bool,
     _cassandra_version: Option<&str>,
+    show_status: bool,
 ) -> Result<TableSchema> {
     let schema_content = std::fs::read_to_string(schema_path)
         .with_context(|| format!("Failed to read schema file: {}", schema_path.display()))?;
 
-    println!("📋 Loading schema from: {}", schema_path.display());
+    if show_status {
+        println!("📋 Loading schema from: {}", schema_path.display());
+    }
 
     // Determine file type by extension
     let extension = schema_path
@@ -29,7 +52,9 @@ pub(crate) fn load_schema_file(
 
     match extension.to_lowercase().as_str() {
         "json" => {
-            println!("📝 Parsing JSON schema format");
+            if show_status {
+                println!("📝 Parsing JSON schema format");
+            }
             // Parse JSON schema
             let json_schema: serde_json::Value = serde_json::from_str(&schema_content)
                 .with_context(|| "Failed to parse JSON schema")?;
@@ -38,7 +63,9 @@ pub(crate) fn load_schema_file(
             parse_json_schema(&json_schema)
         }
         "cql" | "sql" | "" => {
-            println!("📝 Parsing CQL schema format");
+            if show_status {
+                println!("📝 Parsing CQL schema format");
+            }
             // Parse CQL schema
             parse_cql_schema(&schema_content).with_context(|| "Failed to parse CQL schema")
         }

@@ -7,7 +7,7 @@
 #![allow(deprecated)]
 
 #[cfg(feature = "state_machine")]
-use super::schema_load::load_schema_file;
+use super::schema_load::load_schema_file_with_status;
 #[cfg(feature = "state_machine")]
 use super::support::RealDataParser;
 #[cfg(feature = "state_machine")]
@@ -32,9 +32,17 @@ pub async fn export_sstable(
     schema_path: &Path,
     output_path: &Path,
     format: ExportFormat,
+    quiet: bool,
 ) -> Result<()> {
-    // Load schema with auto-detection
-    let schema = load_schema_file(schema_path, false, None)?;
+    use std::io::IsTerminal;
+
+    // Issue #1506 / #284: progress + status chatter is suppressed under --quiet
+    // and when stdout is not a TTY.
+    let show_progress = !quiet && std::io::stdout().is_terminal();
+
+    // Load schema with auto-detection. Issue #1506 / #284: schema-loading status
+    // is gated behind `show_progress` so `--quiet` (and non-TTY stdout) suppress it.
+    let schema = load_schema_file_with_status(schema_path, false, None, show_progress)?;
 
     let config = cqlite_core::Config::default();
     let platform = Arc::new(cqlite_core::platform::Platform::new(&config).await?);
@@ -45,15 +53,24 @@ pub async fn export_sstable(
     let mut output_file = File::create(output_path)
         .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
 
-    println!("Exporting SSTable: {}", sstable_path.display());
-    println!("Output: {} ({})", output_path.display(), format);
+    if show_progress {
+        println!("Exporting SSTable: {}", sstable_path.display());
+        println!("Output: {} ({})", output_path.display(), format);
+    }
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
+    // Hidden bar when suppressed; on a template error fall back to the default
+    // spinner style rather than panicking (the bar is cosmetic).
+    let pb = if show_progress {
+        let pb = ProgressBar::new_spinner();
+        if let Ok(style) = ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {pos} rows exported")
-            .unwrap(),
-    );
+        {
+            pb.set_style(style);
+        }
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
 
     match format {
         ExportFormat::Json => export_as_json(&reader, &schema, &mut output_file, &pb).await,

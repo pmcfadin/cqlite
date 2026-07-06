@@ -5,12 +5,14 @@ use anyhow::{Context, Result};
 use cqlite_core::types::{ScanRow, TableId};
 use cqlite_core::{storage::sstable::reader::SSTableReader, Config as CoreConfig, RowKey, Value};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::cli::OutputFormat;
 
 /// Execute the read-sstable command
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_read_sstable_command(
     file_path: &Path,
     format: OutputFormat,
@@ -19,8 +21,16 @@ pub async fn execute_read_sstable_command(
     keys_only: bool,
     raw: bool,
     verbose: bool,
+    quiet: bool,
 ) -> Result<()> {
-    eprintln!("📖 Reading SSTable: {}", file_path.display());
+    // Issue #1506 / #284: progress + status chatter (stderr) is suppressed under
+    // --quiet and when stderr is not a TTY; the actual data output (stdout) is
+    // always emitted.
+    let show_status = !quiet && std::io::stderr().is_terminal();
+
+    if show_status {
+        eprintln!("📖 Reading SSTable: {}", file_path.display());
+    }
 
     // Validate file exists
     if !file_path.exists() {
@@ -30,8 +40,8 @@ pub async fn execute_read_sstable_command(
         ));
     }
 
-    // Create progress indicator
-    let pb = create_progress_bar("Opening SSTable");
+    // Create progress indicator (hidden when status output is suppressed)
+    let pb = create_progress_bar("Opening SSTable", show_status);
 
     // Initialize Platform and Config (following initialize_database pattern)
     let config = CoreConfig::default();
@@ -65,8 +75,10 @@ pub async fn execute_read_sstable_command(
     let total_entries = entries.len();
     pb.finish_with_message(format!("✅ Read {} entries", total_entries));
 
-    // Show basic stats if verbose
-    if verbose {
+    // Show basic stats if verbose. Issue #1506 / #284: the verbose statistics
+    // block is status chatter on stderr, so `--quiet` wins over `--verbose` and
+    // suppresses it (gated behind `show_status`).
+    if verbose && show_status {
         let stats = reader.stats().await?;
         eprintln!("\n📊 SSTable Statistics:");
         eprintln!("  Total entries: {}", stats.entry_count);
@@ -92,17 +104,21 @@ pub async fn execute_read_sstable_command(
     let displayed_count = display_entries.len();
 
     if displayed_count == 0 {
-        eprintln!(
-            "No entries to display (total: {}, skip: {})",
-            total_entries, skip
-        );
+        if show_status {
+            eprintln!(
+                "No entries to display (total: {}, skip: {})",
+                total_entries, skip
+            );
+        }
         return Ok(());
     }
 
-    eprintln!(
-        "Displaying {} of {} entries (skip: {})\n",
-        displayed_count, total_entries, skip
-    );
+    if show_status {
+        eprintln!(
+            "Displaying {} of {} entries (skip: {})\n",
+            displayed_count, total_entries, skip
+        );
+    }
 
     // Display based on format
     match format {
@@ -120,22 +136,32 @@ pub async fn execute_read_sstable_command(
         }
     }
 
-    eprintln!(
-        "\n✅ Displayed {} entries (total: {}, skipped: {})",
-        displayed_count, total_entries, skip
-    );
+    if show_status {
+        eprintln!(
+            "\n✅ Displayed {} entries (total: {}, skipped: {})",
+            displayed_count, total_entries, skip
+        );
+    }
 
     Ok(())
 }
 
-/// Create a progress bar for operations
-fn create_progress_bar(message: &str) -> ProgressBar {
+/// Create a progress bar for operations.
+///
+/// When `show` is false (quiet mode or non-TTY, per the #284 contract) a hidden
+/// bar is returned so no progress is drawn. The `ProgressStyle::template(...)`
+/// result is handled without `unwrap()`/`expect()`: on a template error we fall
+/// back to indicatif's default spinner style (the bar is cosmetic).
+fn create_progress_bar(message: &str, show: bool) -> ProgressBar {
+    if !show {
+        return ProgressBar::hidden();
+    }
     let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .expect("Failed to create progress bar template"),
-    );
+    if let Ok(style) =
+        ProgressStyle::default_spinner().template("{spinner:.green} [{elapsed_precise}] {msg}")
+    {
+        pb.set_style(style);
+    }
     pb.set_message(message.to_string());
     pb
 }

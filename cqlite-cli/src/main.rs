@@ -690,6 +690,7 @@ async fn run_main() -> Result<()> {
                         false, // keys_only
                         false, // raw
                         cli.verbose > 0,
+                        cli.quiet,
                     )
                     .await;
                 }
@@ -890,7 +891,7 @@ async fn run_main() -> Result<()> {
             table,
             mapping: _,
             batch_size: _,
-        }) => commands::import_data(&database, &file, format, Some(&table)).await,
+        }) => commands::import_data(&database, &file, format, Some(&table), cli.quiet).await,
         Some(Commands::Export {
             file,
             format,
@@ -928,7 +929,7 @@ async fn run_main() -> Result<()> {
             verbose,
         }) => {
             commands::read_sstable::execute_read_sstable_command(
-                &file, format, limit, skip, keys_only, raw, verbose,
+                &file, format, limit, skip, keys_only, raw, verbose, cli.quiet,
             )
             .await
         }

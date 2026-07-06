@@ -222,6 +222,7 @@ class Database:
         *,
         row_group_size: int = 10000,
         compression: str = "snappy",
+        config: "StreamingConfig | None" = None,
     ) -> int:
         """Export the results of a CQL query to a Parquet file.
 
@@ -233,6 +234,8 @@ class Database:
             path: Destination file path (created or truncated)
             row_group_size: Rows per Parquet row group (default: 10000)
             compression: "snappy" (default), "zstd", or "none"
+            config: Optional StreamingConfig tuning buffer/chunk sizes for the
+                underlying streaming scan (defaults to the engine default)
 
         Returns:
             Number of rows written
