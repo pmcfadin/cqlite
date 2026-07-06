@@ -22,6 +22,13 @@ table, and no `fixed → zigzag` double-decode fallback:
 The obsolete `parser/vint_fixed.rs` module SHALL be removed, and no second live
 VInt bit-assembly SHALL remain on the read path.
 
+The `parse_unsigned_vint32` public wrapper — mandated by the archived
+`read-vint-decoder-unify` change — is a dead surface with zero non-test,
+non-benchmark callers and SHALL NOT be required to exist; it was removed by the
+`delete-dead-parser-generations` change (parser-audit finding J3). The remaining
+public wrappers `parse_vuint` / `parse_vint` SHALL contain no VInt bit-assembly of
+their own but delegate to `decode_unsigned` / `decode_signed`.
+
 #### Scenario: Unsigned decode returns value and consumed length
 
 - **WHEN** `decode_unsigned` is called on a well-formed unsigned VInt of width 1..=9 bytes
@@ -35,7 +42,12 @@ VInt bit-assembly SHALL remain on the read path.
 #### Scenario: vint_fixed module is gone and there is a single implementation
 
 - **WHEN** the crate is built
-- **THEN** `parser/vint_fixed.rs` no longer exists, `parse_zigzag_vint` no longer exists, and the public `parse_vuint` / `parse_vint` / `parse_unsigned_vint32` wrappers contain no VInt bit-assembly of their own but delegate to `decode_unsigned` / `decode_signed`
+- **THEN** `parser/vint_fixed.rs` no longer exists, `parse_zigzag_vint` no longer exists, and the public `parse_vuint` / `parse_vint` wrappers contain no VInt bit-assembly of their own but delegate to `decode_unsigned` / `decode_signed`
+
+#### Scenario: The removed parse_unsigned_vint32 wrapper is no longer required
+
+- **WHEN** the workspace is searched for `parse_unsigned_vint32`
+- **THEN** no compiled (non-comment) Rust source references it, and the read-vint-decode capability does not require the wrapper to exist
 
 ### Requirement: Truncated and empty input are rejected without fabrication
 
