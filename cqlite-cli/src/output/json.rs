@@ -26,6 +26,33 @@ struct RowObj<'a> {
     keys: &'a [&'a str],
 }
 
+/// De-duplicate output column keys keeping the FIRST position and the LAST value,
+/// matching the historical `serde_json::Map::insert` (with `preserve_order`)
+/// collapse of duplicate keys. A query with duplicate output column names (e.g.
+/// `SELECT a, a` or duplicate aliases) must render a SINGLE JSON key, not two.
+///
+/// Returns `None` when there are no duplicates so the caller keeps using the
+/// borrowed key slice allocation-free (the common, unique-key case). The
+/// duplicate check itself does not allocate.
+///
+/// Because the row's values live in a `HashMap` keyed by column name, every
+/// occurrence of a duplicate key resolves to the same (last-written) value, so
+/// keeping the first position with a single entry is byte-identical to the old
+/// `Map::insert` last-wins behaviour.
+fn dedup_keys_last_wins<'a>(keys: &[&'a str]) -> Option<Vec<&'a str>> {
+    let has_dup = keys.iter().enumerate().any(|(i, k)| keys[..i].contains(k));
+    if !has_dup {
+        return None;
+    }
+    let mut unique: Vec<&str> = Vec::with_capacity(keys.len());
+    for &k in keys {
+        if !unique.contains(&k) {
+            unique.push(k);
+        }
+    }
+    Some(unique)
+}
+
 impl Serialize for RowObj<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -91,6 +118,11 @@ impl JSONWriter {
             .iter()
             .map(|col| col.name.as_str())
             .collect();
+        // Collapse duplicate output column names to a single (last-wins) key,
+        // matching the historical `Map::insert` semantics (issue #1499). Only
+        // allocated when a duplicate is actually present.
+        let deduped = dedup_keys_last_wins(&keys);
+        let keys: &[&str] = deduped.as_deref().unwrap_or(&keys);
 
         // Serialize directly through serde_json's pretty serializer so the bytes
         // are identical to the previous `to_string_pretty(Vec<Object>)` path while
@@ -100,7 +132,7 @@ impl JSONWriter {
             let mut serializer = serde_json::Serializer::pretty(&mut buf);
             let mut seq = serializer.serialize_seq(Some(rows_to_display.len()))?;
             for row in rows_to_display {
-                seq.serialize_element(&RowObj { row, keys: &keys })?;
+                seq.serialize_element(&RowObj { row, keys })?;
             }
             SerializeSeq::end(seq)?;
         }
@@ -297,7 +329,12 @@ impl<W: Write> StreamingJSONWriter<W> {
     /// #1499). Output is byte-identical to serializing a `serde_json::Map`.
     fn row_to_json_string(&self, row: &QueryRow) -> Result<String, serde_json::Error> {
         let keys: Vec<&str> = self.columns.iter().map(|c| c.as_str()).collect();
-        let obj = RowObj { row, keys: &keys };
+        // Collapse duplicate column names to a single (last-wins) key so the
+        // streaming writer matches the batch writer and the old `Map::insert`
+        // semantics (issue #1499). Allocation-free when there are no duplicates.
+        let deduped = dedup_keys_last_wins(&keys);
+        let keys: &[&str] = deduped.as_deref().unwrap_or(&keys);
+        let obj = RowObj { row, keys };
         if self.pretty {
             serde_json::to_string_pretty(&obj)
         } else {
@@ -478,6 +515,98 @@ mod tests {
         assert_eq!(json_str, expected);
         // A literal text "null" is a JSON string, never dropped.
         assert!(json_str.contains("\"null\""));
+    }
+
+    /// Issue #1499: a result whose `metadata.columns` contains a duplicate output
+    /// column name (e.g. `SELECT a, a`) must render a SINGLE `"a"` key holding the
+    /// LAST value, byte-identical to the old `serde_json::Map::insert` (last-wins)
+    /// path — NOT two duplicate `"a"` keys.
+    #[test]
+    fn test_duplicate_column_names_collapse_last_wins_batch() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![
+            ColumnInfo::new(
+                "a".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                0,
+            ),
+            ColumnInfo::new(
+                "a".to_string(),
+                cqlite_core::types::DataType::Integer,
+                false,
+                1,
+            ),
+        ];
+        // The row's HashMap holds a single value per name — the LAST written value.
+        let mut values = HashMap::new();
+        values.insert("a".to_string(), Value::Integer(2));
+        result
+            .rows
+            .push(QueryRow::with_values(RowKey::new(vec![1]), values));
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+
+        // Reference: old Map-based path, inserting both duplicate columns in order
+        // (first=1, then last=2) collapses to a single `"a"` key holding 2.
+        let mut map = serde_json::Map::new();
+        map.insert("a".to_string(), serde_json::json!(1));
+        map.insert("a".to_string(), serde_json::json!(2));
+        let expected =
+            serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
+
+        assert_eq!(
+            json_str, expected,
+            "duplicate column name must collapse to a single last-wins key"
+        );
+        // Exactly one occurrence of the `"a"` key.
+        assert_eq!(json_str.matches("\"a\"").count(), 1);
+    }
+
+    /// Issue #1499: the streaming writer must apply the same duplicate-key collapse
+    /// as the batch writer.
+    #[test]
+    fn test_duplicate_column_names_collapse_last_wins_streaming() {
+        let metadata = {
+            let mut m = QueryResult::new().metadata;
+            m.columns = vec![
+                ColumnInfo::new(
+                    "a".to_string(),
+                    cqlite_core::types::DataType::Integer,
+                    false,
+                    0,
+                ),
+                ColumnInfo::new(
+                    "a".to_string(),
+                    cqlite_core::types::DataType::Integer,
+                    false,
+                    1,
+                ),
+            ];
+            m
+        };
+
+        let mut values = HashMap::new();
+        values.insert("a".to_string(), Value::Integer(2));
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = StreamingJSONWriter::new(&mut buf);
+            writer.write_header(&metadata).unwrap();
+            writer.write_chunk(std::slice::from_ref(&row)).unwrap();
+            writer.finalize().unwrap();
+        }
+        let json_str = String::from_utf8(buf).unwrap();
+
+        // Parsing into a Map (last-wins) proves there is exactly one `"a"` key.
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let obj = parsed[0].as_object().unwrap();
+        assert_eq!(obj.len(), 1, "duplicate key must collapse to one entry");
+        assert_eq!(obj.get("a").unwrap(), &serde_json::json!(2));
+        // No duplicate `"a"` key in the raw bytes.
+        assert_eq!(json_str.matches("\"a\"").count(), 1);
     }
 
     #[test]
