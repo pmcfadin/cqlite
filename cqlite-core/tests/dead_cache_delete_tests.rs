@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use cqlite_core::storage::cache::DecompressedChunkCache;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::types::TableId;
 use cqlite_core::{Config, Platform};
@@ -88,6 +89,16 @@ async fn open_reader_with_budget(path: &Path, budget_bytes: u64) -> SSTableReade
         .expect("open fixture")
 }
 
+/// Open a reader sharing an explicitly-constructed cache, so a test can control
+/// the shard count (eviction determinism), not just the byte budget.
+async fn open_reader_with_cache(path: &Path, cache: Arc<DecompressedChunkCache>) -> SSTableReader {
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
+    SSTableReader::open_with_cache(path, &config, platform, cache)
+        .await
+        .expect("open fixture")
+}
+
 async fn scan_count(reader: &Arc<SSTableReader>, tid: &TableId) -> usize {
     let mut rx = Arc::clone(reader).scan_stream(tid.clone(), None, None, None, 64);
     let mut n = 0usize;
@@ -156,14 +167,24 @@ async fn small_config_budget_forces_eviction_and_bounds_residency() {
     let loaded_chunks = big.chunk_cache().len();
     assert!(loaded_chunks > 1, "fixture must span multiple chunks");
 
-    // Budget = 3/5 of the footprint, rounded down to a multiple of 16 so the
-    // 16-shard per-shard split (budget/16) comfortably exceeds one chunk (no
-    // single-oversized-per-shard retention) yet the whole table cannot fit —
-    // forcing genuine eviction while keeping resident bytes within budget.
-    let budget = ((footprint as u64) * 3 / 5) & !0xF;
+    // Budget = 3/5 of the footprint. Use a SINGLE-SHARD cache
+    // (`with_budget_and_shards(_, 1)`) so the residency bound is exact and
+    // deterministic. With the production 16-shard cache, each shard independently
+    // retains up to one oversized entry (`insert`'s documented `len() > 1` guard),
+    // so `resident_bytes()` can legitimately exceed the total `budget` — the old
+    // `budget/16 > one chunk` reasoning did not hold for every fixture and made
+    // the `<= budget` assertion flaky. One shard makes `budget_per_shard == budget`;
+    // since `budget` (3/5 of a multi-chunk footprint) far exceeds any single chunk,
+    // the single-oversized retention never triggers, so `resident_bytes() <= budget`
+    // is a real, deterministic eviction invariant.
+    let budget = (footprint as u64) * 3 / 5;
     assert!(budget > 0 && (budget as usize) < footprint);
 
-    let bounded = Arc::new(open_reader_with_budget(&db, budget).await);
+    let cache = Arc::new(DecompressedChunkCache::with_budget_and_shards(
+        budget as usize,
+        1,
+    ));
+    let bounded = Arc::new(open_reader_with_cache(&db, cache).await);
     assert_eq!(bounded.chunk_cache().budget_bytes() as u64, budget);
     let bounded_rows = scan_count(&bounded, &tid).await;
 
