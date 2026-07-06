@@ -9,6 +9,7 @@ use clap::Parser;
 use tonic::transport::Server;
 
 use cqlite_flight::service::CqliteFlightService;
+use cqlite_flight::shutdown::shutdown_signal;
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]
@@ -55,9 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = CqliteFlightService::new(args.data_dir, args.batch_size);
 
     tracing::info!(%listen, batch_size = args.batch_size, "cqlite-flight starting");
+    // Graceful shutdown (issue #1473): on ctrl_c / SIGTERM, tonic stops
+    // accepting new connections and drains in-flight RPCs rather than tearing
+    // every open stream down abruptly.
     Server::builder()
         .add_service(FlightServiceServer::new(service))
-        .serve(listen)
+        .serve_with_shutdown(listen, shutdown_signal())
         .await?;
     Ok(())
 }

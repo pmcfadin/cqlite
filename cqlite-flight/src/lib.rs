@@ -9,11 +9,13 @@
 //! change log.
 
 pub mod agg;
+pub mod cancel;
 pub mod filter;
 pub mod obs;
 pub mod pathsafe;
 pub mod producer;
 pub mod service;
+pub mod shutdown;
 pub mod stats;
 pub mod ticket;
 
