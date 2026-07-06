@@ -1247,7 +1247,7 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
 /// metadata-only conservatism — a lower min never wrongly purges); no active
 /// byte-parity golden exists for compaction TTL-expiry output (blocked on #1538).
 /// No-heuristics: derived solely from authoritative Statistics.db.
-pub fn compute_expiry_ttl_ldt_floor(input_paths: &[PathBuf]) -> Option<i32> {
+pub(crate) fn compute_expiry_ttl_ldt_floor(input_paths: &[PathBuf]) -> Option<i32> {
     let mut floor: Option<i32> = None;
     for data_path in input_paths {
         let stats_path = stats_path_for(data_path);
