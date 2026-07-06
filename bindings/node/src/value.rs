@@ -408,25 +408,32 @@ fn duration_to_object(env: &Env, months: i32, days: i32, nanos: i64) -> Result<J
     Ok(obj.into_unknown())
 }
 
-/// Convert inet bytes to IP address string.
-fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
-    let ip_str = match bytes.len() {
-        4 => {
-            let ip = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-            ip.to_string()
-        }
+/// Format inet bytes into an IP-address string, or return a typed error message
+/// for a malformed length.
+///
+/// A CQL `inet` value is authoritatively 4 (IPv4) or 16 (IPv6) bytes; any other
+/// length is corrupt data. Per the no-heuristics mandate (issue #28) we surface a
+/// typed error naming the bad length rather than inventing a passthrough — this
+/// is the reference behavior the Python binding was aligned to (issue #1453).
+///
+/// Pure (no napi `Env`) so it is unit-testable; `inet_to_string_js` wraps it.
+fn inet_bytes_to_string(bytes: &[u8]) -> std::result::Result<String, String> {
+    match bytes.len() {
+        4 => Ok(std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string()),
         16 => {
             let mut arr = [0u8; 16];
             arr.copy_from_slice(bytes);
-            std::net::Ipv6Addr::from(arr).to_string()
+            Ok(std::net::Ipv6Addr::from(arr).to_string())
         }
-        _ => {
-            return Err(napi::Error::from_reason(format!(
-                "Invalid inet address length: {} (expected 4 or 16)",
-                bytes.len()
-            )))
-        }
-    };
+        n => Err(format!(
+            "Invalid inet address length: {n} (expected 4 or 16)"
+        )),
+    }
+}
+
+/// Convert inet bytes to IP address string.
+fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
+    let ip_str = inet_bytes_to_string(bytes).map_err(napi::Error::from_reason)?;
     env.create_string(&ip_str).map(|s| s.into_unknown())
 }
 
@@ -628,143 +635,8 @@ pub fn row_to_object(
     Ok(obj)
 }
 
+// Unit tests live in a sibling file to keep this file under the campsite
+// size limit (#1116); `super::*` there resolves to this `value` module.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Serializes every test that resets/reads the process-global
-    /// `ctor_lookups` counter. The increment site lives in library code (a true
-    /// process-global, unlike the local-instance trick in `cqlite-core`'s
-    /// `work_counters`), so two `reset`-then-assert tests running under Rust's
-    /// default parallel runner would race. Both counter tests take this guard.
-    static CTOR_COUNTER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn test_decimal_to_string_positive() {
-        // 123 with scale 2 = 1.23
-        let unscaled = vec![123];
-        assert_eq!(decimal_to_string(2, &unscaled), "1.23");
-    }
-
-    #[test]
-    fn test_decimal_to_string_no_scale() {
-        // 123 with scale 0 = 123
-        let unscaled = vec![123];
-        assert_eq!(decimal_to_string(0, &unscaled), "123");
-    }
-
-    #[test]
-    fn test_decimal_to_string_negative_scale() {
-        // 123 with scale -2 = 12300 (123e2)
-        let unscaled = vec![123];
-        assert_eq!(decimal_to_string(-2, &unscaled), "123e2");
-    }
-
-    #[test]
-    fn test_decimal_to_string_large_scale() {
-        // 123 with scale 5 = 0.00123
-        let unscaled = vec![123];
-        assert_eq!(decimal_to_string(5, &unscaled), "0.00123");
-    }
-
-    #[test]
-    fn test_decimal_to_string_empty() {
-        assert_eq!(decimal_to_string(0, &[]), "0");
-    }
-
-    #[test]
-    fn test_decimal_to_string_negative() {
-        // -123 in two's complement (single byte) = 0x85 = 133, but need proper encoding
-        // For -123: 256 - 123 = 133 = 0x85
-        let unscaled = vec![0x85]; // -123 as two's complement byte
-        assert_eq!(decimal_to_string(2, &unscaled), "-1.23");
-    }
-
-    // Issue #1448: prove the constructor-caching invariant without a live JS
-    // `Env`. `cache_get_or_try_init` is the single fetch-vs-cached decision point
-    // both `set_constructor` and `map_constructor` delegate to; exercising it with
-    // a plain `OnceCell<T>` and a counting `fetch` reproduces exactly the caching
-    // logic those methods use, so the work counter (bumped only on the fetch path)
-    // proves the "at most one lookup per cache, zero when unused" invariant.
-    //
-    // Both the zero-lookups case and the once-per-cache case live in a SINGLE
-    // test on purpose: the counter is a process-global (the increment site is in
-    // library code, unlike the local-instance trick in `cqlite-core`'s
-    // `work_counters`), so splitting them into two `reset`-then-assert tests would
-    // race under Rust's default parallel test runner. Tests that touch the counter
-    // serialize on `CTOR_COUNTER_GUARD`.
-    #[test]
-    fn ctor_cache_fetches_at_most_once_per_cache() {
-        let _guard = CTOR_COUNTER_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        testing::reset_ctor_lookups();
-
-        // Zero lookups when no set/map cell is ever converted (a `ConvCtx` never
-        // reaches `cache_get_or_try_init` unless a collection cell needs a ctor).
-        assert_eq!(testing::ctor_lookups(), 0);
-
-        let cell: OnceCell<u32> = OnceCell::new();
-
-        // First access: cache miss -> exactly one fetch (counter goes 0 -> 1).
-        let first = cache_get_or_try_init(&cell, || Ok(7u32)).expect("first init");
-        assert_eq!(*first, 7);
-        assert_eq!(testing::ctor_lookups(), 1);
-
-        // Second access on the SAME cell: cache hit -> NO further fetch. This is
-        // the per-cell repeat that used to re-`get_global()` before #1448.
-        let second = cache_get_or_try_init(&cell, || {
-            panic!("must not fetch again once cached");
-        })
-        .expect("second hit");
-        assert_eq!(*second, 7);
-        assert_eq!(testing::ctor_lookups(), 1);
-    }
-
-    // Issue #1449: FFI-call BUDGET ratchet for the #1448 constructor-caching win.
-    //
-    // The `ctor_lookups` counter is Rust-`#[cfg(test)]` only and NOT exposed to
-    // JS, so per the issue this FFI-call budget is asserted here (Rust) while the
-    // JS test owns the per-row heap-delta budget.
-    //
-    // A `ConvCtx` lives for a WHOLE result conversion; its two `OnceCell`s back
-    // the `Set` and `Map` constructor caches. `row_to_object` -> `value_to_napi`
-    // routes every set/map cell through `set_constructor`/`map_constructor`, both
-    // of which delegate to the single `cache_get_or_try_init` fetch-vs-cached
-    // decision point. So converting a wide result of ROWS rows, each with several
-    // set AND map cells, must still fetch each global constructor at most once for
-    // the entire result — total lookups <= 2 (one Set cache + one Map cache),
-    // regardless of row/cell count. A regression to per-cell `get_global()` would
-    // make this O(rows x collection-cells).
-    //
-    // This exercises `cache_get_or_try_init` directly on two shared cells (exactly
-    // what `set_constructor`/`map_constructor` delegate to) because instantiating a
-    // real `ConvCtx` needs a live napi `Env`, which is unavailable in a unit test.
-    #[test]
-    fn set_map_ctor_lookups_bounded_per_result() {
-        let _guard = CTOR_COUNTER_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        testing::reset_ctor_lookups();
-
-        // One pair of caches shared across the whole simulated result, as a real
-        // per-result `ConvCtx` holds.
-        let set_cell: OnceCell<u32> = OnceCell::new();
-        let map_cell: OnceCell<u32> = OnceCell::new();
-
-        const ROWS: usize = 200;
-        const COLLECTION_CELLS_PER_ROW: usize = 5;
-        for _ in 0..ROWS {
-            for _ in 0..COLLECTION_CELLS_PER_ROW {
-                let _ = cache_get_or_try_init(&set_cell, || Ok(1u32)).expect("set ctor");
-                let _ = cache_get_or_try_init(&map_cell, || Ok(2u32)).expect("map ctor");
-            }
-        }
-
-        // 2 caches, each accessed ROWS * COLLECTION_CELLS_PER_ROW = 1000 times,
-        // but each fetched exactly once -> total 2. Budget is 2 (<=1 per cache).
-        let lookups = testing::ctor_lookups();
-        assert!(
-            lookups <= 2,
-            "constructor lookups {lookups} exceeded FFI-call budget of 2 \
-             (<=1 per Set/Map cache per result); a regression to per-cell \
-             get_global() would make this O(rows x collection-cells) — see #1449"
-        );
-    }
-}
+#[path = "value_tests.rs"]
+mod tests;
