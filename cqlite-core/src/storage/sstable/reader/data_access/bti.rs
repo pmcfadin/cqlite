@@ -312,19 +312,18 @@ impl SSTableReader {
         // Issue #1575 (C4): encode the raw key then walk with the pre-encoded key via
         // the single `lookup_partition_in_bti_slice` primitive every BTI lookup shares.
         let encoded = encode_partition_key_for_bti_trie(partition_key);
-        let rows_offset =
-            match lookup_partition_in_bti_slice(partitions_db.as_slice(), &encoded)
-                .map_err(|e| {
-                    Error::corruption(format!(
-                        "BTI clustering seek: Partitions.db trie lookup failed (key len={}): {}",
-                        partition_key.len(),
-                        e
-                    ))
-                })? {
-                Some(BtiPartitionLocation::RowsOffset(off)) => off as usize,
-                // NARROW partition or absent key: no row index to narrow with.
-                Some(BtiPartitionLocation::DataOffset(_)) | None => return Ok(None),
-            };
+        let rows_offset = match lookup_partition_in_bti_slice(partitions_db.as_slice(), &encoded)
+            .map_err(|e| {
+                Error::corruption(format!(
+                    "BTI clustering seek: Partitions.db trie lookup failed (key len={}): {}",
+                    partition_key.len(),
+                    e
+                ))
+            })? {
+            Some(BtiPartitionLocation::RowsOffset(off)) => off as usize,
+            // NARROW partition or absent key: no row index to narrow with.
+            Some(BtiPartitionLocation::DataOffset(_)) | None => return Ok(None),
+        };
 
         // Resolve the per-partition row-index entry and enumerate its blocks in
         // ascending byte-comparable (clustering) order.
