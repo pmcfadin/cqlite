@@ -100,6 +100,20 @@ pub(crate) enum ScanAdmission {
     /// Sub-scan of a fan-out merge that already holds the operation's single
     /// permit: do NOT admit (independent admission here would hold-and-wait on the
     /// same operation and deadlock).
+    ///
+    /// The SOLE constructor of this variant is the lazy cross-generation fan-out
+    /// merge in `SSTableManager::scan_stream`, which is `#[cfg(not(feature =
+    /// "tombstones"))]` (under `tombstones` that method instead delegates wholesale
+    /// to the materializing `scan`, so no fan-out sub-scan is ever opened). The
+    /// enum, the `run_scan_stream` match arm that consumes this variant, and the
+    /// intra-doc links to it are all compiled UNCONDITIONALLY, so the variant must
+    /// keep existing under every feature set — it cannot itself be `#[cfg]`-gated
+    /// out without breaking that always-compiled match/doc surface. Under
+    /// `tombstones` alone it is therefore declared-but-never-constructed, which
+    /// `-D warnings` dead-code would reject; allow it under exactly the feature
+    /// where its constructor is compiled out (mirroring the constructor's cfg
+    /// rather than blanket-allowing). Issue #1594 / dead-variant clippy fix.
+    #[cfg_attr(feature = "tombstones", allow(dead_code))]
     Exempt,
 }
 
