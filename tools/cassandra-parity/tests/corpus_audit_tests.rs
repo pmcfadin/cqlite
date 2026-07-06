@@ -196,6 +196,33 @@ fn churned_reference_under_new_uuid_is_clean() {
     assert_eq!(report.count(FindingKind::MissingReference), 0);
 }
 
+/// Issue #2009: a fresh regeneration flushes/compacts to a DIFFERENT SSTable
+/// generation than the committed corpus (e.g. committed `nb-1-big`, regenerated
+/// `nb-2-big`). Identity is generation-independent, so a reference whose only
+/// difference is the generation number is NOT missing — the corpus still produces
+/// that table+component. Before the fix this fired MISSING-REFERENCE on every
+/// core keyspace (84+ findings), keeping the lane red.
+#[test]
+fn generation_churn_reference_is_clean() {
+    // Same table + component, but a different generation number in the basename.
+    let regenerated = REF.replace("nb-1-big-", "nb-2-big-");
+    let inv = inventory_with(&[regenerated.as_str()]);
+    let report = corpus_audit::audit(
+        &manifest(),
+        &index_text(false),
+        &inv,
+        &ExpectedInventory::default(),
+        Some(&good_provenance()),
+        &all_corruption_fixtures(),
+    );
+    assert!(
+        report.ok(),
+        "generation churn (same table+component, new generation) must be clean, got: {}",
+        report.render()
+    );
+    assert_eq!(report.count(FindingKind::MissingReference), 0);
+}
+
 #[test]
 fn unclassified_high_relevance_fails_and_names_offender() {
     let report = corpus_audit::audit(

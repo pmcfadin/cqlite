@@ -57,6 +57,14 @@ pub fn check_references(manifest: &Manifest, inventory: &CorpusInventory) -> Vec
             if inventory.files.contains(&r) || produced.contains(&component_identity(&r)) {
                 continue;
             }
+            // A DIRECTORY / keyspace reference (e.g. `.../sstables/test_tomb` or the
+            // corpus root `.../sstables`) names no single component file, so it can
+            // never match by component identity. Under the coverage/presence
+            // contract it is satisfied when the regeneration produced ANY file
+            // under it (issue #2009).
+            if reference_is_satisfied_directory(&r, &inventory.files) {
+                continue;
+            }
             // Genuine disappearance: no regenerated file shares this reference's
             // table+component identity.
             out.push(AuditFinding::new(
@@ -71,6 +79,15 @@ pub fn check_references(manifest: &Manifest, inventory: &CorpusInventory) -> Vec
         }
     }
     out
+}
+
+/// True when `reference` names a directory/keyspace under the corpus that the
+/// regeneration populated — i.e. some produced file lives strictly under it. Used
+/// so a scenario that references a keyspace dir (or the corpus root) rather than a
+/// single component file is satisfied by coverage of that directory (issue #2009).
+fn reference_is_satisfied_directory(reference: &str, files: &BTreeSet<String>) -> bool {
+    let prefix = format!("{}/", reference.trim_end_matches('/'));
+    files.iter().any(|f| f.starts_with(&prefix))
 }
 
 /// Collect a scenario's references that live under the regenerated corpus tree.
@@ -110,20 +127,49 @@ pub fn is_system_keyspace_path(path: &str) -> bool {
         .any(|seg| seg == "system" || seg.starts_with("system_"))
 }
 
-/// A UUID-independent identity for a single component file: its [`table_key`]
-/// (parent directory with the trailing `-<uuid>` stripped) joined with its
-/// basename. So the same golden under `simple_table-<uuidA>/nb-1-big-Data.db.jsonl`
-/// and `simple_table-<uuidB>/nb-1-big-Data.db.jsonl` share one identity. The
-/// component-change audit (issue #1026) keys both the committed-expected and the
-/// regenerated-actual inventories by this identity, so the per-run table-UUID
-/// churn is not mistaken for a presence/checksum change.
+/// A UUID- AND generation-independent identity for a single component file: its
+/// [`table_key`] (parent directory with the trailing `-<uuid>` stripped) joined
+/// with its [`normalize_basename_generation`]-normalized basename. So the same
+/// golden under `simple_table-<uuidA>/nb-1-big-Data.db.jsonl` and
+/// `simple_table-<uuidB>/nb-2-big-Data.db.jsonl` share one identity. The
+/// component-change + missing-reference audits (issues #1026, #2009) key both the
+/// committed-expected and the regenerated-actual inventories by this identity, so
+/// neither the per-run table-UUID churn NOR the per-run SSTable generation number
+/// (a fresh regen flushes/compacts to a different generation, e.g. `nb-1-big` ->
+/// `nb-2-big`) is mistaken for a presence change.
 pub fn component_identity(path: &str) -> String {
     let (parent, base) = split_path(path);
     let key = table_key(parent);
+    let base = normalize_basename_generation(base);
     if key.is_empty() {
-        base.to_string()
+        base
     } else {
         format!("{key}/{base}")
+    }
+}
+
+/// Normalize the per-run SSTable **generation** number out of a component
+/// basename, so a golden is identified by (table, version, format, component)
+/// regardless of which generation Cassandra assigned this run. A Cassandra 5.0
+/// SSTable descriptor filename is `<version>-<generation>-<format>-<component>`
+/// (e.g. `nb-1-big-Data.db`, `oa-2-big-Statistics.db.txt`, `da-2-bti-Data.db.jsonl`);
+/// only the `<generation>` digits vary across a fresh regeneration. This replaces
+/// those digits with a fixed `<gen>` token. A basename that does NOT match the
+/// descriptor shape (version = 2 ascii-alnum, generation = digits, format =
+/// `big`|`bti`) is returned UNCHANGED, so non-SSTable files (schemas, manifests)
+/// are never rewritten (issue #2009).
+pub fn normalize_basename_generation(base: &str) -> String {
+    let parts: Vec<&str> = base.splitn(4, '-').collect();
+    if parts.len() == 4
+        && parts[0].len() == 2
+        && parts[0].chars().all(|c| c.is_ascii_alphanumeric())
+        && !parts[1].is_empty()
+        && parts[1].chars().all(|c| c.is_ascii_digit())
+        && (parts[2] == "big" || parts[2] == "bti")
+    {
+        format!("{}-<gen>-{}-{}", parts[0], parts[2], parts[3])
+    } else {
+        base.to_string()
     }
 }
 
@@ -161,4 +207,71 @@ fn strip_uuid_suffix(seg: &str) -> &str {
         }
     }
     seg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_basename_generation_strips_only_the_generation() {
+        for (input, want) in [
+            ("nb-1-big-Data.db", "nb-<gen>-big-Data.db"),
+            ("nb-2-big-Data.db.jsonl", "nb-<gen>-big-Data.db.jsonl"),
+            (
+                "oa-2-big-Statistics.db.txt",
+                "oa-<gen>-big-Statistics.db.txt",
+            ),
+            ("da-61-bti-TOC.txt", "da-<gen>-bti-TOC.txt"),
+            ("nb-45-big-Digest.crc32", "nb-<gen>-big-Digest.crc32"),
+        ] {
+            assert_eq!(normalize_basename_generation(input), want, "input {input}");
+        }
+        // Non-descriptor basenames are returned unchanged.
+        for unchanged in ["schema.cql", "metadata.yml", "manifest-v1.yml", "TOC.txt"] {
+            assert_eq!(normalize_basename_generation(unchanged), unchanged);
+        }
+    }
+
+    #[test]
+    fn component_identity_is_uuid_and_generation_independent() {
+        let committed =
+            "test-data/datasets/sstables/test_basic/simple_table-aaaa000000000000000000000000ffff/nb-1-big-Data.db.jsonl";
+        let regenerated =
+            "test-data/datasets/sstables/test_basic/simple_table-bbbb000000000000000000001111ffff/nb-2-big-Data.db.jsonl";
+        assert_eq!(
+            component_identity(committed),
+            component_identity(regenerated)
+        );
+        // A different component under the same table has a DIFFERENT identity.
+        let other =
+            "test-data/datasets/sstables/test_basic/simple_table-bbbb000000000000000000001111ffff/nb-2-big-Index.db";
+        assert_ne!(component_identity(committed), component_identity(other));
+    }
+
+    #[test]
+    fn directory_reference_satisfied_only_when_a_file_lives_under_it() {
+        let mut files = BTreeSet::new();
+        files.insert("test-data/datasets/sstables/test_tomb/tt-abcd/nb-1-big-Data.db".to_string());
+        // A keyspace-dir reference is satisfied by a file strictly under it.
+        assert!(reference_is_satisfied_directory(
+            "test-data/datasets/sstables/test_tomb",
+            &files
+        ));
+        // The corpus root is satisfied too.
+        assert!(reference_is_satisfied_directory(
+            "test-data/datasets/sstables",
+            &files
+        ));
+        // A sibling keyspace with no produced file is NOT satisfied.
+        assert!(!reference_is_satisfied_directory(
+            "test-data/datasets/sstables/test_absent",
+            &files
+        ));
+        // A prefix that is not a path-boundary parent must NOT match.
+        assert!(!reference_is_satisfied_directory(
+            "test-data/datasets/sstables/test_to",
+            &files
+        ));
+    }
 }

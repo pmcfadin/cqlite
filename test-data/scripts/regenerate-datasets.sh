@@ -862,13 +862,22 @@ log "=== Exporting SSTables from container ==="
 SSTABLES_DIR="$OUT_DIR/sstables"
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  mkdir -p "$SSTABLES_DIR"
-
-  # Stream all Cassandra data out via tar
+  # Stream all Cassandra data out via tar. The archive is rooted at
+  # /var/lib/cassandra so it unpacks to "$OUT_DIR/data/<keyspace>/...".
   if $ENGINE exec "$CONTAINER_NAME" bash -lc 'tar -C /var/lib/cassandra -cf - data' \
       | tar -C "$OUT_DIR" -xf -; then
+    # RENAME data -> sstables so the layout is "sstables/<keyspace>/...", matching
+    # the committed corpus. Do NOT pre-create $SSTABLES_DIR: a pre-existing target
+    # makes `mv "$OUT_DIR/data" "$SSTABLES_DIR"` nest the tree as
+    # "sstables/data/<keyspace>/..." (issue #2009 — the corpus audit then sees
+    # every regenerated component under a different path/identity than the
+    # committed corpus and false-fails). rm -rf the target first so the rename is
+    # a clean rename, not a move-into.
+    rm -rf "$SSTABLES_DIR"
     if [[ -d "$OUT_DIR/data" ]]; then
       mv "$OUT_DIR/data" "$SSTABLES_DIR"
+    else
+      mkdir -p "$SSTABLES_DIR"
     fi
     log "SSTables exported to $SSTABLES_DIR"
   else
