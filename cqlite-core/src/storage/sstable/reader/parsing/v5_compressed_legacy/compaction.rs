@@ -13,7 +13,7 @@ impl V5CompressedLegacyParser {
     /// (no cells, no tombstone) produces an empty `Live`.
     fn build_compaction_row_data(
         &self,
-        cells: HashMap<Arc<str>, Value>,
+        cells: RowCells,
         cell_meta: Option<HashMap<String, CellWriteMetadata>>,
         complex: CompactionComplexColumns,
         row_header_opt: &Option<RowHeader>,

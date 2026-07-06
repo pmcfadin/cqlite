@@ -528,6 +528,14 @@ impl StorageEngine {
         self.sstables.stats_chunk_cache()
     }
 
+    /// Process-level aggregate of the per-reader key→partition-offset caches
+    /// (issue #1571, B5), summed over live readers. Merged into
+    /// `Database::stats().memory_stats` so the B4 key cache's real
+    /// hits/misses/evictions/occupancy/capacity are observable.
+    pub(crate) async fn key_cache_stats(&self) -> crate::storage::cache::KeyCacheSnapshot {
+        self.sstables.aggregate_key_cache_stats().await
+    }
+
     /// Get storage statistics
     ///
     /// NOTE: Issue #176 removed compaction stats (compaction.rs deleted).

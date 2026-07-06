@@ -133,6 +133,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+// Panic/early-exit drop-guard for the raw-chunk feed loops (roborev finding,
+// issue #1593). In a sibling file to keep this driver under the campsite-rule
+// size limit (epic #1116); re-exported privately so `use super::*` in the test
+// module resolves it.
+#[path = "scan_stream_windowed_guard.rs"]
+mod guard;
+use guard::FeedFailureGuard;
+
 /// Bound on the raw-compressed-chunk channel feeding the blocking parse task.
 ///
 /// This is the I/O-half → parse-half hand-off depth. It must stay small enough
@@ -443,31 +451,22 @@ impl SSTableReader {
         // Feed raw compressed chunks to the parse task. The bounded `raw_tx`
         // applies backpressure all the way back to disk reads when the consumer
         // (and thus the parse task) falls behind.
-        let mut io_err: Option<Error> = None;
-        loop {
-            match self.read_next_block(cursor).await {
-                Ok(Some(chunk)) => {
-                    if raw_tx.send(chunk).await.is_err() {
-                        // Parse task ended early (consumer dropped or parse
-                        // error). Stop reading; the task's result is canonical.
-                        break;
-                    }
-                }
-                Ok(None) => break, // EOF
-                Err(e) => {
-                    // Tell the parse half to SKIP the terminal final drain: the
-                    // stream is truncated, so the trailing window is partial and
-                    // must not be emitted. The store is sequenced before the
-                    // `drop(raw_tx)` the parse half synchronizes on.
-                    io_failed.store(true, Ordering::SeqCst);
-                    io_err = Some(e);
-                    break;
-                }
-            }
-        }
-        // Drop the sender so the blocking task sees EOF and runs its final drain
-        // (only if `io_failed` is still false — see the parse half).
-        drop(raw_tx);
+        //
+        // Determine the ACTUAL scan backend once (the per-scan cursor mutex is
+        // uncontended, so this lock is effectively free). A synchronously-faulting
+        // backend (mmap page fault / `O_DIRECT` `pread`) does its disk I/O
+        // *inside* `poll_read`, so reading it on an async worker blocks — and K
+        // concurrent cold scans pin the whole pool, stalling every warm point read
+        // (issue #1593, F3). Route such a backend's read loop off the async
+        // workers; the buffered backend is genuinely async (`tokio::fs`, reactor-
+        // driven) and stays inline on the runtime.
+        let faulting_backend = cursor.file.lock().await.faults_synchronously();
+
+        let io_err: Option<Error> = if faulting_backend {
+            Self::feed_raw_chunks_blocking(Arc::clone(&self), cursor, raw_tx, &io_failed).await
+        } else {
+            self.feed_raw_chunks_async(cursor, raw_tx, &io_failed).await
+        };
 
         // Join the parse task; its Result is the scan's Result. An I/O error
         // takes precedence (the task only saw a truncated stream). The parse task
@@ -489,6 +488,132 @@ impl SSTableReader {
             return Err(e);
         }
         parse_result
+    }
+
+    /// I/O feed loop for a genuinely-async (buffered) backend: read the next
+    /// compressed chunk on the async runtime and forward it over the bounded
+    /// `raw_tx`. `tokio::fs` reads are reactor-driven and non-blocking, so this
+    /// belongs inline on the worker (issue #1593, F3). Returns the terminal read
+    /// error, if any; consumes `raw_tx` so it drops on return, signalling EOF to
+    /// the parse half (only when `io_failed` stayed false — see the parse half).
+    async fn feed_raw_chunks_async(
+        &self,
+        cursor: &ScanCursor,
+        raw_tx: mpsc::Sender<Vec<u8>>,
+        io_failed: &Arc<AtomicBool>,
+    ) -> Option<Error> {
+        // Flip `io_failed` on any unwind so a panic in `read_next_block` cannot
+        // masquerade as a clean EOF and make the parse half emit a truncated
+        // trailing partition (roborev finding, issue #1593). Disarmed on the
+        // clean-EOF / consumer-ended exit below so the happy path is unchanged.
+        let mut panic_guard = FeedFailureGuard::armed(io_failed);
+        loop {
+            match self.read_next_block(cursor).await {
+                Ok(Some(chunk)) => {
+                    if raw_tx.send(chunk).await.is_err() {
+                        // Parse task ended early (consumer dropped or parse error).
+                        // Stop reading; the task's result is canonical.
+                        break;
+                    }
+                }
+                Ok(None) => break, // EOF
+                Err(e) => {
+                    // Tell the parse half to SKIP the terminal final drain: the
+                    // stream is truncated, so the trailing window is partial and
+                    // must not be emitted. The store is sequenced before the
+                    // `drop(raw_tx)` (on return) the parse half synchronizes on.
+                    io_failed.store(true, Ordering::SeqCst);
+                    return Some(e);
+                }
+            }
+        }
+        // Clean EOF (or consumer ended early): leave `io_failed` false so the
+        // parse half runs its terminal drain exactly as before.
+        panic_guard.disarm();
+        None
+        // `raw_tx` drops here on return, signalling clean EOF to the parse half.
+    }
+
+    /// I/O feed loop for a synchronously-faulting backend (mmap page fault /
+    /// `O_DIRECT` `pread`): run the WHOLE per-scan read loop on ONE
+    /// `spawn_blocking` thread so the blocking disk I/O never pins an async worker
+    /// (issue #1593, F3). One offload per scan (mirroring the parse half — never
+    /// per chunk, which would over-spawn; per-scan admission is F4's scope). Feeds
+    /// the same bounded `raw_tx` via `blocking_send` (backpressure preserved: a
+    /// full channel parks this thread). Consumes `raw_tx` (moved into the task) so
+    /// it drops when the task returns, signalling EOF exactly as the async loop.
+    async fn feed_raw_chunks_blocking(
+        reader: Arc<Self>,
+        cursor: &ScanCursor,
+        raw_tx: mpsc::Sender<Vec<u8>>,
+        io_failed: &Arc<AtomicBool>,
+    ) -> Option<Error> {
+        let io_file = Arc::clone(&cursor.file);
+        let io_chunk_index = Arc::clone(&cursor.chunk_index);
+        let io_failed_feed = Arc::clone(io_failed);
+        let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
+            // Panic/early-exit guard (roborev finding, issue #1593). `raw_tx` is
+            // captured (moved) into this closure and drops when the closure
+            // returns OR unwinds; the parse half reads a `raw_tx` close with
+            // `io_failed == false` as a CLEAN EOF and runs its terminal drain. If
+            // this closure PANICS, `raw_tx` drops during unwind while the only
+            // other `io_failed = true` store (the `Err(join_err)` arm below) runs
+            // LATER — so the parse half would spuriously terminal-drain a
+            // truncated window. Arming this guard as a BODY-LOCAL flips
+            // `io_failed = true` on unwind BEFORE the captured `raw_tx` drops
+            // (body locals drop before a move closure's captured environment).
+            // Disarmed on the clean-EOF / consumer-ended exit so the happy path is
+            // byte-identical.
+            let mut panic_guard = FeedFailureGuard::armed(&io_failed_feed);
+            // Record the thread this scan's raw reads run on so a guard test can
+            // prove it is a spawn_blocking thread, NOT an async worker (F3).
+            // Compiled only under the non-default `scan-offload-probe` feature.
+            #[cfg(feature = "scan-offload-probe")]
+            probe::record_io_read_thread();
+            loop {
+                // SOUNDNESS (issue #1593): driving the async read under
+                // `futures::executor::block_on` on this blocking thread is sound
+                // ONLY because the mmap/`O_DIRECT` per-chunk read path touches no
+                // tokio reactor/timer primitive — the per-scan cursor `Mutex` is
+                // executor-agnostic (semaphore + wakers, no reactor);
+                // `MmapCursor`/`DirectCursor` `poll_*` are pure synchronous
+                // memory/`pread` ops; the CRC digest is preloaded in memory at
+                // open (no per-chunk `tokio::fs`); and the transient-retry re-seek
+                // uses no `tokio::time`. This branch is NEVER taken for the
+                // buffered backend (which needs the reactor). A nested tokio
+                // runtime or `block_in_place` would panic on a `spawn_blocking`
+                // thread; `futures::executor::block_on` is a plain thread-parking
+                // executor with no tokio involvement, so it does not.
+                match futures::executor::block_on(
+                    reader.read_next_block_parts(&io_file, &io_chunk_index),
+                ) {
+                    Ok(Some(chunk)) => {
+                        if raw_tx.blocking_send(chunk).is_err() {
+                            break; // consumer/parse ended early
+                        }
+                    }
+                    Ok(None) => break, // EOF
+                    Err(e) => {
+                        io_failed_feed.store(true, Ordering::SeqCst);
+                        return Some(e);
+                    }
+                }
+            }
+            // Clean EOF (or consumer ended early): leave `io_failed` false so the
+            // parse half runs its terminal drain exactly as before.
+            panic_guard.disarm();
+            None
+            // `raw_tx` drops here (moved into the closure), signalling clean EOF.
+        });
+        match feed.await {
+            Ok(e) => e,
+            Err(join_err) => {
+                io_failed.store(true, Ordering::SeqCst);
+                Some(Error::corruption(format!(
+                    "run_scan_stream_windowed: I/O feed task failed: {join_err}"
+                )))
+            }
+        }
     }
 
     /// Blocking parse half of the windowed streaming scan (issue #1143).

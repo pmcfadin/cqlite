@@ -100,8 +100,13 @@ const _: () = assert!(std::mem::size_of::<Value>() <= 88);
 /// Each entry is `(column_name, value)` where the name is a shared `Arc<str>`
 /// handle interned once by the row decoder. Carrying a cell's name into
 /// `QueryRow.values` is therefore a reference-count bump — NOT a per-cell heap
-/// `String` allocation. Entries are ordered exactly as the producer emits them
-/// (emit-time alphabetical by column name).
+/// `String` allocation. Entries are ordered exactly as the producer emits them,
+/// which is deterministic per producer: the PRIMARY V5 decoder emits positionally
+/// in serialization-header (schema) column order by CONSTRUCTION, with no per-row
+/// sort (issue #1642 / K3); the cold schema-less fallback paths collect into an
+/// unordered map and emit SORTED order. This order is NOT user-visible: the public
+/// query result (`QueryRow.values`) is a name-keyed map, so all consumers key by
+/// name regardless of producer.
 pub type RowCells = Vec<(Arc<str>, Value)>;
 
 /// Payload of a single scanned row as it crosses the storage → query boundary
@@ -118,9 +123,12 @@ pub type RowCells = Vec<(Arc<str>, Value)>;
 /// column values can never silently fall through to a non-row fallback.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanRow {
-    /// A live row: its interned cells, ordered exactly as emitted (emit-time
-    /// alphabetical by column name). These cells are ALREADY DECODED — a
-    /// consumer surfaces them as-is (never re-decoding a cell value).
+    /// A live row: its interned cells, ordered exactly as emitted — the PRIMARY V5
+    /// decoder emits positionally in serialization-header column order (issue #1642
+    /// / K3), while cold schema-less fallback paths emit sorted order (both
+    /// deterministic). These cells are ALREADY DECODED — a consumer surfaces them
+    /// as-is (never re-decoding a cell value). The order is not user-visible (the
+    /// public result is name-keyed).
     Row(RowCells),
     /// A RAW, UNDECODED whole-row value carried with explicit provenance
     /// (issue #1334). Emitted only by the fallback producers — the `data_access`

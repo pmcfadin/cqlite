@@ -212,6 +212,24 @@ pub struct ReadDb {
 /// ingestion API ([`cqlite_core::ingestion::ingest`]).
 #[cfg(feature = "cli-helpers")]
 pub fn open_read_db(fx: &ReadFixture) -> ReadDb {
+    open_read_db_with_config(fx, cqlite_core::Config::default())
+}
+
+/// Open a fixture table with the memory-mapped scan backend forced on
+/// (`storage.use_mmap = true`), for the F3 cold-mixed-load tail gate (issue
+/// #1593). The mmap backend faults synchronously, so its scan reads are the ones
+/// F3 routes off the async worker pool.
+#[cfg(feature = "cli-helpers")]
+pub fn open_read_db_mmap(fx: &ReadFixture) -> ReadDb {
+    let mut cfg = cqlite_core::Config::default();
+    cfg.storage.use_mmap = true;
+    open_read_db_with_config(fx, cfg)
+}
+
+/// Open a fixture table with an explicit core [`cqlite_core::Config`]. Backs
+/// [`open_read_db`] (default config) and [`open_read_db_mmap`] (mmap forced on).
+#[cfg(feature = "cli-helpers")]
+pub fn open_read_db_with_config(fx: &ReadFixture, core_config: cqlite_core::Config) -> ReadDb {
     use cqlite_core::ingestion::{ingest, IngestionConfig};
 
     let src = table_dir(fx.keyspace, fx.table);
@@ -228,7 +246,7 @@ pub fn open_read_db(fx: &ReadFixture) -> ReadDb {
         schema_paths: vec![schema_path],
         data_dir: tmp.path().to_path_buf(),
         version_hint: Some("5.0".to_string()),
-        core_config: cqlite_core::Config::default(),
+        core_config,
         // Substring match on the full table-dir path; narrows discovery to the
         // single fixture table even though only one was copied.
         table_directory_filter: Some(format!("/{}/{}", fx.keyspace, fx.table)),

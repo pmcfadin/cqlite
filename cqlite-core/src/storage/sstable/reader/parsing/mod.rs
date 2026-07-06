@@ -417,6 +417,11 @@ impl SSTableReader {
             return Ok(ScanRow::Marker(Value::Null));
         }
 
+        // Issue #1642 tripwire honesty: this schema-less fallback performs a per-row
+        // cell sort (the recovered cells arrive in no guaranteed order). Record it so
+        // `ROW_SORT_INVOCATIONS` honestly counts EVERY per-row sort — the primary V5
+        // decoder (which the K3 scan assertions exercise) still records 0.
+        crate::storage::sstable::read_work_counters::record_row_sort();
         row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
         Ok(ScanRow::Row(row_cells))
     }
@@ -633,12 +638,21 @@ impl SSTableReader {
 
         // Issue #1334: return the single `ScanRow` row carrier the read path
         // consumes (previously this path returned a `Value::Udt` stand-in because
-        // no row carrier existed). Names become interned `Arc<str>` handles; the
-        // emit-time alphabetical ordering matches the other scan producers.
+        // no row carrier existed). Names become interned `Arc<str>` handles.
+        // Issue #1642 (K3): the PRIMARY V5 decoder emits cells positionally in
+        // serialization-header (schema) column order. This is a COLD schema-less
+        // fallback that collects into an unordered `HashMap`, so it sorts here to
+        // get a deterministic emit order (SORTED, not header order). Both are
+        // deterministic; order is not user-visible (consumers are name-keyed).
         let mut row_cells: RowCells = columns
             .into_iter()
             .map(|(name, value)| (std::sync::Arc::from(name.as_str()), value))
             .collect();
+        // Issue #1642 tripwire honesty: this cold schema-less fallback collects into
+        // an unordered `HashMap`, so it sorts here for a deterministic emit order.
+        // Record it so `ROW_SORT_INVOCATIONS` honestly counts EVERY per-row sort — the
+        // primary V5 decoder (which the K3 scan assertions exercise) still records 0.
+        crate::storage::sstable::read_work_counters::record_row_sort();
         row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
         Ok(ScanRow::Row(row_cells))
     }

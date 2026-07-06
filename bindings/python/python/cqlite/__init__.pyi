@@ -917,9 +917,16 @@ class DatabaseStats:
     def memory_stats(self) -> dict[str, int]:
         """Memory and cache metrics.
 
-        Keys: 'block_cache_hits', 'block_cache_misses', 'row_cache_hits',
-              'row_cache_misses', 'total_memory_used', 'buffer_allocations',
-              'buffer_deallocations'
+        Keys: 'block_cache_hits', 'block_cache_misses', 'block_cache_evictions',
+              'block_cache_capacity_bytes', 'key_cache_hits', 'key_cache_misses',
+              'key_cache_evictions', 'key_cache_resident_bytes',
+              'key_cache_capacity_bytes', 'row_cache_hits', 'row_cache_misses',
+              'total_memory_used', 'buffer_allocations', 'buffer_deallocations'
+
+        The ``block_cache_*`` keys report the real B1 decompressed-chunk cache and
+        the ``key_cache_*`` keys the aggregated B4 key->partition-offset caches
+        (issue #1571). All values are real counters -- an idle/disabled cache
+        reports honest zeros, never a fabricated placeholder.
         """
         ...
 

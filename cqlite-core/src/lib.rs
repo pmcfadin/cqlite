@@ -606,9 +606,21 @@ impl Database {
 
     /// Get database statistics
     pub async fn stats(&self) -> Result<DatabaseStats> {
+        // The chunk-cache-derived block-cache fields come from the memory manager's
+        // live handle; the per-reader B4 key caches are aggregated here (issue
+        // #1571, B5) — this async site owns `storage` and reads live readers, so
+        // the aggregate is always current rather than a stale captured handle.
+        let mut memory_stats = self.memory.stats()?;
+        let key_cache = self.storage.key_cache_stats().await;
+        memory_stats.key_cache_hits = key_cache.hits;
+        memory_stats.key_cache_misses = key_cache.misses;
+        memory_stats.key_cache_evictions = key_cache.evictions;
+        memory_stats.key_cache_resident_bytes = key_cache.resident_bytes;
+        memory_stats.key_cache_capacity_bytes = key_cache.capacity_bytes;
+
         Ok(DatabaseStats {
             storage_stats: self.storage.stats().await?,
-            memory_stats: self.memory.stats()?,
+            memory_stats,
             #[cfg(feature = "state_machine")]
             query_stats: self.query.stats(),
         })

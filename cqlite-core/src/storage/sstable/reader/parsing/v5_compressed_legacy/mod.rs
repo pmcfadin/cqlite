@@ -84,7 +84,7 @@ const MAX_TYPE_NESTING_DEPTH: usize = 10;
 /// always `Some` when `want_cell_metadata == true` and the row contains
 /// collection columns; always `None` when `want_cell_metadata == false`.
 type ParsedRow = (
-    HashMap<Arc<str>, Value>,
+    RowCells,
     Option<HashMap<String, CellWriteMetadata>>,
     Option<RowHeader>,
     usize,
@@ -306,6 +306,14 @@ impl<'a> RowColumnResolution<'a> {
     /// `Arc::clone`, not a `String` allocation.
     pub(super) fn clustering_name(&self, i: usize) -> Option<&Arc<str>> {
         self.clustering.get(i)
+    }
+
+    /// Number of interned clustering-key name handles (issue #1642). Used to
+    /// size the per-row cell `Vec` capacity hint: clustering-key cells are
+    /// pushed FIRST, before the data columns, so a clustered table would
+    /// otherwise reallocate once past the data-column-only hint.
+    pub(super) fn clustering_len(&self) -> usize {
+        self.clustering.len()
     }
 
     /// The pre-resolved on-disk column ordering for a row of the given kind.
@@ -669,12 +677,43 @@ const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 /// identity; they are NOT row data. A row carrying `HAS_DELETION` is a PURE row
 /// tombstone only when no such data cell survives — otherwise the row deletion
 /// COEXISTS with surviving (strictly-newer) cells and the row displays as live.
-fn row_has_non_key_cell(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) -> bool {
-    cells.keys().any(|name| {
+fn row_has_non_key_cell(cells: &[(Arc<str>, Value)], schema: &TableSchema) -> bool {
+    cells.iter().any(|(name, _)| {
         let name: &str = name;
         !schema.partition_keys.iter().any(|k| k.name == name)
             && !schema.clustering_keys.iter().any(|c| c.name == name)
     })
+}
+
+/// Issue #1642 (K3): append accumulated static-column cells onto a clustering
+/// row's positional cell vector. This is an unconditional `extend` (O(n_static))
+/// — NOT a per-cell membership scan — because a static column name can NEVER
+/// collide with a name already in the clustering row's cells, so there is no
+/// clustering-row-wins conflict to resolve.
+///
+/// Disjointness proof (this codebase). `static_cells` is the cell vector of an
+/// IS_STATIC row; its names are exactly `RowColumnResolution::columns_for(true)`
+/// — header columns with `is_static == true` AND `!is_primary_key` AND
+/// `!is_clustering`. A static row has no clustering prefix, so it receives zero
+/// clustering-key pseudo-cells (row_data.rs: `clustering_values` is empty when
+/// static). A clustering row's `cells` names are the clustering-key pseudo-cells
+/// (issue #229) PLUS `columns_for(false)` — header columns with `is_static ==
+/// false` AND `!is_primary_key` AND `!is_clustering`. Every column has exactly
+/// one `is_static` value, so the `is_static == want_static` filter makes
+/// `columns_for(true)` and `columns_for(false)` name-disjoint; and
+/// `columns_for(true)` excludes clustering-key columns, so no static cell shares
+/// a clustering-key pseudo-cell name. Hence the two name sets are disjoint and
+/// the former membership guard could never fire.
+///
+/// Appending AFTER the clustering row's own cells keeps the merged order
+/// deterministic-by-construction (never user-visible: the query result is a
+/// name-keyed map, issue #1334).
+fn merge_static_cells(cells: &mut RowCells, static_cells: &RowCells) {
+    cells.extend(
+        static_cells
+            .iter()
+            .map(|(name, value)| (Arc::clone(name), value.clone())),
+    );
 }
 
 /// Issue #932/#1741: build the user-facing `ScanRow` display value for a parsed
@@ -685,7 +724,7 @@ fn row_has_non_key_cell(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) 
 /// still carries surviving cells displays as a live `Row` (the deletion shadows
 /// only already-absent older cells). An empty cell set becomes a null marker.
 fn build_display_row(
-    cells: HashMap<Arc<str>, Value>,
+    cells: RowCells,
     row_header_opt: Option<&RowHeader>,
     schema: &TableSchema,
 ) -> ScanRow {
@@ -700,14 +739,12 @@ fn build_display_row(
     } else if cells.is_empty() {
         ScanRow::Marker(Value::Null)
     } else {
-        // Issue #1334: carry the interned `Arc<str>` name handles straight into
-        // the row carrier; emit-time alphabetical ordering preserved exactly.
-        let mut row_cells: RowCells = cells.into_iter().collect();
-        // Issue #1618 (H5): count the per-row cell sort — the shared site #1334
-        // consolidated the former block_emit/block_emit_windowed sorts into (K2/L).
-        crate::storage::sstable::read_work_counters::record_row_sort();
-        row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-        ScanRow::Row(row_cells)
+        // Issue #1642 (K3): the decoder already emits cells positionally, in
+        // serialization-header (schema) column order — determinism comes from
+        // CONSTRUCTION, not a per-row sort. The former per-row `HashMap`
+        // allocation and alphabetical `sort_by` are gone; the interned
+        // `Arc<str>` name handles (#1334) move straight into the carrier.
+        ScanRow::Row(cells)
     }
 }
 
@@ -716,11 +753,16 @@ fn build_display_row(
 /// tombstone is currently OPEN in the partition, so the per-row clone is off the
 /// tombstone-free hot path. Returns fewer values than the clustering arity only
 /// for a malformed/partial row (missing clustering pseudo-cells).
-fn extract_clustering_values(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) -> Vec<Value> {
+fn extract_clustering_values(cells: &[(Arc<str>, Value)], schema: &TableSchema) -> Vec<Value> {
     schema
         .clustering_keys
         .iter()
-        .filter_map(|ck| cells.get(ck.name.as_str()).cloned())
+        .filter_map(|ck| {
+            cells
+                .iter()
+                .find(|(name, _)| name.as_ref() == ck.name.as_str())
+                .map(|(_, v)| v.clone())
+        })
         .collect()
 }
 
