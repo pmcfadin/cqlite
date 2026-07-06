@@ -107,9 +107,13 @@ mod tests {
                                     stats.row_stats.total_rows > 0,
                                     "Should have row count data"
                                 );
+                                // The enhanced (nb) parser does NOT decode
+                                // table-level statistics, so `table_stats` is
+                                // honestly `None` rather than a fabricated all-zero
+                                // block (issue #1653; no-heuristics mandate #28).
                                 assert!(
-                                    stats.table_stats.disk_size > 0,
-                                    "Should have disk size data"
+                                    stats.table_stats.is_none(),
+                                    "enhanced nb parser must not fabricate table_stats (issue #1653)"
                                 );
 
                                 // Enhanced validation: basic types table gets strict row count validation
@@ -392,10 +396,11 @@ mod tests {
 
         let (_, timestamp_stats) = result.unwrap();
         assert_eq!(timestamp_stats.min_timestamp, 0x017F00000000);
-        assert_eq!(timestamp_stats.max_timestamp, 0x018000000000);
+        // Legacy parse genuinely reads these → `Some(..)` (issue #1653).
+        assert_eq!(timestamp_stats.max_timestamp, Some(0x018000000000));
         assert!(timestamp_stats.min_ttl.is_none());
         assert!(timestamp_stats.max_ttl.is_none());
-        assert_eq!(timestamp_stats.rows_with_ttl, 0);
+        assert_eq!(timestamp_stats.rows_with_ttl, Some(0));
     }
 
     /// Test column statistics parsing structure
@@ -438,7 +443,11 @@ mod tests {
             .live_data_percentage
             .expect("fixture has authoritative live_rows > 0");
         assert!(live_pct > 0.0 && live_pct <= 100.0);
-        assert!(analysis.compression_efficiency > 0.0);
+        // The fixture has authoritative compression stats → `Some(..)` (#1653).
+        let compression_eff = analysis
+            .compression_efficiency
+            .expect("fixture has authoritative compression stats");
+        assert!(compression_eff > 0.0);
         assert!(analysis.health_score >= 0.0 && analysis.health_score <= 100.0);
         assert!(analysis.timestamp_range_days >= 0.0);
 
@@ -488,13 +497,13 @@ mod tests {
                 ],
             },
             timestamp_stats: TimestampStatistics {
-                min_timestamp: 1609459200000000, // 2021-01-01 00:00:00 UTC
-                max_timestamp: 1640995200000000, // 2022-01-01 00:00:00 UTC
+                min_timestamp: 1609459200000000,       // 2021-01-01 00:00:00 UTC
+                max_timestamp: Some(1640995200000000), // 2022-01-01 00:00:00 UTC
                 min_deletion_time: 0,
                 max_deletion_time: 0,
                 min_ttl: Some(3600),
                 max_ttl: Some(86400),
-                rows_with_ttl: 100,
+                rows_with_ttl: Some(100),
             },
             column_stats: vec![
                 ColumnStatistics {
@@ -522,7 +531,7 @@ mod tests {
                     has_index: false,
                 },
             ],
-            table_stats: TableStatistics {
+            table_stats: Some(TableStatistics {
                 disk_size: 1024 * 1024,
                 uncompressed_size: 2048 * 1024,
                 compressed_size: 1024 * 1024,
@@ -532,8 +541,8 @@ mod tests {
                 index_size: 4096,
                 bloom_filter_size: 2048,
                 level_count: 2,
-            },
-            partition_stats: PartitionStatistics {
+            }),
+            partition_stats: Some(PartitionStatistics {
                 avg_partition_size: 10240.0,
                 min_partition_size: 1024,
                 max_partition_size: 102400,
@@ -558,8 +567,8 @@ mod tests {
                     },
                 ],
                 large_partition_percentage: 2.0,
-            },
-            compression_stats: CompressionStatistics {
+            }),
+            compression_stats: Some(CompressionStatistics {
                 algorithm: "LZ4".to_string(),
                 original_size: 2048 * 1024,
                 compressed_size: 1024 * 1024,
@@ -567,7 +576,7 @@ mod tests {
                 compression_speed: 150.0,
                 decompression_speed: 300.0,
                 compressed_blocks: 128,
-            },
+            }),
             metadata: {
                 let mut map = HashMap::new();
                 map.insert("created_by".to_string(), "cqlite-test".to_string());
