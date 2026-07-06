@@ -1,337 +1,89 @@
-//! Memory management for CQLite
+//! Memory management for CQLite.
+//!
+//! Issue #1568 (Epic B / B2) deleted the dead `MemoryManager` cache core — the
+//! LRU block cache, the row cache, and the buffer pool that no read path used —
+//! now that B1 (#1567) ships the real
+//! [`DecompressedChunkCache`](crate::storage::cache::DecompressedChunkCache).
+//! What remains is the **semver-frozen** public stats shell:
+//! [`MemoryManager::stats`] and [`MemoryStats`], reachable through
+//! `Database::stats().memory_stats`. Its block-cache numbers are now sourced
+//! from the live B1 cache (real hits/misses/occupancy) instead of the deleted
+//! always-zero counters, so a repeated cached read yields a non-zero
+//! [`MemoryStats::block_cache_hit_rate`] rather than a structural `0.0`.
 
-use lru::LruCache;
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::{types::TableId, Config, Result, Value};
+use crate::storage::cache::DecompressedChunkCache;
+#[cfg(feature = "state_machine")]
+use crate::Value;
+use crate::{Config, Result};
 
-/// Memory manager for caching and buffer management
+/// Memory manager: the retained public stats shell over the real B1 cache.
+///
+/// It holds an optional handle to the shared
+/// [`DecompressedChunkCache`](crate::storage::cache::DecompressedChunkCache).
+/// When present (the production path — [`MemoryManager::with_chunk_cache`]),
+/// [`stats`](Self::stats) reports that cache's real activity. When absent
+/// ([`new`](Self::new), used where no cache is wired), the block-cache numbers
+/// report zero.
 #[derive(Debug)]
 pub struct MemoryManager {
-    /// Block cache for storage blocks
-    block_cache: Arc<RwLock<BlockCache>>,
-
-    /// Row cache for frequently accessed rows
-    row_cache: Arc<RwLock<RowCache>>,
-
-    /// Buffer pool for memory allocation
-    buffer_pool: Arc<RwLock<BufferPool>>,
-
-    /// Memory statistics
-    stats: Arc<RwLock<MemoryStats>>,
-}
-
-/// Block cache for storage blocks
-struct BlockCache {
-    /// LRU cache for blocks (provides O(1) get/put)
-    cache: LruCache<BlockKey, Arc<Block>>,
-
-    /// Maximum cache size in bytes
-    max_size: usize,
-
-    /// Current size in bytes
-    current_size: usize,
-}
-
-/// Row cache for frequently accessed rows
-struct RowCache {
-    /// LRU cache for rows (provides O(1) get/put)
-    cache: LruCache<RowKey, Arc<CachedRow>>,
-
-    /// Maximum cache size in bytes
-    max_size: usize,
-
-    /// Current size in bytes
-    current_size: usize,
-}
-
-/// Buffer pool for memory allocation
-#[derive(Debug)]
-struct BufferPool {
-    /// Free buffers by size
-    free_buffers: HashMap<usize, Vec<Vec<u8>>>,
-
-    /// Allocated buffers
-    allocated_count: usize,
-
-    /// Total memory used
-    total_memory: usize,
-
-    /// Maximum memory allowed
-    max_memory: usize,
-}
-
-/// Block key for cache lookup
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct BlockKey {
-    table_id: TableId,
-    block_id: u64,
-}
-
-/// Row key for cache lookup
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct RowKey {
-    table_id: TableId,
-    row_key: String,
-}
-
-/// Cached block
-#[derive(Debug)]
-struct Block {
-    /// Block size
-    size: usize,
-
-    /// Last access time (reserved for future LRU enhancements)
-    _last_access: std::time::Instant,
-}
-
-/// Cached row
-#[derive(Debug)]
-struct CachedRow {
-    /// Row data
-    _data: Vec<Value>,
-
-    /// Row size estimate
-    size: usize,
+    /// The live shared decompressed-chunk cache backing the stats surface, if
+    /// this manager was wired to one.
+    chunk_cache: Option<Arc<DecompressedChunkCache>>,
 }
 
 impl MemoryManager {
-    /// Create a new memory manager
-    pub fn new(config: &Config) -> Result<Self> {
-        let block_cache = Arc::new(RwLock::new(BlockCache::new(
-            config.memory.block_cache.max_size as usize,
-        )));
-        let row_cache = Arc::new(RwLock::new(RowCache::new(
-            config.memory.row_cache.max_size as usize,
-        )));
-        let buffer_pool = Arc::new(RwLock::new(BufferPool::new(
-            config.memory.max_memory as usize,
-        )));
-
-        Ok(Self {
-            block_cache,
-            row_cache,
-            buffer_pool,
-            stats: Arc::new(RwLock::new(MemoryStats::default())),
-        })
+    /// Create a memory manager not wired to a cache.
+    ///
+    /// Retained for callers (and tests) that construct a manager without a live
+    /// storage engine; its [`stats`](Self::stats) reports zero block-cache
+    /// activity. Production opens use [`with_chunk_cache`](Self::with_chunk_cache).
+    pub fn new(_config: &Config) -> Result<Self> {
+        Ok(Self { chunk_cache: None })
     }
 
-    /// Get a block from cache
-    pub fn get_block(&self, table_id: &TableId, block_id: u64) -> Option<Arc<Block>> {
-        let key = BlockKey {
-            table_id: table_id.clone(),
-            block_id,
-        };
-
-        let mut cache = self.block_cache.write();
-
-        // LruCache::get() is O(1) and automatically updates LRU order
-        if let Some(block) = cache.cache.get(&key) {
-            // Update stats
-            {
-                let mut stats = self.stats.write();
-                stats.block_cache_hits += 1;
-            }
-
-            Some(Arc::clone(block))
-        } else {
-            // Update stats
-            {
-                let mut stats = self.stats.write();
-                stats.block_cache_misses += 1;
-            }
-
-            None
+    /// Create a memory manager whose stats surface reports the real activity of
+    /// the shared B1 decompressed-chunk cache (issue #1568).
+    pub fn with_chunk_cache(chunk_cache: Arc<DecompressedChunkCache>) -> Self {
+        Self {
+            chunk_cache: Some(chunk_cache),
         }
     }
 
-    /// Put a block in cache
-    pub fn put_block(&self, table_id: &TableId, block_id: u64, data: Vec<u8>) {
-        let key = BlockKey {
-            table_id: table_id.clone(),
-            block_id,
-        };
-
-        let block = Arc::new(Block {
-            size: data.len(),
-            _last_access: std::time::Instant::now(),
-        });
-
-        let mut cache = self.block_cache.write();
-
-        // Evict LRU entries until we have space
-        while cache.current_size + block.size > cache.max_size {
-            // LruCache::pop_lru() is O(1) and removes the least recently used entry
-            if let Some((_, evicted_block)) = cache.cache.pop_lru() {
-                cache.current_size -= evicted_block.size;
-            } else {
-                // Cache is empty, stop eviction
-                break;
-            }
-        }
-
-        // LruCache::put() is O(1) and automatically updates LRU order
-        cache.current_size += block.size;
-        cache.cache.put(key, block);
-    }
-
-    /// Get a row from cache
-    pub fn get_row(&self, table_id: &TableId, row_key: &str) -> Option<Arc<CachedRow>> {
-        let key = RowKey {
-            table_id: table_id.clone(),
-            row_key: row_key.to_string(),
-        };
-
-        let mut cache = self.row_cache.write();
-
-        // LruCache::get() is O(1) and automatically updates LRU order
-        if let Some(row) = cache.cache.get(&key) {
-            // Update stats
-            {
-                let mut stats = self.stats.write();
-                stats.row_cache_hits += 1;
-            }
-
-            Some(Arc::clone(row))
-        } else {
-            // Update stats
-            {
-                let mut stats = self.stats.write();
-                stats.row_cache_misses += 1;
-            }
-
-            None
-        }
-    }
-
-    /// Put a row in cache
-    pub fn put_row(&self, table_id: &TableId, row_key: &str, data: Vec<Value>) {
-        let key = RowKey {
-            table_id: table_id.clone(),
-            row_key: row_key.to_string(),
-        };
-
-        let size = self.estimate_row_size(&data);
-        let row = Arc::new(CachedRow { _data: data, size });
-
-        let mut cache = self.row_cache.write();
-
-        // Evict LRU entries until we have space
-        while cache.current_size + row.size > cache.max_size {
-            // LruCache::pop_lru() is O(1) and removes the least recently used entry
-            if let Some((_, evicted_row)) = cache.cache.pop_lru() {
-                cache.current_size -= evicted_row.size;
-            } else {
-                // Cache is empty, stop eviction
-                break;
-            }
-        }
-
-        // LruCache::put() is O(1) and automatically updates LRU order
-        cache.current_size += row.size;
-        cache.cache.put(key, row);
-    }
-
-    /// Allocate buffer from pool
-    pub fn allocate_buffer(&self, size: usize) -> Result<Vec<u8>> {
-        let mut pool = self.buffer_pool.write();
-
-        if let Some(buffers) = pool.free_buffers.get_mut(&size) {
-            if let Some(buffer) = buffers.pop() {
-                pool.allocated_count += 1;
-                pool.total_memory += size;
-
-                // Update stats
-                let mut stats = self.stats.write();
-                stats.buffer_allocations += 1;
-                stats.total_memory_used = pool.total_memory;
-
-                return Ok(buffer);
-            }
-        }
-
-        // Check memory limit before allocating new buffer
-        if pool.total_memory + size > pool.max_memory {
-            return Err(crate::Error::Memory(format!(
-                "Memory limit exceeded: requested {} bytes would exceed limit of {} bytes (current usage: {} bytes)",
-                size, pool.max_memory, pool.total_memory
-            )));
-        }
-
-        // Allocate new buffer
-        pool.allocated_count += 1;
-        pool.total_memory += size;
-
-        // Update stats
-        let mut stats = self.stats.write();
-        stats.buffer_allocations += 1;
-        stats.total_memory_used = pool.total_memory;
-
-        Ok(vec![0u8; size])
-    }
-
-    /// Return buffer to pool
-    pub fn deallocate_buffer(&self, mut buffer: Vec<u8>) {
-        let size = buffer.len();
-        buffer.clear();
-        // Don't shrink_to_fit() as we want to preserve capacity for reuse
-        buffer.resize(size, 0);
-
-        let mut pool = self.buffer_pool.write();
-        pool.total_memory -= size;
-        pool.free_buffers.entry(size).or_default().push(buffer);
-        pool.allocated_count -= 1;
-
-        // Update stats
-        let mut stats = self.stats.write();
-        stats.buffer_deallocations += 1;
-        stats.total_memory_used = pool.total_memory;
-    }
-
-    /// Get memory statistics
+    /// Get memory statistics.
+    ///
+    /// The block-cache hit/miss counts and occupancy (`total_memory_used`) are
+    /// sourced from the live B1 [`DecompressedChunkCache`] when wired (issue
+    /// #1568): `hit_count()` / `miss_count()` / `resident_bytes()`. The retained
+    /// row-cache and buffer-pool sub-fields report a fixed `0` — the richer
+    /// honest surface is Epic B / B5. The `-> Result<MemoryStats>` signature is
+    /// preserved for semver compatibility with `Database::stats()`.
+    ///
+    /// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
     pub fn stats(&self) -> Result<MemoryStats> {
-        let stats = self.stats.read();
-        Ok(stats.clone())
-    }
-
-    /// Clear all caches
-    pub fn clear_caches(&self) {
-        {
-            let mut cache = self.block_cache.write();
-            cache.cache.clear();
-            cache.current_size = 0;
+        let mut stats = MemoryStats::default();
+        if let Some(cache) = &self.chunk_cache {
+            stats.block_cache_hits = cache.hit_count();
+            stats.block_cache_misses = cache.miss_count();
+            stats.total_memory_used = cache.resident_bytes();
         }
-
-        {
-            let mut cache = self.row_cache.write();
-            cache.cache.clear();
-            cache.current_size = 0;
-        }
+        Ok(stats)
     }
-
-    /// Estimate row size
-    fn estimate_row_size(&self, data: &[Value]) -> usize {
-        estimate_row_size(data)
-    }
-}
-
-/// Estimate the logical size, in bytes, of a row's values.
-///
-/// This is the single estimator reused by the row cache (eviction accounting)
-/// and by the SELECT executor's byte-bounded result budget (issue #1582), so
-/// both surfaces measure "row bytes" identically. It sums the per-value
-/// estimate over the row; it is a *logical* content estimate and deliberately
-/// does not model container overhead (HashMap slots, `Arc`/`String` capacity),
-/// which is why the executor's byte budget sits well below the process memory
-/// target to leave headroom for that overhead.
-pub(crate) fn estimate_row_size(data: &[Value]) -> usize {
-    data.iter().map(estimate_value_size).sum()
 }
 
 /// Estimate the logical size, in bytes, of a single CQL value.
+///
+/// The single estimator reused by the SELECT executor's byte-bounded result
+/// budget (issue #1582). It is a *logical* content estimate and deliberately
+/// does not model container overhead (HashMap slots, `Arc`/`String` capacity),
+/// which is why the executor's byte budget sits well below the process memory
+/// target to leave headroom for that overhead.
+///
+/// `state_machine`-gated: its only consumer is the (feature-gated) query engine
+/// (`query::result_budget`), so under a minimal `--no-default-features` build it
+/// would otherwise be dead code.
+#[cfg(feature = "state_machine")]
 pub(crate) fn estimate_value_size(value: &Value) -> usize {
     match value {
         Value::Null => 1,
@@ -371,92 +123,41 @@ pub(crate) fn estimate_value_size(value: &Value) -> usize {
     }
 }
 
-impl std::fmt::Debug for BlockCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BlockCache")
-            .field("max_size", &self.max_size)
-            .field("current_size", &self.current_size)
-            .field("cache_len", &self.cache.len())
-            .finish()
-    }
-}
-
-impl BlockCache {
-    fn new(max_size: usize) -> Self {
-        // LruCache requires NonZeroUsize for capacity
-        // We use a reasonable default capacity (1000 entries) for the LRU structure
-        // The actual memory limit is enforced separately via max_size
-        let capacity = NonZeroUsize::new(1000).expect("capacity must be non-zero");
-        Self {
-            cache: LruCache::new(capacity),
-            max_size,
-            current_size: 0,
-        }
-    }
-}
-
-impl std::fmt::Debug for RowCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RowCache")
-            .field("max_size", &self.max_size)
-            .field("current_size", &self.current_size)
-            .field("cache_len", &self.cache.len())
-            .finish()
-    }
-}
-
-impl RowCache {
-    fn new(max_size: usize) -> Self {
-        // LruCache requires NonZeroUsize for capacity
-        // We use a reasonable default capacity (1000 entries) for the LRU structure
-        // The actual memory limit is enforced separately via max_size
-        let capacity = NonZeroUsize::new(1000).expect("capacity must be non-zero");
-        Self {
-            cache: LruCache::new(capacity),
-            max_size,
-            current_size: 0,
-        }
-    }
-}
-
-impl BufferPool {
-    fn new(max_memory: usize) -> Self {
-        Self {
-            free_buffers: HashMap::new(),
-            allocated_count: 0,
-            total_memory: 0,
-            max_memory,
-        }
-    }
-}
-
-/// Memory statistics
+/// Memory statistics.
+///
+/// Public-surface-wired (semver) through `Database::stats().memory_stats`. The
+/// field names and types are preserved verbatim (issue #1568, AK6); only the
+/// *source* of the block-cache numbers changed — they now reflect the real B1
+/// [`DecompressedChunkCache`](crate::storage::cache::DecompressedChunkCache).
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStats {
-    /// Block cache hits
+    /// Block cache hits (real B1 cache hit count when wired).
     pub block_cache_hits: u64,
 
-    /// Block cache misses
+    /// Block cache misses (real B1 cache miss count when wired).
     pub block_cache_misses: u64,
 
-    /// Row cache hits
+    /// Row cache hits. Retained for shape compatibility; the row cache was
+    /// deleted (issue #1568), so this reports `0` (full surface is Epic B / B5).
     pub row_cache_hits: u64,
 
-    /// Row cache misses
+    /// Row cache misses. Retained for shape compatibility; reports `0`.
     pub row_cache_misses: u64,
 
-    /// Total memory used
+    /// Total memory used. Now the B1 cache's resident decompressed bytes
+    /// (`resident_bytes()`) when wired (issue #1568).
     pub total_memory_used: usize,
 
-    /// Buffer pool allocations
+    /// Buffer pool allocations. Retained for shape compatibility; the buffer
+    /// pool was deleted (issue #1568), so this reports `0`.
     pub buffer_allocations: u64,
 
-    /// Buffer pool deallocations
+    /// Buffer pool deallocations. Retained for shape compatibility; reports `0`.
     pub buffer_deallocations: u64,
 }
 
 impl MemoryStats {
-    /// Calculate block cache hit rate
+    /// Calculate block cache hit rate.
     pub fn block_cache_hit_rate(&self) -> f64 {
         let total = self.block_cache_hits + self.block_cache_misses;
         if total > 0 {
@@ -466,7 +167,7 @@ impl MemoryStats {
         }
     }
 
-    /// Calculate row cache hit rate
+    /// Calculate row cache hit rate.
     pub fn row_cache_hit_rate(&self) -> f64 {
         let total = self.row_cache_hits + self.row_cache_misses;
         if total > 0 {
@@ -480,257 +181,42 @@ impl MemoryStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TableId;
+    use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
 
     #[test]
-    fn test_memory_manager_creation() {
+    fn stats_report_zero_without_a_wired_cache() {
         let config = Config::default();
-        let manager = MemoryManager::new(&config).unwrap();
+        let manager = MemoryManager::new(&config).expect("construct manager");
 
-        let stats = manager.stats().unwrap();
+        let stats = manager.stats().expect("stats");
         assert_eq!(stats.block_cache_hits, 0);
         assert_eq!(stats.block_cache_misses, 0);
+        assert_eq!(stats.total_memory_used, 0);
+        assert_eq!(stats.block_cache_hit_rate(), 0.0);
     }
 
     #[test]
-    fn test_block_cache() {
-        let config = Config::default();
-        let manager = MemoryManager::new(&config).unwrap();
+    fn stats_bridge_reports_real_b1_cache_numbers() {
+        // A wired manager reports the live B1 cache's hits/misses/occupancy.
+        let cache = Arc::new(DecompressedChunkCache::with_budget_bytes(1 << 20));
+        let manager = MemoryManager::with_chunk_cache(Arc::clone(&cache));
 
-        let table_id = TableId::new("test_table");
-        let block_id = 1;
-        let data = vec![1, 2, 3, 4, 5];
+        let key = ChunkKey::new(1, 0);
+        cache.insert(key, vec![0xAB; 4096]); // resident bytes now non-zero
+        assert!(cache.get(&key).is_some()); // one hit
+        assert!(cache.get(&ChunkKey::new(1, 1)).is_none()); // one miss
 
-        // Cache miss
-        let result = manager.get_block(&table_id, block_id);
-        assert!(result.is_none());
-
-        // Put block
-        manager.put_block(&table_id, block_id, data.clone());
-
-        // Cache hit
-        let result = manager.get_block(&table_id, block_id);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().size, data.len());
-    }
-
-    #[test]
-    fn test_block_cache_eviction_updates_stats() {
-        let mut config = Config::default();
-        config.memory.block_cache.max_size = 8;
-        let manager = MemoryManager::new(&config).unwrap();
-
-        let table_id = TableId::new("ks_table");
-
-        manager.put_block(&table_id, 1, vec![0u8; 8]);
-        manager.put_block(&table_id, 2, vec![0u8; 4]); // triggers eviction of block 1
-
-        assert!(manager.get_block(&table_id, 1).is_none());
-        assert!(manager.get_block(&table_id, 2).is_some());
-
-        let stats = manager.stats().unwrap();
+        let stats = manager.stats().expect("stats");
         assert_eq!(stats.block_cache_hits, 1);
         assert_eq!(stats.block_cache_misses, 1);
-    }
-
-    #[test]
-    fn test_row_cache() {
-        let config = Config::default();
-        let manager = MemoryManager::new(&config).unwrap();
-
-        let table_id = TableId::new("test_table");
-        let row_key = "test_key";
-        let data = vec![Value::Integer(42), Value::Text("hello".to_string())];
-
-        // Cache miss
-        let result = manager.get_row(&table_id, row_key);
-        assert!(result.is_none());
-
-        // Put row
-        manager.put_row(&table_id, row_key, data.clone());
-
-        // Cache hit
-        let result = manager.get_row(&table_id, row_key);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap()._data, data);
-    }
-
-    #[test]
-    fn test_row_cache_eviction_and_stats() {
-        let mut config = Config::default();
-        config.memory.row_cache.max_size = 8;
-        let manager = MemoryManager::new(&config).unwrap();
-
-        let table_id = TableId::new("ks_table");
-
-        manager.put_row(&table_id, "k1", vec![Value::Text("abcd".into())]);
-        manager.put_row(&table_id, "k2", vec![Value::Text("efgh".into())]);
-        manager.put_row(&table_id, "k3", vec![Value::Text("ijkl".into())]);
-
-        assert!(manager.get_row(&table_id, "k1").is_none());
-        assert!(manager.get_row(&table_id, "k3").is_some());
-
-        let stats = manager.stats().unwrap();
-        assert_eq!(stats.row_cache_hits, 1);
-        assert_eq!(stats.row_cache_misses, 1);
-    }
-
-    #[test]
-    fn test_buffer_pool() {
-        let config = Config::default();
-        let manager = MemoryManager::new(&config).unwrap();
-
-        let size = 1024;
-        let buffer = manager.allocate_buffer(size).unwrap();
-        assert_eq!(buffer.len(), size);
-
-        manager.deallocate_buffer(buffer);
-
-        // Should reuse buffer
-        let buffer2 = manager.allocate_buffer(size).unwrap();
-        assert_eq!(buffer2.len(), size);
-    }
-
-    #[test]
-    fn test_clear_caches() {
-        let mut config = Config::default();
-        config.memory.block_cache.max_size = 8;
-        config.memory.row_cache.max_size = 8;
-        let manager = MemoryManager::new(&config).unwrap();
-
-        let table_id = TableId::new("ks_table");
-        manager.put_block(&table_id, 1, vec![0u8; 8]);
-        manager.put_row(&table_id, "k1", vec![Value::Text("abcd".into())]);
-
-        manager.clear_caches();
-
-        assert!(manager.get_block(&table_id, 1).is_none());
-        assert!(manager.get_row(&table_id, "k1").is_none());
-    }
-
-    #[test]
-    fn test_memory_limit_enforcement() {
-        let mut config = Config::default();
-        config.memory.max_memory = 128 * 1024 * 1024; // 128MB
-        let manager = MemoryManager::new(&config).unwrap();
-
-        // Allocate buffers up to the limit
-        let buffer1 = manager
-            .allocate_buffer(64 * 1024 * 1024)
-            .expect("first 64MB should succeed");
-        let buffer2 = manager
-            .allocate_buffer(64 * 1024 * 1024)
-            .expect("second 64MB should succeed");
-
-        // Try to exceed the limit
-        let result = manager.allocate_buffer(1024);
-        assert!(result.is_err(), "allocation exceeding limit should fail");
-
-        // Verify error message
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains("Memory limit exceeded"),
-                "error should mention memory limit"
-            );
-        }
-
-        // Verify stats
-        let stats = manager.stats().unwrap();
-        assert_eq!(
-            stats.buffer_allocations, 2,
-            "should have 2 successful allocations"
-        );
-        assert_eq!(
-            stats.total_memory_used,
-            128 * 1024 * 1024,
-            "should be at memory limit"
-        );
-
-        // Deallocate and verify we can allocate again
-        manager.deallocate_buffer(buffer1);
-        let stats = manager.stats().unwrap();
-        assert_eq!(stats.buffer_deallocations, 1);
-        assert_eq!(
-            stats.total_memory_used,
-            64 * 1024 * 1024,
-            "memory should be freed"
-        );
-
-        // Should be able to allocate again after freeing
-        let buffer3 = manager
-            .allocate_buffer(32 * 1024 * 1024)
-            .expect("allocation after free should succeed");
-
-        // Clean up remaining buffers
-        manager.deallocate_buffer(buffer2);
-        manager.deallocate_buffer(buffer3);
-
-        let final_stats = manager.stats().unwrap();
-        assert_eq!(
-            final_stats.total_memory_used, 0,
-            "all memory should be freed"
-        );
-    }
-
-    #[test]
-    fn test_memory_limit_with_buffer_reuse() {
-        let mut config = Config::default();
-        config.memory.max_memory = 128 * 1024 * 1024; // 128MB
-        let manager = MemoryManager::new(&config).unwrap();
-
-        // Allocate two 64MB buffers to reach limit
-        let buffer1 = manager
-            .allocate_buffer(64 * 1024 * 1024)
-            .expect("first 64MB should succeed");
-        let buffer2 = manager
-            .allocate_buffer(64 * 1024 * 1024)
-            .expect("second 64MB should succeed");
-
-        // Deallocate first buffer - it goes to free pool
-        manager.deallocate_buffer(buffer1);
-
-        let stats = manager.stats().unwrap();
-        assert_eq!(
-            stats.total_memory_used,
-            64 * 1024 * 1024,
-            "should have 64MB in use after deallocation"
-        );
-
-        // Allocate same size - should REUSE buffer from free pool
-        let buffer3 = manager
-            .allocate_buffer(64 * 1024 * 1024)
-            .expect("reuse should succeed");
-
-        // Critical: reused buffer should still count toward memory limit
-        let stats = manager.stats().unwrap();
-        assert_eq!(
-            stats.total_memory_used,
-            128 * 1024 * 1024,
-            "reused buffer should count toward memory limit"
-        );
-
-        // Now at limit again - allocation should fail
-        let result = manager.allocate_buffer(1024);
+        assert_eq!(stats.total_memory_used, cache.resident_bytes());
         assert!(
-            result.is_err(),
-            "allocation should fail when limit reached via buffer reuse"
+            stats.total_memory_used > 0,
+            "occupancy tracks resident bytes"
         );
-
-        // Verify error message
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains("Memory limit exceeded"),
-                "error should mention memory limit"
-            );
-        }
-
-        // Clean up
-        manager.deallocate_buffer(buffer2);
-        manager.deallocate_buffer(buffer3);
-
-        let final_stats = manager.stats().unwrap();
-        assert_eq!(final_stats.total_memory_used, 0, "all memory freed");
+        assert!(
+            stats.block_cache_hit_rate() > 0.0,
+            "a hit makes the reported rate non-zero (not structural 0.0)"
+        );
     }
 }

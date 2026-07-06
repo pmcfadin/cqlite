@@ -533,12 +533,13 @@ impl SSTableReader {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
 
+        // The shared B1 cache tracks its own hit/miss counters (issue #1567); the
+        // dead per-reader `record_cache_hit`/`record_cache_miss` atomics were
+        // removed (issue #1568).
         let key = self.chunk_cache_key_ranged(NS_BIG_POINT, block_offset, size);
         if let Some(hit) = self.chunk_cache.get(&key) {
-            self.record_cache_hit();
             return Ok(hit.to_vec());
         }
-        self.record_cache_miss();
 
         // Read from disk (counted so a repeat read can prove zero underlying reads).
         // Positioned read on the shared point source (issue #1573, C2): no cursor

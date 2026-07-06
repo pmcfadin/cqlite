@@ -267,23 +267,25 @@ impl Default for CompactionConfig {
     }
 }
 
-/// Memory management configuration
+/// Memory management configuration.
+///
+/// Collapsed to exactly one real caching knob (issue #1568, Epic B/B2): the
+/// block/chunk-cache byte budget (`block_cache.max_size`), wired as the B1
+/// [`DecompressedChunkCache`](crate::storage::cache::DecompressedChunkCache)
+/// capacity. The former decorative `row_cache` / `query_cache` / `allocator`
+/// knobs (wired to nothing at runtime) were deleted. `deny_unknown_fields`
+/// makes a config that still names a removed knob **fail closed** on
+/// deserialization rather than silently ignoring it (which would suggest the
+/// removed knob still has effect).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryConfig {
     /// Maximum total memory usage (default: 1GB)
     pub max_memory: u64,
 
-    /// Block cache configuration
+    /// Block/chunk cache configuration. `block_cache.max_size` is the real,
+    /// wired byte budget of the shared decompressed-chunk cache.
     pub block_cache: CacheConfig,
-
-    /// Row cache configuration  
-    pub row_cache: CacheConfig,
-
-    /// Query result cache configuration
-    pub query_cache: CacheConfig,
-
-    /// Memory allocator settings
-    pub allocator: AllocatorConfig,
 }
 
 impl Default for MemoryConfig {
@@ -297,17 +299,6 @@ impl Default for MemoryConfig {
                 max_size: max_memory / 4, // 256MB
                 policy: CachePolicy::Lru,
             },
-            row_cache: CacheConfig {
-                enabled: true,
-                max_size: max_memory / 8, // 128MB
-                policy: CachePolicy::Lru,
-            },
-            query_cache: CacheConfig {
-                enabled: true,
-                max_size: max_memory / 16, // 64MB
-                policy: CachePolicy::Lru,
-            },
-            allocator: AllocatorConfig::default(),
         }
     }
 }
@@ -325,38 +316,16 @@ pub struct CacheConfig {
     pub policy: CachePolicy,
 }
 
-/// Cache eviction policies
+/// Cache eviction policy.
+///
+/// The shared decompressed-chunk cache is LRU (issue #1567/#1568). The
+/// never-selected `Lfu` / `Arc` variants were removed (Epic B/B2); a config
+/// naming them now fails to deserialize (unknown variant) rather than silently
+/// mapping to a default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CachePolicy {
     /// Least Recently Used
     Lru,
-    /// Least Frequently Used
-    Lfu,
-    /// Adaptive Replacement Cache
-    Arc,
-}
-
-/// Memory allocator configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AllocatorConfig {
-    /// Use custom allocator for better performance
-    pub use_custom: bool,
-
-    /// Pool size for small allocations
-    pub small_pool_size: u64,
-
-    /// Pool size for large allocations
-    pub large_pool_size: u64,
-}
-
-impl Default for AllocatorConfig {
-    fn default() -> Self {
-        Self {
-            use_custom: false,                  // Conservative default
-            small_pool_size: 64 * 1024 * 1024,  // 64MB
-            large_pool_size: 256 * 1024 * 1024, // 256MB
-        }
-    }
 }
 
 /// Default byte ceiling for a materialized SELECT result set (issue #1582).
@@ -408,7 +377,7 @@ pub struct QueryConfig {
     ///
     /// While the SELECT executor collects a materialized `Vec<QueryRow>`, it
     /// tracks a running estimate of the result's logical size (via the shared
-    /// [`crate::memory::estimate_row_size`] estimator) and fails with
+    /// `crate::memory::estimate_value_size` estimator) and fails with
     /// [`crate::Error::ResultTooLarge`] once this ceiling is crossed — telling
     /// the caller to add a `LIMIT` or use the streaming API. This is the
     /// correct-unit primary guard; `max_result_rows` remains as a secondary
@@ -634,8 +603,6 @@ impl Config {
         config.storage.max_sstable_size = 16 * 1024 * 1024; // 16MB
         config.memory.max_memory = 256 * 1024 * 1024; // 256MB
         config.memory.block_cache.max_size = 64 * 1024 * 1024; // 64MB
-        config.memory.row_cache.max_size = 32 * 1024 * 1024; // 32MB
-        config.memory.query_cache.max_size = 16 * 1024 * 1024; // 16MB
 
         // Enable aggressive compression
         config.storage.compression.algorithm = CompressionAlgorithm::Zstd;
@@ -659,8 +626,6 @@ impl Config {
 
         // More aggressive caching
         config.memory.block_cache.max_size = 1024 * 1024 * 1024; // 1GB
-        config.memory.row_cache.max_size = 512 * 1024 * 1024; // 512MB
-        config.memory.query_cache.max_size = 256 * 1024 * 1024; // 256MB
 
         // More I/O threads
         config.storage.io_threads = num_cpus::get();
@@ -721,14 +686,10 @@ impl Config {
             ));
         }
 
-        // Validate cache sizes don't exceed total memory
-        let total_cache = self.memory.block_cache.max_size
-            + self.memory.row_cache.max_size
-            + self.memory.query_cache.max_size;
-
-        if total_cache > self.memory.max_memory {
+        // Validate the (single) cache budget does not exceed total memory.
+        if self.memory.block_cache.max_size > self.memory.max_memory {
             return Err(crate::Error::configuration(
-                "total cache size exceeds max_memory",
+                "block_cache.max_size exceeds max_memory",
             ));
         }
 
@@ -1019,5 +980,81 @@ mod tests {
 
         config.storage.bloom_filter_fp_rate = -1.0; // Should be ignored when bloom filters disabled
         assert!(config.validate().is_ok());
+    }
+
+    // ---- issue #1568 (Epic B / B2): dead-cache config collapse ----
+
+    /// Spec: "A config using a removed knob is rejected." The pre-change
+    /// `MemoryConfig` shape (`row_cache` / `query_cache` / `allocator` alongside
+    /// `block_cache`) must FAIL CLOSED after the collapse — those keys are gone,
+    /// and `#[serde(deny_unknown_fields)]` rejects them instead of silently
+    /// ignoring them (which would suggest they still have effect).
+    #[test]
+    fn removed_memory_knobs_fail_closed() {
+        // The full OLD memory-config shape: valid on pre-change code (RED),
+        // rejected after the collapse (GREEN).
+        let old_shape = serde_json::json!({
+            "max_memory": 1_073_741_824u64,
+            "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
+            "row_cache":   { "enabled": true, "max_size": 134_217_728u64, "policy": "Lru" },
+            "query_cache": { "enabled": true, "max_size": 67_108_864u64,  "policy": "Lru" },
+            "allocator":   { "use_custom": false, "small_pool_size": 1u64, "large_pool_size": 2u64 }
+        });
+        assert!(
+            serde_json::from_value::<MemoryConfig>(old_shape).is_err(),
+            "a MemoryConfig naming removed knobs (row_cache/query_cache/allocator) must fail closed"
+        );
+
+        // Each removed knob, added to the retained-only base, is rejected.
+        for removed in ["row_cache", "query_cache", "allocator"] {
+            let mut v = serde_json::json!({
+                "max_memory": 1_073_741_824u64,
+                "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
+            });
+            v.as_object_mut()
+                .unwrap()
+                .insert(removed.to_string(), serde_json::json!({ "enabled": true }));
+            assert!(
+                serde_json::from_value::<MemoryConfig>(v).is_err(),
+                "a MemoryConfig naming the removed `{removed}` knob must fail closed"
+            );
+        }
+    }
+
+    /// Spec: "A config using a removed knob is rejected" (CachePolicy variants).
+    /// The never-selected `Lfu` / `Arc` variants are gone, so a cache config
+    /// naming them fails to deserialize (unknown variant) rather than silently
+    /// mapping to some default.
+    #[test]
+    fn removed_cache_policy_variants_fail_closed() {
+        for variant in ["Lfu", "Arc"] {
+            let v = serde_json::json!({ "enabled": true, "max_size": 1u64, "policy": variant });
+            assert!(
+                serde_json::from_value::<CacheConfig>(v).is_err(),
+                "a CacheConfig naming the removed CachePolicy::{variant} variant must fail closed"
+            );
+        }
+        // The retained `Lru` variant still deserializes.
+        let ok = serde_json::json!({ "enabled": true, "max_size": 1u64, "policy": "Lru" });
+        assert!(serde_json::from_value::<CacheConfig>(ok).is_ok());
+    }
+
+    /// Spec: "The retained budget knob still deserializes and validates." A
+    /// config specifying only `max_memory` and `block_cache` deserializes, passes
+    /// `Config::validate()`, and its `block_cache.max_size` is the retained knob.
+    #[test]
+    fn retained_budget_knob_deserializes_and_validates() {
+        let mem: MemoryConfig = serde_json::from_value(serde_json::json!({
+            "max_memory": 1_073_741_824u64,
+            "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
+        }))
+        .expect("retained-only MemoryConfig must deserialize");
+        assert_eq!(mem.block_cache.max_size, 268_435_456);
+
+        // A default Config (which now carries only the collapsed MemoryConfig)
+        // still validates, and the block-cache budget is the wired knob.
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+        assert!(config.memory.block_cache.max_size > 0);
     }
 }

@@ -252,13 +252,7 @@ Index only helps with partition key lookups, not arbitrary column filters.
 flowchart LR
     Start[File at position] --> Read[Read 4KB block]
     
-    Read --> Cache{Block in\ncache?}
-    
-    Cache -->|Yes| UseCache[Use cached block]
-    Cache -->|No| StoreCache[Store in block_cache]
-    
-    UseCache --> Parse[Parse partitions]
-    StoreCache --> Parse
+    Read --> Parse[Parse partitions]
     
     Parse --> Multiple{Multiple\npartitions\nin block?}
     
@@ -272,27 +266,18 @@ flowchart LR
     style Results fill:#d1ecf1
 ```
 
-### Block Cache
+### Caching
 
-```rust
-pub struct SSTableReader {
-    // ...
-    block_cache: HashMap<u64, CachedBlock>,  // offset -> block data
-    block_meta_cache: HashMap<u64, BlockMeta>,  // offset -> metadata
-    // ...
-}
+There is **no per-reader block cache** on the scan path. The old
+`block_cache: HashMap<u64, CachedBlock>` (and its `block_meta_cache` companion)
+was dead code — never populated, so it delivered a structural 0.0 hit rate — and
+was **removed in #1568** (B2). Sequential scans read straight through the file and
+rely on the `BufReader` + OS page cache for repeated-read locality.
 
-pub struct CachedBlock {
-    data: Vec<u8>,
-    compressed: bool,
-    cached_at: Instant,
-}
-```
-
-**Benefits**:
-- Avoid repeated disk I/O
-- Amortize decompression cost
-- Better performance for nearby keys
+The only application-level read cache is the shared **`DecompressedChunkCache`**
+(Epic B / B1, issue #1567), which caches decompressed chunks across readers on the
+*compressed* read path; its byte budget comes from `block_cache.max_size`. See
+[Compressed Data](./05-compressed-data.md).
 
 ## Partition Parsing
 

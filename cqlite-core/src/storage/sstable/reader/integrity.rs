@@ -24,10 +24,18 @@ impl SSTableReader {
     pub async fn get_health_metrics(&self) -> Result<SSTableReaderHealthMetrics> {
         let stats = self.stats().await?;
 
-        // Calculate actual cache hit rate from atomic counters
-        let cache_hit_rate = self.calculate_cache_hit_rate();
-
-        let memory_usage = self.estimate_memory_usage();
+        // Cache health is sourced from the shared B1 decompressed-chunk cache
+        // (issue #1568): the dead per-reader block cache and its always-empty
+        // memory summation were deleted, so these numbers now reflect the real
+        // cache rather than a structural zero.
+        let cache = self.chunk_cache();
+        let (hits, misses) = (cache.hit_count(), cache.miss_count());
+        let cache_hit_rate = if hits + misses > 0 {
+            hits as f64 / (hits + misses) as f64
+        } else {
+            0.0
+        };
+        let memory_usage = std::mem::size_of::<Self>() + cache.resident_bytes();
 
         Ok(SSTableReaderHealthMetrics {
             file_path: self.file_path.clone(),
@@ -35,7 +43,7 @@ impl SSTableReader {
             header_version: self.header.cassandra_version,
             total_file_size: stats.file_size,
             estimated_memory_usage: memory_usage,
-            block_cache_entries: self.block_cache.len(),
+            block_cache_entries: cache.len(),
             block_cache_hit_rate: cache_hit_rate,
             compression_enabled: self.compression_reader.is_some(),
             compression_algorithm: self.header.compression.algorithm.clone(),

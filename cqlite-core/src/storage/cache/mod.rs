@@ -122,6 +122,12 @@ pub struct DecompressedChunkCache {
     mask: usize,
     /// Per-shard byte budget (`total_budget / shards.len()`, at least 1).
     budget_per_shard: usize,
+    /// When `true` this is a genuine no-op cache (issue #1568): `get` never
+    /// stores/returns anything and `insert` never retains, so reads bypass the
+    /// cache entirely. Built by [`disabled`](Self::disabled) when
+    /// `block_cache.enabled == false`. Distinct from a zero-budget cache, which
+    /// would still retain one oversized entry per shard.
+    disabled: bool,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -161,6 +167,26 @@ impl DecompressedChunkCache {
             shards: shards.into_boxed_slice(),
             mask: shard_count - 1,
             budget_per_shard,
+            disabled: false,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    /// Create a genuine no-op cache (issue #1568): reads bypass it entirely.
+    ///
+    /// Used when `config.memory.block_cache.enabled == false` so the advertised
+    /// toggle really disables caching instead of being decorative. [`get`](Self::get)
+    /// always returns `None` (no counters touched), [`insert`](Self::insert) returns
+    /// the `Arc` without retaining it, and `resident_bytes()` / `len()` /
+    /// `budget_bytes()` all report `0`. A single dummy shard is allocated only so
+    /// shard indexing stays valid; nothing is ever stored in it.
+    pub fn disabled() -> Self {
+        Self {
+            shards: vec![Mutex::new(Shard::new())].into_boxed_slice(),
+            mask: 0,
+            budget_per_shard: 0,
+            disabled: true,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -185,6 +211,11 @@ impl DecompressedChunkCache {
     /// Look up a resident chunk. On a hit this bumps recency and returns an
     /// `Arc::clone` (no chunk-sized allocation). On a miss returns `None`.
     pub fn get(&self, key: &ChunkKey) -> Option<Arc<[u8]>> {
+        // No-op cache (issue #1568): a disabled cache never holds anything, so
+        // reads bypass it without touching the hit/miss counters.
+        if self.disabled {
+            return None;
+        }
         let mut guard = Self::lock(self.shard_for(key));
         match guard.lru.get(key) {
             Some(v) => {
@@ -209,6 +240,11 @@ impl DecompressedChunkCache {
     /// budget (never evicting the just-inserted entry).
     pub fn insert(&self, key: ChunkKey, data: Vec<u8>) -> Arc<[u8]> {
         let arc: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+        // No-op cache (issue #1568): return the freshly-produced buffer to the
+        // caller without retaining it, so a disabled cache holds nothing.
+        if self.disabled {
+            return arc;
+        }
         let len = arc.len();
         let mut guard = Self::lock(self.shard_for(&key));
 
@@ -252,6 +288,8 @@ impl DecompressedChunkCache {
     }
 
     /// The configured total byte budget (`budget_per_shard * shard count`).
+    ///
+    /// A [`disabled`](Self::disabled) no-op cache reports `0` (it holds nothing).
     pub fn budget_bytes(&self) -> usize {
         self.budget_per_shard * self.shards.len()
     }
@@ -479,5 +517,31 @@ mod tests {
             cache.get(&k0).is_none(),
             "whole-chunk key (aux=0) must not alias a sized range read"
         );
+    }
+
+    /// Issue #1568: `disabled()` is a genuine no-op cache. `insert` returns the
+    /// produced buffer without retaining it, `get` always misses, and every
+    /// occupancy/budget/counter accessor reports zero — so a read path wired to
+    /// it truly bypasses caching (used when `block_cache.enabled == false`).
+    #[test]
+    fn disabled_cache_is_a_genuine_no_op() {
+        let cache = DecompressedChunkCache::disabled();
+        assert_eq!(cache.budget_bytes(), 0, "disabled cache has no budget");
+
+        let key = ChunkKey::new(1, 0);
+        let arc = cache.insert(key, chunk(0xEE, 4096));
+        assert_eq!(
+            arc.len(),
+            4096,
+            "insert still hands back the produced buffer"
+        );
+
+        assert!(cache.get(&key).is_none(), "disabled cache never retains");
+        assert_eq!(cache.resident_bytes(), 0);
+        assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
+        // Bypass touches no counters: a disabled cache reports a structural zero.
+        assert_eq!(cache.hit_count(), 0);
+        assert_eq!(cache.miss_count(), 0);
     }
 }

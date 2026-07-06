@@ -518,6 +518,16 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// The shared, bytes-bounded B1 decompressed-chunk cache owned by the
+    /// SSTable manager (issue #1567/#1568), or `None` when block caching is
+    /// disabled (`config.memory.block_cache.enabled == false`). Cloned (`Arc`) so
+    /// the memory-stats shell can report the live cache's real hit/miss/occupancy
+    /// numbers through `Database::stats().memory_stats`; when `None` the shell
+    /// reports a structural zero (the toggle genuinely disables caching).
+    pub(crate) fn chunk_cache(&self) -> Option<Arc<crate::storage::cache::DecompressedChunkCache>> {
+        self.sstables.stats_chunk_cache()
+    }
+
     /// Get storage statistics
     ///
     /// NOTE: Issue #176 removed compaction stats (compaction.rs deleted).

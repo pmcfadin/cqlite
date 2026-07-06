@@ -300,10 +300,16 @@ pub struct SSTableManager {
     schema_registry: Arc<RwLock<Option<Arc<RwLock<crate::schema::SchemaRegistry>>>>>,
 
     /// Shared, bytes-bounded decompressed-chunk cache (issue #1567, Epic B/B1),
-    /// sized once from `config.memory.block_cache.max_size`. Cloned into every
-    /// reader this manager opens (via `open_reader_with_schema` →
+    /// sized once from `config.memory.block_cache.max_size` when
+    /// `config.memory.block_cache.enabled` is `true` (the default). Cloned into
+    /// every reader this manager opens (via `open_reader_with_schema` →
     /// `SSTableReader::open_with_cache`) so all readers of one dataset — including
     /// those added by a later `refresh_tables` — share one cache and one budget.
+    ///
+    /// When `block_cache.enabled == false` (issue #1568) this is a genuine no-op
+    /// [`disabled`](crate::storage::cache::DecompressedChunkCache::disabled) cache
+    /// so reads bypass caching entirely, and [`stats_chunk_cache`](Self::stats_chunk_cache)
+    /// reports `None` so the memory-stats surface reads a structural zero.
     pub(crate) chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
 
     /// Per-manager deterministic scan gate (issue #1591 test infrastructure).
@@ -314,7 +320,39 @@ pub struct SSTableManager {
     scan_gate: std::sync::Mutex<Option<Arc<scan_gate::Gate>>>,
 }
 
+/// Build the reader-facing decompressed-chunk cache honoring the advertised
+/// `config.memory.block_cache.enabled` toggle (issue #1568). When enabled (the
+/// default) the cache is sized from `block_cache.max_size`; when disabled it is a
+/// genuine no-op cache so reads bypass caching entirely rather than the toggle
+/// being decorative.
+fn build_chunk_cache(config: &Config) -> Arc<crate::storage::cache::DecompressedChunkCache> {
+    use crate::storage::cache::DecompressedChunkCache;
+    if config.memory.block_cache.enabled {
+        Arc::new(DecompressedChunkCache::with_budget_bytes(
+            config.memory.block_cache.max_size as usize,
+        ))
+    } else {
+        Arc::new(DecompressedChunkCache::disabled())
+    }
+}
+
 impl SSTableManager {
+    /// The shared chunk cache to expose to the memory-stats surface, or `None`
+    /// when block caching is disabled (issue #1568).
+    ///
+    /// Returns `Some` only when `config.memory.block_cache.enabled` is `true`; a
+    /// disabled cache is a no-op the stats shell must report as a structural zero
+    /// (via `MemoryManager::new`), never as an active cache.
+    pub(crate) fn stats_chunk_cache(
+        &self,
+    ) -> Option<Arc<crate::storage::cache::DecompressedChunkCache>> {
+        if self.config.memory.block_cache.enabled {
+            Some(Arc::clone(&self.chunk_cache))
+        } else {
+            None
+        }
+    }
+
     /// Create a new SSTable manager
     pub async fn new(
         path: &Path,
@@ -338,11 +376,7 @@ impl SSTableManager {
             refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
-            chunk_cache: Arc::new(
-                crate::storage::cache::DecompressedChunkCache::with_budget_bytes(
-                    config.memory.block_cache.max_size as usize,
-                ),
-            ),
+            chunk_cache: build_chunk_cache(config),
             #[cfg(test)]
             scan_gate: std::sync::Mutex::new(None),
         };
@@ -433,11 +467,7 @@ impl SSTableManager {
             refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
-            chunk_cache: Arc::new(
-                crate::storage::cache::DecompressedChunkCache::with_budget_bytes(
-                    config.memory.block_cache.max_size as usize,
-                ),
-            ),
+            chunk_cache: build_chunk_cache(config),
             #[cfg(test)]
             scan_gate: std::sync::Mutex::new(None),
         };
