@@ -14,8 +14,10 @@
 
 #![cfg(feature = "state_machine")]
 
+mod common;
+
+use common::{crate_root, datasets_root, find_simple_table_data_db, schemas_dir};
 use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
 /// Run the pre-built CLI binary, capturing stdout/stderr.
@@ -24,43 +26,6 @@ fn run_cli_command(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("Failed to execute CLI command")
-}
-
-fn crate_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn datasets_root() -> PathBuf {
-    std::env::var("CQLITE_DATASETS_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| crate_root().parent().unwrap().join("test-data/datasets"))
-}
-
-fn schemas_dir() -> PathBuf {
-    crate_root().parent().unwrap().join("test-data/schemas")
-}
-
-/// Locate a concrete `*-Data.db` file under `test_basic/simple_table-*`, or
-/// return `None` when the binary dataset is not present (test then skips).
-fn find_simple_table_data_db() -> Option<PathBuf> {
-    let dir = datasets_root().join("sstables/test_basic");
-    let entries = fs::read_dir(&dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("simple_table-") {
-            continue;
-        }
-        let sub = fs::read_dir(entry.path()).ok()?;
-        for f in sub.flatten() {
-            let fname = f.file_name();
-            let fname = fname.to_string_lossy();
-            if fname.ends_with("Data.db") {
-                return Some(f.path());
-            }
-        }
-    }
-    None
 }
 
 // ============================================================================

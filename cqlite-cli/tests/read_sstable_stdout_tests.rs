@@ -13,10 +13,18 @@
 //! Tests degrade to a graceful skip (not a false failure) when the binary
 //! Data.db fixtures are absent — see the project test-data guidance about
 //! 0-row false passes in checkouts without `test-data/datasets` binaries.
+//!
+//! Gated on `state_machine` (the `read-sstable` subcommand only exists with it):
+//! without the gate, `--no-default-features` would build a binary lacking the
+//! subcommand and fail loudly instead of skipping.
+
+#![cfg(feature = "state_machine")]
+
+mod common;
 
 use assert_cmd::Command;
-use std::fs;
-use std::path::{Path, PathBuf};
+use common::find_simple_table_data_db;
+use std::path::Path;
 
 /// Decorative markers that must NEVER appear on stdout (they belong on stderr).
 /// This is the exact chatter class the issue calls out (e.g. `📖 Reading …`,
@@ -24,55 +32,6 @@ use std::path::{Path, PathBuf};
 const DECORATIVE_MARKERS: &[&str] = &[
     "📖", "📊", "✅", "🔍", "🚀", "📂", "📋", "📄", "📦", "🎯", "💡", "🔄", "⚠", "❌",
 ];
-
-/// Resolve the datasets root honoring `CQLITE_DATASETS_ROOT` (the CI/agent
-/// convention), falling back to the in-repo `test-data/datasets/sstables`.
-fn datasets_root() -> PathBuf {
-    std::env::var("CQLITE_DATASETS_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .map(|p| p.join("test-data/datasets/sstables"))
-                .unwrap_or_else(|| PathBuf::from("test-data/datasets/sstables"))
-        })
-}
-
-/// Locate a `Data.db` for `test_basic/simple_table`, handling the UUID suffix
-/// and the optional `sstables/` layer. Returns `None` (→ graceful skip) when
-/// the binary fixtures are not present.
-fn find_simple_table_data_file() -> Option<PathBuf> {
-    let root = datasets_root();
-    let keyspace_dir = {
-        let with_sstables = root.join("sstables").join("test_basic");
-        if with_sstables.exists() {
-            with_sstables
-        } else {
-            root.join("test_basic")
-        }
-    };
-
-    let entries = fs::read_dir(&keyspace_dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with("simple_table-") {
-            // Prefer the canonical nb generation; fall back to any *-Data.db.
-            let candidate = entry.path().join("nb-1-big-Data.db");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            if let Ok(files) = fs::read_dir(entry.path()) {
-                for f in files.flatten() {
-                    let fname = f.file_name();
-                    if fname.to_string_lossy().ends_with("-Data.db") {
-                        return Some(f.path());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
 
 /// Run `read-sstable` with the given format/limit, returning (stdout, stderr).
 fn run_read_sstable(data_file: &Path, format: &str, limit: usize) -> (String, String) {
@@ -113,7 +72,7 @@ fn assert_no_decorative_markers(stream_name: &str, contents: &str) {
 /// decorative lines on stdout.
 #[test]
 fn test_read_sstable_json_stdout_is_clean_json() {
-    let Some(data_file) = find_simple_table_data_file() else {
+    let Some(data_file) = find_simple_table_data_db() else {
         eprintln!("SKIP: test_basic/simple_table Data.db fixture not present");
         return;
     };
@@ -151,7 +110,7 @@ fn test_read_sstable_json_stdout_is_clean_json() {
 /// AC #1 (CSV variant): the CSV data payload carries no decorative markers.
 #[test]
 fn test_read_sstable_csv_stdout_has_no_decorative_markers() {
-    let Some(data_file) = find_simple_table_data_file() else {
+    let Some(data_file) = find_simple_table_data_db() else {
         eprintln!("SKIP: test_basic/simple_table Data.db fixture not present");
         return;
     };
@@ -168,7 +127,7 @@ fn test_read_sstable_csv_stdout_has_no_decorative_markers() {
 /// stderr, where they remain available for interactive use.
 #[test]
 fn test_read_sstable_decorative_output_goes_to_stderr() {
-    let Some(data_file) = find_simple_table_data_file() else {
+    let Some(data_file) = find_simple_table_data_db() else {
         eprintln!("SKIP: test_basic/simple_table Data.db fixture not present");
         return;
     };
