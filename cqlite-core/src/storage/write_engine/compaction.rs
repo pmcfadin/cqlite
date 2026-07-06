@@ -427,44 +427,79 @@ impl WriteEngine {
         if let Some(ref ci_path) = tmp_info.compression_info_path {
             renames.push(make_rename(ci_path)?);
         }
-        // TOC.txt is last (publication barrier)
-        renames.push(make_rename(&tmp_info.toc_path)?);
+        // TOC.txt is the publication barrier: rename it LAST and — per the
+        // crash-safety invariant — only AFTER the non-TOC component dirents are
+        // durable (issue #1959). Keep it OUT of the `renames` list so the
+        // intervening directory fsync can be sequenced between the components and
+        // the TOC.
+        let toc_rename = make_rename(&tmp_info.toc_path)?;
 
         // Perform the renames. On failure, remove any already-renamed files so
         // we don't leave a half-published SSTable, then return the error.
         // Time the rename/publication-barrier phase (issue #1037).
         let finalize_start = Instant::now();
-        let mut renamed: Vec<PathBuf> = Vec::with_capacity(renames.len());
-        let mut rename_error: Option<Error> = None;
+        let mut renamed: Vec<PathBuf> = Vec::with_capacity(renames.len() + 1);
 
-        for (src, dst) in &renames {
-            match std::fs::rename(src, dst) {
-                Ok(()) => {
-                    log::debug!(
-                        "Renamed {:?} → {:?}",
-                        src.file_name().unwrap_or_default(),
-                        dst.file_name().unwrap_or_default()
-                    );
-                    renamed.push(dst.clone());
-                }
-                Err(e) => {
-                    rename_error = Some(Error::Storage(format!(
-                        "Atomic rename of {:?} to {:?} failed (rolling back, inputs intact): {}",
-                        src, dst, e
-                    )));
-                    break;
-                }
-            }
-        }
-
-        if let Some(err) = rename_error {
-            // Roll back already-renamed files (best effort)
-            for dst in &renamed {
+        // Best-effort rollback: undo the renames done so far and drop the tmp dir.
+        let rollback = |renamed: &[PathBuf], tmp_dir: &std::path::Path| {
+            for dst in renamed {
                 let _ = std::fs::remove_file(dst);
             }
-            // Clean up tmp directory
-            let _ = std::fs::remove_dir_all(&merge.tmp_dir);
-            return Err(err);
+            let _ = std::fs::remove_dir_all(tmp_dir);
+        };
+
+        // Step 2a: rename every NON-TOC component into the final directory.
+        for (src, dst) in &renames {
+            if let Err(e) = std::fs::rename(src, dst) {
+                let err = Error::Storage(format!(
+                    "Atomic rename of {:?} to {:?} failed (rolling back, inputs intact): {}",
+                    src, dst, e
+                ));
+                rollback(&renamed, &merge.tmp_dir);
+                return Err(err);
+            }
+            log::debug!(
+                "Renamed {:?} → {:?}",
+                src.file_name().unwrap_or_default(),
+                dst.file_name().unwrap_or_default()
+            );
+            renamed.push(dst.clone());
+        }
+
+        // Step 2b: directory durability barrier BEFORE publishing the TOC
+        // (issue #1959). Component *contents* were fsynced in `writer.finish()`,
+        // but the renames only altered dirents; fsync the destination directory
+        // so every non-TOC component's dirent is durable before the TOC — the
+        // barrier readers scan for — is renamed in. Sequencing the fsync here
+        // means the TOC dirent can only become durable AFTER the components it
+        // names, so a crash can never expose a visible TOC that references a
+        // not-yet-durable component.
+        if let Err(e) = super::durability::sync_directory(sstable_dir) {
+            rollback(&renamed, &merge.tmp_dir);
+            return Err(e);
+        }
+
+        // Step 2c: publish by renaming TOC.txt last, then fsync the directory
+        // AGAIN so the TOC dirent itself is durable BEFORE the input SSTables
+        // (the only other durable copy of this data) are deleted below. Without
+        // this second fsync, a crash after the inputs are removed but before the
+        // TOC dirent reached the device would lose the SSTable entirely
+        // (issue #1959).
+        {
+            let (src, dst) = &toc_rename;
+            if let Err(e) = std::fs::rename(src, dst) {
+                let err = Error::Storage(format!(
+                    "Atomic rename of {:?} to {:?} failed (rolling back, inputs intact): {}",
+                    src, dst, e
+                ));
+                rollback(&renamed, &merge.tmp_dir);
+                return Err(err);
+            }
+            renamed.push(dst.clone());
+        }
+        if let Err(e) = super::durability::sync_directory(sstable_dir) {
+            rollback(&renamed, &merge.tmp_dir);
+            return Err(e);
         }
 
         // Finalize/rename latency in seconds (issue #1037): the atomic

@@ -102,8 +102,13 @@ impl DurabilityBarrier for RealDurabilityBarrier {
 /// dirents. On non-Unix targets directory fsync is not available the same way;
 /// the per-file fsyncs performed by the component writers remain the durability
 /// guarantee there, so this is a documented no-op.
+///
+/// Shared crate-wide (issue #1959): the SSTable writer finalize and the
+/// compaction publication rename both fsync their destination directory through
+/// this helper so the "TOC-existence ⇒ all components durable" crash-safety
+/// invariant holds on the compaction path too, not just the flush path.
 #[cfg(unix)]
-fn sync_directory(dir: &Path) -> Result<()> {
+pub(crate) fn sync_directory(dir: &Path) -> Result<()> {
     let handle = std::fs::File::open(dir).map_err(|e| {
         Error::Storage(format!(
             "Failed to open data directory {} for fsync: {e}",
@@ -119,7 +124,7 @@ fn sync_directory(dir: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_dir: &Path) -> Result<()> {
+pub(crate) fn sync_directory(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
