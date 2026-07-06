@@ -683,18 +683,39 @@ impl V5CompressedLegacyParser {
                                 // use cell's own timestamp when present, else row-level liveness timestamp.
                                 let effective_ts = cell_own_ts
                                     .unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
-                                // Resolve expiration: cell-level wins; fall back to row-level TTL when
-                                // the cell used USE_ROW_TTL (cell_exp is None in that case).
-                                // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
-                                // row_header.local_deletion_time is the corresponding expires_at (seconds).
-                                let row_level_exp =
-                                    match (row_header.ttl, row_header.local_deletion_time) {
-                                        (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
+                                // Resolve expiration: explicit per-cell TTL wins;
+                                // else a USE_ROW_TTL (0x10) cell inherits the ROW's
+                                // expiry (issue #1743). For a statement-level `USING
+                                // TTL` INSERT that expiry is the pk-liveness
+                                // localExpirationTime (`liveness_expires_at_seconds`,
+                                // from row `HAS_TTL`) — NOT `local_deletion_time`, the
+                                // GC-grace clock set only by a row tombstone
+                                // (`HAS_DELETION`), `None` for a plain TTL INSERT (so
+                                // the old pairing produced `None` → `TTL(col)` null).
+                                // Mirrors the #1741 shadow-path expiry resolution,
+                                // incl. the oa/da unsigned LDT fallback reinterpret.
+                                let use_row_ttl = (cell_flags & 0x10) != 0;
+                                let row_level_exp = if use_row_ttl {
+                                    let row_expiry =
+                                        row_header.liveness_expires_at_seconds.or_else(|| {
+                                            row_header.local_deletion_time.map(|s| {
+                                                if self.has_uint_deletion_time() {
+                                                    (s as u32) as i64
+                                                } else {
+                                                    s as i64
+                                                }
+                                            })
+                                        });
+                                    match (row_header.ttl, row_expiry) {
+                                        (Some(ttl_s), Some(exp_s)) => Some(CellExpiration {
                                             ttl_seconds: ttl_s,
-                                            expires_at_seconds: ldt_s as i64,
+                                            expires_at_seconds: exp_s,
                                         }),
                                         _ => None,
-                                    };
+                                    }
+                                } else {
+                                    None
+                                };
                                 let effective_exp = cell_exp.or(row_level_exp);
                                 meta_map.insert(
                                     column.name.clone(),
