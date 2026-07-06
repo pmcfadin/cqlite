@@ -2020,9 +2020,22 @@ fn classify_scan_error_class(err: &Error) -> VerifyErrorClass {
     // (canonically a zstd dictionary-compressed chunk). This is NEITHER corruption
     // NOR a checksum mismatch — the frame and its inline CRC are valid — so it must
     // NOT collapse into `ChunkDecompressionError` (truncation/bit-flip) or
-    // `DigestMismatch`. Classify it FIRST, keyed on the authoritative error
-    // variant, not on message substrings.
-    if matches!(err, Error::UnsupportedFormat(_)) {
+    // `DigestMismatch`. Classify it FIRST, keyed on the authoritative error variant.
+    //
+    // INVARIANT (roborev): only a COMPRESSION-related `UnsupportedFormat` may reach
+    // this scan classifier and earn the compression-specific class. Every such
+    // producer names compression in its message — "Unknown/Unsupported compression
+    // algorithm …", "<X> support not compiled in", or the zstd dictionary rejection
+    // ("… dictionary compression … is unsupported …"). The version/format-detection
+    // `UnsupportedFormat` producers fire at OPEN time and are classified on a
+    // different path, so they never arrive here; but the coupling is implicit, so we
+    // gate on the compression message-shape and fall through to the generic
+    // `RowScanFailed` for any non-compression `UnsupportedFormat` rather than
+    // mislabeling it as an unsupported compression feature. (Classifying an
+    // already-typed error by message shape is not type inference; #28 is respected.)
+    if matches!(err, Error::UnsupportedFormat(_))
+        && (lower.contains("compress") || lower.contains("compiled in"))
+    {
         return VerifyErrorClass::UnsupportedCompressionFeature;
     }
     if msg.contains("CRC32 mismatch") {
@@ -2112,6 +2125,42 @@ mod tests {
         assert_eq!(
             classify_scan_error_class(&crc_err),
             VerifyErrorClass::ChunkDecompressionError
+        );
+    }
+
+    #[test]
+    fn non_compression_unsupported_format_falls_through_to_generic() {
+        // roborev (issue #1414): the compression-specific class is reserved for
+        // compression-related `UnsupportedFormat`. A NON-compression `UnsupportedFormat`
+        // reaching this scan classifier (e.g. a hypothetical future decode-path feature
+        // rejection) MUST NOT be mislabeled as an unsupported compression feature — it
+        // falls through to the generic `RowScanFailed`.
+        let non_compression = Error::UnsupportedFormat(
+            "tuple element type not yet supported for chunk 0 at offset 0x0".to_string(),
+        );
+        assert_eq!(
+            classify_scan_error_class(&non_compression),
+            VerifyErrorClass::RowScanFailed
+        );
+        assert_ne!(
+            classify_scan_error_class(&non_compression),
+            VerifyErrorClass::UnsupportedCompressionFeature
+        );
+
+        // Every real compression-related producer still earns the compression class,
+        // regardless of the exact wording: the "not compiled in" build-config path…
+        let not_compiled = Error::UnsupportedFormat("Zstd support not compiled in".to_string());
+        assert_eq!(
+            classify_scan_error_class(&not_compiled),
+            VerifyErrorClass::UnsupportedCompressionFeature
+        );
+        // …and the unknown/unsupported algorithm path.
+        let unknown_algo = Error::UnsupportedFormat(
+            "Unknown compression algorithm: BogusCompressor".to_string(),
+        );
+        assert_eq!(
+            classify_scan_error_class(&unknown_algo),
+            VerifyErrorClass::UnsupportedCompressionFeature
         );
     }
 
