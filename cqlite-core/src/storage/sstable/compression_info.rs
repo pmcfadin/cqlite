@@ -261,6 +261,24 @@ impl CompressionInfo {
         crate::storage::sstable::compression::CompressionAlgorithm::parse(&self.algorithm)
     }
 
+    /// Return the value of a dictionary-related compression option if present.
+    ///
+    /// Stock Apache Cassandra `ZstdCompressor` (CASSANDRA-14482) exposes only a
+    /// `compression_level` option and never trains, stores, or names a zstd
+    /// dictionary, so this returns `None` for every stock SSTable. A
+    /// `CompressionInfo.db` that DOES name a dictionary (an option key containing
+    /// `dictionary`, e.g. `dictionary`/`dictionary_id`) is authoritative metadata
+    /// evidence of dictionary compression, which CQLite does not support (issue
+    /// #1414); the reader fails closed on it. Matched case-insensitively on the
+    /// option KEY — this reads authoritative metadata, not a byte-pattern guess
+    /// (no-heuristics mandate, issue #28).
+    pub fn zstd_dictionary_option(&self) -> Option<&str> {
+        self.option_pairs
+            .iter()
+            .find(|(k, _)| k.to_ascii_lowercase().contains("dictionary"))
+            .map(|(k, _)| k.as_str())
+    }
+
     /// Get the chunk index for a given offset in the uncompressed data
     pub fn chunk_for_offset(&self, offset: u64) -> usize {
         (offset / self.chunk_length as u64) as usize

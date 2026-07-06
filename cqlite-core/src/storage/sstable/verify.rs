@@ -91,6 +91,19 @@ pub enum VerifyErrorClass {
     /// An inline `Data.db` chunk CRC32 did not match, or a chunk could not be
     /// read / decompressed (truncation, bit flip).
     ChunkDecompressionError,
+    /// A chunk is compressed with a valid but UNSUPPORTED compression feature —
+    /// distinct from truncation/bit-flip ([`ChunkDecompressionError`]) and from a
+    /// checksum mismatch ([`DigestMismatch`]) (issue #1414). The canonical case is
+    /// a **zstd dictionary-compressed** chunk: the frame is well-formed and its
+    /// inline chunk CRC is valid, but CQLite ships no-dictionary zstd only, so the
+    /// frame cannot be decoded. The reader fails closed with
+    /// `Error::UnsupportedFormat` naming the feature (e.g. the `Dictionary_ID`);
+    /// this class makes the verify report say "unsupported feature", never
+    /// "corruption".
+    ///
+    /// [`ChunkDecompressionError`]: VerifyErrorClass::ChunkDecompressionError
+    /// [`DigestMismatch`]: VerifyErrorClass::DigestMismatch
+    UnsupportedCompressionFeature,
     /// An **uncompressed** BIG `Data.db` chunk did not match its stored `CRC.db`
     /// per-chunk CRC32 (issue #1396) — the uncompressed analogue of the compressed
     /// path's inline chunk-CRC finding ([`ChunkDecompressionError`]). Cassandra
@@ -154,6 +167,7 @@ impl VerifyErrorClass {
             VerifyErrorClass::CompressionInfoCorrupt => "CompressionInfoCorrupt",
             VerifyErrorClass::ChunkOffsetOutOfBounds => "ChunkOffsetOutOfBounds",
             VerifyErrorClass::ChunkDecompressionError => "ChunkDecompressionError",
+            VerifyErrorClass::UnsupportedCompressionFeature => "UnsupportedCompressionFeature",
             VerifyErrorClass::UncompressedChunkCrcMismatch => "UncompressedChunkCrcMismatch",
             VerifyErrorClass::UnexpectedEof => "UnexpectedEof",
             VerifyErrorClass::IndexEntryCorrupt => "IndexEntryCorrupt",
@@ -1990,9 +2004,41 @@ fn classify_data_error(component: &str, err: &Error) -> VerifyFinding {
 /// decode failure.
 fn classify_scan_error(components: &ComponentSet, err: &Error) -> VerifyFinding {
     let _ = components; // index/BTI corruption is classified earlier; this is Data.db decode
+    let class = classify_scan_error_class(err);
+    VerifyFinding::new(class, "Data.db".to_string(), err.to_string())
+}
+
+/// Map a Data.db scan/decode error to its stable [`VerifyErrorClass`].
+///
+/// Split out from [`classify_scan_error`] so the classification is unit-testable
+/// without constructing a [`ComponentSet`] (which the classifier ignores).
+fn classify_scan_error_class(err: &Error) -> VerifyErrorClass {
     let msg = err.to_string();
     let lower = msg.to_lowercase();
-    let class = if msg.contains("CRC32 mismatch") {
+    // Unsupported compression FEATURE (issue #1414): the reader fails closed with
+    // `Error::UnsupportedFormat` on a valid-but-unimplemented compression feature
+    // (canonically a zstd dictionary-compressed chunk). This is NEITHER corruption
+    // NOR a checksum mismatch — the frame and its inline CRC are valid — so it must
+    // NOT collapse into `ChunkDecompressionError` (truncation/bit-flip) or
+    // `DigestMismatch`. Classify it FIRST, keyed on the authoritative error variant.
+    //
+    // INVARIANT (roborev): only a COMPRESSION-related `UnsupportedFormat` may reach
+    // this scan classifier and earn the compression-specific class. Every such
+    // producer names compression in its message — "Unknown/Unsupported compression
+    // algorithm …", "<X> support not compiled in", or the zstd dictionary rejection
+    // ("… dictionary compression … is unsupported …"). The version/format-detection
+    // `UnsupportedFormat` producers fire at OPEN time and are classified on a
+    // different path, so they never arrive here; but the coupling is implicit, so we
+    // gate on the compression message-shape and fall through to the generic
+    // `RowScanFailed` for any non-compression `UnsupportedFormat` rather than
+    // mislabeling it as an unsupported compression feature. (Classifying an
+    // already-typed error by message shape is not type inference; #28 is respected.)
+    if matches!(err, Error::UnsupportedFormat(_))
+        && (lower.contains("compress") || lower.contains("compiled in"))
+    {
+        return VerifyErrorClass::UnsupportedCompressionFeature;
+    }
+    if msg.contains("CRC32 mismatch") {
         VerifyErrorClass::ChunkDecompressionError
     } else if msg.contains("failed to fill whole buffer")
         || lower.contains("unexpected")
@@ -2007,8 +2053,7 @@ fn classify_scan_error(components: &ComponentSet, err: &Error) -> VerifyFinding 
         VerifyErrorClass::ChunkDecompressionError
     } else {
         VerifyErrorClass::RowScanFailed
-    };
-    VerifyFinding::new(class, "Data.db".to_string(), msg)
+    }
 }
 
 #[cfg(test)]
@@ -2034,6 +2079,142 @@ mod tests {
         assert_eq!(
             VerifyErrorClass::InvalidLocalDeletionTime.code(),
             "InvalidLocalDeletionTime"
+        );
+        // issue #1414: the unsupported-compression-feature class must be stable.
+        assert_eq!(
+            VerifyErrorClass::UnsupportedCompressionFeature.code(),
+            "UnsupportedCompressionFeature"
+        );
+    }
+
+    #[test]
+    fn unsupported_compression_feature_classified_distinctly() {
+        // issue #1414: a zstd dictionary rejection reaches the scan classifier as
+        // `Error::UnsupportedFormat` and MUST map to the dedicated
+        // `UnsupportedCompressionFeature` class — never the truncation/bit-flip
+        // `ChunkDecompressionError` nor the checksum `DigestMismatch`.
+        let dict_err = Error::UnsupportedFormat(
+            "zstd dictionary compression (Dictionary_ID=1234) is unsupported for chunk 0 at offset 0x0"
+                .to_string(),
+        );
+        assert_eq!(
+            classify_scan_error_class(&dict_err),
+            VerifyErrorClass::UnsupportedCompressionFeature
+        );
+        assert_ne!(
+            classify_scan_error_class(&dict_err),
+            VerifyErrorClass::ChunkDecompressionError
+        );
+        assert_ne!(
+            classify_scan_error_class(&dict_err),
+            VerifyErrorClass::DigestMismatch
+        );
+
+        // Regression guard: a genuine plain-decode failure (truncation/bit-flip)
+        // stays `ChunkDecompressionError` — the new class must not swallow it.
+        let decode_err = Error::InvalidFormat(
+            "Zstd decompression failed for chunk 0 at offset 0x0: corrupted input".to_string(),
+        );
+        assert_eq!(
+            classify_scan_error_class(&decode_err),
+            VerifyErrorClass::ChunkDecompressionError
+        );
+
+        // A chunk inline-CRC mismatch also stays `ChunkDecompressionError`.
+        let crc_err = Error::Corruption("Data.db chunk 0 CRC32 mismatch".to_string());
+        assert_eq!(
+            classify_scan_error_class(&crc_err),
+            VerifyErrorClass::ChunkDecompressionError
+        );
+    }
+
+    #[test]
+    fn non_compression_unsupported_format_falls_through_to_generic() {
+        // roborev (issue #1414): the compression-specific class is reserved for
+        // compression-related `UnsupportedFormat`. A NON-compression `UnsupportedFormat`
+        // reaching this scan classifier (e.g. a hypothetical future decode-path feature
+        // rejection) MUST NOT be mislabeled as an unsupported compression feature — it
+        // falls through to the generic `RowScanFailed`.
+        let non_compression = Error::UnsupportedFormat(
+            "tuple element type not yet supported for chunk 0 at offset 0x0".to_string(),
+        );
+        assert_eq!(
+            classify_scan_error_class(&non_compression),
+            VerifyErrorClass::RowScanFailed
+        );
+        assert_ne!(
+            classify_scan_error_class(&non_compression),
+            VerifyErrorClass::UnsupportedCompressionFeature
+        );
+
+        // Every real compression-related producer still earns the compression class,
+        // regardless of the exact wording: the "not compiled in" build-config path…
+        let not_compiled = Error::UnsupportedFormat("Zstd support not compiled in".to_string());
+        assert_eq!(
+            classify_scan_error_class(&not_compiled),
+            VerifyErrorClass::UnsupportedCompressionFeature
+        );
+        // …and the unknown/unsupported algorithm path.
+        let unknown_algo =
+            Error::UnsupportedFormat("Unknown compression algorithm: BogusCompressor".to_string());
+        assert_eq!(
+            classify_scan_error_class(&unknown_algo),
+            VerifyErrorClass::UnsupportedCompressionFeature
+        );
+    }
+
+    /// End-to-end wiring (issue #1414): a REAL trained-dictionary zstd frame,
+    /// driven through the shipped `ChunkDecompressor`, must surface the typed
+    /// `Error::UnsupportedFormat` that `classify_scan_error_class` maps to
+    /// `UnsupportedCompressionFeature` — proving the reader error and the verify
+    /// class agree end to end (not just on a hand-written message).
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn dictionary_frame_wires_reader_error_to_unsupported_class() {
+        use crate::parser::header::CassandraVersion;
+        use crate::storage::sstable::chunk_decompressor::ChunkDecompressor;
+        use crate::storage::sstable::compression_info::CompressionInfo;
+        use std::io::Cursor;
+
+        let plaintext =
+            b"cqlite|zstd|dictionary|row=verify|table=zstd_dictionary_table|value=payload-7"
+                .to_vec();
+        let samples: Vec<Vec<u8>> = (0..1024u32)
+            .map(|i| format!("cqlite|zstd|dictionary|row={i}|value={}", i % 37).into_bytes())
+            .collect();
+        let dict = zstd::dict::from_samples(&samples, 4 * 1024).expect("train zstd dictionary");
+        let dict_frame = zstd::bulk::Compressor::with_dictionary(3, &dict)
+            .expect("dictionary compressor")
+            .compress(&plaintext)
+            .expect("dictionary-compress chunk");
+
+        // Cassandra chunk framing: [compressed payload][4-byte BE CRC32].
+        let mut image = dict_frame.clone();
+        image.extend_from_slice(&crc32fast::hash(&dict_frame).to_be_bytes());
+
+        let info = CompressionInfo {
+            algorithm: "ZstdCompressor".to_string(),
+            option_pairs: vec![],
+            chunk_length: plaintext.len() as u32,
+            max_compressed_length: i32::MAX as u32,
+            data_length: plaintext.len() as u64,
+            chunk_offsets: vec![0],
+        };
+        let mut dec = ChunkDecompressor::new(info, CassandraVersion::V5_0Release)
+            .expect("build decompressor");
+        let err = dec
+            .decompress_chunk_by_index(&mut Cursor::new(image), 0)
+            .expect_err("dictionary frame must be rejected");
+
+        assert!(
+            matches!(err, Error::UnsupportedFormat(_)),
+            "reader must reject with UnsupportedFormat; got: {err}"
+        );
+        assert_eq!(
+            classify_scan_error_class(&err),
+            VerifyErrorClass::UnsupportedCompressionFeature,
+            "verify must classify the reader's dictionary rejection as \
+             UnsupportedCompressionFeature; got err: {err}"
         );
     }
 

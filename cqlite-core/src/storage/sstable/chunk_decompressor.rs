@@ -4,6 +4,8 @@
 //! using CompressionInfo.db metadata to decompress chunks on-demand.
 
 use super::compression_info::CompressionInfo;
+#[cfg(feature = "zstd")]
+use super::zstd_frame::zstd_dictionary_rejection;
 use crate::parser::header::CassandraVersion;
 use crate::{Error, Result};
 use rustc_hash::FxHashMap;
@@ -529,6 +531,16 @@ impl ChunkDecompressor {
         {
             use std::io::Read;
             use zstd::stream::read::Decoder as ZstdDecoder;
+
+            // AUTHORITATIVE dictionary detection (issue #1414): fail closed with a
+            // typed, feature-naming error BEFORE a plain decode when the metadata or
+            // frame header declares a dictionary — an unsupported FEATURE, not
+            // corruption/checksum, so it classifies distinctly (never a guess, #28).
+            if let Some(msg) =
+                zstd_dictionary_rejection(&self.compression_info, compressed_data, chunk_index)
+            {
+                return Err(Error::UnsupportedFormat(msg));
+            }
 
             // Decompression-bomb guard: stream through a reader capped at
             // chunk_length + 1 rather than `decode_all`, which would pre-allocate

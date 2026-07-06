@@ -22,6 +22,15 @@ pub mod reader;
 pub mod summary_reader;
 pub mod version_gate;
 pub mod work_counters;
+/// Authoritative zstd frame-header parsing for dictionary detection (issue #1414).
+///
+/// Gated on the `zstd` feature: the only consumer is the zstd decode path in
+/// `chunk_decompressor`, which is itself `#[cfg(feature = "zstd")]`. Without this
+/// gate the module's items are unused under a zstd-off build (e.g. the
+/// `Minimal Compression Build` CI lane `--features=lz4,snappy`) and fail
+/// `-D warnings`.
+#[cfg(feature = "zstd")]
+pub mod zstd_frame;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
