@@ -226,6 +226,8 @@ where
         }
 
         nodes_visited = nodes_visited.saturating_add(1);
+        // Issue #1618 (H5): count every node the DFS enters (L1/L3: <40 nodes visited).
+        crate::storage::sstable::read_work_counters::record_bti_node_visited();
         if nodes_visited > trie_data.len() {
             return Err(Error::Parse(format!(
                 "BTI DFS exceeded total work bound ({nodes_visited} nodes visited > \

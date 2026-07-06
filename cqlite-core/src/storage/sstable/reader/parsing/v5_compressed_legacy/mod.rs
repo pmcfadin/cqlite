@@ -660,6 +660,9 @@ fn build_display_row(
         // Issue #1334: carry the interned `Arc<str>` name handles straight into
         // the row carrier; emit-time alphabetical ordering preserved exactly.
         let mut row_cells: RowCells = cells.into_iter().collect();
+        // Issue #1618 (H5): count the per-row cell sort — the shared site #1334
+        // consolidated the former block_emit/block_emit_windowed sorts into (K2/L).
+        crate::storage::sstable::read_work_counters::record_row_sort();
         row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
         ScanRow::Row(row_cells)
     }

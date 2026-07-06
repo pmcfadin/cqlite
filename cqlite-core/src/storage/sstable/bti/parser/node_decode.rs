@@ -303,6 +303,9 @@ fn dense_child(offset: u64, delta: u64) -> Option<SizedPointer> {
 /// node-type nibble is out of range, or any other structural invariant is
 /// violated.
 pub(crate) fn parse_bti_node(data: &[u8], offset: u64) -> BtiResult<BtiNode> {
+    // Issue #1618 (H5): count every node/pointer decode (L1/L3: pairs with
+    // BTI_NODES_VISITED to prove the descent does not re-decode nodes).
+    crate::storage::sstable::read_work_counters::record_bti_pointer_decode();
     if data.is_empty() {
         return Err(Error::Parse("Empty BTI node data".to_string()));
     }

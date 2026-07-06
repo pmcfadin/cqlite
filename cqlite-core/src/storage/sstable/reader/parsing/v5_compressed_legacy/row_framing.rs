@@ -681,6 +681,9 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         mut offset: usize,
     ) -> Result<(RowKey, usize, Option<(i64, i32)>)> {
+        // Issue #1618 (H5): count every speculative partition-header parse — the
+        // boundary-peek/try-parse primitive every emit path routes through (K2/K3).
+        crate::storage::sstable::read_work_counters::record_partition_header_try_parse();
         let start_offset = offset;
 
         if offset >= data.len() {
