@@ -756,6 +756,7 @@ mod complex_column;
 mod frozen;
 mod marshal_element;
 mod now_clock;
+mod partition_driver;
 mod partition_shadow;
 mod raw_type_value;
 mod raw_value;
@@ -763,6 +764,7 @@ mod row_data;
 mod row_framing;
 mod udt;
 
+use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
 use partition_shadow::{clustering_reversed_flags, PartitionShadow};
 // #1741: shared partition-header need-more classifier used by both sliding
 // parsers (`block_emit_windowed` + `compaction`) via their `use super::*` glob.

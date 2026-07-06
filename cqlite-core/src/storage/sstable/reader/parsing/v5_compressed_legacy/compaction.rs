@@ -330,8 +330,6 @@ impl V5CompressedLegacyParser {
             crate::storage::sstable::reader::compaction_row::CompactionRow,
         ) -> Result<std::ops::ControlFlow<()>>,
     {
-        use crate::storage::sstable::reader::compaction_row::CompactionRow;
-
         if data.is_empty() {
             return Ok(ParseStep::Done);
         }
@@ -343,70 +341,102 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
-        // Issue #1046: per-PARTITION resolution build (this driver is re-entered once
-        // per partition by the sliding-window compaction caller). Allocations scale
-        // with partition count, not row count.
-        let resolution = RowColumnResolution::build(schema, reader);
+        // Issue #1640 (K1): thin adapter over the single sliding-window partition
+        // driver. `CompactionPolicy` supplies the three per-consumer hooks
+        // (partition-tombstone emit, range-marker bound pairing, per-element
+        // CompactionRow build); the driver owns the framing skeleton + ParseStep
+        // + pending buffering this function used to hand-roll.
+        let mut policy = CompactionPolicy::new(self);
+        self.drive_partition_sliding(data, schema, reader, at_final_chunk, &mut policy, |row| {
+            emit(row)
+        })
+    }
+}
 
-        // #1741 (roborev HIGH): size the header need-more decision correctly for
-        // the oa/da DeletionTime form. A DELETED oa/da partition carries the full
-        // 12-byte DeletionTime, not the 1-byte LIVE sentinel; a header split across
-        // a NON-FINAL chunk with only the first deletion byte present must return
-        // `NeedMore`, NOT be mis-parsed and skipped as `Emitted(1)` — on the
-        // compaction path that would DROP the partition tombstone and let older /
-        // deleted data survive or resurface. The nb path is unchanged (fixed
-        // 12-byte signed form). No heuristics: keyed off the authoritative
-        // `hasUIntDeletionTime` gate and the canonical DeletionTime sentinel.
-        match self.partition_header_readiness(data) {
-            PartitionHeaderReadiness::Malformed => return Ok(ParseStep::Emitted(1)),
-            PartitionHeaderReadiness::Incomplete => {
-                return Ok(if at_final_chunk {
-                    ParseStep::Done
-                } else {
-                    ParseStep::NeedMore
-                });
-            }
-            PartitionHeaderReadiness::Ready => {}
+/// Issue #1640 (K1): [`SlidingPartitionPolicy`] for the per-element compaction
+/// read path (epic #899). Compaction is a PHYSICAL consumer: no read-side
+/// shadowing (it reconciles tombstones itself across generations), the static
+/// row is emitted as its own `CompactionRow` (issue #1074, not merged), and
+/// range-tombstone markers are paired into `RangeMarker` rows (issue #933).
+struct CompactionPolicy<'a> {
+    parser: &'a V5CompressedLegacyParser,
+    partition_key: RowKey,
+    /// Issue #933: in-flight range-tombstone start bound
+    /// `(bound, markedForDeleteAt µs, localDeletionTime s)`, re-derived from the
+    /// partition start on every sliding-window re-parse.
+    pending_range_start: Option<(
+        crate::storage::sstable::reader::compaction_row::CompactionBound,
+        i64,
+        i32,
+    )>,
+}
+
+impl<'a> CompactionPolicy<'a> {
+    fn new(parser: &'a V5CompressedLegacyParser) -> Self {
+        Self {
+            parser,
+            partition_key: RowKey(Vec::new()),
+            pending_range_start: None,
         }
+    }
 
-        let (partition_key, mut offset, partition_deletion) = match self
-            .parse_partition_header_full(data, 0)
-        {
-            Ok(v) => v,
-            // Defense-in-depth: `Ready` guarantees the DeletionTime is fully
-            // present, so this cannot be a truncation. On a non-final chunk
-            // only re-request bytes if the header is still incomplete;
-            // otherwise skip a byte to resynchronise (NeedMore on a complete
-            // buffer would loop forever). Under `Ready` this stays a byte skip.
-            Err(_) => {
-                if !at_final_chunk
-                    && self.partition_header_readiness(data) == PartitionHeaderReadiness::Incomplete
-                {
-                    return Ok(ParseStep::NeedMore);
-                }
-                return Ok(ParseStep::Emitted(1));
-            }
-        };
+    /// Build a `CompactionBound` from decoded clustering-prefix values. An empty
+    /// prefix is an OPEN bound (Bottom for a start, Top for an end); a non-empty
+    /// prefix pairs each value with its schema clustering-column name
+    /// (positionally; bounds may be PREFIX-length).
+    fn make_bound(
+        &self,
+        schema: &TableSchema,
+        values: Vec<Value>,
+        inclusive: bool,
+        is_start: bool,
+    ) -> crate::storage::sstable::reader::compaction_row::CompactionBound {
+        use crate::storage::sstable::reader::compaction_row::CompactionBound;
+        if values.is_empty() {
+            return if is_start {
+                CompactionBound::Bottom
+            } else {
+                CompactionBound::Top
+            };
+        }
+        let pairs: Vec<(String, Value)> = values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let name = schema
+                    .clustering_keys
+                    .get(i)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| format!("ck{i}"));
+                (name, v)
+            })
+            .collect();
+        if inclusive {
+            CompactionBound::Inclusive(pairs)
+        } else {
+            CompactionBound::Exclusive(pairs)
+        }
+    }
+}
 
-        // Issue #1074: on the COMPACTION path the static row is emitted as its own
-        // partition-level `CompactionRow` (Cassandra's `Row.staticRow`), NOT folded
-        // into the clustering rows. The user-facing read paths
-        // (`parse_block_emit_*` / `parse_one_partition_with_timestamps`) still fold
-        // statics into each row so a `SELECT` surfaces the static columns per row;
-        // compaction must preserve the partition/clustering-row separation instead.
-        let mut pending: Vec<CompactionRow> = Vec::new();
+impl SlidingPartitionPolicy for CompactionPolicy<'_> {
+    type Row = crate::storage::sstable::reader::compaction_row::CompactionRow;
 
-        // Issue #1072: a partition-level tombstone in this SSTable must shadow OLDER
-        // live rows in OTHER SSTables during a cross-generation compaction merge.
-        // Surface it as a synthetic partition-deletion `CompactionRow` (mirroring the
-        // `RangeMarker` carrier) so the merge can apply the partition floor and
-        // re-emit the surviving tombstone. Pushed exactly once per partition — even
-        // when the partition has zero rows (tombstone-only case) — because this
-        // header parse runs once per partition emit.
+    fn on_partition_open(
+        &mut self,
+        partition_key: RowKey,
+        partition_deletion: Option<(i64, i32)>,
+        _schema: &TableSchema,
+        pending: &mut Vec<Self::Row>,
+    ) {
+        use crate::storage::sstable::reader::compaction_row::{CompactionRow, CompactionRowData};
+        self.partition_key = partition_key;
+        // Issue #1072: surface a partition-level tombstone as a synthetic
+        // partition-delete `CompactionRow` (pushed once per partition, even for a
+        // tombstone-only partition) so the merge can apply the partition floor.
         if let Some((mfda, ldt)) = partition_deletion {
-            use crate::storage::sstable::reader::compaction_row::CompactionRowData;
             pending.push(CompactionRow {
-                key: partition_key.clone(),
+                key: self.partition_key.clone(),
                 row_timestamp: mfda,
                 row_data: CompactionRowData::PartitionDelete {
                     deletion_time: mfda,
@@ -414,244 +444,137 @@ impl V5CompressedLegacyParser {
                 },
             });
         }
+    }
 
-        // In-flight range tombstone start bound (issue #933). A range tombstone is
-        // a pair of adjacent bound markers (start then end), or a sequence of
-        // boundary markers that close one range and open the next. We buffer the
-        // open start here and emit a complete `CompactionRowData::RangeMarker` when
-        // the matching end/boundary arrives. Local to this call so it is re-derived
-        // from the partition start on every sliding-window re-parse (the `pending`
-        // rows are only flushed on a clean `Emitted`).
-        //
-        // Tuple: (start bound, deletion_time µs, local_deletion_time s).
-        let mut pending_range_start: Option<(
-            crate::storage::sstable::reader::compaction_row::CompactionBound,
-            i64,
-            i32,
-        )> = None;
-
-        // Build a `CompactionBound` from decoded clustering prefix values. The
-        // writer emits an OPEN bound (Bottom/Top) as an inclusive bound with zero
-        // clustering values, so an empty prefix decodes to Bottom (start) / Top
-        // (end). A non-empty prefix pairs each value with its schema clustering
-        // column name (positionally; bounds may be PREFIX-length).
-        let make_bound = |values: Vec<Value>, inclusive: bool, is_start: bool| {
-            use crate::storage::sstable::reader::compaction_row::CompactionBound;
-            if values.is_empty() {
-                return if is_start {
-                    CompactionBound::Bottom
-                } else {
-                    CompactionBound::Top
-                };
-            }
-            let pairs: Vec<(String, Value)> = values
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let name = schema
-                        .clustering_keys
-                        .get(i)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_else(|| format!("ck{i}"));
-                    (name, v)
-                })
-                .collect();
-            if inclusive {
-                CompactionBound::Inclusive(pairs)
-            } else {
-                CompactionBound::Exclusive(pairs)
-            }
+    fn on_range_marker(
+        &mut self,
+        data: &[u8],
+        offset: usize,
+        schema: &TableSchema,
+        pending: &mut Vec<Self::Row>,
+    ) -> MarkerOutcome {
+        use crate::storage::sstable::reader::compaction_row::{
+            CompactionBound, CompactionRow, CompactionRowData,
+        };
+        // Issue #933: parse the range-tombstone bound marker and pair it into a
+        // complete `RangeMarker` so the merge can shadow covered cells AND
+        // re-emit the surviving marker.
+        let (bound_values, bound_kind, (mfda_p, ldt_p), secondary, next_offset) = match self
+            .parser
+            .parse_range_tombstone_marker_with_ldt(data, offset, schema)
+        {
+            Ok(v) => v,
+            // Truncated marker body at a chunk boundary (or corrupt at the
+            // final chunk): terminate exactly as the prior skip path did.
+            Err(_) => return MarkerOutcome::Stop,
         };
 
-        macro_rules! flush_and_emitted {
-            ($consumed:expr, $pending:expr, $emit:expr) => {{
-                for row in $pending.drain(..) {
-                    match $emit(row)? {
-                        std::ops::ControlFlow::Continue(()) => {}
-                        std::ops::ControlFlow::Break(()) => break,
-                    }
+        // ClusteringPrefix.Kind ordinals:
+        //   0 EXCL_END, 1 INCL_START, 2 EXCL_END_INCL_START_BOUNDARY,
+        //   5 INCL_END_EXCL_START_BOUNDARY, 6 INCL_END, 7 EXCL_START.
+        match bound_kind {
+            1 | 7 => {
+                // Simple start bound: buffer until the matching end.
+                let start = self.make_bound(schema, bound_values, bound_kind == 1, true);
+                self.pending_range_start = Some((start, mfda_p, ldt_p));
+            }
+            0 | 6 => {
+                // Simple end bound: close the buffered start.
+                let end = self.make_bound(schema, bound_values, bound_kind == 6, false);
+                let start = self
+                    .pending_range_start
+                    .take()
+                    .map(|(s, _, _)| s)
+                    .unwrap_or(CompactionBound::Bottom);
+                pending.push(CompactionRow {
+                    key: self.partition_key.clone(),
+                    row_timestamp: mfda_p,
+                    row_data: CompactionRowData::RangeMarker {
+                        start,
+                        end,
+                        deletion_time: mfda_p,
+                        local_deletion_time: ldt_p,
+                    },
+                });
+            }
+            2 | 5 => {
+                // Boundary marker: primary closes the previous range, the
+                // secondary opens the next. kind 2 = EXCL_END + INCL_START,
+                // kind 5 = INCL_END + EXCL_START.
+                let end_inclusive = bound_kind == 5;
+                if let Some((start, _, _)) = self.pending_range_start.take() {
+                    let end = self.make_bound(schema, bound_values.clone(), end_inclusive, false);
+                    pending.push(CompactionRow {
+                        key: self.partition_key.clone(),
+                        row_timestamp: mfda_p,
+                        row_data: CompactionRowData::RangeMarker {
+                            start,
+                            end,
+                            deletion_time: mfda_p,
+                            local_deletion_time: ldt_p,
+                        },
+                    });
                 }
-                Ok(ParseStep::Emitted($consumed))
-            }};
+                let (new_mfda, new_ldt) = secondary.unwrap_or((mfda_p, ldt_p));
+                let new_start = self.make_bound(schema, bound_values, bound_kind == 2, true);
+                self.pending_range_start = Some((new_start, new_mfda, new_ldt));
+            }
+            _ => {
+                // Unknown bound kind: skip it rather than mis-parse the partition
+                // (the offset already advanced past the marker).
+            }
         }
+        MarkerOutcome::Advanced(next_offset)
+    }
 
-        loop {
-            if offset < data.len() && Self::is_end_of_partition(data[offset]) {
-                offset += 1;
-                return flush_and_emitted!(offset, pending, emit);
-            }
+    fn on_data_row(
+        &mut self,
+        data: &[u8],
+        offset: usize,
+        schema: &TableSchema,
+        reader: &crate::storage::sstable::reader::types::SSTableReader,
+        resolution: &RowColumnResolution,
+        pending: &mut Vec<Self::Row>,
+    ) -> Option<usize> {
+        use crate::storage::sstable::reader::compaction_row::CompactionRow;
+        // Compaction mode: capture per-column complex elements and request
+        // per-cell metadata so simple cells carry per-cell timestamps/TTLs.
+        let mut complex_capture: CompactionComplexColumns = HashMap::new();
+        match self.parser.parse_row_data_with_offset_impl(
+            data,
+            offset,
+            Some(schema),
+            reader,
+            true,
+            Some(&mut complex_capture),
+            resolution,
+            // Compaction is a physical consumer: no read-side shadowing.
+            None,
+        ) {
+            Ok((cells, cell_meta, row_header_opt, next_offset, _is_static, _complex_meta)) => {
+                // Issue #932 (K1): the ONE row-write-timestamp coexistence rule.
+                let row_ts = row_write_timestamp(&row_header_opt);
 
-            if offset >= data.len() {
-                if at_final_chunk {
-                    return flush_and_emitted!(offset, pending, emit);
-                }
-                return Ok(ParseStep::NeedMore);
-            }
-
-            if Self::is_range_tombstone_marker(data[offset]) {
-                // Issue #933: parse the range-tombstone bound marker and pair it
-                // into a complete `RangeMarker` so the merge can shadow covered
-                // cells AND re-emit the surviving marker (previously SKIPPED, which
-                // dropped the tombstone entirely).
-                let (bound_values, bound_kind, (mfda_p, ldt_p), secondary, next_offset) =
-                    match self.parse_range_tombstone_marker_with_ldt(data, offset, schema) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            // Truncated marker body at a chunk boundary (or corrupt
-                            // at the final chunk): request more / flush, exactly as
-                            // the prior skip path did.
-                            if at_final_chunk {
-                                return flush_and_emitted!(offset, pending, emit);
-                            }
-                            return Ok(ParseStep::NeedMore);
-                        }
-                    };
-                offset = next_offset;
-
-                use crate::storage::sstable::reader::compaction_row::{
-                    CompactionBound, CompactionRowData,
-                };
-
-                // Emit a complete range tombstone given a (start, deletion) and an
-                // end bound + the end's deletion time/ldt.
-                let mut emit_range =
-                    |start: CompactionBound, end: CompactionBound, dt: i64, ldt: i32| {
-                        pending.push(CompactionRow {
-                            key: partition_key.clone(),
-                            row_timestamp: dt,
-                            row_data: CompactionRowData::RangeMarker {
-                                start,
-                                end,
-                                deletion_time: dt,
-                                local_deletion_time: ldt,
-                            },
-                        });
-                    };
-
-                // ClusteringPrefix.Kind ordinals:
-                //   0 EXCL_END, 1 INCL_START, 2 EXCL_END_INCL_START_BOUNDARY,
-                //   5 INCL_END_EXCL_START_BOUNDARY, 6 INCL_END, 7 EXCL_START.
-                match bound_kind {
-                    1 | 7 => {
-                        // Simple start bound: buffer until the matching end.
-                        let start = make_bound(bound_values, bound_kind == 1, true);
-                        pending_range_start = Some((start, mfda_p, ldt_p));
-                    }
-                    0 | 6 => {
-                        // Simple end bound: close the buffered start.
-                        let end = make_bound(bound_values, bound_kind == 6, false);
-                        let start = pending_range_start
-                            .take()
-                            .map(|(s, _, _)| s)
-                            .unwrap_or(CompactionBound::Bottom);
-                        emit_range(start, end, mfda_p, ldt_p);
-                    }
-                    2 | 5 => {
-                        // Boundary marker: primary closes the previous range, the
-                        // secondary opens the next. kind 2 = EXCL_END + INCL_START,
-                        // kind 5 = INCL_END + EXCL_START.
-                        let end_inclusive = bound_kind == 5;
-                        if let Some((start, _, _)) = pending_range_start.take() {
-                            let end = make_bound(bound_values.clone(), end_inclusive, false);
-                            emit_range(start, end, mfda_p, ldt_p);
-                        }
-                        let (new_mfda, new_ldt) = secondary.unwrap_or((mfda_p, ldt_p));
-                        let new_start = make_bound(bound_values, bound_kind == 2, true);
-                        pending_range_start = Some((new_start, new_mfda, new_ldt));
-                    }
-                    _ => {
-                        // Unknown bound kind: skip it rather than mis-parse the
-                        // partition (the offset already advanced past the marker).
-                    }
-                }
-                continue;
-            }
-
-            // Compaction mode: capture per-column complex elements and request
-            // per-cell metadata so simple cells carry per-cell timestamps/TTLs.
-            let mut complex_capture: CompactionComplexColumns = HashMap::new();
-            match self.parse_row_data_with_offset_impl(
-                data,
-                offset,
-                Some(schema),
-                reader,
-                true,
-                Some(&mut complex_capture),
-                &resolution,
-                // Compaction is a physical consumer: no read-side shadowing.
-                None,
-            ) {
-                Ok((
+                // Issue #1074: emit BOTH static and clustering rows as their own
+                // `CompactionRow` (static-ness is decided by the schema in the
+                // writer, not by on-disk folding).
+                let row_data = self.parser.build_compaction_row_data(
                     cells,
                     cell_meta,
-                    row_header_opt,
-                    next_offset,
-                    // Issue #1074: the on-disk static flag no longer changes the
-                    // emit path — static and clustering rows each become their own
-                    // `CompactionRow` (see below) and the writer decides static
-                    // placement from the schema, not from on-disk folding.
-                    _is_static,
-                    _complex_meta,
-                )) => {
-                    offset = next_offset;
+                    complex_capture,
+                    &row_header_opt,
+                    row_ts,
+                    schema,
+                );
 
-                    let row_tombstone = row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
-                    // Issue #932: a HAS_DELETION row may ALSO carry a liveness
-                    // timestamp (surviving cells written strictly after the
-                    // deletion). Prefer the liveness timestamp as the row
-                    // timestamp so those cells inherit it and are NOT shadowed by
-                    // the older row deletion during reconcile; fall back to
-                    // markedForDeleteAt only for a PURE row tombstone (which has no
-                    // HAS_TIMESTAMP).
-                    let row_ts = row_header_opt
-                        .as_ref()
-                        .and_then(|h| h.timestamp)
-                        .or_else(|| row_tombstone.map(|h| h.row_tombstone_deletion_time()))
-                        .unwrap_or(0);
-
-                    // Issue #1074: emit BOTH static and clustering rows as their own
-                    // `CompactionRow`. A static row carries no clustering prefix, so
-                    // it decodes to the merge's `None` bucket and reconciles
-                    // independently of the clustering rows — a clustering-row delete
-                    // can no longer shadow the static cell, a static-only partition is
-                    // no longer dropped, and the static cell keeps its OWN write
-                    // timestamp (instead of inheriting a clustering row's). The merge
-                    // re-emits it as a `clustering_key: None` mutation and the writer
-                    // rebuilds the partition static prelude via
-                    // `collect_static_operations` (static-ness decided by the schema,
-                    // not by on-disk folding).
-                    let row_data = self.build_compaction_row_data(
-                        cells,
-                        cell_meta,
-                        complex_capture,
-                        &row_header_opt,
-                        row_ts,
-                        schema,
-                    );
-
-                    pending.push(CompactionRow {
-                        key: partition_key.clone(),
-                        row_timestamp: row_ts,
-                        row_data,
-                    });
-
-                    if offset >= data.len() {
-                        if at_final_chunk {
-                            return flush_and_emitted!(offset, pending, emit);
-                        }
-                        return Ok(ParseStep::NeedMore);
-                    }
-                    if self.peek_is_partition_header(data, offset) {
-                        return flush_and_emitted!(offset, pending, emit);
-                    }
-                }
-                Err(_) => {
-                    if at_final_chunk {
-                        return flush_and_emitted!(offset, pending, emit);
-                    }
-                    return Ok(ParseStep::NeedMore);
-                }
+                pending.push(CompactionRow {
+                    key: self.partition_key.clone(),
+                    row_timestamp: row_ts,
+                    row_data,
+                });
+                Some(next_offset)
             }
+            Err(_) => None,
         }
     }
 }
