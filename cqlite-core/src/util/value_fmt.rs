@@ -15,7 +15,72 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// ValueFormatter provides cqlsh-compatible string formatting for CQL values
 pub struct ValueFormatter;
 
+/// Lowercase hex digits for the lookup-table UUID/hex encoders.
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
+
 impl ValueFormatter {
+    /// Returns `true` when the value represents a genuine CQL `NULL`.
+    ///
+    /// This is the authoritative null predicate used by output writers to decide
+    /// whether to emit an empty CSV field. It replaces the fragile
+    /// `format_value(v) == "null"` sentinel, which wrongly collapsed a literal
+    /// text value `"null"` to an empty field (issue #1499). Only `Value::Null`
+    /// formats to the bare string `"null"`, so matching on the variant is exact.
+    #[inline]
+    pub fn is_null(value: &Value) -> bool {
+        matches!(value, Value::Null)
+    }
+
+    /// Append the formatted string representation of `value` to `out`.
+    ///
+    /// Byte-for-byte identical to `format_value`, but writes into a caller-owned
+    /// scratch buffer so hot loops (CSV rows) can reuse one allocation across all
+    /// cells instead of allocating a fresh `String` per cell (issue #1499). Scalar
+    /// hot paths are written directly; rarer complex types delegate to
+    /// `format_value` for a single append.
+    pub fn format_into(value: &Value, out: &mut String) {
+        use std::fmt::Write as _;
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Boolean(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::TinyInt(i) => {
+                let _ = write!(out, "{}", i);
+            }
+            Value::SmallInt(i) => {
+                let _ = write!(out, "{}", i);
+            }
+            Value::Integer(i) => {
+                let _ = write!(out, "{}", i);
+            }
+            Value::BigInt(i) => {
+                let _ = write!(out, "{}", i);
+            }
+            Value::Counter(i) => {
+                let _ = write!(out, "{}", i);
+            }
+            Value::Text(s) => out.push_str(s),
+            Value::Uuid(bytes) => Self::format_uuid_into(bytes, out),
+            // Complex / rarer types: single append via the owned formatter. This
+            // keeps output byte-identical without duplicating their logic.
+            other => out.push_str(&Self::format_value(other)),
+        }
+    }
+
+    /// Encode a 16-byte UUID as lowercase hyphenated text into `out` using a hex
+    /// lookup table (no per-cell `format!` machinery). Shared by `format_uuid`
+    /// and the JSON writer (issue #1499).
+    pub fn format_uuid_into(bytes: &[u8; 16], out: &mut String) {
+        out.reserve(36);
+        for (i, b) in bytes.iter().enumerate() {
+            // Hyphens after bytes 4, 6, 8, and 10 (1-based).
+            if matches!(i, 4 | 6 | 8 | 10) {
+                out.push('-');
+            }
+            out.push(HEX_LOWER[(b >> 4) as usize] as char);
+            out.push(HEX_LOWER[(b & 0x0f) as usize] as char);
+        }
+    }
+
     /// Format a Value to its string representation according to the contract specification
     ///
     /// # Contract Guarantees
@@ -187,14 +252,9 @@ impl ValueFormatter {
 
     /// Format UUID as lowercase hyphenated format
     fn format_uuid(bytes: &[u8; 16]) -> String {
-        format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5],
-            bytes[6], bytes[7],
-            bytes[8], bytes[9],
-            bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-        )
+        let mut s = String::with_capacity(36);
+        Self::format_uuid_into(bytes, &mut s);
+        s
     }
 
     /// Format varint as decimal string
@@ -641,6 +701,76 @@ mod tests {
         let formatted = ValueFormatter::format_value(&decimal);
         // Should contain decimal point
         assert!(formatted.contains('.'));
+    }
+
+    #[test]
+    fn test_is_null_only_matches_null_variant() {
+        // Issue #1499: is_null must be exact — a literal text "null" is NOT null.
+        assert!(ValueFormatter::is_null(&Value::Null));
+        assert!(!ValueFormatter::is_null(&Value::Text("null".to_string())));
+        assert!(!ValueFormatter::is_null(&Value::Integer(0)));
+        assert!(!ValueFormatter::is_null(&Value::Text(String::new())));
+    }
+
+    #[test]
+    fn test_format_into_matches_format_value() {
+        // Issue #1499: format_into must be byte-identical to format_value for every
+        // representative variant, including scalar hot paths and complex fallbacks.
+        let samples = vec![
+            Value::Null,
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::TinyInt(-7),
+            Value::SmallInt(1234),
+            Value::Integer(-2147483648),
+            Value::BigInt(9223372036854775807),
+            Value::Counter(42),
+            Value::Text("hello".to_string()),
+            Value::Text("null".to_string()),
+            Value::Text(String::new()),
+            Value::Uuid([
+                0xa8, 0xf1, 0x67, 0xf0, 0xeb, 0xe7, 0x4f, 0x20, 0xa3, 0x86, 0x31, 0xff, 0x13,
+                0x8b, 0xec, 0x3b,
+            ]),
+            Value::Float32(3.25),
+            Value::Float(2.75),
+            Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+            Value::Set(vec![Value::Text("a".to_string())]),
+            Value::Map(vec![(Value::Text("k".to_string()), Value::Integer(1))]),
+            Value::Varint(vec![0x01, 0x00]),
+        ];
+        for v in &samples {
+            let mut buf = String::new();
+            ValueFormatter::format_into(v, &mut buf);
+            assert_eq!(
+                buf,
+                ValueFormatter::format_value(v),
+                "format_into mismatch for {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_into_reuses_buffer() {
+        // Clearing and reusing the scratch buffer yields the same result as fresh.
+        let mut buf = String::from("stale-contents");
+        buf.clear();
+        ValueFormatter::format_into(&Value::Integer(99), &mut buf);
+        assert_eq!(buf, "99");
+    }
+
+    #[test]
+    fn test_format_uuid_into_matches_reference() {
+        let bytes = [
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
+        ];
+        let mut s = String::new();
+        ValueFormatter::format_uuid_into(&bytes, &mut s);
+        assert_eq!(s, "12345678-9abc-def0-1122-334455667788");
+        // And the owned formatter agrees.
+        assert_eq!(ValueFormatter::format_value(&Value::Uuid(bytes)), s);
     }
 
     #[test]

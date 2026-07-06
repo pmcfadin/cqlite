@@ -8,11 +8,41 @@ use crate::config::OutputConfig;
 use crate::output::{OutputError, StreamingWriter};
 use cqlite_core::query::{QueryMetadata, QueryResult, QueryRow};
 use cqlite_core::Value;
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json::{json, Map, Value as JsonValue};
 use std::error::Error as StdError;
 use std::io::Write;
 
 use super::value_fmt::ValueFormatter;
+
+/// A single result row serialized as a JSON object with keys in `metadata.columns`
+/// order, borrowing each column name (`&str`) as the object key instead of cloning
+/// a `String` per row (issue #1499).
+///
+/// Because it drives serde_json's own serializer, the produced bytes are identical
+/// to building a `serde_json::Map` and calling `to_string`/`to_string_pretty`.
+struct RowObj<'a> {
+    row: &'a QueryRow,
+    keys: &'a [&'a str],
+}
+
+impl Serialize for RowObj<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.keys.len()))?;
+        for &key in self.keys {
+            // Missing column → JSON null, matching the historical Map behaviour.
+            let json_value = match self.row.values.get(key) {
+                Some(value) => JSONWriter::value_to_json(value),
+                None => JsonValue::Null,
+            };
+            map.serialize_entry(key, &json_value)?;
+        }
+        map.end()
+    }
+}
 
 /// JSON writer for QueryResult
 #[allow(dead_code)]
@@ -47,8 +77,6 @@ impl JSONWriter {
     /// Pretty-printed JSON string or error
     #[allow(dead_code)]
     pub fn write(result: &QueryResult, config: &OutputConfig) -> Result<String, Box<dyn StdError>> {
-        let mut rows_json = Vec::new();
-
         // Apply row limit if specified in config
         let rows_to_display = if let Some(limit) = config.limit {
             &result.rows[..result.rows.len().min(limit)]
@@ -56,25 +84,27 @@ impl JSONWriter {
             &result.rows
         };
 
-        for row in rows_to_display {
-            // CRITICAL: Use LinkedHashMap-like pattern by iterating columns in order
-            let mut row_obj = Map::new();
+        // Column names are borrowed once (not cloned per row) as object keys.
+        let keys: Vec<&str> = result
+            .metadata
+            .columns
+            .iter()
+            .map(|col| col.name.as_str())
+            .collect();
 
-            // Iterate columns in metadata order, NOT HashMap order!
-            for col in &result.metadata.columns {
-                let value_opt = row.values.get(col.name.as_str());
-                let json_value = match value_opt {
-                    Some(value) => Self::value_to_json(value),
-                    None => JsonValue::Null,
-                };
-                row_obj.insert(col.name.clone(), json_value);
+        // Serialize directly through serde_json's pretty serializer so the bytes
+        // are identical to the previous `to_string_pretty(Vec<Object>)` path while
+        // avoiding a per-row key clone (issue #1499).
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut serializer = serde_json::Serializer::pretty(&mut buf);
+            let mut seq = serializer.serialize_seq(Some(rows_to_display.len()))?;
+            for row in rows_to_display {
+                seq.serialize_element(&RowObj { row, keys: &keys })?;
             }
-
-            rows_json.push(JsonValue::Object(row_obj));
+            SerializeSeq::end(seq)?;
         }
-
-        // Pretty-print for readability
-        serde_json::to_string_pretty(&rows_json).map_err(|e| e.into())
+        String::from_utf8(buf).map_err(|e| e.into())
     }
 
     /// Convert a CQLite Value to a serde_json::Value
@@ -106,15 +136,10 @@ impl JSONWriter {
             // Use ValueFormatter for human-readable Time (HH:MM:SS.nnnnnnnnn)
             Value::Time(_) => JsonValue::String(ValueFormatter::format_value(value)),
             Value::Uuid(uuid) => {
-                // Format UUID as standard hyphenated string
-                let uuid_str = format!(
-                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    uuid[0], uuid[1], uuid[2], uuid[3],
-                    uuid[4], uuid[5],
-                    uuid[6], uuid[7],
-                    uuid[8], uuid[9],
-                    uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
-                );
+                // Format UUID via the shared hex lookup-table encoder (issue #1499)
+                // instead of a 16-arg `format!` per cell.
+                let mut uuid_str = String::with_capacity(36);
+                ValueFormatter::format_uuid_into(uuid, &mut uuid_str);
                 JsonValue::String(uuid_str)
             }
             // Use ValueFormatter for human-readable Varint (decimal string)
@@ -267,22 +292,17 @@ impl<W: Write> StreamingJSONWriter<W> {
         }
     }
 
-    /// Convert a single row to JSON object with deterministic key ordering
-    #[allow(dead_code)]
-    fn row_to_json(&self, row: &QueryRow) -> JsonValue {
-        let mut row_obj = Map::new();
-
-        // Iterate columns in metadata order, NOT HashMap order
-        for col in &self.columns {
-            let value_opt = row.values.get(col.as_str());
-            let json_value = match value_opt {
-                Some(value) => JSONWriter::value_to_json(value),
-                None => JsonValue::Null,
-            };
-            row_obj.insert(col.clone(), json_value);
+    /// Serialize a single row to a JSON object string with deterministic key
+    /// ordering, borrowing column names as keys (no per-row key clone, issue
+    /// #1499). Output is byte-identical to serializing a `serde_json::Map`.
+    fn row_to_json_string(&self, row: &QueryRow) -> Result<String, serde_json::Error> {
+        let keys: Vec<&str> = self.columns.iter().map(|c| c.as_str()).collect();
+        let obj = RowObj { row, keys: &keys };
+        if self.pretty {
+            serde_json::to_string_pretty(&obj)
+        } else {
+            serde_json::to_string(&obj)
         }
-
-        JsonValue::Object(row_obj)
     }
 }
 
@@ -303,7 +323,9 @@ impl<W: Write + Send> StreamingWriter for StreamingJSONWriter<W> {
 
     fn write_chunk(&mut self, rows: &[QueryRow]) -> Result<usize, OutputError> {
         for row in rows {
-            let json_obj = self.row_to_json(row);
+            let json_str = self.row_to_json_string(row).map_err(|e| {
+                OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+            })?;
 
             // Handle comma separator between rows
             if !self.first_row {
@@ -317,18 +339,12 @@ impl<W: Write + Send> StreamingWriter for StreamingJSONWriter<W> {
 
             // Write JSON object
             if self.pretty {
-                let json_str = serde_json::to_string_pretty(&json_obj).map_err(|e| {
-                    OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-                })?;
                 // Indent each line
                 for line in json_str.lines() {
                     write!(self.writer, "  {}", line).map_err(OutputError::Io)?;
                     writeln!(self.writer).map_err(OutputError::Io)?;
                 }
             } else {
-                let json_str = serde_json::to_string(&json_obj).map_err(|e| {
-                    OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-                })?;
                 write!(self.writer, "{}", json_str).map_err(OutputError::Io)?;
             }
 
@@ -423,6 +439,44 @@ mod tests {
             json_str.find("\"b\"").unwrap() < json_str.find("\"a\"").unwrap(),
             "Key 'b' must appear before 'a' in JSON string"
         );
+    }
+
+    /// Issue #1499: the borrowed-key serializer must produce byte-identical pretty
+    /// JSON to the previous `serde_json::Map` + `to_string_pretty` path.
+    #[test]
+    fn test_borrowed_key_pretty_output_is_byte_identical() {
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![
+            ColumnInfo::new("id".to_string(), cqlite_core::types::DataType::Integer, false, 0),
+            ColumnInfo::new("name".to_string(), cqlite_core::types::DataType::Text, false, 1),
+        ];
+        let mut values = HashMap::new();
+        values.insert("id".to_string(), Value::Integer(7));
+        values.insert("name".to_string(), Value::Text("null".to_string()));
+        result
+            .rows
+            .push(QueryRow::with_values(RowKey::new(vec![7]), values));
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+
+        // Reference: what the old Map-based path produced.
+        let mut map = serde_json::Map::new();
+        map.insert("id".to_string(), serde_json::json!(7));
+        map.insert("name".to_string(), serde_json::json!("null"));
+        let expected =
+            serde_json::to_string_pretty(&vec![serde_json::Value::Object(map)]).unwrap();
+
+        assert_eq!(json_str, expected);
+        // A literal text "null" is a JSON string, never dropped.
+        assert!(json_str.contains("\"null\""));
+    }
+
+    #[test]
+    fn test_empty_result_is_empty_array_bytes() {
+        // serialize_seq(Some(0)) must still render exactly "[]".
+        let result = QueryResult::new();
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+        assert_eq!(json_str, "[]");
     }
 
     #[test]

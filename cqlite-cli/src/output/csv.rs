@@ -74,28 +74,27 @@ impl CSVWriter {
             &result.rows
         };
 
-        // Write data rows in stable column order
+        // Write data rows in stable column order. A single scratch buffer is
+        // reused across every cell to avoid a per-cell String allocation, and a
+        // genuine NULL (or missing column) is detected via `is_null` rather than a
+        // fragile `== "null"` sentinel so a literal text value `"null"` round-trips
+        // instead of collapsing to an empty field (issue #1499).
+        let mut scratch = String::new();
         for row in rows_to_display {
-            let record: Vec<String> = result
-                .metadata
-                .columns
-                .iter()
-                .map(|col| {
-                    row.values
-                        .get(col.name.as_str())
-                        .map(|v| {
-                            let formatted = ValueFormatter::format_value(v);
-                            // For CSV, convert "null" to empty string
-                            if formatted == "null" {
-                                String::new()
-                            } else {
-                                formatted
-                            }
-                        })
-                        .unwrap_or_else(String::new) // Missing column → empty
-                })
-                .collect();
-            wtr.write_record(&record)?;
+            for col in &result.metadata.columns {
+                scratch.clear();
+                match row.values.get(col.name.as_str()) {
+                    // Present and non-null → format its value.
+                    Some(v) if !ValueFormatter::is_null(v) => {
+                        ValueFormatter::format_into(v, &mut scratch);
+                    }
+                    // Real NULL or missing column → empty field (scratch stays "").
+                    _ => {}
+                }
+                wtr.write_field(scratch.as_bytes())?;
+            }
+            // Terminate the record (field-by-field records need an explicit end).
+            wtr.write_record(None::<&[u8]>)?;
         }
 
         // Extract the CSV data as string
@@ -174,28 +173,25 @@ impl<W: Write + Send> StreamingWriter for StreamingCSVWriter<W> {
     }
 
     fn write_chunk(&mut self, rows: &[QueryRow]) -> Result<usize, OutputError> {
+        // Reuse one scratch buffer across all cells; detect NULL via `is_null`
+        // (not a `== "null"` sentinel) so literal text `"null"` round-trips
+        // instead of collapsing to an empty field (issue #1499).
+        let mut scratch = String::new();
         for row in rows {
-            let record: Vec<String> = self
-                .columns
-                .iter()
-                .map(|col| {
-                    row.values
-                        .get(col.as_str())
-                        .map(|v| {
-                            let formatted = ValueFormatter::format_value(v);
-                            // For CSV, convert "null" to empty string
-                            if formatted == "null" {
-                                String::new()
-                            } else {
-                                formatted
-                            }
-                        })
-                        .unwrap_or_default()
-                })
-                .collect();
-
+            for col in &self.columns {
+                scratch.clear();
+                match row.values.get(col.as_str()) {
+                    Some(v) if !ValueFormatter::is_null(v) => {
+                        ValueFormatter::format_into(v, &mut scratch);
+                    }
+                    _ => {}
+                }
+                self.writer.write_field(scratch.as_bytes()).map_err(|e| {
+                    OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                })?;
+            }
             self.writer
-                .write_record(&record)
+                .write_record(None::<&[u8]>)
                 .map_err(|e| OutputError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         }
 
@@ -331,6 +327,94 @@ mod tests {
         assert_eq!(lines[0], "id,name");
         assert_eq!(lines[1], "1,"); // null → empty
         assert_eq!(lines[2], ",Bob"); // null → empty
+    }
+
+    /// Issue #1499: a literal text value `"null"` must round-trip as the string
+    /// `null`, NOT be turned into an empty field. Previously the CSV writer used a
+    /// fragile `formatted == "null"` sentinel that collapsed a genuine `"null"`
+    /// text cell to empty. This test fails on the pre-fix code.
+    #[test]
+    fn test_csv_literal_null_text_is_not_emptied() {
+        let result = create_test_result(
+            vec![("id", DataType::Integer), ("name", DataType::Text)],
+            vec![
+                // Row 1: real SQL NULL → empty field.
+                vec![("id", Value::Integer(1)), ("name", Value::Null)],
+                // Row 2: literal text "null" → must stay "null", not empty.
+                vec![
+                    ("id", Value::Integer(2)),
+                    ("name", Value::Text("null".to_string())),
+                ],
+            ],
+        );
+
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
+        let lines: Vec<&str> = csv.lines().collect();
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "id,name");
+        assert_eq!(lines[1], "1,", "real NULL must become an empty field");
+        assert_eq!(
+            lines[2], "2,null",
+            "literal text \"null\" must round-trip, not become empty"
+        );
+    }
+
+    /// Issue #1499: same literal-`"null"` guarantee for the streaming CSV writer.
+    #[test]
+    fn test_streaming_csv_literal_null_text_is_not_emptied() {
+        use cqlite_core::query::ColumnInfo;
+
+        let mut metadata = QueryMetadata::default();
+        metadata.columns = vec![
+            ColumnInfo {
+                name: "id".to_string(),
+                data_type: DataType::Integer,
+                nullable: true,
+                position: 0,
+                table_name: None,
+                cql_type: None,
+            },
+            ColumnInfo {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+                nullable: true,
+                position: 1,
+                table_name: None,
+                cql_type: None,
+            },
+        ];
+
+        let mk_row = |id: i32, name: Value| {
+            let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+            values.insert("id".into(), Value::Integer(id));
+            values.insert("name".into(), name);
+            QueryRow {
+                values,
+                key: RowKey::new(vec![id as u8]),
+                metadata: Default::default(),
+                cell_metadata: None,
+            }
+        };
+        let rows = vec![
+            mk_row(1, Value::Null),
+            mk_row(2, Value::Text("null".to_string())),
+        ];
+
+        let mut writer = StreamingCSVWriter::new(Vec::new());
+        writer.write_header(&metadata).expect("header");
+        writer.write_chunk(&rows).expect("chunk");
+        writer.finalize().expect("finalize");
+        let bytes = writer.writer.into_inner().expect("into_inner");
+        let csv = String::from_utf8(bytes).expect("utf8");
+        let lines: Vec<&str> = csv.lines().collect();
+
+        assert_eq!(lines[0], "id,name");
+        assert_eq!(lines[1], "1,", "real NULL must become an empty field");
+        assert_eq!(
+            lines[2], "2,null",
+            "literal text \"null\" must round-trip, not become empty"
+        );
     }
 
     #[test]
