@@ -104,17 +104,26 @@ const fn entry_cost(key_len: usize) -> usize {
 ///
 /// # Aggregate-footprint math (byte-bounded, key-size-independent)
 ///
-/// With a per-reader budget `B` and `N` concurrently-open readers the worst-case
-/// aggregate resident footprint is exactly `N × B` — regardless of individual key
-/// sizes, because each reader's cache evicts to stay within `B` bytes.
+/// With a per-reader budget `B` and `N` concurrently-open readers the aggregate
+/// resident footprint is `≈ N × B` for typical (small) keys, because each reader's
+/// cache evicts to stay within `B` bytes. This is an approximation, not an exact
+/// cap: the eviction guard never evicts the just-resolved entry (the `lru.len() > 1`
+/// condition), so a shard may exceed its per-shard budget by at most **one**
+/// oversized entry. With `shard_count = 16` per reader and a Cassandra partition key
+/// up to ~64 KB, each of the 16 shards can retain one ~64 KB entry beyond its 32 KiB
+/// per-shard budget, so a single reader's true worst case is ~1 MB (~2× the nominal
+/// 512 KiB). The exact upper bound is therefore
+/// `N × (B + shard_count × max_key_bytes)`; the figures below are the **typical**
+/// small-key case, which dominates in practice.
 ///
 /// - `B = 512 KiB` per reader.
-/// - A point-read-heavy workload with ~40 open generations: `40 × 512 KiB ≈ 20 MB`
-///   — well within `<128MB`, leaving the majority for B1's decompressed-chunk cache
-///   and the working set.
-/// - Even a very generous ~128 open readers is `128 × 512 KiB = 64 MB`, still within
-///   budget. The footprint no longer depends on whether keys are 16 B UUIDs or 1 KB
-///   composites — the byte budget bounds it either way.
+/// - A point-read-heavy workload with ~40 open generations (typical keys):
+///   `40 × 512 KiB ≈ 20 MB` — well within `<128MB`, leaving the majority for B1's
+///   decompressed-chunk cache and the working set.
+/// - Even a very generous ~128 open readers is `≈ 128 × 512 KiB = 64 MB` for typical
+///   keys, still within budget. The typical footprint no longer depends on whether
+///   keys are 16 B UUIDs or 1 KB composites — the byte budget bounds it either way,
+///   with the bounded oversized-entry slack above as the only exception.
 ///
 /// Each shard's bucket array still grows only with actual occupancy (unbounded
 /// `LruCache` + manual byte-budget eviction), so an idle/empty reader's cache costs
