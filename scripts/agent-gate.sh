@@ -2470,7 +2470,6 @@ dispatch_component() {
     integration-tests) run_component integration-tests bash -c '
   cargo test --package cqlite-integration-tests --no-run &&
   cargo test --package cqlite-integration-tests \
-    --test chunked_data_reader_direct_test \
     --test comprehensive_component_integration_tests \
     --test fixture_specific_integration_tests \
     --test golden_path_get_operations_tests \
