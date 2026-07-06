@@ -5,7 +5,6 @@
 
 pub mod encoder;
 pub mod node;
-pub mod nodes;
 pub mod parser;
 pub mod sized_ints;
 

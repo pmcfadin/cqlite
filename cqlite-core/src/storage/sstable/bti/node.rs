@@ -361,24 +361,6 @@ impl BtiNode {
         }
     }
 
-    /// Get all child transitions
-    pub fn get_transitions(&self) -> Vec<&Transition> {
-        match &self.data {
-            BtiNodeData::PayloadOnly { .. } => Vec::new(),
-            BtiNodeData::Single { transition } => vec![transition],
-            BtiNodeData::Sparse { transitions } => transitions.iter().collect(),
-            BtiNodeData::Dense {
-                start_byte: _,
-                children: _,
-            } => {
-                // Convert dense representation to transitions
-                // Note: This creates temporary Transition objects
-                // In practice, you'd want to avoid this allocation
-                Vec::new() // Simplified for this example
-            }
-        }
-    }
-
     /// Get the payload reference if this is a leaf node
     pub fn get_payload(&self) -> Option<&PayloadRef> {
         match &self.data {
