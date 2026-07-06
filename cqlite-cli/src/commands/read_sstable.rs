@@ -23,10 +23,14 @@ pub async fn execute_read_sstable_command(
     verbose: bool,
     quiet: bool,
 ) -> Result<()> {
-    // Issue #1506 / #284: progress + status chatter (stderr) is suppressed under
-    // --quiet and when stderr is not a TTY; the actual data output (stdout) is
-    // always emitted.
-    let show_status = !quiet && std::io::stderr().is_terminal();
+    // Issue #1483 (AB8): decorative text banners/status go to STDERR whenever the
+    // user has not asked for --quiet, so piped/redirected *stdout* stays pure,
+    // machine-consumable data while both interactive and redirected-stderr
+    // consumers still see the chatter. The animated progress bar additionally
+    // requires a TTY — its carriage-return redraws would corrupt a captured
+    // (non-TTY) stderr log — per the #284/#1506 progress-suppression contract.
+    let show_status = !quiet;
+    let show_progress = show_status && std::io::stderr().is_terminal();
 
     if show_status {
         eprintln!("📖 Reading SSTable: {}", file_path.display());
@@ -40,8 +44,9 @@ pub async fn execute_read_sstable_command(
         ));
     }
 
-    // Create progress indicator (hidden when status output is suppressed)
-    let pb = create_progress_bar("Opening SSTable", show_status);
+    // Create progress indicator (hidden under --quiet or a non-TTY stderr, so a
+    // captured/redirected stderr log is not polluted with the bar's redraws).
+    let pb = create_progress_bar("Opening SSTable", show_progress);
 
     // Initialize Platform and Config (following initialize_database pattern)
     let config = CoreConfig::default();
