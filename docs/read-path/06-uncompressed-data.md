@@ -25,18 +25,11 @@ flowchart TD
     
     DirectPath --> CalcOffset[Calculate file offset\nindex_offset + header_size]
     
-    CalcOffset --> CheckCache{Block in\ncache?}
+    CalcOffset --> SeekFile[Seek to offset\nblock_io.rs]
     
-    CheckCache -->|Yes| CacheHit[Use cached block\nblock_cache HashMap]
-    CheckCache -->|No| SeekFile[Seek to offset\nblock_io.rs]
+    SeekFile --> ReadBlock[Read block\nstd::fs::read\nserved by OS page cache on re-read]
     
-    CacheHit --> Parse[Parse partition\nSee diagram 07]
-    
-    SeekFile --> ReadBlock[Read block\nstd::fs::read]
-    
-    ReadBlock --> StoreCache[Store in block_cache\nfor future reads]
-    
-    StoreCache --> Parse
+    ReadBlock --> Parse[Parse partition\nSee diagram 07]
     
     Parse --> Result[Return Value]
     
@@ -150,93 +143,29 @@ let file = Arc::new(Mutex::new(BufReader::new(file)));
 - Amortizes seek overhead
 - Better performance for sequential reads
 
-## Block Caching
+## Caching
 
-**File**: `storage/sstable/reader/types.rs`
+### No per-reader block cache
 
-### Cache Structure
+The uncompressed read path has **no application-level block cache**. Repeated
+reads of the same file region are served by the `BufReader` and the kernel page
+cache (see [Direct I/O Path](#direct-io-path) below).
 
-```rust
-pub struct SSTableReader {
-    // ... other fields ...
-    
-    /// Block cache for recently read blocks
-    block_cache: HashMap<u64, CachedBlock>,
-    
-    /// Metadata cache for block information
-    block_meta_cache: HashMap<u64, BlockMeta>,
-    
-    // ... other fields ...
-}
+An earlier design carried a per-reader `block_cache: HashMap<u64, CachedBlock>`
+(with a `block_meta_cache: HashMap<u64, BlockMeta>` companion and a `CachedBlock`
+type) on `SSTableReader`. That map was **dead code** — nothing ever inserted into
+it, so it produced a structural 0.0 hit rate while still costing memory — and it
+was **removed in #1568** (B2). Do not reintroduce it.
 
-pub struct CachedBlock {
-    /// Block data
-    data: Vec<u8>,
-    /// Whether data is compressed
-    compressed: bool,
-    /// When block was cached
-    cached_at: Instant,
-}
+### The real read cache: shared `DecompressedChunkCache`
 
-pub struct BlockMeta {
-    /// Block offset in file
-    offset: u64,
-    /// Block size in bytes
-    size: u32,
-    /// Number of partitions in block
-    partition_count: u32,
-}
-```
-
-### Cache Operations
-
-```mermaid
-sequenceDiagram
-    participant Reader
-    participant Cache
-    participant Disk
-    
-    Reader->>Cache: Check block_cache[offset]
-    
-    alt Cache Hit
-        Cache-->>Reader: Return cached block
-        Note over Reader: Skip disk I/O
-    else Cache Miss
-        Reader->>Disk: Read from file
-        Disk-->>Reader: Block data
-        Reader->>Cache: Store in block_cache
-        Cache-->>Reader: Block data
-    end
-    
-    Reader->>Reader: Parse block
-```
-
-### Cache Eviction
-
-Simple LRU-based eviction:
-
-```rust
-const MAX_CACHE_SIZE: usize = 100; // blocks
-
-fn cache_block(&mut self, offset: u64, block: Vec<u8>) {
-    if self.block_cache.len() >= MAX_CACHE_SIZE {
-        // Find oldest entry
-        if let Some((oldest_offset, _)) = self.block_cache
-            .iter()
-            .min_by_key(|(_, block)| block.cached_at)
-        {
-            let oldest_offset = *oldest_offset;
-            self.block_cache.remove(&oldest_offset);
-        }
-    }
-    
-    self.block_cache.insert(offset, CachedBlock {
-        data: block,
-        compressed: false,
-        cached_at: Instant::now(),
-    });
-}
-```
+The one application-level cache in the read path is the shared
+**`DecompressedChunkCache`** (Epic B / B1, issue #1567). It lives *outside* the
+per-reader struct and is shared across readers, caching decompressed chunks on the
+*compressed* read path (uncompressed reads bypass it — they have no chunks to
+decompress). Its byte budget is configured via `block_cache.max_size`, and its
+hit-rate/eviction statistics come from the real B1 instrumentation. See
+[Compressed Data](./05-compressed-data.md) for the chunk-cache flow.
 
 ## File Seeking
 
@@ -329,15 +258,13 @@ let buffer = vec![0u8; index_entry.size as usize];
 │ SSTableReader                       │
 ├─────────────────────────────────────┤
 │ file: Arc<Mutex<BufReader<File>>>  │ ← OS buffer (8KB)
-├─────────────────────────────────────┤
-│ block_cache: HashMap<u64, Vec<u8>> │ ← App cache (100 blocks)
-│   [offset] → [4-64KB data]          │
-├─────────────────────────────────────┤
-│ block_meta_cache: HashMap<...>     │ ← Metadata (~32 bytes/entry)
 └─────────────────────────────────────┘
 
-Total memory ≈ 8KB + (100 × 32KB) + (100 × 32B)
-             ≈ 3.2 MB per reader
+Per-reader footprint ≈ 8KB (the BufReader window).
+No per-reader block cache — the dead block_cache/block_meta_cache maps were
+removed in #1568. Decompressed-chunk caching (compressed reads only) lives in
+the shared DecompressedChunkCache, budgeted by block_cache.max_size (Epic B/B1,
+issue #1567), not in this struct.
 ```
 
 ## Direct I/O Path
@@ -429,26 +356,15 @@ let entry = index.find_entry(&table_id, &key).await?;
 // 2. Calculate file offset
 let file_offset = entry.offset + self.actual_header_size as u64;
 
-// 3. Check cache
-if let Some(cached) = self.block_cache.get(&file_offset) {
-    return parse_value(&cached.data);
-}
-
-// 4. Read from disk
+// 3. Read from disk (repeat reads served by the OS page cache; there is no
+//    per-reader block cache — the dead one was removed in #1568)
 let mut file = self.file.lock().await;
 file.seek(SeekFrom::Start(file_offset)).await?;
 
 let mut buffer = vec![0u8; entry.size as usize];
 file.read_exact(&mut buffer).await?;
 
-// 5. Cache the block
-self.block_cache.insert(file_offset, CachedBlock {
-    data: buffer.clone(),
-    compressed: false,
-    cached_at: Instant::now(),
-});
-
-// 6. Parse and return
+// 4. Parse and return
 parse_value(&buffer)
 ```
 
