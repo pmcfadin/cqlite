@@ -131,11 +131,13 @@ fn test_read_sstable_json_stdout_is_clean_json() {
         parsed.is_array(),
         "read-sstable --format json should emit a JSON array, got: {stdout}"
     );
-    // A present-but-empty fixture would emit `[]`, which is a valid JSON array
-    // and would silently pass `is_array()` — the project's "0-rows-when-present
-    // is a false pass" hazard. Since we only reach here when the fixture IS
-    // present (the skip path returns early above), require ≥1 decoded entry,
-    // consistent with the CSV test's non-empty payload check.
+    // Guard against the project's "0-rows-when-present is a false pass" hazard.
+    // We only reach here when the fixture IS present (the skip path returns early
+    // above), so a present-but-empty result must not silently pass. Today a
+    // zero-row read emits no stdout (the command returns early), which the
+    // `from_str` parse above already rejects; this `!is_empty()` assertion also
+    // fails closed on a hypothetical future `[]` emission — consistent with the
+    // CSV test's non-empty payload check.
     let entries = parsed
         .as_array()
         .expect("parsed JSON is an array (asserted above)");
