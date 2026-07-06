@@ -278,6 +278,23 @@ pub struct MergeProducer {
     partial_columns: Option<Vec<ColumnInfo>>,
 }
 
+/// Abstraction over the k-way merge stepper.
+///
+/// Exists so the cooperative-cancellation ordering (issue #1473: cancel is
+/// polled BEFORE each `step()`) can be proven by a test double that counts
+/// `step()` calls — a pre-cancel must yield ZERO steps, i.e. no partition is
+/// collected/reconciled before cancellation is observed.
+trait PartitionStepper {
+    /// Advance the merge by one partition (or report completion).
+    fn step(&mut self) -> Result<MergeStep, cqlite_core::Error>;
+}
+
+impl PartitionStepper for KWayMerger {
+    fn step(&mut self) -> Result<MergeStep, cqlite_core::Error> {
+        KWayMerger::step(self)
+    }
+}
+
 impl MergeProducer {
     /// Build an unfiltered producer for `schema` (emits all rows and columns).
     pub fn new(schema: TableSchema, batch_size: usize) -> Result<Self, ProducerError> {
@@ -453,17 +470,32 @@ impl MergeProducer {
         }
 
         let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        self.drive_merge(&mut merger, cancel, &mut batches)?;
+        Ok(batches)
+    }
+
+    /// Drive the row-merge loop over `merger`, appending full-row batches.
+    ///
+    /// Cooperative cancellation (issue #1473) is polled BEFORE each
+    /// `merger.step()`, so a cancel (e.g. client disconnect) stops the merge
+    /// before collecting/reconciling the next partition — never after performing
+    /// one more potentially large partition merge.
+    fn drive_merge(
+        &self,
+        merger: &mut dyn PartitionStepper,
+        cancel: &CancelFlag,
+        batches: &mut Vec<RecordBatch>,
+    ) -> Result<(), ProducerError> {
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
 
-        while let MergeStep::Partition { key, rows } =
-            merger.step().map_err(ProducerError::Merge)?
-        {
-            // Cooperative cancellation (issue #1473): checked at the top of every
-            // partition step, so a cancel (e.g. client disconnect) stops the merge
-            // within one partition rather than draining every remaining partition.
+        loop {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
             }
+            let MergeStep::Partition { key, rows } = merger.step().map_err(ProducerError::Merge)?
+            else {
+                break;
+            };
             // Token-range filter: drop whole partitions outside the split's range.
             if let Some(token) = &self.spec.token {
                 if !token.contains(key.token) {
@@ -495,7 +527,7 @@ impl MergeProducer {
         if !buffer.is_empty() {
             batches.push(self.flush_buffer(&mut buffer)?);
         }
-        Ok(batches)
+        Ok(())
     }
 
     /// Aggregate path (issue #841): stream every surviving row — through the same
@@ -517,30 +549,7 @@ impl MergeProducer {
 
         if !paths.is_empty() {
             let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
-            while let MergeStep::Partition { key, rows } =
-                merger.step().map_err(ProducerError::Merge)?
-            {
-                // Cooperative cancellation (issue #1473): see `merge_paths`.
-                if cancel.is_cancelled() {
-                    return Err(ProducerError::Cancelled);
-                }
-                if let Some(token) = &self.spec.token {
-                    if !token.contains(key.token) {
-                        continue;
-                    }
-                }
-                for entry in rows {
-                    let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
-                        continue;
-                    };
-                    if let Some(filter) = &self.spec.filter {
-                        if !filter.keeps(&row) {
-                            continue;
-                        }
-                    }
-                    plan.accumulate_row(&mut state, &row)?;
-                }
-            }
+            self.drive_aggregate(plan, &mut merger, cancel, &mut state)?;
         }
 
         let partial_rows = plan.finish(state);
@@ -550,6 +559,47 @@ impl MergeProducer {
         }
         let columns = self.output_columns();
         Ok(vec![rows_to_record_batch(columns, &partial_rows)?])
+    }
+
+    /// Drive the aggregate-merge loop over `merger`, folding surviving rows into
+    /// `state`.
+    ///
+    /// Cooperative cancellation (issue #1473): see [`Self::drive_merge`] — the
+    /// cancel is polled BEFORE each `merger.step()`, so a cancel aborts before
+    /// reconciling the next partition, not after.
+    fn drive_aggregate(
+        &self,
+        plan: &AggPlan,
+        merger: &mut dyn PartitionStepper,
+        cancel: &CancelFlag,
+        state: &mut crate::agg::AggState,
+    ) -> Result<(), ProducerError> {
+        loop {
+            if cancel.is_cancelled() {
+                return Err(ProducerError::Cancelled);
+            }
+            let MergeStep::Partition { key, rows } = merger.step().map_err(ProducerError::Merge)?
+            else {
+                break;
+            };
+            if let Some(token) = &self.spec.token {
+                if !token.contains(key.token) {
+                    continue;
+                }
+            }
+            for entry in rows {
+                let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
+                    continue;
+                };
+                if let Some(filter) = &self.spec.filter {
+                    if !filter.keeps(&row) {
+                        continue;
+                    }
+                }
+                plan.accumulate_row(state, &row)?;
+            }
+        }
+        Ok(())
     }
 
     /// Reconstruct one full logical row from a merged entry, or `None` for a row
@@ -773,6 +823,70 @@ mod tests {
         assert!(
             matches!(err, ProducerError::Cancelled),
             "expected ProducerError::Cancelled, got {err:?}"
+        );
+    }
+
+    /// A [`PartitionStepper`] that counts `step()` calls, so a test can prove the
+    /// cancel is polled BEFORE `step()` (zero steps when pre-cancelled) rather
+    /// than after (one wasted partition merge).
+    struct CountingStepper<M> {
+        inner: M,
+        steps: usize,
+    }
+
+    impl<M: PartitionStepper> PartitionStepper for CountingStepper<M> {
+        fn step(&mut self) -> Result<MergeStep, cqlite_core::Error> {
+            self.steps += 1;
+            self.inner.step()
+        }
+    }
+
+    /// Issue #1473 (roborev follow-up): a cancel set BEFORE the first `step()`
+    /// must abort having performed ZERO partition merges — proving the cancel is
+    /// checked BEFORE `merger.step()`, not after it has already collected and
+    /// reconciled a (potentially large) partition.
+    ///
+    /// FAILS on the pre-fix ordering (cancel checked AFTER `step()`): there
+    /// `step()` runs once before the check fires, so `steps == 1` and this
+    /// `assert_eq!(steps, 0)` trips. PASSES after the fix (cancel checked first).
+    #[test]
+    fn merge_performs_zero_steps_when_pre_cancelled() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100), write_row(2, "b", 20, 100)],
+                vec![write_row(3, "c", 30, 100), write_row(4, "d", 40, 100)],
+            ],
+        );
+        let producer = MergeProducer::new(schema.clone(), 8192).unwrap();
+
+        // Real merger over the fixtures, wrapped so we can count its steps.
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+        let merger = KWayMerger::new(paths, &schema).unwrap();
+        let mut counting = CountingStepper {
+            inner: merger,
+            steps: 0,
+        };
+
+        let cancelled = CancelFlag::new();
+        cancelled.cancel();
+        let mut batches = Vec::new();
+        let err = producer
+            .drive_merge(&mut counting, &cancelled, &mut batches)
+            .expect_err("pre-cancelled merge aborts");
+
+        assert!(
+            matches!(err, ProducerError::Cancelled),
+            "expected ProducerError::Cancelled, got {err:?}"
+        );
+        assert_eq!(
+            counting.steps, 0,
+            "cancel must be observed BEFORE any merger.step() — zero partitions merged"
+        );
+        assert!(
+            batches.is_empty(),
+            "no output batch is produced when cancelled before the first step"
         );
     }
 
