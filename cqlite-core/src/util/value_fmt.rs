@@ -24,11 +24,24 @@ impl ValueFormatter {
     /// This is the authoritative null predicate used by output writers to decide
     /// whether to emit an empty CSV field. It replaces the fragile
     /// `format_value(v) == "null"` sentinel, which wrongly collapsed a literal
-    /// text value `"null"` to an empty field (issue #1499). Only `Value::Null`
-    /// formats to the bare string `"null"`, so matching on the variant is exact.
+    /// text value `"null"` to an empty field (issue #1499).
+    ///
+    /// A genuine null in a frozen column is represented as
+    /// `Value::Frozen(Box::new(Value::Null))` (which `format_value` renders as the
+    /// bare string `"null"`), so `is_null` unwraps `Value::Frozen` recursively
+    /// before checking for `Value::Null`. This restores the pre-#1499 CSV
+    /// null-output contract for frozen columns without re-introducing the original
+    /// bug: a literal text value `Value::Text("null")` is NOT null and still emits
+    /// `"null"`. `Value::Null` and `Value::Frozen(..)` are the only genuine-null
+    /// representations that format to the bare string `"null"` (a UDT/collection
+    /// with null members formats as `{field: null}`/`[null]`, not `"null"`).
     #[inline]
     pub fn is_null(value: &Value) -> bool {
-        matches!(value, Value::Null)
+        match value {
+            Value::Null => true,
+            Value::Frozen(inner) => Self::is_null(inner),
+            _ => false,
+        }
     }
 
     /// Append the formatted string representation of `value` to `out`.
@@ -710,6 +723,27 @@ mod tests {
         assert!(!ValueFormatter::is_null(&Value::Text("null".to_string())));
         assert!(!ValueFormatter::is_null(&Value::Integer(0)));
         assert!(!ValueFormatter::is_null(&Value::Text(String::new())));
+    }
+
+    #[test]
+    fn test_is_null_unwraps_frozen_null() {
+        // Regression: a genuine CQL null in a frozen column is
+        // Value::Frozen(Box::new(Value::Null)), which format_value renders as
+        // "null". is_null must treat it (and deeper nestings) as null so CSV emits
+        // an empty field, while a frozen NON-null must remain non-null.
+        assert!(ValueFormatter::is_null(&Value::Frozen(Box::new(
+            Value::Null
+        ))));
+        assert!(ValueFormatter::is_null(&Value::Frozen(Box::new(
+            Value::Frozen(Box::new(Value::Null))
+        ))));
+        assert!(!ValueFormatter::is_null(&Value::Frozen(Box::new(
+            Value::Integer(7)
+        ))));
+        // A frozen literal text "null" is still NOT a genuine null.
+        assert!(!ValueFormatter::is_null(&Value::Frozen(Box::new(
+            Value::Text("null".to_string())
+        ))));
     }
 
     #[test]

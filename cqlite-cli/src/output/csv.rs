@@ -417,6 +417,101 @@ mod tests {
         );
     }
 
+    /// Regression: a genuine CQL null in a FROZEN column is represented as
+    /// `Value::Frozen(Box::new(Value::Null))`, which `format_value` renders as the
+    /// string `"null"`. The batch CSV writer must emit an EMPTY field for it (not a
+    /// literal `null`). This fails on the pre-fix `is_null` (which matched only
+    /// `Value::Null`) and passes once `is_null` unwraps `Frozen` recursively.
+    #[test]
+    fn test_csv_frozen_null_becomes_empty() {
+        let result = create_test_result(
+            vec![("id", DataType::Integer), ("name", DataType::Text)],
+            vec![
+                // Row 1: frozen null → empty field.
+                vec![
+                    ("id", Value::Integer(1)),
+                    ("name", Value::Frozen(Box::new(Value::Null))),
+                ],
+                // Row 2: frozen NON-null must still be formatted (not emptied).
+                vec![
+                    ("id", Value::Integer(2)),
+                    (
+                        "name",
+                        Value::Frozen(Box::new(Value::Text("Bob".to_string()))),
+                    ),
+                ],
+            ],
+        );
+
+        let csv = CSVWriter::write(&result, &default_config()).expect("CSV write failed");
+        let lines: Vec<&str> = csv.lines().collect();
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "id,name");
+        assert_eq!(
+            lines[1], "1,",
+            "frozen NULL must become an empty field, not literal \"null\""
+        );
+        assert_eq!(lines[2], "2,Bob", "frozen non-null must still be formatted");
+    }
+
+    /// Regression: same frozen-null empty-field guarantee for the streaming writer.
+    #[test]
+    fn test_streaming_csv_frozen_null_becomes_empty() {
+        use cqlite_core::query::ColumnInfo;
+
+        let mut metadata = QueryMetadata::default();
+        metadata.columns = vec![
+            ColumnInfo {
+                name: "id".to_string(),
+                data_type: DataType::Integer,
+                nullable: true,
+                position: 0,
+                table_name: None,
+                cql_type: None,
+            },
+            ColumnInfo {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+                nullable: true,
+                position: 1,
+                table_name: None,
+                cql_type: None,
+            },
+        ];
+
+        let mk_row = |id: i32, name: Value| {
+            let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+            values.insert("id".into(), Value::Integer(id));
+            values.insert("name".into(), name);
+            QueryRow {
+                values,
+                key: RowKey::new(vec![id as u8]),
+                metadata: Default::default(),
+                cell_metadata: None,
+            }
+        };
+        let rows = vec![
+            mk_row(1, Value::Frozen(Box::new(Value::Null))),
+            mk_row(2, Value::Frozen(Box::new(Value::Text("Bob".to_string())))),
+        ];
+
+        let mut writer = StreamingCSVWriter::new(Vec::new());
+        writer.write_header(&metadata).expect("header");
+        writer.write_chunk(&rows).expect("chunk");
+        writer.finalize().expect("finalize");
+        let bytes = writer.writer.into_inner().expect("into_inner");
+        let csv = String::from_utf8(bytes).expect("utf8");
+        let lines: Vec<&str> = csv.lines().collect();
+
+        assert_eq!(lines[0], "id,name");
+        assert_eq!(
+            lines[1], "1,",
+            "frozen NULL must become an empty field, not literal \"null\""
+        );
+        assert_eq!(lines[2], "2,Bob", "frozen non-null must still be formatted");
+    }
+
     #[test]
     fn test_csv_missing_columns_become_empty() {
         let result = create_test_result(
