@@ -335,4 +335,241 @@ mod tests {
         let odd = Some(hdr(None, Some(7), None));
         assert_eq!(row_write_timestamp(&odd), 7 * 1_000_000);
     }
+
+    // -----------------------------------------------------------------------
+    // Driver-level framing tests (issue #1640, roborev K1 test-depth finding).
+    //
+    // The correctness-critical logic this refactor centralizes is
+    // `drive_partition_sliding`'s framing skeleton — the previously-duplicated
+    // loop whose divergence "manufactures parity regressions". These tests drive
+    // that skeleton directly with a STUB `SlidingPartitionPolicy` over a SYNTHETIC
+    // byte buffer, so the framing contract (buffer-then-flush, no-double-emit on a
+    // mid-partition `NeedMore`, marker-Stop termination) is pinned independently of
+    // any real row decode, schema, or on-disk fixture.
+    //
+    // `write-support` is a DEFAULT feature; the gate is only so the minimal
+    // `--no-default-features` build (no synthetic-reader writer) still compiles.
+    // -----------------------------------------------------------------------
+
+    /// A synthetic byte the stub treats as exactly ONE data row: it carries
+    /// neither the END_OF_PARTITION bit (0x01) nor the IS_MARKER bit (0x02), so
+    /// the driver routes it to `on_data_row`.
+    #[cfg(feature = "write-support")]
+    const STUB_ROW_BYTE: u8 = 0xa0;
+
+    /// The IS_MARKER flag byte (0x02, END_OF_PARTITION bit clear): the driver
+    /// routes it to `on_range_marker`.
+    #[cfg(feature = "write-support")]
+    const STUB_MARKER_BYTE: u8 = 0x02;
+
+    /// A carrier row the stub policy buffers into the driver-owned `pending` vec.
+    #[cfg(feature = "write-support")]
+    #[derive(Debug, PartialEq, Eq)]
+    struct StubRow(u8);
+
+    /// Test-only [`SlidingPartitionPolicy`] over a synthetic buffer. It exercises
+    /// the driver's framing skeleton WITHOUT any real row decode: each
+    /// [`STUB_ROW_BYTE`] is one row (buffered into `pending`, consuming 1 byte),
+    /// any range-tombstone marker is answered with [`MarkerOutcome::Stop`], and
+    /// `buffered` records how many rows were pushed into `pending` — so a test can
+    /// prove a row WAS buffered even when the driver forwards ZERO rows.
+    #[cfg(feature = "write-support")]
+    struct StubPolicy {
+        /// Count of rows the policy pushed into the driver-owned `pending` vec.
+        buffered: usize,
+    }
+
+    #[cfg(feature = "write-support")]
+    impl SlidingPartitionPolicy for StubPolicy {
+        type Row = StubRow;
+
+        fn on_partition_open(
+            &mut self,
+            _partition_key: RowKey,
+            _partition_deletion: Option<(i64, i32)>,
+            _schema: &TableSchema,
+            _pending: &mut Vec<Self::Row>,
+        ) {
+            // No synthetic partition-delete row for these framing tests.
+        }
+
+        fn on_range_marker(
+            &mut self,
+            _data: &[u8],
+            _offset: usize,
+            _schema: &TableSchema,
+            _pending: &mut Vec<Self::Row>,
+        ) -> MarkerOutcome {
+            // Mirror the pre-K1 `break`/`NeedMore` behaviour: a marker the policy
+            // cannot represent faithfully terminates the partition.
+            MarkerOutcome::Stop
+        }
+
+        fn on_data_row(
+            &mut self,
+            data: &[u8],
+            offset: usize,
+            _schema: &TableSchema,
+            _reader: &crate::storage::sstable::reader::types::SSTableReader,
+            _resolution: &RowColumnResolution,
+            pending: &mut Vec<Self::Row>,
+        ) -> Option<usize> {
+            match data.get(offset) {
+                Some(&b) if b == STUB_ROW_BYTE => {
+                    pending.push(StubRow(b));
+                    self.buffered += 1;
+                    Some(offset + 1)
+                }
+                // Anything else: "row failed to parse" — the driver treats this as
+                // end-of-partition on the final chunk, else `NeedMore`.
+                _ => None,
+            }
+        }
+    }
+
+    /// A minimal single-partition-key schema `t(pk int, v text)`. The concrete
+    /// columns are irrelevant to the framing under test (the stub never consults
+    /// the schema, reader, or resolution), but a valid schema is required to build
+    /// [`RowColumnResolution`].
+    #[cfg(feature = "write-support")]
+    fn stub_schema() -> crate::schema::TableSchema {
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        let col = |name: &str, ty: &str, nullable: bool| Column {
+            name: name.to_string(),
+            data_type: ty.to_string(),
+            nullable,
+            default: None,
+            is_static: false,
+        };
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![col("pk", "int", false), col("v", "text", true)],
+            comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Build a synthetic **nb**-format partition: a LIVE header (no partition
+    /// tombstone) followed by `body` bytes. The parser built by
+    /// [`V5CompressedLegacyParser::new`] uses the nb-compatible gates
+    /// (`has_uint_deletion_time == false`), so the header is:
+    /// `flags(1) + key_len(1) + key(1) + nb DeletionTime` where the nb
+    /// DeletionTime is a 4-byte localDeletionTime (`i32::MAX` == LIVE sentinel) +
+    /// 8-byte markedForDeleteAt (0). Fixed bytes only — no wall-clock input.
+    #[cfg(feature = "write-support")]
+    fn synthetic_partition(body: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0x00, 0x01, 0x42]; // flags, key_len=1, key=[0x42]
+        buf.extend_from_slice(&i32::MAX.to_be_bytes()); // LIVE localDeletionTime
+        buf.extend_from_slice(&0i64.to_be_bytes()); // markedForDeleteAt
+        buf.extend_from_slice(body);
+        buf
+    }
+
+    /// Drive one synthetic partition through the real `drive_partition_sliding`
+    /// skeleton with the [`StubPolicy`]. Returns the [`ParseStep`], the number of
+    /// rows the policy buffered into `pending`, and the rows the driver actually
+    /// forwarded to the external `emit` closure.
+    ///
+    /// The `&SSTableReader` is a genuine (dataset-independent) synthetic handle
+    /// reused from the decoder-lockstep net; its bytes are never consulted here —
+    /// the stub ignores the reader and resolution entirely.
+    #[cfg(feature = "write-support")]
+    async fn drive(data: &[u8], at_final_chunk: bool) -> (ParseStep, usize, Vec<StubRow>) {
+        let reader = super::super::decoder_lockstep_tests::open_reader()
+            .await
+            .expect("write-support synthetic reader is always available");
+        let parser = V5CompressedLegacyParser::new(
+            "test_ks".to_string(),
+            "test_tbl".to_string(),
+            0,
+            0,
+            None,
+        );
+        let schema = stub_schema();
+        let mut policy = StubPolicy { buffered: 0 };
+        let mut collected: Vec<StubRow> = Vec::new();
+        let step = parser
+            .drive_partition_sliding(data, &schema, &reader, at_final_chunk, &mut policy, |row| {
+                collected.push(row);
+                Ok(std::ops::ControlFlow::Continue(()))
+            })
+            .expect("drive_partition_sliding should not error on a well-formed header");
+        (step, policy.buffered, collected)
+    }
+
+    /// (a) Issue-#827 no-double-emit invariant: a truncated partition on a
+    /// NON-final chunk returns `NeedMore` and forwards ZERO rows — *even though*
+    /// the policy already buffered a row into `pending`. Discarding `pending` on a
+    /// mid-partition `NeedMore` is what makes a refill-and-re-parse from the
+    /// partition start safe (a forwarded row here would be duplicated on re-parse).
+    #[cfg(feature = "write-support")]
+    #[tokio::test]
+    async fn truncated_non_final_chunk_buffers_but_emits_zero() {
+        // Header + one row byte, no END_OF_PARTITION: the buffer ends mid-partition.
+        let data = synthetic_partition(&[STUB_ROW_BYTE]);
+        let (step, buffered, collected) = drive(&data, false).await;
+        assert_eq!(
+            step,
+            ParseStep::NeedMore,
+            "a mid-partition end-of-buffer on a non-final chunk must request more bytes"
+        );
+        assert_eq!(
+            buffered, 1,
+            "the row WAS buffered into the driver-owned pending vec"
+        );
+        assert!(
+            collected.is_empty(),
+            "NeedMore must DISCARD pending and forward zero rows so a re-parse cannot \
+             double-emit (issue #827)"
+        );
+    }
+
+    /// (b) The SAME buffer with `at_final_chunk = true` flushes the buffered row:
+    /// on the final chunk an end-of-buffer is end-of-partition, so `pending` is
+    /// forwarded exactly once.
+    #[cfg(feature = "write-support")]
+    #[tokio::test]
+    async fn same_buffer_final_chunk_flushes_pending() {
+        let data = synthetic_partition(&[STUB_ROW_BYTE]);
+        let (step, buffered, collected) = drive(&data, true).await;
+        assert!(
+            matches!(step, ParseStep::Emitted(_)),
+            "the final chunk treats end-of-buffer as end-of-partition and flushes"
+        );
+        assert_eq!(buffered, 1, "the same single row is buffered");
+        assert_eq!(
+            collected,
+            vec![StubRow(STUB_ROW_BYTE)],
+            "the buffered row is forwarded exactly once on the final chunk"
+        );
+    }
+
+    /// (c) A range-tombstone marker the policy answers with `MarkerOutcome::Stop`
+    /// on a NON-final chunk yields `NeedMore` with NO emission — mirroring the
+    /// pre-K1 `break`/`NeedMore` terminate-partition behaviour — and discards any
+    /// rows already buffered before the marker.
+    #[cfg(feature = "write-support")]
+    #[tokio::test]
+    async fn marker_stop_non_final_chunk_needmore_no_emit() {
+        // One row, then a marker byte (IS_MARKER set, END_OF_PARTITION clear).
+        let data = synthetic_partition(&[STUB_ROW_BYTE, STUB_MARKER_BYTE]);
+        let (step, buffered, collected) = drive(&data, false).await;
+        assert_eq!(
+            step,
+            ParseStep::NeedMore,
+            "on_range_marker -> Stop on a non-final chunk requests more bytes"
+        );
+        assert_eq!(buffered, 1, "the pre-marker row was buffered into pending");
+        assert!(
+            collected.is_empty(),
+            "a marker Stop discards pending and forwards nothing"
+        );
+    }
 }
