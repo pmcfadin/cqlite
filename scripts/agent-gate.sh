@@ -1121,7 +1121,7 @@ run_clippy() {
   #     (the OpenTelemetry stack). Keep this in sync with cqlite-core/Cargo.toml when
   #     features are added; the nightly CQLITE_CLIPPY_FULL=1 pass is the drift guard.
   env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features \
-"all-compression,antlr,arrow,bench-internals,benchmarks,ci_zero_tolerance,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,events,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-coverage-tracking,test-infrastructure,test-property-testing,test-quality-gates,test-schema-validation,tombstones,unit-tests-only,wasm,work-counters,write-support,zstd" \
+"all-compression,arrow,bench-internals,benchmarks,ci_zero_tolerance,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,events,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-coverage-tracking,test-infrastructure,test-property-testing,test-quality-gates,test-schema-validation,tombstones,unit-tests-only,wasm,work-counters,write-support,zstd" \
     || return 1
 
   # (3) cqlite-cli: every feature EXCEPT duckdb-tests + observability. Pulls in
