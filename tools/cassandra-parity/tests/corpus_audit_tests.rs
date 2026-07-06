@@ -196,6 +196,85 @@ fn churned_reference_under_new_uuid_is_clean() {
     assert_eq!(report.count(FindingKind::MissingReference), 0);
 }
 
+/// Issue #2009: a fresh regeneration flushes/compacts to a DIFFERENT SSTable
+/// generation than the committed corpus (e.g. committed `nb-1-big`, regenerated
+/// `nb-2-big`). Identity is generation-independent, so a reference whose only
+/// difference is the generation number is NOT missing — the corpus still produces
+/// that table+component. Before the fix this fired MISSING-REFERENCE on every
+/// core keyspace (84+ findings), keeping the lane red.
+#[test]
+fn generation_churn_reference_is_clean() {
+    // Same table + component, but a different generation number in the basename.
+    let regenerated = REF.replace("nb-1-big-", "nb-2-big-");
+    let inv = inventory_with(&[regenerated.as_str()]);
+    let report = corpus_audit::audit(
+        &manifest(),
+        &index_text(false),
+        &inv,
+        &ExpectedInventory::default(),
+        Some(&good_provenance()),
+        &all_corruption_fixtures(),
+    );
+    assert!(
+        report.ok(),
+        "generation churn (same table+component, new generation) must be clean, got: {}",
+        report.render()
+    );
+    assert_eq!(report.count(FindingKind::MissingReference), 0);
+}
+
+/// Issue #2009: a manifest reference into a `system*` keyspace is EXCLUDED from
+/// the missing-reference check, consistently with the expected-inventory
+/// exclusion — a system keyspace's tables/generations are inherently run- and
+/// Cassandra-version-dependent (e.g. `system_schema.column_masks` only exists on
+/// newer versions), so a reference pinned to one is not a coverage guarantee this
+/// tier makes. The regeneration NOT producing it must be clean.
+#[test]
+fn system_keyspace_reference_is_excluded_from_missing_check() {
+    let sys_ref = "test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Statistics.db.txt";
+    let yaml = format!(
+        r#"manifest_version: 1
+cassandra_source:
+  repo: https://github.com/apache/cassandra
+  ref: cassandra-5.0.2
+  sha: {GOOD_SHA}
+  index: docs/cassandra_test_index.md
+  assessment_report: docs/reports/x.md
+program:
+  parent_epic: 966
+  reporting_epic: 967
+scenarios:
+  - id: cass.repair.system_schema_ref
+    title: t
+    status: mirrored
+    capability: sstable_format
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable_format
+      relevance: high
+      files:
+        - SortedTableWriterTest.java
+    cqlite: {{}}
+    evidence:
+      type: byte_for_byte
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: {GOOD_SHA}
+      reference_paths:
+        - {sys_ref}
+    ci:
+      tier: exhaustive_regeneration
+"#
+    );
+    let manifest = Manifest::from_yaml(&yaml).expect("fixture manifest parses");
+    // Inventory does NOT contain the system_schema component at all.
+    let findings = corpus_audit::refs::check_references(&manifest, &inventory_with(&[]));
+    assert!(
+        findings.is_empty(),
+        "a system* keyspace reference must not fire MISSING-REFERENCE, got: {findings:?}"
+    );
+}
+
 #[test]
 fn unclassified_high_relevance_fails_and_names_offender() {
     let report = corpus_audit::audit(
@@ -246,10 +325,13 @@ fn uuid_churn_alone_does_not_fire_unexpected_component_change() {
     );
 }
 
-/// A genuine checksum drift of a STABLE identity (same table+component) is still
-/// caught even though the regeneration churned the UUID directory.
+/// Issue #2009: the `exhaustive_regeneration` tier is a COVERAGE/PRESENCE audit,
+/// NOT a byte-drift/checksum tier. A checksum drift of a STABLE identity that is
+/// still PRESENT in the regenerated corpus (even under a churned UUID directory)
+/// must produce ZERO findings — presence alone passes. Byte-parity is owned by
+/// the sstabledump-parity-gate + nightly_docker tiers on the committed corpus.
 #[test]
-fn unexpected_component_change_fires_on_checksum_drift_across_uuid_churn() {
+fn unexpected_component_change_does_not_fire_on_checksum_drift_across_uuid_churn() {
     let regenerated = REF.replace(
         "simple_table-aaaa0000000000000000000000000001",
         "simple_table-bbbb0000000000000000000000000002",
@@ -267,12 +349,10 @@ fn unexpected_component_change_fires_on_checksum_drift_across_uuid_churn() {
             components: expected,
         },
     );
-    assert_eq!(
-        findings.len(),
-        1,
-        "drift under a stable identity must fire exactly one finding, got: {findings:?}"
+    assert!(
+        findings.is_empty(),
+        "a PRESENT identity must pass regardless of SHA256 (coverage tier), got: {findings:?}"
     );
-    assert_eq!(findings[0].kind, FindingKind::UnexpectedComponentChange);
 }
 
 /// A genuinely removed component (expected identity has no regenerated match at
@@ -286,6 +366,10 @@ fn unexpected_component_change_fires_on_removed_component() {
     // same table — the expected component itself is gone.
     let other = REF.replace("Data.db.jsonl", "Index.db.jsonl");
     let mut inv = CorpusInventory::default();
+    // The regenerated corpus DOES produce a sibling component in the same table;
+    // presence is by component identity (table+basename), so the sibling must NOT
+    // satisfy REF's own identity — REF is genuinely absent.
+    inv.files.insert(other.clone());
     inv.checksums.insert(other, "x".to_string());
 
     let findings = corpus_audit::check_component_changes(
@@ -299,8 +383,39 @@ fn unexpected_component_change_fires_on_removed_component() {
         .any(|f| f.kind == FindingKind::UnexpectedComponentChange && f.detail.contains("absent")));
 }
 
+/// Issue #2009 (contract item: no "appeared" finding): a component the
+/// regeneration produced that the expected inventory does NOT track — even inside
+/// an already-tracked table — is NEVER a finding under the coverage contract
+/// (the newly-wired generators may emit goldens absent from the committed set).
 #[test]
-fn unexpected_component_change_fails_on_checksum_drift() {
+fn extra_produced_component_never_fires() {
+    let mut expected = BTreeMap::new();
+    expected.insert(REF.to_string(), "some_sha".to_string());
+
+    // Regenerated corpus has REF (present -> passes) PLUS an extra sibling the
+    // expected set does not track.
+    let extra = REF.replace("Data.db.jsonl", "Index.db.jsonl");
+    let mut inv = CorpusInventory::default();
+    inv.files.insert(REF.to_string());
+    inv.files.insert(extra);
+
+    let findings = corpus_audit::check_component_changes(
+        &inv,
+        &ExpectedInventory {
+            components: expected,
+        },
+    );
+    assert!(
+        findings.is_empty(),
+        "an extra produced component must never fire (no 'appeared' finding), got: {findings:?}"
+    );
+}
+
+/// Issue #2009 (full-audit path): a present component identity whose SHA256
+/// drifted must NOT fire under the COVERAGE/PRESENCE contract — the whole audit
+/// stays clean (byte-drift is not this tier's job).
+#[test]
+fn unexpected_component_change_does_not_fire_on_checksum_drift() {
     let comp = REF.to_string();
     let mut expected = BTreeMap::new();
     expected.insert(comp.clone(), "expected_sha".to_string());
@@ -318,9 +433,51 @@ fn unexpected_component_change_fails_on_checksum_drift() {
         Some(&good_provenance()),
         &all_corruption_fixtures(),
     );
-    assert!(!report.ok());
-    assert_eq!(report.count(FindingKind::UnexpectedComponentChange), 1);
-    assert!(report.render().contains(&comp));
+    assert!(
+        report.ok(),
+        "a present identity with a drifted SHA256 must pass the coverage tier, got: {}",
+        report.render()
+    );
+    assert_eq!(report.count(FindingKind::UnexpectedComponentChange), 0);
+}
+
+/// Issue #2009: `system*` keyspaces are excluded from the expected inventory
+/// (their on-disk contents are inherently run-dependent). An ABSENT expected
+/// component under `system` or `system_schema` produces ZERO findings, while an
+/// ABSENT non-system component still fires — proving the exclusion is scoped.
+#[test]
+fn system_keyspace_components_are_excluded_from_presence_check() {
+    let system = "test-data/datasets/sstables/system/local-1234/nb-1-big-Statistics.db".to_string();
+    let system_schema =
+        "test-data/datasets/sstables/system_schema/tables-5678/nb-1-big-Statistics.db".to_string();
+    let non_system =
+        "test-data/datasets/sstables/test_basic/simple_table-abcd/nb-1-big-Statistics.db"
+            .to_string();
+
+    let mut expected = BTreeMap::new();
+    expected.insert(system, "sha_a".to_string());
+    expected.insert(system_schema, "sha_b".to_string());
+    expected.insert(non_system.clone(), "sha_c".to_string());
+
+    // Regenerated corpus reproduces NONE of them (empty checksums).
+    let inv = CorpusInventory::default();
+
+    let findings = corpus_audit::check_component_changes(
+        &inv,
+        &ExpectedInventory {
+            components: expected,
+        },
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "only the absent NON-system component should fire, got: {findings:?}"
+    );
+    assert_eq!(findings[0].kind, FindingKind::UnexpectedComponentChange);
+    assert!(
+        findings[0].subject.contains(&non_system) && findings[0].detail.contains("absent"),
+        "the single finding must name the non-system absent component, got: {findings:?}"
+    );
 }
 
 #[test]

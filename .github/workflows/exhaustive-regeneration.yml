@@ -67,10 +67,13 @@ jobs:
       - name: Fetch dataset binaries (clean sources)
         run: bash test-data/scripts/fetch-datasets.sh
 
-      # Snapshot the committed reference-golden checksums BEFORE regeneration.
-      # After regeneration we recompute the same set; the audit's
-      # "unexpected component change" check flags any golden whose bytes drifted
-      # without a manifest/golden-update PR.
+      # Snapshot the committed reference-golden PATHS BEFORE regeneration to form
+      # the expected inventory. Under the COVERAGE/PRESENCE contract (issue #2009)
+      # the audit checks that every expected (non-`system*`) component identity is
+      # PRODUCED by regeneration — it does NOT compare bytes (a present golden
+      # passes regardless of SHA256; byte-parity is owned by the
+      # sstabledump-parity-gate + nightly_docker tiers). The checksums are still
+      # recorded for provenance/forensics, not for a drift gate.
       - name: Snapshot committed reference-golden checksums (expected inventory)
         run: |
           set -euo pipefail
@@ -108,6 +111,63 @@ jobs:
           set -euo pipefail
           bash test-data/scripts/generate-corruption-corpus.sh \
             2>&1 | tee "$ARTIFACT_DIR/generate-corruption-corpus.log"
+
+      # ---- exhaustive.regenerate.extended_keyspaces (issue #2009) ----
+      # Wire the eight generator scripts that own newer corpus keyspaces but were
+      # never invoked here, so their manifest-referenced + committed-golden
+      # component identities are actually PRODUCED by regeneration (the coverage/
+      # presence audit expects them). Each writes its own NEW keyspace into
+      # $CQLITE_DATASETS_ROOT; ordering vs the other generators is independent.
+      # The seven `generate-*-parity` scripts take `--out <dir>`; gen-wide-big.sh
+      # reads `OUT=` (same convention as gen-wide-bti.sh above). Scripts are
+      # referenced by literal path (no `${{ }}` in the shell body).
+      - name: Regenerate CQL type & schema-evolution fixtures (test_types)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-cql-type-parity.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-cql-type-parity.log"
+
+      - name: Regenerate tombstone / TTL fixtures (test_tomb)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-tombstone-parity.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-tombstone-parity.log"
+
+      - name: Regenerate live-cell compaction fixtures (test_compactionparity)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-compaction-parity.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-compaction-parity.log"
+
+      - name: Regenerate UDT compaction fixtures (test_compactionparityudt)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-compaction-parity-udt.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-compaction-parity-udt.log"
+
+      - name: Regenerate write-load fixtures (test_writeparity)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-write-load-parity.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-write-load-parity.log"
+
+      - name: Regenerate signed-collection fixtures (test_signed_coll)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-signed-collection-parity.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-signed-collection-parity.log"
+
+      - name: Regenerate tombstone/TTL compaction fixtures (test_compaction_tombstone_ttl)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh --out "$CQLITE_DATASETS_ROOT" \
+            2>&1 | tee "$ARTIFACT_DIR/generate-compaction-tombstone-ttl-parity.log"
+
+      - name: Regenerate wide-partition BIG fixture (test_big)
+        run: |
+          set -euo pipefail
+          OUT="$CQLITE_DATASETS_ROOT" bash test-data/scripts/gen-wide-big.sh \
+            2>&1 | tee "$ARTIFACT_DIR/gen-wide-big.log"
 
       # Package the regenerated corpus to obtain the asset name + SHA256 for the
       # provenance record. NO publish (design D6 / non-goal).
@@ -182,6 +242,14 @@ jobs:
                   "bash test-data/scripts/generate-compression-parity.sh",
                   "bash test-data/scripts/gen-wide-bti.sh",
                   "bash test-data/scripts/generate-corruption-corpus.sh",
+                  "bash test-data/scripts/generate-cql-type-parity.sh",
+                  "bash test-data/scripts/generate-tombstone-parity.sh",
+                  "bash test-data/scripts/generate-compaction-parity.sh",
+                  "bash test-data/scripts/generate-compaction-parity-udt.sh",
+                  "bash test-data/scripts/generate-write-load-parity.sh",
+                  "bash test-data/scripts/generate-signed-collection-parity.sh",
+                  "bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh",
+                  "bash test-data/scripts/gen-wide-big.sh",
               ],
               "dataset_asset_name": "dataset-asset.tar.gz",
               "dataset_asset_sha256": asset_sha,
@@ -318,7 +386,7 @@ jobs:
             echo "- Branch: ${{ github.ref_name }}"
             echo "- Report artifact: exhaustive-regeneration-report (retained 90 days)"
             echo "- Failure artifact: parity-failures, when emitted (retained 90 days)"
-            echo "- Main logs: regenerate-datasets.log, generate-deltas.log, generate-compression-parity.log, gen-wide-bti.log, generate-corruption-corpus.log, package_datasets.log, corpus-audit-report.txt"
+            echo "- Main logs: regenerate-datasets.log, generate-deltas.log, generate-compression-parity.log, gen-wide-bti.log, generate-corruption-corpus.log, generate-cql-type-parity.log, generate-tombstone-parity.log, generate-compaction-parity.log, generate-compaction-parity-udt.log, generate-write-load-parity.log, generate-signed-collection-parity.log, generate-compaction-tombstone-ttl-parity.log, gen-wide-big.log, package_datasets.log, corpus-audit-report.txt"
             echo ""
             echo "If this nightly run fails, download the report artifact first and start with corpus-audit-report.txt. Do not publish regenerated dataset assets from this workflow."
             echo "Policy: docs/ci/ci-tier-policy.md"

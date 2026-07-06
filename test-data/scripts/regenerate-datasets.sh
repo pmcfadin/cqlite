@@ -675,6 +675,39 @@ except Exception as e:
   done < <(find "$sstables_dir" -type f -name "*-Data.db" -print0)
 }
 
+# Derive a Statistics.db.txt golden alongside each Data.db, so the corpus audit's
+# COVERAGE/PRESENCE check finds those `.db.txt` identities present after regen
+# (issue #2009). Mirrors the sstablemetadata derivation used by the other
+# generators (e.g. generate-write-load-parity.sh / generate-cql-type-parity.sh):
+# dump Statistics.db via sstablemetadata to `<...>-Statistics.db.txt` beside the
+# component. Uses the SAME running-container exec convention as
+# generate_sstabledump_jsonl above and honors the same --dry-run guard.
+generate_statistics_txt() {
+  local sstables_dir="$1"
+  log "Generating Statistics.db.txt golden files..."
+  while IFS= read -r -d '' data_file; do
+    local rel
+    rel="${data_file#"$sstables_dir"/}"
+    # As in generate_sstabledump_jsonl: the tar archive paths start with "data/";
+    # strip it before prepending the in-container base path.
+    local rel_sstabledump="${rel#data/}"
+    local stats_file="${data_file%Data.db}Statistics.db.txt"
+    log "  sstablemetadata: $rel"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "[dry-run] sstablemetadata $data_file > $stats_file"
+    else
+      $ENGINE exec "$CONTAINER_NAME" bash -lc \
+        "/opt/cassandra/tools/bin/sstablemetadata /var/lib/cassandra/data/${rel_sstabledump}" \
+        > "$stats_file" 2>/dev/null || true
+      if [[ -s "$stats_file" ]]; then
+        log "  OK: $stats_file"
+      else
+        log "  WARNING: Empty statistics for $rel"
+      fi
+    fi
+  done < <(find "$sstables_dir" -type f -name "*-Data.db" -print0)
+}
+
 # ---------------------------------------------------------------------------
 # Main procedure
 # ---------------------------------------------------------------------------
@@ -829,13 +862,22 @@ log "=== Exporting SSTables from container ==="
 SSTABLES_DIR="$OUT_DIR/sstables"
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  mkdir -p "$SSTABLES_DIR"
-
-  # Stream all Cassandra data out via tar
+  # Stream all Cassandra data out via tar. The archive is rooted at
+  # /var/lib/cassandra so it unpacks to "$OUT_DIR/data/<keyspace>/...".
   if $ENGINE exec "$CONTAINER_NAME" bash -lc 'tar -C /var/lib/cassandra -cf - data' \
       | tar -C "$OUT_DIR" -xf -; then
+    # RENAME data -> sstables so the layout is "sstables/<keyspace>/...", matching
+    # the committed corpus. Do NOT pre-create $SSTABLES_DIR: a pre-existing target
+    # makes `mv "$OUT_DIR/data" "$SSTABLES_DIR"` nest the tree as
+    # "sstables/data/<keyspace>/..." (issue #2009 — the corpus audit then sees
+    # every regenerated component under a different path/identity than the
+    # committed corpus and false-fails). rm -rf the target first so the rename is
+    # a clean rename, not a move-into.
+    rm -rf "$SSTABLES_DIR"
     if [[ -d "$OUT_DIR/data" ]]; then
       mv "$OUT_DIR/data" "$SSTABLES_DIR"
+    else
+      mkdir -p "$SSTABLES_DIR"
     fi
     log "SSTables exported to $SSTABLES_DIR"
   else
@@ -847,6 +889,10 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 
   # Generate JSONL golden files
   generate_sstabledump_jsonl "$SSTABLES_DIR"
+
+  # Derive Statistics.db.txt goldens so their identities are present after regen
+  # (issue #2009: the corpus audit's coverage/presence check expects them).
+  generate_statistics_txt "$SSTABLES_DIR"
 
   # Write a simple metadata.yml
   {

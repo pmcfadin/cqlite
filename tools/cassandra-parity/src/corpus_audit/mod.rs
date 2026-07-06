@@ -19,8 +19,13 @@
 //!   3. **Unclassified high-relevance file** — a `docs/cassandra_test_index.md`
 //!      high-relevance entry no manifest scenario classifies (reuses
 //!      [`crate::coverage`], the `coverage --strict` failure verbatim).
-//!   4. **Unexpected component change** — a regenerated component whose
-//!      presence/SHA256 diverges from the expected manifest entry set.
+//!   4. **Unexpected component change** — a COVERAGE/PRESENCE check (issue #2009):
+//!      an expected non-`system*` component identity that the regeneration did NOT
+//!      reproduce at all. This tier promises coverage/presence, NOT byte-drift
+//!      detection: a present identity passes regardless of its SHA256 (byte-parity
+//!      is owned by the sstabledump-parity-gate + nightly_docker tiers on the
+//!      committed corpus), and `system*` keyspaces are excluded from the expected
+//!      inventory because their contents are inherently run-dependent.
 //!   5. **Provenance mismatch** — the run's recorded Cassandra version/ref/sha is
 //!      not declared by the manifest's `cassandra_source` / `evidence.*` pin.
 //!   6. **Corruption coverage gap** — a required corrupted-component type
@@ -217,22 +222,27 @@ pub fn audit(
     AuditReport { findings }
 }
 
-/// Diff the regenerated component inventory's presence/checksums against the
-/// expected entry set: a recorded component that disappeared, whose checksum
-/// changed, or that newly appeared inside an expected table — each without a
-/// corresponding manifest update — is an unexpected component change.
+/// COVERAGE/PRESENCE audit of the regenerated component inventory against the
+/// expected entry set (issue #2009). The `exhaustive_regeneration` tier promises
+/// that every manifest-referenced + committed-golden component identity is
+/// PRODUCED by regeneration — it is NOT a byte-drift/checksum tier. So:
+///   * an expected non-`system*` identity that NO regenerated file reproduces is
+///     a finding (the presence check — detail carries the word `absent`);
+///   * an expected identity that IS present passes REGARDLESS of its SHA256
+///     (byte-parity is owned by the sstabledump-parity-gate + nightly_docker
+///     tiers on the committed corpus, not here);
+///   * extra produced components are never a finding (the newly-wired generators
+///     may produce goldens not in the committed expected set), so there is no
+///     "appeared" finding;
+///   * `system*` keyspaces are excluded — their contents are inherently
+///     run-dependent, so demanding their presence would false-positive.
 ///
 /// Both sides are keyed by their UUID-independent table+component identity
-/// ([`refs::component_identity`]), NOT by the raw repo-relative path. Every
+/// ([`refs::component_identity`]), NOT the raw repo-relative path: every
 /// regeneration `rm -rf`s the corpus and re-mints each table under a fresh
 /// `<table>-<uuid>` directory, so the committed-expected golden and the
-/// regenerated-actual golden never share a path; comparing identities is what
-/// makes the check fire only on a *genuine* presence/checksum change of a stable
-/// identity instead of false-positiving on the per-run UUID churn (issue #1026).
-///
-/// "Appeared" is scoped to tables that already carry an expected entry, so churn
-/// in *unpinned* fixtures never reds the lane: only a table the manifest already
-/// tracks can surface a surprise component.
+/// regenerated-actual golden never share a path. Comparing identities makes the
+/// presence check tolerant of that per-run UUID churn (issue #1026).
 pub fn check_component_changes(
     inventory: &CorpusInventory,
     expected: &ExpectedInventory,
@@ -242,50 +252,30 @@ pub fn check_component_changes(
         return out;
     }
 
-    // Regenerated checksummed components keyed by UUID-independent identity,
-    // keeping a representative regenerated path for messaging.
-    let mut actual_by_identity: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for (path, sha) in &inventory.checksums {
-        actual_by_identity
-            .entry(refs::component_identity(path))
-            .or_insert_with(|| (sha.clone(), path.clone()));
-    }
+    // UUID-independent identities the regeneration actually produced. Source this
+    // from the WALKED file set (`inventory.files`), which the CLI always
+    // populates under `--corpus .` — NOT from `inventory.checksums`, which is
+    // optional (`--checksums`). A presence contract must not depend on checksum
+    // data: keying off checksums would false-fire every expected component as
+    // "absent" whenever `--checksums` is omitted or empty (issue #2009).
+    let produced_identities: BTreeSet<String> = inventory
+        .files
+        .iter()
+        .map(|p| refs::component_identity(p))
+        .collect();
 
-    // Identities + tables the expected set tracks (for the "appeared" half).
-    let mut expected_identities: BTreeSet<String> = BTreeSet::new();
-    let mut expected_tables: BTreeSet<String> = BTreeSet::new();
-
-    // Disappeared / checksum-changed, by identity.
-    for (path, expected_sha) in &expected.components {
-        let identity = refs::component_identity(path);
-        expected_tables.insert(refs::split_path(&identity).0.to_string());
-        expected_identities.insert(identity.clone());
-        match actual_by_identity.get(&identity) {
-            Some((actual_sha, _)) if actual_sha == expected_sha => {}
-            Some((actual_sha, actual_path)) => out.push(AuditFinding::new(
-                FindingKind::UnexpectedComponentChange,
-                actual_path.clone(),
-                format!("checksum changed: expected {expected_sha}, regenerated {actual_sha}"),
-            )),
-            None => out.push(AuditFinding::new(
-                FindingKind::UnexpectedComponentChange,
-                path.clone(),
-                "expected component is absent from the regenerated corpus".to_string(),
-            )),
-        }
-    }
-
-    // Appeared: a regenerated component whose table identity the expected set
-    // already tracks, but whose own component identity it does not.
-    for (identity, (_, path)) in &actual_by_identity {
-        if expected_identities.contains(identity) {
+    for path in expected.components.keys() {
+        // `system*` keyspaces are inherently run-dependent; exclude them from the
+        // expected inventory entirely (issue #2009).
+        if refs::is_system_keyspace_path(path) {
             continue;
         }
-        if expected_tables.contains(refs::split_path(identity).0) {
+        let identity = refs::component_identity(path);
+        if !produced_identities.contains(&identity) {
             out.push(AuditFinding::new(
                 FindingKind::UnexpectedComponentChange,
                 path.clone(),
-                "component appeared in a tracked table with no expected manifest entry".to_string(),
+                "expected component identity is absent from the regenerated corpus".to_string(),
             ));
         }
     }
