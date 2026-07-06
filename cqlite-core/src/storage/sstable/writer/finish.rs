@@ -264,6 +264,30 @@ impl SSTableWriter {
         }
         toc_writer.write(&components)?;
 
+        // Directory durability barrier (issue #1959).
+        //
+        // Every component's *contents* is now fsynced (Data.db/Index.db at their
+        // streaming-writer finish; Statistics/Summary/CRC/Rows/Partitions via
+        // `fsync_component`; Filter/Digest/TOC inside their own writers), and the
+        // TOC — the publication barrier — was written LAST. On POSIX, fsyncing a
+        // file persists only its contents, NOT the parent directory's entries:
+        // after a power loss the freshly created dirents (including TOC.txt) can be
+        // missing even though the file contents reached the device, or (worse for
+        // the crash-safety invariant) the TOC dirent could be durable while a
+        // component's dirent is not. fsync the containing directory now — AFTER the
+        // component contents and the TOC — so the directory entries for the whole
+        // component set become durable, and only AFTER their contents. On Unix this
+        // upholds the invariant "if TOC.txt is visible then every component it names
+        // is present and complete" for any finalize that writes directly into the
+        // final SSTable directory (flush, one-shot merge). The background
+        // compaction path writes into a tmp directory and republishes via rename,
+        // so it additionally fsyncs the *destination* directory (and its ancestor
+        // chain) after the renames (see `finalize_merge_async`). The invariant is
+        // Unix-scoped: directory fsync is a documented no-op on non-Unix (issue
+        // #1392 / #1959), where the per-file fsyncs remain the durability guarantee
+        // and the parent dirents are not separately persisted.
+        crate::storage::write_engine::durability::sync_directory(sstable_dir)?;
+
         // Data.db bytes written by this SSTable writer (issue #1036). Counts
         // flush and compaction output alike; finalize sums all components.
         crate::observability::add_counter(
