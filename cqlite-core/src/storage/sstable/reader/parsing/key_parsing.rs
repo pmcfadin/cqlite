@@ -39,7 +39,7 @@ impl SSTableReader {
             | crate::parser::header::CassandraVersion::V5_0WideRows
             | crate::parser::header::CassandraVersion::V5_0FormatG => Err(Error::Schema(format!(
                 "Non-schema key parsing fallback not allowed for modern format {:?}. \
-                     Use SchemaAwareReader with proper schema registry.",
+                     Use schema-aware decode via SSTableReader with a registered schema.",
                 self.header.cassandra_version
             ))),
             _ => {
@@ -47,7 +47,7 @@ impl SSTableReader {
                 #[cfg(feature = "legacy-heuristics")]
                 {
                     log::warn!(
-                        "No schema available - returning raw key data for key of length {} (use SchemaAwareReader)",
+                        "No schema available - returning raw key data for key of length {} (register a schema for schema-aware decode)",
                         key_data.len()
                     );
                     Ok(RowKey::new(key_data.to_vec()))
@@ -410,11 +410,11 @@ pub(crate) fn parse_key_with_schema_impl(
             // Extract component data
             let component_data = &remaining[..component_len];
 
-            // DEPRECATED: This should use SchemaAwareReader with proper comparators
+            // DEPRECATED: This should use schema-aware decode (registered schema) with proper comparators
             let comparator =
                 ComparatorType::from_data_type(&clustering_column.data_type).map_err(|e| {
                     Error::Schema(format!(
-                        "Invalid clustering key type '{}' - use SchemaAwareReader: {}",
+                        "Invalid clustering key type '{}' - use schema-aware decode with a registered schema: {}",
                         clustering_column.data_type, e
                     ))
                 })?;

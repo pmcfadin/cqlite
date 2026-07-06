@@ -157,6 +157,11 @@ struct Counters {
     /// Per-row cell `sort_by` invocations (`ROW_SORT_INVOCATIONS`, Issue #1618) —
     /// consumers K2/L.
     row_sort_invocations: AtomicU64,
+    /// `CompressionInfo.db` parses (`COMPRESSION_INFO_PARSES`, Issue #1597 / G1) —
+    /// one per `compression_info::CompressionInfo::parse`. Consumer G1: a reader
+    /// open must parse `CompressionInfo.db` exactly once (was 2 — a legacy
+    /// `parse_binary` plus the modern `parse`).
+    compression_info_parses: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -174,6 +179,7 @@ impl Counters {
             bti_nodes_visited: AtomicU64::new(0),
             bti_pointer_decodes: AtomicU64::new(0),
             row_sort_invocations: AtomicU64::new(0),
+            compression_info_parses: AtomicU64::new(0),
         }
     }
 
@@ -222,6 +228,10 @@ impl Counters {
         self.row_sort_invocations.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_compression_info_parse(&self) {
+        self.compression_info_parses.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -266,6 +276,10 @@ impl Counters {
         self.row_sort_invocations.load(Ordering::Relaxed)
     }
 
+    fn compression_info_parses(&self) -> u64 {
+        self.compression_info_parses.load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
@@ -278,6 +292,7 @@ impl Counters {
         self.bti_nodes_visited.store(0, Ordering::Relaxed);
         self.bti_pointer_decodes.store(0, Ordering::Relaxed);
         self.row_sort_invocations.store(0, Ordering::Relaxed);
+        self.compression_info_parses.store(0, Ordering::Relaxed);
     }
 }
 
@@ -422,6 +437,18 @@ pub fn record_row_sort() {
     COUNTERS.record_row_sort();
 }
 
+/// Record one `CompressionInfo.db` parse (`COMPRESSION_INFO_PARSES`; consumer G1,
+/// Issue #1597).
+///
+/// Called unconditionally at the single surviving `CompressionInfo.db` parser
+/// (`compression_info::CompressionInfo::parse`); the body compiles to a no-op in a
+/// release build (design.md Decision 3).
+#[inline(always)]
+pub fn record_compression_info_parse() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_compression_info_parse();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -494,6 +521,13 @@ pub fn bti_pointer_decodes() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn row_sort_invocations() -> u64 {
     COUNTERS.row_sort_invocations()
+}
+
+/// Number of `CompressionInfo.db` parses since the last [`reset`]
+/// (`COMPRESSION_INFO_PARSES`, Issue #1597).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn compression_info_parses() -> u64 {
+    COUNTERS.compression_info_parses()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
@@ -602,6 +636,9 @@ mod tests {
         for _ in 0..11 {
             c.record_row_sort();
         }
+        for _ in 0..12 {
+            c.record_compression_info_parse();
+        }
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
@@ -614,6 +651,7 @@ mod tests {
         assert_eq!(c.bti_nodes_visited(), 9);
         assert_eq!(c.bti_pointer_decodes(), 10);
         assert_eq!(c.row_sort_invocations(), 11);
+        assert_eq!(c.compression_info_parses(), 12);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
@@ -627,6 +665,7 @@ mod tests {
         assert_eq!(c.bti_nodes_visited(), 0);
         assert_eq!(c.bti_pointer_decodes(), 0);
         assert_eq!(c.row_sort_invocations(), 0);
+        assert_eq!(c.compression_info_parses(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms

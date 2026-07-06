@@ -492,7 +492,7 @@ impl SSTableReader {
 
         // Preserve raw data until schema is available. Pre-#1334 this offset-read
         // placeholder returned a bare `Value::Blob` of the row's raw value bytes,
-        // which `SchemaAwareReader` then schema-decoded and the no-schema query
+        // which the schema-aware decode path then schema-decoded and the no-schema query
         // layer surfaced as a synthetic single-column "data" row. Carry that RAW
         // provenance explicitly (issue #1334): a schema-aware consumer decodes the
         // bytes; a no-schema consumer surfaces a single "data" blob — with no

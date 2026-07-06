@@ -34,8 +34,8 @@ use std::io::{Cursor, Read};
 /// Cassandra compressor simple names that CQLite can decompress.
 ///
 /// These are the only `org.apache.cassandra.io.compress.ICompressor` implementations
-/// CQLite supports. The decompression paths in `chunk_decompressor.rs` and
-/// `chunked_data_reader.rs` are keyed on exactly these names. Any other name in a
+/// CQLite supports. The decompression path in `chunk_decompressor.rs` is keyed on
+/// exactly these names. Any other name in a
 /// `CompressionInfo.db` is rejected fail-fast at metadata-parse time rather than
 /// silently treated as uncompressed (issue #1001). No content-based guessing is ever
 /// performed (no-heuristics mandate, issue #28).
@@ -130,6 +130,11 @@ impl CompressionInfo {
     /// Implements the deterministic layout from CompressionMetadata.java:375-392.
     /// No heuristics — every field is read at its authoritative position.
     pub fn parse(data: &[u8]) -> Result<Self> {
+        // One-parse-per-open wiring evidence (issue #1597 / G1): the reader open
+        // path must parse each CompressionInfo.db exactly once. Zero-overhead in
+        // release (see read_work_counters).
+        crate::storage::sstable::read_work_counters::record_compression_info_parse();
+
         if data.is_empty() {
             return Err(Error::InvalidFormat(
                 "Empty compression info data".to_string(),

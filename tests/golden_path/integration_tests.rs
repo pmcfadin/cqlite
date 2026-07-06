@@ -15,7 +15,6 @@ use cqlite_core::{
         SSTableReader,
         summary_reader::{SummaryReader, SummaryEntry},
         index_reader::{IndexReader, PartitionIndexEntry},
-        schema_aware_reader::SchemaAwareReader,
     },
     types::TableId,
 };
