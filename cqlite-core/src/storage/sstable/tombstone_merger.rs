@@ -92,21 +92,29 @@ pub struct TombstoneMerger {
     current_time: i64,
 }
 
+/// Convert a `SystemTime` to microseconds since the Unix epoch.
+///
+/// No `unwrap()`/`expect()` (CQLite library hard rule): `duration_since` fails
+/// only for a clock predating 1970 (`t` before `UNIX_EPOCH`), in which case we
+/// fall back to epoch (`0`). Under a zero current time nothing is treated as
+/// expired (the expiry checks are `current_time > deadline`), a safe
+/// degradation. This mirrors the fallback in `integrity.rs::filter_tombstone`.
+fn system_time_to_micros(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
 impl TombstoneMerger {
     /// Create a new tombstone merger seeded with the current wall-clock time.
     ///
-    /// No `unwrap()`/`expect()` (CQLite library hard rule): `duration_since` fails
-    /// only for a clock predating 1970, in which case we fall back to epoch
-    /// (`current_time = 0`). Under a zero current time nothing is treated as
-    /// expired (the expiry checks are `current_time > deadline`), a safe
-    /// degradation. This mirrors the fallback in `integrity.rs::filter_tombstone`.
+    /// Delegates to [`system_time_to_micros`], whose pre-epoch fallback keeps this
+    /// constructor panic-free (the previous `.unwrap()` on `duration_since` was a
+    /// library-code hard-rule violation).
     pub fn new() -> Self {
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as i64;
-
-        Self { current_time }
+        Self {
+            current_time: system_time_to_micros(std::time::SystemTime::now()),
+        }
     }
 
     /// Create a tombstone merger with specific current time (for testing)
@@ -486,6 +494,25 @@ mod tests {
             "the production new() constructor must resolve to the newest live value"
         );
         Ok(())
+    }
+
+    /// Issue #1600: exercise the pre-epoch fallback branch that replaced the
+    /// former `.unwrap()`. A `SystemTime` strictly before `UNIX_EPOCH` makes
+    /// `duration_since(UNIX_EPOCH)` return `Err`; the helper must degrade to `0`
+    /// (not panic). This is the branch the production-`new()` no-panic test could
+    /// never reach with a real ~2026 clock.
+    #[test]
+    fn system_time_to_micros_falls_back_to_zero_before_epoch() {
+        let pre_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert_eq!(
+            system_time_to_micros(pre_epoch),
+            0,
+            "a SystemTime before UNIX_EPOCH must fall back to 0 micros"
+        );
+
+        // Sanity: a post-epoch time yields a positive value (fallback not taken).
+        let post_epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        assert_eq!(system_time_to_micros(post_epoch), 1_000_000);
     }
 
     #[test]
