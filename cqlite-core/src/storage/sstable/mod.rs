@@ -390,16 +390,34 @@ impl SSTableManager {
     /// (issue #1571, B5). Sums each reader's real observability counters (hits,
     /// misses, evictions, resident bytes, capacity bytes) into one snapshot.
     ///
-    /// Iterates the canonical by-id reader map (`self.readers`), which holds each
-    /// reader **exactly once** — the by-name `table_readers` map re-references the
-    /// same `Arc`s and would double-count, so it is deliberately not used here.
+    /// Counts each distinct reader **exactly once** by unioning the by-id
+    /// `self.readers` map and the by-name `table_readers` map and deduping on
+    /// `Arc::as_ptr` (roborev #1571 Low). Deduping is required for correctness in
+    /// **both** directions: (a) the two maps re-reference the same reader `Arc`s,
+    /// so a naive sum of both would double-count; (b) crucially, `self.readers` is
+    /// **not** a strict superset of `table_readers` — `SSTableId::from_filename`
+    /// keys the by-id map on the bare generation filename (e.g. `nb-1-big-Data.db`),
+    /// so two tables sharing that filename collide and the by-id map keeps only the
+    /// last-inserted reader while `table_readers` retains both under distinct keys.
+    /// Iterating `self.readers` alone would therefore **silently omit** the
+    /// overwritten reader's cache and under-count the aggregate. The pointer-dedup
+    /// union counts every physically-open reader once regardless of collisions.
     /// Every field is read from a live counter/aggregate — no fabricated values.
+    ///
+    /// Lock ordering matches every writer (`readers` before `table_readers`), so
+    /// acquiring both read guards here cannot deadlock.
     pub(crate) async fn aggregate_key_cache_stats(
         &self,
     ) -> crate::storage::cache::KeyCacheSnapshot {
         let readers = self.readers.read().await;
+        let table_readers = self.table_readers.read().await;
+        let mut seen: std::collections::HashSet<*const reader::SSTableReader> =
+            std::collections::HashSet::new();
         let mut agg = crate::storage::cache::KeyCacheSnapshot::default();
-        for reader in readers.values() {
+        for reader in readers.values().chain(table_readers.values().flatten()) {
+            if !seen.insert(Arc::as_ptr(reader)) {
+                continue; // already counted this physical reader
+            }
             let s = reader.key_offset_cache.snapshot();
             agg.hits = agg.hits.saturating_add(s.hits);
             agg.misses = agg.misses.saturating_add(s.misses);
@@ -2640,6 +2658,101 @@ mod tests {
         assert!(
             SSTableManager::fully_qualified_match(&table_readers, "ks_a.users"),
             "exact FQ key present → relaxed guard, applied only to the resolved (ks_a) set"
+        );
+    }
+
+    /// Resolve the on-disk table directory (the one holding `*-Data.db`) for
+    /// `keyspace.table`, or `None` when datasets are absent (CI-lane skip).
+    fn dataset_table_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
+        let datasets_root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+        let keyspace_dir = PathBuf::from(datasets_root).join("sstables").join(keyspace);
+        let table_prefix = format!("{}-", table);
+        for entry in std::fs::read_dir(&keyspace_dir).ok()?.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name()?.to_str()?.to_string();
+            if path.is_dir() && file_name.starts_with(&table_prefix) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Issue #1571 (roborev Low, aggregate omission guard): `aggregate_key_cache_stats`
+    /// must count every physically-open reader's key cache **exactly once**, even
+    /// though `self.readers` (by-id) is NOT a strict superset of `table_readers`
+    /// (by-name). `SSTableId::from_filename` keys the by-id map on the bare
+    /// generation filename (`nb-1-big-Data.db`), so two tables sharing that
+    /// filename collide: the by-id map keeps only the last-inserted reader while
+    /// `table_readers` retains both. This test reproduces that collision with two
+    /// real tables (both ship `nb-1-big-Data.db`) and proves the dedup-union
+    /// aggregate (a) is not fooled into omitting the reader reachable only by name
+    /// and (b) does not double-count the readers present in both maps. A pre-fix
+    /// `self.readers`-only aggregate would FAIL this (under-counting the omitted
+    /// reader's capacity).
+    #[tokio::test]
+    async fn test_aggregate_key_cache_counts_every_reader_exactly_once() {
+        // Two distinct real table directories whose Data.db share a generation
+        // filename → colliding SSTableId; skip when datasets are absent.
+        let Some(dir_a) = dataset_table_dir("test_basic", "simple_table") else {
+            eprintln!("skipping: CQLITE_DATASETS_ROOT / test_basic.simple_table absent");
+            return;
+        };
+        let Some(dir_b) = dataset_table_dir("test_basic", "counters") else {
+            eprintln!("skipping: CQLITE_DATASETS_ROOT / test_basic.counters absent");
+            return;
+        };
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage_path = dir_a.parent().map(PathBuf::from).unwrap_or(dir_a.clone());
+        let manager = SSTableManager::new_from_discovered_paths(
+            &storage_path,
+            vec![dir_a, dir_b],
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Deduped set of physically-open readers across BOTH maps (by pointer),
+        // and the expected capacity sum computed independently of the aggregate.
+        let (by_id_len, distinct, expected_capacity) = {
+            let readers = manager.readers.read().await;
+            let table_readers = manager.table_readers.read().await;
+            assert!(!readers.is_empty(), "fixture present but no readers by-id");
+            assert!(
+                !table_readers.is_empty(),
+                "fixture present but no readers by-name"
+            );
+            let mut seen: std::collections::HashSet<*const reader::SSTableReader> =
+                std::collections::HashSet::new();
+            let mut expected_capacity = 0usize;
+            for r in readers.values().chain(table_readers.values().flatten()) {
+                if seen.insert(Arc::as_ptr(r)) {
+                    expected_capacity = expected_capacity
+                        .saturating_add(r.key_offset_cache.snapshot().capacity_bytes);
+                }
+            }
+            (readers.len(), seen.len(), expected_capacity)
+        };
+
+        // The collision reality this guards against: the by-id map holds strictly
+        // fewer readers than physically exist, so a `self.readers`-only aggregate
+        // would silently omit at least one reader's cache.
+        assert!(
+            by_id_len < distinct,
+            "expected an SSTableId collision (by-id map {by_id_len} < {distinct} distinct readers)"
+        );
+
+        // The dedup-union aggregate counts every distinct reader exactly once:
+        // capacity equals the independently-summed deduped capacity — neither
+        // under-counted (omission) nor over-counted (double-count).
+        let agg = manager.aggregate_key_cache_stats().await;
+        assert_eq!(
+            agg.capacity_bytes, expected_capacity,
+            "aggregate must sum each distinct reader's key-cache capacity exactly once"
         );
     }
 }

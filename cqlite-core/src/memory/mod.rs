@@ -131,6 +131,19 @@ pub(crate) fn estimate_value_size(value: &Value) -> usize {
 /// field names and types are preserved verbatim (issue #1568, AK6); only the
 /// *source* of the block-cache numbers changed — they now reflect the real B1
 /// [`DecompressedChunkCache`](crate::storage::cache::DecompressedChunkCache).
+///
+/// # Independent sampling (advisory observability)
+///
+/// The `block_cache_*` fields and the `key_cache_*` fields are sampled
+/// **independently and at different instants**: the block-cache figures come from
+/// the [`MemoryManager`] (its shared B1 chunk cache), while the key-cache figures
+/// are aggregated from the storage engine's per-reader B4 caches
+/// (`SSTableManager::aggregate_key_cache_stats`) in a separate step. Under
+/// concurrent read load the two groups can therefore reflect slightly different
+/// moments in time, so within a single `memory_stats` snapshot the block-cache vs
+/// key-cache figures are **not guaranteed to be mutually coherent**. Treat this as
+/// advisory observability (trends, rough ratios), not a transactionally-consistent
+/// point-in-time view of both caches.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStats {
     /// Block cache hits (real B1 cache hit count when wired).

@@ -399,11 +399,25 @@ async fn stats_surface_disabled_caches_report_honest_zeros() {
     assert_eq!(ms.block_cache_evictions, 0);
     assert_eq!(ms.block_cache_capacity_bytes, 0);
     assert_eq!(ms.total_memory_used, 0);
+
+    // Key cache (B4): the SAME `block_cache.enabled == false` flag disables BOTH
+    // read caches — `storage::sstable::build_key_offset_cache` builds a
+    // `KeyOffsetCache::disabled()` (zero-capacity, no-op) when
+    // `block_cache.enabled == false`, exactly as `build_chunk_cache` no-ops the B1
+    // chunk cache. So this test's single flag verifies both. The self-verifying
+    // proof that the key cache is genuinely disabled is `capacity_bytes == 0`: a
+    // disabled cache has zero configured budget, which cannot be a coincidence of
+    // an idle-but-enabled cache (that would report its real non-zero budget). The
+    // zero hits/misses/evictions/resident then follow honestly from a no-op cache.
+    assert_eq!(
+        ms.key_cache_capacity_bytes, 0,
+        "block_cache.enabled=false disables the B4 key cache too (build_key_offset_cache \
+         → KeyOffsetCache::disabled()); a disabled cache reports zero capacity"
+    );
     assert_eq!(ms.key_cache_hits, 0);
     assert_eq!(ms.key_cache_misses, 0);
     assert_eq!(ms.key_cache_evictions, 0);
     assert_eq!(ms.key_cache_resident_bytes, 0);
-    assert_eq!(ms.key_cache_capacity_bytes, 0);
     assert_eq!(ms.key_cache_hit_rate(), 0.0);
 }
 
