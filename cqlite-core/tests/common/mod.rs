@@ -27,9 +27,9 @@ use cqlite_core::Config;
 pub fn create_test_config() -> Config {
     let mut config = Config::default();
 
-    // Optimize for testing - smaller cache sizes
+    // Optimize for testing - smaller cache sizes. `row_cache` was removed in
+    // issue #1568; `block_cache.max_size` is the single real cache knob.
     config.memory.block_cache.max_size = 8 * 1024 * 1024; // 8MB
-    config.memory.row_cache.max_size = 4 * 1024 * 1024; // 4MB
     config.storage.max_sstable_size = 16 * 1024 * 1024; // 16MB for tests
 
     config
@@ -51,7 +51,6 @@ mod tests {
     fn test_config_creation() {
         let config = create_test_config();
         assert_eq!(config.memory.block_cache.max_size, 8 * 1024 * 1024);
-        assert_eq!(config.memory.row_cache.max_size, 4 * 1024 * 1024);
     }
 
     #[test]
