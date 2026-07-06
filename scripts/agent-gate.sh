@@ -32,6 +32,14 @@
 #                      --test issue_1589_window_drain_bytes (the scan/compaction
 #                      windows advance a cursor + compact once per refill instead
 #                      of front-draining per partition — issue #1589); same gate.
+#   work-counters-guard cargo test -p cqlite-core --features cli-helpers,work-counters
+#                      the read/parser work-counter wiring-evidence tests
+#                      (issue_1566/1573/1585 read-work counters + issue_1618 parser
+#                      work counters). The counter bodies/getters are feature-gated
+#                      behind `work-counters`, so the default core-tests run can't
+#                      execute them — without this component the wiring evidence
+#                      would only run under a manual `--features work-counters`
+#                      invocation (issue #1618).
 #   byte-budget-guard  cargo test -p cqlite-core --features write-support,cli-helpers,state_machine
 #                      --test issue_1582_byte_bounded_result_budget (issue #1582,
 #                      Epic D6). Byte-bounded result budget: the materializing
@@ -729,7 +737,7 @@ _delta_python_tier_gap() {
   return 0
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -2322,6 +2330,7 @@ run_file_size
 # for a dataset-dependent component is the #646 hazard, so this set must stay
 # complete.
 #   needs datasets: core-tests, tombstones-scan, scan-offload-guard,
+#     work-counters-guard (the wiring-evidence tests scan real Data.db fixtures),
 #     memory-budget (dhat lane reads real Data.db and fails closed on empty),
 #     integration-tests, write-tests, smoke (read Data.db / golden fixtures), and
 #     python-bindings — the pytest suite resolves CQLITE_DATASETS_ROOT and calls
@@ -2345,7 +2354,7 @@ run_file_size
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard memory-budget integration-tests write-tests python-bindings smoke"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests python-bindings smoke"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -2445,6 +2454,12 @@ dispatch_component() {
       --test issue_1143_scan_offload_thread \
       --test issue_1333_scan_scratch_reuse \
       --test issue_1589_window_drain_bytes ;;
+    work-counters-guard) run_component work-counters-guard cargo test --package cqlite-core \
+      --features cli-helpers,work-counters \
+      --test issue_1566_read_work_counters \
+      --test issue_1573_readat_positional \
+      --test issue_1585_read_op_per_chunk \
+      --test issue_1618_parser_work_counters ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
       --test issue_1582_byte_bounded_result_budget ;;

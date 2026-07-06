@@ -245,6 +245,8 @@ impl V5CompressedLegacyParser {
         // Parse based on column type (data_type is a String with CQL type name)
         // CRITICAL: Normalize type name to lowercase for case-insensitive matching
         // Schema may provide "TEXT", "INT", etc. (uppercase) while match arms use lowercase
+        // Issue #1618 (H5): measure the per-cell type normalization work (J1 flips to 0).
+        crate::storage::sstable::read_work_counters::record_type_normalize();
         let normalized_type = column.data_type.to_lowercase();
         let value = match normalized_type.as_str() {
             "boolean" => {

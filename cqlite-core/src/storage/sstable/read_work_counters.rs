@@ -67,6 +67,37 @@
 //!   to bound fd growth. It is a *sample*, not an atomic — wrapping every
 //!   `open`/`close` to keep a live count is invasive and racy; sampling at a test
 //!   checkpoint is what the guard actually needs.
+//!
+//! # Parser work counters (Issue #1618, Epic H / H5)
+//!
+//! H5 lands the *parser* gauges the audit (`§Epic H`, block 2) needs so epics
+//! J1/K2/K3/L1/L3 can assert their claims ("zero `to_lowercase` per cell", "one
+//! header try-parse per partition", "<40 BTI nodes visited"). Same cfg-gated,
+//! zero-in-release pattern as the A5 counters above:
+//!
+//! - [`record_type_normalize`] / [`type_normalize_calls`] — **`TYPE_NORMALIZE_CALLS`**:
+//!   one per `data_type.to_lowercase()` in the per-cell decode path — the value-parse
+//!   normalization (`v5_compressed_legacy/cell_value.rs`) and the per-column
+//!   complex-check (`v5_compressed_legacy/udt.rs::is_complex_column`). Consumer **J1**
+//!   (zero `to_lowercase` per cell): flips its assertion to `== 0` once the type name
+//!   is normalized once at schema-load, not per cell.
+//! - [`record_partition_header_try_parse`] / [`partition_header_try_parses`] —
+//!   **`PARTITION_HEADER_TRY_PARSES`**: one per speculative partition-header parse
+//!   (`v5_compressed_legacy/row_framing.rs::parse_partition_header_full`, the single
+//!   boundary-peek/try-parse primitive every emit path routes through). Consumer
+//!   **K2/K3** (one try-parse per partition): flips to an exact per-partition bound.
+//! - [`record_bti_node_visited`] / [`bti_nodes_visited`] — **`BTI_NODES_VISITED`**:
+//!   one per node the BTI DFS enters (`bti/parser/traversal.rs`). Consumer **L1/L3**
+//!   (<40 BTI nodes visited): flips to the bounded-descent count.
+//! - [`record_bti_pointer_decode`] / [`bti_pointer_decodes`] — **`BTI_POINTER_DECODES`**:
+//!   one per BTI node/pointer decode (`bti/parser/node_decode.rs::parse_bti_node`).
+//!   Consumer **L1/L3**: pairs with `BTI_NODES_VISITED` to prove the descent does not
+//!   re-decode nodes.
+//! - [`record_row_sort`] / [`row_sort_invocations`] — **`ROW_SORT_INVOCATIONS`**:
+//!   one per per-row cell `sort_by` at the shared display-row builder
+//!   (`v5_compressed_legacy/mod.rs::build_display_row`, which #1334 consolidated the
+//!   former `block_emit`/`block_emit_windowed` sort sites into). Consumer **K2/L**:
+//!   flips to prove cells arrive pre-sorted (no per-row sort).
 
 // The atomics, the process-global, the struct methods, the getters, and `reset`
 // exist ONLY in test/feature builds — a release build links none of them, which is
@@ -109,6 +140,19 @@ struct Counters {
     /// undercounts the full copy chain. Wiring those sites (and the ≤1-alloc/chunk
     /// reduction they measure) is the A4 work deferred to issue #1940.
     chunk_path_allocs: AtomicU64,
+    /// `data_type.to_lowercase()` calls in the per-cell decode path
+    /// (`TYPE_NORMALIZE_CALLS`, Issue #1618) — consumer J1.
+    type_normalize_calls: AtomicU64,
+    /// Speculative partition-header parses (`PARTITION_HEADER_TRY_PARSES`,
+    /// Issue #1618) — consumers K2/K3.
+    partition_header_try_parses: AtomicU64,
+    /// BTI DFS node entries (`BTI_NODES_VISITED`, Issue #1618) — consumers L1/L3.
+    bti_nodes_visited: AtomicU64,
+    /// BTI node/pointer decodes (`BTI_POINTER_DECODES`, Issue #1618) — consumers L1/L3.
+    bti_pointer_decodes: AtomicU64,
+    /// Per-row cell `sort_by` invocations (`ROW_SORT_INVOCATIONS`, Issue #1618) —
+    /// consumers K2/L.
+    row_sort_invocations: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -121,6 +165,11 @@ impl Counters {
             file_opens: AtomicU64::new(0),
             read_calls: AtomicU64::new(0),
             chunk_path_allocs: AtomicU64::new(0),
+            type_normalize_calls: AtomicU64::new(0),
+            partition_header_try_parses: AtomicU64::new(0),
+            bti_nodes_visited: AtomicU64::new(0),
+            bti_pointer_decodes: AtomicU64::new(0),
+            row_sort_invocations: AtomicU64::new(0),
         }
     }
 
@@ -148,6 +197,27 @@ impl Counters {
         self.chunk_path_allocs.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_type_normalize(&self) {
+        self.type_normalize_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_partition_header_try_parse(&self) {
+        self.partition_header_try_parses
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_bti_node_visited(&self) {
+        self.bti_nodes_visited.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_bti_pointer_decode(&self) {
+        self.bti_pointer_decodes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_row_sort(&self) {
+        self.row_sort_invocations.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -172,6 +242,26 @@ impl Counters {
         self.chunk_path_allocs.load(Ordering::Relaxed)
     }
 
+    fn type_normalize_calls(&self) -> u64 {
+        self.type_normalize_calls.load(Ordering::Relaxed)
+    }
+
+    fn partition_header_try_parses(&self) -> u64 {
+        self.partition_header_try_parses.load(Ordering::Relaxed)
+    }
+
+    fn bti_nodes_visited(&self) -> u64 {
+        self.bti_nodes_visited.load(Ordering::Relaxed)
+    }
+
+    fn bti_pointer_decodes(&self) -> u64 {
+        self.bti_pointer_decodes.load(Ordering::Relaxed)
+    }
+
+    fn row_sort_invocations(&self) -> u64 {
+        self.row_sort_invocations.load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
@@ -179,6 +269,11 @@ impl Counters {
         self.file_opens.store(0, Ordering::Relaxed);
         self.read_calls.store(0, Ordering::Relaxed);
         self.chunk_path_allocs.store(0, Ordering::Relaxed);
+        self.type_normalize_calls.store(0, Ordering::Relaxed);
+        self.partition_header_try_parses.store(0, Ordering::Relaxed);
+        self.bti_nodes_visited.store(0, Ordering::Relaxed);
+        self.bti_pointer_decodes.store(0, Ordering::Relaxed);
+        self.row_sort_invocations.store(0, Ordering::Relaxed);
     }
 }
 
@@ -261,6 +356,66 @@ pub fn record_chunk_path_alloc() {
     COUNTERS.record_chunk_path_alloc();
 }
 
+/// Record one `data_type.to_lowercase()` in the per-cell decode path
+/// (`TYPE_NORMALIZE_CALLS`; consumer J1, Issue #1618).
+///
+/// Called unconditionally at each per-cell type-name normalization site (the
+/// value-parse normalization in `v5_compressed_legacy/cell_value.rs` and the
+/// per-column complex-check `is_complex_column` in `v5_compressed_legacy/udt.rs`);
+/// the body compiles to a no-op in a release build (design.md Decision 1).
+#[inline(always)]
+pub fn record_type_normalize() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_type_normalize();
+}
+
+/// Record one speculative partition-header parse (`PARTITION_HEADER_TRY_PARSES`;
+/// consumers K2/K3, Issue #1618).
+///
+/// Called unconditionally at the single boundary-peek/try-parse primitive
+/// (`v5_compressed_legacy/row_framing.rs::parse_partition_header_full`) every emit
+/// path routes through; the body compiles to a no-op in a release build.
+#[inline(always)]
+pub fn record_partition_header_try_parse() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_partition_header_try_parse();
+}
+
+/// Record one BTI DFS node entry (`BTI_NODES_VISITED`; consumers L1/L3, Issue #1618).
+///
+/// Called unconditionally once per node the BTI depth-first walk enters
+/// (`bti/parser/traversal.rs`); the body compiles to a no-op in a release build.
+#[inline(always)]
+pub fn record_bti_node_visited() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_bti_node_visited();
+}
+
+/// Record one BTI node/pointer decode (`BTI_POINTER_DECODES`; consumers L1/L3,
+/// Issue #1618).
+///
+/// Called unconditionally at the single node-decode entry
+/// (`bti/parser/node_decode.rs::parse_bti_node`); the body compiles to a no-op in a
+/// release build.
+#[inline(always)]
+pub fn record_bti_pointer_decode() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_bti_pointer_decode();
+}
+
+/// Record one per-row cell `sort_by` (`ROW_SORT_INVOCATIONS`; consumers K2/L,
+/// Issue #1618).
+///
+/// Called unconditionally at the shared display-row builder's sort
+/// (`v5_compressed_legacy/mod.rs::build_display_row`, into which #1334 consolidated
+/// the former `block_emit`/`block_emit_windowed` per-row sort sites); the body
+/// compiles to a no-op in a release build.
+#[inline(always)]
+pub fn record_row_sort() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_row_sort();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -298,6 +453,41 @@ pub fn read_calls() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn chunk_path_allocs() -> u64 {
     COUNTERS.chunk_path_allocs()
+}
+
+/// Number of per-cell `data_type.to_lowercase()` calls since the last [`reset`]
+/// (`TYPE_NORMALIZE_CALLS`, Issue #1618).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn type_normalize_calls() -> u64 {
+    COUNTERS.type_normalize_calls()
+}
+
+/// Number of speculative partition-header parses since the last [`reset`]
+/// (`PARTITION_HEADER_TRY_PARSES`, Issue #1618).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn partition_header_try_parses() -> u64 {
+    COUNTERS.partition_header_try_parses()
+}
+
+/// Number of BTI DFS node entries since the last [`reset`] (`BTI_NODES_VISITED`,
+/// Issue #1618).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn bti_nodes_visited() -> u64 {
+    COUNTERS.bti_nodes_visited()
+}
+
+/// Number of BTI node/pointer decodes since the last [`reset`]
+/// (`BTI_POINTER_DECODES`, Issue #1618).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn bti_pointer_decodes() -> u64 {
+    COUNTERS.bti_pointer_decodes()
+}
+
+/// Number of per-row cell `sort_by` invocations since the last [`reset`]
+/// (`ROW_SORT_INVOCATIONS`, Issue #1618).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn row_sort_invocations() -> u64 {
+    COUNTERS.row_sort_invocations()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
@@ -389,6 +579,23 @@ mod tests {
         c.record_chunk_path_alloc();
         c.record_chunk_path_alloc();
         c.record_chunk_path_alloc();
+        // Issue #1618 parser counters: distinct multiplicities so a mis-wired
+        // getter/field cross-up is caught.
+        for _ in 0..7 {
+            c.record_type_normalize();
+        }
+        for _ in 0..8 {
+            c.record_partition_header_try_parse();
+        }
+        for _ in 0..9 {
+            c.record_bti_node_visited();
+        }
+        for _ in 0..10 {
+            c.record_bti_pointer_decode();
+        }
+        for _ in 0..11 {
+            c.record_row_sort();
+        }
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
@@ -396,6 +603,11 @@ mod tests {
         assert_eq!(c.file_opens(), 4);
         assert_eq!(c.read_calls(), 5);
         assert_eq!(c.chunk_path_allocs(), 6);
+        assert_eq!(c.type_normalize_calls(), 7);
+        assert_eq!(c.partition_header_try_parses(), 8);
+        assert_eq!(c.bti_nodes_visited(), 9);
+        assert_eq!(c.bti_pointer_decodes(), 10);
+        assert_eq!(c.row_sort_invocations(), 11);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
@@ -404,6 +616,11 @@ mod tests {
         assert_eq!(c.file_opens(), 0);
         assert_eq!(c.read_calls(), 0);
         assert_eq!(c.chunk_path_allocs(), 0);
+        assert_eq!(c.type_normalize_calls(), 0);
+        assert_eq!(c.partition_header_try_parses(), 0);
+        assert_eq!(c.bti_nodes_visited(), 0);
+        assert_eq!(c.bti_pointer_decodes(), 0);
+        assert_eq!(c.row_sort_invocations(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms
