@@ -212,6 +212,11 @@ pub struct BlockMeta {
     pub entry_count: u32,
 }
 
+/// Single-entry same-key memo of a BTI partition resolution (issue #1574, C3):
+/// `(partition-key bytes, resolved uncompressed Data.db offset or authoritative
+/// absence)`. See [`SSTableReader::bti_lookup_memo`].
+type BtiLookupMemo = std::sync::Mutex<Option<(Box<[u8]>, Option<u64>)>>;
+
 /// SSTable reader for efficient data access
 #[allow(dead_code)]
 pub struct SSTableReader {
@@ -388,5 +393,5 @@ pub struct SSTableReader {
     /// concurrent read) simply misses and re-walks — never a wrong result. Best
     /// effort: a poisoned lock is treated as a miss. This is NOT a cross-lookup
     /// key/offset cache (that is Epic B/B4); it is bounded to one entry.
-    pub(crate) bti_lookup_memo: std::sync::Mutex<Option<(Box<[u8]>, Option<u64>)>>,
+    pub(crate) bti_lookup_memo: BtiLookupMemo,
 }
