@@ -50,8 +50,12 @@ byte-for-byte compaction parity — plus no-heuristics correctness fixes.
 
 ### Known Issues
 
-- **Node.js `Test (windows-latest)` CI leg** is failing and is **waived** for the
-  v0.13.0 release (best-effort, not release-gated) — tracked in [#2007](https://github.com/pmcfadin/cqlite/issues/2007).
+- **Node.js `Test (windows-latest)` CI leg** has 3 chronic, windows-only
+  test-suite failures (refresh generation-drop, write-smoke, execute-deprecation),
+  tracked in [#1979](https://github.com/pmcfadin/cqlite/issues/1979). Windows Node.js
+  CI is **best-effort, not a release gate**, so these were **waived** for the
+  v0.13.0 release (waiver tracked in [#2007](https://github.com/pmcfadin/cqlite/issues/2007)).
+  Linux and macOS Node.js CI are green and gating.
 - **Coverage Gate `(enforced)` (90%) leg** is not green and is **waived** for the
   v0.13.0 release; restoration is post-0.13 — tracked in [#2022](https://github.com/pmcfadin/cqlite/issues/2022).
 
