@@ -78,6 +78,14 @@ bash test-data/scripts/fetch-datasets.sh
 This prevents the failure mode where dataset-dependent tests silently pass on an
 empty dataset by returning 0 rows.
 
+**Missing-fixtures fail-closed (issue #2078).** The FULL gate FAILs CLOSED when the
+fetched validation corpus (`test_basic/…`) is absent, even though a fresh worktree's
+committed byte-parity reference `*-Data.db` files keep the raw Data.db count > 0
+(previously a false PASS via SKIP). It stamps `missing-fixtures: FAIL-CLOSED (#2078)`
+with the remedy (`bash test-data/scripts/fetch-datasets.sh`);
+`AGENT_GATE_ALLOW_MISSING_FIXTURES=1` restores the lenient SKIP and stamps a visible
+`missing-fixtures: OPT-OUT (…)` line. `--lite`/`--only` are unchanged (lenient).
+
 ## Running the gate
 
 ```bash
@@ -110,12 +118,15 @@ pasted as the full SUMMARY. Iterate on `--lite` every fix round; run the FULL
 `scripts/agent-gate.sh` **exactly once** before merge. `--lite` never replaces the
 full gate.
 
-**Division of labor (issue #1855).** In the worker → subagent model, an
+**Division of labor (issues #1855, #2084).** In the worker → subagent model, an
 implementer subagent (`sstable-developer`) edits, commits, pushes, and verifies
 with `--lite`/targeted tests **only** — it must **never** invoke the full gate. The
-worker/orchestrator runs the FULL gate itself, exactly once. A subagent idle-waiting
-on a 12–20 min full gate gets killed by the stall watchdog and takes its child gate
-process down with it.
+ONE full gate of record runs inside the disposable **`flow-closer`** subagent
+(spawned per issue by `flow-implement`), which invokes it via `run_in_background`
+with the summary-file pattern and **never idle-waits** — a subagent idle-waiting on
+a 12–25 min gate gets killed by the stall watchdog and orphans its child gate
+process (issue #1855). Review runs **before** that gate (see
+[Delivery pipeline](/cqlite/agents-developing/delivery-pipeline/)).
 
 ## Test/docs-only delta re-certification: `--delta` (issue #1892)
 
@@ -134,18 +145,18 @@ scripts/agent-gate.sh --delta X --anchor-summary-file <path-to-X-full-SUMMARY>
 `--delta` verifies the diff `X..Y` (committed + working tree) touches **ONLY** what
 the re-cert can **EXECUTE**: rust cargo test code (`.rs` under `tests/` dirs,
 `*_test(s).rs` anywhere), python binding tests (`bindings/python/tests/` — run by
-the issue-1893 python tier), and/or docs (`*.md` anywhere; **top-level-anchored**
-`docs/`, `website/` only). It is **fail-closed**: anything else (src, scripts,
-workflows, `Cargo.*`, config, test-data) makes it **REFUSE** and name the
-offending files — a production change always requires a fresh full gate. The
-refusal deliberately includes two *test* classes the delta components cannot
-execute (roborev job 1452): node `__test__/` files (scoped-tests only
-compile-checks `cqlite-node`; it never runs jest) and shell self-tests
-(`scripts/tests/*.sh`, run only by the full gate's tooling-tests) — allowing them
-would mint a PASS DELTA block for an untested change. On pass it runs **only**
-file-size + fmt + the diff's changed test targets (the same blast-radius scoper
-`--lite` uses) and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block
-(`MODE: delta`, recovery default `.agent-gate-delta-summary.txt`).
+the issue-1893 python tier), Node.js binding tests (`bindings/node/__test__/*`, run
+against an ALREADY-BUILT native module), shell self-tests (`scripts/tests/*.sh`),
+and/or docs (`*.md` anywhere; **top-level-anchored** `docs/`, `website/` only —
+issue #2081 moved node/shell from refused to executed). It is **fail-closed**:
+anything else (src, scripts, workflows, `Cargo.*`, config, test-data, or an unbuilt
+node module — it NEVER builds with cargo and never passes vacuously) makes it
+**REFUSE** and name the offending files — a production change always requires a
+fresh full gate. On pass it runs **only** file-size + fmt + the diff's changed test
+targets (the same blast-radius scoper `--lite` uses) and emits a DISTINCT
+`==== AGENT-GATE DELTA SUMMARY ====` block (`MODE: delta`, recovery default
+`.agent-gate-delta-summary.txt`) carrying a `delta-executors:` line naming which
+executors ran.
 
 The delta block is **not the gate of record** and carries an explicit
 `gate-of-record:` line naming the full PASS at `X` plus the anchor run-id, so it can
@@ -231,32 +242,36 @@ hermetic self-test proving queueing at N, `--lite` exemption, and SIGKILL slot
 release lives at `scripts/tests/test_gate_concurrency_cap.sh` and runs inside the
 `tooling-tests` component.
 
-## Capturing the gate robustly (issue #1175)
+## Capturing the gate: the summary-file redirect is the DEFAULT (issues #1175, #2079)
 
-The SUMMARY block is the only artifact that counts, so it must survive however
-you capture the run. Use the foreground redirect — it writes each line straight
-to a file descriptor and never buffers:
+The SUMMARY block is the only gate text an agent retains — and the raw gate log
+(thousands of lines) must **never** be read into a persistent agent context. So
+the **required default invocation everywhere** — the full gate AND each `--lite`
+round — sets a summary file in advance and reads it, rather than streaming stdout:
 
 ```bash
-bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt \
+  bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+cat /tmp/gate-summary.txt   # complete SUMMARY block; gate.log is never read into context
 ```
 
-Under **non-foreground** capture (a `script`/pty, a buffering wrapper, a
-"drain-until-EOF then write" reader, or a backgrounded pipeline) the streamed
-SUMMARY block can be lost entirely: a gate component sometimes leaks a descendant
-(a `cargo`/`rustc` build server, a daemonizing test, etc.) that keeps the gate's
-stdout pipe open, so an until-EOF reader never sees EOF, gets killed by a
-timeout, and discards its in-memory buffer — even though the gate exited 0.
-(Detaching the gate's *own* stdout cannot fix this: the leaked child still holds
-its inherited copy of the pipe write-end.)
-
-The recovery contract does not depend on the stream at all — pick the path in
-advance and read it:
+This is the default because it is **also** the robust path. Under **non-foreground**
+capture (a `script`/pty, a buffering wrapper, a "drain-until-EOF then write"
+reader, or a backgrounded pipeline) a streamed SUMMARY block can be lost entirely:
+a gate component sometimes leaks a descendant (a `cargo`/`rustc` build server, a
+daemonizing test, etc.) that keeps the gate's stdout pipe open, so an until-EOF
+reader never sees EOF, gets killed by a timeout, and discards its in-memory buffer
+— even though the gate exited 0. (Detaching the gate's *own* stdout cannot fix
+this: the leaked child still holds its inherited copy of the pipe write-end.) The
+summary file does not depend on the stream at all — pick the path in advance and
+read it:
 
 - **Set `AGENT_GATE_SUMMARY_FILE=/path` before running.** The gate writes the
   complete SUMMARY to that exact path with plain redirection, so the file is
   complete no matter what happens to stdout. `cat` it afterward; it always
-  contains the full block (start marker → `RESULT:` → end marker).
+  contains the full block (start marker → `RESULT:` → end marker). Prefer
+  `run_in_background` (or a long timeout) so a subagent never idle-waits on the
+  gate and gets watchdog-killed (issue #1855).
 
   ```bash
   AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt \
