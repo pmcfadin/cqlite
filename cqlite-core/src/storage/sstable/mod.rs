@@ -2684,6 +2684,14 @@ mod tests {
 
     /// Resolve the on-disk table directory (the one holding `*-Data.db`) for
     /// `keyspace.table`, or `None` when datasets are absent (CI-lane skip).
+    ///
+    /// Skip keys off the `-Data.db` binary being present, NOT merely the table
+    /// directory existing: a clean worktree ships the JSONL references (so the
+    /// directory exists) but not the gitignored `-Data.db` binaries. Returning
+    /// `Some` for a binary-less directory would open zero readers and make the
+    /// caller's `readers.is_empty()` assertion PANIC instead of skip. Keeping the
+    /// gate on the binary preserves "present fixture that yields 0 readers is a
+    /// hard failure" (issue #2065, same doctrine as #1860).
     fn dataset_table_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
         let datasets_root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
         let keyspace_dir = PathBuf::from(datasets_root).join("sstables").join(keyspace);
@@ -2691,11 +2699,22 @@ mod tests {
         for entry in std::fs::read_dir(&keyspace_dir).ok()?.flatten() {
             let path = entry.path();
             let file_name = path.file_name()?.to_str()?.to_string();
-            if path.is_dir() && file_name.starts_with(&table_prefix) {
+            if path.is_dir() && file_name.starts_with(&table_prefix) && dir_has_data_db(&path) {
                 return Some(path);
             }
         }
         None
+    }
+
+    /// True if `dir` holds a `*-Data.db` binary (the gitignored fixture data),
+    /// as opposed to only JSONL references. See `dataset_table_dir`.
+    fn dir_has_data_db(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .any(|f| f.file_name().to_string_lossy().ends_with("-Data.db"))
     }
 
     /// Issue #1571 (roborev Low, aggregate omission guard): `aggregate_key_cache_stats`

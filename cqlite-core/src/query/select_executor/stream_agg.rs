@@ -9,8 +9,8 @@
 //!   `COUNT(*)`/`MIN`/`MAX`/`SUM`/`AVG` never buffer the whole table.
 
 use super::aggregation::{
-    build_group_key, finalize_group, find_or_init_group, init_aggregate_accumulators,
-    update_aggregate, AggregationState,
+    build_group_key, finalize_empty_global_aggregate, finalize_group, find_or_init_group,
+    init_aggregate_accumulators, update_aggregate, AggregationState,
 };
 use super::{
     build_row_from_scan, classify_partition_lookup, evaluate_predicates, validate_token_predicates,
@@ -79,6 +79,16 @@ impl SelectExecutor {
                     "Aggregation memory limit exceeded".to_string(),
                 ));
             }
+        }
+
+        // Issue #2069: a GLOBAL aggregate (no GROUP BY) always emits exactly one
+        // row, even when the input is empty. With rows present a single `[Null]`
+        // group is created above (see `build_group_key`); with zero rows no group
+        // exists yet, so synthesize the empty-input row (COUNT = 0, other
+        // aggregates NULL). A GROUP BY query is UNAFFECTED — it correctly returns
+        // zero rows when there are no groups.
+        if agg_state.groups.is_empty() && agg_plan.group_by_columns.is_empty() {
+            return Ok(vec![finalize_empty_global_aggregate(agg_plan)]);
         }
 
         let result_rows = agg_state
@@ -180,12 +190,16 @@ impl SelectExecutor {
             }
         }
 
-        // Preserve the buffered path's semantics exactly: an empty aggregate input
-        // produces NO group (0 result rows), not a synthetic COUNT=0 row. (The
-        // Cassandra one-row-for-empty divergence is a pre-existing behavior gap
-        // tracked outside this memory fix.)
+        // Issue #2069: a GLOBAL aggregate (no GROUP BY) ALWAYS produces exactly one
+        // result row, even over zero input rows. Cassandra returns COUNT = 0 and
+        // NULL for every other aggregate (SUM/AVG/MIN/MAX) of empty input, so when
+        // nothing folded we synthesize that single row rather than returning zero
+        // rows. This fold only handles the GROUP-BY-free case (see
+        // `classify_global_aggregate`), so it never affects a GROUP BY query, which
+        // correctly yields zero rows when there are no groups.
         if !folded_any {
-            return Ok(Some(Vec::new()));
+            let row = finalize_empty_global_aggregate(agg_plan);
+            return Ok(Some(vec![row]));
         }
 
         let row = finalize_group(vec![Value::Null], accumulators, agg_plan);
