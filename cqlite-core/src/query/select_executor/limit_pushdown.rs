@@ -25,6 +25,7 @@ use super::{
     SSTablePredicate, SelectExecutor, TableId, TableSchema,
 };
 use crate::query::select_ast::SelectClause;
+use crate::types::{RowKey, ScanRow};
 
 /// In-flight row bound for the capped streaming fallback scan (issue #1577).
 ///
@@ -146,6 +147,15 @@ impl SelectExecutor {
             return Ok(Vec::new());
         }
 
+        // Metric accuracy (issue #1577, SUGGESTION-3): snapshot the scan counters
+        // so the short-stream reconciliation below can charge the AUTHORITATIVE
+        // re-scan exactly ONCE. Without this, the partial stream's per-row
+        // increments PLUS the re-scan's increments both land in
+        // `QUERY_ROWS_SCANNED` for the reconcile path, inflating rows-scanned.
+        // Results are unaffected — this only fixes double-counting.
+        let processed_baseline = context.rows_processed;
+        let scan_rows_baseline = context.scan_rows;
+
         let buffer = cap.saturating_add(1).min(CAPPED_SCAN_STREAM_BUFFER);
         let mut scan_stream = self
             .storage
@@ -165,41 +175,152 @@ impl SelectExecutor {
             if evaluate_predicates(&row, predicates)? {
                 results.push(row);
                 if results.len() >= cap {
+                    // ── Trusted full-cap stream fast path (issue #1577) ──────────
+                    //
                     // Decode-stop win: dropping the stream closes the channel and
                     // the producer stops parsing the remaining (unneeded) rows.
+                    //
+                    // INVARIANT — on-disk row order == token order — pinned here.
+                    // We return the stream's first `cap` rows WITHOUT re-sorting or
+                    // re-checking their order against the authoritative scan. This
+                    // is sound ONLY because every SUPPORTED writer emits rows in
+                    // token order, so `scan_stream` (which does NOT sort) yields the
+                    // same order as the materializing `scan` (which token-sorts via
+                    // `sort_by_token_order`):
+                    //   * Cassandra 5.0 SSTable `Data.db` files are written
+                    //     token-ordered on disk;
+                    //   * CQLite's memtable is a token-ordered `BTreeMap`, so every
+                    //     flushed generation is token-ordered;
+                    //   * compaction output is a k-way TOKEN merge of token-ordered
+                    //     inputs.
+                    // The `debug_assert` below pins this: it re-runs the
+                    // authoritative token-ordered `scan` and verifies the trusted
+                    // prefix matches, so a FUTURE writer that emits rows out of
+                    // token order trips in debug/tests rather than silently
+                    // returning misordered rows. It is debug-only — never compiled
+                    // into release, so it adds zero release perf cost.
+                    #[cfg(debug_assertions)]
+                    self.debug_assert_trusted_prefix(
+                        table, predicates, projection, schema_opt, cap, &results,
+                    )
+                    .await?;
                     return Ok(results);
                 }
             }
         }
 
         // Short stream: reconcile against the authoritative materializing scan so
-        // a `scan_stream`/`scan` divergence can never drop a row.
+        // a `scan_stream`/`scan` divergence can never drop a row. Roll the scan
+        // counters back to the pre-stream baseline first (SUGGESTION-3) so the
+        // re-scan below is the only work charged to `QUERY_ROWS_SCANNED` for this
+        // path — the partial stream's examined rows are not double-counted.
         drop(scan_stream);
+        context.rows_processed = processed_baseline;
+        context.scan_rows = scan_rows_baseline;
         let authoritative = self
             .storage
             .scan(table, None, None, None, schema_opt)
             .await?;
-        let mut reconciled = Vec::with_capacity(cap.min(authoritative.len()));
+        collect_capped_accepted(
+            authoritative,
+            predicates,
+            projection,
+            schema_opt,
+            cap,
+            context,
+        )
+    }
+
+    /// Debug-only guard for the trusted full-cap stream fast path in
+    /// [`capped_fallback_scan`](Self::capped_fallback_scan) (issue #1577).
+    ///
+    /// Re-runs the AUTHORITATIVE materializing `scan` (whose rows are token-sorted
+    /// via `sort_by_token_order`), builds its first-`cap` ACCEPTED row keys, and
+    /// asserts they equal the trusted stream's row keys in order. A supported
+    /// writer emits rows in token order, so the two prefixes match; a future
+    /// writer that violates the invariant trips this `debug_assert` in debug/tests
+    /// instead of silently returning misordered rows.
+    ///
+    /// Compiled only under `debug_assertions`, so it has zero release perf cost.
+    #[cfg(debug_assertions)]
+    async fn debug_assert_trusted_prefix(
+        &self,
+        table: &TableId,
+        predicates: &[SSTablePredicate],
+        projection: &[String],
+        schema_opt: Option<&TableSchema>,
+        cap: usize,
+        trusted: &[QueryRow],
+    ) -> Result<()> {
+        let authoritative = self
+            .storage
+            .scan(table, None, None, None, schema_opt)
+            .await?;
+        let mut expected: Vec<RowKey> = Vec::with_capacity(cap);
         for (key, value) in authoritative {
-            if reconciled.len() >= cap {
+            if expected.len() >= cap {
                 break;
             }
-            context.rows_processed += 1;
-            context.scan_rows += 1;
-            let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
-                continue;
-            };
-            if evaluate_predicates(&row, predicates)? {
-                reconciled.push(row);
+            if let Some(row) = build_row_from_scan(key, value, projection, schema_opt) {
+                if evaluate_predicates(&row, predicates)? {
+                    expected.push(row.key);
+                }
             }
         }
-        Ok(reconciled)
+        let got: Vec<RowKey> = trusted.iter().map(|r| r.key.clone()).collect();
+        debug_assert_eq!(
+            got, expected,
+            "issue #1577 invariant violated: the trusted full-cap `scan_stream` prefix \
+             diverged from the authoritative token-ordered `scan` prefix. Every supported \
+             writer must emit rows in token order (Cassandra 5.0 on-disk files are \
+             token-ordered; CQLite's memtable is a token-ordered BTreeMap; compaction \
+             output is k-way token-merged). A writer that violates this must sort before \
+             emit, or the full-cap stream fast path returns rows in the wrong order."
+        );
+        Ok(())
     }
+}
+
+/// Collect the first `cap` ACCEPTED rows from an already-materialized scan
+/// result, in scan order, counting each EXAMINED row exactly once in `context`
+/// (issue #1577).
+///
+/// This is the shared body of the short-stream reconciliation branch of
+/// [`SelectExecutor::capped_fallback_scan`]: after a short `scan_stream` it is
+/// fed the AUTHORITATIVE materializing `scan` and returns the exact first-`cap`
+/// window `execute_limit` will slice. A row suppressed by
+/// [`build_row_from_scan`] (a marker / tombstone) or rejected by
+/// [`evaluate_predicates`] is skipped and never counted toward `cap`, so the cap
+/// means "enough ACCEPTED rows" — identical to the streaming accept loop, so the
+/// reconciled result is byte-identical to the trusted stream's.
+fn collect_capped_accepted(
+    rows: Vec<(RowKey, ScanRow)>,
+    predicates: &[SSTablePredicate],
+    projection: &[String],
+    schema_opt: Option<&TableSchema>,
+    cap: usize,
+    context: &mut ExecutionContext,
+) -> Result<Vec<QueryRow>> {
+    let mut out = Vec::with_capacity(cap.min(rows.len()));
+    for (key, value) in rows {
+        if out.len() >= cap {
+            break;
+        }
+        context.rows_processed += 1;
+        context.scan_rows += 1;
+        let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
+            continue;
+        };
+        if evaluate_predicates(&row, predicates)? {
+            out.push(row);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::scan_pushdown_cap;
+    use super::{collect_capped_accepted, scan_pushdown_cap, ExecutionContext};
     use crate::query::select_ast::{
         ColumnRef, ComparisonExpression, ComparisonOperator, ComparisonRightSide, OrderByClause,
         OrderByItem, SelectClause, SelectExpression, SortDirection, WhereExpression,
@@ -207,7 +328,8 @@ mod tests {
     use crate::query::select_optimizer::{
         AggregateComputation, AggregationPlan, ExecutionStep, SSTablePredicate,
     };
-    use crate::types::{TableId, Value};
+    use crate::types::{RowKey, ScanRow, TableId, Value};
+    use std::sync::Arc;
 
     fn col(name: &str) -> SelectExpression {
         SelectExpression::Column(ColumnRef {
@@ -354,5 +476,107 @@ mod tests {
             scan_pushdown_cap(&[scan(), limit(u64::MAX, Some(u64::MAX))], &all()),
             Some(usize::MAX)
         );
+    }
+
+    // ── Short-stream reconciliation logic (issue #1577, IMPORTANT-1) ────────────
+    //
+    // `capped_fallback_scan` discards a SHORT `scan_stream` and reconciles by
+    // re-running the authoritative materializing `scan`, feeding its rows to
+    // `collect_capped_accepted`. That is the branch where a `scan_stream`/`scan`
+    // divergence must NOT drop or misorder a row — but the integration fixtures
+    // use single-reader tables whose stream reaches the cap (fast path), so the
+    // reconciliation LOGIC never runs there. This unit test drives it directly
+    // with a synthetic authoritative scan that holds MORE accepted rows than the
+    // cap (the exact situation a divergent short stream leaves behind), and proves
+    // it returns the correct first-`cap` ACCEPTED rows in scan order.
+
+    fn exec_context() -> ExecutionContext {
+        ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: Default::default(),
+            access_path: None,
+            reverse_served: false,
+        }
+    }
+
+    /// A live scan row carrying a single `name` text cell (no schema, so
+    /// `build_row_from_scan` surfaces the cell verbatim and reconstructs no
+    /// partition-key columns — accept/suppress is controlled purely by
+    /// `Row` vs `Marker`).
+    fn live(key: &[u8], name: &str) -> (RowKey, ScanRow) {
+        (
+            RowKey::new(key.to_vec()),
+            ScanRow::Row(vec![(Arc::from("name"), Value::Text(name.to_string()))]),
+        )
+    }
+
+    /// A suppressed marker row (row tombstone / null row): must be skipped and
+    /// never counted toward the cap.
+    fn marker(key: &[u8]) -> (RowKey, ScanRow) {
+        (RowKey::new(key.to_vec()), ScanRow::Marker(Value::Null))
+    }
+
+    #[test]
+    fn reconcile_returns_first_cap_accepted_rows_in_order() {
+        // Authoritative scan has 5 live rows (more than the cap of 3), with a
+        // suppressed marker interleaved after the first live row.
+        let authoritative = vec![
+            live(b"k0", "a"),
+            marker(b"k0m"), // suppressed: must not consume a cap slot
+            live(b"k1", "b"),
+            live(b"k2", "c"),
+            live(b"k3", "d"),
+            live(b"k4", "e"),
+        ];
+        let preds: Vec<SSTablePredicate> = Vec::new();
+        let mut ctx = exec_context();
+
+        let out = collect_capped_accepted(authoritative, &preds, &[], None, 3, &mut ctx)
+            .expect("reconciliation must not error");
+
+        // Exactly the first 3 ACCEPTED rows, in scan order (marker skipped).
+        let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
+        assert_eq!(
+            keys,
+            vec![b"k0".to_vec(), b"k1".to_vec(), b"k2".to_vec()],
+            "reconciliation must return the first `cap` ACCEPTED rows in scan order"
+        );
+        // The marker was examined (and counted) but never filled a cap slot; the
+        // loop stops examining once the cap is reached, so exactly 4 rows were
+        // examined (k0, marker, k1, k2) — not the whole authoritative scan.
+        assert_eq!(ctx.scan_rows, 4, "examined rows counted once, stops at cap");
+        assert_eq!(ctx.rows_processed, 4);
+    }
+
+    #[test]
+    fn reconcile_short_of_cap_returns_all_accepted() {
+        // Fewer accepted rows than the cap: return every accepted row (a genuinely
+        // small table — the non-divergent short-stream case).
+        let authoritative = vec![live(b"k0", "a"), marker(b"k0m"), live(b"k1", "b")];
+        let preds: Vec<SSTablePredicate> = Vec::new();
+        let mut ctx = exec_context();
+
+        let out = collect_capped_accepted(authoritative, &preds, &[], None, 100, &mut ctx)
+            .expect("reconciliation must not error");
+
+        let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
+        assert_eq!(keys, vec![b"k0".to_vec(), b"k1".to_vec()]);
+        assert_eq!(ctx.scan_rows, 3, "all three entries examined once");
+    }
+
+    #[test]
+    fn reconcile_cap_zero_returns_empty_without_examining() {
+        let authoritative = vec![live(b"k0", "a"), live(b"k1", "b")];
+        let preds: Vec<SSTablePredicate> = Vec::new();
+        let mut ctx = exec_context();
+
+        let out = collect_capped_accepted(authoritative, &preds, &[], None, 0, &mut ctx)
+            .expect("reconciliation must not error");
+
+        assert!(out.is_empty(), "cap 0 accepts no rows");
+        assert_eq!(ctx.scan_rows, 0, "cap 0 examines no rows");
     }
 }
