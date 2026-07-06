@@ -160,7 +160,10 @@ async fn open_db(data_dir: std::path::PathBuf, schema_path: std::path::PathBuf) 
 /// The ordered comparison key: `(token, raw key bytes)` — exactly what
 /// `sort_by_token_order` orders by.
 fn order_key(key: &RowKey) -> (i64, Vec<u8>) {
-    (cassandra_murmur3_token(key.as_bytes()), key.as_bytes().to_vec())
+    (
+        cassandra_murmur3_token(key.as_bytes()),
+        key.as_bytes().to_vec(),
+    )
 }
 
 /// Collect streamed rows IN EMITTED ORDER (no re-sort) so the raw stream order is
@@ -187,7 +190,10 @@ async fn collect_streaming_ordered(
     rows
 }
 
-async fn collect_execute_sorted(db: &Database, sql: &str) -> Vec<(Vec<u8>, HashMap<Arc<str>, Value>)> {
+async fn collect_execute_sorted(
+    db: &Database,
+    sql: &str,
+) -> Vec<(Vec<u8>, HashMap<Arc<str>, Value>)> {
     let result = db.execute(sql).await.expect("execute should succeed");
     let mut rows: Vec<(Vec<u8>, HashMap<Arc<str>, Value>)> = result
         .rows

@@ -10,6 +10,8 @@ pub mod compression_info;
 pub mod directory;
 pub mod directory_integration_tests;
 pub mod format_detector;
+#[cfg(feature = "write-support")]
+mod generation_merge; // Cross-generation read reconciliation (issues #883/#885/#957/#1579).
 pub mod header_spec;
 pub mod index;
 pub mod index_reader;
@@ -90,11 +92,6 @@ use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 use crate::types::CellWriteMetadata;
 use crate::{types::TableId, Config, Result, RowKey, ScanRow};
-// `RowCells`/`Value` are only referenced by the write-support merge read path
-// (`merge_generations_for_read` and the metadata scan); gate the import so the
-// minimal build does not flag them unused (issue #1334).
-#[cfg(feature = "write-support")]
-use crate::{RowCells, Value};
 
 /// Maximum directory depth when scanning for SSTable files.
 ///
@@ -971,9 +968,15 @@ impl SSTableManager {
         #[cfg(feature = "write-support")]
         if reader_list.len() > 1 {
             if let Some(schema) = schema {
-                match self
-                    .merge_generations_for_read(&reader_list, schema, start_key, end_key, limit)
-                    .await
+                match generation_merge::merge_generations_for_read(
+                    &reader_list,
+                    schema,
+                    start_key,
+                    end_key,
+                    limit,
+                    None,
+                )
+                .await
                 {
                     Ok(merged) => {
                         log::debug!(
@@ -1120,8 +1123,8 @@ impl SSTableManager {
     /// Reconciliation mirrors `scan_partition`:
     /// - More than one candidate generation (write-support + schema): drive the
     ///   authoritative k-way merge via
-    ///   [`merge_generations_for_read_with_metadata`](Self::merge_generations_for_read_with_metadata)
-    ///   over JUST the candidates, then retain this partition's rows. This preserves
+    ///   `generation_merge::merge_generations_for_read_with_metadata` TARGETED to
+    ///   just this partition. This preserves
     ///   per-cell cross-generation LWW / tombstone shadowing for WRITETIME/TTL
     ///   (Issue #885) on the targeted path.
     /// - Otherwise: decode each candidate via the reader's metadata path and retain
@@ -1215,20 +1218,29 @@ impl SSTableManager {
 
         // Multiple candidate generations may hold the same partition; reconcile
         // with the same authoritative metadata-aware k-way merge the full metadata
-        // scan uses (write-support only, schema present), then keep just this
-        // partition's rows. This preserves per-cell cross-generation WRITETIME/TTL.
+        // scan uses (write-support only, schema present), TARGETED to just this
+        // partition (issue #1579): the merge keeps only `partition_key`'s rows and
+        // stops as soon as it finds them, byte-identical to the former
+        // full-merge-then-`retain(matches_key)` but without materializing every
+        // other partition. This preserves per-cell cross-generation WRITETIME/TTL.
         #[cfg(feature = "write-support")]
         if candidates.len() > 1 {
             if let Some(schema) = schema {
-                match self
-                    .merge_generations_for_read_with_metadata(&candidates, schema, None, None, None)
-                    .await
+                let target = RowKey::new(partition_key.to_vec());
+                match generation_merge::merge_generations_for_read_with_metadata(
+                    &candidates,
+                    schema,
+                    None,
+                    None,
+                    None,
+                    Some(&target),
+                )
+                .await
                 {
-                    Ok(mut merged) => {
-                        merged.retain(matches_key);
+                    Ok(merged) => {
                         // Work-counter gate (Issue #958): the merge parsed every
-                        // surviving candidate; `merged` (post-retain) is exactly the
-                        // partitions this lookup returns.
+                        // surviving candidate; `merged` (already the target partition
+                        // only) is exactly the partitions this lookup returns.
                         work_counters::add_sstables_scanned(candidates.len() as u64);
                         work_counters::add_partitions_parsed(merged.len() as u64);
                         return Ok((merged, true));
@@ -1367,21 +1379,28 @@ impl SSTableManager {
 
         // Multiple candidate generations may hold the same partition; reconcile
         // with the same authoritative k-way merge the full scan uses (write-support
-        // only), then keep just this partition's rows.
+        // only), TARGETED to just this partition (issue #1579): the merge keeps only
+        // `partition_key`'s rows and stops as soon as it finds them, byte-identical
+        // to the former full-merge-then-`retain(matches_key)` but without
+        // materializing every other partition.
         #[cfg(feature = "write-support")]
         if candidates.len() > 1 {
             if let Some(schema) = schema {
-                match self
-                    // Partition-targeted: no key range; `retain(matches_key)` below
-                    // is a stricter single-partition filter than any range bound.
-                    .merge_generations_for_read(&candidates, schema, None, None, None)
-                    .await
+                let target = RowKey::new(partition_key.to_vec());
+                match generation_merge::merge_generations_for_read(
+                    &candidates,
+                    schema,
+                    None,
+                    None,
+                    None,
+                    Some(&target),
+                )
+                .await
                 {
-                    Ok(mut merged) => {
-                        merged.retain(matches_key);
+                    Ok(merged) => {
                         // Work-counter gate (Issue #958): the k-way merge parsed
-                        // every surviving candidate, and `merged` (post-retain) is
-                        // exactly the partitions this lookup returns.
+                        // every surviving candidate, and `merged` (already the target
+                        // partition only) is exactly the partitions this lookup returns.
                         work_counters::add_sstables_scanned(candidates.len() as u64);
                         work_counters::add_partitions_parsed(merged.len() as u64);
                         // The cross-generation merge decodes full partitions; the
@@ -1532,285 +1551,6 @@ impl SSTableManager {
         !table_name.contains('.') || table_readers.contains_key(table_name)
     }
 
-    /// Reconcile multiple SSTable generations of one table into the single
-    /// authoritative live-row set, matching Cassandra read semantics (Issue #883).
-    ///
-    /// Plain `scan` concatenates each reader's live rows, which is only correct
-    /// for a single generation. With several generations in a table directory
-    /// (successive flushes), the same `(partition, clustering)` row can appear in
-    /// more than one generation, and a row/cell deleted in a later generation is
-    /// suppressed only inside the generation that holds its tombstone — so the
-    /// older generation's copy leaks back into the result.
-    ///
-    /// This drives the same [`KWayMerger`](crate::storage::write_engine::KWayMerger)
-    /// the compaction path uses, so reconciliation is byte-for-byte the
-    /// last-write-wins + tombstone-shadowing logic (`merge_partition_rows`):
-    /// per-cell LWW by write timestamp, row/cell tombstones shadow older cells,
-    /// and fully-deleted rows are dropped. The merger manages its own reader
-    /// threads/runtimes internally, so it runs on a blocking task.
-    ///
-    /// Requires a schema (cells carry no column names on disk) and the
-    /// `write-support` feature (the merger lives in the write engine). Callers
-    /// fall back to concatenation when either is unavailable.
-    ///
-    /// `start_key`/`end_key` bound the merged output to the same inclusive
-    /// `[start_key, end_key]` key range the per-reader [`scan`](reader::SSTableReader::scan)
-    /// applies (skip `key < start`, skip `key > end`, using `RowKey`'s `Ord`), so a
-    /// bounded multi-generation read returns only the requested range rather than the
-    /// full reconciled table (Issue #957). The range filter runs before `limit`, matching
-    /// the per-reader scan order (range then limit). With `None`/`None` bounds the output
-    /// is byte-for-byte the full reconciled set, unchanged from before.
-    #[cfg(feature = "write-support")]
-    async fn merge_generations_for_read(
-        &self,
-        reader_list: &[Arc<reader::SSTableReader>],
-        schema: &crate::schema::TableSchema,
-        start_key: Option<&RowKey>,
-        end_key: Option<&RowKey>,
-        limit: Option<usize>,
-    ) -> Result<Vec<(RowKey, ScanRow)>> {
-        use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
-
-        // Own the bounds so the merge body (and any later filtering) can use them
-        // without borrowing across the await; cheap clone of the key bytes.
-        let start_key = start_key.cloned();
-        let end_key = end_key.cloned();
-
-        // The merger expects inputs ordered newest → oldest (run_index 0 = newest)
-        // for its stable tie-break; the reader Vec order is discovery-dependent, so
-        // sort explicitly by generation descending.
-        let mut ordered: Vec<&Arc<reader::SSTableReader>> = reader_list.iter().collect();
-        ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
-        let paths: Vec<PathBuf> = ordered.iter().map(|r| r.file_path.clone()).collect();
-        let schema = schema.clone();
-
-        let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
-            let mut merger = KWayMerger::new(paths, &schema)?;
-            let mut out = Vec::new();
-            while let MergeStep::Partition { key, rows } = merger.step()? {
-                // Enforce the same inclusive `[start_key, end_key]` range the
-                // per-reader scan applies (Issue #957): skip `key < start` and
-                // `key > end`, comparing with the identical `RowKey` ordering used
-                // for the final sort. Filtering at the partition key drops every
-                // out-of-range row before it is materialized.
-                let row_key = RowKey(key.key.clone());
-                if let Some(ref start) = start_key {
-                    if &row_key < start {
-                        continue;
-                    }
-                }
-                if let Some(ref end) = end_key {
-                    if &row_key > end {
-                        continue;
-                    }
-                }
-                for entry in rows {
-                    match entry.row_data {
-                        RowData::Live { cells } => {
-                            // Drop cell tombstones: a deleted column must be
-                            // absent from the merged row, not surfaced. Issue
-                            // #1334: emit the interned-name `ScanRow` carrier
-                            // the read path consumes.
-                            let row_cells: RowCells = cells
-                                .into_iter()
-                                .filter(|c| !matches!(c.value, Value::Tombstone(_)))
-                                .map(|c| (Arc::from(c.column.as_str()), c.value))
-                                .collect();
-                            if !row_cells.is_empty() {
-                                out.push((row_key.clone(), ScanRow::Row(row_cells)));
-                            }
-                        }
-                        // Row tombstone: the row is deleted across all
-                        // generations — suppress it entirely.
-                        RowData::Tombstone { .. } => {}
-                    }
-                }
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| crate::Error::Storage(format!("cross-generation read merge task: {e}")))??;
-
-        // Match the plain-scan contract: the merger already emits partitions in
-        // Cassandra token order with clustering rows contiguous within a
-        // partition. Preserve that with a stable TOKEN-order sort (issue #1580) —
-        // NOT a raw-key-byte sort, which would re-break the token ordering — then
-        // apply LIMIT. The sort is a no-op ordering-wise when the merger's output
-        // is already token-ordered; it only guards against a stray divergence.
-        scan_merge::sort_by_token_order(&mut merged, limit, |(k, _)| k);
-        Ok(merged)
-    }
-
-    /// Metadata-aware sibling of [`merge_generations_for_read`](Self::merge_generations_for_read)
-    /// for the `WRITETIME(col)` / `TTL(col)` projection path (Issue #885).
-    ///
-    /// Reconciles multiple SSTable generations into the authoritative live-row set
-    /// with the same [`KWayMerger`](crate::storage::write_engine::KWayMerger)
-    /// (per-cell LWW + row/cell tombstone shadowing), and additionally surfaces the
-    /// **winning** cell's per-cell write metadata in the
-    /// [`CellWriteMetadata`](crate::types::CellWriteMetadata) shape
-    /// `scan_with_cell_metadata` returns:
-    ///
-    /// - `write_timestamp_micros` comes straight from the winning `CellData`
-    ///   (`reconcile_cluster` keeps each surviving cell's own timestamp), so it is
-    ///   the WRITETIME of the cell that actually won cross-generation LWW — not an
-    ///   arbitrary generation's.
-    /// - `expiration` (TTL) is recovered best-effort from the per-reader
-    ///   `scan_with_cell_metadata` outputs: the merger's compaction iterator does
-    ///   not carry per-cell TTL, so for each surviving `(key, column)` we take the
-    ///   newest reader-surfaced metadata and attach its expiration only when its
-    ///   timestamp matches the merge winner. Absent/mismatched ⇒ `None` (no TTL),
-    ///   which is the same answer the plain read gives for a cell without TTL.
-    ///
-    /// Requires a schema and the `write-support` feature; callers fall back to
-    /// per-reader concatenation when either is unavailable.
-    ///
-    /// `start_key`/`end_key` bound the merged output to the same inclusive
-    /// `[start_key, end_key]` key range as the non-metadata
-    /// [`merge_generations_for_read`](Self::merge_generations_for_read) (skip
-    /// `key < start`, skip `key > end`, using `RowKey`'s `Ord`), so a bounded
-    /// multi-generation metadata read returns only the requested range rather than
-    /// the full reconciled table (Issue #957). The range filter runs before `limit`,
-    /// matching the per-reader scan order (range then limit). With `None`/`None`
-    /// bounds the output is byte-for-byte the full reconciled set, unchanged from
-    /// before. This stays definitionally in lockstep with the plain helper.
-    ///
-    /// Available whenever `write-support` is on — the `tombstones` build reuses the
-    /// identical `KWayMerger` reconciliation so `WRITETIME(col)` / `TTL(col)` resolve
-    /// from the authoritative winning cell there too (Issue #1535). Nothing in this
-    /// body depends on the tombstones GC path; it only needs the merger.
-    #[cfg(feature = "write-support")]
-    async fn merge_generations_for_read_with_metadata(
-        &self,
-        reader_list: &[Arc<reader::SSTableReader>],
-        schema: &crate::schema::TableSchema,
-        start_key: Option<&RowKey>,
-        end_key: Option<&RowKey>,
-        limit: Option<usize>,
-    ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
-        use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
-        use crate::types::TableId as CqlTableId;
-
-        // Own the bounds so the merge body can use them without borrowing across
-        // the await; cheap clone of the key bytes. Mirrors the plain helper.
-        let start_key = start_key.cloned();
-        let end_key = end_key.cloned();
-
-        // Best-effort TTL source: gather each reader's own per-cell metadata and
-        // keep, per (row-key bytes, column), the entry with the newest write
-        // timestamp. The merger surfaces accurate WRITETIME but no TTL, so this
-        // recovers expiration for the winning cell when the reader format carries
-        // it (V5CompressedLegacy / BTI). Keyed by raw key bytes so it lines up with
-        // the merger's `DecoratedKey` partition bytes.
-        let table_id = CqlTableId::from(format!("{}.{}", schema.keyspace, schema.table).as_str());
-        let mut ttl_lookup: HashMap<(Vec<u8>, String), CellWriteMetadata> = HashMap::new();
-        for reader in reader_list {
-            let per_reader = reader
-                .scan_with_cell_metadata(&table_id, None, None, None, Some(schema))
-                .await?;
-            for (row_key, _value, meta) in per_reader {
-                for (column, cell_meta) in meta {
-                    ttl_lookup
-                        .entry((row_key.0.clone(), column))
-                        .and_modify(|existing| {
-                            if cell_meta.write_timestamp_micros > existing.write_timestamp_micros {
-                                *existing = cell_meta.clone();
-                            }
-                        })
-                        .or_insert(cell_meta);
-                }
-            }
-        }
-
-        // Drive the authoritative merge (newest → oldest), mirroring the plain
-        // `merge_generations_for_read` path, but keep each winning cell's timestamp.
-        let mut ordered: Vec<&Arc<reader::SSTableReader>> = reader_list.iter().collect();
-        ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
-        let paths: Vec<PathBuf> = ordered.iter().map(|r| r.file_path.clone()).collect();
-        let merge_schema = schema.clone();
-
-        // Returns (key bytes, ScanRow row carrier, [(column, write_timestamp_micros)]).
-        type MergedRow = (Vec<u8>, ScanRow, Vec<(String, i64)>);
-        let merged_rows = tokio::task::spawn_blocking(move || -> Result<Vec<MergedRow>> {
-            let mut merger = KWayMerger::new(paths, &merge_schema)?;
-            let mut out = Vec::new();
-            while let MergeStep::Partition { key, rows } = merger.step()? {
-                // Enforce the same inclusive `[start_key, end_key]` range as the
-                // non-metadata `merge_generations_for_read` (Issue #957): skip
-                // `key < start` and `key > end`, comparing with the identical
-                // `RowKey` ordering used for the final sort. Filtering at the
-                // partition key drops every out-of-range row before it is
-                // materialized.
-                let row_key = RowKey(key.key.clone());
-                if let Some(ref start) = start_key {
-                    if &row_key < start {
-                        continue;
-                    }
-                }
-                if let Some(ref end) = end_key {
-                    if &row_key > end {
-                        continue;
-                    }
-                }
-                for entry in rows {
-                    if let RowData::Live { cells } = entry.row_data {
-                        // Issue #1334: emit the interned-name `ScanRow` carrier
-                        // the read path consumes.
-                        let mut row_cells: RowCells = Vec::with_capacity(cells.len());
-                        let mut timestamps: Vec<(String, i64)> = Vec::with_capacity(cells.len());
-                        for c in cells {
-                            // Drop cell tombstones: a deleted column is absent.
-                            if matches!(c.value, Value::Tombstone(_)) {
-                                continue;
-                            }
-                            timestamps.push((c.column.clone(), c.timestamp));
-                            row_cells.push((Arc::from(c.column.as_str()), c.value));
-                        }
-                        if !row_cells.is_empty() {
-                            out.push((key.key.clone(), ScanRow::Row(row_cells), timestamps));
-                        }
-                    }
-                    // Row tombstones suppress the row entirely (no emission).
-                }
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| {
-            crate::Error::Storage(format!("cross-generation metadata merge task: {e}"))
-        })??;
-
-        // Attach per-cell metadata: WRITETIME from the merge winner, TTL recovered
-        // from the reader lookup only when its timestamp matches the winner.
-        let mut results: Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)> =
-            Vec::with_capacity(merged_rows.len());
-        for (key_bytes, value, timestamps) in merged_rows {
-            let mut meta_map: HashMap<String, CellWriteMetadata> =
-                HashMap::with_capacity(timestamps.len());
-            for (column, write_ts) in timestamps {
-                let expiration = ttl_lookup
-                    .get(&(key_bytes.clone(), column.clone()))
-                    .filter(|m| m.write_timestamp_micros == write_ts)
-                    .and_then(|m| m.expiration.clone());
-                meta_map.insert(
-                    column,
-                    CellWriteMetadata {
-                        write_timestamp_micros: write_ts,
-                        expiration,
-                    },
-                );
-            }
-            results.push((RowKey(key_bytes), value, meta_map));
-        }
-
-        // Match the plain-scan contract: stable TOKEN-order sort (issue #1580),
-        // not a raw-key-byte sort, then apply LIMIT. The metadata payload rides
-        // along in the tuple's tail, which `sort_by_token_order` orders by
-        // (token, key) — identical ordering to the plain merge path.
-        scan_merge::sort_by_token_order(&mut results, limit, |(k, _, _)| k);
-        Ok(results)
-    }
-
     /// Scan a table and return per-cell write metadata alongside row values.
     ///
     /// Used when `ProjectionFlags::include_cell_metadata` is set (issue #693 — the
@@ -1855,15 +1595,15 @@ impl SSTableManager {
         #[cfg(feature = "write-support")]
         if reader_list.len() > 1 {
             if let Some(schema) = schema {
-                match self
-                    .merge_generations_for_read_with_metadata(
-                        &reader_list,
-                        schema,
-                        start_key,
-                        end_key,
-                        limit,
-                    )
-                    .await
+                match generation_merge::merge_generations_for_read_with_metadata(
+                    &reader_list,
+                    schema,
+                    start_key,
+                    end_key,
+                    limit,
+                    None,
+                )
+                .await
                 {
                     Ok(merged) => return Ok(merged),
                     Err(e) => {
@@ -2000,20 +1740,28 @@ impl SSTableManager {
     /// row/cell tombstone in a newer generation suppresses only its own
     /// generation's copy — so a pure key-ordered merge would emit overwritten
     /// rows twice and resurrect rows deleted in a later generation. `scan` avoids
-    /// this by routing the multi-generation case through
-    /// [`merge_generations_for_read`](Self::merge_generations_for_read) (the same
-    /// LWW + tombstone-shadowing k-way merge compaction uses); this streaming path
-    /// must reconcile identically or `execute()` and `execute_streaming()` diverge.
+    /// this by routing the multi-generation case through the authoritative
+    /// `KWayMerger` (the same LWW + tombstone-shadowing k-way merge compaction
+    /// uses); this streaming path must reconcile identically or `execute()` and
+    /// `execute_streaming()` diverge.
     ///
-    /// So, mirroring the `tombstones`-variant `scan_stream` (which delegates
-    /// wholesale to the materializing `scan`), the multi-generation case here
-    /// materializes the reconciled rows via `merge_generations_for_read` and
-    /// forwards them through the same bounded channel. This trades the O(rows)
-    /// streaming memory win for cross-generation correctness; a fully-streaming,
-    /// generation-aware merge (preserving the bounded-memory property across
-    /// generations) is a larger follow-up. The single-generation /
-    /// no-schema / no-`write-support` cases keep the lazy streaming merge, which
-    /// already matches `scan`'s concat path exactly and preserves LIMIT/backpressure.
+    /// # Streaming the multi-generation merge (Issue #1579 / D3)
+    ///
+    /// The multi-generation case runs
+    /// [`generation_merge::stream_generations_for_read`], which drives that same
+    /// `KWayMerger` on a blocking task and feeds each stepped partition's live
+    /// rows STRAIGHT into the bounded channel via `blocking_send` (backpressure
+    /// preserved) — instead of collecting the ENTIRE reconciled table, sorting it,
+    /// and only then dribbling it (the pre-D3 behaviour). Live heap is therefore
+    /// O(one partition + channel), and time-to-first-row is O(first partition),
+    /// not O(full merge). The merger already emits partitions in `(token, key)`
+    /// order, byte-identical to `scan`'s `sort_by_token_order`, so the emitted
+    /// order is unchanged (issue #1579 ordering guardrail). On a merger
+    /// CONSTRUCTION error the driver reports back so this path FALLS BACK to the
+    /// lazy per-reader streaming merge, mirroring `scan`'s fall-back-to-concat. The
+    /// single-generation / no-schema / no-`write-support` cases keep the lazy
+    /// streaming merge, which already matches `scan`'s concat path exactly and
+    /// preserves LIMIT/backpressure.
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_stream(
         &self,
@@ -2036,34 +1784,26 @@ impl SSTableManager {
         #[cfg(feature = "write-support")]
         if readers.len() > 1 {
             if let Some(schema) = schema {
-                match self
-                    .merge_generations_for_read(&readers, schema, start_key, end_key, None)
-                    .await
+                match generation_merge::stream_generations_for_read(
+                    &readers,
+                    schema,
+                    start_key,
+                    end_key,
+                    buffer_size,
+                )
+                .await
                 {
-                    Ok(merged) => {
+                    Ok(rx) => {
                         log::debug!(
-                            "SSTableManager::scan_stream - cross-generation merge produced {} rows \
-                             (materialized for streaming)",
-                            merged.len()
+                            "SSTableManager::scan_stream - cross-generation merge streaming \
+                             (O(window), not materialized)"
                         );
-                        // Issue #1579 (D3): the eager path holds the WHOLE reconciled
-                        // table resident before dribbling — record that as the resident
-                        // high-water mark so the memory guard observes O(table).
-                        stream_merge_probe::record_resident(merged.len() as u64);
-                        let (tx, rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
-                        tokio::spawn(async move {
-                            for entry in merged {
-                                if tx.send(Ok(entry)).await.is_err() {
-                                    break; // consumer dropped
-                                }
-                            }
-                        });
                         return Ok(rx);
                     }
                     Err(e) => {
-                        // Never fail a read because the merge path hit an
-                        // unsupported format; fall back to the lazy streaming
-                        // merge, matching `scan`'s fall-back-to-concatenation.
+                        // Never fail a read because the merge could not be
+                        // constructed (unsupported format); fall back to the lazy
+                        // streaming merge, matching `scan`'s fall-back-to-concatenation.
                         log::warn!(
                             "SSTableManager::scan_stream - cross-generation merge failed for '{}' ({}); \
                              falling back to lazy per-reader streaming merge",

@@ -122,7 +122,9 @@ async fn open_two_gen(n: i32) -> (Database, TempDir) {
                     .expect("write g2 overwrite");
             }
             for id in (0..n).step_by(7) {
-                engine.write(delete_mutation(id, 300)).expect("write g2 del");
+                engine
+                    .write(delete_mutation(id, 300))
+                    .expect("write g2 del");
             }
             rt.block_on(engine.flush())
                 .expect("flush g2")
