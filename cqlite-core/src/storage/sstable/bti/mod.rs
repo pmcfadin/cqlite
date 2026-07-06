@@ -29,7 +29,9 @@ pub use parser::{
 // candidate-prune loop (issue #1575 / C4).
 pub(crate) use parser::lookup_partition_in_bti_slice;
 // Crate-internal O(key-length) Rows.db floor/ceiling walks (issue #1647 / L1),
-// consumed only by the reader's clustering-window path.
+// consumed only by the reader's clustering-window path (compiled out under
+// `tombstones`).
+#[cfg(not(feature = "tombstones"))]
 pub(crate) use parser::{rows_floor_block, rows_strict_ceiling_block};
 
 use crate::parser::header::CassandraVersion;

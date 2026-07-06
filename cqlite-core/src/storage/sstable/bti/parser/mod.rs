@@ -89,6 +89,8 @@ pub use rows::{
 pub(crate) use slice_walk::lookup_partition_in_bti_slice;
 // Crate-internal only: the O(key-length) Rows.db floor/ceiling walks (issue #1647
 // / L1). Their sole consumer is the SSTable reader's clustering-window path
-// (data_access::bti); kept off the public semver surface like the slice walker.
+// (data_access::bti), which is compiled out under `tombstones`; kept off the
+// public semver surface like the slice walker.
+#[cfg(not(feature = "tombstones"))]
 pub(crate) use rows_floor::{rows_floor_block, rows_strict_ceiling_block};
 pub use traversal::iterate_partitions_in_bti_file;

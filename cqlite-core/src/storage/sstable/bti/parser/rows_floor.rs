@@ -35,8 +35,16 @@
 use crate::{error::Error, storage::sstable::bti::node::BtiResult};
 
 use super::node_decode::parse_bti_node;
-use super::partitions::{parse_bti_node_for_traversal, payload_start_in_node};
+use super::partitions::payload_start_in_node;
 use super::rows::{decode_bti_row_payload, BtiRowIndexEntry};
+
+// The floor/ceiling walks (and these two imports) are consumed ONLY by the
+// clustering-window path, which is compiled out under `tombstones` (that build
+// serves reads via a full-scan filter). `read_row_node_payload` below is always
+// compiled — the full-partition DFS uses it in every build.
+#[cfg(not(feature = "tombstones"))]
+use super::partitions::parse_bti_node_for_traversal;
+#[cfg(not(feature = "tombstones"))]
 use super::traversal::ordered_children;
 
 /// Read the `BtiRowIndexEntry` from the payload attached to a `Rows.db` node at
@@ -93,6 +101,7 @@ pub(super) fn read_row_node_payload(
     }
 }
 
+#[cfg(not(feature = "tombstones"))]
 /// Result of searching a node's ascending child list for the next key byte
 /// (mirrors `TrieNode.search`).  `insertion` is the number of children whose
 /// transition byte is `< b` (the lower-bound index); `exact` is the child index
@@ -108,6 +117,7 @@ struct ChildSearch {
     exact: Option<usize>,
 }
 
+#[cfg(not(feature = "tombstones"))]
 /// Locate `b` in the node's ascending `(byte, child)` children.
 fn search_children(children: &[(u8, usize)], b: Option<u8>) -> ChildSearch {
     let Some(byte) = b else {
@@ -126,6 +136,7 @@ fn search_children(children: &[(u8, usize)], b: Option<u8>) -> ChildSearch {
     ChildSearch { insertion, exact }
 }
 
+#[cfg(not(feature = "tombstones"))]
 /// Descend to the MAXIMUM (rightmost) leaf under `node_offset` and return its
 /// row-index payload (mirrors `Walker#goMax`, always following the last child
 /// until a leaf, then reading the payload).
@@ -147,6 +158,7 @@ fn go_max_payload(trie_data: &[u8], mut node_offset: usize) -> BtiResult<BtiRowI
     })
 }
 
+#[cfg(not(feature = "tombstones"))]
 /// Descend to the MINIMUM (leftmost) key under `node_offset` and return its
 /// row-index payload (mirrors `Walker#goMin`, stopping at the first node that
 /// carries a payload, else following the first child to a leaf).
@@ -170,6 +182,7 @@ fn go_min_payload(trie_data: &[u8], mut node_offset: usize) -> BtiResult<BtiRowI
     }
 }
 
+#[cfg(not(feature = "tombstones"))]
 /// Count one visited node and enforce the acyclic total-work bound: an acyclic
 /// trie has each node on a downward path occupy `>= 1` byte, so a walk that visits
 /// more nodes than the trie has bytes is proof of a cycle/corruption. Mirrors the
@@ -189,6 +202,7 @@ fn record_visit(trie_data: &[u8], steps: &mut usize) -> BtiResult<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "tombstones"))]
 /// Compute `separatorFloor(target_key)`: the row-index block whose half-open
 /// clustering interval `[s_i, s_{i+1})` contains `target_key` — i.e. the block for
 /// the largest separator `<= target_key`.
@@ -257,6 +271,7 @@ pub(crate) fn rows_floor_block(
     }
 }
 
+#[cfg(not(feature = "tombstones"))]
 /// Compute the block with the smallest separator **strictly greater** than
 /// `target_key` (`target_key`'s successor block).
 ///
@@ -313,6 +328,7 @@ pub(crate) fn rows_strict_ceiling_block(
     }
 }
 
+#[cfg(not(feature = "tombstones"))]
 #[cfg(test)]
 mod tests {
     use super::super::rows::{iterate_rows_in_bti_trie, select_row_index_blocks_for_range};
@@ -363,7 +379,7 @@ mod tests {
         let oracle = |key: &[u8]| -> Option<u64> {
             all.iter()
                 .filter(|(sep, _)| sep.as_slice() <= key)
-                .last()
+                .next_back()
                 .map(|(_, e)| e.data_offset)
         };
 
