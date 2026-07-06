@@ -383,7 +383,7 @@ pub(crate) fn decode_v5(
 ) -> crate::Result<Value> {
     let col = test_column(cql_type);
     parser
-        .parse_cell_value_schema_order(cell_bytes, 0, &col, None, reader)
+        .parse_cell_value_schema_order(cell_bytes, 0, &col, None, None, reader)
         .map(|(v, _ts, _exp, _off)| v)
 }
 

@@ -416,7 +416,7 @@ impl V5CompressedLegacyParser {
             // Issue #221: Branch based on column type - complex columns need special parsing
             // Issue #693: simple columns return 4-tuple including cell timestamp / expiration;
             //             complex columns return 2-tuple and inherit the row-level timestamp.
-            if Self::is_complex_column(complex_type) {
+            if ctp.is_complex {
                 log::debug!(
                     "V5CompressedLegacy: Column '{}' is complex (non-frozen collection / multicell UDT), using parse_complex_column",
                     column.name
@@ -585,8 +585,16 @@ impl V5CompressedLegacyParser {
                 // to detect USE_ROW_TTL (0x10), which makes a cell with no explicit
                 // expiry inherit the ROW's expiry rather than being live-forever.
                 let cell_flags = data.get(offset).copied().unwrap_or(0);
-                match self.parse_cell_value_schema_order(data, offset, column, header_type, reader)
-                {
+                match self.parse_cell_value_schema_order(
+                    data,
+                    offset,
+                    column,
+                    header_type,
+                    // J1 (issue #1635): the precomputed per-column dispatch tag,
+                    // resolved once per block — no per-cell `to_lowercase`.
+                    Some(&ctp.kind),
+                    reader,
+                ) {
                     Ok((value, cell_own_ts, cell_exp, new_offset)) => {
                         log::debug!(
                             "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",

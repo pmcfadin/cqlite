@@ -2145,7 +2145,7 @@ mod tests {
         buf.extend_from_slice(trailing_marker);
 
         let (value, _ts, _exp, new_offset) = parser
-            .parse_cell_value_schema_order(&buf, 0, &column, Some("int"), &reader)
+            .parse_cell_value_schema_order(&buf, 0, &column, Some("int"), None, &reader)
             .expect("dropped int cell must decode with fixed-width framing");
         assert_eq!(value, Value::Integer(0x0102_0304));
         assert_eq!(
@@ -2228,7 +2228,7 @@ mod tests {
         buf.extend_from_slice(trailing_marker);
 
         let (value, _ts, _exp, new_offset) = parser
-            .parse_cell_value_schema_order(&buf, 0, &column, None, &reader)
+            .parse_cell_value_schema_order(&buf, 0, &column, None, None, &reader)
             .expect("marshal-form frozen UDT must decode");
         // Structured frozen UDT, NOT a blob.
         let inner = match &value {
