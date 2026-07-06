@@ -45,6 +45,8 @@ pub use export::export_data;
 pub use export_sstable::export_sstable;
 pub use import::import_data;
 pub use inspect::{analyze_sstable, validate_sstable};
+#[cfg(feature = "state_machine")]
+pub use query::collect_query_result;
 pub use query::{execute_query, execute_select_query};
 pub use read::{read_sstable, read_sstable_enhanced};
 pub(crate) use schema_load::load_schema_file;

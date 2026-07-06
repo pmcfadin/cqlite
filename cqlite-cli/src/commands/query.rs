@@ -69,9 +69,14 @@ pub async fn execute_query(
         return Ok(());
     }
 
-    // Execute the query
-    let result = database
-        .execute(query)
+    // Execute the query via the BOUNDED streaming path (issue #1581, Epic D):
+    // route CLI queries through `execute_streaming` so a `LIMIT N` early-stops the
+    // scan producer and only the returned rows are materialized, instead of
+    // `execute()` slurping the whole table before truncating. Output is
+    // byte-identical because both paths build result columns from the same
+    // planner metadata (`get_result_columns`) and the writers depend only on
+    // `rows` + `metadata.columns` (+ the display `limit` applied identically).
+    let result = collect_query_result(database, query, config.limit)
         .await
         .with_context(|| "Failed to execute query")?;
 
@@ -160,6 +165,64 @@ pub async fn execute_query(
     }
 
     Ok(())
+}
+
+/// Collect a SELECT into a materialized `QueryResult` via the BOUNDED streaming
+/// path (issue #1581, Epic D).
+///
+/// Routing CLI queries through [`cqlite_core::Database::execute_streaming`]
+/// instead of `execute()` makes a `LIMIT N` early-stop the scan producer, so only
+/// the returned rows are ever materialized rather than slurping the whole table
+/// before truncating (`execute()` materializes every matching row, then applies
+/// LIMIT). For ORDER BY / GROUP BY / aggregate queries the streaming engine
+/// transparently falls back to materialize-then-stream (`requires_materialization`),
+/// so this is a safe drop-in for arbitrary SELECT.
+///
+/// Output is byte-identical to the previous `execute()` path: both build result
+/// columns from the same planner metadata (`get_result_columns`), and the CLI
+/// writers depend only on `rows` + `metadata.columns` (plus the display `limit`,
+/// applied identically here and by the writers).
+///
+/// `display_limit` (the resolved `--limit`) additionally caps how many rows are
+/// pulled into memory, bounding peak heap for a `--limit N` query that carries no
+/// SQL `LIMIT` to O(N + streaming buffer) instead of O(table).
+#[cfg(feature = "state_machine")]
+pub async fn collect_query_result(
+    database: &Database,
+    query: &str,
+    display_limit: Option<usize>,
+) -> Result<cqlite_core::query::result::QueryResult> {
+    use cqlite_core::query::result::{QueryResult, StreamingConfig};
+
+    let mut iter = database
+        .execute_streaming(query, StreamingConfig::default())
+        .await?;
+
+    let mut rows = Vec::new();
+    loop {
+        // Stop pulling once the display limit is satisfied (bounds peak memory
+        // when the query itself carries no SQL LIMIT). Dropping `iter` on break
+        // closes the channel, signalling the producer to stop scanning.
+        if let Some(cap) = display_limit {
+            if rows.len() >= cap {
+                break;
+            }
+        }
+        match iter.next_async().await {
+            Some(Ok(row)) => rows.push(row),
+            Some(Err(e)) => {
+                return Err(anyhow::Error::new(e).context("Failed while streaming query rows"))
+            }
+            None => break,
+        }
+    }
+
+    Ok(QueryResult {
+        rows,
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: iter.metadata,
+    })
 }
 
 #[cfg(not(feature = "state_machine"))]
