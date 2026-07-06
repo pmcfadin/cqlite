@@ -630,13 +630,13 @@ impl QueryExecutor {
 
     /// Compare two values
     fn compare_values(&self, a: &Value, b: &Value) -> Result<Ordering> {
+        use crate::float_cmp::cassandra_double_cmp as dcmp;
         match (a, b) {
             (Value::Integer(a), Value::Integer(b)) => Ok(a.cmp(b)),
-            (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
+            (Value::Float(a), Value::Float(b)) => Ok(dcmp(*a, *b)), // Cassandra order #1870/#2010
             (Value::Text(a), Value::Text(b)) => Ok(a.cmp(b)),
             (Value::Boolean(a), Value::Boolean(b)) => Ok(a.cmp(b)),
-            // UUID comparison: byte-wise (same as Cassandra's ordering).
-            // Covers both UUID and TIMEUUID columns — both are stored as Value::Uuid.
+            // UUID/TIMEUUID (both Value::Uuid): byte-wise, as Cassandra orders.
             (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
             (Value::Null, Value::Null) => Ok(Ordering::Equal),
             (Value::Null, _) => Ok(Ordering::Less),

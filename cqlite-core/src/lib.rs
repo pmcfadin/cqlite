@@ -6,6 +6,7 @@
 pub mod config;
 pub mod cql;
 pub mod error;
+pub(crate) mod float_cmp;
 pub mod parser;
 // DISABLED FOR M1: Security and performance modules causing compilation errors
 // pub mod performance;
