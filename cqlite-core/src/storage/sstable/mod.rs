@@ -1974,17 +1974,15 @@ impl SSTableManager {
         let readers = self.resolve_table_readers(table_id).await;
 
         if readers.len() == 1 {
-            let reader = readers
-                .into_iter()
-                .next()
-                .expect("readers.len() == 1 checked above");
-            return Ok(reader.scan_stream_batched(
-                table_id.clone(),
-                start_key.cloned(),
-                end_key.cloned(),
-                schema.cloned(),
-                buffer_size,
-            ));
+            if let Some(reader) = readers.into_iter().next() {
+                return Ok(reader.scan_stream_batched(
+                    table_id.clone(),
+                    start_key.cloned(),
+                    end_key.cloned(),
+                    schema.cloned(),
+                    buffer_size,
+                ));
+            }
         }
 
         let per_row = self
