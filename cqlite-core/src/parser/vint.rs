@@ -425,11 +425,13 @@ pub fn parse_unsigned_vint32(input: &[u8]) -> IResult<&[u8], u32> {
             nom::error::ErrorKind::Eof,
         )));
     }
-    let (value, consumed) = decode_unsigned(input).map_err(|_| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof))
-    })?;
+    let (value, consumed) = decode_unsigned(input)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof)))?;
     let value = u32::try_from(value).map_err(|_| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge))
+        nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        ))
     })?;
     Ok((&input[consumed..], value))
 }

@@ -841,10 +841,18 @@ mod tests {
         let mut dec = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
         let mut reader = std::io::Cursor::new(data_db);
 
-        let first = dec.get_decompressed_chunk(&mut reader, 1).expect("cold read");
-        assert_eq!(dec.decompress_call_count(), 1, "cold read decompresses once");
+        let first = dec
+            .get_decompressed_chunk(&mut reader, 1)
+            .expect("cold read");
+        assert_eq!(
+            dec.decompress_call_count(),
+            1,
+            "cold read decompresses once"
+        );
 
-        let second = dec.get_decompressed_chunk(&mut reader, 1).expect("cache hit");
+        let second = dec
+            .get_decompressed_chunk(&mut reader, 1)
+            .expect("cache hit");
         assert!(
             Arc::ptr_eq(&first, &second),
             "a hit must return the same Arc buffer, not a copy"
@@ -869,7 +877,10 @@ mod tests {
 
         let a = dec.read_data(&mut reader, 400, 100).expect("first read");
         let calls_after_first = dec.decompress_call_count();
-        assert_eq!(calls_after_first, 1, "one chunk decompressed on the cold read");
+        assert_eq!(
+            calls_after_first, 1,
+            "one chunk decompressed on the cold read"
+        );
 
         let b = dec.read_data(&mut reader, 400, 100).expect("second read");
         assert_eq!(a, b, "repeated read returns identical bytes");
@@ -898,7 +909,11 @@ mod tests {
         let _a = dec.get_decompressed_chunk(&mut reader, 0).expect("A cold");
         let _b = dec.get_decompressed_chunk(&mut reader, 1).expect("B cold");
         let _a2 = dec.get_decompressed_chunk(&mut reader, 0).expect("A hit"); // bump A recency
-        assert_eq!(dec.decompress_call_count(), 2, "A,B decompressed; A re-access is a hit");
+        assert_eq!(
+            dec.decompress_call_count(),
+            2,
+            "A,B decompressed; A re-access is a hit"
+        );
 
         // Insert C → over capacity → evict LRU, which is now B (A was just accessed).
         let _c = dec.get_decompressed_chunk(&mut reader, 2).expect("C cold");
@@ -906,13 +921,27 @@ mod tests {
 
         let calls = dec.decompress_call_count();
         // A survives (recently used) → hit, no new decompress.
-        let _ = dec.get_decompressed_chunk(&mut reader, 0).expect("A still resident");
-        assert_eq!(dec.decompress_call_count(), calls, "A (recently used) must survive");
+        let _ = dec
+            .get_decompressed_chunk(&mut reader, 0)
+            .expect("A still resident");
+        assert_eq!(
+            dec.decompress_call_count(),
+            calls,
+            "A (recently used) must survive"
+        );
         // C survives (just inserted) → hit.
-        let _ = dec.get_decompressed_chunk(&mut reader, 2).expect("C still resident");
-        assert_eq!(dec.decompress_call_count(), calls, "C (just inserted) must survive");
+        let _ = dec
+            .get_decompressed_chunk(&mut reader, 2)
+            .expect("C still resident");
+        assert_eq!(
+            dec.decompress_call_count(),
+            calls,
+            "C (just inserted) must survive"
+        );
         // B was evicted → miss → re-decompress.
-        let _ = dec.get_decompressed_chunk(&mut reader, 1).expect("B re-read");
+        let _ = dec
+            .get_decompressed_chunk(&mut reader, 1)
+            .expect("B re-read");
         assert_eq!(
             dec.decompress_call_count(),
             calls + 1,
@@ -931,7 +960,9 @@ mod tests {
 
         let (_, cap) = dec.cache_stats();
         for i in 0..20usize {
-            let _ = dec.get_decompressed_chunk(&mut reader, i).expect("chunk read");
+            let _ = dec
+                .get_decompressed_chunk(&mut reader, i)
+                .expect("chunk read");
             let (resident, _) = dec.cache_stats();
             assert!(
                 resident <= cap,
@@ -939,6 +970,9 @@ mod tests {
             );
         }
         let (resident, _) = dec.cache_stats();
-        assert_eq!(resident, cap, "reading 20 chunks fills the {cap}-entry cache");
+        assert_eq!(
+            resident, cap,
+            "reading 20 chunks fills the {cap}-entry cache"
+        );
     }
 }
