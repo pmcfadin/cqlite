@@ -52,6 +52,16 @@ pub fn check_references(manifest: &Manifest, inventory: &CorpusInventory) -> Vec
             if !seen.insert(r.clone()) {
                 continue;
             }
+            // `system*` keyspace references are excluded, consistently with the
+            // expected-inventory exclusion in [`super::check_component_changes`]:
+            // a system keyspace's on-disk layout/generations are inherently
+            // run- and Cassandra-version-dependent (e.g. `system_schema` gains
+            // tables like `column_masks` across versions), so a manifest
+            // reference pinned to one is not a coverage guarantee this tier makes
+            // (issue #2009).
+            if is_system_keyspace_path(&r) {
+                continue;
+            }
             // Exact path present, or the same table+component exists under a
             // churned UUID dir -> the corpus still produces it; not a finding.
             if inventory.files.contains(&r) || produced.contains(&component_identity(&r)) {

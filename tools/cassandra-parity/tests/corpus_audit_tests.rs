@@ -223,6 +223,58 @@ fn generation_churn_reference_is_clean() {
     assert_eq!(report.count(FindingKind::MissingReference), 0);
 }
 
+/// Issue #2009: a manifest reference into a `system*` keyspace is EXCLUDED from
+/// the missing-reference check, consistently with the expected-inventory
+/// exclusion — a system keyspace's tables/generations are inherently run- and
+/// Cassandra-version-dependent (e.g. `system_schema.column_masks` only exists on
+/// newer versions), so a reference pinned to one is not a coverage guarantee this
+/// tier makes. The regeneration NOT producing it must be clean.
+#[test]
+fn system_keyspace_reference_is_excluded_from_missing_check() {
+    let sys_ref = "test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Statistics.db.txt";
+    let yaml = format!(
+        r#"manifest_version: 1
+cassandra_source:
+  repo: https://github.com/apache/cassandra
+  ref: cassandra-5.0.2
+  sha: {GOOD_SHA}
+  index: docs/cassandra_test_index.md
+  assessment_report: docs/reports/x.md
+program:
+  parent_epic: 966
+  reporting_epic: 967
+scenarios:
+  - id: cass.repair.system_schema_ref
+    title: t
+    status: mirrored
+    capability: sstable_format
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable_format
+      relevance: high
+      files:
+        - SortedTableWriterTest.java
+    cqlite: {{}}
+    evidence:
+      type: byte_for_byte
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: {GOOD_SHA}
+      reference_paths:
+        - {sys_ref}
+    ci:
+      tier: exhaustive_regeneration
+"#
+    );
+    let manifest = Manifest::from_yaml(&yaml).expect("fixture manifest parses");
+    // Inventory does NOT contain the system_schema component at all.
+    let findings = corpus_audit::refs::check_references(&manifest, &inventory_with(&[]));
+    assert!(
+        findings.is_empty(),
+        "a system* keyspace reference must not fire MISSING-REFERENCE, got: {findings:?}"
+    );
+}
+
 #[test]
 fn unclassified_high_relevance_fails_and_names_offender() {
     let report = corpus_audit::audit(
