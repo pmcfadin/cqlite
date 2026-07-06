@@ -51,9 +51,15 @@ pub(super) fn is_fully_expired(stats: &TimestampStatistics, gc_before_secs: i64)
 /// `None` here forces the overlap gate to FAIL CLOSED (retain the candidate).
 fn authoritative_max_timestamp(stats: &TimestampStatistics) -> Option<i64> {
     // `max_timestamp` is already `Option` (issue #1653): `Some` only when the
-    // authoritative maximum was decoded, `None` when unavailable. Propagate it
-    // directly — a `None` forces the overlap gate to FAIL CLOSED.
-    stats.max_timestamp
+    // authoritative maximum was decoded, `None` when unavailable. Propagate it,
+    // but defense-in-depth (#1653): a drop/GC gate must NEVER treat Cassandra's
+    // `Long.MIN_VALUE` "no max recorded" sentinel as a real newest write (it
+    // would compare below any overlap bound and wrongly permit a drop). Degrade
+    // a stray `Some(i64::MIN)` from any source to `None` so the overlap gate
+    // FAILS CLOSED (retain the candidate).
+    stats
+        .max_timestamp
+        .filter(|&ts| ts != crate::parser::repair_metadata::NO_MAX_TIMESTAMP_SENTINEL)
 }
 
 /// Read a candidate SSTable's `TimestampStatistics` from its sibling

@@ -441,9 +441,14 @@ pub fn parse_timestamp_statistics(input: &[u8]) -> IResult<&[u8], TimestampStati
         TimestampStatistics {
             min_timestamp,
             // Legacy format genuinely parses `max_timestamp` and `rows_with_ttl`
-            // from fixed-width fields, so they are `Some(..)` (issue #1653); the
-            // enhanced parser leaves them `None` when unavailable.
-            max_timestamp: Some(max_timestamp),
+            // from fixed-width fields (issue #1653); the enhanced parser leaves
+            // them `None` when unavailable. But Cassandra seeds its timestamp
+            // `MinMaxLongTracker` max with `Long.MIN_VALUE`, so an SSTable that
+            // recorded no live write timestamp serializes that `i64::MIN`
+            // sentinel verbatim. Decode it to `None` via the SAME helper the
+            // enhanced parser uses, so a legacy parse can never leak the "no max
+            // recorded" sentinel as a real maximum (roborev #1653 legacy leak).
+            max_timestamp: crate::parser::repair_metadata::decode_max_timestamp(max_timestamp),
             min_deletion_time,
             max_deletion_time,
             min_ttl,

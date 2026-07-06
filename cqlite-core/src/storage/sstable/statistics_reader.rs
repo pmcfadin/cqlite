@@ -214,7 +214,14 @@ impl StatisticsReader {
     /// Consumers that must not proceed without a real maximum (e.g. a
     /// compaction drop/GC gate, #1388) should gate on this returning `Some`.
     pub fn max_timestamp(&self) -> Option<i64> {
-        self.statistics.timestamp_stats.max_timestamp
+        // Defense-in-depth (#1653): both parsers should already map Cassandra's
+        // `Long.MIN_VALUE` "no max recorded" sentinel to `None`, but degrade a
+        // stray `Some(i64::MIN)` from ANY source to `None` here too, so a
+        // caller can never read the sentinel as a real maximum.
+        self.statistics
+            .timestamp_stats
+            .max_timestamp
+            .filter(|&ts| ts != crate::parser::repair_metadata::NO_MAX_TIMESTAMP_SENTINEL)
     }
 
     /// Get compression information as `(algorithm, ratio)`, or `None` when

@@ -1061,7 +1061,7 @@ pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<
 /// `Long.MIN_VALUE` for the max; an SSTable that recorded no live write
 /// timestamp serializes that sentinel verbatim to STATS field 4. We treat it as
 /// "no authoritative maxTimestamp" rather than a real (nonsensical) maximum.
-const NO_MAX_TIMESTAMP_SENTINEL: i64 = i64::MIN;
+pub(crate) const NO_MAX_TIMESTAMP_SENTINEL: i64 = i64::MIN;
 
 /// Normalize a raw STATS `maxTimestamp` (i64 BE microseconds) into an
 /// authoritative value, or `None` when the SSTable recorded no write timestamp.
@@ -1069,7 +1069,11 @@ const NO_MAX_TIMESTAMP_SENTINEL: i64 = i64::MIN;
 /// The `Long.MIN_VALUE` sentinel maps to `None` (fail-closed: consumers that
 /// require a real max must not proceed as if one were known). Every other value
 /// — including a valid large or negative real timestamp — is returned verbatim.
-fn decode_max_timestamp(raw: i64) -> Option<i64> {
+///
+/// Shared by both parsers (enhanced nb walk here, and the legacy fixed-width
+/// `parse_timestamp_statistics`, issue #1653) so the sentinel→`None` mapping
+/// never drifts between paths.
+pub(crate) fn decode_max_timestamp(raw: i64) -> Option<i64> {
     if raw == NO_MAX_TIMESTAMP_SENTINEL {
         None
     } else {

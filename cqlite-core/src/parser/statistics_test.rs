@@ -403,6 +403,45 @@ mod tests {
         assert_eq!(timestamp_stats.rows_with_ttl, Some(0));
     }
 
+    /// The legacy fixed-width `parse_timestamp_statistics` must decode
+    /// Cassandra's `Long.MIN_VALUE` (`i64::MIN`) "no max recorded" sentinel to
+    /// `None`, never leak it as a real maximum (roborev #1653 legacy leak). A
+    /// genuinely-present max still yields `Some(real)`.
+    #[test]
+    fn test_legacy_max_timestamp_min_sentinel_maps_to_none() {
+        // Build a legacy timestamp-statistics buffer: min_timestamp,
+        // max_timestamp = i64::MIN sentinel, min/max_deletion_time, has_ttl=0.
+        let mut sentinel_buf = Vec::new();
+        sentinel_buf.extend_from_slice(&100_i64.to_be_bytes()); // min_timestamp
+        sentinel_buf.extend_from_slice(&i64::MIN.to_be_bytes()); // max_timestamp = sentinel
+        sentinel_buf.extend_from_slice(&0_i64.to_be_bytes()); // min_deletion_time
+        sentinel_buf.extend_from_slice(&0_i64.to_be_bytes()); // max_deletion_time
+        sentinel_buf.push(0x00); // has_ttl = 0
+
+        let (_, sentinel_stats) =
+            parse_timestamp_statistics(&sentinel_buf).expect("legacy parse should succeed");
+        assert_eq!(
+            sentinel_stats.max_timestamp, None,
+            "the i64::MIN 'no max recorded' sentinel must decode to None, not Some(i64::MIN)"
+        );
+
+        // A genuinely-present max stays Some(real).
+        let mut real_buf = Vec::new();
+        real_buf.extend_from_slice(&100_i64.to_be_bytes()); // min_timestamp
+        real_buf.extend_from_slice(&2_000_000_i64.to_be_bytes()); // max_timestamp = real
+        real_buf.extend_from_slice(&0_i64.to_be_bytes()); // min_deletion_time
+        real_buf.extend_from_slice(&0_i64.to_be_bytes()); // max_deletion_time
+        real_buf.push(0x00); // has_ttl = 0
+
+        let (_, real_stats) =
+            parse_timestamp_statistics(&real_buf).expect("legacy parse should succeed");
+        assert_eq!(
+            real_stats.max_timestamp,
+            Some(2_000_000),
+            "a genuinely-present max must be preserved as Some(real)"
+        );
+    }
+
     /// Test column statistics parsing structure
     #[test]
     fn test_column_statistics_structure() {
