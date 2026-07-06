@@ -294,6 +294,43 @@ pub(super) fn finalize_group(
     }
 }
 
+/// Issue #2069: materialize the single result row of a GLOBAL aggregate (no
+/// GROUP BY) over ZERO input rows.
+///
+/// Cassandra's CQL semantics say a bare aggregate SELECT with no GROUP BY is a
+/// "global aggregate" and ALWAYS produces exactly one row, even over an empty
+/// table: `COUNT(*)`/`COUNT(col)` = `0`, and `MIN`/`MAX`/`SUM`/`AVG` = `NULL`
+/// (notably SUM of empty input is NULL, not `0`). This is DISTINCT from a
+/// GROUP BY query, which yields zero rows when there are no groups — the callers
+/// only reach this helper on the GROUP-BY-free path.
+///
+/// We cannot reuse [`init_aggregate_accumulators`] + [`finalize_group`] for this
+/// because a fresh `AggregateValue::Sum(0.0)` finalizes to `Float(0.0)`, whereas
+/// the empty-input answer must be `NULL`. This builds the row directly instead.
+pub(super) fn finalize_empty_global_aggregate(agg_plan: &AggregationPlan) -> QueryRow {
+    let mut row_values: HashMap<std::sync::Arc<str>, Value> =
+        HashMap::with_capacity(agg_plan.aggregates.len());
+
+    for agg_comp in &agg_plan.aggregates {
+        let result_value = match agg_comp.function {
+            // COUNT of empty input is 0 (BigInt, matching the non-empty finalize).
+            AggregateType::Count => Value::BigInt(0),
+            // SUM/AVG/MIN/MAX of empty input are NULL in Cassandra.
+            AggregateType::Sum | AggregateType::Avg | AggregateType::Min | AggregateType::Max => {
+                Value::Null
+            }
+        };
+        row_values.insert(agg_comp.alias.as_str().into(), result_value);
+    }
+
+    QueryRow {
+        values: row_values,
+        key: RowKey::new(vec![]),
+        metadata: Default::default(),
+        cell_metadata: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +395,45 @@ mod tests {
              for {rows} rows / {groups_count} groups (linear scan would be ~{})",
             rows * groups_count / 2
         );
+    }
+
+    /// Issue #2069: the empty global-aggregate synthesizer emits COUNT = 0
+    /// (BigInt) and NULL for every other aggregate — SUM of empty is NULL, NOT
+    /// the `Float(0.0)` a fresh `Sum(0.0)` accumulator would finalize to.
+    #[test]
+    fn finalize_empty_global_aggregate_count_zero_others_null() {
+        let agg = |function, alias: &str| AggregateComputation {
+            function,
+            column: "x".to_string(),
+            alias: alias.to_string(),
+            distinct: false,
+        };
+        let plan = AggregationPlan {
+            group_by_columns: Vec::new(),
+            group_by_output_names: Vec::new(),
+            aggregates: vec![
+                agg(AggregateType::Count, "c"),
+                agg(AggregateType::Sum, "s"),
+                agg(AggregateType::Avg, "a"),
+                agg(AggregateType::Min, "mn"),
+                agg(AggregateType::Max, "mx"),
+            ],
+        };
+
+        let row = finalize_empty_global_aggregate(&plan);
+
+        assert_eq!(
+            row.values.get("c"),
+            Some(&Value::BigInt(0)),
+            "COUNT of empty input is 0"
+        );
+        for (alias, kind) in [("s", "SUM"), ("a", "AVG"), ("mn", "MIN"), ("mx", "MAX")] {
+            assert_eq!(
+                row.values.get(alias),
+                Some(&Value::Null),
+                "{kind} of empty input is NULL (not 0)"
+            );
+        }
     }
 
     /// The hash index must never merge distinct keys: `-0.0`/`+0.0` group
