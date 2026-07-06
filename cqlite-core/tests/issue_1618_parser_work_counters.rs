@@ -282,7 +282,11 @@ async fn bti_point_read_visits_and_decodes_nodes() {
     };
 
     rwc::reset();
-    assert_eq!(rwc::bti_nodes_visited(), 0, "reset must zero BTI_NODES_VISITED");
+    assert_eq!(
+        rwc::bti_nodes_visited(),
+        0,
+        "reset must zero BTI_NODES_VISITED"
+    );
     assert_eq!(
         rwc::bti_pointer_decodes(),
         0,
