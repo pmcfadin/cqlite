@@ -122,27 +122,6 @@ pub fn parse_binary_data(data: &[u8]) -> ParseResult<Vec<u8>> {
     Ok(data.to_vec())
 }
 
-/// Parse variable-length integer from binary data
-pub fn parse_vint_binary(data: &[u8]) -> ParseResult<(u64, usize)> {
-    if data.is_empty() {
-        return Err(CQLiteParseError::InvalidFormat(
-            "Empty vint data".to_string(),
-        ));
-    }
-
-    // Simple vint parsing - first byte indicates length
-    let first_byte = data[0];
-    if first_byte & 0x80 == 0 {
-        // Single byte
-        Ok((first_byte as u64, 1))
-    } else {
-        // Multi-byte - not fully implemented
-        Err(CQLiteParseError::Unsupported(
-            "Multi-byte vint not implemented".to_string(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,25 +152,6 @@ mod tests {
 
         let empty_result = parse_binary_data(&[]);
         assert!(empty_result.is_err());
-    }
-
-    #[test]
-    fn test_parse_vint_binary() {
-        let data = &[0x42]; // Single byte vint
-        let (value, consumed) = parse_vint_binary(data).unwrap();
-        assert_eq!(value, 0x42);
-        assert_eq!(consumed, 1);
-
-        let empty_result = parse_vint_binary(&[]);
-        assert!(empty_result.is_err());
-    }
-
-    #[test]
-    fn test_parse_vint_binary_unsupported_multi_byte() {
-        let data = &[0x80, 0x01];
-        let err =
-            parse_vint_binary(data).expect_err("multi-byte vint should return unsupported error");
-        assert!(matches!(err, CQLiteParseError::Unsupported(_)));
     }
 
     #[test]

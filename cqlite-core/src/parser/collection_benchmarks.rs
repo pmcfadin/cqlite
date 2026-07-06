@@ -1,5 +1,3 @@
-#![cfg(feature = "benchmarks")]
-
 //! Performance benchmarks for collection parsing and serialization
 //!
 //! This module provides comprehensive benchmarks for collections to ensure
