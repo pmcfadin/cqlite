@@ -1,11 +1,12 @@
 //! Async pipeline entry points for the SELECT executor (issue #1174).
 //!
 //! This submodule continues the [`SelectExecutor`](super::SelectExecutor) `impl`
-//! with the three large `async` pipeline methods that drive query execution:
+//! with the large `async` pipeline methods that drive query execution:
 //! - [`SelectExecutor::execute`] — the materializing plan runner,
-//! - [`SelectExecutor::execute_streaming_background`] — the streaming producer
-//!   task spawned by `execute_streaming` (which stays in `mod.rs`),
 //! - [`SelectExecutor::execute_sstable_scan`] — the SSTable-scan step.
+//!
+//! (The streaming producer, `execute_streaming_background`, moved to the sibling
+//! `streaming` submodule in issue #1578's file-size split.)
 //!
 //! These were relocated verbatim from `mod.rs` (epic #1116 file-size split); the
 //! per-step helpers they call (`execute_filter`, `execute_sort`, etc.) and the

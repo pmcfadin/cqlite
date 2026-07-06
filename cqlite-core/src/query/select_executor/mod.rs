@@ -16,12 +16,15 @@
 //! - [`value_ops`] — value comparison + arithmetic primitives,
 //! - [`predicate`] — SSTable leaf-predicate evaluation (public `evaluate_*`),
 //! - [`lookup`] — partition/clustering lookup classification,
-//! - [`aggregation`] — GROUP BY accumulation,
+//! - [`aggregation`] — GROUP BY accumulator state + shared per-row update helpers,
+//! - [`stream_agg`] — aggregation execution: the buffered `execute_aggregation`
+//!   and the O(1) streaming-fold `try_execute_global_aggregate` (issue #1578),
 //! - [`row_build`] — scan-row assembly (public `build_row_from_scan`),
 //! - [`writetime_ttl`] — WRITETIME/TTL projection + injectable clock,
-//! - [`execute`] — the three large `async` pipeline methods (`execute`,
-//!   `execute_streaming_background`, `execute_sstable_scan`) as an `impl`
-//!   continuation (issue #1174),
+//! - [`execute`] — the `async` pipeline methods `execute` and
+//!   `execute_sstable_scan` as an `impl` continuation (issue #1174),
+//! - [`streaming`] — the streaming producer task, `execute_streaming_background`
+//!   (split out of `execute` in issue #1578),
 //! - this `mod.rs` — the [`SelectExecutor`] orchestration and remaining
 //!   per-step helpers.
 //!

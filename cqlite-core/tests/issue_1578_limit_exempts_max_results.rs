@@ -10,6 +10,11 @@
 //!     which trips the valve at 4 > 2 even with an explicit LIMIT.
 //!   * `SELECT * ...` (no LIMIT) over 4 rows STILL errors — the valve remains a
 //!     genuine safety net for unbounded materialization.
+//!   * `SELECT * ... LIMIT 4` with a tiny `max_result_bytes` STILL errors with
+//!     `Error::ResultTooLarge` — the row-count valve is exempted for an explicit
+//!     LIMIT, but the BYTE budget (the primary guard, issue #1582) is NOT. This
+//!     pins the exact contract the demotion leans on: LIMIT bypasses the
+//!     secondary row-count valve only, never the byte ceiling.
 //!
 //! Run:
 //!   cargo test --package cqlite-core \
@@ -28,7 +33,7 @@ use cqlite_core::storage::write_engine::{
     CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
-use cqlite_core::{Config, Database};
+use cqlite_core::{Config, Database, Error};
 use tempfile::TempDir;
 
 const KS: &str = "limit_ks";
@@ -49,6 +54,16 @@ fn write_mutation(id: i32, ts: i64) -> Mutation {
 
 /// Open with `max_result_rows` lowered so a tiny fixture exercises the valve.
 async fn open_with_row_cap(n_rows: i32, max_result_rows: u64) -> (Database, TempDir) {
+    open_with_caps(n_rows, max_result_rows, None).await
+}
+
+/// Open with both `max_result_rows` and (optionally) `max_result_bytes` lowered,
+/// so a tiny fixture can exercise either guard independently.
+async fn open_with_caps(
+    n_rows: i32,
+    max_result_rows: u64,
+    max_result_bytes: Option<u64>,
+) -> (Database, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let data_dir = temp_dir.path().join("data");
     let wal_dir = temp_dir.path().join("wal");
@@ -83,6 +98,9 @@ async fn open_with_row_cap(n_rows: i32, max_result_rows: u64) -> (Database, Temp
 
     let mut core_config = Config::default();
     core_config.query.max_result_rows = max_result_rows;
+    if let Some(bytes) = max_result_bytes {
+        core_config.query.max_result_bytes = bytes;
+    }
 
     let result = ingest(IngestionConfig {
         schema_paths: vec![schema_path],
@@ -134,4 +152,31 @@ async fn no_limit_still_trips_row_count_valve() {
         msg.contains("too large") || msg.contains("limit"),
         "expected a result-too-large error, got: {err}"
     );
+}
+
+/// The LIMIT exemption is SCOPED to the row-count valve only: the byte budget
+/// (the primary guard, issue #1582) still fires `Error::ResultTooLarge` even on
+/// a LIMIT-bounded query. This is the exact contract the row-count demotion
+/// leans on — LIMIT does not blanket-exempt a query from EVERY materialization
+/// guard, only the crude row-count one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_limit_does_not_exempt_byte_budget() {
+    // Row-count valve is generous (100) so only the byte budget can trip;
+    // max_result_bytes is set far below what 4 rows require.
+    let (db, _tmp) = open_with_caps(4, 100, Some(4)).await;
+
+    let err = db
+        .execute(&format!("SELECT * FROM {KS}.{TBL} LIMIT 4"))
+        .await
+        .err()
+        .expect(
+            "Issue #1578: an explicit LIMIT exempts the ROW-COUNT valve only — \
+             the byte budget must still trip ResultTooLarge",
+        );
+    match err {
+        Error::ResultTooLarge { budget_bytes, .. } => {
+            assert_eq!(budget_bytes, 4, "byte budget must be the one we configured");
+        }
+        other => panic!("expected Error::ResultTooLarge, got: {other:?}"),
+    }
 }
