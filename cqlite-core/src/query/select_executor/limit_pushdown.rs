@@ -199,7 +199,17 @@ impl SelectExecutor {
                     // token order trips in debug/tests rather than silently
                     // returning misordered rows. It is debug-only — never compiled
                     // into release, so it adds zero release perf cost.
-                    #[cfg(debug_assertions)]
+                    //
+                    // The guard is ALSO compiled out under the `work-counters`
+                    // feature: that build is a measurement build whose sole job is
+                    // to count decode work, and the guard's authoritative
+                    // verification `scan` parses the whole fixture, inflating the
+                    // very `PARTITION_HEADER_TRY_PARSES` counter the decode-stop
+                    // test asserts. The token-order guard is a correctness check for
+                    // normal debug/test runs and need not (must not) coexist with
+                    // the measurement build. It still runs in a normal debug build
+                    // (no `work-counters`), so the invariant protection is retained.
+                    #[cfg(all(debug_assertions, not(feature = "work-counters")))]
                     self.debug_assert_trusted_prefix(
                         table, predicates, projection, schema_opt, cap, &results,
                     )
@@ -242,7 +252,11 @@ impl SelectExecutor {
     /// instead of silently returning misordered rows.
     ///
     /// Compiled only under `debug_assertions`, so it has zero release perf cost.
-    #[cfg(debug_assertions)]
+    /// Also compiled out under the `work-counters` measurement build: its
+    /// authoritative verification `scan` parses the whole fixture and would
+    /// pollute the decode-work counters that build exists to measure. The guard
+    /// still runs in a normal debug build (no `work-counters`).
+    #[cfg(all(debug_assertions, not(feature = "work-counters")))]
     async fn debug_assert_trusted_prefix(
         &self,
         table: &TableId,
