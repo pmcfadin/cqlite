@@ -37,7 +37,7 @@
 pub mod key_offset;
 
 pub use key_offset::{
-    KeyOffsetCache, PartitionLoc, DEFAULT_KEY_CACHE_ENTRIES, DEFAULT_KEY_CACHE_SHARDS,
+    KeyOffsetCache, PartitionLoc, DEFAULT_KEY_CACHE_BYTES, DEFAULT_KEY_CACHE_SHARDS,
 };
 
 use lru::LruCache;

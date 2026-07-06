@@ -333,29 +333,33 @@ fn build_chunk_cache(config: &Config) -> Arc<crate::storage::cache::Decompressed
 
 /// Build a reader's per-reader key→partition-offset cache (issue #1570, B4),
 /// honoring the same `config.memory.block_cache.enabled` read-cache toggle B2
-/// established (issue #1568). When enabled (the default) the cache holds up to
-/// [`DEFAULT_KEY_CACHE_ENTRIES`](crate::storage::cache::DEFAULT_KEY_CACHE_ENTRIES)
-/// tiny entries; when disabled it is a genuine no-op cache so the point-read path
-/// bypasses key caching entirely rather than the toggle being decorative. Capacity
-/// is a small constant, not a new config knob (the audit forbids a decorative one).
+/// established (issue #1568). When enabled (the default) the cache is bounded by an
+/// approximate BYTE budget of
+/// [`DEFAULT_KEY_CACHE_BYTES`](crate::storage::cache::DEFAULT_KEY_CACHE_BYTES);
+/// when disabled it is a genuine no-op cache so the point-read path bypasses key
+/// caching entirely rather than the toggle being decorative. The budget is a small
+/// constant, not a new config knob (the audit forbids a decorative one).
 ///
-/// **Aggregate memory** (`<128MB` budget): this cache is per-reader (design D2),
-/// so with no global ceiling the worst-case resident footprint is
-/// `N_open_readers × DEFAULT_KEY_CACHE_ENTRIES × ~80 B/entry`. The per-reader cap
-/// is deliberately small (4096) so a generous open-reader count stays within
-/// budget: e.g. ~40 open generations, fully occupied, is
-/// `40 × 4096 × ~80 B ≈ 13 MB`. Allocation is occupancy-proportional, so idle
-/// readers cost ~nothing; the cap bounds only the fully-occupied case. See
-/// [`DEFAULT_KEY_CACHE_ENTRIES`](crate::storage::cache::DEFAULT_KEY_CACHE_ENTRIES)
-/// for the full derivation. A single global bounded cache keyed on
-/// `(sstable_id, key)` would bound the aggregate regardless of reader count and
-/// is a deferred future optimization (see `design.md` "Deferred").
+/// **Aggregate memory** (`<128MB` budget): this cache is per-reader (design D2), so
+/// with no global ceiling the worst-case resident footprint is `N_open_readers ×
+/// DEFAULT_KEY_CACHE_BYTES`. Bounding each reader by BYTES (not an entry count)
+/// makes this **independent of key size** — the #1570 roborev fix: partition keys
+/// are variable-length (composite/text up to ~64 KB), so a count cap of 4096
+/// entries did NOT bound resident bytes (worst case ~40 readers × 4096 × ~1 KB ≈
+/// 160 MB, over budget). With a 512 KiB per-reader budget, ~40 open generations is
+/// `40 × 512 KiB ≈ 20 MB` and even ~128 readers is `128 × 512 KiB = 64 MB`, both
+/// within `<128MB` regardless of key size. Allocation stays occupancy-proportional,
+/// so idle readers cost ~nothing. See
+/// [`DEFAULT_KEY_CACHE_BYTES`](crate::storage::cache::DEFAULT_KEY_CACHE_BYTES) for
+/// the full derivation. A single global bounded cache keyed on `(sstable_id, key)`
+/// would bound the aggregate regardless of reader count and is a deferred future
+/// optimization (see `design.md` "Deferred").
 pub(crate) fn build_key_offset_cache(
     config: &Config,
 ) -> Arc<crate::storage::cache::KeyOffsetCache> {
-    use crate::storage::cache::{KeyOffsetCache, DEFAULT_KEY_CACHE_ENTRIES};
+    use crate::storage::cache::{KeyOffsetCache, DEFAULT_KEY_CACHE_BYTES};
     if config.memory.block_cache.enabled {
-        Arc::new(KeyOffsetCache::with_capacity(DEFAULT_KEY_CACHE_ENTRIES))
+        Arc::new(KeyOffsetCache::with_budget_bytes(DEFAULT_KEY_CACHE_BYTES))
     } else {
         Arc::new(KeyOffsetCache::disabled())
     }
