@@ -8,17 +8,42 @@ use super::compression_info::CompressionInfo;
 use super::zstd_frame::zstd_dictionary_rejection;
 use crate::parser::header::CassandraVersion;
 use crate::{Error, Result};
-use rustc_hash::FxHashMap;
+use lru::LruCache;
 use std::io::{Read, Seek, SeekFrom};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
+/// Number of decompressed chunks the on-demand cache retains (16 * 16KB ≈ 256KB).
+///
+/// Kept as a `const NonZeroUsize` so [`LruCache::new`] takes it without any runtime
+/// `unwrap()`/`expect()` (library code must be panic-free). The `match` folds the
+/// `Option` at compile time; the `NonZeroUsize::MIN` arm is unreachable for a literal
+/// `16` and exists only to keep the `const` total.
+const CHUNK_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(16) {
+    Some(n) => n,
+    None => NonZeroUsize::MIN,
+};
 
 /// Chunk-based decompressor for SSTable Data.db files
 pub struct ChunkDecompressor {
     /// Compression metadata from CompressionInfo.db
     compression_info: CompressionInfo,
-    /// Cache of decompressed chunks
-    chunk_cache: FxHashMap<usize, Vec<u8>>,
-    /// Maximum number of chunks to cache
-    max_cached_chunks: usize,
+    /// Recency-tracked cache of decompressed chunks keyed by authoritative chunk
+    /// index (issue #1569, Epic B/B3).
+    ///
+    /// Values are `Arc<[u8]>`: a cache hit is an `Arc::clone` (refcount bump), never
+    /// a chunk-sized memcpy of the cached bytes. Eviction is real LRU — `LruCache`
+    /// tracks recency on every `get`/`put` and evicts the genuinely least-recently-
+    /// used entry at capacity — replacing the previous `FxHashMap` that cloned on
+    /// hit and evicted an arbitrary `keys().next()` entry. This cache is exercised
+    /// single-threaded (the decompressor is owned `&mut` by one `BulletproofReader`),
+    /// so no `Mutex`/sharding is needed here; contrast B1's shared
+    /// `DecompressedChunkCache`.
+    chunk_cache: LruCache<usize, Arc<[u8]>>,
+    /// Count of actual chunk decompressions performed (miss path only). A cache hit
+    /// never increments it, so a test can prove a repeated read of the same chunk
+    /// decompressed exactly once (issue #1569).
+    decompress_calls: u64,
     /// Data file path for error reporting
     data_file_path: Option<String>,
     /// Cached Data.db length, captured on the first chunk read (issue #1586).
@@ -52,8 +77,8 @@ impl ChunkDecompressor {
 
         Ok(Self {
             compression_info,
-            chunk_cache: FxHashMap::default(),
-            max_cached_chunks: 16, // Cache up to 16 chunks (16 * 16KB = 256KB max memory)
+            chunk_cache: LruCache::new(CHUNK_CACHE_CAPACITY),
+            decompress_calls: 0,
             data_file_path: None,
             cached_data_file_size: None,
             stream_pos: None,
@@ -72,8 +97,8 @@ impl ChunkDecompressor {
 
         Ok(Self {
             compression_info,
-            chunk_cache: FxHashMap::default(),
-            max_cached_chunks: 16,
+            chunk_cache: LruCache::new(CHUNK_CACHE_CAPACITY),
+            decompress_calls: 0,
             data_file_path: Some(data_file_path),
             cached_data_file_size: None,
             stream_pos: None,
@@ -129,30 +154,31 @@ impl ChunkDecompressor {
         Ok(result)
     }
 
-    /// Get a decompressed chunk, using cache if available
+    /// Get a decompressed chunk, using the cache if available.
+    ///
+    /// On a hit this bumps the chunk's LRU recency and returns an `Arc::clone`
+    /// (a refcount bump, never a chunk-sized memcpy). On a miss it decompresses
+    /// once, converts the buffer to `Arc<[u8]>` exactly once, and inserts it — the
+    /// `LruCache` evicts the genuinely least-recently-used entry at capacity
+    /// (issue #1569).
     fn get_decompressed_chunk<R: Read + Seek>(
         &mut self,
         reader: &mut R,
         chunk_index: usize,
-    ) -> Result<Vec<u8>> {
-        // Check cache first
+    ) -> Result<Arc<[u8]>> {
+        // Cache hit: refcount bump + recency update, no copy of the chunk bytes.
         if let Some(cached_chunk) = self.chunk_cache.get(&chunk_index) {
-            return Ok(cached_chunk.clone());
+            return Ok(Arc::clone(cached_chunk));
         }
 
-        // Decompress the chunk
+        // Miss: decompress, then convert `Vec<u8>` -> `Arc<[u8]>` exactly once.
         let chunk_data = self.decompress_chunk(reader, chunk_index)?;
+        let arc: Arc<[u8]> = Arc::from(chunk_data.into_boxed_slice());
 
-        // Add to cache (with LRU eviction if necessary)
-        if self.chunk_cache.len() >= self.max_cached_chunks {
-            // Simple eviction: remove first entry
-            if let Some(first_key) = self.chunk_cache.keys().next().copied() {
-                self.chunk_cache.remove(&first_key);
-            }
-        }
-
-        self.chunk_cache.insert(chunk_index, chunk_data.clone());
-        Ok(chunk_data)
+        // Real LRU eviction: `put` inserts as most-recently-used and evicts the
+        // least-recently-used entry when at capacity.
+        self.chunk_cache.put(chunk_index, Arc::clone(&arc));
+        Ok(arc)
     }
 
     /// Exact uncompressed size Cassandra wrote for chunk `chunk_index`, derived from
@@ -183,6 +209,11 @@ impl ChunkDecompressor {
         reader: &mut R,
         chunk_index: usize,
     ) -> Result<Vec<u8>> {
+        // Count every actual decompression (miss path only). A cache hit returns
+        // before reaching here, so a repeated read of a resident chunk leaves this
+        // unchanged — the wiring evidence for issue #1569.
+        self.decompress_calls = self.decompress_calls.saturating_add(1);
+
         // Get compressed chunk offset
         let compressed_offset = self
             .compression_info
@@ -588,9 +619,18 @@ impl ChunkDecompressor {
         self.chunk_cache.clear();
     }
 
-    /// Get cache statistics
+    /// Get cache statistics: `(resident entry count, capacity)`.
     pub fn cache_stats(&self) -> (usize, usize) {
-        (self.chunk_cache.len(), self.max_cached_chunks)
+        (self.chunk_cache.len(), self.chunk_cache.cap().get())
+    }
+
+    /// Number of actual chunk decompressions performed so far (miss path only).
+    ///
+    /// A cache hit does NOT increment this, so a repeated read of a resident chunk
+    /// leaves it unchanged. Exposed for wiring-evidence tests (issue #1569).
+    #[cfg(test)]
+    pub(crate) fn decompress_call_count(&self) -> u64 {
+        self.decompress_calls
     }
 
     /// Read all data from the compressed file (for testing/debugging).
@@ -621,7 +661,10 @@ impl ChunkDecompressor {
         // Single-chunk entry point: the reader position is unknown here too, so
         // force the first (only) read to seek (issue #1586).
         self.stream_pos = None;
-        self.get_decompressed_chunk(reader, chunk_index)
+        // Cold per-chunk parity/verification path — hand callers an owned `Vec`
+        // (explicit copy, off the hot hit path) so the public signature is
+        // unchanged (issue #1569).
+        Ok(self.get_decompressed_chunk(reader, chunk_index)?.to_vec())
     }
 
     /// Get compression info
@@ -784,6 +827,152 @@ mod tests {
             total <= budget,
             "expected <= {budget} seeks for {k} chunks (K + O(1)), got {total} \
              — per-chunk file-size re-probe not eliminated (issue #1586)"
+        );
+    }
+
+    /// Issue #1569 (B3), zero-copy hit: fetching the same chunk twice returns the
+    /// SAME underlying buffer (`Arc` pointer identity) — a refcount bump, never a
+    /// chunk-sized copy — and does not re-decompress. RED on old code, which
+    /// returned a fresh `Vec` clone per hit.
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn hit_is_arc_refcount_bump_not_copy() {
+        let (data_db, info) = build_multichunk_lz4(3, 200, 200);
+        let mut dec = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
+        let mut reader = std::io::Cursor::new(data_db);
+
+        let first = dec
+            .get_decompressed_chunk(&mut reader, 1)
+            .expect("cold read");
+        assert_eq!(
+            dec.decompress_call_count(),
+            1,
+            "cold read decompresses once"
+        );
+
+        let second = dec
+            .get_decompressed_chunk(&mut reader, 1)
+            .expect("cache hit");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a hit must return the same Arc buffer, not a copy"
+        );
+        assert_eq!(
+            dec.decompress_call_count(),
+            1,
+            "a hit must not re-decompress"
+        );
+    }
+
+    /// Issue #1569 (B3), decompress-once through the real `read_data` path: reading
+    /// the same in-chunk range twice decompresses exactly once (the second read is
+    /// a cache hit).
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn read_same_chunk_twice_decompresses_once() {
+        // 4 chunks * 200 bytes; a read at offset 400 len 100 lands wholly in chunk 2.
+        let (data_db, info) = build_multichunk_lz4(4, 200, 200);
+        let mut dec = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
+        let mut reader = std::io::Cursor::new(data_db);
+
+        let a = dec.read_data(&mut reader, 400, 100).expect("first read");
+        let calls_after_first = dec.decompress_call_count();
+        assert_eq!(
+            calls_after_first, 1,
+            "one chunk decompressed on the cold read"
+        );
+
+        let b = dec.read_data(&mut reader, 400, 100).expect("second read");
+        assert_eq!(a, b, "repeated read returns identical bytes");
+        assert_eq!(
+            dec.decompress_call_count(),
+            calls_after_first,
+            "second read of a resident chunk must not decompress"
+        );
+    }
+
+    /// Issue #1569 (B3), real LRU eviction: at capacity 2, access A, B, A, then
+    /// insert C. B (least recently used) must be evicted while A (re-accessed) and
+    /// C (just inserted) survive. RED on old code, whose `keys().next()` eviction
+    /// could drop A instead of B.
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn eviction_is_real_lru_not_arbitrary() {
+        let (data_db, info) = build_multichunk_lz4(3, 200, 200);
+        let mut dec = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
+        // Force capacity 2 for a deterministic A,B,A,C test (in-module test can set
+        // the private cache field directly).
+        dec.chunk_cache = LruCache::new(NonZeroUsize::new(2).expect("capacity 2"));
+        let mut reader = std::io::Cursor::new(data_db);
+
+        // A = chunk 0, B = chunk 1, C = chunk 2.
+        let _a = dec.get_decompressed_chunk(&mut reader, 0).expect("A cold");
+        let _b = dec.get_decompressed_chunk(&mut reader, 1).expect("B cold");
+        let _a2 = dec.get_decompressed_chunk(&mut reader, 0).expect("A hit"); // bump A recency
+        assert_eq!(
+            dec.decompress_call_count(),
+            2,
+            "A,B decompressed; A re-access is a hit"
+        );
+
+        // Insert C → over capacity → evict LRU, which is now B (A was just accessed).
+        let _c = dec.get_decompressed_chunk(&mut reader, 2).expect("C cold");
+        assert_eq!(dec.decompress_call_count(), 3, "C is a fresh decompress");
+
+        let calls = dec.decompress_call_count();
+        // A survives (recently used) → hit, no new decompress.
+        let _ = dec
+            .get_decompressed_chunk(&mut reader, 0)
+            .expect("A still resident");
+        assert_eq!(
+            dec.decompress_call_count(),
+            calls,
+            "A (recently used) must survive"
+        );
+        // C survives (just inserted) → hit.
+        let _ = dec
+            .get_decompressed_chunk(&mut reader, 2)
+            .expect("C still resident");
+        assert_eq!(
+            dec.decompress_call_count(),
+            calls,
+            "C (just inserted) must survive"
+        );
+        // B was evicted → miss → re-decompress.
+        let _ = dec
+            .get_decompressed_chunk(&mut reader, 1)
+            .expect("B re-read");
+        assert_eq!(
+            dec.decompress_call_count(),
+            calls + 1,
+            "B (least recently used) must have been evicted"
+        );
+    }
+
+    /// Issue #1569 (B3), capacity bound: reading more distinct chunks than the
+    /// cache capacity keeps the resident entry count within capacity throughout.
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn cache_never_exceeds_capacity() {
+        let (data_db, info) = build_multichunk_lz4(20, 200, 200);
+        let mut dec = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
+        let mut reader = std::io::Cursor::new(data_db);
+
+        let (_, cap) = dec.cache_stats();
+        for i in 0..20usize {
+            let _ = dec
+                .get_decompressed_chunk(&mut reader, i)
+                .expect("chunk read");
+            let (resident, _) = dec.cache_stats();
+            assert!(
+                resident <= cap,
+                "resident {resident} must never exceed capacity {cap} (after chunk {i})"
+            );
+        }
+        let (resident, _) = dec.cache_stats();
+        assert_eq!(
+            resident, cap,
+            "reading 20 chunks fills the {cap}-entry cache"
         );
     }
 }

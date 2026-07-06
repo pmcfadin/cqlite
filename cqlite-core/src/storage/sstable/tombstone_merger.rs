@@ -1,7 +1,46 @@
-//! Tombstone merging and generation handling for SSTable operations
+//! Tombstone merging and generation handling for SSTable operations.
 //!
-//! This module provides comprehensive tombstone handling for CQLite, implementing
-//! the Cassandra 5.0 deletion semantics with proper multi-generation merging.
+//! Implements Cassandra 5.0 deletion semantics (last-write-wins with tombstone
+//! shadowing + TTL expiry) for multi-generation reconciliation.
+//!
+//! # Legacy confinement (issue #1600 / read-path audit §Epic G, G4)
+//!
+//! This module is **legacy and deliberately confined**. It is compiled ONLY under
+//! the `tombstones` feature (gated at the parent module level; the parent build
+//! never sees these symbols), and it is **OFF the default C1/C4 point-read fast
+//! path** — the default `not(tombstones)` `get()`/`scan_partition` paths do not
+//! use it. Its SEMANTICS are parity-pinned; only mechanics may change here.
+//!
+//! ## Complexity of the retained live surface
+//!
+//! After the G4 confinement the module contains no `O(entries × tombstones)`
+//! method (the dead nested-loop `apply_range_tombstones`/`range_tombstone_applies`
+//! range-tombstone path was removed — it had zero callers). Every retained public
+//! method is at most `O(n log n)` in the per-key generation count `n`:
+//!
+//! - [`TombstoneMerger::merge_generations`] — `O(n log n)` sort + two `O(n)`
+//!   passes. Live caller: `SSTableManager::get` (the `tombstones` point-read).
+//! - [`TombstoneMerger::fast_tombstone_check`] — `O(1)`. Live caller:
+//!   `SSTableReader::filter_tombstone`.
+//! - [`TombstoneMerger::batch_merge_with_tombstones`] — `O(Σ nᵢ log nᵢ)` (one
+//!   `merge_generations` per key). Live caller:
+//!   `SSTableReader::filter_with_multi_generation_merge`.
+//!
+//! ## Why the retained cost is acceptable here
+//!
+//! `n` (the number of generations holding one key) is low-cardinality in practice,
+//! this code is `tombstones`-only, and it is not on the hot default path — so the
+//! `O(n log n)` per-key reconciliation is not a read-path bottleneck for the
+//! builds that enable it.
+//!
+//! ## Future consolidation direction
+//!
+//! The `get()` use should eventually fold into a single-key **multi-candidate KWay
+//! point path** once one exists — REUSE that path, do not rewrite one here. Today
+//! no such path exists: `scan_merge::kway_merge_token_order` merges token-ordered
+//! row *streams* for scans, and the multi-candidate `scan_partition*` fast path is
+//! itself `not(tombstones)`-gated. Building a point-KWay path is out of G4's scope
+//! (the parity-pinned semantics guardrail; "reuse, don't rewrite").
 
 // Feature flag handled at parent module level
 
@@ -53,15 +92,29 @@ pub struct TombstoneMerger {
     current_time: i64,
 }
 
-impl TombstoneMerger {
-    /// Create a new tombstone merger
-    pub fn new() -> Self {
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
+/// Convert a `SystemTime` to microseconds since the Unix epoch.
+///
+/// No `unwrap()`/`expect()` (CQLite library hard rule): `duration_since` fails
+/// only for a clock predating 1970 (`t` before `UNIX_EPOCH`), in which case we
+/// fall back to epoch (`0`). Under a zero current time nothing is treated as
+/// expired (the expiry checks are `current_time > deadline`), a safe
+/// degradation. This mirrors the fallback in `integrity.rs::filter_tombstone`.
+fn system_time_to_micros(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
 
-        Self { current_time }
+impl TombstoneMerger {
+    /// Create a new tombstone merger seeded with the current wall-clock time.
+    ///
+    /// Delegates to [`system_time_to_micros`], whose pre-epoch fallback keeps this
+    /// constructor panic-free (the previous `.unwrap()` on `duration_since` was a
+    /// library-code hard-rule violation).
+    pub fn new() -> Self {
+        Self {
+            current_time: system_time_to_micros(std::time::SystemTime::now()),
+        }
     }
 
     /// Create a tombstone merger with specific current time (for testing)
@@ -188,84 +241,6 @@ impl TombstoneMerger {
 
         // Merge remaining cell values
         self.merge_generations(cell_values)
-    }
-
-    /// Check if a range tombstone applies to a given key
-    pub fn range_tombstone_applies(&self, tombstone: &TombstoneInfo, key: &RowKey) -> bool {
-        if tombstone.tombstone_type != TombstoneType::RangeTombstone {
-            return false;
-        }
-
-        if self.is_tombstone_expired(tombstone) {
-            return false;
-        }
-
-        // Check if key falls within the range
-        match (&tombstone.range_start, &tombstone.range_end) {
-            (Some(start), Some(end)) => key >= start && key <= end,
-            (Some(start), None) => key >= start,
-            (None, Some(end)) => key <= end,
-            (None, None) => false, // Invalid range tombstone
-        }
-    }
-
-    /// Filter values based on range tombstones with optimized performance
-    /// Enhanced for better Cassandra 5.0 range deletion semantics
-    pub fn apply_range_tombstones(
-        &self,
-        entries: Vec<(RowKey, GenerationValue)>,
-        range_tombstones: Vec<GenerationValue>,
-    ) -> Result<Vec<(RowKey, GenerationValue)>> {
-        // Early return if no range tombstones
-        if range_tombstones.is_empty() {
-            return Ok(entries);
-        }
-
-        // Pre-process and sort range tombstones by deletion time (newest first)
-        let mut active_range_tombstones = Vec::new();
-        for range_tombstone_entry in range_tombstones {
-            if let Some(tombstone_info) = range_tombstone_entry.tombstone_info() {
-                if tombstone_info.tombstone_type == TombstoneType::RangeTombstone
-                    && !self.is_tombstone_expired(tombstone_info)
-                {
-                    // Clone the tombstone info to avoid lifetime issues
-                    active_range_tombstones.push((
-                        tombstone_info.clone(),
-                        range_tombstone_entry.metadata.write_time,
-                    ));
-                }
-            }
-        }
-
-        // Sort by deletion time (newest first) for proper precedence
-        active_range_tombstones.sort_by(|a, b| b.0.deletion_time.cmp(&a.0.deletion_time));
-
-        let mut filtered_entries = Vec::new();
-
-        // Process entries in batches for better performance
-        const BATCH_SIZE: usize = 1000;
-        for entry_batch in entries.chunks(BATCH_SIZE) {
-            for (key, entry) in entry_batch {
-                let mut is_deleted_by_range = false;
-
-                // Check against active range tombstones (sorted by deletion time)
-                for (tombstone_info, _) in &active_range_tombstones {
-                    // Only apply range tombstone if it's newer than the entry
-                    if tombstone_info.deletion_time > entry.metadata.write_time
-                        && self.range_tombstone_applies(tombstone_info, key)
-                    {
-                        is_deleted_by_range = true;
-                        break; // Stop at first matching tombstone (they're sorted by time)
-                    }
-                }
-
-                if !is_deleted_by_range {
-                    filtered_entries.push((key.clone(), entry.clone()));
-                }
-            }
-        }
-
-        Ok(filtered_entries)
     }
 
     /// Check if a tombstone has expired and can be garbage collected
@@ -481,6 +456,65 @@ mod tests {
         Ok(())
     }
 
+    /// Issue #1600: the PRODUCTION constructor `TombstoneMerger::new()` (which
+    /// reads the wall clock) must build without panicking — the previous `.unwrap()`
+    /// on `duration_since(UNIX_EPOCH)` was a library-code hard-rule violation. Every
+    /// other test uses `with_time`, so `new()`'s path was never exercised. This
+    /// drives the real constructor end-to-end through `merge_generations` on a
+    /// current-clock merger, where "no active tombstone" resolves to the newest
+    /// live value. (Timestamps are far in the past so nothing looks expired under a
+    /// real ~2026 clock.)
+    #[test]
+    fn production_new_constructor_merges_without_panicking() -> Result<()> {
+        let merger = TombstoneMerger::new();
+
+        let values = vec![
+            GenerationValue {
+                value: ScanRow::Marker(Value::Integer(10)),
+                metadata: EntryMetadata {
+                    write_time: 1_000,
+                    generation: 1,
+                    ttl: None,
+                },
+            },
+            GenerationValue {
+                value: ScanRow::Marker(Value::Integer(20)),
+                metadata: EntryMetadata {
+                    write_time: 2_000,
+                    generation: 2,
+                    ttl: None,
+                },
+            },
+        ];
+
+        let result = merger.merge_generations(values)?;
+        assert_eq!(
+            result,
+            Some(ScanRow::Marker(Value::Integer(20))),
+            "the production new() constructor must resolve to the newest live value"
+        );
+        Ok(())
+    }
+
+    /// Issue #1600: exercise the pre-epoch fallback branch that replaced the
+    /// former `.unwrap()`. A `SystemTime` strictly before `UNIX_EPOCH` makes
+    /// `duration_since(UNIX_EPOCH)` return `Err`; the helper must degrade to `0`
+    /// (not panic). This is the branch the production-`new()` no-panic test could
+    /// never reach with a real ~2026 clock.
+    #[test]
+    fn system_time_to_micros_falls_back_to_zero_before_epoch() {
+        let pre_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert_eq!(
+            system_time_to_micros(pre_epoch),
+            0,
+            "a SystemTime before UNIX_EPOCH must fall back to 0 micros"
+        );
+
+        // Sanity: a post-epoch time yields a positive value (fallback not taken).
+        let post_epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        assert_eq!(system_time_to_micros(post_epoch), 1_000_000);
+    }
+
     #[test]
     fn test_ttl_expiration() -> Result<()> {
         let merger = TombstoneMerger::with_time(5000);
@@ -500,29 +534,6 @@ mod tests {
         assert!(matches!(result, Some(ScanRow::Marker(v)) if v.is_tombstone()));
 
         Ok(())
-    }
-
-    #[test]
-    fn test_range_tombstone_application() {
-        let merger = TombstoneMerger::with_time(5000);
-
-        let start_key = RowKey::from("key1");
-        let end_key = RowKey::from("key5");
-        let test_key = RowKey::from("key3");
-
-        let tombstone = TombstoneInfo {
-            deletion_time: 2000,
-            tombstone_type: TombstoneType::RangeTombstone,
-            local_deletion_time: 0,
-            ttl: None,
-            range_start: Some(start_key),
-            range_end: Some(end_key),
-        };
-
-        assert!(merger.range_tombstone_applies(&tombstone, &test_key));
-
-        let outside_key = RowKey::from("key9");
-        assert!(!merger.range_tombstone_applies(&tombstone, &outside_key));
     }
 
     #[test]
