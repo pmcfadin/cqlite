@@ -13,6 +13,15 @@
 //! correct `cell_path` with the correct value and (b) the trailing simple column
 //! decodes to its exact written value (catching the byte desync).
 //!
+//! Why a cqlite-write → cqlite-read self-consistency check is the sufficient
+//! property here (no Cassandra golden fixture needed): the defect was an INTERNAL
+//! desync between CQLite's own SerializationHeader column order and its Data.db
+//! cell order — both produced by this same writer. A round-trip that recovers the
+//! collection `cell_path`s and the trailing simple `score == 7` canary directly
+//! exercises the exact header-order-vs-cell-order invariant that was broken.
+//! Cassandra-golden BYTE-parity of the SerializationHeader is covered separately
+//! by the compaction-byte-parity gate component.
+//!
 //! Run with:
 //!   CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 //!     cargo test --package cqlite-core --features write-support \

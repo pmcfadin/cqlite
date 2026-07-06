@@ -9,22 +9,9 @@ use super::metadata::StatisticsMetadata;
 use super::{StatisticsWriter, DELETION_TIME_EPOCH, TIMESTAMP_EPOCH, TTL_EPOCH};
 use crate::error::Result;
 use crate::parser::vint::encode_vuint;
-use crate::schema::{Column, TableSchema};
-use crate::storage::sstable::writer::data_writer::is_complex_column;
+use crate::schema::TableSchema;
+use crate::storage::sstable::writer::data_writer::column_order_key;
 use std::io::Write;
-
-/// SerializationHeader column ordering key (issue #2035).
-///
-/// Cassandra stores a `SerializationHeader`'s regular/static columns in
-/// `ColumnMetadata.comparisonOrder` order, where the `isComplex` bit (`1L << 60`)
-/// outranks the column name — so all SIMPLE columns precede all COMPLEX
-/// (non-frozen collection / non-frozen UDT) columns, then ties break by name.
-/// This is the SAME key the DATA writer uses for on-disk cell order
-/// (`column_order_key`), and the two MUST agree: the reader resolves each cell to
-/// its column by this header order, so any divergence desyncs the row.
-fn serialization_header_column_key(column: &Column) -> (bool, &str) {
-    (is_complex_column(&column.data_type), column.name.as_str())
-}
 
 impl StatisticsWriter {
     /// Build SERIALIZATION_HEADER component (MetadataType ordinal 3)
@@ -169,9 +156,7 @@ impl StatisticsWriter {
                             && !ck_names.contains(c.name.as_str())
                     })
                     .collect();
-                static_cols.sort_by(|a, b| {
-                    serialization_header_column_key(a).cmp(&serialization_header_column_key(b))
-                });
+                static_cols.sort_by(|a, b| column_order_key(a).cmp(&column_order_key(b)));
                 buffer.write_all(&encode_vuint(static_cols.len() as u64))?;
                 for col in &static_cols {
                     // Column name: VUInt length + UTF-8 bytes
@@ -198,9 +183,7 @@ impl StatisticsWriter {
                             && !ck_names.contains(c.name.as_str())
                     })
                     .collect();
-                regular_cols.sort_by(|a, b| {
-                    serialization_header_column_key(a).cmp(&serialization_header_column_key(b))
-                });
+                regular_cols.sort_by(|a, b| column_order_key(a).cmp(&column_order_key(b)));
                 buffer.write_all(&encode_vuint(regular_cols.len() as u64))?;
                 for col in &regular_cols {
                     buffer.write_all(&encode_vuint(col.name.len() as u64))?;
