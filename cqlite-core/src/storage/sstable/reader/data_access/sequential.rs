@@ -7,6 +7,7 @@
 //! routed here only to delegate to [`SSTableReader::bti_scan_with_metadata`].
 
 use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
+use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
 use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
@@ -369,8 +370,15 @@ impl SSTableReader {
             // + `table_ids_match` filters, dropped timestamp) is parity-identical to
             // `parse_stitched_stream`. Full rationale + the in-flight batching bound
             // live in the `scan_stream_windowed` module docs.
-            self.run_scan_stream_windowed(table_id, start_key, end_key, schema, &cursor, &tx)
-                .await
+            self.run_scan_stream_windowed(
+                table_id,
+                start_key,
+                end_key,
+                schema,
+                &cursor,
+                WindowedOut::PerRow(tx.clone()),
+            )
+            .await
         } else {
             // Non-stitching formats already read block-by-block; emit per block so
             // only one block's entries are live at a time.
@@ -397,6 +405,141 @@ impl SSTableReader {
                     if tx.send(Ok((entry_key, entry_value))).await.is_err() {
                         return Ok(()); // consumer dropped
                     }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
+    /// [`scan_stream`](Self::scan_stream) whose channel item is a `Vec` BATCH of
+    /// `(RowKey, ScanRow)` entries rather than a single entry. Forwarding one batch
+    /// per channel send collapses the one-async-wake-per-row cost the internal
+    /// windowed pipeline (issue #1143) was designed to amortize but the public
+    /// forwarder then re-flattened away.
+    ///
+    /// Order and content are identical to [`scan_stream`](Self::scan_stream):
+    /// flattening the batches yields exactly the per-row stream. Backpressure is
+    /// preserved — the channel is bounded (in BATCHES) and every send observes it.
+    pub fn scan_stream_batched(
+        self: std::sync::Arc<Self>,
+        table_id: TableId,
+        start_key: Option<RowKey>,
+        end_key: Option<RowKey>,
+        schema: Option<crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>> {
+        self.scan_stream_batched_admitted(
+            table_id,
+            start_key,
+            end_key,
+            schema,
+            buffer_size,
+            ScanAdmission::Acquire,
+        )
+    }
+
+    /// [`scan_stream_batched`](Self::scan_stream_batched) with an explicit
+    /// admission context (issue #1594), mirroring
+    /// [`scan_stream_admitted`](Self::scan_stream_admitted).
+    pub(crate) fn scan_stream_batched_admitted(
+        self: std::sync::Arc<Self>,
+        table_id: TableId,
+        start_key: Option<RowKey>,
+        end_key: Option<RowKey>,
+        schema: Option<crate::schema::TableSchema>,
+        buffer_size: usize,
+        admission: ScanAdmission,
+    ) -> mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>> {
+        // The public channel carries BATCHES; sizing it to
+        // `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps the resident-row
+        // budget of this channel comparable to the per-row surface's `buffer_size`
+        // rather than `buffer_size * BATCH_EMIT_ROWS`.
+        let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        tokio::spawn(async move {
+            if let Err(e) = self
+                .run_scan_stream_batched(
+                    table_id,
+                    start_key,
+                    end_key,
+                    schema,
+                    tx.clone(),
+                    admission,
+                )
+                .await
+            {
+                let _ = tx.send(Err(e)).await;
+            }
+        });
+        rx
+    }
+
+    async fn run_scan_stream_batched(
+        self: std::sync::Arc<Self>,
+        table_id: TableId,
+        start_key: Option<RowKey>,
+        end_key: Option<RowKey>,
+        schema: Option<crate::schema::TableSchema>,
+        tx: mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
+        admission: ScanAdmission,
+    ) -> Result<()> {
+        // Admission control (issue #1594, F4): identical discipline to the per-row
+        // `run_scan_stream` — one permit per top-level scan operation, held via RAII.
+        let _admission = match admission {
+            ScanAdmission::Acquire => Some(scan_admission::admit().await),
+            ScanAdmission::Exempt => None,
+        };
+
+        let cursor = self.new_scan_cursor().await?;
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+
+        if self.requires_chunk_stitching() {
+            // Forward the windowed driver's internal batches straight through — no
+            // flatten, no re-batch (issue #1592). Same driver, same order/content
+            // as the per-row path; only the output surface differs.
+            self.run_scan_stream_windowed(
+                table_id,
+                start_key,
+                end_key,
+                schema,
+                &cursor,
+                WindowedOut::Batched(tx.clone()),
+            )
+            .await
+        } else {
+            // Non-stitching formats read block-by-block; emit one BATCH per block
+            // (its surviving entries), so only one block's entries are live at a
+            // time and the consumer is woken once per block rather than per row.
+            while let Some(block) = self.read_next_block(&cursor).await? {
+                let entries =
+                    self.parse_block_entries_with_schema(&block, schema.as_ref(), true)?;
+                let mut batch: Vec<(RowKey, ScanRow)> = Vec::new();
+                for (entry_table_id, entry_key, entry_value) in entries {
+                    if !table_ids_match(&entry_table_id, &table_id) {
+                        continue;
+                    }
+                    if let Some(ref start) = start_key {
+                        if &entry_key < start {
+                            continue;
+                        }
+                    }
+                    if let Some(ref end) = end_key {
+                        if &entry_key > end {
+                            continue;
+                        }
+                    }
+                    if !self.filter_tombstone(&entry_value) {
+                        continue;
+                    }
+                    batch.push((entry_key, entry_value));
+                }
+                if !batch.is_empty() && tx.send(Ok(batch)).await.is_err() {
+                    return Ok(()); // consumer dropped
                 }
             }
             Ok(())

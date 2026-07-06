@@ -1944,6 +1944,100 @@ impl SSTableManager {
         Ok(out_rx)
     }
 
+    /// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
+    /// [`scan_stream`](Self::scan_stream) whose channel item is a `Vec` BATCH of
+    /// entries. It forwards one batch per async wake instead of one row, undoing
+    /// the per-row re-flattening on the public channel that the internal windowed
+    /// pipeline (issue #1143) was built to avoid.
+    ///
+    /// Content + order are identical to [`scan_stream`](Self::scan_stream):
+    /// flattening the batches reproduces the per-row stream exactly.
+    ///
+    /// - **Single generation** (one reader): the reader's windowed batches are
+    ///   forwarded STRAIGHT THROUGH — no per-row channel is interposed, so the
+    ///   wake amortization survives end to end (the F2 win).
+    /// - **Zero / multiple generations**: reuses the fully-correct per-row
+    ///   [`scan_stream`](Self::scan_stream) (cross-generation reconciliation +
+    ///   token-ordered k-way merge + empty case) and re-chunks its output into
+    ///   batches for the public channel. A generation-aware fully-batched merge is
+    ///   a deliberate follow-up (audit §Epic F); cross-generation correctness wins
+    ///   here.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_stream_batched(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        schema: Option<&crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>> {
+        let readers = self.resolve_table_readers(table_id).await;
+
+        if readers.len() == 1 {
+            let reader = readers
+                .into_iter()
+                .next()
+                .expect("readers.len() == 1 checked above");
+            return Ok(reader.scan_stream_batched(
+                table_id.clone(),
+                start_key.cloned(),
+                end_key.cloned(),
+                schema.cloned(),
+                buffer_size,
+            ));
+        }
+
+        let per_row = self
+            .scan_stream(table_id, start_key, end_key, schema, buffer_size)
+            .await?;
+        Ok(Self::rechunk_into_batches(per_row, buffer_size))
+    }
+
+    /// Re-chunk a per-row streaming receiver into `BATCH_EMIT_ROWS`-sized `Vec`
+    /// batches over a bounded channel (issue #1592). Preserves order and content
+    /// exactly (FIFO push/flush) and preserves backpressure: the batch channel is
+    /// bounded, so a stalled consumer stops the drain of the per-row source, which
+    /// stops the upstream scan. The trailing partial batch is flushed at end. A
+    /// mid-stream error is forwarded as a terminal item.
+    ///
+    /// Used for the zero/multi-generation and `tombstones` cases, where a
+    /// straight-through single-reader hand-off is not applicable (the per-row
+    /// source is a k-way merge / materialized reconciliation, not one reader).
+    fn rechunk_into_batches(
+        mut per_row: tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>,
+        buffer_size: usize,
+    ) -> tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>> {
+        use reader::scan_stream_windowed::BATCH_EMIT_ROWS;
+        // Bound the batch channel so its resident-row budget stays comparable to
+        // the per-row surface's `buffer_size`, not `buffer_size * BATCH_EMIT_ROWS`.
+        let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(cap);
+        tokio::spawn(async move {
+            let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
+            while let Some(item) = per_row.recv().await {
+                match item {
+                    Ok(entry) => {
+                        batch.push(entry);
+                        if batch.len() >= BATCH_EMIT_ROWS {
+                            if tx.send(Ok(std::mem::take(&mut batch))).await.is_err() {
+                                return; // consumer dropped
+                            }
+                            batch.reserve(BATCH_EMIT_ROWS);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                let _ = tx.send(Ok(batch)).await;
+            }
+        });
+        rx
+    }
+
     /// Streaming scan under the `tombstones` feature.
     ///
     /// Streaming the cross-generation tombstone merge is not yet implemented, so
@@ -1972,6 +2066,29 @@ impl SSTableManager {
             }
         });
         Ok(rx)
+    }
+
+    /// Batched streaming scan under the `tombstones` feature (issue #1592).
+    ///
+    /// Tombstone builds reconcile via the materializing [`scan`](Self::scan)
+    /// inside [`scan_stream`](Self::scan_stream); this re-chunks that per-row
+    /// stream into `Vec` batches. Unlike the default build there is no
+    /// single-reader straight-through path — a straight-through hand-off would
+    /// bypass the cross-generation tombstone reconciliation. Content and order
+    /// match [`scan_stream`](Self::scan_stream) exactly.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_stream_batched(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        schema: Option<&crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>> {
+        let per_row = self
+            .scan_stream(table_id, start_key, end_key, schema, buffer_size)
+            .await?;
+        Ok(Self::rechunk_into_batches(per_row, buffer_size))
     }
 
     /// Get list of all SSTable IDs

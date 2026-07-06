@@ -234,64 +234,69 @@ impl SelectExecutor {
                     // instead of materializing the full result `Vec`. The reader
                     // parses one entry at a time into this channel, so live heap
                     // stays bounded by `buffer_size` rather than O(result rows).
+                    // Issue #1592: consume the BATCHED streaming surface — one
+                    // async wake per batch, not per row. Flattening each batch
+                    // yields the same rows in the same order as `scan_stream`.
                     let mut scan_stream = storage
-                        .scan_stream(table, None, None, schema_opt, buffer_size)
+                        .scan_stream_batched(table, None, None, schema_opt, buffer_size)
                         .await?;
 
-                    while let Some(item) = scan_stream.recv().await {
-                        let (key, value) = item?;
-                        // Capture the partition-key digest before `key` is moved
-                        // into row construction (only when needed).
-                        let part_sig = per_partition_limit.map(|_| partition_key_digest(&key.0));
-                        let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
-                        else {
-                            continue;
-                        };
+                    while let Some(batch) = scan_stream.recv().await {
+                        for (key, value) in batch? {
+                            // Capture the partition-key digest before `key` is moved
+                            // into row construction (only when needed).
+                            let part_sig =
+                                per_partition_limit.map(|_| partition_key_digest(&key.0));
+                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
+                            else {
+                                continue;
+                            };
 
-                        if !evaluate_predicates(&row, predicates)? {
-                            continue;
-                        }
-
-                        // Apply PER PARTITION LIMIT: cap matching rows per
-                        // partition, before OFFSET/LIMIT (Cassandra semantics).
-                        if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                            // Fast digest pre-check, then EXACT byte confirm so a
-                            // digest collision between DISTINCT partitions never
-                            // shares a counter (issue #1590).
-                            let same = matches!(
-                                &current_partition,
-                                Some((d, bytes))
-                                    if *d == sig && bytes.as_slice() == row.key.0.as_slice()
-                            );
-                            if !same {
-                                // Clone the key bytes ONCE per boundary, not per row.
-                                current_partition = Some((sig, row.key.0.clone()));
-                                partition_count = 0;
-                            }
-                            if partition_count >= cap {
+                            if !evaluate_predicates(&row, predicates)? {
                                 continue;
                             }
-                            partition_count += 1;
-                        }
 
-                        // Apply OFFSET: skip the first `offset_remaining` matches.
-                        if offset_remaining > 0 {
-                            offset_remaining -= 1;
-                            continue;
-                        }
+                            // Apply PER PARTITION LIMIT: cap matching rows per
+                            // partition, before OFFSET/LIMIT (Cassandra semantics).
+                            if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
+                                // Fast digest pre-check, then EXACT byte confirm so a
+                                // digest collision between DISTINCT partitions never
+                                // shares a counter (issue #1590).
+                                let same = matches!(
+                                    &current_partition,
+                                    Some((d, bytes))
+                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                );
+                                if !same {
+                                    // Clone the key bytes ONCE per boundary, not per row.
+                                    current_partition = Some((sig, row.key.0.clone()));
+                                    partition_count = 0;
+                                }
+                                if partition_count >= cap {
+                                    continue;
+                                }
+                                partition_count += 1;
+                            }
 
-                        // Send row through channel (with backpressure). Consumer drop ends the scan.
-                        if tx.send(Ok(row)).await.is_err() {
-                            return Ok(());
-                        }
-                        sent += 1;
+                            // Apply OFFSET: skip the first `offset_remaining` matches.
+                            if offset_remaining > 0 {
+                                offset_remaining -= 1;
+                                continue;
+                            }
 
-                        // Apply LIMIT: stop scanning once `count` rows have been
-                        // sent. Dropping `scan_stream` here signals the producer
-                        // (via a closed channel) to stop parsing early.
-                        if let Some(count) = limit_count {
-                            if sent >= count {
+                            // Send row through channel (with backpressure). Consumer drop ends the scan.
+                            if tx.send(Ok(row)).await.is_err() {
                                 return Ok(());
+                            }
+                            sent += 1;
+
+                            // Apply LIMIT: stop scanning once `count` rows have been
+                            // sent. Dropping `scan_stream` here signals the producer
+                            // (via a closed channel) to stop parsing early.
+                            if let Some(count) = limit_count {
+                                if sent >= count {
+                                    return Ok(());
+                                }
                             }
                         }
                     }

@@ -46,9 +46,16 @@
 //!     rows promptly instead of waiting for the whole scan to finish. The wake
 //!     rate is thus ~one-per-chunk (plus one-per-full-batch in dense windows),
 //!     far below PR #1156's one-per-row.
-//!   - **Async forwarder task** (in `run_scan_stream_windowed`): flattens each
-//!     `Vec` batch back into the caller's per-item `tx`, preserving the public
-//!     `scan_stream` contract (item type, order, backpressure) unchanged. Runs on
+//!   - **Async forwarder task** (in `run_scan_stream_windowed`): adapts the SAME
+//!     internal `Vec`-batched stream to whichever public surface the caller asked
+//!     for (issue #1592, Epic F/F2), selected by [`WindowedOut`]. The
+//!     [`WindowedOut::PerRow`] arm FLATTENS each `Vec` batch back into the caller's
+//!     per-item `tx`, preserving the historical `scan_stream` contract (item type,
+//!     order, backpressure) unchanged — so per-row is a thin flattening adapter
+//!     over the batched internal stream. The [`WindowedOut::Batched`] arm FORWARDS
+//!     each `Vec` batch straight through to the caller's batched `tx`, so the
+//!     consumer is woken once per BATCH, not once per row (the F2 win: the internal
+//!     batch is not re-flattened then re-batched onto the public channel). Runs on
 //!     the async runtime concurrently with the I/O half (both are needed at once;
 //!     running them sequentially would deadlock), so its wakes are cheap
 //!     async-worker wakes, not blocking-pool condvar wakes.
@@ -199,7 +206,7 @@ const RAW_CHUNK_CHANNEL_CAP: usize = 8;
 /// modest value keeps the per-batch heap small; tiny / sparse result sets do not
 /// wait for a full batch because the pending tail is flushed at every chunk/window
 /// drain boundary (and at stream end), preserving incremental first-row delivery.
-const BATCH_EMIT_ROWS: usize = 256;
+pub(crate) const BATCH_EMIT_ROWS: usize = 256;
 
 /// Bound on the batched-row channel feeding the async forwarder. Small: the
 /// forwarder flattens batches into the public per-item channel roughly as fast as
@@ -254,6 +261,24 @@ const BATCH_CHANNEL_CAP: usize = 2;
 /// the batching subsystem's runtime worst case never exceeds this; any sizing
 /// change that breaks the bound must update this constant AND keep that test green.
 pub(super) const MAX_INFLIGHT_BATCH_ROWS: usize = (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS;
+
+/// Which public surface the windowed driver's forwarder adapts its single
+/// internal `Vec`-batched stream to (issue #1592, Epic F/F2).
+///
+/// The driver ([`SSTableReader::run_scan_stream_windowed`]) always produces one
+/// internal batched stream (the pre-existing #1143 batch channel). This selects
+/// how [`SSTableReader::spawn_windowed_forwarder`] delivers it to the caller —
+/// flattened to per-row (the historical contract, an adapter over the batches) or
+/// forwarded straight through as `Vec` batches (one async wake per batch).
+pub(super) enum WindowedOut {
+    /// Historical per-item surface: each `Vec` batch is FLATTENED into
+    /// `(RowKey, ScanRow)` items on `tx`, one send per row.
+    PerRow(mpsc::Sender<Result<(RowKey, ScanRow)>>),
+    /// Batched surface (F2): each internal `Vec` batch is forwarded straight
+    /// through on `tx`, one send per batch — so the consumer is woken once per
+    /// batch instead of once per row.
+    Batched(mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>),
+}
 
 /// Decide whether the blocking parse half should run its terminal
 /// (`at_final_chunk = true`) drain once the raw-chunk stream has ended.
@@ -370,7 +395,11 @@ impl SSTableReader {
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
         cursor: &ScanCursor,
-        tx: &mpsc::Sender<Result<(RowKey, ScanRow)>>,
+        // Which public surface to adapt the internal batched stream to (issue
+        // #1592): per-row (flatten) or batched (straight-through). The rest of the
+        // driver — I/O feed, blocking parse, join, backpressure — is identical for
+        // both; only the forwarder arm differs.
+        out: WindowedOut,
     ) -> Result<()> {
         // Admission control (issue #1594, F4) is applied by the CALLER at
         // top-level scan-OPERATION granularity, NOT here per sub-scan: a direct
@@ -432,43 +461,23 @@ impl SSTableReader {
             reader.drain_scan_window_blocking(ctx, raw_rx, batch_tx, task_io_failed)
         });
 
-        // Forwarder task: flatten batched rows from the blocking parse half into
-        // the caller's per-item `tx`. Runs CONCURRENTLY with the I/O feed loop
+        // Forwarder task: adapt the blocking parse half's batched stream to the
+        // caller's chosen public surface (per-row flatten or batched
+        // straight-through; issue #1592). Runs CONCURRENTLY with the I/O feed loop
         // below — both are needed at once (the I/O loop produces the raw chunks
         // the parse half consumes; the parse half produces the batches this task
         // drains), so running them sequentially would deadlock. On the async
         // runtime, so its wakes are cheap async-worker wakes, not blocking-pool
         // condvar wakes.
         //
-        // Backpressure: a slow consumer blocks `fwd_tx.send().await` here, which
-        // stops draining `batch_rx`, which (being bounded) blocks the parse half's
-        // `blocking_send`, which stops the parse loop and ultimately disk reads —
-        // the exact end-to-end backpressure shape PR #1156 had, just batched. If
-        // the consumer drops `tx`, the send fails, this task returns and drops
-        // `batch_rx`; the parse half's next `blocking_send` then fails so it
-        // terminates (`*broke = true`).
-        let fwd_tx = tx.clone();
-        let forwarder = tokio::spawn(async move {
-            let mut batch_rx = batch_rx;
-            while let Some(batch) = batch_rx.recv().await {
-                match batch {
-                    Ok(rows) => {
-                        for entry in rows {
-                            if fwd_tx.send(Ok(entry)).await.is_err() {
-                                return; // consumer dropped
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // The parse half surfaced an error mid-stream; forward it
-                        // as a terminal stream item and stop. The parse half also
-                        // returns the same error via its `Result`, joined below.
-                        let _ = fwd_tx.send(Err(e)).await;
-                        return;
-                    }
-                }
-            }
-        });
+        // Backpressure: a slow consumer blocks the `send().await` inside the
+        // forwarder, which stops draining `batch_rx`, which (being bounded) blocks
+        // the parse half's `blocking_send`, which stops the parse loop and
+        // ultimately disk reads — the exact end-to-end backpressure shape PR #1156
+        // had, just batched, on BOTH arms. If the consumer drops its receiver, the
+        // send fails, the forwarder returns and drops `batch_rx`; the parse half's
+        // next `blocking_send` then fails so it terminates (`*broke = true`).
+        let forwarder = Self::spawn_windowed_forwarder(out, batch_rx);
 
         // Feed raw compressed chunks to the parse task. The bounded `raw_tx`
         // applies backpressure all the way back to disk reads when the consumer
@@ -510,6 +519,67 @@ impl SSTableReader {
             return Err(e);
         }
         parse_result
+    }
+
+    /// Spawn the forwarder that drains the internal `Vec`-batched channel into the
+    /// caller's public surface (issue #1592, Epic F/F2).
+    ///
+    /// This is the ONE place per-row and batched delivery diverge; everything
+    /// upstream (I/O feed, blocking decompress+parse, the internal batch channel,
+    /// backpressure) is shared. The per-row arm is a thin flattening adapter over
+    /// the same batched stream the batched arm forwards straight through, so the
+    /// two surfaces are guaranteed to yield identical rows in identical order (the
+    /// batched arm's output flattened equals the per-row arm's output).
+    ///
+    /// Both arms preserve backpressure: a stalled consumer blocks the `send().await`
+    /// here, stopping the drain of `batch_rx`, which (bounded) blocks the parse
+    /// half's `blocking_send`, all the way back to disk reads. On consumer drop the
+    /// `send` fails and the forwarder returns, dropping `batch_rx` so the parse
+    /// half terminates.
+    fn spawn_windowed_forwarder(
+        out: WindowedOut,
+        mut batch_rx: mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            match out {
+                // Per-row (historical) surface: FLATTEN each confirmed batch back
+                // into single `(RowKey, ScanRow)` items. One send per row.
+                WindowedOut::PerRow(tx) => {
+                    while let Some(batch) = batch_rx.recv().await {
+                        match batch {
+                            Ok(rows) => {
+                                for entry in rows {
+                                    if tx.send(Ok(entry)).await.is_err() {
+                                        return; // consumer dropped
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Parse half surfaced a mid-stream error; forward it
+                                // as a terminal item and stop. The parse half also
+                                // returns the same error via its `Result`.
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                }
+                // Batched (F2) surface: FORWARD each confirmed batch straight
+                // through — one send per batch, not per row. A terminal error is
+                // forwarded as one item then the stream ends.
+                WindowedOut::Batched(tx) => {
+                    while let Some(batch) = batch_rx.recv().await {
+                        let terminal = batch.is_err();
+                        if tx.send(batch).await.is_err() {
+                            return; // consumer dropped
+                        }
+                        if terminal {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// I/O feed loop for a genuinely-async (buffered) backend: read the next
