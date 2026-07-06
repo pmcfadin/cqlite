@@ -129,11 +129,16 @@ fn reorder_timestamp_bytes(input: u64) -> u64 {
 ///
 /// Single source of truth: this DELEGATES to the crate-wide canonical
 /// comparator [`crate::float_cmp::cassandra_float_cmp`] (issues #1870/#2010).
-/// The two are semantically identical — for non-NaN operands `total_cmp` yields
-/// the numeric order with `-0.0 < +0.0`, exactly what the canonical comparator's
-/// `partial_cmp` + sign-bit tie-break produces; for NaN both give NaN-last /
-/// all-NaN-equal — so delegating preserves the SET/MAP element byte order that
-/// has byte-parity coverage. See float_cmp.rs.
+/// The delegation is byte-neutral: `cassandra_float_cmp` implements the SAME
+/// `Float.compare` semantics as the prior explicit Java-compare code here
+/// (compare non-NaN numerically with `-0.0 < +0.0`; sort EVERY NaN last and
+/// treat all NaN bit-patterns as equal), so the SET/MAP element byte order that
+/// has byte-parity coverage is preserved.
+///
+/// Note: `f32::total_cmp` is NOT a drop-in substitute — it sorts NEGATIVE NaN
+/// FIRST and orders NaN by bit pattern (not all-NaN-equal, not NaN-last), which
+/// would diverge from Cassandra. The canonical comparator is used precisely
+/// because it matches Java, not `total_cmp`. See float_cmp.rs.
 pub(super) fn compare_f32_java(x: f32, y: f32) -> Ordering {
     crate::float_cmp::cassandra_float_cmp(x, y)
 }
