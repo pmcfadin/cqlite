@@ -32,7 +32,35 @@ impl SSTableReader {
         let _span = tracing::debug_span!("sstable.partition_lookup.index").entered();
         let format = self.sstable_format_label();
 
+        // B4 key→partition-offset cache (issue #1570): a repeated point read of the
+        // same present key returns the cached location without re-probing Index.db,
+        // so `INDEX_PROBES` stays 0 on the hit. Positive-only, so an absent key is
+        // never cached and never fabricates a hit. The cached location is the exact
+        // `(offset,size)` a fresh probe resolved (correctness guardrail).
+        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+            debug!(
+                "B4 key-cache hit for partition (raw key len={}): offset={}, size={}",
+                partition_key.len(),
+                loc.data_offset,
+                loc.data_size
+            );
+            obs::add_counter(
+                catalog::READ_PARTITION_LOOKUP,
+                1,
+                &[
+                    (catalog::attr::RESULT, "hit".into()),
+                    (catalog::attr::LOOKUP_ROUTE, "index".into()),
+                    (catalog::attr::SSTABLE_FORMAT, format.into()),
+                ],
+            );
+            return Ok(Some((loc.data_offset, loc.data_size)));
+        }
+
         if let Some(index_reader) = &self.index_reader {
+            // A5/B4 read-work counter (`INDEX_PROBES`; consumer B4): one per real
+            // `Index.db` probe. Counted only when a cache miss forces a real probe,
+            // so a B4 cache hit above records nothing. No-op in release.
+            crate::storage::sstable::read_work_counters::record_index_probe();
             // Direct raw-key lookup — O(1) HashMap lookup.
             // Index.db entries are keyed on the raw partition key bytes since #552;
             // no Murmur3 digest computation is needed or correct here.
@@ -49,6 +77,12 @@ impl SSTableReader {
                         (catalog::attr::LOOKUP_ROUTE, "index".into()),
                         (catalog::attr::SSTABLE_FORMAT, format.into()),
                     ],
+                );
+                // B4: cache this present-key resolution so the next point read of
+                // the same key skips the Index.db probe (issue #1570).
+                self.key_offset_cache.insert(
+                    partition_key,
+                    crate::storage::cache::PartitionLoc::new(entry.data_offset, entry.data_size),
                 );
                 return Ok(Some((entry.data_offset, entry.data_size)));
             } else {
@@ -108,6 +142,25 @@ impl SSTableReader {
             return Ok(None);
         }
 
+        // B4 key→partition-offset cache (issue #1570) — the OUTERMOST layer, checked
+        // BEFORE the C3 memo and BEFORE the encode, so a repeated point read of the
+        // same present key returns the cached offset WITHOUT a trie descent
+        // (`TRIE_WALKS` stays 0) AND WITHOUT re-encoding the key (no `KEY_HASH_CALLS`
+        // bump — the encode below is skipped on a hit, preserving C4's
+        // one-hash-per-read property). Unlike the single-entry C3 memo, the multi-key
+        // B4 cache serves a hit even across interleaved keys. Trie-hit-only
+        // (prefix-collision candidates included; the caller re-verifies the key bytes
+        // at the resolved offset), never a trie MISS: the cached offset is the exact
+        // offset a fresh descent resolves, so re-verification reaches the identical
+        // conclusion (correctness guardrail; mirrors the C3 memo). Emit the presence
+        // counters (found = true) so a cache-served lookup records the same presence
+        // decision a fresh descent does. A disabled cache (`block_cache.enabled=false`)
+        // is a genuine no-op `get`, so this falls through and the read re-walks.
+        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+            Self::emit_bti_presence_counters(true);
+            return Ok(Some(loc.data_offset));
+        }
+
         // Issue #1574 (C3) single walk: reuse the prune's resolution for the seek —
         // a pure function of the immutable trie + key. Checked BEFORE the encode so
         // a memo hit costs neither a trie descent NOR a Murmur3 key hash. A
@@ -142,6 +195,19 @@ impl SSTableReader {
     ) -> Result<Option<u64>> {
         if self.bti_partitions_db.is_none() {
             return Ok(None);
+        }
+        // B4 key→partition-offset cache (issue #1570) — the OUTERMOST layer on the
+        // candidate-prune path too, checked BEFORE the C3 memo and the trie descent.
+        // The caller (`prune_candidates`) already hoisted the single encode into
+        // `encoded` (C4 / `KEY_HASH_CALLS == 1` per read); a cache hit here simply
+        // skips this candidate's trie descent (`TRIE_WALKS` stays 0 on the hit) — the
+        // multi-key cache covers interleaved keys the single-entry memo cannot. Same
+        // trie-hit-only correctness guardrail as the raw-key entry: the cached offset
+        // is the exact offset a fresh descent resolves. A disabled cache is a no-op
+        // `get`, so this falls through and the candidate re-walks.
+        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+            Self::emit_bti_presence_counters(true);
+            return Ok(Some(loc.data_offset));
         }
         if let Some(resolved) = self.bti_lookup_memo_get(partition_key) {
             Self::emit_bti_presence_counters(resolved.is_some());
@@ -240,6 +306,13 @@ impl SSTableReader {
                     off
                 );
                 self.bti_lookup_memo_store(partition_key, Some(off));
+                // B4: cache this trie-hit resolution (a prefix-collision candidate,
+                // re-verified by the caller downstream) so a later interleaved read of
+                // the same key skips the trie descent (issue #1570).
+                self.key_offset_cache.insert(
+                    partition_key,
+                    crate::storage::cache::PartitionLoc::offset_only(off),
+                );
                 Ok(Some(off))
             }
             Some(BtiPartitionLocation::RowsOffset(rows_offset)) => {
@@ -300,6 +373,11 @@ impl SSTableReader {
                     header.block_count
                 );
                 self.bti_lookup_memo_store(partition_key, Some(header.data_position));
+                // B4: cache this present WIDE-partition resolution (issue #1570).
+                self.key_offset_cache.insert(
+                    partition_key,
+                    crate::storage::cache::PartitionLoc::offset_only(header.data_position),
+                );
                 Ok(Some(header.data_position))
             }
             None => {
@@ -316,140 +394,6 @@ impl SSTableReader {
                 Ok(None)
             }
         }
-    }
-
-    /// Authoritatively resolve the UNCOMPRESSED `Data.db` offset of the partition
-    /// that immediately FOLLOWS the partition starting at `target_offset`, used to
-    /// bound the within-SSTable seek's decompression window to exactly one
-    /// partition's byte extent (issue #953 / #951 MEDIUM).
-    ///
-    /// The successor's start offset is the partition's exclusive END: a partition
-    /// occupies `[target_offset, successor_offset)`, so decompressing the chunks
-    /// covering that half-open range materializes every byte of the target
-    /// partition (including a row/cell that spans multiple compression chunks)
-    /// without reading any of the next partition. This is authoritative metadata
-    /// (the index/trie's own partition layout), NOT a heuristic boundary scan.
-    ///
-    /// Returns:
-    /// - `Ok(Some(off))` — the next partition's start offset (`off > target_offset`).
-    /// - `Ok(None)` — `target_offset` is the LAST partition (no successor); the
-    ///   caller bounds the end with the authoritative data-section length.
-    ///
-    /// Resolution is per index format:
-    /// - **BTI (`da`)** — the `Partitions.db` trie is enumerated in byte-comparable
-    ///   order (which equals `Data.db` layout order) and the resolved offsets are
-    ///   cached ([`bti_partition_offsets`]); the successor is the smallest cached
-    ///   offset strictly greater than `target_offset` (binary search).
-    /// - **BIG (`nb`)** — `Index.db` `partition_entries` are sorted by key (==
-    ///   `Data.db` order); the successor is the smallest `data_offset` strictly
-    ///   greater than `target_offset`.
-    ///
-    /// [`bti_partition_offsets`]: Self::bti_partition_offsets
-    ///
-    /// Gated `not(tombstones)` like the seek path it serves: the only caller is
-    /// `scan_single_partition`, which the `tombstones` build compiles out (it
-    /// serves single-partition reads via a full scan + filter, not a seek).
-    #[cfg(not(feature = "tombstones"))]
-    pub(crate) fn successor_partition_offset(&self, target_offset: u64) -> Result<Option<u64>> {
-        if self.bti_partitions_db.is_some() {
-            let offsets = self.bti_partition_offsets()?;
-            // Smallest offset strictly greater than target_offset.
-            let idx = offsets.partition_point(|&o| o <= target_offset);
-            return Ok(offsets.get(idx).copied());
-        }
-
-        // BIG (`nb`): scan the sorted Index.db entries for the smallest data_offset
-        // strictly greater than target_offset. `partition_entries` are emitted in
-        // key (== Data.db) order, but we take the min over `> target` defensively
-        // rather than rely on positional adjacency.
-        if let Some(index_reader) = &self.index_reader {
-            let successor = index_reader
-                .get_partition_entries()
-                .iter()
-                .map(|e| e.data_offset)
-                .filter(|&o| o > target_offset)
-                .min();
-            return Ok(successor);
-        }
-
-        // No index available: cannot resolve a successor authoritatively.
-        Ok(None)
-    }
-
-    /// Enumerate and cache every partition's UNCOMPRESSED `Data.db` start offset
-    /// from the BTI `Partitions.db` trie, ascending (issue #953 / #951).
-    ///
-    /// Computed lazily once and memoised in [`bti_partition_offsets`]: the trie is
-    /// DFS-walked in byte-comparable order, each `BtiPartitionLocation` is resolved
-    /// to its `Data.db` offset (NARROW → `DataOffset` directly; WIDE → the
-    /// `RowsOffset`'s `TrieIndexEntry.data_position` via `Rows.db`), and the
-    /// resulting offsets are sorted ascending. The sort makes the cache a clean
-    /// successor index regardless of trie emission order.
-    ///
-    /// [`bti_partition_offsets`]: Self::bti_partition_offsets
-    #[cfg(not(feature = "tombstones"))]
-    fn bti_partition_offsets(&self) -> Result<&[u64]> {
-        use crate::storage::sstable::bti::{
-            iterate_partitions_in_bti_file, resolve_rows_db_entry, BtiPartitionLocation,
-        };
-
-        if let Some(cached) = self.bti_partition_offsets.get() {
-            return Ok(cached);
-        }
-
-        let Some(partitions_db) = &self.bti_partitions_db else {
-            // Not a BTI reader: no trie to enumerate. Cache an empty list so the
-            // successor lookup is consistently O(1) and returns no successor.
-            let _ = self.bti_partition_offsets.set(Vec::new());
-            return Ok(self
-                .bti_partition_offsets
-                .get()
-                .map(Vec::as_slice)
-                .unwrap_or(&[]));
-        };
-
-        let mut cursor = std::io::Cursor::new(partitions_db.as_slice());
-        let entries = iterate_partitions_in_bti_file(&mut cursor).map_err(|e| {
-            Error::corruption(format!(
-                "BTI Partitions.db trie enumeration failed while resolving the \
-                 next-partition seek bound: {e}"
-            ))
-        })?;
-
-        let mut offsets = Vec::with_capacity(entries.len());
-        for (_token_key, location) in entries {
-            let off = match location {
-                BtiPartitionLocation::DataOffset(off) => off,
-                BtiPartitionLocation::RowsOffset(rows_offset) => {
-                    let rows_db = self.bti_rows_db.as_ref().ok_or_else(|| {
-                        Error::corruption(format!(
-                            "BTI Partitions.db enumeration returned RowsOffset({rows_offset}) \
-                             but this reader has no Rows.db; the SSTable is structurally invalid \
-                             (Rows.db is required for wide partitions)."
-                        ))
-                    })?;
-                    let header = resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize)
-                        .map_err(|e| {
-                            Error::corruption(format!(
-                                "BTI Rows.db row-index entry at RowsOffset({rows_offset}) is \
-                                 unreadable while resolving the next-partition seek bound: {e}"
-                            ))
-                        })?;
-                    header.data_position
-                }
-            };
-            offsets.push(off);
-        }
-        offsets.sort_unstable();
-
-        // Another thread may have populated the cache between the `get` above and
-        // here; `set` fails in that case and we read the winning value back.
-        let _ = self.bti_partition_offsets.set(offsets);
-        Ok(self
-            .bti_partition_offsets
-            .get()
-            .map(Vec::as_slice)
-            .unwrap_or(&[]))
     }
 
     /// Cheap presence oracle: can this SSTable possibly contain `partition_key`?

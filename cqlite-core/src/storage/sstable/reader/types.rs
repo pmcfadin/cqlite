@@ -394,4 +394,17 @@ pub struct SSTableReader {
     /// effort: a poisoned lock is treated as a miss. This is NOT a cross-lookup
     /// key/offset cache (that is Epic B/B4); it is bounded to one entry.
     pub(crate) bti_lookup_memo: BtiLookupMemo,
+    /// Per-reader key→partition-offset cache (issue #1570, Epic B/B4) — the
+    /// Cassandra key-cache analogue. Maps the raw partition-key bytes to the
+    /// location the index/trie descent produces, so a repeated hot point read can
+    /// return the location without re-probing `Index.db` (BIG,
+    /// `lookup_partition_with_index`) or re-descending the `Partitions.db` trie
+    /// (BTI, `lookup_partition_via_bti_trie`, `TRIE_WALKS`). Per-reader (not shared):
+    /// a location is meaningful only within this SSTable's offset domain, so the
+    /// cache dies with the reader on remove/reload — the audit's immutable-SSTable
+    /// invalidation rule, trivially satisfied. Positive-only (absent keys are never
+    /// stored, so a hit can never be fabricated). Built honoring
+    /// `config.memory.block_cache.enabled` (the B2 read-cache toggle): a disabled
+    /// cache is a genuine no-op so the point-read path bypasses it.
+    pub(crate) key_offset_cache: Arc<crate::storage::cache::KeyOffsetCache>,
 }

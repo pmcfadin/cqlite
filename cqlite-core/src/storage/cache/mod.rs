@@ -34,6 +34,12 @@
 //! eviction ordering. Both remain power-of-two hand-sharded `Mutex<LruCache>` —
 //! the design intent is preserved.
 
+pub mod key_offset;
+
+pub use key_offset::{
+    KeyOffsetCache, PartitionLoc, DEFAULT_KEY_CACHE_BYTES, DEFAULT_KEY_CACHE_SHARDS,
+};
+
 use lru::LruCache;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};

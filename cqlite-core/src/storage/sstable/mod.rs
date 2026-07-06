@@ -331,6 +331,44 @@ fn build_chunk_cache(config: &Config) -> Arc<crate::storage::cache::Decompressed
     }
 }
 
+/// Build a reader's per-reader key→partition-offset cache (issue #1570, B4),
+/// honoring the same `config.memory.block_cache.enabled` read-cache toggle B2
+/// established (issue #1568). When enabled (the default) the cache is bounded by an
+/// approximate BYTE budget of
+/// [`DEFAULT_KEY_CACHE_BYTES`](crate::storage::cache::DEFAULT_KEY_CACHE_BYTES);
+/// when disabled it is a genuine no-op cache so the point-read path bypasses key
+/// caching entirely rather than the toggle being decorative. The budget is a small
+/// constant, not a new config knob (the audit forbids a decorative one).
+///
+/// **Aggregate memory** (`<128MB` budget): this cache is per-reader (design D2), so
+/// with no global ceiling the resident footprint is `≈ N_open_readers ×
+/// DEFAULT_KEY_CACHE_BYTES` for typical (small) keys. Bounding each reader by BYTES
+/// (not an entry count) makes this **independent of key size** for the typical case
+/// — the #1570 roborev fix: partition keys are variable-length (composite/text up to
+/// ~64 KB), so a count cap of 4096 entries did NOT bound resident bytes (worst case
+/// ~40 readers × 4096 × ~1 KB ≈ 160 MB, over budget). The `≈` is deliberate: the
+/// eviction guard never evicts the just-resolved entry, so each of the 16 shards can
+/// retain one oversized (~64 KB) entry beyond its 32 KiB per-shard budget, making a
+/// single reader's true worst case ~1 MB (~2× the nominal 512 KiB) and the exact
+/// upper bound `N × (B + shard_count × max_key_bytes)`. With a 512 KiB per-reader
+/// budget, ~40 open generations is `≈ 40 × 512 KiB ≈ 20 MB` and even ~128 readers is
+/// `≈ 128 × 512 KiB = 64 MB`, both comfortably within `<128MB` for typical keys.
+/// Allocation stays occupancy-proportional, so idle readers cost ~nothing. See
+/// [`DEFAULT_KEY_CACHE_BYTES`](crate::storage::cache::DEFAULT_KEY_CACHE_BYTES) for
+/// the full derivation. A single global bounded cache keyed on `(sstable_id, key)`
+/// would bound the aggregate regardless of reader count and is a deferred future
+/// optimization (see `design.md` "Deferred").
+pub(crate) fn build_key_offset_cache(
+    config: &Config,
+) -> Arc<crate::storage::cache::KeyOffsetCache> {
+    use crate::storage::cache::{KeyOffsetCache, DEFAULT_KEY_CACHE_BYTES};
+    if config.memory.block_cache.enabled {
+        Arc::new(KeyOffsetCache::with_budget_bytes(DEFAULT_KEY_CACHE_BYTES))
+    } else {
+        Arc::new(KeyOffsetCache::disabled())
+    }
+}
+
 impl SSTableManager {
     /// The shared chunk cache to expose to the memory-stats surface, or `None`
     /// when block caching is disabled (issue #1568).
