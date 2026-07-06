@@ -890,284 +890,170 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
-        // Issue #1046: per-PARTITION resolution build (this driver is re-entered once
-        // per partition by the sliding-window caller; allocations scale with partition
-        // count, not row count). Borrows header strings + schema columns for the loop.
-        let resolution = RowColumnResolution::build(schema, reader);
+        // Issue #1640 (K1): thin adapter over the single sliding-window partition
+        // driver. `TimestampPolicy` supplies the three per-consumer hooks
+        // (read-side shadow open, range-tombstone FSM feed, static-merge +
+        // display-row build); the driver owns the framing skeleton + ParseStep +
+        // pending buffering this function used to hand-roll.
+        let mut policy = TimestampPolicy::new(self);
+        self.drive_partition_sliding(data, schema, reader, at_final_chunk, &mut policy, |row| {
+            emit(row)
+        })
+    }
+}
 
-        let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
+/// Issue #1640 (K1): [`SlidingPartitionPolicy`] for the streaming-scan /
+/// compaction-read `(TableId, RowKey, ScanRow, row_timestamp)` path
+/// (`parse_block_with_timestamps` family). Read-side shadowing is active only
+/// when the parser was built for a user-facing query read (`read_shadowing`);
+/// physical consumers leave `shadow` `None` and see every on-disk row.
+struct TimestampPolicy<'a> {
+    parser: &'a V5CompressedLegacyParser,
+    table_id: TableId,
+    partition_key: RowKey,
+    /// Issue #1741 per-partition read-side shadow; `None` for physical reads.
+    shadow: Option<PartitionShadow>,
+    /// Issue #480 static cells accumulated for merge into each clustering row.
+    static_cells: HashMap<Arc<str>, Value>,
+}
 
-        // #1741 (roborev HIGH): size the header need-more decision correctly for
-        // the oa/da DeletionTime form. A DELETED oa/da partition carries the full
-        // 12-byte DeletionTime, not the 1-byte LIVE sentinel; peeking the
-        // discriminator (via `partition_header_readiness`) ensures a deleted header
-        // split across a NON-FINAL chunk returns `NeedMore` instead of being
-        // mis-parsed and emitted as `Emitted(1)` (which desynced the scan). The
-        // nb path is unchanged (fixed 12-byte signed form).
-        match self.partition_header_readiness(data) {
-            // Invalid header shape (zero/over-long key) → malformed; advance by
-            // one byte so the outer loop can resynchronise. Mirrors the legacy
-            // `offset += 1; continue` skip-a-byte recovery.
-            PartitionHeaderReadiness::Malformed => return Ok(ParseStep::Emitted(1)),
-            // Header (or its deleted-form DeletionTime) is split across the chunk
-            // boundary. On a non-final chunk request more bytes; on the final
-            // chunk no more will arrive, so the legacy loop treated this as the
-            // end of parseable partitions.
-            PartitionHeaderReadiness::Incomplete => {
-                return Ok(if at_final_chunk {
-                    ParseStep::Done
-                } else {
-                    ParseStep::NeedMore
-                });
-            }
-            // Every byte of the header (incl. its full DeletionTime) is present.
-            PartitionHeaderReadiness::Ready => {}
+impl<'a> TimestampPolicy<'a> {
+    fn new(parser: &'a V5CompressedLegacyParser) -> Self {
+        Self {
+            parser,
+            table_id: TableId::new(format!("{}.{}", parser.keyspace, parser.table_name)),
+            partition_key: RowKey(Vec::new()),
+            shadow: None,
+            static_cells: HashMap::new(),
         }
+    }
+}
 
-        let (partition_key, mut offset, partition_deletion) = match self
-            .parse_partition_header_full(data, 0)
-        {
-            Ok(v) => v,
-            // Defense-in-depth: `Ready` guarantees the DeletionTime is fully
-            // present, so a parse failure here cannot be truncation — it is a
-            // genuinely corrupt header (e.g. a non-0x80 byte with bit 7 set).
-            // On a non-final chunk, however, only re-request more bytes if the
-            // header is not yet complete; otherwise skip a byte to make forward
-            // progress (returning NeedMore on a complete buffer would loop
-            // forever). Since `Ready` holds, that reduces to the legacy
-            // skip-a-byte resync.
-            Err(_) => {
-                if !at_final_chunk
-                    && self.partition_header_readiness(data) == PartitionHeaderReadiness::Incomplete
-                {
-                    return Ok(ParseStep::NeedMore);
-                }
-                return Ok(ParseStep::Emitted(1));
-            }
-        };
+impl SlidingPartitionPolicy for TimestampPolicy<'_> {
+    type Row = (TableId, RowKey, ScanRow, i64);
 
-        // Issue #1741: read-side shadowing is active ONLY when the parser was built
-        // for a user-facing query read (`self.read_shadowing`); the compaction caller
-        // builds the parser without it, leaving this `None`.
-        // F2: reuse the parser's once-per-read `now_secs` (see `new`), not a per-block
-        // wall-clock sample, so all blocks of one scan share a single `now`.
-        let now_secs = self.now_secs;
-        let mut shadow = self.read_shadowing.then(|| {
+    fn on_partition_open(
+        &mut self,
+        partition_key: RowKey,
+        partition_deletion: Option<(i64, i32)>,
+        schema: &TableSchema,
+        _pending: &mut Vec<Self::Row>,
+    ) {
+        self.partition_key = partition_key;
+        // Issue #1741 (F2): reuse the parser's once-per-read `now_secs`, not a
+        // per-block wall-clock sample, so all blocks of one scan share one `now`.
+        self.shadow = self.parser.read_shadowing.then(|| {
             PartitionShadow::open(
-                now_secs,
+                self.parser.now_secs,
                 partition_deletion,
                 clustering_reversed_flags(schema),
             )
         });
+    }
 
-        let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
-
-        // Finding 1 (#827): buffer this partition's emitted rows locally and only
-        // forward them to the external `emit` once the partition is CONFIRMED
-        // complete (a `ParseStep::Emitted` return). If the buffer is truncated
-        // mid-partition (`NeedMore`) after one or more rows were parsed, we must
-        // emit NOTHING and let the caller refill and re-parse this partition from
-        // its start — otherwise the already-forwarded rows would be re-emitted on
-        // the retry, duplicating them in the streaming compaction output.
-        //
-        // The buffer is bounded by ONE partition's rows (the documented
-        // `max_partition_size` bound), not the whole file, so memory stays
-        // bounded as required by the #827 deliverable.
-        let mut pending: Vec<(TableId, RowKey, ScanRow, i64)> = Vec::new();
-
-        // Flush the buffered rows to the external `emit`, honouring an early
-        // `Break`. Returns the `ParseStep` to surface to the caller: on `Break`
-        // we still report the bytes consumed for this (complete) partition so the
-        // caller drains correctly, but stop forwarding the remaining buffered
-        // rows. `flushed_break` becomes true so the driver can stop promptly.
-        macro_rules! flush_and_emitted {
-            ($consumed:expr, $pending:expr, $emit:expr) => {{
-                for entry in $pending.drain(..) {
-                    match $emit(entry)? {
-                        std::ops::ControlFlow::Continue(()) => {}
-                        std::ops::ControlFlow::Break(()) => break,
+    fn on_range_marker(
+        &mut self,
+        data: &[u8],
+        offset: usize,
+        schema: &TableSchema,
+        _pending: &mut Vec<Self::Row>,
+    ) -> MarkerOutcome {
+        // Issue #1741: on the user-facing scan path decode the marker and feed
+        // the range-tombstone FSM so covered rows are shadowed; the physical path
+        // (shadow == None) only advances past it.
+        if let Some(sh) = self.shadow.as_mut() {
+            match self
+                .parser
+                .parse_range_tombstone_marker_full(data, offset, schema)
+            {
+                Ok((bv, bk, dp, ds, next_offset)) => {
+                    if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
+                        return MarkerOutcome::Stop;
                     }
+                    MarkerOutcome::Advanced(next_offset)
                 }
-                Ok(ParseStep::Emitted($consumed))
-            }};
+                Err(_) => MarkerOutcome::Stop,
+            }
+        } else {
+            match self.parser.skip_range_tombstone_marker(data, offset, schema) {
+                Ok(next_offset) => MarkerOutcome::Advanced(next_offset),
+                Err(_) => MarkerOutcome::Stop,
+            }
         }
+    }
 
-        loop {
-            // END_OF_PARTITION (0x01): partition complete, consume the marker.
-            if offset < data.len() && Self::is_end_of_partition(data[offset]) {
-                offset += 1;
-                return flush_and_emitted!(offset, pending, emit);
+    fn on_data_row(
+        &mut self,
+        data: &[u8],
+        offset: usize,
+        schema: &TableSchema,
+        reader: &crate::storage::sstable::reader::types::SSTableReader,
+        resolution: &RowColumnResolution,
+        pending: &mut Vec<Self::Row>,
+    ) -> Option<usize> {
+        match self.parser.parse_row_data_with_offset(
+            data,
+            offset,
+            Some(schema),
+            reader,
+            false,
+            resolution,
+            self.shadow.as_ref(),
+        ) {
+            Ok((
+                mut cells,
+                _row_cell_meta,
+                row_header_opt,
+                next_offset,
+                is_static,
+                _complex_meta,
+            )) => {
+                // Issue #932 (K1): the ONE row-write-timestamp coexistence rule.
+                let row_ts = row_write_timestamp(&row_header_opt);
+
+                if is_static {
+                    // Issue #1741 (Finding 1): drop a shadowed/expired static row's
+                    // cells so a surviving clustering row does not resurface stale
+                    // static data. No-op when shadowing is off.
+                    let static_hidden = self.shadow.as_ref().is_some_and(|sh| {
+                        row_header_opt.as_ref().is_some_and(|h| sh.row_hidden(h, &[]))
+                    });
+                    self.static_cells = if static_hidden { HashMap::new() } else { cells };
+                } else {
+                    for (k, v) in &self.static_cells {
+                        cells.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+
+                    // Issue #1741: hide rows shadowed by a partition/range tombstone
+                    // or expired by TTL (matching a Cassandra SELECT). No-op on the
+                    // physical path (shadow == None).
+                    let hidden = self.shadow.as_ref().is_some_and(|sh| {
+                        row_header_opt.as_ref().is_some_and(|h| {
+                            let clustering = if sh.needs_clustering() {
+                                extract_clustering_values(&cells, schema)
+                            } else {
+                                Vec::new()
+                            };
+                            sh.row_hidden(h, &clustering)
+                        })
+                    });
+
+                    // Issue #505/#932: row-tombstone display rule lives in the
+                    // shared `build_display_row` helper.
+                    let row_value = build_display_row(cells, row_header_opt.as_ref(), schema);
+
+                    if !hidden {
+                        pending.push((
+                            self.table_id.clone(),
+                            self.partition_key.clone(),
+                            row_value,
+                            row_ts,
+                        ));
+                    }
+                }
+                Some(next_offset)
             }
-
-            // Consumed everything but never saw END_OF_PARTITION: the partition
-            // may continue in the next chunk. On NeedMore emit NOTHING (drop the
-            // buffered rows) so the caller can refill and re-parse from the start
-            // without duplicating already-buffered rows (Finding 1).
-            if offset >= data.len() {
-                if at_final_chunk {
-                    return flush_and_emitted!(offset, pending, emit);
-                }
-                return Ok(ParseStep::NeedMore);
-            }
-
-            if Self::is_range_tombstone_marker(data[offset]) {
-                // Issue #1741: on the user-facing scan path decode the marker and
-                // feed the range-tombstone FSM so covered rows are shadowed; the
-                // compaction path (shadow == None) only advances past it.
-                if let Some(sh) = shadow.as_mut() {
-                    match self.parse_range_tombstone_marker_full(data, offset, schema) {
-                        Ok((bv, bk, dp, ds, next_offset)) => {
-                            if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
-                                if at_final_chunk {
-                                    return flush_and_emitted!(offset, pending, emit);
-                                }
-                                return Ok(ParseStep::NeedMore);
-                            }
-                            offset = next_offset;
-                            continue;
-                        }
-                        Err(_) => {
-                            if at_final_chunk {
-                                return flush_and_emitted!(offset, pending, emit);
-                            }
-                            return Ok(ParseStep::NeedMore);
-                        }
-                    }
-                }
-                match self.skip_range_tombstone_marker(data, offset, schema) {
-                    Ok(next_offset) => {
-                        offset = next_offset;
-                        continue;
-                    }
-                    Err(_) => {
-                        // Marker body truncated? request more unless final.
-                        if at_final_chunk {
-                            return flush_and_emitted!(offset, pending, emit);
-                        }
-                        return Ok(ParseStep::NeedMore);
-                    }
-                }
-            }
-
-            match self.parse_row_data_with_offset(
-                data,
-                offset,
-                Some(schema),
-                reader,
-                false,
-                &resolution,
-                shadow.as_ref(),
-            ) {
-                Ok((
-                    mut cells,
-                    _row_cell_meta,
-                    row_header_opt,
-                    next_offset,
-                    is_static,
-                    _complex_meta,
-                )) => {
-                    offset = next_offset;
-
-                    // For a row tombstone the authoritative timestamp is
-                    // markedForDeleteAt (HAS_TIMESTAMP is absent for pure row
-                    // deletes). For a live row it is the row write timestamp.
-                    // Both the merger tuple `row_ts` and the emitted
-                    // Value::Tombstone must agree, so resolve once here (#505).
-                    let row_tombstone = row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
-                    // Issue #932: a HAS_DELETION row may ALSO carry a liveness
-                    // timestamp (surviving cells written strictly after the
-                    // deletion). Prefer the liveness timestamp as the row
-                    // timestamp so those cells inherit it and are NOT shadowed by
-                    // the older row deletion during reconcile; fall back to
-                    // markedForDeleteAt only for a PURE row tombstone (which has no
-                    // HAS_TIMESTAMP).
-                    let row_ts = row_header_opt
-                        .as_ref()
-                        .and_then(|h| h.timestamp)
-                        .or_else(|| row_tombstone.map(|h| h.row_tombstone_deletion_time()))
-                        .unwrap_or(0);
-
-                    if is_static {
-                        // Issue #1741 (Finding 1): on the shadowing (user-facing) path,
-                        // drop a static row's cells when the static row is itself shadowed
-                        // by the partition tombstone or expired by its own TTL, so a
-                        // surviving clustering row does not resurface stale static data.
-                        // No-op on the compaction path (shadow == None), which must keep
-                        // the raw static cells for cross-generation reconcile.
-                        let static_hidden = shadow.as_ref().is_some_and(|sh| {
-                            row_header_opt
-                                .as_ref()
-                                .is_some_and(|h| sh.row_hidden(h, &[]))
-                        });
-                        static_cells = if static_hidden { HashMap::new() } else { cells };
-                    } else {
-                        for (k, v) in &static_cells {
-                            cells.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-
-                        // Issue #1741: on the user-facing scan path, hide rows
-                        // shadowed by a partition/range tombstone or expired by TTL
-                        // (matching a Cassandra SELECT). No-op on the compaction path
-                        // (shadow == None), which must preserve the row for the merger.
-                        // A row reduced to only its primary key by per-cell filtering is
-                        // hidden here too: the dropped cells still fold into the row
-                        // aggregate, so `row_hidden` sees it shadowed/expired.
-                        let hidden = shadow.as_ref().is_some_and(|sh| {
-                            row_header_opt.as_ref().is_some_and(|h| {
-                                let clustering = if sh.needs_clustering() {
-                                    extract_clustering_values(&cells, schema)
-                                } else {
-                                    Vec::new()
-                                };
-                                sh.row_hidden(h, &clustering)
-                            })
-                        });
-
-                        // Issue #505/#932: row-tombstone display rule now lives in the
-                        // shared `build_display_row` helper. This `ScanRow` drives BOTH
-                        // the user-facing streaming scan and the compaction read; both
-                        // consume the same carrier.
-                        let row_value = build_display_row(cells, row_header_opt.as_ref(), schema);
-
-                        // Finding 1: buffer the row instead of forwarding it now.
-                        // It is flushed to `emit` only when the partition is
-                        // confirmed complete (a `flush_and_emitted!` return). A
-                        // mid-partition `NeedMore` discards `pending` and the
-                        // caller re-parses from the partition start.
-                        if !hidden {
-                            pending.push((
-                                table_id.clone(),
-                                partition_key.clone(),
-                                row_value,
-                                row_ts,
-                            ));
-                        }
-                    }
-
-                    if offset >= data.len() {
-                        // End of the buffer without an explicit END_OF_PARTITION:
-                        // the partition may continue in the next chunk.
-                        if at_final_chunk {
-                            return flush_and_emitted!(offset, pending, emit);
-                        }
-                        return Ok(ParseStep::NeedMore);
-                    }
-                    if self.peek_is_partition_header(data, offset) {
-                        // Next partition starts here — current one is complete.
-                        return flush_and_emitted!(offset, pending, emit);
-                    }
-                }
-                Err(_) => {
-                    // A row failed to parse. The legacy loop unconditionally
-                    // `break`s here (end-of-partition). Mid-stream that may
-                    // instead be a row straddling the chunk boundary, so request
-                    // more bytes unless this is the final chunk.
-                    if at_final_chunk {
-                        return flush_and_emitted!(offset, pending, emit);
-                    }
-                    return Ok(ParseStep::NeedMore);
-                }
-            }
+            Err(_) => None,
         }
     }
 }
