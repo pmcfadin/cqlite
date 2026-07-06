@@ -33,8 +33,9 @@
 //! Extracted from `sstable/mod.rs` (issue #1116 campsite split): behaviour of the
 //! two materializing helpers is unchanged apart from the new `target_key`
 //! partition-targeting parameter (issue #1579, point-read path).
-
-#![cfg(feature = "write-support")]
+//!
+//! The whole module is gated on `write-support` at its `mod` declaration in the
+//! parent (`sstable/mod.rs`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -49,6 +50,11 @@ use super::{reader, scan_merge};
 use crate::storage::write_engine::merge::{KWayMerger, MergeEntry, MergeStep, RowData};
 use crate::types::{CellWriteMetadata, TableId as CqlTableId};
 use crate::{Result, RowCells, RowKey, ScanRow, Value};
+
+/// One reconciled metadata row inside the merge task, before per-cell metadata is
+/// attached: `(partition key bytes, ScanRow row carrier, [(column,
+/// write_timestamp_micros)])`.
+type MergedMetaRow = (Vec<u8>, ScanRow, Vec<(String, i64)>);
 
 /// Convert one reconciled partition's merge rows into the live scan rows the read
 /// path emits: drop cell tombstones, drop row tombstones, drop rows left empty.
@@ -232,9 +238,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     let end_key = owned_end;
     let target_for_merge = target_bytes;
 
-    // (key bytes, ScanRow row carrier, [(column, write_timestamp_micros)]).
-    type MergedRow = (Vec<u8>, ScanRow, Vec<(String, i64)>);
-    let merged_rows = tokio::task::spawn_blocking(move || -> Result<Vec<MergedRow>> {
+    let merged_rows = tokio::task::spawn_blocking(move || -> Result<Vec<MergedMetaRow>> {
         let mut merger = KWayMerger::new(paths, &merge_schema)?;
         let mut out = Vec::new();
         while let MergeStep::Partition { key, rows } = merger.step()? {
@@ -300,11 +304,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
 /// live cells plus each surviving cell's `(column, write_timestamp)`. Shared by the
 /// range and point-targeted branches of the metadata merge so the tombstone
 /// filtering + timestamp capture live once.
-fn push_metadata_rows(
-    key_bytes: &[u8],
-    rows: Vec<MergeEntry>,
-    out: &mut Vec<(Vec<u8>, ScanRow, Vec<(String, i64)>)>,
-) {
+fn push_metadata_rows(key_bytes: &[u8], rows: Vec<MergeEntry>, out: &mut Vec<MergedMetaRow>) {
     for entry in rows {
         if let RowData::Live { cells } = entry.row_data {
             let mut row_cells: RowCells = Vec::with_capacity(cells.len());
