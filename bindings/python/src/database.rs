@@ -69,7 +69,14 @@ use crate::write::{MaintenanceReport, PyWriteEngine, WriteStats};
 #[pyclass(module = "cqlite")]
 pub struct Database {
     inner: Arc<cqlite_core::Database>,
-    closed: AtomicBool,
+    /// Closed flag, shared (via `Arc`) with any `StreamingIterator` this
+    /// database hands out (issue #1462). `Arc<AtomicBool>` derefs to
+    /// `AtomicBool`, so every existing `.load(..)`/`.swap(..)` call site is
+    /// unchanged; only the field type + initialization change. Sharing the
+    /// exact atomic lets an iterator observe `close()` atomically and raise a
+    /// clean `RuntimeError` from `__next__` instead of driving a torn-down
+    /// engine.
+    closed: Arc<AtomicBool>,
     /// Optional write engine — present only when opened with `writable=True`.
     /// A `tokio::sync::Mutex` (not `std`) so its guard is `Send` and survives the
     /// `py.allow_threads` boundary (issue #1444): blocking writes (WAL fsync +
@@ -387,7 +394,15 @@ impl Database {
             .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
-        Ok(StreamingIterator::with_span(core_iter, span.clone()))
+        // Share the *same* closed atomic with the iterator (issue #1462) so a
+        // `db.close()` that outlives this iterator is observed atomically and
+        // `__next__` raises a clean RuntimeError instead of touching the
+        // torn-down engine.
+        Ok(StreamingIterator::with_span(
+            core_iter,
+            span.clone(),
+            Arc::clone(&self.closed),
+        ))
     }
 
     /// Export the results of a CQL query to a Parquet file.
@@ -950,7 +965,7 @@ pub fn open(
 
     Ok(Database {
         inner: Arc::new(db),
-        closed: AtomicBool::new(false),
+        closed: Arc::new(AtomicBool::new(false)),
         write_engine,
         default_traceparent: traceparent.filter(|s| !s.trim().is_empty()),
     })
