@@ -404,7 +404,7 @@ impl SSTableReader {
             crate::parser::header::CassandraVersion::V5_0NewBig
             | crate::parser::header::CassandraVersion::V5_0Bti => Err(Error::Schema(format!(
                 "Blob fallback not allowed for value parsing in modern format {:?}. \
-                     Use SchemaAwareReader with complete schema information.",
+                     Use schema-aware decode via SSTableReader with complete schema information.",
                 self.header.cassandra_version
             ))),
             _ => {
@@ -711,7 +711,7 @@ impl SSTableReader {
             crate::parser::header::CassandraVersion::V5_0NewBig
             | crate::parser::header::CassandraVersion::V5_0Bti => Err(Error::Schema(format!(
                 "Generic UDT fabrication not allowed for modern format {:?}. \
-                     Use SchemaAwareReader with complete UDT schema information.",
+                     Use schema-aware decode via SSTableReader with complete UDT schema information.",
                 self.header.cassandra_version
             ))),
             _ => {
@@ -740,13 +740,13 @@ impl SSTableReader {
         _table_id: &TableId,
         _key: &RowKey,
     ) -> Option<String> {
-        // Modern formats require SchemaAwareReader for proper column name extraction
+        // Modern formats require schema-aware decode (registered schema) for proper column name extraction
         match self.header.cassandra_version {
             crate::parser::header::CassandraVersion::V5_0NewBig
             | crate::parser::header::CassandraVersion::V5_0Bti => {
                 // Modern formats should not use this placeholder implementation
                 log::error!(
-                    "Column name extraction from key context requires SchemaAwareReader for modern format {:?}",
+                    "Column name extraction from key context requires schema-aware decode (registered schema) for modern format {:?}",
                     self.header.cassandra_version
                 );
                 None
