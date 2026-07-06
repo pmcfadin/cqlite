@@ -285,6 +285,38 @@ pub enum CellOperation {
         value: Value,
         /// Time-to-live in seconds
         ttl_seconds: u32,
+        /// Authoritative per-cell `localDeletionTime` (seconds since the Unix
+        /// epoch, the on-disk GC clock) for this expiring cell — Cassandra's
+        /// `localExpirationTime`, equal to `writetime_seconds + ttl_seconds`
+        /// (issue #1538).
+        ///
+        /// When `Some`, the writer stamps the emitting expiring cell with this
+        /// LDT VERBATIM rather than deriving one from `SystemTime::now() + ttl`.
+        /// The compaction merge→rewrite path
+        /// ([`cells_to_cell_operations`]) sets it from the SOURCE cell's own
+        /// authoritative on-disk LDT ([`CellData::local_deletion_time`]) so a
+        /// live expiring cell that survives a compaction is re-emitted
+        /// byte-identically (its `localDeletionTime` is preserved, not
+        /// recomputed from the compaction wall clock — mirror of #921's
+        /// Delete-path precedent).
+        ///
+        /// `None` preserves the historical behavior (the writer derives
+        /// `now + ttl`), so the fresh CQL/WAL `USING TTL` write paths that build
+        /// a `WriteWithTtl` without a surfaced source LDT are unchanged.
+        ///
+        /// `#[serde(default)]` only helps SELF-DESCRIBING formats (e.g. the JSON
+        /// `--mutation` CLI input), where a missing field is defaulted by name.
+        /// It does NOT provide WAL back-compat: the WAL uses bincode, a
+        /// non-self-describing positional format that IGNORES `#[serde(default)]`,
+        /// so upgrade-replay of pre-#1538 `WriteWithTtl` records is handled by the
+        /// pre-#1538 mirror layouts in `wal.rs` (`PreCellLdtWriteTtlMutation` /
+        /// `PreCellLdtWriteTtlCellOperation`), not by this attribute. Do not delete
+        /// those mirrors on the assumption this attribute covers the WAL.
+        ///
+        /// [`cells_to_cell_operations`]: crate::storage::write_engine::merge
+        /// [`CellData::local_deletion_time`]: crate::storage::write_engine::merge::CellData::local_deletion_time
+        #[serde(default)]
+        local_deletion_time: Option<i32>,
     },
     /// Delete a specific column
     Delete {

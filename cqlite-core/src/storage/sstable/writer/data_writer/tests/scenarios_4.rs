@@ -977,6 +977,7 @@ fn test_write_with_ttl_complex_column() {
                 Value::Text("b".to_string()),
             ]),
             ttl_seconds: 3600,
+            local_deletion_time: None,
         }],
         1001000,
         None,

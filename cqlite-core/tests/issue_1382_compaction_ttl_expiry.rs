@@ -20,10 +20,10 @@
 //! written (writer stamps `flush_now + ttl`), so each test READS that
 //! authoritative LDT back from the input, then pins `now_secs`/`gc_before`
 //! RELATIVE to it — the expiry / purge DECISIONS never sample a wall clock.
-//! (The one value the compaction writer re-derives at write time is a surviving
-//! LIVE TTL cell's output LDT — `compaction_flush_wall_clock + ttl`, since no
-//! per-cell LDT rides on `WriteWithTtl`; criterion 3 therefore asserts only that
-//! the survivor stays un-expired, never a byte-identical LDT — see #1387.)
+//! (Issue #1538: `WriteWithTtl` now carries the source cell's authoritative
+//! per-cell LDT, threaded verbatim through the compaction merge→writer, so a
+//! surviving LIVE TTL cell's output LDT EQUALS its input LDT byte-for-byte —
+//! criterion 3 asserts that equality.)
 //!
 //! ## Acceptance criteria (issue #1382)
 //!
@@ -33,11 +33,10 @@
 //!   2. `expired_past_grace_purged_entirely` — creation-time LDT `< gcBefore`: the
 //!      cell is absent from the compacted output entirely (purged).
 //!   3. `live_ttl_cell_survives` — LDT in the future: emitted live with a
-//!      TTL and its value, and its LDT stays in the future (un-expired). The
-//!      compaction writer re-derives a surviving live TTL cell's LDT from the
-//!      compaction flush wall clock + ttl (no per-cell LDT rides on
-//!      `WriteWithTtl`), so this test does NOT assert a byte-identical LDT for
-//!      the survivor — that byte-parity is deferred to the #1387 byte-oracle.
+//!      TTL and its value, and its LDT stays in the future (un-expired). Issue
+//!      #1538: the surviving cell's LDT is preserved byte-identically (the source
+//!      per-cell LDT threads verbatim through the merge→writer), so this test
+//!      asserts the output LDT EQUALS the input LDT.
 //!   4. `expired_past_grace_retained_under_overlap_gate` — expired-past-grace but
 //!      a PARTIAL compaction with an EXCLUDED overlapping SSTable holding older
 //!      data under the same key: the tombstone is RETAINED (max_purgeable gate).
@@ -112,6 +111,7 @@ fn write_ttl_row(id: i32, ck: i32, name: &str, ttl_seconds: u32, ts: i64) -> Mut
             column: "name".to_string(),
             value: Value::Text(name.to_string()),
             ttl_seconds,
+            local_deletion_time: None,
         }],
         ts,
         None,
@@ -407,16 +407,12 @@ fn live_ttl_cell_survives() {
         "value survives live"
     );
     assert!(cell.ttl.is_some(), "TTL preserved");
-    // The cell is genuinely un-expired: its `localDeletionTime` is still in the
-    // future relative to the pinned evaluation instant. We do NOT assert
-    // byte-identical LDT here: the compaction writer re-derives a surviving live
-    // TTL cell's LDT as `compaction_flush_wall_clock + ttl` (there is no
-    // per-cell LDT carried on `CellOperation::WriteWithTtl`), so the output LDT
-    // is >= the input LDT by exactly the wall-clock skew between the original
-    // flush and the compaction flush (0 within a second, 1 across a second
-    // boundary — asserting equality here is a wall-clock race). Byte-identical
-    // LDT preservation for a surviving live TTL cell is a public-API extension
-    // deferred with the Cassandra byte-oracle work (#1387).
+    // Issue #1538: the surviving live TTL cell is now re-emitted BYTE-IDENTICALLY.
+    // `CellOperation::WriteWithTtl` carries the source cell's authoritative per-cell
+    // `localDeletionTime`, and the compaction merge→writer threads it VERBATIM
+    // (`cells_to_cell_operations` → `write_cell_with_ttl`) instead of re-deriving
+    // `compaction_flush_wall_clock + ttl`. The output LDT therefore EQUALS the input
+    // LDT exactly (no wall-clock skew), meeting #1382 crit-3 literally.
     let out_ldt = cell
         .local_deletion_time
         .map(|l| i64::from(l as u32))
@@ -425,9 +421,10 @@ fn live_ttl_cell_survives() {
         out_ldt > now_secs,
         "surviving cell must be un-expired (LDT {out_ldt} > now {now_secs})"
     );
-    assert!(
-        out_ldt >= ldt,
-        "writer never stamps an LDT earlier than the source (out {out_ldt} >= src {ldt})"
+    assert_eq!(
+        out_ldt, ldt,
+        "surviving live TTL cell's LDT is preserved byte-identically through compaction \
+         (out {out_ldt} == src {ldt}), #1538"
     );
 }
 

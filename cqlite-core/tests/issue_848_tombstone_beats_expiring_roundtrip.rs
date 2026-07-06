@@ -99,6 +99,7 @@ fn expiring_write(id: i32, ttl: u32, ts: i64) -> Mutation {
             column: "v".to_string(),
             value: Value::Text("expiring-if-buggy".to_string()),
             ttl_seconds: ttl,
+            local_deletion_time: None,
         },
     ];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)

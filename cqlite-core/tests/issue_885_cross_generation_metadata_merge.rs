@@ -96,6 +96,7 @@ fn write_name_only_ttl(id: i32, name: &str, ttl_seconds: u32, ts: i64) -> Mutati
         column: "name".to_string(),
         value: Value::Text(name.to_string()),
         ttl_seconds,
+        local_deletion_time: None,
     }];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)
 }

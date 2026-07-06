@@ -94,6 +94,7 @@ fn write_row_with_ttl(id: i32, name: &str, score: i32, ttl_seconds: u32, ts: i64
             column: "score".to_string(),
             value: Value::Integer(score),
             ttl_seconds,
+            local_deletion_time: None,
         },
     ];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)

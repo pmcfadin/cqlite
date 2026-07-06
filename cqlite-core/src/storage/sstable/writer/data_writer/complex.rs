@@ -133,12 +133,15 @@ impl DataWriter {
                                 ttl_seconds,
                             )?;
                         } else {
+                            // Row-level `USING TTL` write (no per-cell LDT source):
+                            // derive `now + ttl` (historical behavior).
                             self.write_cell_with_ttl(
                                 buf,
                                 column,
                                 value,
                                 mop.timestamp_micros,
                                 ttl_seconds,
+                                None,
                             )?;
                         }
                     } else if row.liveness_ts == Some(mop.timestamp_micros) {
@@ -153,6 +156,7 @@ impl DataWriter {
                 column,
                 value,
                 ttl_seconds,
+                local_deletion_time,
             } => {
                 // Skip NULL values - they are represented by absence in the bitmap
                 if matches!(value, Value::Null) {
@@ -169,12 +173,16 @@ impl DataWriter {
                 } else {
                     // roborev #1020 Finding 1: schema-aware frozen-UDT value.
                     let canon = canonicalize_udt_value(&col.data_type, value)?;
+                    // Issue #1538: stamp the authoritative per-cell LDT verbatim
+                    // when present (a surviving expiring cell preserved through
+                    // compaction), else derive `now + ttl`.
                     self.write_cell_with_ttl(
                         buf,
                         column,
                         canon.as_ref(),
                         mop.timestamp_micros,
                         *ttl_seconds,
+                        *local_deletion_time,
                     )?;
                 }
                 Ok(1)

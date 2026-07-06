@@ -3472,10 +3472,18 @@ impl KWayMerger {
                     }
                 }
                 if let Some(ttl) = cell.ttl {
+                    // #1538: preserve the SOURCE expiring cell's authoritative
+                    // on-disk `localDeletionTime` (= writetime_s + ttl) so a live
+                    // TTL cell that survives THIS compaction is re-emitted
+                    // byte-identically — the writer stamps this LDT verbatim
+                    // instead of recomputing `now + ttl` (which would drift by the
+                    // compaction wall-clock skew). `None` (LDT not surfaced by the
+                    // reader) leaves the writer's historical derivation in place.
                     CellOperation::WriteWithTtl {
                         column: cell.column,
                         value: cell.value,
                         ttl_seconds: ttl,
+                        local_deletion_time: cell.local_deletion_time,
                     }
                 } else {
                     CellOperation::Write {
@@ -8980,6 +8988,7 @@ mod issue_822_merge_ordering_semantics {
                 column: "v".to_string(),
                 value: Value::Text("expiring-if-buggy".to_string()),
                 ttl_seconds: 3600,
+                local_deletion_time: None,
             }],
             TS,
             None,
@@ -9132,6 +9141,7 @@ mod issue_822_merge_ordering_semantics {
                 column: "v".to_string(),
                 value: Value::Text("expiring-if-buggy".to_string()),
                 ttl_seconds: 3600,
+                local_deletion_time: None,
             }],
             TS,
             None,

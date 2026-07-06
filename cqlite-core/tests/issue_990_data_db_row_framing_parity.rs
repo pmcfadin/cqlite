@@ -654,6 +654,7 @@ fn cell_flag_expiring_explicit_ttl() {
         column: "a".to_string(),
         value: Value::Text("temp".to_string()),
         ttl_seconds: 3600,
+        local_deletion_time: None,
     }];
     let loc = single_cell_flags(det_stats(), ops, None);
     fail_flag(loc, CELL_IS_EXPIRING, "expiring cell (explicit TTL)");
