@@ -322,6 +322,15 @@ pub enum ParseStep {
     Done,
 }
 
+// Struct-size regression guard (issue #1616, Epic H/H3; see
+// docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)). `ParseStep`
+// is returned once per partition by the bounded compaction-read driver on the
+// scan hot path. Measured 16 bytes today (discriminant + inlined `usize`) on
+// 64-bit targets. Update this pin DELIBERATELY, never silently: any change —
+// growth or shrink — must be a reviewed edit here.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<ParseStep>() == 16);
+
 /// Row header data extracted from V5CompressedLegacy row
 #[derive(Debug, Clone)]
 struct RowHeader {

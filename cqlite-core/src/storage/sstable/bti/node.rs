@@ -108,6 +108,15 @@ pub struct SizedPointer {
     pub size: u8,
 }
 
+// Struct-size regression guard (issue #1616, Epic H/H3; see
+// docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)). BTI trie
+// pointer decoded once per transition during partition lookup on the read hot
+// path. Measured 16 bytes today (u64 + u8, padded) on 64-bit targets. Update
+// this pin DELIBERATELY, never silently: any change — growth or shrink — must
+// be a reviewed edit here.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<SizedPointer>() == 16);
+
 impl SizedPointer {
     /// Create a new sized pointer
     pub fn new(distance: u64) -> Self {
@@ -166,6 +175,15 @@ pub struct Transition {
     pub child: SizedPointer,
 }
 
+// Struct-size regression guard (issue #1616, Epic H/H3; see
+// docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)). One BTI
+// `Transition` is decoded per trie edge walked during partition lookup on the
+// read hot path. Measured 24 bytes today (u8 + `SizedPointer`, padded) on
+// 64-bit targets. Update this pin DELIBERATELY, never silently: any change —
+// growth or shrink — must be a reviewed edit here.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Transition>() == 24);
+
 impl Transition {
     pub fn new(byte: u8, child: SizedPointer) -> Self {
         Self { byte, child }
@@ -182,6 +200,15 @@ pub struct PayloadRef {
     /// Optional checksum for validation
     pub checksum: Option<u32>,
 }
+
+// Struct-size regression guard (issue #1616, Epic H/H3; see
+// docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)). One BTI
+// `PayloadRef` is produced per matched leaf during partition lookup on the read
+// hot path. Measured 24 bytes today (u64 + u32 + Option<u32>, padded) on 64-bit
+// targets. Update this pin DELIBERATELY, never silently: any change — growth or
+// shrink — must be a reviewed edit here.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<PayloadRef>() == 24);
 
 impl PayloadRef {
     pub fn new(offset: u64, length: u32) -> Self {
