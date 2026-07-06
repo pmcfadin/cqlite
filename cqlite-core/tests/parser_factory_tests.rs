@@ -227,16 +227,23 @@ fn test_parser_wrapper_functionality() {
 fn test_complex_configuration_scenarios() {
     // Test complex configuration scenarios
 
-    // Test configuration with multiple features
+    // Test configuration with multiple nom-supported features
     let complex_config = ParserConfig::default()
         .with_backend(ParserBackend::Auto)
         .with_feature(ParserFeature::ErrorRecovery)
-        .with_feature(ParserFeature::SyntaxHighlighting)
-        .with_feature(ParserFeature::CodeCompletion)
+        .with_feature(ParserFeature::Caching)
+        .with_feature(ParserFeature::Streaming)
         .with_timeout(Duration::from_secs(30));
 
     let result = ParserFactory::create(complex_config);
     assert!(result.is_ok());
+
+    // The ANTLR-only tooling features are now truthfully rejected: nom (the only
+    // built-in backend after #1639) does not implement them.
+    let unsupported = ParserConfig::default()
+        .with_backend(ParserBackend::Auto)
+        .with_feature(ParserFeature::SyntaxHighlighting);
+    assert!(ParserFactory::create(unsupported).is_err());
 
     // Test configuration with performance settings
     let mut perf_config = ParserConfig::default();
