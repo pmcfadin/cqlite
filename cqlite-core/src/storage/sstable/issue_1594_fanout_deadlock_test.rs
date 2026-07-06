@@ -53,6 +53,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serial_test::serial;
 use tokio::sync::RwLock;
 
 use super::reader::scan_stream_windowed::scan_admission::probe as admission;
@@ -161,7 +162,14 @@ async fn build_schema_registry(
 /// priming merge never drains the holders → permanent hang → `COMPLETION_TIMEOUT`
 /// fires and this test FAILS. GREEN (per-operation admission): the fan-out holds
 /// ONE permit, its sub-scans are `Exempt`, the scan drains to completion.
+// `#[serial]` (serial_test): this guard installs a process-global admission cap
+// via `set_test_limit` (which zeros `IN_FLIGHT`/`MAX_IN_FLIGHT`) and reads
+// `max_in_flight`. Serializing it against the other probe counter tests (also
+// `#[serial]`) prevents a concurrent test's permit-holder from underflowing the
+// global counter across our `reset` when the new gate lib run executes them in one
+// binary (issue #1594 roborev Low).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn fanout_over_more_generations_than_cap_completes() {
     let Some(fixture_dir) = compressed_fixture_dir() else {
         eprintln!(

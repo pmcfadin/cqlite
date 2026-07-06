@@ -254,8 +254,20 @@ pub mod probe {
 
     /// Record that a scan just released its admission permit. Called from
     /// [`ScanAdmissionPermit`]'s `Drop`.
+    ///
+    /// Defense-in-depth (issue #1594 roborev Low): saturating, never wrapping.
+    /// Real admission is balanced — every [`on_admit`] is paired with exactly one
+    /// `on_release` — so `IN_FLIGHT` never legitimately underflows. But once the
+    /// probe lib-tests run in-process together (the new gate lib run), a test's
+    /// [`reset`] could zero the counter while another test/scan still holds a
+    /// permit; a plain `fetch_sub(1)` from 0 would then wrap `usize` and corrupt
+    /// [`current_in_flight`]/[`max_in_flight`] for unrelated scans in the same
+    /// binary. `saturating_sub` clamps at 0 instead. Production admission is
+    /// unaffected (it never underflows).
     pub(super) fn on_release() {
-        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        let _ = IN_FLIGHT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            Some(v.saturating_sub(1))
+        });
     }
 
     /// Scans currently admitted (holding a permit).
@@ -273,14 +285,23 @@ pub mod probe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::sync::Semaphore;
+
+    // These tests drive `admit_with`, which under the `scan-offload-probe` feature
+    // mutates the process-global `IN_FLIGHT`/`MAX_IN_FLIGHT` counters via
+    // `probe::on_admit`/`on_release`. `#[serial]` (serial_test) serializes them
+    // against each other AND the fan-out deadlock guard (also `#[serial]`) so
+    // cargo's parallel intra-binary threads cannot race a permit-holder against a
+    // `set_test_limit`/`reset` that zeros those globals (issue #1594 roborev Low).
 
     /// The bound: against an isolated `L`-permit semaphore, at most `L` permits
     /// are outstanding at once and the `L+1`-th `admit_with` WAITS until one frees
     /// (queue-full = wait, not error), then proceeds.
     #[tokio::test]
+    #[serial]
     async fn admission_bounds_outstanding_permits_and_queues_the_overflow() {
         const L: usize = 3;
         let sem = Arc::new(Semaphore::new(L));
@@ -331,6 +352,7 @@ mod tests {
     /// before any scan work would complete) returns every permit to the
     /// semaphore, so the full limit is always eventually available.
     #[tokio::test]
+    #[serial]
     async fn repeated_acquire_and_drop_leaks_no_permits() {
         const L: usize = 2;
         let sem = Arc::new(Semaphore::new(L));

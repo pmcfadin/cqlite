@@ -38,7 +38,15 @@
 #                      scheduling change is data-transparent — issue #1593); and the
 #                      F4 admission guard --test issue_1594_scan_admission_bound
 #                      (concurrent windowed scans admitted to the blocking pool
-#                      never exceed the admission limit — issue #1594); same gate.
+#                      never exceed the admission limit — issue #1594). It then
+#                      runs a SECOND invocation: cargo test -p cqlite-core --lib
+#                      --features cli-helpers,scan-offload-probe --
+#                      scan_admission issue_1594_fanout_deadlock — the fan-out
+#                      DEADLOCK regression
+#                      guard is a LIB #[cfg(test, scan-offload-probe)] module (to
+#                      reach pub(crate) manager.table_readers), so no --test run
+#                      compiles it; this lib run makes it execute (issue #1594
+#                      roborev, same gate-wiring class as #1597/#1618); same gate.
 #   work-counters-guard cargo test -p cqlite-core --features cli-helpers,work-counters
 #                      the read/parser work-counter wiring-evidence tests
 #                      (issue_1566/1573/1585 read-work counters + issue_1618 parser
@@ -2440,6 +2448,32 @@ run_core_tests() {
   fi
 }
 
+# run_scan_offload_guard_cmd: the scan-offload-guard component's command (issue
+# #1594 roborev). Runs the INTEGRATION offload/admission guards, then a SECOND
+# invocation that runs the cqlite-core LIB unit tests WITH the scan-offload-probe
+# feature so the fan-out DEADLOCK regression guard actually EXECUTES. That guard —
+# `fanout_over_more_generations_than_cap_completes` in
+# storage::sstable::issue_1594_fanout_deadlock_test — is a LIB `#[cfg(all(test,
+# feature = "scan-offload-probe"))]` module (it must be, to reach the pub(crate)
+# `manager.table_readers`), so no `--test <name>` integration run ever compiles it;
+# without this lib run the deadlock fix would have no auto-executing gate guard
+# (the #1597/#1618 gate-wiring class). The filters keep it fast (only the admission
+# + deadlock lib tests) and it inherits CQLITE_DATASETS_ROOT; the deadlock test
+# skips-not-fails when the compressed fixture is absent.
+run_scan_offload_guard_cmd() {
+  cargo test --package cqlite-core \
+    --features cli-helpers,scan-offload-probe \
+    --test issue_1143_scan_offload_thread \
+    --test issue_1333_scan_scratch_reuse \
+    --test issue_1589_window_drain_bytes \
+    --test issue_1593_io_offload_thread \
+    --test issue_1593_mmap_scan_parity \
+    --test issue_1594_scan_admission_bound \
+    && cargo test --package cqlite-core --lib \
+    --features cli-helpers,scan-offload-probe \
+    -- scan_admission issue_1594_fanout_deadlock
+}
+
 # _pool_selected <name>: honor the --only filter when building the launch list.
 _pool_selected() {
   [ -z "$ONLY" ] && return 0
@@ -2458,14 +2492,7 @@ dispatch_component() {
     tombstones-scan) run_component tombstones-scan cargo test --package cqlite-core \
       --features write-support,cli-helpers,tombstones \
       --test issue_1085_tombstones_full_scan_parity ;;
-    scan-offload-guard) run_component scan-offload-guard cargo test --package cqlite-core \
-      --features cli-helpers,scan-offload-probe \
-      --test issue_1143_scan_offload_thread \
-      --test issue_1333_scan_scratch_reuse \
-      --test issue_1589_window_drain_bytes \
-      --test issue_1593_io_offload_thread \
-      --test issue_1593_mmap_scan_parity \
-      --test issue_1594_scan_admission_bound ;;
+    scan-offload-guard) run_component scan-offload-guard run_scan_offload_guard_cmd ;;
     work-counters-guard) run_component work-counters-guard cargo test --package cqlite-core \
       --features cli-helpers,work-counters \
       --test issue_1566_read_work_counters \
