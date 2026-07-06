@@ -931,6 +931,12 @@ impl SelectExecutor {
         const PER_ROW_MEMORY_ESTIMATE_BYTES: usize = 100;
         const DEFAULT_AGGREGATION_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 
+        // Issue #1578 (D2): record how many rows this buffered aggregate input
+        // carried, so the O(1) memory guard can prove a GROUP-BY-free aggregate
+        // served by the streaming fold buffers ZERO rows here (the fold never
+        // calls this method). Zero-overhead in release (probe body is cfg-gated).
+        crate::query::agg_stream_probe::record_buffered_rows(rows.len() as u64);
+
         let mut agg_state = AggregationState {
             groups: Vec::new(),
             group_index: rustc_hash::FxHashMap::default(),
