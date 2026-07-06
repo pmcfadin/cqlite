@@ -11,7 +11,6 @@
 //!    directly on the new pair).
 
 use crate::parser::vint::{decode_signed, decode_unsigned, encode_vuint, MAX_VINT_SIZE};
-use crate::storage::serialization::vint as write_vint;
 use proptest::prelude::*;
 
 /// Byte-identical snapshot of the pre-refactor `parse_vuint` unsigned
@@ -116,7 +115,10 @@ fn complete_value_is_framing_independent() {
         decode_unsigned(&[0x80, 0x80, 0xAA, 0xBB]).expect("2-byte vint + trailing junk");
     assert_eq!(v_alone, v_junk, "value must not depend on framing");
     assert_eq!(n_alone, 2, "consumes exactly the encoded width");
-    assert_eq!(n_junk, 2, "consumes exactly the encoded width, ignoring junk");
+    assert_eq!(
+        n_junk, 2,
+        "consumes exactly the encoded width, ignoring junk"
+    );
 }
 
 #[test]
@@ -129,35 +131,51 @@ fn max_width_nine_byte_vint_decodes() {
 }
 
 proptest! {
-    /// Encode any u64 with the exemplary write-side encoder, decode with the new
-    /// canonical decoder → identity of value and consumed length.
-    #[test]
-    fn roundtrip_unsigned_identity(value in any::<u64>()) {
-        let mut buf = Vec::new();
-        write_vint::encode_unsigned(value, &mut buf);
-        let (decoded, consumed) = decode_unsigned(&buf).expect("decode encoded unsigned vint");
-        prop_assert_eq!(decoded, value);
-        prop_assert_eq!(consumed, buf.len());
-    }
-
-    /// Encode any i64 with the write-side signed (ZigZag) encoder, decode with
-    /// the new signed decoder → identity of value and consumed length.
-    #[test]
-    fn roundtrip_signed_identity(value in any::<i64>()) {
-        let mut buf = Vec::new();
-        write_vint::encode_signed(value, &mut buf);
-        let (decoded, consumed) = decode_signed(&buf).expect("decode encoded signed vint");
-        prop_assert_eq!(decoded, value);
-        prop_assert_eq!(consumed, buf.len());
-    }
-
-    /// The read-side `encode_vuint` and the new `decode_unsigned` also round-trip
-    /// (guards the read-side encoder against the decoder).
+    /// The read-side `encode_vuint` and the new `decode_unsigned` round-trip
+    /// (guards the read-side encoder against the decoder). Ungated — this holds
+    /// on every feature set.
     #[test]
     fn roundtrip_read_side_encoder(value in any::<u64>()) {
         let buf = encode_vuint(value);
         let (decoded, consumed) = decode_unsigned(&buf).expect("decode read-side encoded vint");
         prop_assert_eq!(decoded, value);
         prop_assert_eq!(consumed, buf.len());
+    }
+}
+
+/// Round-trip proofs against the exemplary write-side `serialization::vint`
+/// encoders. That module is `#[cfg(feature = "write-support")]`, so these tests
+/// only compile/run with `write-support`; the minimal-feature lib-test build
+/// (`--no-default-features --features all-compression`) skips them, keeping the
+/// ungated decode/proptest/corpus-differential coverage above building on every
+/// feature set (roborev #1638 finding 1).
+#[cfg(feature = "write-support")]
+mod write_side_roundtrip {
+    use super::{decode_signed, decode_unsigned};
+    use crate::storage::serialization::vint as write_vint;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Encode any u64 with the exemplary write-side encoder, decode with the
+        /// new canonical decoder → identity of value and consumed length.
+        #[test]
+        fn roundtrip_unsigned_identity(value in any::<u64>()) {
+            let mut buf = Vec::new();
+            write_vint::encode_unsigned(value, &mut buf);
+            let (decoded, consumed) = decode_unsigned(&buf).expect("decode encoded unsigned vint");
+            prop_assert_eq!(decoded, value);
+            prop_assert_eq!(consumed, buf.len());
+        }
+
+        /// Encode any i64 with the write-side signed (ZigZag) encoder, decode with
+        /// the new signed decoder → identity of value and consumed length.
+        #[test]
+        fn roundtrip_signed_identity(value in any::<i64>()) {
+            let mut buf = Vec::new();
+            write_vint::encode_signed(value, &mut buf);
+            let (decoded, consumed) = decode_signed(&buf).expect("decode encoded signed vint");
+            prop_assert_eq!(decoded, value);
+            prop_assert_eq!(consumed, buf.len());
+        }
     }
 }
