@@ -215,6 +215,9 @@ pub struct KeyOffsetCache {
     disabled: bool,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Cumulative count of entries evicted to stay within the byte budget
+    /// (issue #1571, B5). Relaxed atomic — advisory observability only.
+    evictions: AtomicU64,
 }
 
 impl std::fmt::Debug for KeyOffsetCache {
@@ -227,8 +230,23 @@ impl std::fmt::Debug for KeyOffsetCache {
             .field("resident_bytes", &self.resident_bytes())
             .field("hits", &self.hits.load(Ordering::Relaxed))
             .field("misses", &self.misses.load(Ordering::Relaxed))
+            .field("evictions", &self.evictions.load(Ordering::Relaxed))
             .finish()
     }
+}
+
+/// A point-in-time snapshot of one key cache's real observability counters
+/// (issue #1571, B5). Summed across live readers to build the process-level
+/// key-cache aggregate reported through `Database::stats().memory_stats`. Every
+/// field is a real counter/aggregate read from the live cache — never a
+/// fabricated placeholder.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct KeyCacheSnapshot {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub resident_bytes: usize,
+    pub capacity_bytes: usize,
 }
 
 impl KeyOffsetCache {
@@ -261,6 +279,7 @@ impl KeyOffsetCache {
             disabled: false,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -277,6 +296,7 @@ impl KeyOffsetCache {
             disabled: true,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -344,14 +364,20 @@ impl KeyOffsetCache {
         // now most-recently-used, so `pop_lru` never targets it while other entries
         // remain. The `len() > 1` guard keeps the entry we just resolved resident
         // even if it alone exceeds the budget (documented: single oversized entry).
+        let mut evicted_here: u64 = 0;
         while guard.current_bytes > self.per_shard_bytes && guard.lru.len() > 1 {
             match guard.lru.pop_lru() {
                 Some((evicted_key, _)) => {
                     let reclaimed = entry_cost(evicted_key.len());
                     guard.current_bytes = guard.current_bytes.saturating_sub(reclaimed);
+                    evicted_here += 1;
                 }
                 None => break,
             }
+        }
+        drop(guard);
+        if evicted_here > 0 {
+            self.evictions.fetch_add(evicted_here, Ordering::Relaxed);
         }
     }
 
@@ -389,6 +415,28 @@ impl KeyOffsetCache {
     /// Cumulative cache misses (test/observability instrumentation).
     pub fn miss_count(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative entries evicted to stay within budget (issue #1571, B5).
+    ///
+    /// Real relaxed-atomic counter; a [`disabled`](Self::disabled) no-op cache
+    /// never evicts and reports `0`.
+    pub fn eviction_count(&self) -> u64 {
+        self.evictions.load(Ordering::Relaxed)
+    }
+
+    /// A point-in-time snapshot of this cache's real observability counters,
+    /// summed across readers to build the process-level key-cache aggregate
+    /// (issue #1571, B5). Reads only relaxed atomics plus the per-shard locks
+    /// occupancy already uses — no new hot-path lock.
+    pub(crate) fn snapshot(&self) -> KeyCacheSnapshot {
+        KeyCacheSnapshot {
+            hits: self.hit_count(),
+            misses: self.miss_count(),
+            evictions: self.eviction_count(),
+            resident_bytes: self.resident_bytes(),
+            capacity_bytes: self.budget_bytes(),
+        }
     }
 }
 
@@ -445,6 +493,44 @@ mod tests {
         );
         assert_eq!(cache.len(), 2);
         assert!(cache.resident_bytes() <= cache.budget_bytes());
+    }
+
+    /// Issue #1571 (B5): the eviction counter reflects the real number of entries
+    /// evicted to stay within budget; the snapshot exposes the real numbers, and a
+    /// disabled cache reports honest zeros.
+    #[test]
+    fn eviction_count_and_snapshot_track_real_activity() {
+        // Single shard sized for exactly 2 five-byte keys.
+        let cache = KeyOffsetCache::with_budget_and_shards(budget_for(2, 5), 1);
+        assert_eq!(cache.eviction_count(), 0);
+
+        cache.insert(b"key-A".as_slice(), PartitionLoc::new(10, 100));
+        cache.insert(b"key-B".as_slice(), PartitionLoc::new(20, 200));
+        assert_eq!(cache.eviction_count(), 0, "still within budget");
+
+        // Each further distinct insert evicts exactly one LRU entry.
+        cache.insert(b"key-C".as_slice(), PartitionLoc::new(30, 300));
+        assert_eq!(cache.eviction_count(), 1);
+        cache.insert(b"key-D".as_slice(), PartitionLoc::new(40, 400));
+        assert_eq!(cache.eviction_count(), 2);
+
+        // One hit + one miss so the snapshot carries real counter values.
+        assert!(cache.get(b"key-D".as_slice()).is_some());
+        assert!(cache.get(b"absent".as_slice()).is_none());
+        let snap = cache.snapshot();
+        assert_eq!(snap.evictions, 2);
+        assert_eq!(snap.hits, 1);
+        assert_eq!(snap.misses, 1);
+        assert_eq!(snap.resident_bytes, cache.resident_bytes());
+        assert_eq!(snap.capacity_bytes, cache.budget_bytes());
+
+        // A disabled cache never evicts and reports honest zeros.
+        let disabled = KeyOffsetCache::disabled();
+        disabled.insert(b"k".as_slice(), PartitionLoc::new(1, 1));
+        let dsnap = disabled.snapshot();
+        assert_eq!(dsnap.evictions, 0);
+        assert_eq!(dsnap.resident_bytes, 0);
+        assert_eq!(dsnap.capacity_bytes, 0);
     }
 
     /// Task 1.2: BYTE bound — inserting more distinct equal-size keys than the

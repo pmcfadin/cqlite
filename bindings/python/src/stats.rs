@@ -50,6 +50,15 @@ impl DatabaseStats {
         let mem = &stats.memory_stats;
         memory.set_item("block_cache_hits", mem.block_cache_hits)?;
         memory.set_item("block_cache_misses", mem.block_cache_misses)?;
+        // Issue #1571 (B5): honest cache observability — real chunk-cache
+        // evictions/capacity and the aggregated key-cache counters.
+        memory.set_item("block_cache_evictions", mem.block_cache_evictions)?;
+        memory.set_item("block_cache_capacity_bytes", mem.block_cache_capacity_bytes)?;
+        memory.set_item("key_cache_hits", mem.key_cache_hits)?;
+        memory.set_item("key_cache_misses", mem.key_cache_misses)?;
+        memory.set_item("key_cache_evictions", mem.key_cache_evictions)?;
+        memory.set_item("key_cache_resident_bytes", mem.key_cache_resident_bytes)?;
+        memory.set_item("key_cache_capacity_bytes", mem.key_cache_capacity_bytes)?;
         memory.set_item("row_cache_hits", mem.row_cache_hits)?;
         memory.set_item("row_cache_misses", mem.row_cache_misses)?;
         memory.set_item("total_memory_used", mem.total_memory_used)?;
@@ -94,11 +103,18 @@ impl DatabaseStats {
     /// Memory and cache statistics.
     ///
     /// Returns a dictionary containing:
-    /// - `block_cache_hits`: Number of block cache hits
+    /// - `block_cache_hits`: Number of block (decompressed-chunk) cache hits
     /// - `block_cache_misses`: Number of block cache misses
+    /// - `block_cache_evictions`: Chunk-cache entries evicted to stay within budget (B5, #1571)
+    /// - `block_cache_capacity_bytes`: Configured chunk-cache byte budget (B5, #1571)
+    /// - `key_cache_hits`: Aggregate key→partition-offset cache hits (B5, #1571)
+    /// - `key_cache_misses`: Aggregate key-cache misses (B5, #1571)
+    /// - `key_cache_evictions`: Aggregate key-cache evictions (B5, #1571)
+    /// - `key_cache_resident_bytes`: Aggregate key-cache resident bytes (B5, #1571)
+    /// - `key_cache_capacity_bytes`: Aggregate key-cache byte budget (B5, #1571)
     /// - `row_cache_hits`: Number of row cache hits
     /// - `row_cache_misses`: Number of row cache misses
-    /// - `total_memory_used`: Total memory used in bytes
+    /// - `total_memory_used`: Total memory used in bytes (chunk-cache resident bytes)
     /// - `buffer_allocations`: Number of buffer allocations
     /// - `buffer_deallocations`: Number of buffer deallocations
     #[getter]

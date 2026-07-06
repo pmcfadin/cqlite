@@ -36,6 +36,7 @@
 
 pub mod key_offset;
 
+pub(crate) use key_offset::KeyCacheSnapshot;
 pub use key_offset::{
     KeyOffsetCache, PartitionLoc, DEFAULT_KEY_CACHE_BYTES, DEFAULT_KEY_CACHE_SHARDS,
 };
@@ -136,6 +137,10 @@ pub struct DecompressedChunkCache {
     disabled: bool,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Cumulative count of entries evicted to stay within the byte budget
+    /// (issue #1571, B5). Relaxed atomic — advisory observability, never on a
+    /// fence-bearing path.
+    evictions: AtomicU64,
 }
 
 impl std::fmt::Debug for DecompressedChunkCache {
@@ -146,6 +151,7 @@ impl std::fmt::Debug for DecompressedChunkCache {
             .field("resident_bytes", &self.resident_bytes())
             .field("hits", &self.hits.load(Ordering::Relaxed))
             .field("misses", &self.misses.load(Ordering::Relaxed))
+            .field("evictions", &self.evictions.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -176,6 +182,7 @@ impl DecompressedChunkCache {
             disabled: false,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -195,6 +202,7 @@ impl DecompressedChunkCache {
             disabled: true,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -264,13 +272,19 @@ impl DecompressedChunkCache {
         // most-recently-used, so `pop_lru` never targets it while other entries
         // remain. The `len() > 1` guard keeps the chunk we just produced resident
         // even if it alone exceeds the budget (documented: single oversized entry).
+        let mut evicted_here: u64 = 0;
         while guard.current_bytes > self.budget_per_shard && guard.lru.len() > 1 {
             match guard.lru.pop_lru() {
                 Some((_, evicted)) => {
                     guard.current_bytes = guard.current_bytes.saturating_sub(evicted.len());
+                    evicted_here += 1;
                 }
                 None => break,
             }
+        }
+        drop(guard);
+        if evicted_here > 0 {
+            self.evictions.fetch_add(evicted_here, Ordering::Relaxed);
         }
         arc
     }
@@ -308,6 +322,14 @@ impl DecompressedChunkCache {
     /// Cumulative cache misses (test/observability instrumentation).
     pub fn miss_count(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative entries evicted to stay within budget (issue #1571, B5).
+    ///
+    /// Real relaxed-atomic counter; a [`disabled`](Self::disabled) no-op cache
+    /// never evicts and reports `0`.
+    pub fn eviction_count(&self) -> u64 {
+        self.evictions.load(Ordering::Relaxed)
     }
 }
 
@@ -373,6 +395,37 @@ mod tests {
             "entry count must stay bounded (got {})",
             cache.len()
         );
+    }
+
+    /// Issue #1571 (B5): the eviction counter reflects the real number of entries
+    /// evicted to stay within budget, and an insert within budget increments it by
+    /// zero (no-fabrication).
+    #[test]
+    fn eviction_count_tracks_real_evictions() {
+        // Budget holds exactly 2 * 100-byte chunks.
+        let cache = DecompressedChunkCache::with_budget_and_shards(200, 1);
+        assert_eq!(cache.eviction_count(), 0, "fresh cache has evicted nothing");
+
+        cache.insert(ChunkKey::new(1, 0), chunk(0x00, 100));
+        cache.insert(ChunkKey::new(1, 1), chunk(0x01, 100));
+        // Still within budget (200 <= 200): no eviction yet.
+        assert_eq!(cache.eviction_count(), 0);
+
+        // Each further distinct insert pushes over budget → exactly one eviction.
+        cache.insert(ChunkKey::new(1, 2), chunk(0x02, 100));
+        assert_eq!(cache.eviction_count(), 1);
+        cache.insert(ChunkKey::new(1, 3), chunk(0x03, 100));
+        assert_eq!(cache.eviction_count(), 2);
+    }
+
+    /// A disabled no-op cache never evicts and reports a real zero.
+    #[test]
+    fn disabled_cache_reports_zero_evictions() {
+        let cache = DecompressedChunkCache::disabled();
+        for i in 0..10u64 {
+            cache.insert(ChunkKey::new(1, i), chunk(i as u8, 4096));
+        }
+        assert_eq!(cache.eviction_count(), 0);
     }
 
     /// A single entry larger than the budget is retained (never evict below one
