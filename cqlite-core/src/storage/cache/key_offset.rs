@@ -21,8 +21,12 @@
 //! - **Sharded `Mutex<LruCache>`, entry-count bounded** (D3): `LruCache::get`
 //!   mutates recency (hence a `Mutex`, not an `RwLock`), hand-sharded (power-of-two,
 //!   masked) so the hit path locks exactly ONE shard, never a process-wide lock —
-//!   B1's concurrency rule. Each shard's `LruCache::new(NonZeroUsize)` evicts LRU by
-//!   count on its own; entries are uniform and tiny so no byte accounting is needed.
+//!   B1's concurrency rule. Each shard is an `LruCache::unbounded()` whose per-shard
+//!   entry cap is enforced MANUALLY on insert (`pop_lru` while over cap), mirroring
+//!   B1's [`DecompressedChunkCache`]. This keeps allocation proportional to actual
+//!   occupancy: an empty cache allocates no bucket array, so many concurrently-open
+//!   readers do not each pre-pay a full-capacity hash table (the <128MB budget).
+//!   Entries are uniform and tiny so no byte accounting is needed.
 //! - **Resolution-hit only, never a MISS** (D4): the cache stores only a location a
 //!   lookup actually resolved, never a definitive MISS, so it can never fabricate a
 //!   hit for a key the underlying structure did not resolve. Both read paths preserve
@@ -49,12 +53,14 @@
 
 use lru::LruCache;
 use std::hash::{Hash, Hasher};
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// Default per-cache entry capacity. Entries are tiny (key bytes + a 12-byte
-/// value), so a generous count stays well within the memory budget.
+/// value), and each shard's bucket array grows only with actual occupancy
+/// (unbounded `LruCache` + manual eviction), so an idle/empty reader's cache
+/// costs ~nothing even at this generous count — the memory footprint tracks the
+/// keys actually resolved, not the configured capacity.
 pub const DEFAULT_KEY_CACHE_ENTRIES: usize = 65_536;
 
 /// Default shard count (power of two), mirroring [`DecompressedChunkCache`]'s
@@ -98,14 +104,20 @@ impl PartitionLoc {
     }
 }
 
-/// One cache shard: an entry-count-bounded `LruCache` mapping the raw
-/// partition-key bytes to the resolved [`PartitionLoc`], behind a `Mutex` (the
-/// hit path mutates recency, so an `RwLock` would degrade to a `Mutex`).
+/// One cache shard: an `unbounded` `LruCache` mapping the raw partition-key bytes
+/// to the resolved [`PartitionLoc`], behind a `Mutex` (the hit path mutates
+/// recency, so an `RwLock` would degrade to a `Mutex`). The entry-count bound is
+/// enforced manually on insert so the bucket array grows only with occupancy.
 type KeyShard = Mutex<LruCache<Box<[u8]>, PartitionLoc>>;
 
 /// A bounded, sharded key→partition-offset cache.
 pub struct KeyOffsetCache {
     shards: Box<[KeyShard]>,
+    /// Maximum resident entries PER shard. Enforced manually in
+    /// [`insert`](Self::insert) (`pop_lru` while over cap) since each shard is an
+    /// `unbounded` `LruCache`. Always `>= 1` for an enabled cache; `0` when
+    /// [`disabled`](Self::disabled).
+    per_shard_cap: usize,
     /// `shards.len() - 1`; `shards.len()` is always a power of two.
     mask: usize,
     /// When `true` this is a genuine no-op cache (honoring
@@ -143,18 +155,17 @@ impl KeyOffsetCache {
     /// deterministic eviction ordering; production uses [`DEFAULT_KEY_CACHE_SHARDS`].
     pub fn with_capacity_and_shards(total_entries: usize, shard_count: usize) -> Self {
         let shard_count = shard_count.max(1).next_power_of_two();
-        // At least one entry per shard so `LruCache::new` gets a non-zero capacity
-        // and the cache can always retain the entry it just resolved.
-        let per_shard = (total_entries / shard_count).max(1);
-        // `per_shard >= 1`, so this `NonZeroUsize` construction never fails; the
-        // `unwrap_or` keeps the code panic-free without an `expect`.
-        let cap = NonZeroUsize::new(per_shard).unwrap_or(NonZeroUsize::MIN);
+        // At least one entry per shard so the cache can always retain the entry it
+        // just resolved. Each shard is an `unbounded` `LruCache` whose bucket array
+        // grows with actual occupancy; the cap is enforced manually on insert.
+        let per_shard_cap = (total_entries / shard_count).max(1);
         let mut shards = Vec::with_capacity(shard_count);
         for _ in 0..shard_count {
-            shards.push(Mutex::new(LruCache::new(cap)));
+            shards.push(Mutex::new(LruCache::unbounded()));
         }
         Self {
             shards: shards.into_boxed_slice(),
+            per_shard_cap,
             mask: shard_count - 1,
             disabled: false,
             hits: AtomicU64::new(0),
@@ -169,7 +180,8 @@ impl KeyOffsetCache {
     pub fn disabled() -> Self {
         Self {
             // One dummy shard so shard indexing stays valid; nothing is ever stored.
-            shards: vec![Mutex::new(LruCache::new(NonZeroUsize::MIN))].into_boxed_slice(),
+            shards: vec![Mutex::new(LruCache::unbounded())].into_boxed_slice(),
+            per_shard_cap: 0,
             mask: 0,
             disabled: true,
             hits: AtomicU64::new(0),
@@ -218,15 +230,24 @@ impl KeyOffsetCache {
     }
 
     /// Insert `loc` under the raw partition-key bytes `key`. On a disabled cache
-    /// this is a no-op. The owning shard evicts its LRU entry if it is at capacity.
+    /// this is a no-op. The owning shard evicts its LRU entry(ies) if inserting
+    /// pushes it over the per-shard cap.
     pub fn insert(&self, key: &[u8], loc: PartitionLoc) {
         if self.disabled {
             return;
         }
         let mut guard = Self::lock(self.shard_for(key));
-        // `LruCache::put` evicts the least-recently-used entry when at capacity and
-        // promotes the inserted key to most-recently-used.
+        // Each shard is an `unbounded` `LruCache`, so `put` never evicts: it inserts
+        // (or updates in place) and promotes the key to most-recently-used. Enforce
+        // the per-shard cap manually — after the insert the new key is MRU, so
+        // `pop_lru` removes the genuine least-recently-used entry. The loop tolerates
+        // a cap that was lowered between inserts; normally it pops at most once.
         guard.put(Box::from(key), loc);
+        while guard.len() > self.per_shard_cap {
+            if guard.pop_lru().is_none() {
+                break;
+            }
+        }
     }
 
     /// Total resident entry count across all shards.
@@ -242,10 +263,9 @@ impl KeyOffsetCache {
     /// The configured total entry capacity (per-shard capacity × shard count). A
     /// [`disabled`](Self::disabled) no-op cache reports `0`.
     pub fn capacity(&self) -> usize {
-        if self.disabled {
-            return 0;
-        }
-        self.shards.iter().map(|m| Self::lock(m).cap().get()).sum()
+        // Shards are `unbounded` `LruCache`s (their `cap()` is `usize::MAX`); the
+        // real bound is the manually enforced per-shard cap.
+        self.per_shard_cap.saturating_mul(self.shards.len())
     }
 
     /// Cumulative cache hits (test/observability instrumentation).

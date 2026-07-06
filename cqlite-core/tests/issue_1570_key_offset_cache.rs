@@ -73,7 +73,13 @@ mod big {
         data_db: &Path,
         platform: Arc<cqlite_core::platform::Platform>,
     ) -> Option<Vec<u8>> {
-        let index_path = data_db.with_file_name("nb-1-big-Index.db");
+        // Derive the Index.db name from the DISCOVERED Data.db filename (swap the
+        // `-Data.db` suffix for `-Index.db`) so the probe tracks whatever fixture
+        // `find_data_db` actually found — not a hardcoded gen-1 `nb-big` name that
+        // would silently self-skip on any other generation/format.
+        let data_name = data_db.file_name()?.to_string_lossy();
+        let index_name = format!("{}-Index.db", data_name.strip_suffix("-Data.db")?);
+        let index_path = data_db.with_file_name(index_name);
         if !index_path.exists() {
             return None;
         }
