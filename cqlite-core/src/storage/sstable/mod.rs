@@ -386,6 +386,30 @@ impl SSTableManager {
         }
     }
 
+    /// Process-level aggregate of the per-reader key→partition-offset caches
+    /// (issue #1571, B5). Sums each reader's real observability counters (hits,
+    /// misses, evictions, resident bytes, capacity bytes) into one snapshot.
+    ///
+    /// Iterates the canonical by-id reader map (`self.readers`), which holds each
+    /// reader **exactly once** — the by-name `table_readers` map re-references the
+    /// same `Arc`s and would double-count, so it is deliberately not used here.
+    /// Every field is read from a live counter/aggregate — no fabricated values.
+    pub(crate) async fn aggregate_key_cache_stats(
+        &self,
+    ) -> crate::storage::cache::KeyCacheSnapshot {
+        let readers = self.readers.read().await;
+        let mut agg = crate::storage::cache::KeyCacheSnapshot::default();
+        for reader in readers.values() {
+            let s = reader.key_offset_cache.snapshot();
+            agg.hits = agg.hits.saturating_add(s.hits);
+            agg.misses = agg.misses.saturating_add(s.misses);
+            agg.evictions = agg.evictions.saturating_add(s.evictions);
+            agg.resident_bytes = agg.resident_bytes.saturating_add(s.resident_bytes);
+            agg.capacity_bytes = agg.capacity_bytes.saturating_add(s.capacity_bytes);
+        }
+        agg
+    }
+
     /// Create a new SSTable manager
     pub async fn new(
         path: &Path,

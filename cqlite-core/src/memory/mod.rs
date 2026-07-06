@@ -66,6 +66,8 @@ impl MemoryManager {
         if let Some(cache) = &self.chunk_cache {
             stats.block_cache_hits = cache.hit_count();
             stats.block_cache_misses = cache.miss_count();
+            stats.block_cache_evictions = cache.eviction_count();
+            stats.block_cache_capacity_bytes = cache.budget_bytes();
             stats.total_memory_used = cache.resident_bytes();
         }
         Ok(stats)
@@ -137,6 +139,37 @@ pub struct MemoryStats {
     /// Block cache misses (real B1 cache miss count when wired).
     pub block_cache_misses: u64,
 
+    /// Block cache evictions: entries the B1 decompressed-chunk cache evicted to
+    /// stay within its byte budget (issue #1571, B5). Real `eviction_count()`
+    /// when wired; `0` (honest — no cache, no evictions) otherwise. High churn
+    /// relative to hits signals an undersized `block_cache_capacity_bytes`.
+    pub block_cache_evictions: u64,
+
+    /// Block cache configured byte budget (issue #1571, B5): the B1 cache's
+    /// `budget_bytes()` when wired, so a hit rate can be read against the budget
+    /// it was measured under; `0` when no cache is wired / block caching disabled.
+    pub block_cache_capacity_bytes: usize,
+
+    /// Key cache hits: aggregate across the per-reader B4 key→partition-offset
+    /// caches (issue #1571, B5). A hit lets a repeated point read skip the
+    /// `Index.db`/trie descent. Real summed counter; `0` when no reader is open.
+    pub key_cache_hits: u64,
+
+    /// Key cache misses: aggregate across the per-reader B4 caches (issue #1571).
+    pub key_cache_misses: u64,
+
+    /// Key cache evictions: aggregate across the per-reader B4 caches (issue
+    /// #1571) — entries evicted to stay within each reader's byte budget.
+    pub key_cache_evictions: u64,
+
+    /// Key cache resident bytes: aggregate approximate resident footprint of the
+    /// per-reader B4 caches (issue #1571).
+    pub key_cache_resident_bytes: usize,
+
+    /// Key cache capacity bytes: summed configured byte budget across the
+    /// per-reader B4 caches (issue #1571).
+    pub key_cache_capacity_bytes: usize,
+
     /// Row cache hits. Retained for shape compatibility; the row cache was
     /// deleted (issue #1568), so this reports `0` (full surface is Epic B / B5).
     pub row_cache_hits: u64,
@@ -162,6 +195,18 @@ impl MemoryStats {
         let total = self.block_cache_hits + self.block_cache_misses;
         if total > 0 {
             self.block_cache_hits as f64 / total as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Calculate the aggregate key-cache hit rate (issue #1571, B5) from the real
+    /// summed hit and miss counts. Returns `0.0` when there has been no key-cache
+    /// activity (honest — not a structural pin).
+    pub fn key_cache_hit_rate(&self) -> f64 {
+        let total = self.key_cache_hits + self.key_cache_misses;
+        if total > 0 {
+            self.key_cache_hits as f64 / total as f64
         } else {
             0.0
         }
@@ -193,6 +238,16 @@ mod tests {
         assert_eq!(stats.block_cache_misses, 0);
         assert_eq!(stats.total_memory_used, 0);
         assert_eq!(stats.block_cache_hit_rate(), 0.0);
+        // Issue #1571 (B5): every new cache-observability field reports an honest
+        // zero when no cache is wired — never a fabricated placeholder.
+        assert_eq!(stats.block_cache_evictions, 0);
+        assert_eq!(stats.block_cache_capacity_bytes, 0);
+        assert_eq!(stats.key_cache_hits, 0);
+        assert_eq!(stats.key_cache_misses, 0);
+        assert_eq!(stats.key_cache_evictions, 0);
+        assert_eq!(stats.key_cache_resident_bytes, 0);
+        assert_eq!(stats.key_cache_capacity_bytes, 0);
+        assert_eq!(stats.key_cache_hit_rate(), 0.0);
     }
 
     #[test]
@@ -218,5 +273,27 @@ mod tests {
             stats.block_cache_hit_rate() > 0.0,
             "a hit makes the reported rate non-zero (not structural 0.0)"
         );
+        // Issue #1571 (B5): capacity is the real budget; no eviction yet.
+        assert_eq!(stats.block_cache_capacity_bytes, cache.budget_bytes());
+        assert_eq!(stats.block_cache_evictions, 0);
+    }
+
+    #[test]
+    fn stats_bridge_reports_real_b1_eviction_count() {
+        // Issue #1571 (B5): a wired manager surfaces the chunk cache's real
+        // eviction count. Tiny budget on a single shard forces deterministic
+        // evictions.
+        let cache = Arc::new(DecompressedChunkCache::with_budget_and_shards(200, 1));
+        let manager = MemoryManager::with_chunk_cache(Arc::clone(&cache));
+        for i in 0..5u64 {
+            cache.insert(ChunkKey::new(1, i), vec![i as u8; 100]);
+        }
+        let stats = manager.stats().expect("stats");
+        assert_eq!(stats.block_cache_evictions, cache.eviction_count());
+        assert!(
+            stats.block_cache_evictions > 0,
+            "over-budget inserts must have evicted"
+        );
+        assert_eq!(stats.block_cache_capacity_bytes, cache.budget_bytes());
     }
 }

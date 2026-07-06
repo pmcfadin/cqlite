@@ -275,6 +275,138 @@ async fn stats_block_cache_hit_rate_and_occupancy_are_real() {
     );
 }
 
+/// Issue #1571 (B5 — honest cache observability): after repeated point reads that
+/// exercise BOTH read caches, `Database::stats().memory_stats` surfaces the REAL
+/// hit/eviction/occupancy/capacity numbers for the B1 chunk cache AND the
+/// aggregated B4 key cache — never a fabricated placeholder. On pre-change code the
+/// new fields do not exist and the key cache is entirely absent from the surface.
+///
+/// A point lookup (`WHERE id = <uuid>`) routes through both the cache-consulting
+/// chunk-read site and the per-reader key→partition-offset cache, so a repeated
+/// identical read makes both caches report a real hit.
+#[cfg(feature = "cli-helpers")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn stats_surface_reports_real_chunk_and_key_cache_observability() {
+    let Some(_) = resolve_or_skip("test_basic", "simple_table") else {
+        return;
+    };
+    let Some(db) = open_fixture_db(
+        "test_basic",
+        "simple_table",
+        "basic-types.cql",
+        Config::default(),
+    )
+    .await
+    else {
+        return;
+    };
+
+    let scan = db
+        .execute("SELECT * FROM test_basic.simple_table")
+        .await
+        .expect("scan for a key");
+    assert!(
+        !scan.rows.is_empty(),
+        "fixture present but scan returned 0 rows"
+    );
+    let id = scan
+        .rows
+        .iter()
+        .find_map(|r| r.get("id").and_then(uuid_literal))
+        .expect("a row with a UUID id");
+
+    // Same point read twice: the second is served warm from both caches.
+    let q = format!("SELECT * FROM test_basic.simple_table WHERE id = {id}");
+    assert_eq!(db.execute(&q).await.expect("cold").rows.len(), 1);
+    assert_eq!(db.execute(&q).await.expect("warm").rows.len(), 1);
+
+    let ms = db.stats().await.expect("stats").memory_stats;
+
+    // Chunk cache (B1): real hits + non-zero hit rate + occupancy + a real budget.
+    assert!(
+        ms.block_cache_hits > 0 && ms.block_cache_hit_rate() > 0.0,
+        "repeat cached read must yield real, non-zero chunk-cache hits (got {} hits, rate {})",
+        ms.block_cache_hits,
+        ms.block_cache_hit_rate()
+    );
+    assert!(
+        ms.total_memory_used > 0,
+        "reported occupancy must track the B1 cache's real resident bytes"
+    );
+    assert!(
+        ms.block_cache_capacity_bytes > 0,
+        "an enabled chunk cache reports its real configured budget, not a placeholder"
+    );
+    // Evictions are a real counter; on a tiny fixture there is likely no eviction,
+    // so we assert only that hit rate is bounded (a real ratio), not fabricated.
+    assert!(
+        ms.block_cache_hit_rate() <= 1.0,
+        "hit rate is a real ratio in [0,1]"
+    );
+
+    // Key cache (B4), aggregated across readers: the second identical point read
+    // must have been served by the per-reader key cache → real hit + capacity.
+    assert!(
+        ms.key_cache_hits > 0 && ms.key_cache_hit_rate() > 0.0,
+        "repeat point read must yield real, non-zero key-cache hits (got {} hits, rate {})",
+        ms.key_cache_hits,
+        ms.key_cache_hit_rate()
+    );
+    assert!(
+        ms.key_cache_capacity_bytes > 0,
+        "an enabled key cache reports its real aggregated budget"
+    );
+    assert!(
+        ms.key_cache_hit_rate() <= 1.0,
+        "key-cache hit rate is a real ratio in [0,1]"
+    );
+}
+
+/// Issue #1571 (B5): with the read caches disabled, EVERY cache-observability
+/// field reports a real zero — the honest reflection of no caching, never a
+/// fabricated non-zero placeholder. Contrast the enabled test above.
+#[cfg(feature = "cli-helpers")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn stats_surface_disabled_caches_report_honest_zeros() {
+    let Some(_) = resolve_or_skip("test_basic", "simple_table") else {
+        return;
+    };
+    let mut config = Config::default();
+    config.memory.block_cache.enabled = false;
+    let Some(db) = open_fixture_db("test_basic", "simple_table", "basic-types.cql", config).await
+    else {
+        return;
+    };
+
+    let scan = db
+        .execute("SELECT * FROM test_basic.simple_table")
+        .await
+        .expect("scan for a key");
+    assert!(!scan.rows.is_empty(), "fixture present but 0 rows");
+    let id = scan
+        .rows
+        .iter()
+        .find_map(|r| r.get("id").and_then(uuid_literal))
+        .expect("a row with a UUID id");
+    let q = format!("SELECT * FROM test_basic.simple_table WHERE id = {id}");
+    assert_eq!(db.execute(&q).await.expect("first").rows.len(), 1);
+    assert_eq!(db.execute(&q).await.expect("second").rows.len(), 1);
+
+    let ms = db.stats().await.expect("stats").memory_stats;
+    assert_eq!(ms.block_cache_hits, 0);
+    assert_eq!(ms.block_cache_evictions, 0);
+    assert_eq!(ms.block_cache_capacity_bytes, 0);
+    assert_eq!(ms.total_memory_used, 0);
+    assert_eq!(ms.key_cache_hits, 0);
+    assert_eq!(ms.key_cache_misses, 0);
+    assert_eq!(ms.key_cache_evictions, 0);
+    assert_eq!(ms.key_cache_resident_bytes, 0);
+    assert_eq!(ms.key_cache_capacity_bytes, 0);
+    assert_eq!(ms.key_cache_hit_rate(), 0.0);
+}
+
 /// Issue #1568 (roborev F1): `block_cache.enabled == false` must GENUINELY
 /// disable caching, not be a decorative toggle. The contrast to
 /// `stats_block_cache_hit_rate_and_occupancy_are_real` (which opens with the
@@ -419,6 +551,15 @@ fn memory_stats_semver_shape_preserved() {
     let _: u64 = ms.buffer_deallocations;
     let _: f64 = ms.block_cache_hit_rate();
     let _: f64 = ms.row_cache_hit_rate();
+    // Issue #1571 (B5): additive observability fields (no existing field renamed).
+    let _: u64 = ms.block_cache_evictions;
+    let _: usize = ms.block_cache_capacity_bytes;
+    let _: u64 = ms.key_cache_hits;
+    let _: u64 = ms.key_cache_misses;
+    let _: u64 = ms.key_cache_evictions;
+    let _: usize = ms.key_cache_resident_bytes;
+    let _: usize = ms.key_cache_capacity_bytes;
+    let _: f64 = ms.key_cache_hit_rate();
 }
 
 /// Open a queryable `Database` over one fixture table, isolated in a temp dir so
