@@ -206,9 +206,12 @@ async fn positional_emit_across_column_shapes() {
 }
 
 /// Determinism-by-construction: two independent scans of the same fixture yield
-/// the identical per-row column set, and BOTH perform zero per-row sorts. This is
-/// the guarantee that replaced the per-row alphabetical sort — the emit order is
-/// fixed by the serialization header, not by `HashMap` iteration.
+/// the identical per-row column SET, and BOTH perform zero per-row sorts (the
+/// per-row alphabetical sort that this change removed). This asserts stability of
+/// the surfaced column set plus the zero-sort guarantee; it does NOT observe emit
+/// ORDER, because the public result is a name-keyed map (issue #1334) whose
+/// key iteration order is not the positional emit order — cross-scan positional
+/// order is unobservable at this layer.
 #[tokio::test]
 #[serial]
 async fn two_scans_identical_columns_without_sort() {

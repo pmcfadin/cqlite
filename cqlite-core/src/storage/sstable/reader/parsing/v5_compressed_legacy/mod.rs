@@ -685,21 +685,35 @@ fn row_has_non_key_cell(cells: &[(Arc<str>, Value)], schema: &TableSchema) -> bo
     })
 }
 
-/// Issue #1642 (K3): merge accumulated static-column cells into a clustering
-/// row's positional cell vector, CLUSTERING-ROW-WINS (a static cell is appended
-/// only when the clustering row does not already carry that column). This is the
-/// ordered-`Vec` analogue of the former `HashMap::entry(..).or_insert_with(..)`
-/// merge: static and regular columns are disjoint in Cassandra, so the membership
-/// check is defensive and the common effect is a concatenation. The static cells
-/// are appended AFTER the clustering row's own cells; the merged order is never
-/// user-visible (the query result is a name-keyed map, issue #1334) — this only
-/// preserves determinism-by-construction.
+/// Issue #1642 (K3): append accumulated static-column cells onto a clustering
+/// row's positional cell vector. This is an unconditional `extend` (O(n_static))
+/// — NOT a per-cell membership scan — because a static column name can NEVER
+/// collide with a name already in the clustering row's cells, so there is no
+/// clustering-row-wins conflict to resolve.
+///
+/// Disjointness proof (this codebase). `static_cells` is the cell vector of an
+/// IS_STATIC row; its names are exactly `RowColumnResolution::columns_for(true)`
+/// — header columns with `is_static == true` AND `!is_primary_key` AND
+/// `!is_clustering`. A static row has no clustering prefix, so it receives zero
+/// clustering-key pseudo-cells (row_data.rs: `clustering_values` is empty when
+/// static). A clustering row's `cells` names are the clustering-key pseudo-cells
+/// (issue #229) PLUS `columns_for(false)` — header columns with `is_static ==
+/// false` AND `!is_primary_key` AND `!is_clustering`. Every column has exactly
+/// one `is_static` value, so the `is_static == want_static` filter makes
+/// `columns_for(true)` and `columns_for(false)` name-disjoint; and
+/// `columns_for(true)` excludes clustering-key columns, so no static cell shares
+/// a clustering-key pseudo-cell name. Hence the two name sets are disjoint and
+/// the former membership guard could never fire.
+///
+/// Appending AFTER the clustering row's own cells keeps the merged order
+/// deterministic-by-construction (never user-visible: the query result is a
+/// name-keyed map, issue #1334).
 fn merge_static_cells(cells: &mut RowCells, static_cells: &RowCells) {
-    for (name, value) in static_cells {
-        if !cells.iter().any(|(existing, _)| existing == name) {
-            cells.push((Arc::clone(name), value.clone()));
-        }
-    }
+    cells.extend(
+        static_cells
+            .iter()
+            .map(|(name, value)| (Arc::clone(name), value.clone())),
+    );
 }
 
 /// Issue #932/#1741: build the user-facing `ScanRow` display value for a parsed
