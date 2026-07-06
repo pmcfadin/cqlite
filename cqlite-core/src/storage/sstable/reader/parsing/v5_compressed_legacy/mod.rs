@@ -123,6 +123,20 @@ pub(super) struct ColumnToParse<'a> {
     /// name; for a DROPPED column (never emitted) it mirrors the on-disk header
     /// name and is unused.
     pub(super) name: Arc<str>,
+    /// Precomputed value-decode dispatch (Epic J / issue #1635), resolved ONCE per
+    /// block from the AUTHORITATIVE declared type (the supplied-schema type when
+    /// matched, else the on-disk header marshal type for a DROPPED column — exactly
+    /// the type `parse_cell_value_schema_order` decoded against per cell before J1).
+    /// The per-cell decode `match`es on this instead of re-lowercasing + string-
+    /// matching every cell (no per-cell `to_lowercase`, no per-cell allocation).
+    pub(super) kind: CellKind,
+    /// Precomputed complex-ness (Epic J / issue #1635): `true` for a non-frozen
+    /// collection / multicell UDT (routed to `parse_complex_column`), `false` for a
+    /// single-cell scalar / frozen value. Resolved ONCE per block via
+    /// `is_complex_column` on the authoritative complex-ness type (on-disk header
+    /// marshal type preferred, supplied-schema type on the header-empty fallback) —
+    /// the row body reads this instead of calling `is_complex_column` per row.
+    pub(super) is_complex: bool,
 }
 
 /// Pre-resolved header→schema column ordering for a whole SSTable block.
@@ -206,10 +220,24 @@ impl<'a> RowColumnResolution<'a> {
                                 .map(|c| c.name.as_str())
                                 .unwrap_or(col_info.name.as_str()),
                         );
+                        // J1 (issue #1635): resolve dispatch ONCE per column here.
+                        // `value_type` drives the scalar decode dispatch — the
+                        // supplied-schema type when matched, else the on-disk header
+                        // marshal type for a DROPPED column (exactly the type the
+                        // per-cell path decoded against). `is_complex` uses the
+                        // header marshal type (authoritative complex-ness source,
+                        // carries `UserType(...)`).
+                        let value_type = schema
+                            .map(|c| c.data_type.as_str())
+                            .unwrap_or(col_info.column_type.as_str());
                         ColumnToParse {
                             schema,
                             header_type: Some(col_info.column_type.as_str()),
                             name,
+                            kind: CellKind::from_type(value_type),
+                            is_complex: V5CompressedLegacyParser::is_complex_column(
+                                col_info.column_type.as_str(),
+                            ),
                         }
                     })
                     .collect()
@@ -252,6 +280,12 @@ impl<'a> RowColumnResolution<'a> {
                         schema: Some(col),
                         header_type: None,
                         name: Arc::from(col.name.as_str()),
+                        // J1 (issue #1635): header-empty fallback — the supplied
+                        // schema type is the only authoritative source for both the
+                        // scalar dispatch and complex-ness (matches the pre-J1
+                        // `complex_type = header_type.unwrap_or(&column.data_type)`).
+                        kind: CellKind::from_type(&col.data_type),
+                        is_complex: V5CompressedLegacyParser::is_complex_column(&col.data_type),
                     })
                     .collect()
             };
@@ -750,6 +784,7 @@ pub struct V5CompressedLegacyParser {
 
 mod block_emit;
 mod block_emit_windowed;
+mod cell_kind;
 mod cell_value;
 mod compaction;
 mod complex_column;
@@ -765,6 +800,10 @@ mod row_framing;
 mod udt;
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
+// Per-column decode dispatch tag (Epic J / issue #1635). Imported into this
+// module's namespace so the `use super::*` sibling modules (`cell_value`,
+// `row_data`) can name it via `super::*`.
+use cell_kind::CellKind;
 use partition_shadow::{clustering_reversed_flags, PartitionShadow};
 // #1741: shared partition-header need-more classifier used by both sliding
 // parsers (`block_emit_windowed` + `compaction`) via their `use super::*` glob.

@@ -132,14 +132,18 @@ async fn learn_point_sql(db: &Database, table: &str) -> Option<String> {
     ))
 }
 
-/// Scenario (J1 currency): a full scan normalizes the type name per cell, so
-/// `TYPE_NORMALIZE_CALLS` scales with the rows scanned. Two normalization sites
-/// fire per non-key cell today (the value-parse `to_lowercase` and the
-/// per-column `is_complex_column`), so the count is at least one per returned row.
-/// J1 (zero `to_lowercase` per cell) flips this assertion to `== 0`.
+/// Scenario (J1 delivered): a full scan resolves each column's decode dispatch
+/// ONCE per block (`RowColumnResolution::build`), so NO `to_lowercase` runs in the
+/// per-cell decode path. `TYPE_NORMALIZE_CALLS` — the per-cell-loop normalization
+/// gauge — therefore reads exactly `0` after a scan. On `main` (pre-J1) two
+/// normalization sites fired per non-key cell (the value-parse `to_lowercase` and
+/// the per-row `is_complex_column`), so the count was at least one per returned row;
+/// this `== 0` assertion FAILS there and PASSES after J1. The parallel `rows > 0`
+/// assertion keeps the check non-vacuous: the per-column dispatch must still decode
+/// real rows, not skip them.
 #[tokio::test]
 #[serial]
-async fn scan_normalizes_type_per_cell() {
+async fn scan_does_not_normalize_type_per_cell() {
     if !fixture_data_present("test_basic", "simple_table") {
         eprintln!("Skipping (H5 wiring): test_basic/simple_table Data.db not present");
         return;
@@ -167,35 +171,28 @@ async fn scan_normalizes_type_per_cell() {
     );
 
     let normalizes = rwc::type_normalize_calls();
-    eprintln!("H5: rows={rows} TYPE_NORMALIZE_CALLS={normalizes}");
-    // Today's (wasteful) cost: at least one type normalization per returned row —
-    // the per-cell `to_lowercase` J1 will eliminate.
-    assert!(
-        normalizes >= rows,
-        "H5: type normalization must scale with cells scanned (>= rows); got \
-         {normalizes} for {rows} rows"
+    eprintln!("H5 (J1): rows={rows} TYPE_NORMALIZE_CALLS={normalizes}");
+    // J1: dispatch is resolved once per column at block bind time, so the per-cell
+    // decode path performs ZERO type normalizations. (Pre-J1 this was >= rows.)
+    assert_eq!(
+        normalizes, 0,
+        "J1: the per-cell decode path must perform zero type normalizations \
+         (dispatch resolved once per column); got {normalizes} for {rows} rows"
     );
 }
 
-/// Scenario (issue #1618 roborev undercount fix): the empty-value cell path must
-/// count its per-cell type normalization too. `test_types/nb_null_empty_text_blob`
-/// row `ck=4` writes an empty `text` (`''`) and an empty `blob` (`0x`) — both take
-/// the `HAS_EMPTY_VALUE` early-return in `parse_cell_value_schema_order`, which
-/// still `to_lowercase()`-normalizes the declared type. Before the fix that
-/// normalization allocation ran UNCOUNTED (the counter only fired on the live-cell
-/// path AFTER the empty early-return), so a future J1 `== 0` assertion could pass
-/// while the hot-path allocation still happened. The fix normalizes once before
-/// the empty/live split and records the counter at that single site, so both empty
-/// cells are now counted.
-///
-/// Pinned counts for this 4-row fixture (deterministic parse):
-///   - post-fix `TYPE_NORMALIZE_CALLS` = **29**
-///   - pre-fix it was **27** — exactly `empty_simple` (=2) lower, because the two
-///     empty simple cells in `ck=4` went uncounted. This assertion therefore fails
-///     on the pre-fix undercount and passes after.
+/// Scenario (J1 delivered, empty-value path): the empty (`HAS_EMPTY_VALUE`)
+/// early-return in `parse_cell_value_schema_order` used to `to_lowercase()`-normalize
+/// the declared type per cell too (issue #1618 counted it at 29 for this 4-row
+/// fixture). J1 dispatches the empty-value early-return on the precomputed per-column
+/// `CellKind`, so it performs ZERO per-cell normalizations. `test_types/
+/// nb_null_empty_text_blob` row `ck=4` writes an empty `text` (`''`) and an empty
+/// `blob` (`0x`); this scan must still surface them (parity) while
+/// `TYPE_NORMALIZE_CALLS` reads `0`. On `main` this fixture read 29 — the `== 0`
+/// assertion FAILS there and PASSES after J1.
 #[tokio::test]
 #[serial]
-async fn scan_counts_empty_cell_type_normalization() {
+async fn scan_empty_cells_do_not_normalize_type() {
     if !fixture_data_present("test_types", "nb_null_empty_text_blob") {
         eprintln!("Skipping (H5 wiring): test_types/nb_null_empty_text_blob not present");
         return;
@@ -236,7 +233,7 @@ async fn scan_counts_empty_cell_type_normalization() {
     }
 
     let normalizes = rwc::type_normalize_calls();
-    eprintln!("H5: rows={rows} empty_simple={empty_simple} TYPE_NORMALIZE_CALLS={normalizes}");
+    eprintln!("H5 (J1): rows={rows} empty_simple={empty_simple} TYPE_NORMALIZE_CALLS={normalizes}");
 
     // Fixture-shape guards: fail loudly (pointing at the fixture) if the pinned
     // dataset ever regenerates into a different shape than these counts assume.
@@ -246,11 +243,13 @@ async fn scan_counts_empty_cell_type_normalization() {
         "fixture shape changed: expected 2 empty simple cells (empty text + empty blob in ck=4)"
     );
 
-    // The empty-cell type normalization is now counted (pre-fix undercount was 27).
+    // J1: the empty-value early-return dispatches on the precomputed per-column
+    // CellKind, so it performs zero per-cell normalizations (pre-J1 this fixture
+    // read 29). The empty text/blob cells above prove the path is still exercised.
     assert_eq!(
-        normalizes, 29,
-        "empty-cell type normalization must be counted: expected 29 \
-         (pre-fix undercount was 27, missing the {empty_simple} empty simple cells); got {normalizes}"
+        normalizes, 0,
+        "J1: the empty-value cell path must perform zero per-cell type \
+         normalizations (dispatch resolved once per column); got {normalizes}"
     );
 }
 
