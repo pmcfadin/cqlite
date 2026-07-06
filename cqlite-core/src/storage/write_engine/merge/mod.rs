@@ -1224,6 +1224,81 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
     (baseline_min_ts, baseline_min_ldt, baseline_min_ttl)
 }
 
+/// Expiry-aware LOWER bound for the compaction output's `min_local_deletion_time`
+/// delta baseline (issue #1537).
+///
+/// When expiry is active, an EXPIRED expiring cell converts to a tombstone whose
+/// `localDeletionTime` is the CREATION time `ldt - ttl` (Cassandra
+/// `AbstractCell.purge` → `localDeletionTime() - ttl()`) — STRICTLY BELOW the input's
+/// `min_deletion_time` (the EXPIRY instant `ldt`). Without lowering, the input-derived
+/// baseline from [`compute_baseline_min`] sits ABOVE that tombstone's LDT and the
+/// DataWriter's unsigned LDT-delta underflows (the below-baseline guard rejects it).
+///
+/// For each input carrying expiring cells (authoritative signal: a present, positive
+/// `max_ttl` — `EncodingStats` tracks TTL only for expiring cells),
+/// `min_deletion_time - max_ttl` is a PROVABLY-SAFE lower bound for every `ldt - ttl`
+/// (each cell has `ldt >= min_deletion_time`, `ttl <= max_ttl`), and `<=` every
+/// live/unchanged LDT too — so the delta never underflows and the output is a
+/// self-consistent, readable SSTable. Returns the min floor across inputs (wrapped
+/// `i32` GC-clock bits), or `None` when no input carries expiring cells (no-op).
+///
+/// NOTE (byte-parity, deferred to #1538): for MIXED-`ttl` inputs this floor can be
+/// conservatively lower than Cassandra's exact per-cell `min(ldt_i - ttl_i)` (a safe,
+/// metadata-only conservatism — a lower min never wrongly purges); no active
+/// byte-parity golden exists for compaction TTL-expiry output (blocked on #1538).
+/// No-heuristics: derived solely from authoritative Statistics.db.
+pub(crate) fn compute_expiry_ttl_ldt_floor(input_paths: &[PathBuf]) -> Option<i32> {
+    let mut floor: Option<i32> = None;
+    for data_path in input_paths {
+        let stats_path = stats_path_for(data_path);
+        if !stats_path.exists() {
+            continue;
+        }
+        let stats_bytes = match std::fs::read(&stats_path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!(
+                    "Could not read Statistics.db {:?} for expiry-TTL LDT floor: {}",
+                    stats_path,
+                    e
+                );
+                continue;
+            }
+        };
+        if let Ok((_, sstable_stats)) =
+            crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+                &stats_bytes,
+                None,
+            )
+        {
+            let ts_stats = &sstable_stats.timestamp_stats;
+            // Authoritative "has expiring cells" signal: a present, positive
+            // `max_ttl` (EncodingStats tracks TTL only for expiring cells).
+            let Some(max_ttl) = ts_stats.max_ttl.filter(|&t| t > 0) else {
+                continue;
+            };
+            // Reinterpret the on-disk `min_deletion_time` bits as UNSIGNED GC-clock
+            // seconds (mirrors `compute_baseline_min`) before subtracting the TTL.
+            let min_ldt_unsigned = i64::from(ts_stats.min_deletion_time as u32);
+            // Clamp the floor at 0 before the `as i32` reinterpret. A well-formed
+            // GC-clock creation time (`ldt - ttl`) is always >= 0 — Cassandra never
+            // writes a pre-epoch localDeletionTime — so `max_ttl > min_deletion_time`
+            // (a negative floor) is impossible for real data. The clamp defends the
+            // `as i32` cast against a spurious negative bit pattern should a
+            // malformed input ever violate that pre-epoch assumption.
+            let input_floor_i64 = (min_ldt_unsigned - max_ttl).max(0);
+            // Store back as the wrapped i32 GC-clock bit pattern (the DataWriter's
+            // delta baseline representation).
+            let input_floor = input_floor_i64 as i32;
+            floor = Some(match floor {
+                Some(cur) => cur.min(input_floor),
+                None => input_floor,
+            });
+        }
+    }
+    floor
+}
+
 /// Compute the overlap-aware max-purgeable timestamp (#935, parity with
 /// Cassandra `CompactionController.maxPurgeableTimestamp`) for a PARTIAL
 /// compaction from the SSTables NOT included in it.
@@ -1832,7 +1907,17 @@ pub async fn compact_sstables_with_registry(
 
     // Two-pass compaction (issue #729): seed the output's encoding baselines from
     // the inputs' Statistics.db before writing any partition.
-    let (baseline_min_ts, baseline_min_ldt, baseline_min_ttl) = compute_baseline_min(&input_paths);
+    let (baseline_min_ts, mut baseline_min_ldt, baseline_min_ttl) =
+        compute_baseline_min(&input_paths);
+    // Issue #1537: when expiry is active, an expired expiring cell converts to a
+    // creation-time (`ldt - ttl`) tombstone whose LDT is BELOW the input-derived
+    // baseline; lower the LDT baseline to a provably-safe floor so the DataWriter's
+    // unsigned LDT-delta never underflows. No-op when no input carries expiring cells.
+    if now_secs.is_some() {
+        if let Some(floor) = compute_expiry_ttl_ldt_floor(&input_paths) {
+            baseline_min_ldt = baseline_min_ldt.min(floor);
+        }
+    }
     writer.pre_seed_encoding_baselines(baseline_min_ts, baseline_min_ldt, baseline_min_ttl);
 
     let mut stats = merger.merge(&mut writer)?;

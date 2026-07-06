@@ -248,8 +248,24 @@ impl WriteEngine {
         // Two-pass compaction (issue #729): compute output FINAL encoding baselines
         // by reading the minimum values from each input SSTable's Statistics.db.
         // The output baseline must be ≤ all per-partition values from all inputs.
-        let (baseline_min_ts, baseline_min_ldt, baseline_min_ttl) =
+        let (baseline_min_ts, mut baseline_min_ldt, baseline_min_ttl) =
             merge::compute_baseline_min(&input_paths);
+        // Issue #1537: unlike `compact_sstables_with_registry` — whose
+        // `now_secs: Option<i64>` parameter can be `None` (expiry disabled), so it
+        // gates the floor application on `now_secs.is_some()` — this WriteEngine
+        // path computes `now_secs` locally above as a plain `i64` (unwrap_or(0))
+        // and ALWAYS builds the merger with the literal `Some(now_secs)` (see the
+        // `KWayMerger::new_with_gc_and_registry` construction above). Expiry is
+        // therefore unconditionally active here, so no `is_some()` gate is needed
+        // (and `now_secs` is not an `Option`, so a literal mirror would not even
+        // compile). An expired expiring cell converts to a creation-time
+        // (`ldt - ttl`) tombstone whose LDT sits BELOW the input-derived baseline,
+        // so lower the LDT baseline to a provably-safe floor so the DataWriter's
+        // unsigned LDT-delta never underflows. No-op when no input carries
+        // expiring cells.
+        if let Some(floor) = merge::compute_expiry_ttl_ldt_floor(&input_paths) {
+            baseline_min_ldt = baseline_min_ldt.min(floor);
+        }
         writer.pre_seed_encoding_baselines(baseline_min_ts, baseline_min_ldt, baseline_min_ttl);
 
         // Increment generation for next operation

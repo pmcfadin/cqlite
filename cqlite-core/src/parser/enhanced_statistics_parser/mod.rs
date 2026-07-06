@@ -339,6 +339,16 @@ pub fn parse_enhanced_statistics_file<'a>(
                         if let Some(max_ts) = extras.max_timestamp {
                             timestamp_stats.max_timestamp = Some(max_ts);
                         }
+                        // Authoritative maxTTL (issue #1537): the inner nb walk only
+                        // decodes the EncodingStats minTTL baseline and honestly
+                        // leaves `max_ttl = None`. Recover the true maximum from the
+                        // STATS-extras walk so the compaction TTL-expiry LDT floor
+                        // (`compute_expiry_ttl_ldt_floor`) can lower the output's
+                        // min-LDT delta baseline below a creation-time (`ldt - ttl`)
+                        // tombstone. `None` (no expiring cells) stays `None`.
+                        if extras.max_ttl.is_some() {
+                            timestamp_stats.max_ttl = extras.max_ttl;
+                        }
                         extras.tombstone_drop_times
                     }
                     Err(e) => {
