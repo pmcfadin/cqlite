@@ -41,6 +41,8 @@ mod execute;
 mod lookup;
 mod predicate;
 mod row_build;
+mod stream_agg;
+mod streaming;
 mod value_ops;
 mod writetime_ttl;
 
@@ -54,7 +56,7 @@ use super::{
         QueryResultIterator, QueryRow, StreamingConfig,
     },
     select_ast::*,
-    select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
+    select_optimizer::{ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
 use crate::{
     schema::{CqlType, SchemaManager, TableSchema},
@@ -66,9 +68,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use aggregation::{
-    build_group_key, finalize_group, find_or_init_group, update_aggregate, AggregationState,
-};
 use lookup::{
     classify_partition_lookup, honest_targeted_path, sort_rows_by_token, PartitionLookupOutcome,
 };
@@ -461,9 +460,20 @@ impl SelectExecutor {
         // previous query cannot satisfy a test assertion against this one.
         crate::query::access_path::reset();
 
-        // Check if query requires full materialization (ORDER BY, GROUP BY, aggregates)
+        // Issue #1578 (D2): route ANY aggregate through `execute_and_stream`, which
+        // delegates to `execute`. For a GROUP-BY-free aggregate `execute` runs the
+        // O(1) fold (`try_execute_global_aggregate`) — no whole-table buffer — so
+        // the streaming API is no longer forced through a buffered path; for a
+        // GROUP BY it runs the (E5) materialized path. This must precede the
+        // `requires_materialization` check, which now returns `false` for a global
+        // aggregate (it does not require full materialization).
+        if plan.aggregation_plan.is_some() {
+            return self.execute_and_stream(plan, config).await;
+        }
+
+        // Check if query requires full materialization (ORDER BY, GROUP BY, projection trim)
         if self.requires_materialization(&plan) {
-            log::info!("Query requires materialization (ORDER BY/GROUP BY/aggregates), using execute-then-stream");
+            log::info!("Query requires materialization (ORDER BY/GROUP BY/projection trim), using execute-then-stream");
             return self.execute_and_stream(plan, config).await;
         }
 
@@ -565,7 +575,18 @@ impl SelectExecutor {
         for step in &plan.execution_steps {
             match step {
                 ExecutionStep::Sort { .. } => return true,
-                ExecutionStep::Aggregate { .. } => return true,
+                // Issue #1578 (D2): a GROUP-BY-free aggregate no longer requires
+                // full materialization — `execute` folds it into an O(1)
+                // accumulator (`try_execute_global_aggregate`). Only a GROUP BY
+                // aggregate still buffers (E5 territory). `execute_streaming`
+                // routes ALL aggregates to `execute_and_stream` explicitly (via the
+                // `aggregation_plan` check), so a global aggregate returning `false`
+                // here is still served correctly (through the folded `execute`).
+                ExecutionStep::Aggregate { plan: agg_plan, .. }
+                    if !agg_plan.group_by_columns.is_empty() =>
+                {
+                    return true
+                }
                 // The streaming producer (`execute_streaming_background`) IGNORES
                 // `Project`, so a `Project` step that changes the row's column SET
                 // or SHAPE must fall back to the materialized execute()-then-stream
@@ -917,59 +938,6 @@ impl SelectExecutor {
         });
 
         Ok(decorated.into_iter().map(|(_, row)| row).collect())
-    }
-
-    /// Execute the aggregation step. Splits naturally into three phases:
-    /// build group key, accumulate per-aggregate state, then finalize each
-    /// group into a result row.
-    fn execute_aggregation(
-        &self,
-        rows: Vec<QueryRow>,
-        agg_plan: &AggregationPlan,
-        _context: &mut ExecutionContext,
-    ) -> Result<Vec<QueryRow>> {
-        const PER_ROW_MEMORY_ESTIMATE_BYTES: usize = 100;
-        const DEFAULT_AGGREGATION_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
-
-        // Issue #1578 (D2): record how many rows this buffered aggregate input
-        // carried, so the O(1) memory guard can prove a GROUP-BY-free aggregate
-        // served by the streaming fold buffers ZERO rows here (the fold never
-        // calls this method). Zero-overhead in release (probe body is cfg-gated).
-        crate::query::agg_stream_probe::record_buffered_rows(rows.len() as u64);
-
-        let mut agg_state = AggregationState {
-            groups: Vec::new(),
-            group_index: rustc_hash::FxHashMap::default(),
-            memory_usage_bytes: 0,
-            memory_limit_bytes: DEFAULT_AGGREGATION_MEMORY_LIMIT,
-        };
-
-        for row in rows {
-            let group_key = build_group_key(&row, &agg_plan.group_by_columns);
-            let group_index = find_or_init_group(&mut agg_state, group_key, &agg_plan.aggregates);
-            let group_aggregates = &mut agg_state.groups[group_index].1;
-
-            for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
-                update_aggregate(&mut group_aggregates[i], agg_comp, &row);
-            }
-
-            agg_state.memory_usage_bytes += PER_ROW_MEMORY_ESTIMATE_BYTES;
-            if agg_state.memory_usage_bytes > agg_state.memory_limit_bytes {
-                return Err(Error::query_execution(
-                    "Aggregation memory limit exceeded".to_string(),
-                ));
-            }
-        }
-
-        let result_rows = agg_state
-            .groups
-            .into_iter()
-            .map(|(group_key, group_aggregates)| {
-                finalize_group(group_key, group_aggregates, agg_plan)
-            })
-            .collect();
-
-        Ok(result_rows)
     }
 
     /// Execute PER PARTITION LIMIT: keep at most `count` rows per partition,

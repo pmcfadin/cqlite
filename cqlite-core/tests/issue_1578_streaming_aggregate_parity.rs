@@ -184,11 +184,41 @@ async fn assert_agg(db: &Database, sql: &str, expected: Value) {
 
 fn fixture_rows() -> Vec<Fx> {
     vec![
-        Fx { id: 1, i: Some(10), b: Some(1000), d: Some(1.5), t: Some("charlie") },
-        Fx { id: 2, i: Some(-4), b: Some(-20), d: Some(0.25), t: Some("alpha") },
-        Fx { id: 3, i: None, b: Some(7), d: None, t: Some("delta") },
-        Fx { id: 4, i: Some(30), b: None, d: Some(9.75), t: None },
-        Fx { id: 5, i: Some(10), b: Some(50), d: Some(-2.0), t: Some("bravo") },
+        Fx {
+            id: 1,
+            i: Some(10),
+            b: Some(1000),
+            d: Some(1.5),
+            t: Some("charlie"),
+        },
+        Fx {
+            id: 2,
+            i: Some(-4),
+            b: Some(-20),
+            d: Some(0.25),
+            t: Some("alpha"),
+        },
+        Fx {
+            id: 3,
+            i: None,
+            b: Some(7),
+            d: None,
+            t: Some("delta"),
+        },
+        Fx {
+            id: 4,
+            i: Some(30),
+            b: None,
+            d: Some(9.75),
+            t: None,
+        },
+        Fx {
+            id: 5,
+            i: Some(10),
+            b: Some(50),
+            d: Some(-2.0),
+            t: Some("bravo"),
+        },
     ]
 }
 
@@ -233,8 +263,18 @@ async fn streaming_aggregate_parity_matrix() {
     assert_agg(&db, &format!("SELECT SUM(d) {from}"), Value::Float(9.5)).await;
 
     // AVG = sum/count over the NON-NULL values (i: 46/4, d: 9.5/4).
-    assert_agg(&db, &format!("SELECT AVG(i) {from}"), Value::Float(46.0 / 4.0)).await;
-    assert_agg(&db, &format!("SELECT AVG(d) {from}"), Value::Float(9.5 / 4.0)).await;
+    assert_agg(
+        &db,
+        &format!("SELECT AVG(i) {from}"),
+        Value::Float(46.0 / 4.0),
+    )
+    .await;
+    assert_agg(
+        &db,
+        &format!("SELECT AVG(d) {from}"),
+        Value::Float(9.5 / 4.0),
+    )
+    .await;
 
     // With a predicate: only rows with i >= 10 (ids 1,4,5 → i=10,30,10).
     assert_agg(

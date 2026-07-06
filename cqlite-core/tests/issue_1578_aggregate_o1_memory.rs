@@ -74,7 +74,9 @@ async fn open_with_n_rows(n: i32) -> (Database, TempDir) {
             let config = WriteEngineConfig::new(data_dir, wal_dir, schema);
             let mut engine = WriteEngine::new(config).expect("engine");
             for id in 0..n {
-                engine.write(write_mutation(id, 100 + id as i64)).expect("write");
+                engine
+                    .write(write_mutation(id, 100 + id as i64))
+                    .expect("write");
             }
             rt.block_on(engine.flush())
                 .expect("flush")

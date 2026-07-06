@@ -15,18 +15,15 @@
 
 use super::{
     build_row_from_scan, classify_partition_lookup, column_info_from_type_str, evaluate_predicates,
-    honest_targeted_path, parse_table_id, partition_key_digest, project_expr_reshapes_row,
-    select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
-    PartitionLookupOutcome, SSTablePredicate,
+    honest_targeted_path, parse_table_id, project_expr_reshapes_row, select_has_writetime_ttl,
+    sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
-    ProjectionFlags, QueryResult, QueryRow, Result, SelectExecutor, StorageEngine, TableId,
-    TableSchema,
+    ProjectionFlags, QueryResult, QueryRow, Result, SelectExecutor, TableId, TableSchema,
 };
 use crate::query::result_budget::enforce_materialized_rows;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 impl SelectExecutor {
     /// Execute an optimized query plan.
@@ -132,93 +129,109 @@ impl SelectExecutor {
             plan.execution_steps.clone()
         };
 
-        for step in &execution_steps {
-            match step {
-                ExecutionStep::SSTableScan {
-                    table,
-                    predicates,
-                    projection,
-                    ..
-                } => {
-                    let rows = self
-                        .execute_sstable_scan(
-                            table,
-                            predicates,
-                            projection,
-                            plan.statement.order_by.as_ref(),
-                            query_schema.as_deref(),
-                            &mut context,
-                        )
-                        .await?;
-                    intermediate_results = rows;
-                }
-                ExecutionStep::Filter { expression, .. } => {
-                    intermediate_results =
-                        self.execute_filter(intermediate_results, expression, &mut context)?;
-                }
-                ExecutionStep::Sort { order_by, .. } => {
-                    // Issue #1184: when the BIG reverse partition iterator already
-                    // produced the rows in descending clustering order, skip the
-                    // in-memory sort entirely (it remains the fallback otherwise).
-                    if !context.reverse_served {
+        // Issue #1578 (D2): fold a GROUP-BY-free aggregate over a full table scan
+        // into an O(1) accumulator instead of buffering the whole table here.
+        // Returns None for any plan shape it does not model (GROUP BY, targeted
+        // lookup, WRITETIME/TTL, or a Sort/Project/Limit step) → the buffered step
+        // loop below runs unchanged.
+        if let Some(rows) = self
+            .try_execute_global_aggregate(&execution_steps, query_schema.as_deref(), &mut context)
+            .await?
+        {
+            intermediate_results = rows;
+        } else {
+            for step in &execution_steps {
+                match step {
+                    ExecutionStep::SSTableScan {
+                        table,
+                        predicates,
+                        projection,
+                        ..
+                    } => {
+                        let rows = self
+                            .execute_sstable_scan(
+                                table,
+                                predicates,
+                                projection,
+                                plan.statement.order_by.as_ref(),
+                                query_schema.as_deref(),
+                                &mut context,
+                            )
+                            .await?;
+                        intermediate_results = rows;
+                    }
+                    ExecutionStep::Filter { expression, .. } => {
                         intermediate_results =
-                            self.execute_sort(intermediate_results, order_by, &mut context)?;
-                    } else {
-                        // Issue #1307 (hardening): skipping this Sort is sound ONLY
-                        // because `reverse_served` is set exclusively by
-                        // `targeted_partition_rows`, which serves the reverse
-                        // promoted-index iterator precisely when `statement.order_by`
-                        // requests the reverse of the stored clustering order — and
-                        // the planner emits EXACTLY ONE `Sort` step, cloned from that
-                        // same `statement.order_by` (see `select_optimizer.rs`). So
-                        // the reverse scan's ordering matches this step's `order_by`,
-                        // and skipping it drops a redundant sort rather than a
-                        // different ordering. What would break the invariant: a
-                        // multi-table / join plan (or any plan) that reused the flag
-                        // across a Sort NOT derived from the reverse-served scan's
-                        // `statement.order_by` — such a plan must clear
-                        // `reverse_served` before this step. The debug_assert pins
-                        // the property (the skipped Sort's key equals the statement's
-                        // order_by); it is debug-only and never alters release
-                        // behavior.
-                        debug_assert!(
-                            plan.statement.order_by.as_ref() == Some(order_by),
-                            "reverse_served Sort-skip invariant violated: the skipped \
+                            self.execute_filter(intermediate_results, expression, &mut context)?;
+                    }
+                    ExecutionStep::Sort { order_by, .. } => {
+                        // Issue #1184: when the BIG reverse partition iterator already
+                        // produced the rows in descending clustering order, skip the
+                        // in-memory sort entirely (it remains the fallback otherwise).
+                        if !context.reverse_served {
+                            intermediate_results =
+                                self.execute_sort(intermediate_results, order_by, &mut context)?;
+                        } else {
+                            // Issue #1307 (hardening): skipping this Sort is sound ONLY
+                            // because `reverse_served` is set exclusively by
+                            // `targeted_partition_rows`, which serves the reverse
+                            // promoted-index iterator precisely when `statement.order_by`
+                            // requests the reverse of the stored clustering order — and
+                            // the planner emits EXACTLY ONE `Sort` step, cloned from that
+                            // same `statement.order_by` (see `select_optimizer.rs`). So
+                            // the reverse scan's ordering matches this step's `order_by`,
+                            // and skipping it drops a redundant sort rather than a
+                            // different ordering. What would break the invariant: a
+                            // multi-table / join plan (or any plan) that reused the flag
+                            // across a Sort NOT derived from the reverse-served scan's
+                            // `statement.order_by` — such a plan must clear
+                            // `reverse_served` before this step. The debug_assert pins
+                            // the property (the skipped Sort's key equals the statement's
+                            // order_by); it is debug-only and never alters release
+                            // behavior.
+                            debug_assert!(
+                                plan.statement.order_by.as_ref() == Some(order_by),
+                                "reverse_served Sort-skip invariant violated: the skipped \
                              Sort's order_by must be the statement's order_by that drove \
                              the reverse-served scan (single-table plan); a plan whose \
                              Sort is not the reverse scan's matching Sort must clear \
                              reverse_served first",
-                        );
+                            );
+                        }
                     }
-                }
-                ExecutionStep::Aggregate { plan: agg_plan, .. } => {
-                    intermediate_results =
-                        self.execute_aggregation(intermediate_results, agg_plan, &mut context)?;
-                }
-                ExecutionStep::PerPartitionLimit { count } => {
-                    intermediate_results =
-                        Self::execute_per_partition_limit(intermediate_results, *count);
-                }
-                ExecutionStep::Limit { count, offset } => {
-                    intermediate_results =
-                        self.execute_limit(intermediate_results, *count, *offset, &mut context)?;
-                }
-                ExecutionStep::Project { columns } => {
-                    // Issue #1952 (round-6 fix): branch on whether the projection
-                    // RESHAPES the row. A plain-column Project only trims the
-                    // #1952-widened helper columns — route it through the
-                    // key-preserving `trim_projection` so the row keeps its real
-                    // RowKey / metadata and a sparse row's absent selected cell is
-                    // omitted rather than erroring. Only a reshaping / computed
-                    // projection (alias, arithmetic, aggregate, function,
-                    // writetime/ttl, collection-access) goes through
-                    // `execute_projection`, whose empty-RowKey + name-derivation is
-                    // correct for a computed row that has no natural stored key.
-                    intermediate_results = if columns.iter().any(project_expr_reshapes_row) {
-                        self.execute_projection(intermediate_results, columns, &mut context)?
-                    } else {
-                        self.trim_projection(intermediate_results, columns)
-                    };
+                    ExecutionStep::Aggregate { plan: agg_plan, .. } => {
+                        intermediate_results =
+                            self.execute_aggregation(intermediate_results, agg_plan, &mut context)?;
+                    }
+                    ExecutionStep::PerPartitionLimit { count } => {
+                        intermediate_results =
+                            Self::execute_per_partition_limit(intermediate_results, *count);
+                    }
+                    ExecutionStep::Limit { count, offset } => {
+                        intermediate_results = self.execute_limit(
+                            intermediate_results,
+                            *count,
+                            *offset,
+                            &mut context,
+                        )?;
+                    }
+                    ExecutionStep::Project { columns } => {
+                        // Issue #1952 (round-6 fix): branch on whether the projection
+                        // RESHAPES the row. A plain-column Project only trims the
+                        // #1952-widened helper columns — route it through the
+                        // key-preserving `trim_projection` so the row keeps its real
+                        // RowKey / metadata and a sparse row's absent selected cell is
+                        // omitted rather than erroring. Only a reshaping / computed
+                        // projection (alias, arithmetic, aggregate, function,
+                        // writetime/ttl, collection-access) goes through
+                        // `execute_projection`, whose empty-RowKey + name-derivation is
+                        // correct for a computed row that has no natural stored key.
+                        intermediate_results = if columns.iter().any(project_expr_reshapes_row) {
+                            self.execute_projection(intermediate_results, columns, &mut context)?
+                        } else {
+                            self.trim_projection(intermediate_results, columns)
+                        };
+                    }
                 }
             }
         }
@@ -242,10 +255,20 @@ impl SelectExecutor {
         //   * Does NOT cover the LEGACY point-lookup `QueryExecutor` path
         //     (`WHERE id = ?` short lookups route there, not through this modern
         //     executor) — deferred to the D6 redesign.
+        // Issue #1578 (D2): demote the row-count valve to a genuine safety valve.
+        // A query with an EXPLICIT `LIMIT` already bounds its own result, so it is
+        // exempt from the crude row-count ceiling (the user accepted the count);
+        // the byte budget still guards memory. Without an explicit LIMIT the valve
+        // remains a real net against unbounded materialization.
+        let effective_max_rows = if plan.statement.limit.is_some() {
+            usize::MAX
+        } else {
+            self.max_result_rows
+        };
         enforce_materialized_rows(
             &intermediate_results,
             self.max_result_bytes,
-            self.max_result_rows,
+            effective_max_rows,
         )?;
 
         let total_rows = intermediate_results.len() as u64;
@@ -343,305 +366,6 @@ impl SelectExecutor {
                 access_path: context.access_path.clone(),
             },
         })
-    }
-
-    /// Background task: Execute streaming scan and send rows through channel
-    pub(super) async fn execute_streaming_background(
-        storage: Arc<StorageEngine>,
-        // Issue #1587 (E5): schema resolved ONCE per query by `execute_streaming`
-        // and moved into this task — no per-scan-step registry lock + deep clone.
-        query_schema: Option<Arc<TableSchema>>,
-        _table_id: TableId,
-        execution_steps: Vec<ExecutionStep>,
-        tx: mpsc::Sender<Result<QueryRow>>,
-        buffer_size: usize,
-    ) -> Result<()> {
-        // Issue #581: LIMIT/OFFSET must be enforced by the producer in the
-        // streaming path. The `ExecutionStep::Limit` arm previously only logged a
-        // message and relied on a consumer that never applied it, so
-        // `execute_streaming` yielded the full result set regardless of LIMIT.
-        // Extract the bound up front (steps are ordered with Limit after the scan)
-        // and stop sending once it is satisfied — mirroring `execute_limit`
-        // (drain OFFSET, then truncate to `count`) row-by-row so the producer
-        // stops scanning early.
-        let limit = execution_steps.iter().find_map(|step| match step {
-            ExecutionStep::Limit { count, offset } => Some((*count, offset.unwrap_or(0))),
-            _ => None,
-        });
-        let (limit_count, mut offset_remaining) = match limit {
-            Some((count, offset)) => (Some(count), offset),
-            None => (None, 0),
-        };
-
-        // A `LIMIT 0` means no rows can ever be sent; return before scanning.
-        if limit_count == Some(0) {
-            return Ok(());
-        }
-
-        // Issue #757: PER PARTITION LIMIT caps rows per partition before the
-        // query-wide LIMIT/OFFSET. The scan yields rows grouped by partition
-        // key, so we track the current partition and reset the counter at each
-        // boundary. Issue #1590 (E8): the boundary is compared on the partition
-        // key's 128-bit `partition_key_digest` (a heap-free hash of the key bytes
-        // we already hold) as a FAST pre-check, then confirmed by EXACT byte
-        // equality against the current partition's raw bytes — stored ONCE when
-        // the boundary advances, never cloned per row. This keeps correctness
-        // independent of digest collisions (a collision between two DISTINCT
-        // partitions never shares a counter).
-        let per_partition_limit = execution_steps.iter().find_map(|step| match step {
-            ExecutionStep::PerPartitionLimit { count } => Some(*count),
-            _ => None,
-        });
-        let mut current_partition: Option<(u128, Vec<u8>)> = None;
-        let mut partition_count: u64 = 0;
-
-        let mut sent: u64 = 0;
-
-        for step in &execution_steps {
-            match step {
-                ExecutionStep::SSTableScan {
-                    table,
-                    predicates,
-                    projection,
-                    ..
-                } => {
-                    let schema_opt = query_schema.as_deref();
-
-                    // FINDING 2 (Issue #955 follow-up): reject a `token(...)` whose
-                    // columns are not the full partition key in declared order
-                    // before scanning (same rule as the materializing path).
-                    validate_token_predicates(predicates, schema_opt)?;
-
-                    // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
-                    // partition-targeted lookup that prunes SSTables via bloom/BTI,
-                    // instead of streaming a scan over every SSTable. The resulting
-                    // rows are sent through the same per-row pipeline below
-                    // (predicates, PER PARTITION LIMIT, OFFSET, LIMIT). Note
-                    // `scan_partition` reconciles across SSTable generations like the
-                    // materializing `scan()` (last-write-wins + tombstone shadowing),
-                    // which is the authoritative read semantics; it does not merely
-                    // mirror `scan_stream`'s per-key merge.
-                    let lookup = classify_partition_lookup(predicates, schema_opt);
-                    if let PartitionLookupOutcome::Targeted(ref pk_bytes) = lookup {
-                        // Issue #960: the streaming analogue of the materializing
-                        // partition-targeted lookup. Epic #951 (honest paths): the
-                        // `tombstones` build's `scan_partition` is a full-scan +
-                        // retain with NO prune, reported via `engaged == false`; only
-                        // claim `StreamingPartitionLookup` when it really pruned.
-                        let (rows, engaged) =
-                            storage.scan_partition(table, pk_bytes, schema_opt).await?;
-                        crate::query::access_path::record(honest_targeted_path(
-                            AccessPath::StreamingPartitionLookup,
-                            engaged,
-                        ));
-                        for (key, value) in rows {
-                            let part_sig =
-                                per_partition_limit.map(|_| partition_key_digest(&key.0));
-                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
-                            else {
-                                continue;
-                            };
-                            if !evaluate_predicates(&row, predicates)? {
-                                continue;
-                            }
-                            if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                // Fast digest pre-check, then EXACT byte confirm so a
-                                // digest collision between DISTINCT partitions never
-                                // shares a counter (issue #1590).
-                                let same = matches!(
-                                    &current_partition,
-                                    Some((d, bytes))
-                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
-                                );
-                                if !same {
-                                    // Clone the key bytes ONCE per boundary, not per row.
-                                    current_partition = Some((sig, row.key.0.clone()));
-                                    partition_count = 0;
-                                }
-                                if partition_count >= cap {
-                                    continue;
-                                }
-                                partition_count += 1;
-                            }
-                            if offset_remaining > 0 {
-                                offset_remaining -= 1;
-                                continue;
-                            }
-                            if tx.send(Ok(row)).await.is_err() {
-                                return Ok(());
-                            }
-                            sent += 1;
-                            if let Some(count) = limit_count {
-                                if sent >= count {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        // This SSTableScan step is fully served by the lookup.
-                        continue;
-                    }
-
-                    // Issue #955: `WHERE pk IN (...)` over the complete key is the
-                    // union of N partition-targeted lookups. Gather them, sort by
-                    // token to match full-scan order, then drive the same per-row
-                    // pipeline (predicates, PER PARTITION LIMIT, OFFSET, LIMIT).
-                    if let PartitionLookupOutcome::MultiTargeted(ref pk_keys) = lookup {
-                        // Epic #951 (honest paths): each lookup reports whether it
-                        // pruned. On the `tombstones` build every call full-scans
-                        // (`engaged == false`); claim `MultiPartitionLookup` only when
-                        // the lookups actually pruned, else report the honest fallback.
-                        let mut combined = Vec::new();
-                        let mut all_engaged = true;
-                        for pk_bytes in pk_keys {
-                            let (rows, engaged) =
-                                storage.scan_partition(table, pk_bytes, schema_opt).await?;
-                            all_engaged &= engaged;
-                            combined.extend(rows);
-                        }
-                        crate::query::access_path::record(honest_targeted_path(
-                            AccessPath::MultiPartitionLookup,
-                            all_engaged,
-                        ));
-                        sort_rows_by_token(&mut combined);
-                        for (key, value) in combined {
-                            let part_sig =
-                                per_partition_limit.map(|_| partition_key_digest(&key.0));
-                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
-                            else {
-                                continue;
-                            };
-                            if !evaluate_predicates(&row, predicates)? {
-                                continue;
-                            }
-                            if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                // Fast digest pre-check, then EXACT byte confirm so a
-                                // digest collision between DISTINCT partitions never
-                                // shares a counter (issue #1590).
-                                let same = matches!(
-                                    &current_partition,
-                                    Some((d, bytes))
-                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
-                                );
-                                if !same {
-                                    // Clone the key bytes ONCE per boundary, not per row.
-                                    current_partition = Some((sig, row.key.0.clone()));
-                                    partition_count = 0;
-                                }
-                                if partition_count >= cap {
-                                    continue;
-                                }
-                                partition_count += 1;
-                            }
-                            if offset_remaining > 0 {
-                                offset_remaining -= 1;
-                                continue;
-                            }
-                            if tx.send(Ok(row)).await.is_err() {
-                                return Ok(());
-                            }
-                            sent += 1;
-                            if let Some(count) = limit_count {
-                                if sent >= count {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        // This SSTableScan step is fully served by the lookups.
-                        continue;
-                    }
-
-                    // Issue #960: the streaming path did not take a targeted
-                    // lookup; report the honest fallback reason. `lookup` is the
-                    // `Fallback` arm here (the `Targeted`/`MultiTargeted` arms
-                    // returned above via `continue`).
-                    if let PartitionLookupOutcome::Fallback(reason) = lookup {
-                        crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
-                    }
-
-                    // Issue #790: pull rows lazily from a bounded streaming scan
-                    // instead of materializing the full result `Vec`. The reader
-                    // parses one entry at a time into this channel, so live heap
-                    // stays bounded by `buffer_size` rather than O(result rows).
-                    let mut scan_stream = storage
-                        .scan_stream(table, None, None, schema_opt, buffer_size)
-                        .await?;
-
-                    while let Some(item) = scan_stream.recv().await {
-                        let (key, value) = item?;
-                        // Capture the partition-key digest before `key` is moved
-                        // into row construction (only when needed).
-                        let part_sig = per_partition_limit.map(|_| partition_key_digest(&key.0));
-                        let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
-                        else {
-                            continue;
-                        };
-
-                        if !evaluate_predicates(&row, predicates)? {
-                            continue;
-                        }
-
-                        // Apply PER PARTITION LIMIT: cap matching rows per
-                        // partition, before OFFSET/LIMIT (Cassandra semantics).
-                        if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                            // Fast digest pre-check, then EXACT byte confirm so a
-                            // digest collision between DISTINCT partitions never
-                            // shares a counter (issue #1590).
-                            let same = matches!(
-                                &current_partition,
-                                Some((d, bytes))
-                                    if *d == sig && bytes.as_slice() == row.key.0.as_slice()
-                            );
-                            if !same {
-                                // Clone the key bytes ONCE per boundary, not per row.
-                                current_partition = Some((sig, row.key.0.clone()));
-                                partition_count = 0;
-                            }
-                            if partition_count >= cap {
-                                continue;
-                            }
-                            partition_count += 1;
-                        }
-
-                        // Apply OFFSET: skip the first `offset_remaining` matches.
-                        if offset_remaining > 0 {
-                            offset_remaining -= 1;
-                            continue;
-                        }
-
-                        // Send row through channel (with backpressure). Consumer drop ends the scan.
-                        if tx.send(Ok(row)).await.is_err() {
-                            return Ok(());
-                        }
-                        sent += 1;
-
-                        // Apply LIMIT: stop scanning once `count` rows have been
-                        // sent. Dropping `scan_stream` here signals the producer
-                        // (via a closed channel) to stop parsing early.
-                        if let Some(count) = limit_count {
-                            if sent >= count {
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                ExecutionStep::Limit { .. } | ExecutionStep::PerPartitionLimit { .. } => {
-                    // Enforced inline during the scan above (see the bounds
-                    // extracted before the loop).
-                }
-                // Projection and predicate filtering are pushed into SSTableScan above.
-                ExecutionStep::Project { .. } | ExecutionStep::Filter { .. } => {}
-                _ => {
-                    // Data-safety (issue #1694): log the step's variant name only,
-                    // never its contents (which carry query literals/values).
-                    log::warn!(
-                        "Streaming execution: skipping unsupported step {}",
-                        step.variant_name()
-                    );
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Execute SSTable scan with predicate pushdown.
