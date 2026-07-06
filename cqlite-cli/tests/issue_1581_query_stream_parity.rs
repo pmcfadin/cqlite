@@ -292,6 +292,89 @@ async fn point_lookup_returns_full_row() {
     }
 }
 
+/// Byte-parity guard for MATERIALIZED query shapes (roborev follow-up on issue
+/// #1581): `assert_table_matrix` only exercises the pure-scan streaming producer
+/// (`SELECT *` / a single-column projection, with/without `LIMIT`). But the CLI
+/// cutover routes EVERY SELECT — not just scans — through
+/// `collect_query_result` -> `Database::execute_streaming`, and `execute()` is no
+/// longer reachable from the CLI at all. An aggregate, `ORDER BY`, or `GROUP BY`
+/// shape internally trips `execute_streaming`'s `requires_materialization` /
+/// `aggregation_plan` checks and falls back to `execute_and_stream` (which itself
+/// delegates to `execute()` and streams the already-materialized rows) — so these
+/// shapes are byte-identical to the oracle BY CONSTRUCTION today, but nothing
+/// pinned that classification: a future change that accidentally routed one of
+/// these shapes down the raw scan producer (which does not aggregate/sort) would
+/// ship silently. This test is that pin.
+///
+/// Covers:
+/// 1. an aggregate (`COUNT(*)`, `SUM(...)`),
+/// 2. `ORDER BY` (single-partition clustering scan, real multi-row fixture),
+/// 3. `GROUP BY` (a regular, non-primary-key column, whole-table),
+/// 4. a display `--limit` interacting with a materialized/sorted (`ORDER BY`)
+///    result — the limit must truncate to the SAME prefix an un-limited run's
+///    first rows would show.
+#[tokio::test]
+async fn materialized_query_shapes_parity() {
+    if !keyspace_has_data("test_basic") || !keyspace_has_data("test_timeseries") {
+        eprintln!(
+            "skip materialized_query_shapes_parity: missing test_basic/test_timeseries \
+             Data.db fixtures (run fetch-datasets.sh)"
+        );
+        return;
+    }
+
+    let basic_db = setup_db("basic-types.cql", "test_basic").await;
+    let ts_db = setup_db("time-series.cql", "test_timeseries").await;
+
+    // (1) Aggregate — COUNT(*) and SUM(regular numeric column), no GROUP BY.
+    assert_parity(
+        &basic_db,
+        "SELECT COUNT(*) FROM test_basic.static_columns_table",
+        None,
+    )
+    .await;
+    assert_parity(
+        &basic_db,
+        "SELECT SUM(row_value) FROM test_basic.static_columns_table",
+        None,
+    )
+    .await;
+
+    // Discover a real `sensor_id` so the WHERE predicate below matches real
+    // fixture data (sensor_data has ~10 partitions of ~200 clustering rows each —
+    // a real multi-row ORDER BY, not a trivial single-row partition).
+    let probe = ts_db
+        .execute("SELECT sensor_id FROM test_timeseries.sensor_data LIMIT 1")
+        .await
+        .unwrap_or_else(|e| panic!("sensor_id probe failed: {e}"));
+    let sensor_id = probe
+        .rows
+        .first()
+        .and_then(|r| r.values.get("sensor_id"))
+        .and_then(uuid_literal)
+        .unwrap_or_else(|| panic!("fixture problem: sensor_data has no usable sensor_id"));
+    let order_by_query = format!(
+        "SELECT sensor_id, timestamp, temperature FROM test_timeseries.sensor_data \
+         WHERE sensor_id = {sensor_id} ORDER BY timestamp DESC"
+    );
+
+    // (2) ORDER BY — single-partition clustering scan (materializes + sorts).
+    assert_parity(&ts_db, &order_by_query, None).await;
+
+    // (4) display `--limit` on a materialized/sorted ORDER BY result: both the
+    // oracle and the streaming path apply the SAME `config.limit` truncation in
+    // their writers, so this proves the interaction (not just the unbounded case).
+    assert_parity(&ts_db, &order_by_query, Some(5)).await;
+
+    // (3) GROUP BY — a regular (non-primary-key) column, whole-table.
+    assert_parity(
+        &ts_db,
+        "SELECT status, COUNT(*) FROM test_timeseries.sensor_data GROUP BY status",
+        None,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn query_stream_parity_matrix() {
     // (schema file, keyspace, tables) — a representative slice across simple
