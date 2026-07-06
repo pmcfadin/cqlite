@@ -57,6 +57,10 @@ pub mod writer;
 /// F1: scan must not hold the table_readers read guard across its I/O (Issue #1591).
 #[cfg(test)]
 mod issue_1591_scan_lock_test;
+/// F4: the fan-out scan merge must not deadlock under admission when it fans out
+/// to more generations than the admission cap (Issue #1594).
+#[cfg(all(test, feature = "scan-offload-probe"))]
+mod issue_1594_fanout_deadlock_test;
 /// VG1: Thread VersionGates through the read path (Issue #653).
 #[cfg(test)]
 mod issue_653_version_gates_plumbing_test;
@@ -2075,16 +2079,33 @@ impl SSTableManager {
         let schema = schema.cloned();
 
         tokio::spawn(async move {
-            // Open one streaming scan per reader.
+            // Admission control (issue #1594, F4): this fan-out merge is ONE
+            // top-level scan OPERATION that legitimately needs all N per-generation
+            // sub-scans live AT ONCE (it primes a head from every sub-scan before
+            // draining any). Acquire exactly ONE admission permit here, for the
+            // whole operation, and open each sub-scan `Exempt` (below) so the
+            // sub-scans do NOT each independently admit. If they did, a fan-out to
+            // `N > cap` generations would deadlock: `cap` sub-scans would win
+            // permits and park in backpressure while the rest blocked forever at
+            // `admit`, and this priming loop — waiting on the blocked sub-scans —
+            // would never drain the permit-holders. Held via this RAII guard for
+            // the whole merge; released on every exit. See `scan_admission` docs.
+            let _admission =
+                crate::storage::sstable::reader::scan_stream_windowed::scan_admission::admit()
+                    .await;
+
+            // Open one streaming scan per reader. Each is `Exempt` — the single
+            // permit above covers the whole fan-out operation (issue #1594).
             let mut streams: Vec<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> = readers
                 .into_iter()
                 .map(|reader| {
-                    reader.scan_stream(
+                    reader.scan_stream_admitted(
                         table_id.clone(),
                         start_key.clone(),
                         end_key.clone(),
                         schema.clone(),
                         buffer_size,
+                        crate::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission::Exempt,
                     )
                 })
                 .collect();

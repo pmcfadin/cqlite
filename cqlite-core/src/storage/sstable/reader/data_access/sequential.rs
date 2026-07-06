@@ -6,6 +6,7 @@
 //! the non-stitching block-by-block formats. BTI (`da`) range/full scans are
 //! routed here only to delegate to [`SSTableReader::bti_scan_with_metadata`].
 
+use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
 use super::super::SSTableReader;
 use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
@@ -283,10 +284,40 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> mpsc::Receiver<Result<(RowKey, ScanRow)>> {
+        // A directly-invoked reader scan is a top-level scan OPERATION: acquire one
+        // admission permit (issue #1594). Callers that fan out to multiple readers
+        // (`SSTableManager::scan_stream`) instead hold ONE permit for the whole
+        // operation and open each sub-scan `Exempt` via `scan_stream_admitted`.
+        self.scan_stream_admitted(
+            table_id,
+            start_key,
+            end_key,
+            schema,
+            buffer_size,
+            ScanAdmission::Acquire,
+        )
+    }
+
+    /// [`scan_stream`](Self::scan_stream) with an explicit admission context
+    /// (issue #1594). Admission is per top-level scan OPERATION: a cross-generation
+    /// fan-out merge passes [`ScanAdmission::Exempt`] for each sub-scan while
+    /// holding ONE permit for the whole operation, so a single query's fan-out to
+    /// `N > cap` generations can never hold-and-wait on itself (the deadlock a
+    /// per-sub-scan permit introduced). A direct scan passes
+    /// [`ScanAdmission::Acquire`].
+    pub(crate) fn scan_stream_admitted(
+        self: std::sync::Arc<Self>,
+        table_id: TableId,
+        start_key: Option<RowKey>,
+        end_key: Option<RowKey>,
+        schema: Option<crate::schema::TableSchema>,
+        buffer_size: usize,
+        admission: ScanAdmission,
+    ) -> mpsc::Receiver<Result<(RowKey, ScanRow)>> {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
         tokio::spawn(async move {
             if let Err(e) = self
-                .run_scan_stream(table_id, start_key, end_key, schema, tx.clone())
+                .run_scan_stream(table_id, start_key, end_key, schema, tx.clone(), admission)
                 .await
             {
                 // Surface the error to the consumer as a terminal stream item.
@@ -303,7 +334,21 @@ impl SSTableReader {
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
         tx: mpsc::Sender<Result<(RowKey, ScanRow)>>,
+        admission: ScanAdmission,
     ) -> Result<()> {
+        // Admission control (issue #1594, F4): a top-level scan operation acquires
+        // ONE blocking-pool permit here, at the top, BEFORE opening the cursor or
+        // spawning any `spawn_blocking` work, and holds it via this RAII guard for
+        // the whole scan (released on every exit — success, error, cancellation).
+        // A fan-out merge's sub-scan is `Exempt` (the merge holds the operation's
+        // single permit), so it acquires none — a fan-out to `N > cap` generations
+        // can never hold-and-wait on itself. No other permit/lock is held while
+        // awaiting admission, so this single-permit acquisition cannot deadlock.
+        let _admission = match admission {
+            ScanAdmission::Acquire => Some(scan_admission::admit().await),
+            ScanAdmission::Exempt => None,
+        };
+
         // Issue #815: independent per-scan cursor — no cross-scan serialization.
         let cursor = self.new_scan_cursor().await?;
 
