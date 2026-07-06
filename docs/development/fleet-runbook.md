@@ -5,9 +5,9 @@ This is the *operator's* doc — what you type, what you'll see, when the system
 Doctrine and internals live elsewhere ([delivery pipeline](https://pmcfadin.github.io/cqlite/agents-developing/delivery-pipeline/),
 `docs/development/pm-operating-loop.md`, `CLAUDE.md`); this page is the driver's seat.
 
-> **Status notes:** items marked **[after #2084]** etc. describe behavior that lands with the
-> Tier-2 epic #2083 (context-economy restructure, audit `docs/reports/agentic-workflow-audit-2026-07-06.md`).
-> Everything unmarked works today.
+> **Status:** the context-economy restructure (Tier-2 epic #2083, audit
+> `docs/reports/agentic-workflow-audit-2026-07-06.md`) has landed — the disposable per-issue closer,
+> inter-issue lead reset, claim heartbeats + deterministic reap, and the worker supervisor all work today.
 
 ---
 
@@ -71,10 +71,10 @@ It orients from the board automatically and opens with something like:
 Say **"work the queue"** (or just `implement <N>`). The lead claims an issue exactly like any
 worker — branch push, assignee, board `In Progress` — and drives it through subagents. You can
 interrupt at any time to groom an idea, ask "where do things stand", or approve a spec; the heavy
-lifting is in subagents and background gates, not your conversation. **[after #2084/#2085]** the
-gate → review → merge endgame runs in a disposable "closer" agent and the lead resets between
-issues, so the session stays crisp all day — restarting it is also always free (state lives on
-the board and disk, never in the window).
+lifting is in subagents and background gates, not your conversation. The gate → review → merge
+endgame runs in a disposable "closer" agent and the lead resets between issues (issues #2084/#2085),
+so the session stays crisp all day — restarting it is also always free (state lives on the board and
+disk, never in the window).
 
 If you want Laptop A undistracted for a strategy session: **"hold claims — B has the queue."**
 
@@ -102,7 +102,7 @@ has one — two sessions collide on worktrees and oversubscribe the CPU (SIGKILL
 perf tests, corrupted sccache under load — all field-observed). More throughput = another
 *machine*, not another session.
 
-### Overnight / unattended operation **[after #2090]**
+### Overnight / unattended operation
 
 Never leave one session grinding all night — context accretes across issues until the worker
 degrades, and a session can't judge its own degradation from the inside. Instead, run the
@@ -167,12 +167,12 @@ branch lock prevents them — 0 collisions in 174 issues).
 ## Reading the board
 
 `what needs me` on any lead shows: item · Status · assignee · priority · claim (origin branch) ·
-**[after #2089]** machine + heartbeat age. Interpretation:
+machine + heartbeat age (issue #2089). Interpretation:
 
 - **Ready, no claim branch** → next thing a worker will grab
 - **In Progress, heartbeat fresh** → leave it alone
-- **In Progress, heartbeat stale** → **[after #2089]** auto-reaped (Status → Ready, work
-  preserved on the branch); today: the flow-board reaper flags it and asks you
+- **In Progress, heartbeat stale** → deterministically reaped by flow-board (heartbeat age > 4h AND no
+  open PR → Status → Ready, work preserved on the branch, traceable comment; issue #2089)
 - **Ready but branch already on origin** → parked-by-design (e.g. spec approved, awaiting a
   team) — pickup is *resume that branch*, never a fresh claim
 

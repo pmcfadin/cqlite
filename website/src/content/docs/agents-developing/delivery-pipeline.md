@@ -26,7 +26,7 @@ middle; you sit in two seats.
 |------|--------------|
 | `flow-groom` | rough idea → one scoped issue (one `P0`–`P3`, `status:ready`, testable criteria); decides oracle vs design |
 | `flow-activate` | worktree + branch + `opsx:propose`; renders spec + design inline; **STOPS at Seam 1** |
-| `flow-implement` | spawns the team in the worktree; runs `agent-gate` → **C** → roborev; opens the PR |
+| `flow-implement` | implement (TDD) → review-first (`rust-reviewer` + roborev on the lite-green diff) → open PR → spawn `flow-closer` for the endgame (full gate → **C** → final roborev → merge → finalize) |
 | `flow-address` | resolves PR review comments; re-verifies; pushes; replies |
 | `flow-finalize` | `opsx:archive` + **stamp the telemetry ledger** + remove worktree/branch + close issue (post-merge) |
 | `flow-board` | status across in-flight work + drives the one item waiting on you |
@@ -75,12 +75,13 @@ is complete.
 | Role | Agent / tool |
 |------|--------------|
 | implement / format debug (TDD) | `sstable-developer` |
+| review-first (Rust review) | `rust-reviewer` — on the lite-green diff, BEFORE the full gate |
+| endgame owner (full gate → C → final roborev → merge → finalize) | `flow-closer` — per issue, disposable context |
 | intent audit (C) | `spec-auditor` (anchored to `openspec/changes/<name>/specs/**`) — see [Spec-driven audit](/cqlite/agents-developing/spec-driven-audit/) |
-| Rust review | `rust-reviewer` |
 | parity / test execution | `test-validator` |
 | test quality | `coverage-reviewer` |
-| code review | roborev |
-| correctness | `scripts/agent-gate.sh` |
+| code review | roborev (review-first + the closer's final pass) |
+| correctness | `scripts/agent-gate.sh` — the ONE gate of record, inside `flow-closer` |
 
 ## State model
 
@@ -130,9 +131,22 @@ artifact).
    it; otherwise back off and take the next eligible item.
 
 Another machine that finds an existing claim branch can `git fetch` it to **resume** that work instead of
-colliding. `flow-board` reaps **abandoned claims** — an `In Progress` item whose branch has had no recent
-commits (the claiming session died) is flagged as STALLED for reclaim or finish, so a crash never leaks a
-stuck item. `flow-finalize` releases the claim by deleting the origin branch on cleanup.
+colliding. The claiming session also maintains a liveness **heartbeat** (`scripts/flow/claim-heartbeat.sh
+beat <N>` — a cheap origin git ref under `refs/heartbeats/<machine>`, never a GitHub API call — refreshed at
+claim time and on every stage transition: activate/implement/gate/PR). `flow-board` reaps **abandoned
+claims deterministically** (issue #2089): an `In Progress` item is reaped only when its heartbeat age
+exceeds the documented threshold (4h — the `claim-heartbeat.sh` header is the single source of truth) **AND**
+it has no open PR — reap = a traceable comment + assignee clear + `Status → Ready` + a claim-branch note
+(never deleting a branch that carries commits). This replaces the old "no recent commits" guess.
+`flow-finalize` releases the claim by deleting the origin branch and clearing the heartbeat on cleanup.
+
+For unattended/overnight runs a **worker supervisor** (`scripts/local/worker-supervisor.sh`, issue #2090)
+recycles one worker process per issue — the hard context bound is process exit: the worker rehydrates from
+the board, resumes this machine's own claim branch first (crash recovery) else claims the next Ready item,
+runs it to merged + finalized, writes a `.worker-last-iteration.json` marker, and **exits** (never a second
+issue per session). The supervisor adds a flock single-instance (mechanizing one-worker-per-machine),
+fail-closed preflight (load/disk/leftover-process/stop-file), a crash-loop breaker, budgets, and ntfy
+notifications. See the [fleet runbook](https://github.com/pmcfadin/cqlite/blob/main/docs/development/fleet-runbook.md).
 
 ## Concurrency model
 
@@ -176,16 +190,55 @@ the merge event moves the board item to `Done`. The owner intervenes on merge (f
 UI) **only on escalation** — a genuine design-call roborev finding, a scope/product question, or work
 outside the issue.
 
-## Tiered gate + division of labor (issues #1821, #1855)
+## The implement loop: review before gate, gate once at the end (issues #1821, #2084, #2086, #2087, #2088)
 
-Inside `flow-implement` the gate is **tiered**: the implementer iterates on
-`scripts/agent-gate.sh --lite` (~1–5 min) every fix round, and the **worker/orchestrator** runs the FULL
-`scripts/agent-gate.sh` **exactly once** before merge — its `==== AGENT-GATE SUMMARY ====` block is the
-only run that counts. `--lite` never replaces the full gate. **Division of labor:** an implementer
-subagent (`sstable-developer`) edits/commits/pushes and verifies with `--lite`/targeted tests **only** — it
-must **never** invoke the full gate (a subagent idle-waiting on a 12–20 min gate is killed by the stall
-watchdog and takes its child gate process down with it). See the
-[gate contract](/cqlite/agents-developing/gate-contract/) for the full loop and the `accelerators:` line.
+Inside `flow-implement` the loop is ONE coherent design, not three patches:
+
+```
+implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lite-green diff
+  (review-first, DEFAULT) → fix (lite re-cert + diff-scoped targets, NEVER a full gate)
+  → open PR → flow-closer { FULL gate ONCE → C → final roborev → merge-on-green → finalize }
+```
+
+- **Review-first is the default (issue #2086).** `rust-reviewer` + roborev run on the **lite-green** diff
+  **before** the first full gate, so review discovers fixable problems before we pay for the 12–25 min gate.
+  Skip only for a genuinely mechanical diff (no `pub`-item change AND single call site AND no new surface).
+- **Scoped re-cert, one full gate (issue #2087).** A roborev blocker that touches src re-certifies with
+  `scripts/agent-gate.sh --lite` (blast-radius-scoped) + any diff-relevant parity/integration target — NOT
+  a full gate. The single full gate of record runs **once**, immediately pre-merge; lite re-certs (their
+  `MODE: lite` marker) are never the gate of record.
+- **Severity-triaged findings (issue #2088).** Findings are classified per the
+  [roborev severity rubric](https://github.com/pmcfadin/cqlite/blob/main/docs/development/roborev-severity.md):
+  **blockers** (correctness, data-parity, no-heuristics, safety, wiring-evidence, security, any acceptance
+  criterion) are fixed pre-merge; **nits** (style, naming, comment/doc polish, no-repro test suggestions)
+  are batched into ONE linked follow-up issue at merge time and never trigger a re-verify round. When in
+  doubt, blocker.
+- **The disposable `flow-closer` owns the endgame (issue #2084).** `flow-implement` opens the PR, then
+  spawns a per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via
+  `run_in_background` + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall
+  watchdog and orphan the gate), the **C** intent audit, the final roborev pass, then merges on green and
+  `flow-finalize`s. It returns only a terminal packet (verdict, PR URL, summary-file path, ≤10 lines
+  residual), so gate stdout and review churn die with its context instead of accreting in the lead session.
+  Any src change after the full gate INVALIDATES it — the gate of record must postdate the final src change
+  and rebase.
+- **Division of labor.** An implementer subagent (`sstable-developer`) edits/commits/pushes and verifies
+  with `--lite`/targeted tests **only** — it must **never** invoke the full gate.
+
+Every gate invocation — full and `--lite` — uses the **summary-file redirect** by default
+(`AGENT_GATE_SUMMARY_FILE=<path> … > gate.log 2>&1 < /dev/null`, then `cat <path>`); raw gate stdout is
+never read into a persistent agent context (issue #2079). See the
+[gate contract](/cqlite/agents-developing/gate-contract/) for the summary-file default and the
+`accelerators:` line.
+
+## Inter-issue reset for the lead (issue #2085)
+
+The `flow-lead` is the only long-lived agent, so it compacts between issues: after each `flow-finalize` it
+carries **zero prior-issue history** (board renders, gate summaries, roborev findings, PR bodies, and
+Seam-1 spec renders are dropped — `spec-auditor` re-reads specs from `openspec/changes/<slug>/` anyway),
+re-hydrates the **next** item from the **board alone**, and stays re-runnable from board + disk state at any
+point (worktree, origin claim branch, issue/PR bodies, OpenSpec files, summary files, telemetry ledger).
+Durable cross-issue lessons route to `MEMORY.md` / `process_improvements.md`, never the live window. The
+same board-only rehydration rule applies to worker sessions (see the supervisor below).
 
 ## Machine setup + accelerators
 

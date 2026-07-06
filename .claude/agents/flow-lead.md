@@ -22,9 +22,11 @@ already in context — this file is your operating manual for the *role*, not a 
 2. **Activate** (`flow-activate <N>`) — **Seam 1**. Worktree + branch + `opsx:propose` + design.
    Render the spec (requirements + `#### Scenario:` blocks verbatim) + recommended design INLINE and
    **STOP for the owner's approval**. Never implement here.
-3. **Implement** (`flow-implement <N>`) — after approval. Spawn the specialist team in the worktree,
-   run the quality stages (`agent-gate.sh` → **C** intent audit → roborev), push the branch, open the
-   PR. **Do not merge by default** (see autonomy).
+3. **Implement** (`flow-implement <N>`) — after approval. Spawn `sstable-developer` (TDD, iterating on
+   `--lite`), run **review-first** (`rust-reviewer` + roborev on the lite-green diff, BEFORE any full gate),
+   open the PR, then hand the endgame — the ONE full `agent-gate.sh` of record → **C** → final roborev →
+   merge-on-green → finalize — to a disposable **`flow-closer`** that runs it in its own context and returns
+   only a terminal packet (issue #2084).
 4. **Address** (`flow-address <N>`) — owner-invoked when they leave PR comments; resolve in the
    worktree, push, reply per thread.
 5. **Finalize** (`flow-finalize <N>`) — `opsx:archive` the change, remove the worktree/branch, close
@@ -66,8 +68,11 @@ the owner (a green PR to merge, a spec to approve), or a short pick-list. Drive 
 
 - **No-heuristics mandate (#28):** authoritative metadata only — schema, else `Statistics.db`. No type
   guessing; legacy fallbacks live only behind the `experimental` flag.
-- **The gate is `scripts/agent-gate.sh` — the only run that counts.** Paste its AGENT-GATE SUMMARY block
-  verbatim; ad-hoc cargo runs do not count. Run `scripts/agent-gate.sh --list` for the component set.
+- **The gate is `scripts/agent-gate.sh` — the only run that counts.** The AGENT-GATE SUMMARY block is the
+  verdict; ad-hoc cargo runs do not count. Run `scripts/agent-gate.sh --list` for the component set. **The
+  ONE gate of record runs inside `flow-closer`, not in your context (issue #2084):** you never run the full
+  gate or read its raw stdout/`gate.log` — the closer returns a terminal packet with the summary-file path
+  (issue #2079). Retain the packet, not the log.
 - **Wiring-evidence:** a feature is done only when its public surface exercises it — a named surface +
   call chain + an end-to-end test. Green helper-only unit tests are not sufficient.
 - **Parity is truth:** validate against `sstabledump` JSONL goldens; integration tests use real SSTable
@@ -86,12 +91,13 @@ silently fails:
 | Role | Agent | Stage |
 |------|-------|-------|
 | implement / format debug (TDD) | `sstable-developer` | flow-implement |
-| intent audit (C) | `spec-auditor` (anchored to `openspec/changes/<name>/specs/**`) | after the gate |
-| Rust review | `rust-reviewer` | review |
+| review-first (Rust review) | `rust-reviewer` | on the lite-green diff, BEFORE the full gate |
+| endgame owner (full gate → C → final roborev → merge → finalize) | `flow-closer` | terminal stages, per issue |
+| intent audit (C) | `spec-auditor` (anchored to `openspec/changes/<name>/specs/**`) | inside flow-closer, after the gate |
 | parity / test execution | `test-validator` | verify |
 | test quality | `coverage-reviewer` | review |
-| code review | roborev (`/roborev-review-branch --base origin/main`) | before merge |
-| correctness | `scripts/agent-gate.sh` | gate |
+| code review | roborev (`/roborev-review-branch --base origin/main`) | review-first + final closer pass |
+| correctness | `scripts/agent-gate.sh` | the ONE gate of record, inside flow-closer |
 
 - Parallelize independent specialists in one message; sequence dependent work. A review finding that is
   **mechanical** (a missing test, a fmt/clippy nit) is the loop's to fix; a genuine **decision** goes to
@@ -106,7 +112,10 @@ same item. The deciding cross-machine lock is the **`issue-<N>-<slug>` branch pu
 `@me` is identical for the same GitHub user on two machines, so assignee alone is NOT a lock); a session
 claims by pushing that branch, sets assignee + `Status=In Progress` for visibility, then **re-reads** and
 proceeds only if it holds the branch. See `flow-activate` / `flow-implement` for the steps and `flow-board`
-for the render + reaper.
+for the render + reaper. The claiming session also maintains a liveness **heartbeat**
+(`scripts/flow/claim-heartbeat.sh beat <N>` — a cheap origin git ref, never a GitHub API call — refreshed at
+claim time and every stage transition) that `flow-board` uses for deterministic reaping (age > 4h AND no
+open PR), replacing the old "no recent commits" guesswork (issue #2089).
 
 - **One active worker per machine; the worker paces the machine's load (#1930).** A single lead/worker
   session owns a machine at a time — this is the load + worktree-isolation rule that sits *above* the
@@ -168,6 +177,25 @@ near-independent issues instead of running one to done before starting the next:
   `test-data/datasets`.
 - **Every issue/PR number carries a brief description** in output — `#1081 (multicell UDT)`, never a bare
   `#1081`.
+
+## Inter-issue context reset — O(1 issue) per session (issue #2085)
+
+You are the only long-lived agent, so nothing compacts between issues unless you do it. After each
+`flow-finalize`, **reset**:
+
+- **Board is the sole re-hydration source for the next item.** `flow-finalize` already stamped the
+  telemetry ledger (one line: issue, PR, verdict); carry **zero prior-issue history** forward — no retained
+  board renders, gate summaries, roborev findings, PR bodies, or spec renders. Pick the next item from the
+  board alone.
+- **Be re-runnable from board + disk alone.** All durable state already lives outside your window — the
+  worktree, the origin claim branch, the issue/PR bodies, the OpenSpec files under `openspec/changes/`, the
+  gate summary files, the telemetry ledger. A fresh session must rehydrate in one board read; if it can't,
+  something was being held only in the window — fix that, don't lean on it.
+- **Seam-1 spec bodies are NOT retained after owner approval** — render inline for approval, get the call,
+  then drop them. `spec-auditor` (C) re-reads the spec from `openspec/changes/<slug>/` anyway, so keeping
+  the verbatim render in your window is pure accretion.
+- **Cross-issue lessons route to persisted files, never the live window** — `MEMORY.md` /
+  `process_improvements.md` for durable lessons; the ledger for per-issue metrics.
 
 ## Memory + docs
 

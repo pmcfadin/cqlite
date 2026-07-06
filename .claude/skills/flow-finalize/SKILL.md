@@ -91,6 +91,11 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
    `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
    (Regression coverage: `scripts/flow/tests/finalize-cleanup.test.sh` encodes the #1143 scenario.)
+   Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap
+   window (issue #2089):
+   ```bash
+   scripts/flow/claim-heartbeat.sh clear "$(hostname -s)"
+   ```
 7. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
    acceptance criteria are fully met — never close an epic):
    ```bash
@@ -102,3 +107,9 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    close → `PATCH repos/OWNER/REPO/issues/N -f state=closed`). Never stall finalize on one exhausted bucket.
 8. **Report** the closed issue, the live capability (if a spec was synced), and surface the next board
    item.
+9. **Reset before the next item (issue #2085).** This is the inter-issue compaction point. The ledger stamp
+   (step 4) is the durable record — carry **zero prior-issue history** forward. Drop the retained board
+   renders, gate summaries, roborev findings, PR body, and any Seam-1 spec render for this issue; route any
+   durable cross-issue lesson to `MEMORY.md` / `process_improvements.md`, never the live window. Re-hydrate
+   the **next** item from the **board alone** — the lead must be re-runnable from board + disk state at any
+   point, so a session that clears N issues stays O(1 issue), not O(N).
