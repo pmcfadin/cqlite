@@ -276,14 +276,16 @@ impl SSTableWriter {
         // the crash-safety invariant) the TOC dirent could be durable while a
         // component's dirent is not. fsync the containing directory now — AFTER the
         // component contents and the TOC — so the directory entries for the whole
-        // component set become durable, and only AFTER their contents. This upholds
-        // the invariant "if TOC.txt is visible then every component it names is
-        // present and complete" for any finalize that writes directly into the
+        // component set become durable, and only AFTER their contents. On Unix this
+        // upholds the invariant "if TOC.txt is visible then every component it names
+        // is present and complete" for any finalize that writes directly into the
         // final SSTable directory (flush, one-shot merge). The background
         // compaction path writes into a tmp directory and republishes via rename,
-        // so it additionally fsyncs the *destination* directory after the renames
-        // (see `finalize_merge_async`). Directory fsync is a no-op on non-Unix,
-        // where the per-file fsyncs remain the durability guarantee.
+        // so it additionally fsyncs the *destination* directory (and its ancestor
+        // chain) after the renames (see `finalize_merge_async`). The invariant is
+        // Unix-scoped: directory fsync is a documented no-op on non-Unix (issue
+        // #1392 / #1959), where the per-file fsyncs remain the durability guarantee
+        // and the parent dirents are not separately persisted.
         crate::storage::write_engine::durability::sync_directory(sstable_dir)?;
 
         // Data.db bytes written by this SSTable writer (issue #1036). Counts
