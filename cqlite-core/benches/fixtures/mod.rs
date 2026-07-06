@@ -165,6 +165,19 @@ impl ReadFixture {
         schema_file: "time-series.cql",
     };
 
+    /// `test_da.wide_table` — the BTI (`da`) WIDE-partition fixture: `PRIMARY KEY
+    /// (pk, ck)`, `int` pk, 3 partitions (pk=1/2/3) each holding 300 clustering
+    /// rows (ck=0..299) whose per-partition `Rows.db` trie indexes 38 row-index
+    /// blocks. The single-column clustering seek fixture for the L1 floor-walk
+    /// benches (issue #1647). **Optional** — the `test_da` corpus is not present in
+    /// every checkout, so benches MUST guard on [`fixture_present`] and skip-register
+    /// when absent. Uses the `wide-table-bti.cql` schema.
+    pub const WIDE_BTI: ReadFixture = ReadFixture {
+        keyspace: "test_da",
+        table: "wide_table",
+        schema_file: "wide-table-bti.cql",
+    };
+
     /// `test_collections.collection_table` — lists/sets/maps. The type-heavy
     /// decode fixture (isolates deserialization cost).
     pub const TYPE_HEAVY: ReadFixture = ReadFixture {

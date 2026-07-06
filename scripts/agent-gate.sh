@@ -2505,7 +2505,8 @@ dispatch_component() {
       --test issue_1570_key_offset_cache \
       --test issue_1575_candidate_key_hash_hoist \
       --test issue_1576_range_short_circuit \
-      --test issue_1578_aggregate_o1_memory ;;
+      --test issue_1578_aggregate_o1_memory \
+      --test issue_1647_rows_floor_walk ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
       --test issue_1582_byte_bounded_result_budget \

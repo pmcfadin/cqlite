@@ -270,6 +270,64 @@ fn bench_clustering_slice(c: &mut Criterion) {
     group.finish();
 }
 
+/// Shared driver for the BTI (`da`) single-column clustering-seek benches
+/// (issue #1647 / L1). Runs a fully-constrained `WHERE pk = 1 AND <clustering>`
+/// query against `test_da.wide_table`, whose per-partition `Rows.db` trie indexes
+/// 38 row-index blocks. Post-L1 the read locates its block(s) with an
+/// O(key-length) separator-floor walk instead of materializing every block, so
+/// these benches are the sensitive read benches for a regression back to the
+/// enumerate-then-filter path. **Optional fixture**: registers nothing when the
+/// `test_da` corpus is absent, so the bench binary still runs everywhere.
+#[cfg(feature = "cli-helpers")]
+fn bench_clustering_bti(c: &mut Criterion, clustering: &str, bench_name: &str) {
+    let fx = fixtures::ReadFixture::WIDE_BTI;
+    if !fixtures::fixture_present(&fx) {
+        eprintln!("skip {bench_name}: optional BTI test_da/wide_table fixture not present");
+        return;
+    }
+    let loaded = fixtures::open_read_db(&fx);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let sql = format!(
+        "SELECT pk, ck, payload FROM {} WHERE pk = 1 AND {clustering}",
+        fx.qualified()
+    );
+
+    let setup = rt
+        .block_on(loaded.db.execute(&sql))
+        .unwrap_or_else(|e| panic!("{bench_name} setup query failed: {e}"));
+    let rows_measured = setup.rows.len() as u64;
+    assert!(
+        rows_measured > 0,
+        "{bench_name}: `{sql}` returned zero rows — fixtures not fetched?",
+    );
+
+    let mut group = c.benchmark_group("read");
+    group.throughput(Throughput::Elements(rows_measured));
+    group.bench_function(bench_name, |bch| {
+        bch.iter(|| {
+            let res = rt
+                .block_on(loaded.db.execute(black_box(&sql)))
+                .expect("bti clustering seek");
+            black_box(res.rows.len())
+        });
+    });
+    group.finish();
+}
+
+/// Bench: BTI single-partition clustering POINT read (`ck = 150`) — the L1
+/// separator-floor fast path (issue #1647). Registers as `read/clustering_point_bti`.
+#[cfg(feature = "cli-helpers")]
+fn bench_clustering_point_bti(c: &mut Criterion) {
+    bench_clustering_bti(c, "ck = 150", "clustering_point_bti");
+}
+
+/// Bench: BTI single-partition clustering RANGE read (`ck in [100, 110)`) — floor
+/// + strict-ceiling walk (issue #1647). Registers as `read/clustering_range_bti`.
+#[cfg(feature = "cli-helpers")]
+fn bench_clustering_range_bti(c: &mut Criterion) {
+    bench_clustering_bti(c, "ck >= 100 AND ck < 110", "clustering_range_bti");
+}
+
 /// Bench: full-table scan of simple_table.
 ///
 /// `SELECT * FROM test_basic.simple_table` streams all ~999 rows.
@@ -407,6 +465,8 @@ criterion_group!(
               bench_get_partition_bti,
               bench_point_lookup_repeated,
               bench_clustering_slice,
+              bench_clustering_point_bti,
+              bench_clustering_range_bti,
               bench_full_scan,
               bench_type_heavy,
               bench_scan_partition_dense_stream

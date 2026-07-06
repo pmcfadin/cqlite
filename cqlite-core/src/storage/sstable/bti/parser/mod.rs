@@ -49,6 +49,8 @@
 //!   partition iterator.
 //! - [`rows`]        — `Rows.db` `RowIndexReader.IndexInfo` / `TrieIndexEntry`
 //!   decode, row iteration, and range-block selection.
+//! - [`rows_floor`]  — O(key-length) `separatorFloor` / strict-ceiling `Rows.db`
+//!   walks (issue #1647 / L1) + the shared per-node payload primitive.
 //! - [`encoding`]    — Cassandra OSS50 byte-comparable clustering-bound encoders.
 //! - [`reader`]      — the stateful `BtiHeader` / `PartitionsParser` /
 //!   `RowsParser` navigators, their iterators, and `BtiIndexStats`.
@@ -58,6 +60,7 @@ mod node_decode;
 mod partitions;
 mod reader;
 mod rows;
+mod rows_floor;
 mod slice_walk;
 mod traversal;
 
@@ -84,4 +87,10 @@ pub use rows::{
 // (issue #1575 / C4): every BTI partition lookup now encodes then walks via this
 // single primitive.
 pub(crate) use slice_walk::lookup_partition_in_bti_slice;
+// Crate-internal only: the O(key-length) Rows.db floor/ceiling walks (issue #1647
+// / L1). Their sole consumer is the SSTable reader's clustering-window path
+// (data_access::bti), which is compiled out under `tombstones`; kept off the
+// public semver surface like the slice walker.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) use rows_floor::{rows_floor_block, rows_strict_ceiling_block};
 pub use traversal::iterate_partitions_in_bti_file;

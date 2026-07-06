@@ -295,9 +295,9 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<ClusteringRowWindow>> {
         use crate::storage::sstable::bti::{
-            encode_partition_key_for_bti_trie, iterate_rows_for_partition,
-            lookup_partition_in_bti_slice, resolve_rows_db_entry,
-            select_row_index_blocks_for_range, BtiPartitionLocation,
+            encode_partition_key_for_bti_trie, lookup_partition_in_bti_slice,
+            resolve_rows_db_entry, rows_floor_block, rows_strict_ceiling_block,
+            BtiPartitionLocation,
         };
 
         let (Some(partitions_db), Some(rows_db)) = (&self.bti_partitions_db, &self.bti_rows_db)
@@ -325,25 +325,17 @@ impl SSTableReader {
             Some(BtiPartitionLocation::DataOffset(_)) | None => return Ok(None),
         };
 
-        // Resolve the per-partition row-index entry and enumerate its blocks in
-        // ascending byte-comparable (clustering) order.
+        // Resolve the per-partition row-index entry ONCE (issue #1647 / L1: the
+        // pre-L1 path resolved it HERE and again inside `iterate_rows_for_partition`,
+        // discarding the first). `header.trie_root` roots the O(key-length)
+        // floor/ceiling walks below, so a clustering read never materializes every
+        // row-index block.
         let header = resolve_rows_db_entry(rows_db.as_slice(), rows_offset).map_err(|e| {
             Error::corruption(format!(
                 "BTI clustering seek: Rows.db entry at RowsOffset({rows_offset}) unreadable: {e}"
             ))
         })?;
-        let (_header2, entries) = iterate_rows_for_partition(rows_db.as_slice(), rows_offset)
-            .map_err(|e| {
-                Error::corruption(format!(
-                    "BTI clustering seek: Rows.db trie at RowsOffset({rows_offset}) unreadable: {e}"
-                ))
-            })?;
-        // `iterate_rows_for_partition` re-resolves the header internally; keep the
-        // first `header` (identical) for `block_count`/`data_position`.
-        let _ = header;
-        if entries.is_empty() {
-            return Ok(None);
-        }
+        let root = header.trie_root;
 
         // Per-column reverse order for the FIRST clustering column (single-column
         // scope per #954). A missing/absent schema treats it as ascending.
@@ -358,124 +350,105 @@ impl SSTableReader {
 
         // Encode the CQL bounds into the PHYSICAL byte-comparable order the row
         // index uses, normalizing for a DESC first clustering column (issue #954
-        // High-severity correctness fix). `select_row_index_blocks_for_range`
-        // operates purely in physical (on-disk, byte-comparable) order, so the CQL
-        // lower/upper bounds must be mapped to the physical-lower/physical-upper
-        // sides before block selection. For a DESC column those roles SWAP (see
-        // `physical_byte_bounds_for_slice`). An un-encodable bound makes the
-        // narrowing unsafe → decode the whole partition (honest fallback).
+        // High-severity correctness fix). The floor/ceiling walks operate purely in
+        // physical (on-disk, byte-comparable) order, so the CQL lower/upper bounds
+        // must be mapped to the physical-lower/physical-upper sides before the walk.
+        // For a DESC column those roles SWAP (see `physical_byte_bounds_for_slice`).
+        // An un-encodable bound makes the narrowing unsafe → decode the whole
+        // partition (honest fallback).
         let Some((start_bytes, end_bytes)) = physical_byte_bounds_for_slice(slice, &is_reversed)?
         else {
             return Ok(None);
         };
 
-        // CORRECTNESS GUARD (no-heuristics, never wrong results): a row-index block
-        // carrying an `open_marker` (FLAG_OPEN_MARKER) means a range tombstone is
-        // OPEN at that block boundary — a deletion opened in an earlier block can
-        // still shadow rows inside the requested slice. Narrowing the decode skips
-        // the rows (and the range-marker bytes) before the slice, which would drop
-        // that open deletion and risk resurrecting a deleted row. The post-scan
-        // backstop only FILTERS rows, it cannot re-apply a missed range tombstone.
-        // So when ANY block in this partition's row index carries an open marker we
-        // fall back to a full-partition decode (correct, just unnarrowed). The
-        // common wide-partition slice (no range tombstones) is unaffected.
-        if entries.iter().any(|(_sep, b)| b.open_marker.is_some()) {
+        // Locate the row-body window with two O(key-length) separator walks instead
+        // of materializing every row-index block then linearly filtering (issue
+        // #1647 / L1). Both mirror Cassandra `RowIndexReader.separatorFloor`:
+        //   - floor(start): the block whose half-open interval `[s_i, s_{i+1})`
+        //     contains the physical-lower bound (largest separator `<= start`), i.e.
+        //     the first block that can hold a row of the slice. `None` when `start`
+        //     sorts below the FIRST separator — the trie-implicit first block at the
+        //     partition body start (issue #1968), which no stored walk can return.
+        //   - strict_ceiling(end): the block with the smallest separator strictly
+        //     `> end` = the EXCLUSIVE window end (the successor of `floor(end)`).
+        //     `None` when the slice reaches the last block (window runs to the
+        //     partition end).
+        // These reproduce the pre-L1 `select_row_index_blocks_for_range` window
+        // (min selected-block start .. successor of max selected-block) EXACTLY, by
+        // construction, for every boundary class (see the rows_floor unit tests).
+        let floor_block =
+            rows_floor_block(rows_db.as_slice(), root, &start_bytes).map_err(|e| {
+                Error::corruption(format!(
+                "BTI clustering seek: Rows.db floor walk at RowsOffset({rows_offset}) failed: {e}"
+            ))
+            })?;
+        let ceil_block =
+            rows_strict_ceiling_block(rows_db.as_slice(), root, &end_bytes).map_err(|e| {
+                Error::corruption(format!(
+                    "BTI clustering seek: Rows.db ceiling walk at RowsOffset({rows_offset}) \
+                     failed: {e}"
+                ))
+            })?;
+
+        // The static row precedes the clustering rows and must be merged into each
+        // emitted clustering row, so we may only fast-forward PAST it when the table
+        // has NO static columns; otherwise decode from the partition body start
+        // (`body_start_rel = 0`) so the static prefix is seen (the END bound still
+        // narrows). (`test_da.wide_table` has no static columns, so the start narrows
+        // too.)
+        let has_static = schema
+            .map(|s| s.columns.iter().any(|c| c.is_static))
+            .unwrap_or(false);
+
+        // IMPLICIT FIRST BLOCK (issue #1968): a `start` below the first separator
+        // selects the implicit block at the partition body start, which no walk can
+        // return. `rows_floor_block` returns `None` in exactly that case, so it IS
+        // the implicit-first signal; the decode must then begin at rel 0 or the
+        // earliest clustering rows are dropped.
+        let includes_implicit_first_block = floor_block.is_none();
+
+        // The start narrows to the floor block only when NEITHER a static row NOR the
+        // implicit first block forces decoding from rel 0.
+        let narrows_start = !has_static && !includes_implicit_first_block;
+
+        // CORRECTNESS GUARD (no-heuristics, never wrong results): FLAG_OPEN_MARKER on
+        // the floor block's `IndexInfo` means a range tombstone is OPEN at the START
+        // of the narrowed window — a deletion opened in an earlier block still shadows
+        // rows inside the slice. Skipping earlier blocks would drop that range-open
+        // marker and risk resurrecting a deleted row (the post-scan backstop only
+        // FILTERS rows, it cannot re-apply a missed range tombstone). Per Cassandra
+        // `RowIndexReader.IndexInfo.openDeletion`, the marker on the floor block fully
+        // captures any deletion open at the window start, so this is the exact, tight
+        // guard: when it fires (only relevant when the start actually narrows) fall
+        // back to a full-partition decode. When the decode already starts at rel 0
+        // (static / implicit-first) no earlier block is skipped, so no guard is
+        // needed. (`test_da.wide_table` has no range tombstones.)
+        if narrows_start
+            && floor_block
+                .as_ref()
+                .map(|b| b.open_marker.is_some())
+                .unwrap_or(false)
+        {
             debug!(
-                "BTI clustering seek: partition row index has open range-tombstone marker(s); \
-                 decoding full partition to preserve range-deletion semantics (no narrowing)"
+                "BTI clustering seek: floor row-index block carries an open range-tombstone \
+                 marker; decoding full partition to preserve range-deletion semantics (no \
+                 narrowing)"
             );
             return Ok(None);
         }
 
-        let blocks = select_row_index_blocks_for_range(&entries, &start_bytes, &end_bytes);
-
-        // IMPLICIT FIRST BLOCK (issue #1968). A `Rows.db` row-index trie stores a
-        // separator per block EXCEPT the first: the block covering keys BELOW the
-        // first separator lives at the partition body start and has NO trie entry
-        // (mirroring Cassandra `RowIndexReader.separatorFloor`, which returns the
-        // partition start for a key below the first separator). Consequently
-        // `select_row_index_blocks_for_range` — which operates purely over the
-        // stored (separator, block) entries — can NEVER return that implicit block.
-        //
-        // The requested range overlaps the implicit first block iff its
-        // physical-lower bound sorts strictly BELOW the first separator
-        // (`start_bytes < entries[0].sep`). The canonical trigger is an OPEN lower
-        // bound (`ck < N` / `ck <= N`), whose physical-lower sentinel is `-∞` = the
-        // empty slice `b""`, but a closed lower bound below the first separator
-        // (`ck >= 2 AND ck < 20`, `ck = 0`) hits it too. When the range includes
-        // that block the earliest clustering rows precede every stored block, so the
-        // decode MUST begin at the partition body start (rel 0) or those rows are
-        // silently dropped (the pre-fix bug returned `ck=8..19` for `ck < 20`).
-        // Bind the first stored entry ONCE and reuse it for both the predicate and
-        // the entirely-within-implicit-block window below, so the window end can
-        // never diverge from the predicate (no `usize::MAX` over-read fallback).
-        let first_entry = entries.first();
-        let includes_implicit_first_block = first_entry
-            .map(|(sep, _)| start_bytes.as_slice() < sep.as_slice())
-            .unwrap_or(false);
-
-        if blocks.is_empty() {
-            // `includes_implicit_first_block` is true only when `first_entry` is
-            // `Some`; the `if let` makes that invariant explicit and reuses the exact
-            // entry that satisfied the predicate (its start is the window end).
-            if let (true, Some((_sep, first_block))) = (includes_implicit_first_block, first_entry)
-            {
-                // The range lies ENTIRELY within the implicit first block (its
-                // physical-upper is also below the first separator, e.g. `ck <= 3`
-                // or `ck = 0`): no stored block overlaps, but the implicit block
-                // does. Narrow to [partition body start, first stored block start);
-                // the post-scan backstop trims to the exact predicate.
-                return Ok(Some(ClusteringRowWindow {
-                    body_start_rel: 0,
-                    body_end_rel: first_block.data_offset as usize,
-                }));
-            }
-            // No block (implicit or stored) overlaps the range. The slice may still
-            // select rows that share the floor block's separator boundary; to stay
-            // correct we fall back to a full-partition decode rather than risk
-            // dropping a row.
-            return Ok(None);
-        }
-
-        // Row-body byte window = [first selected block start, end of the LAST
-        // selected block). The block `data_offset` is relative to the partition
-        // start (the same domain the parser sees for `window[within..]`). The end
-        // is the start of the FIRST block AFTER the last selected one (or +∞ via
-        // the partition end when the last selected block is the partition's last).
-        // The static row precedes the clustering rows and must be merged into each
-        // emitted clustering row, so we may only fast-forward PAST it when the
-        // table has NO static columns. With a static column present, decode from
-        // the partition body start (`body_start_rel = 0`) so the static prefix is
-        // seen; the END bound still narrows the decode. (The acceptance fixture
-        // `test_da.wide_table` has no static columns, so the start narrows too.)
-        let has_static = schema
-            .map(|s| s.columns.iter().any(|c| c.is_static))
-            .unwrap_or(false);
-        // Start at the earliest selected STORED block — UNLESS the table has a
-        // static row, or the range also covers the implicit first block (issue
-        // #1968); either case must decode from the partition body start (rel 0) so
-        // the static prefix / the implicit block's rows are seen. The END bound
-        // still narrows the decode in both cases.
-        let body_start_rel = if has_static || includes_implicit_first_block {
-            0
-        } else {
-            blocks
-                .iter()
-                .map(|b| b.data_offset as usize)
-                .min()
-                .unwrap_or(0)
+        // body_start_rel: the floor block's offset when the start narrows, else the
+        // partition body start (rel 0). The block `data_offset` is relative to the
+        // partition start (the same domain the parser sees for `window[within..]`).
+        let body_start_rel = match &floor_block {
+            Some(b) if narrows_start => b.data_offset as usize,
+            _ => 0,
         };
-        let last_selected_off = blocks.iter().map(|b| b.data_offset).max().unwrap_or(0);
-        // The exclusive end is the next block's start strictly greater than the
-        // last selected block; if none, the window runs to the partition end
-        // (`usize::MAX` is clamped by the caller against the authoritative
-        // partition end / data-section length).
-        let body_end_rel = entries
-            .iter()
-            .map(|(_sep, b)| b.data_offset)
-            .filter(|&off| off > last_selected_off)
-            .min()
-            .map(|off| off as usize)
+        // body_end_rel: the exclusive successor block start, or the partition end
+        // (`usize::MAX`, clamped by the caller against the authoritative partition
+        // end / data-section length) when the slice reaches the last block.
+        let body_end_rel = ceil_block
+            .map(|b| b.data_offset as usize)
             .unwrap_or(usize::MAX);
 
         Ok(Some(ClusteringRowWindow {

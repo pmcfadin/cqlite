@@ -30,8 +30,7 @@
 use crate::{error::Error, storage::sstable::bti::node::BtiResult};
 use std::io::{Read, Seek, SeekFrom};
 
-use super::node_decode::parse_bti_node;
-use super::partitions::{payload_start_in_node, sized_ints_read_from_slice};
+use super::partitions::sized_ints_read_from_slice;
 use super::traversal::{dfs_collect_in_order, load_bti_trie_via_footer};
 
 #[allow(unused_imports)] // referenced in doc-links
@@ -252,66 +251,17 @@ pub fn decode_bti_row_payload(
     })
 }
 
-/// Read the `BtiRowIndexEntry` from the payload attached to a `Rows.db` node at
-/// `node_offset`, or `None` if the node carries no payload.
-///
-/// Structurally parallels
-/// [`read_node_payload`](super::partitions::read_node_payload) but decodes the
-/// Rows.db payload format via [`decode_bti_row_payload`].
-fn read_row_node_payload(
-    trie_data: &[u8],
-    node_offset: usize,
-) -> BtiResult<Option<BtiRowIndexEntry>> {
-    if node_offset >= trie_data.len() {
-        return Err(Error::Parse(format!(
-            "Rows.db payload read: node_offset {node_offset} out of bounds"
-        )));
-    }
-
-    let header_byte = trie_data[node_offset];
-    let ordinal = (header_byte >> 4) & 0x0F;
-    let payload_flags = header_byte & 0x0F;
-
-    // SingleNoPayload variants (ordinals 1, 3) carry their delta in the low
-    // nibble and never have a payload.  See `read_node_payload`.
-    if ordinal == 1 || ordinal == 3 {
-        return Ok(None);
-    }
-
-    if ordinal == 0 {
-        if payload_flags == 0 {
-            return Err(Error::Parse(
-                "Rows.db PayloadOnly node has zero payload_flags".to_string(),
-            ));
-        }
-        let payload_start = node_offset + 1;
-        Ok(Some(decode_bti_row_payload(
-            trie_data,
-            payload_start,
-            payload_flags,
-        )?))
-    } else if payload_flags != 0 {
-        // Slice must start at the node (see note in `read_node_payload`).
-        let node = parse_bti_node(&trie_data[node_offset..], node_offset as u64)?;
-        let payload_start = payload_start_in_node(&node, trie_data, node_offset)?;
-        Ok(Some(decode_bti_row_payload(
-            trie_data,
-            payload_start,
-            payload_flags,
-        )?))
-    } else {
-        Ok(None)
-    }
-}
-
 /// Enumerate every row-index entry in a `Rows.db` trie (rooted at `root_offset`)
 /// in byte-comparable order: `(reconstructed_clustering_key, BtiRowIndexEntry)`.
+///
+/// The per-node payload primitive lives in [`super::rows_floor`], alongside the
+/// O(key-length) floor/ceiling walks that share it (issue #1647 / L1).
 pub(crate) fn dfs_collect_row_entries(
     trie_data: &[u8],
     root_offset: usize,
 ) -> BtiResult<Vec<(Vec<u8>, BtiRowIndexEntry)>> {
     dfs_collect_in_order(trie_data, root_offset, |data, off| {
-        read_row_node_payload(data, off)
+        super::rows_floor::read_row_node_payload(data, off)
     })
 }
 
@@ -403,6 +353,9 @@ pub struct BtiRowIndexHeader {
 /// implausible, the vint fields are truncated, or the recovered trie root falls
 /// outside `rows_db`.
 pub fn resolve_rows_db_entry(rows_db: &[u8], rows_offset: usize) -> BtiResult<BtiRowIndexHeader> {
+    // Issue #1647 (L1): count every `TrieIndexEntry.deserialize` so the clustering
+    // read path can prove it resolves the per-partition entry EXACTLY once.
+    crate::storage::sstable::read_work_counters::record_rows_db_entry_resolve();
     if rows_offset + 2 > rows_db.len() {
         return Err(Error::Parse(format!(
             "Rows.db entry: rows_offset {rows_offset} + 2 (key length) exceeds file size {}",
