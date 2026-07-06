@@ -65,9 +65,21 @@ impl SSTableReader {
         // comparing the (token, bytes) tuple reproduces `DecoratedKey.compareTo`
         // exactly. Inclusive bound: `< first` OR `> last` is out of range; equality
         // with either endpoint is in range.
+        //
+        // The two endpoint tokens are IMMUTABLE for the reader's lifetime, so they
+        // are computed ONCE at open and cached in `endpoint_tokens` (issue #1576,
+        // Epic C/C5 perf finding); the hot path only hashes the QUERY key. The
+        // cached tokens are byte-identical to `cassandra_murmur3_token(first/last)`.
+        // The `unwrap_or_else` is a defensive recompute that never runs on the
+        // armed path (`endpoint_tokens` is `Some` exactly when Summary.db is present
+        // with two non-empty endpoints, which the guards above already established).
+        let (first_token, last_token) = self.endpoint_tokens.unwrap_or_else(|| {
+            (
+                cassandra_murmur3_token(first),
+                cassandra_murmur3_token(last),
+            )
+        });
         let key_token = cassandra_murmur3_token(key);
-        let first_token = cassandra_murmur3_token(first);
-        let last_token = cassandra_murmur3_token(last);
 
         (key_token, key) < (first_token, first) || (key_token, key) > (last_token, last)
     }
