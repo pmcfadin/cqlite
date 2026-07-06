@@ -177,6 +177,83 @@ async fn scan_normalizes_type_per_cell() {
     );
 }
 
+/// Scenario (issue #1618 roborev undercount fix): the empty-value cell path must
+/// count its per-cell type normalization too. `test_types/nb_null_empty_text_blob`
+/// row `ck=4` writes an empty `text` (`''`) and an empty `blob` (`0x`) — both take
+/// the `HAS_EMPTY_VALUE` early-return in `parse_cell_value_schema_order`, which
+/// still `to_lowercase()`-normalizes the declared type. Before the fix that
+/// normalization allocation ran UNCOUNTED (the counter only fired on the live-cell
+/// path AFTER the empty early-return), so a future J1 `== 0` assertion could pass
+/// while the hot-path allocation still happened. The fix normalizes once before
+/// the empty/live split and records the counter at that single site, so both empty
+/// cells are now counted.
+///
+/// Pinned counts for this 4-row fixture (deterministic parse):
+///   - post-fix `TYPE_NORMALIZE_CALLS` = **29**
+///   - pre-fix it was **27** — exactly `empty_simple` (=2) lower, because the two
+///     empty simple cells in `ck=4` went uncounted. This assertion therefore fails
+///     on the pre-fix undercount and passes after.
+#[tokio::test]
+#[serial]
+async fn scan_counts_empty_cell_type_normalization() {
+    if !fixture_data_present("test_types", "nb_null_empty_text_blob") {
+        eprintln!("Skipping (H5 wiring): test_types/nb_null_empty_text_blob not present");
+        return;
+    }
+    let Some(db) = setup("test_types", "cql-type-parity.cql").await else {
+        eprintln!("Skipping (H5 wiring): could not ingest test_types");
+        return;
+    };
+
+    rwc::reset();
+    assert_eq!(
+        rwc::type_normalize_calls(),
+        0,
+        "reset must zero TYPE_NORMALIZE_CALLS"
+    );
+
+    let scan = db
+        .execute("SELECT * FROM test_types.nb_null_empty_text_blob")
+        .await
+        .expect("scan of nb_null_empty_text_blob");
+    let rows = scan.rows.len();
+    assert!(
+        rows > 0,
+        "present fixture must return rows (0 rows = read regression, not a skip)"
+    );
+
+    // Count the empty simple cells the scan surfaced — these are the cells that
+    // take the HAS_EMPTY_VALUE early-return in the value parser.
+    let mut empty_simple = 0usize;
+    for row in &scan.rows {
+        for v in row.values.values() {
+            match v {
+                cqlite_core::Value::Text(s) if s.is_empty() => empty_simple += 1,
+                cqlite_core::Value::Blob(b) if b.is_empty() => empty_simple += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let normalizes = rwc::type_normalize_calls();
+    eprintln!("H5: rows={rows} empty_simple={empty_simple} TYPE_NORMALIZE_CALLS={normalizes}");
+
+    // Fixture-shape guards: fail loudly (pointing at the fixture) if the pinned
+    // dataset ever regenerates into a different shape than these counts assume.
+    assert_eq!(rows, 4, "fixture shape changed: expected 4 rows");
+    assert_eq!(
+        empty_simple, 2,
+        "fixture shape changed: expected 2 empty simple cells (empty text + empty blob in ck=4)"
+    );
+
+    // The empty-cell type normalization is now counted (pre-fix undercount was 27).
+    assert_eq!(
+        normalizes, 29,
+        "empty-cell type normalization must be counted: expected 29 \
+         (pre-fix undercount was 27, missing the {empty_simple} empty simple cells); got {normalizes}"
+    );
+}
+
 /// Scenario (K2/K3 currency): a full scan speculatively try-parses a partition
 /// header at every partition boundary, so `PARTITION_HEADER_TRY_PARSES` is at
 /// least the partition count. For `test_basic/simple_table` each row is its own
