@@ -22,9 +22,12 @@
 //! 3. A process-global probe ([`record`], [`last`], [`reset`]) that mirrors the
 //!    `scan_for_key_call_count` pattern (issue #831). Because the streaming
 //!    SELECT path executes inside a spawned task (a different thread), the probe
-//!    is a `Mutex`-guarded global rather than a thread-local — that is the only
-//!    mechanism observable from *both* the materializing and streaming paths and
-//!    from an integration test without parsing logs.
+//!    is a process-global rather than a thread-local — that is the only mechanism
+//!    observable from *both* the materializing and streaming paths and from an
+//!    integration test without parsing logs. It is stored lock-free via
+//!    `arc_swap::ArcSwapOption` (issue #1595): the signal was written on every
+//!    SELECT, so a `Mutex` here was a process-wide serialization point (and a
+//!    lock-poisoning surface) with no functional need.
 //!
 //! # Scope (per #960)
 //!
@@ -34,8 +37,9 @@
 //! [`AccessPath::FullScan`], and a test pins that current reality so #962 can
 //! later flip it.
 
+use arc_swap::ArcSwapOption;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::Arc;
 
 /// The access path a `SELECT` surface selected for a single SSTable-scan step.
 ///
@@ -202,25 +206,23 @@ impl std::fmt::Display for AccessPath {
 /// Process-global record of the most recent access path selected by a SELECT
 /// SSTable-scan step.
 ///
-/// A `Mutex<Option<_>>` rather than a thread-local because the streaming SELECT
+/// An [`ArcSwapOption`] rather than a thread-local because the streaming SELECT
 /// path runs inside a spawned task; the probe must be observable from a different
-/// thread than the one that called `execute_streaming`. The lock is taken only on
-/// the cold per-scan decision boundary, so contention is negligible. It is not
-/// gated behind `cfg(test)` because integration tests in `tests/` compile against
-/// the library crate without its `test` cfg (same rationale as
+/// thread than the one that called `execute_streaming`. Lock-free (issue #1595):
+/// the signal is written on every SELECT, so it must not be a serialization point.
+/// It is not gated behind `cfg(test)` because integration tests in `tests/` compile
+/// against the library crate without its `test` cfg (same rationale as
 /// `SCAN_FOR_KEY_CALLS`, issue #831).
-static LAST_ACCESS_PATH: Mutex<Option<AccessPath>> = Mutex::new(None);
+static LAST_ACCESS_PATH: ArcSwapOption<AccessPath> = ArcSwapOption::const_empty();
 
 /// Record the access path chosen by a SELECT SSTable-scan step.
 ///
 /// Called at each decision boundary in the executor. The last call before a test
-/// reads [`last`] reflects the path the query actually took. If the mutex is
-/// poisoned (a prior panic while holding it), the record is silently dropped —
-/// recording is a diagnostic side channel and must never abort a query.
+/// reads [`last`] reflects the path the query actually took. The store is lock-free
+/// and infallible (no poisoning surface); recording is a diagnostic side channel and
+/// never aborts a query.
 pub fn record(path: AccessPath) {
-    if let Ok(mut guard) = LAST_ACCESS_PATH.lock() {
-        *guard = Some(path);
-    }
+    LAST_ACCESS_PATH.store(Some(Arc::new(path)));
 }
 
 /// Read the most recently recorded access path, or `None` if none was recorded
@@ -229,15 +231,13 @@ pub fn record(path: AccessPath) {
 /// Tests assert against this after running a query. Mirrors
 /// `SSTableReader::scan_for_key_call_count` (issue #831).
 pub fn last() -> Option<AccessPath> {
-    LAST_ACCESS_PATH.lock().ok().and_then(|g| g.clone())
+    LAST_ACCESS_PATH.load_full().map(|path| (*path).clone())
 }
 
 /// Clear the recorded access path. Tests call this before a query so a stale
 /// value from a previous query cannot satisfy the assertion.
 pub fn reset() {
-    if let Ok(mut guard) = LAST_ACCESS_PATH.lock() {
-        *guard = None;
-    }
+    LAST_ACCESS_PATH.store(None);
 }
 
 #[cfg(test)]

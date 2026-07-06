@@ -18,6 +18,7 @@ use super::{
     QueryStats,
 };
 
+use super::engine_stats::AtomicQueryStats;
 #[cfg(feature = "state_machine")]
 use super::{
     select_executor::SelectExecutor,
@@ -29,11 +30,12 @@ use crate::{
     Value,
 };
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 /// Query cache entry
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct QueryCacheEntry {
     /// Parsed query
     pub parsed_query: super::ParsedQuery,
@@ -41,8 +43,24 @@ pub struct QueryCacheEntry {
     pub plan: super::planner::QueryPlan,
     /// Cache timestamp
     pub cached_at: Instant,
-    /// Hit count
-    pub hit_count: u64,
+    /// Hit count. Lock-free (issue #1595): a plan-cache HIT bumps this via a
+    /// shard READ lock (`DashMap::get`) + relaxed `fetch_add`, so concurrent hits
+    /// to the same shard no longer contend on a write lock.
+    pub hit_count: AtomicU64,
+}
+
+// `AtomicU64` is not `Clone`, so the previous `#[derive(Clone)]` no longer
+// applies; preserve the public `Clone` surface by hand, snapshotting the counter
+// with a relaxed load (issue #1595).
+impl Clone for QueryCacheEntry {
+    fn clone(&self) -> Self {
+        Self {
+            parsed_query: self.parsed_query.clone(),
+            plan: self.plan.clone(),
+            cached_at: self.cached_at,
+            hit_count: AtomicU64::new(self.hit_count.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 /// Schema availability status for diagnostic purposes
@@ -90,8 +108,9 @@ pub struct QueryEngine {
     /// other. Value is `(inserted_at, plan)` for the same simple-LRU eviction.
     #[cfg(feature = "state_machine")]
     select_plan_cache: DashMap<String, (Instant, Arc<OptimizedQueryPlan>)>,
-    /// Query statistics
-    stats: Arc<parking_lot::RwLock<QueryStats>>,
+    /// Query statistics. Lock-free atomic counters (issue #1595): counters are
+    /// bumped with relaxed atomics instead of a `RwLock` taken 2–3× per query.
+    stats: AtomicQueryStats,
     /// Configuration
     config: Config,
 }
@@ -137,7 +156,7 @@ impl QueryEngine {
             plan_cache: DashMap::new(),
             #[cfg(feature = "state_machine")]
             select_plan_cache: DashMap::new(),
-            stats: Arc::new(parking_lot::RwLock::new(QueryStats::default())),
+            stats: AtomicQueryStats::default(),
             config: config.clone(),
         })
     }
@@ -163,22 +182,20 @@ impl QueryEngine {
         })
     }
 
-    /// Increment the total queries counter
+    /// Increment the total queries counter (lock-free, issue #1595)
     fn inc_total_queries(&self) {
-        self.stats.write().total_queries += 1;
+        self.stats.record_query();
     }
 
-    /// Increment the error queries counter
+    /// Increment the error queries counter (lock-free, issue #1595)
     fn inc_error_queries(&self) {
-        self.stats.write().error_queries += 1;
+        self.stats.record_error();
     }
 
-    /// Update cache hit ratio after a cache hit
+    /// Record a plan-cache hit (lock-free, issue #1595). `cache_hit_ratio` is
+    /// derived at read time as `cache_hits / total_queries`.
     fn record_cache_hit(&self) {
-        let mut stats = self.stats.write();
-        let total = stats.total_queries as f64;
-        // Running mean: previous ratio weighted by (total - 1) hits + 1 hit / total
-        stats.cache_hit_ratio = (stats.cache_hit_ratio * (total - 1.0) + 1.0) / total;
+        self.stats.record_cache_hit();
     }
 
     /// Execute a CQL query
@@ -217,15 +234,20 @@ impl QueryEngine {
             );
         }
 
-        // Check plan cache first for non-SELECT queries
-        if let Some(mut cached_entry) = self.plan_cache.get_mut(cql) {
+        // Check plan cache first for non-SELECT queries. Issue #1595: serve the
+        // HIT under a shard READ lock (`DashMap::get`), bump the lock-free
+        // `hit_count`, clone the plan out, and DROP the guard before the `.await`
+        // so no shard lock is held across execution and concurrent hits do not
+        // contend on a write lock.
+        let cached_plan = self.plan_cache.get(cql).map(|entry| {
+            entry.hit_count.fetch_add(1, Ordering::Relaxed);
+            entry.plan.clone()
+        });
+        if let Some(plan) = cached_plan {
             self.record_cache_hit();
-            cached_entry.hit_count += 1;
 
-            let mut result = crate::observability::record_result(
-                "query",
-                self.executor.execute(&cached_entry.plan).await,
-            )?;
+            let mut result =
+                crate::observability::record_result("query", self.executor.execute(&plan).await)?;
             // Issue #1582 (D6): the LEGACY point-lookup path bypasses the
             // SelectExecutor's byte budget; enforce it on the plan-cache HIT
             // return too (roborev finding) so a single very wide row cannot
@@ -302,15 +324,31 @@ impl QueryEngine {
 
     /// Execute a SELECT query using the advanced parser and optimizer
     async fn execute_select_query(&self, cql: &str, start_time: Instant) -> Result<QueryResult> {
-        // Check plan cache first for SELECT queries too
-        if let Some(mut cached_entry) = self.plan_cache.get_mut(cql) {
-            if cached_entry.plan.table.is_some() {
+        // Check plan cache first for SELECT queries too. Issue #1595: resolve the
+        // outcome under a shard READ lock (`DashMap::get`) — bumping the lock-free
+        // `hit_count` and cloning the plan for a reusable entry — then DROP the
+        // guard before acting, so the `.await` holds no shard lock and `remove`
+        // never runs while a `get` guard on the same shard is held.
+        enum HitOutcome {
+            Reuse(super::planner::QueryPlan),
+            Placeholder,
+            Miss,
+        }
+        let outcome = match self.plan_cache.get(cql) {
+            Some(entry) if entry.plan.table.is_some() => {
+                entry.hit_count.fetch_add(1, Ordering::Relaxed);
+                HitOutcome::Reuse(entry.plan.clone())
+            }
+            Some(_) => HitOutcome::Placeholder,
+            None => HitOutcome::Miss,
+        };
+        match outcome {
+            HitOutcome::Reuse(plan) => {
                 self.record_cache_hit();
-                cached_entry.hit_count += 1;
 
                 let mut result = crate::observability::record_result(
                     "query",
-                    self.executor.execute(&cached_entry.plan).await,
+                    self.executor.execute(&plan).await,
                 )?;
                 // Issue #1582 (D6): this cached SELECT plan is served by the
                 // LEGACY executor, which bypasses the SelectExecutor's byte
@@ -319,10 +357,11 @@ impl QueryEngine {
                 self.update_execution_stats(&mut result, start_time);
                 return Ok(result);
             }
-
-            // Placeholder plans without table information are not reusable; drop them.
-            drop(cached_entry);
-            self.plan_cache.remove(cql);
+            HitOutcome::Placeholder => {
+                // Placeholder plans without table information are not reusable; drop them.
+                self.plan_cache.remove(cql);
+            }
+            HitOutcome::Miss => {}
         }
 
         #[cfg(not(feature = "state_machine"))]
@@ -552,7 +591,7 @@ impl QueryEngine {
 
     /// Get query statistics
     pub fn stats(&self) -> QueryStats {
-        self.stats.read().clone()
+        self.stats.snapshot()
     }
 
     /// Clear all caches
@@ -703,7 +742,7 @@ impl QueryEngine {
                 parsed_query,
                 plan,
                 cached_at: Instant::now(),
-                hit_count: 0,
+                hit_count: AtomicU64::new(0),
             },
         );
     }
@@ -812,15 +851,12 @@ impl QueryEngine {
         span.record(catalog::attr::ACCESS_PATH, access_path_label);
         span.record("cqlite.query.rows", result.rows.len());
 
+        // Lock-free (issue #1595): accumulate the execution time and rows into
+        // relaxed atomics. `avg_execution_time_us` is derived at read time as
+        // `exec_time_us_sum / total_queries`.
         let new_time_us = execution_time.as_micros() as u64;
-        let mut stats = self.stats.write();
-        stats.avg_execution_time_us = if stats.total_queries <= 1 {
-            new_time_us
-        } else {
-            ((stats.avg_execution_time_us * (stats.total_queries - 1)) + new_time_us)
-                / stats.total_queries
-        };
-        stats.rows_affected += result.rows_affected;
+        self.stats
+            .record_execution(new_time_us, result.rows_affected);
     }
 
     /// Map a `PlanInfo.plan_type` (an executor `Debug`-formatted plan family such

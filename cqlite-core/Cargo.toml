@@ -45,6 +45,9 @@ crc32fast = { workspace = true }
 # Concurrency and collections
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
+# Lock-free atomic Arc swap for the per-SELECT access-path signal cell,
+# replacing a process-global Mutex on the hot path (issue #1595).
+arc-swap = { workspace = true }
 lru = "0.16"
 # Stack-backed worklist for the write-path size estimator so shallow/normal
 # mutations incur ZERO heap allocation on the admission/accounting hot path

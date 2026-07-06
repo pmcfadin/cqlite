@@ -18,6 +18,7 @@
 
 pub mod access_path;
 pub mod engine;
+pub(crate) mod engine_stats;
 pub mod executor;
 pub mod m2_select_validator;
 pub mod parser;
