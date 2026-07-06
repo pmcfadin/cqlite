@@ -67,10 +67,13 @@ jobs:
       - name: Fetch dataset binaries (clean sources)
         run: bash test-data/scripts/fetch-datasets.sh
 
-      # Snapshot the committed reference-golden checksums BEFORE regeneration.
-      # After regeneration we recompute the same set; the audit's
-      # "unexpected component change" check flags any golden whose bytes drifted
-      # without a manifest/golden-update PR.
+      # Snapshot the committed reference-golden PATHS BEFORE regeneration to form
+      # the expected inventory. Under the COVERAGE/PRESENCE contract (issue #2009)
+      # the audit checks that every expected (non-`system*`) component identity is
+      # PRODUCED by regeneration — it does NOT compare bytes (a present golden
+      # passes regardless of SHA256; byte-parity is owned by the
+      # sstabledump-parity-gate + nightly_docker tiers). The checksums are still
+      # recorded for provenance/forensics, not for a drift gate.
       - name: Snapshot committed reference-golden checksums (expected inventory)
         run: |
           set -euo pipefail

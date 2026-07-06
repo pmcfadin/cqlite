@@ -252,11 +252,15 @@ pub fn check_component_changes(
         return out;
     }
 
-    // UUID-independent identities the regeneration actually produced (keyed off
-    // the recorded checksums, the actual inventory the CLI feeds in).
+    // UUID-independent identities the regeneration actually produced. Source this
+    // from the WALKED file set (`inventory.files`), which the CLI always
+    // populates under `--corpus .` — NOT from `inventory.checksums`, which is
+    // optional (`--checksums`). A presence contract must not depend on checksum
+    // data: keying off checksums would false-fire every expected component as
+    // "absent" whenever `--checksums` is omitted or empty (issue #2009).
     let produced_identities: BTreeSet<String> = inventory
-        .checksums
-        .keys()
+        .files
+        .iter()
         .map(|p| refs::component_identity(p))
         .collect();
 

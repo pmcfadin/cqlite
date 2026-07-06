@@ -287,6 +287,10 @@ fn unexpected_component_change_fires_on_removed_component() {
     // same table — the expected component itself is gone.
     let other = REF.replace("Data.db.jsonl", "Index.db.jsonl");
     let mut inv = CorpusInventory::default();
+    // The regenerated corpus DOES produce a sibling component in the same table;
+    // presence is by component identity (table+basename), so the sibling must NOT
+    // satisfy REF's own identity — REF is genuinely absent.
+    inv.files.insert(other.clone());
     inv.checksums.insert(other, "x".to_string());
 
     let findings = corpus_audit::check_component_changes(
@@ -298,6 +302,34 @@ fn unexpected_component_change_fires_on_removed_component() {
     assert!(findings
         .iter()
         .any(|f| f.kind == FindingKind::UnexpectedComponentChange && f.detail.contains("absent")));
+}
+
+/// Issue #2009 (contract item: no "appeared" finding): a component the
+/// regeneration produced that the expected inventory does NOT track — even inside
+/// an already-tracked table — is NEVER a finding under the coverage contract
+/// (the newly-wired generators may emit goldens absent from the committed set).
+#[test]
+fn extra_produced_component_never_fires() {
+    let mut expected = BTreeMap::new();
+    expected.insert(REF.to_string(), "some_sha".to_string());
+
+    // Regenerated corpus has REF (present -> passes) PLUS an extra sibling the
+    // expected set does not track.
+    let extra = REF.replace("Data.db.jsonl", "Index.db.jsonl");
+    let mut inv = CorpusInventory::default();
+    inv.files.insert(REF.to_string());
+    inv.files.insert(extra);
+
+    let findings = corpus_audit::check_component_changes(
+        &inv,
+        &ExpectedInventory {
+            components: expected,
+        },
+    );
+    assert!(
+        findings.is_empty(),
+        "an extra produced component must never fire (no 'appeared' finding), got: {findings:?}"
+    );
 }
 
 /// Issue #2009 (full-audit path): a present component identity whose SHA256
