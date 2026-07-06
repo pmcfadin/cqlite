@@ -44,8 +44,7 @@ pub mod select_parser;
 
 pub use access_path::{AccessPath, FallbackReason};
 pub use engine::{
-    AnalyzeResult, CacheStats, ExplainResult, QueryCacheEntry, QueryEngine as AdvancedQueryEngine,
-    SchemaStatus,
+    AnalyzeResult, CacheStats, ExplainResult, QueryEngine as AdvancedQueryEngine, SchemaStatus,
 };
 pub use executor::{
     QueryExecutor, QueryResult as ExecutorQueryResult, QueryRow as ExecutorQueryRow,

@@ -35,8 +35,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Query cache entry
+///
+/// Crate-internal plan-cache entry with no external consumers, so the
+/// `hit_count: AtomicU64` field (issue #1595) is kept off the public semver
+/// surface by keeping this type `pub(crate)`.
 #[derive(Debug)]
-pub struct QueryCacheEntry {
+pub(crate) struct QueryCacheEntry {
     /// Parsed query
     pub parsed_query: super::ParsedQuery,
     /// Query plan

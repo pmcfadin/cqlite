@@ -79,7 +79,11 @@ impl AtomicQueryStats {
         } else {
             (
                 exec_time_us_sum / total_queries,
-                cache_hits as f64 / total_queries as f64,
+                // Clamp the numerator: `total_queries` and `cache_hits` are
+                // read as independent `Relaxed` atomics, so a concurrent
+                // snapshot could observe `cache_hits > total_queries` and yield
+                // a ratio > 1.0, violating the documented 0.0..=1.0 contract.
+                cache_hits.min(total_queries) as f64 / total_queries as f64,
             )
         };
 
