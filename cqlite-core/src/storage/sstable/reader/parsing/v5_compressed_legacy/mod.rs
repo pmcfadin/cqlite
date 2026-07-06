@@ -940,12 +940,15 @@ impl V5CompressedLegacyParser {
     ///
     /// This is the NO-HEURISTICS approach: we validate the actual structure
     /// instead of guessing from byte patterns. Issue #1641 (K2) made it
-    /// non-allocating — it delegates to [`peek_partition_boundary`], which shares
-    /// the structural walk of `parse_partition_header_full` (via
-    /// `scan_partition_header`) but copies no key, builds no error string, and
-    /// records no `PARTITION_HEADER_TRY_PARSES`. The boolean result is identical
-    /// to the former allocating implementation (marker pre-check + full-parse
-    /// `is_ok`), proved by the `peek_matches_full_parse` proptest.
+    /// non-allocating on the fast-reject paths — it delegates to
+    /// [`peek_partition_boundary`], which shares the structural walk of
+    /// `parse_partition_header_full` (via `scan_partition_header`) but always
+    /// skips the success-path key `to_vec` and the `PARTITION_HEADER_TRY_PARSES`
+    /// counter. The marker pre-check and readiness gate allocate nothing; the
+    /// strict scan on a `Ready` buffer may still build a discarded error string
+    /// on a structural mismatch. The boolean result is identical to the former
+    /// allocating implementation (marker pre-check + full-parse `is_ok`), proved
+    /// by the `peek_matches_full_parse` proptest.
     ///
     /// # Arguments
     /// * `data` - Binary data buffer

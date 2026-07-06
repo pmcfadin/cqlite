@@ -917,12 +917,16 @@ impl V5CompressedLegacyParser {
     /// Non-allocating partition-BOUNDARY peek (issue #1641, K2).
     ///
     /// Answers "do the bytes at `offset` begin a new partition header?" for the
-    /// post-row emit loop WITHOUT allocating a throwaway key, building error
-    /// strings, or incrementing `PARTITION_HEADER_TRY_PARSES`. It reaches the same
-    /// verdict the old allocating `peek_is_partition_header` did — proved by the
-    /// `#[cfg(test)]` proptest (`Header` ⟺ `!marker && parse.is_ok()`).
+    /// post-row emit loop while skipping the success-path key `to_vec` and the
+    /// `PARTITION_HEADER_TRY_PARSES` counter that the full parse incurs. The
+    /// fast-reject paths (marker pre-check + readiness gate) allocate nothing at
+    /// all; only the strict scan on a `Ready` buffer may still build a discarded
+    /// `format!` error string on a structural mismatch (inside
+    /// `scan_partition_header`). It reaches the same verdict the old allocating
+    /// `peek_is_partition_header` did — proved by the `#[cfg(test)]` proptest
+    /// (`Header` ⟺ `!marker && parse.is_ok()`).
     ///
-    /// Algorithm (all non-allocating, no gauge):
+    /// Algorithm (fast-reject paths allocate nothing; no gauge on any path):
     /// 1. Marker pre-check (issue #229): an END_OF_PARTITION (`0x01`) or
     ///    range-tombstone (IS_MARKER) leading byte is never a partition header;
     ///    an offset past the buffer end is `NeedMoreBytes`.
