@@ -36,6 +36,10 @@ mod read_at;
 // Concurrency scenarios for the ReadAt point-read migration (issue #1573).
 #[cfg(test)]
 mod read_at_point_tests;
+// Direct-I/O read-ahead window sizing (issue #1596, Epic F / F6): clamps a
+// sub-chunk `direct_io_prefetch_bytes` so one compression chunk never straddles
+// more than two aligned refills.
+mod prefetch_window;
 // sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
 mod registry_schema;
@@ -897,10 +901,20 @@ impl SSTableReader {
     ) -> Result<(BlockSource, ScanSource)> {
         // With prefetch off, use the minimal aligned read-ahead the direct
         // backend still requires (a single block, rounded up inside the cursor).
+        // Otherwise clamp the configured window so a sub-chunk
+        // `direct_io_prefetch_bytes` cannot make one compression chunk straddle
+        // many aligned refills (issue #1596, F6). The actual per-SSTable chunk
+        // length is not parsed yet at this open-time construction site, so the
+        // clamp floors against Cassandra's default 64 KiB chunk — which fully
+        // protects the default case (and the 1 MiB default window is already
+        // above the floor, so the clamp is a no-op there).
         let direct_window = if matches!(prefetch, PrefetchMode::Off) {
             1
         } else {
-            prefetch_bytes
+            prefetch_window::clamp_direct_prefetch_window(
+                prefetch_bytes,
+                prefetch_window::DEFAULT_COMPRESSION_CHUNK_BYTES,
+            )
         };
         match mode {
             DiskAccessMode::Buffered => Self::open_buffered_sources(path, file_size).await,
