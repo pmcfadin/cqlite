@@ -15,40 +15,98 @@
 //!
 //! # The mechanism
 //!
-//! A process-wide [`tokio::sync::Semaphore`] caps the number of windowed scans
-//! admitted to the blocking pool concurrently. [`run_scan_stream_windowed`]
-//! acquires exactly ONE permit ([`admit`]) at the TOP of the scan — BEFORE any
-//! `spawn_blocking` — and holds it via the RAII [`ScanAdmissionPermit`] guard for
-//! the whole scan. The permit (and therefore the admission slot) is returned on
-//! EVERY exit path — success, error, or cancellation/drop — because the guard's
-//! `Drop` returns the owned permit. A scan can never leak a slot.
+//! A process-wide [`tokio::sync::Semaphore`] caps the number of scan OPERATIONS
+//! admitted to the blocking pool concurrently. Admission is per top-level scan
+//! OPERATION — NOT per blocking thread and NOT per fan-out sub-scan (issue #1594
+//! deadlock fix):
 //!
-//! One permit per SCAN (not per blocking thread): the scan owns both its blocking
-//! threads, so admitting `cap` scans bounds faulting-backend blocking threads to
-//! `2 × cap` and buffered-backend threads to `cap`. Sizing `cap` from the CPU
-//! count therefore leaves the pool's remaining `512 − 2·cap` threads free for
-//! fs/point ops.
+//! - A direct single-generation scan
+//!   ([`run_scan_stream`](super::SSTableReader::run_scan_stream) invoked with
+//!   [`ScanAdmission::Acquire`]) acquires exactly ONE permit ([`admit`]) at the
+//!   TOP of the scan — BEFORE any `spawn_blocking` — and holds it via the RAII
+//!   [`ScanAdmissionPermit`] guard for the whole scan.
+//! - A cross-generation fan-out merge (`SSTableManager::scan_stream`) is ONE
+//!   operation that legitimately opens N per-generation sub-scans and primes a
+//!   head from EVERY sub-scan before draining any. It acquires exactly ONE permit
+//!   for the whole merge and opens each sub-scan with [`ScanAdmission::Exempt`], so
+//!   the sub-scans do NOT independently admit. A single query therefore needs
+//!   exactly ONE permit, never N.
 //!
-//! Queue-full behavior is WAIT, not error: when `cap` scans are admitted the
-//! `cap + 1`-th scan's spawned task simply blocks at `admit().await` until a
-//! permit frees, then proceeds (natural backpressure). There is exactly one
-//! admission point and each scan takes exactly one permit once, holding no other
-//! permit/lock while awaiting — so admission is deadlock-free by construction.
+//! The permit (and therefore the admission slot) is returned on EVERY exit path —
+//! success, error, or cancellation/drop — because the guard's `Drop` returns the
+//! owned permit. A scan can never leak a slot.
 //!
-//! [`run_scan_stream_windowed`]: super::SSTableReader::run_scan_stream_windowed
+//! One permit per scan OPERATION (not per blocking thread, not per sub-scan): the
+//! bound limits concurrent INDEPENDENT scan operations (the K-concurrent-cold-scans
+//! case the July 2026 audit named). For the common single-generation table each
+//! admitted operation owns its (up to two, faulting-backend) blocking threads, so
+//! `cap` operations bound the footprint to `~2 × cap` threads — a small fraction of
+//! tokio's 512-thread default, leaving ample headroom for latency-critical fs/point
+//! ops. A cross-generation operation's fan-out inherently needs its N sub-scans
+//! live AT ONCE (it primes every head before draining), so that intra-operation
+//! fan-out is deliberately NOT throttled: throttling it would deadlock (see below).
+//! The admission bound is therefore on operation concurrency, not on the total
+//! blocking threads a single multi-generation operation may transiently use.
+//!
+//! # Deadlock-freedom
+//!
+//! Admission is per top-level scan OPERATION; a fan-out merge's sub-scans are
+//! EXEMPT and never independently admit. No code path blocks on [`admit`] while
+//! already holding a permit, and no permit-holder's progress depends on another
+//! permit being granted: an operation acquires AT MOST ONE permit, once, at its
+//! top, holding no other permit/lock while awaiting, and its internal fan-out
+//! sub-scans run permit-free. Independent operations that queue at [`admit`] hold
+//! nothing, so they cannot block a permit-holder. Hence there is no hold-and-wait
+//! cycle — the mechanism stays deadlock-free even when a single query fans out to
+//! `N > cap` generations.
+//!
+//! This is the exact bug an earlier per-SUB-SCAN design introduced: with each
+//! sub-scan admitting independently, a fan-out to `N > cap` generations let `cap`
+//! sub-scans win permits and park in consumer backpressure while the remaining
+//! sub-scans blocked forever at `admit`; the merge — stuck priming a head from
+//! EVERY sub-scan — never drained the permit-holders, so no permit ever freed
+//! (permanent hang). Admitting at operation granularity removes the hold-and-wait.
+//!
+//! Queue-full behavior is WAIT, not error: when `cap` operations are admitted the
+//! `cap + 1`-th operation simply blocks at `admit().await` until a permit frees,
+//! then proceeds (natural backpressure).
 
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+/// Whether a windowed scan must acquire its own admission permit, or is already
+/// covered by a caller's permit.
+///
+/// Admission is per top-level scan OPERATION (issue #1594). A cross-generation
+/// fan-out merge is ONE operation that opens N sub-scans and primes a head from
+/// every one before draining any; if each sub-scan admitted independently, a
+/// fan-out to `N > cap` generations would deadlock (`cap` sub-scans hold permits
+/// and park in backpressure while the rest block forever at [`admit`], and the
+/// priming merge never drains the holders). So the fan-out acquires ONE permit for
+/// the whole operation and opens each sub-scan [`Exempt`](ScanAdmission::Exempt).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanAdmission {
+    /// Top-level scan operation: acquire exactly one permit for the whole scan.
+    Acquire,
+    /// Sub-scan of a fan-out merge that already holds the operation's single
+    /// permit: do NOT admit (independent admission here would hold-and-wait on the
+    /// same operation and deadlock).
+    Exempt,
+}
+
 /// Default cap on concurrently-admitted windowed scans.
 ///
 /// Derived from `available_parallelism`: the windowed parse half is CPU-bound, so
-/// admitting more concurrent scans than cores yields no throughput, only pressure
-/// on the shared blocking pool. Because a faulting-backend scan holds TWO blocking
-/// threads per admitted permit (issue #1593, F3's doubled footprint), a cap of
-/// `ncpu` bounds the worst-case blocking-thread footprint to `2 × ncpu` — a small
-/// fraction of tokio's 512-thread default pool — leaving ample headroom for
-/// latency-critical fs/point-read operations regardless of scan concurrency `K`.
+/// admitting more concurrent scan OPERATIONS than cores yields no throughput, only
+/// pressure on the shared blocking pool. For the common single-generation table a
+/// faulting-backend operation holds TWO blocking threads per admitted permit (issue
+/// #1593, F3's doubled footprint), so a cap of `ncpu` bounds that footprint to
+/// `~2 × ncpu` — a small fraction of tokio's 512-thread default pool — leaving
+/// ample headroom for latency-critical fs/point-read operations regardless of
+/// operation concurrency `K`. (A cross-generation operation's fan-out inherently
+/// uses more, one pair per sub-scan, because it needs all N sub-scans live at once;
+/// that intra-operation fan-out is deliberately not throttled — see the module
+/// docs — so the cap bounds operation concurrency, not one operation's fan-out.)
 /// Never below 1 (a zero-permit semaphore would deadlock every scan).
 fn default_limit() -> usize {
     std::thread::available_parallelism()
@@ -77,10 +135,12 @@ fn semaphore() -> Arc<Semaphore> {
     production_semaphore()
 }
 
-/// Acquire one admission permit for a windowed scan against the process-wide
+/// Acquire one admission permit for a scan OPERATION against the process-wide
 /// semaphore, waiting if the admission limit is currently reached. See
-/// [`admit_with`] for the fail-open / no-panic contract.
-pub(super) async fn admit() -> ScanAdmissionPermit {
+/// [`admit_with`] for the fail-open / no-panic contract. Callers acquire at most
+/// ONE permit per top-level operation (a fan-out merge's sub-scans are
+/// [`ScanAdmission::Exempt`] and do not call this) — see the module docs.
+pub(crate) async fn admit() -> ScanAdmissionPermit {
     admit_with(&semaphore()).await
 }
 
@@ -104,7 +164,7 @@ async fn admit_with(sem: &Arc<Semaphore>) -> ScanAdmissionPermit {
 /// returns the permit to the semaphore, releasing the admission slot. `Drop`
 /// performs only atomic bookkeeping + the owned-permit drop and never panics
 /// (no-panic-in-`Drop`).
-pub(super) struct ScanAdmissionPermit {
+pub(crate) struct ScanAdmissionPermit {
     /// `None` only on the impossible fail-open path (closed semaphore); a real
     /// admission always carries `Some`.
     _permit: Option<OwnedSemaphorePermit>,

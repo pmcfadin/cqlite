@@ -148,7 +148,7 @@ use guard::FeedFailureGuard;
 // file to keep this driver under the campsite-rule size limit (epic #1116).
 #[cfg(not(feature = "scan-offload-probe"))]
 #[path = "scan_admission.rs"]
-mod scan_admission;
+pub(crate) mod scan_admission;
 #[cfg(feature = "scan-offload-probe")]
 #[path = "scan_admission.rs"]
 pub mod scan_admission;
@@ -371,15 +371,15 @@ impl SSTableReader {
         cursor: &ScanCursor,
         tx: &mpsc::Sender<Result<(RowKey, ScanRow)>>,
     ) -> Result<()> {
-        // Admission control (issue #1594, F4): acquire ONE blocking-pool admission
-        // permit BEFORE spawning any `spawn_blocking` work (the parse task below
-        // and, for a faulting backend, the feed task). Held for the whole scan via
-        // this RAII guard; released on EVERY exit — success, error, or
-        // cancellation/drop — so a scan can never leak a slot. When `cap` scans are
-        // already admitted the `cap + 1`-th waits here (natural backpressure), it
-        // never errors. No other permit/lock is held while awaiting admission, so
-        // this single-point, single-permit acquisition cannot deadlock.
-        let _admission = scan_admission::admit().await;
+        // Admission control (issue #1594, F4) is applied by the CALLER at
+        // top-level scan-OPERATION granularity, NOT here per sub-scan: a direct
+        // scan acquires its permit in `run_scan_stream` (`ScanAdmission::Acquire`),
+        // and a cross-generation fan-out merge acquires ONE permit for the whole
+        // operation and opens each sub-scan `ScanAdmission::Exempt`. So this
+        // windowed sub-scan does NOT admit — a fan-out to `N > cap` generations
+        // would otherwise let `cap` sub-scans hold permits and park in backpressure
+        // while the priming merge blocks forever waiting on the rest (the deadlock
+        // the per-sub-scan design introduced). See `scan_admission`'s module docs.
 
         // Resolve everything the parser needs ONCE, here on the async side, so
         // the blocking task never touches the async runtime. Schema resolution

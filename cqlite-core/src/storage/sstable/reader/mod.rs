@@ -42,7 +42,7 @@ mod registry_schema;
 // Windowed streaming-scan driver (issue #1143); `pub` ONLY under non-default
 // `scan-offload-probe` so the #1143 guard reaches its probe, else private.
 #[cfg(not(feature = "scan-offload-probe"))]
-mod scan_stream_windowed;
+pub(crate) mod scan_stream_windowed;
 #[cfg(feature = "scan-offload-probe")]
 pub mod scan_stream_windowed;
 mod source;
