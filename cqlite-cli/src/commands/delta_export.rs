@@ -64,14 +64,20 @@ impl DeltaExportResult {
 /// statement — no `CREATE KEYSPACE` / `USE` preamble and no trailing statements.
 /// Without this guard a leading preamble fails with an opaque raw nom `{:?}` debug
 /// dump, and statements *after* the `CREATE TABLE` are silently discarded. Both are
-/// fail-open surprises. For CQL schema files we detect >1 top-level statement up
-/// front (via `split_cql_statements`) and emit a clear, targeted error. JSON schema
-/// documents are exempt: they are validated by the JSON loader, not this contract.
+/// fail-open surprises. For CQL schema files we require **exactly one** top-level
+/// statement (via `split_cql_statements`) **and** that it classify as a
+/// `CREATE TABLE` (via `classify_statement`) — a zero-statement schema or a single
+/// non-`CREATE TABLE` statement (e.g. a lone `CREATE KEYSPACE`) would otherwise fall
+/// through to the legacy parser and reproduce the opaque error this guard replaces.
+/// JSON schema documents are exempt: they are validated by the JSON loader, not this
+/// contract.
 #[cfg(feature = "delta-export")]
 fn ensure_bare_create_table_schema(
     schema_path: &std::path::Path,
     content: &str,
 ) -> anyhow::Result<()> {
+    use cqlite_core::schema::cql_parser::{classify_statement, StatementType};
+
     let is_cql = matches!(
         schema_path
             .extension()
@@ -85,7 +91,12 @@ fn ensure_bare_create_table_schema(
     }
 
     let statements = cqlite_core::schema::cql_parser::split_cql_statements(content);
-    if statements.len() > 1 {
+    let is_single_create_table = statements.len() == 1
+        && matches!(
+            classify_statement(&statements[0]),
+            StatementType::CreateTable
+        );
+    if !is_single_create_table {
         return Err(anyhow::anyhow!(
             "delta-export requires a bare CREATE TABLE (no CREATE KEYSPACE / USE preamble)"
         ));
@@ -362,6 +373,9 @@ mod bare_create_table_schema_tests {
         CREATE TABLE ks.t (id uuid PRIMARY KEY, name text);";
     const TRAILING_STATEMENT: &str = "CREATE TABLE ks.t (id uuid PRIMARY KEY, name text); \
         CREATE INDEX ON ks.t (name);";
+    const LONE_KEYSPACE: &str = "CREATE KEYSPACE ks WITH replication = \
+        {'class': 'SimpleStrategy', 'replication_factor': 1};";
+    const EMPTY_SCHEMA: &str = "   \n  -- just a comment\n  ";
 
     /// A single bare CREATE TABLE is accepted.
     #[test]
@@ -391,6 +405,33 @@ mod bare_create_table_schema_tests {
     fn trailing_statement_names_the_bare_create_table_contract() {
         let err = ensure_bare_create_table_schema(Path::new("schema.cql"), TRAILING_STATEMENT)
             .expect_err("a trailing statement must be rejected");
+        assert!(
+            err.to_string().contains("bare CREATE TABLE"),
+            "error must name the bare-CREATE-TABLE contract, got: {err}"
+        );
+    }
+
+    /// A single statement that is NOT a CREATE TABLE (e.g. a lone CREATE
+    /// KEYSPACE) must yield the same targeted error. On pre-fix code this
+    /// single statement passed the `len() > 1` check and fell through to the
+    /// legacy parser, producing the opaque nom error the guard was meant to
+    /// replace.
+    #[test]
+    fn lone_non_create_table_names_the_bare_create_table_contract() {
+        let err = ensure_bare_create_table_schema(Path::new("schema.cql"), LONE_KEYSPACE)
+            .expect_err("a lone CREATE KEYSPACE must be rejected");
+        assert!(
+            err.to_string().contains("bare CREATE TABLE"),
+            "error must name the bare-CREATE-TABLE contract, got: {err}"
+        );
+    }
+
+    /// A zero-statement (empty / comment-only) schema must yield the same
+    /// targeted error rather than falling through to the legacy parser.
+    #[test]
+    fn empty_schema_names_the_bare_create_table_contract() {
+        let err = ensure_bare_create_table_schema(Path::new("schema.cql"), EMPTY_SCHEMA)
+            .expect_err("an empty/zero-statement schema must be rejected");
         assert!(
             err.to_string().contains("bare CREATE TABLE"),
             "error must name the bare-CREATE-TABLE contract, got: {err}"
