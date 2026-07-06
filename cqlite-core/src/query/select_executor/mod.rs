@@ -533,6 +533,12 @@ impl SelectExecutor {
         // `execute_streaming_background` returns — the ORIGINAL `tx` is moved
         // into (and consumed/dropped by) that call, so it is gone by the time we
         // observe its `Err`.
+        //
+        // File-size note (campsite rule, epic #1116): this file is already over
+        // the 800-line threshold; this fix's +18 lines are acknowledged via
+        // CQLITE_ALLOW_FILE_GROWTH=1 rather than a split, since a sibling lane
+        // (#1578) is concurrently editing this same file — restructuring it now
+        // would conflict with that in-flight work. A split is tracked under #1116.
         let error_tx = tx.clone();
 
         // Spawn background task to stream rows
