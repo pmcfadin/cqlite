@@ -25,7 +25,6 @@ use super::{
     SSTablePredicate, SelectExecutor, TableId, TableSchema,
 };
 use crate::query::select_ast::SelectClause;
-use crate::types::{RowKey, ScanRow};
 
 /// In-flight row bound for the capped streaming fallback scan (issue #1577).
 ///
@@ -129,6 +128,10 @@ impl SelectExecutor {
     /// guaranteeing a byte-identical result. A short stream costs one extra scan
     /// (of a table already known to hold `< cap` rows, or a divergent format);
     /// there is no decode-stop win in that branch, but correctness is the law.
+    /// Because that re-run `scan` fully materializes the table, this branch charges
+    /// `QUERY_ROWS_SCANNED` the FULL decoded count via `collect_capped_materialized`
+    /// (not just `cap`), so the scan-work metric reflects the real work even when
+    /// the reconciled table holds more than `cap` accepted rows.
     ///
     /// A stream that reaches a FULL `cap` is trusted (returned early): its rows are
     /// the token-first `cap` rows, identical to `scan` truncated to `cap` — the same
@@ -231,13 +234,25 @@ impl SelectExecutor {
             .storage
             .scan(table, None, None, None, schema_opt)
             .await?;
-        collect_capped_accepted(
+        // Metric accuracy (issue #1577, roborev round-3 finding): the re-run
+        // `scan` FULLY MATERIALIZES/decodes every row of the table before
+        // returning it. This branch is therefore NOT decode-bounded (unlike the
+        // trusted full-cap stream fast path above, which drops the stream at the
+        // cap). Route it through the SAME `collect_capped_materialized` accountant
+        // the materializing `execute_sstable_scan` paths use, so it charges
+        // `context.scan_rows` (→ `QUERY_ROWS_SCANNED`) with the TRUE decoded count
+        // (`authoritative.len()`) UP FRONT — not just the `cap` rows it examines.
+        // The `cap` still bounds `rows_processed` and the returned window, so
+        // RESULTS and LIMIT/OFFSET semantics are unchanged; only the scan-work
+        // metric is corrected. Before this, `collect_capped_accepted` counted only
+        // up to `cap`, so a reconciliation over a table with more than `cap`
+        // accepted rows under-reported `QUERY_ROWS_SCANNED` to at most `LIMIT + OFFSET`.
+        collect_capped_materialized(
             authoritative,
+            Some(cap),
             predicates,
-            projection,
-            schema_opt,
-            cap,
             context,
+            |(key, value)| build_row_from_scan(key, value, projection, schema_opt),
         )
     }
 
@@ -270,6 +285,7 @@ impl SelectExecutor {
             .storage
             .scan(table, None, None, None, schema_opt)
             .await?;
+        use crate::types::RowKey;
         let mut expected: Vec<RowKey> = Vec::with_capacity(cap);
         for (key, value) in authoritative {
             if expected.len() >= cap {
@@ -295,43 +311,6 @@ impl SelectExecutor {
     }
 }
 
-/// Collect the first `cap` ACCEPTED rows from an already-materialized scan
-/// result, in scan order, counting each EXAMINED row exactly once in `context`
-/// (issue #1577).
-///
-/// This is the shared body of the short-stream reconciliation branch of
-/// [`SelectExecutor::capped_fallback_scan`]: after a short `scan_stream` it is
-/// fed the AUTHORITATIVE materializing `scan` and returns the exact first-`cap`
-/// window `execute_limit` will slice. A row suppressed by
-/// [`build_row_from_scan`] (a marker / tombstone) or rejected by
-/// [`evaluate_predicates`] is skipped and never counted toward `cap`, so the cap
-/// means "enough ACCEPTED rows" — identical to the streaming accept loop, so the
-/// reconciled result is byte-identical to the trusted stream's.
-fn collect_capped_accepted(
-    rows: Vec<(RowKey, ScanRow)>,
-    predicates: &[SSTablePredicate],
-    projection: &[String],
-    schema_opt: Option<&TableSchema>,
-    cap: usize,
-    context: &mut ExecutionContext,
-) -> Result<Vec<QueryRow>> {
-    let mut out = Vec::with_capacity(cap.min(rows.len()));
-    for (key, value) in rows {
-        if out.len() >= cap {
-            break;
-        }
-        context.rows_processed += 1;
-        context.scan_rows += 1;
-        let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
-            continue;
-        };
-        if evaluate_predicates(&row, predicates)? {
-            out.push(row);
-        }
-    }
-    Ok(out)
-}
-
 /// Collect the ACCEPTED rows from an ALREADY-MATERIALIZED scan, applying an
 /// optional LIMIT+OFFSET `cap` (issue #1577; roborev metric-accounting fix).
 ///
@@ -342,10 +321,14 @@ fn collect_capped_accepted(
 /// size of the returned window; it must NOT shrink the scan-work metric, or the
 /// metric would under-report the scan the storage layer actually performed.
 ///
-/// This is deliberately distinct from the TRULY decode-bounded full-scan
-/// fallback ([`SelectExecutor::capped_fallback_scan`]), which stops its bounded
-/// stream early and so legitimately charges `scan_rows` only for the rows it
-/// actually decoded.
+/// The materializing `execute_sstable_scan` metadata / partition-targeted paths
+/// AND the short-stream reconciliation branch of
+/// [`SelectExecutor::capped_fallback_scan`] (which re-runs the fully-materializing
+/// `scan`) all route through here, so the full-decode accounting is applied
+/// uniformly and cannot drift per call site. This is deliberately distinct from
+/// the TRULY decode-bounded trusted full-cap stream fast path in
+/// `capped_fallback_scan`, which drops its bounded stream at the cap and so
+/// legitimately charges `scan_rows` only for the rows it actually decoded.
 ///
 /// `build` maps a materialized entry to an optional [`QueryRow`] (`None` = a
 /// suppressed marker / tombstone, per [`build_row_from_scan`]); the metadata
@@ -388,8 +371,7 @@ pub(super) fn collect_capped_materialized<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_row_from_scan, collect_capped_accepted, collect_capped_materialized,
-        scan_pushdown_cap, ExecutionContext,
+        build_row_from_scan, collect_capped_materialized, scan_pushdown_cap, ExecutionContext,
     };
     use crate::query::select_ast::{
         ColumnRef, ComparisonExpression, ComparisonOperator, ComparisonRightSide, OrderByClause,
@@ -548,17 +530,22 @@ mod tests {
         );
     }
 
-    // ── Short-stream reconciliation logic (issue #1577, IMPORTANT-1) ────────────
+    // ── Short-stream reconciliation logic (issue #1577, IMPORTANT-1 + roborev
+    //    round-3 metric-accounting finding) ───────────────────────────────────
     //
     // `capped_fallback_scan` discards a SHORT `scan_stream` and reconciles by
-    // re-running the authoritative materializing `scan`, feeding its rows to
-    // `collect_capped_accepted`. That is the branch where a `scan_stream`/`scan`
-    // divergence must NOT drop or misorder a row — but the integration fixtures
-    // use single-reader tables whose stream reaches the cap (fast path), so the
-    // reconciliation LOGIC never runs there. This unit test drives it directly
-    // with a synthetic authoritative scan that holds MORE accepted rows than the
-    // cap (the exact situation a divergent short stream leaves behind), and proves
-    // it returns the correct first-`cap` ACCEPTED rows in scan order.
+    // re-running the authoritative FULLY-MATERIALIZING `scan`, feeding its rows to
+    // `collect_capped_materialized` (the SAME accountant the materializing
+    // `execute_sstable_scan` paths use). These unit tests drive that exact call
+    // shape directly — a synthetic authoritative scan fed to
+    // `collect_capped_materialized(authoritative, Some(cap), …, build_row_from_scan)`
+    // — because the integration fixtures use single-reader tables whose stream
+    // reaches the cap (fast path), so the reconciliation LOGIC never runs there.
+    // They prove BOTH invariants: (a) results are the first-`cap` ACCEPTED rows in
+    // scan order (the divergence-safety guarantee) AND (b) `scan_rows` is charged
+    // the FULL decoded count `authoritative.len()`, not just `cap` (the round-3
+    // finding — the re-run scan is NOT decode-bounded, so under-charging it to
+    // `LIMIT + OFFSET` under-reported `QUERY_ROWS_SCANNED`).
 
     fn exec_context() -> ExecutionContext {
         ExecutionContext {
@@ -589,10 +576,27 @@ mod tests {
         (RowKey::new(key.to_vec()), ScanRow::Marker(Value::Null))
     }
 
+    /// The exact call shape `capped_fallback_scan`'s reconciliation branch now
+    /// makes: `collect_capped_materialized(authoritative, Some(cap), …,
+    /// build_row_from_scan)`. Mirrors the branch (which maps the authoritative
+    /// `(RowKey, ScanRow)` scan through `build_row_from_scan`).
+    fn reconcile(
+        authoritative: Vec<(RowKey, ScanRow)>,
+        cap: usize,
+        ctx: &mut ExecutionContext,
+    ) -> Vec<super::QueryRow> {
+        let preds: Vec<SSTablePredicate> = Vec::new();
+        collect_capped_materialized(authoritative, Some(cap), &preds, ctx, |(key, value)| {
+            build_row_from_scan(key, value, &[], None)
+        })
+        .expect("reconciliation must not error")
+    }
+
     #[test]
-    fn reconcile_returns_first_cap_accepted_rows_in_order() {
-        // Authoritative scan has 5 live rows (more than the cap of 3), with a
-        // suppressed marker interleaved after the first live row.
+    fn reconcile_charges_full_authoritative_count_when_over_cap() {
+        // Authoritative scan has 5 live rows (MORE than the cap of 3), with a
+        // suppressed marker interleaved after the first live row — the exact
+        // situation a divergent short stream leaves for reconciliation.
         let authoritative = vec![
             live(b"k0", "a"),
             marker(b"k0m"), // suppressed: must not consume a cap slot
@@ -601,53 +605,74 @@ mod tests {
             live(b"k3", "d"),
             live(b"k4", "e"),
         ];
-        let preds: Vec<SSTablePredicate> = Vec::new();
+        let decoded = authoritative.len() as u64; // 6 — the real scan work
         let mut ctx = exec_context();
 
-        let out = collect_capped_accepted(authoritative, &preds, &[], None, 3, &mut ctx)
-            .expect("reconciliation must not error");
+        let out = reconcile(authoritative, 3, &mut ctx);
 
-        // Exactly the first 3 ACCEPTED rows, in scan order (marker skipped).
+        // Results stay CAPPED: exactly the first 3 ACCEPTED rows, in scan order
+        // (marker skipped). The fix must NOT change output or LIMIT/OFFSET semantics.
         let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
         assert_eq!(
             keys,
             vec![b"k0".to_vec(), b"k1".to_vec(), b"k2".to_vec()],
             "reconciliation must return the first `cap` ACCEPTED rows in scan order"
         );
-        // The marker was examined (and counted) but never filled a cap slot; the
-        // loop stops examining once the cap is reached, so exactly 4 rows were
-        // examined (k0, marker, k1, k2) — not the whole authoritative scan.
-        assert_eq!(ctx.scan_rows, 4, "examined rows counted once, stops at cap");
-        assert_eq!(ctx.rows_processed, 4);
+        // ROUND-3 FIX: the re-run `scan` fully decoded all 6 rows, so `scan_rows`
+        // (→ `QUERY_ROWS_SCANNED`) must charge the FULL count (6), NOT the cap (3)
+        // and NOT the pre-fix capped-examination count (4).
+        assert_eq!(
+            ctx.scan_rows, decoded,
+            "reconciliation must charge QUERY_ROWS_SCANNED the full materialized \
+             decode count, not the LIMIT+OFFSET cap"
+        );
+        assert!(
+            ctx.scan_rows > out.len() as u64,
+            "reconciled scan-work metric must exceed the returned/capped row count"
+        );
+        // Per-row BUILD work stays bounded by the cap (k0, marker, k1, k2 examined).
+        assert_eq!(
+            ctx.rows_processed, 4,
+            "per-row build work is bounded by the cap even though scan_rows is full"
+        );
     }
 
     #[test]
     fn reconcile_short_of_cap_returns_all_accepted() {
         // Fewer accepted rows than the cap: return every accepted row (a genuinely
-        // small table — the non-divergent short-stream case).
+        // small table — the non-divergent short-stream case). Full count == examined
+        // count here, so both accounting styles agree; still pinned for regression.
         let authoritative = vec![live(b"k0", "a"), marker(b"k0m"), live(b"k1", "b")];
-        let preds: Vec<SSTablePredicate> = Vec::new();
+        let decoded = authoritative.len() as u64;
         let mut ctx = exec_context();
 
-        let out = collect_capped_accepted(authoritative, &preds, &[], None, 100, &mut ctx)
-            .expect("reconciliation must not error");
+        let out = reconcile(authoritative, 100, &mut ctx);
 
         let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
         assert_eq!(keys, vec![b"k0".to_vec(), b"k1".to_vec()]);
-        assert_eq!(ctx.scan_rows, 3, "all three entries examined once");
+        assert_eq!(
+            ctx.scan_rows, decoded,
+            "all three entries decoded and counted"
+        );
     }
 
     #[test]
-    fn reconcile_cap_zero_returns_empty_without_examining() {
+    fn reconcile_cap_zero_charges_full_scan_but_returns_empty() {
+        // `capped_fallback_scan` guards `cap == 0` before ever re-scanning, so this
+        // exercises the accountant directly: even at cap 0 the whole scan was
+        // decoded, so the full count is charged while no rows are returned.
         let authoritative = vec![live(b"k0", "a"), live(b"k1", "b")];
-        let preds: Vec<SSTablePredicate> = Vec::new();
+        let decoded = authoritative.len() as u64;
         let mut ctx = exec_context();
 
-        let out = collect_capped_accepted(authoritative, &preds, &[], None, 0, &mut ctx)
-            .expect("reconciliation must not error");
+        let out = reconcile(authoritative, 0, &mut ctx);
 
         assert!(out.is_empty(), "cap 0 accepts no rows");
-        assert_eq!(ctx.scan_rows, 0, "cap 0 examines no rows");
+        assert_eq!(
+            ctx.scan_rows, decoded,
+            "a materialized scan decoded every row even when the cap accepts none"
+        );
+        assert_eq!(ctx.rows_processed, 0, "cap 0 builds no rows");
     }
 
     // ── Materialized-scan metric accounting (issue #1577 roborev finding) ───────
