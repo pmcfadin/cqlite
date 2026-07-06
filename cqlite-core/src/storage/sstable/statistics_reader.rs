@@ -192,44 +192,60 @@ impl StatisticsReader {
 
     /// Get timestamp range in microseconds as `(min, max)`.
     ///
-    /// Note (#1729): the returned `max` may be the `i64::MIN` "unavailable"
+    /// Note (#1729/#1653): the returned `max` is the `i64::MIN` "unavailable"
     /// sentinel when the enhanced (nb) parser could not authoritatively decode
-    /// `maxTimestamp` from STATS. Callers that need a guaranteed-real maximum
-    /// should use [`Self::max_timestamp`], which returns `None` for that case.
+    /// `maxTimestamp` from STATS (`max_timestamp == None`). This legacy tuple
+    /// accessor preserves that documented sentinel contract; callers that need a
+    /// guaranteed-real maximum should use [`Self::max_timestamp`], which returns
+    /// `None` for that case.
     pub fn timestamp_range(&self) -> (i64, i64) {
         (
             self.statistics.timestamp_stats.min_timestamp,
-            self.statistics.timestamp_stats.max_timestamp,
+            self.statistics
+                .timestamp_stats
+                .max_timestamp
+                .unwrap_or(i64::MIN),
         )
     }
 
     /// Get the authoritative SSTable `maxTimestamp` (microseconds), or `None`
-    /// when it is not available (#1729 fail-closed sentinel `i64::MIN`).
+    /// when it is not available (issue #1653 — `max_timestamp == None`).
     ///
     /// Consumers that must not proceed without a real maximum (e.g. a
     /// compaction drop/GC gate, #1388) should gate on this returning `Some`.
     pub fn max_timestamp(&self) -> Option<i64> {
-        match self.statistics.timestamp_stats.max_timestamp {
-            i64::MIN => None,
-            v => Some(v),
-        }
+        // Defense-in-depth (#1653): both parsers should already map Cassandra's
+        // `Long.MIN_VALUE` "no max recorded" sentinel to `None`, but degrade a
+        // stray `Some(i64::MIN)` from ANY source to `None` here too, so a
+        // caller can never read the sentinel as a real maximum.
+        self.statistics
+            .timestamp_stats
+            .max_timestamp
+            .filter(|&ts| ts != crate::parser::repair_metadata::NO_MAX_TIMESTAMP_SENTINEL)
     }
 
-    /// Get compression information
-    pub fn compression_info(&self) -> (&str, f64) {
-        (
-            &self.statistics.compression_stats.algorithm,
-            self.statistics.compression_stats.ratio,
-        )
+    /// Get compression information as `(algorithm, ratio)`, or `None` when
+    /// compression statistics were not authoritatively parsed from
+    /// `Statistics.db` (issue #1653 — the enhanced nb parser does not decode
+    /// them; the value is not fabricated as `("unknown", 1.0)`).
+    pub fn compression_info(&self) -> Option<(&str, f64)> {
+        self.statistics
+            .compression_stats
+            .as_ref()
+            .map(|c| (c.algorithm.as_str(), c.ratio))
     }
 
-    /// Get partition statistics
-    pub fn partition_info(&self) -> (u64, f64, u64) {
-        (
-            self.statistics.partition_stats.min_partition_size,
-            self.statistics.partition_stats.avg_partition_size,
-            self.statistics.partition_stats.max_partition_size,
-        )
+    /// Get partition statistics as `(min_size, avg_size, max_size)`, or `None`
+    /// when partition statistics were not authoritatively parsed from
+    /// `Statistics.db` (issue #1653 — not fabricated as all-zero).
+    pub fn partition_info(&self) -> Option<(u64, f64, u64)> {
+        self.statistics.partition_stats.as_ref().map(|p| {
+            (
+                p.min_partition_size,
+                p.avg_partition_size,
+                p.max_partition_size,
+            )
+        })
     }
 
     /// Get column statistics by name
@@ -252,18 +268,24 @@ impl StatisticsReader {
             .collect()
     }
 
-    /// Check if data has TTL information
+    /// Check if data has TTL information.
+    ///
+    /// Returns `false` when the rows-with-TTL count is not authoritatively
+    /// available (issue #1653 — `rows_with_ttl == None`, the enhanced nb parser
+    /// case): "unknown" is reported as "no known TTL data" rather than
+    /// fabricating a positive count.
     pub fn has_ttl_data(&self) -> bool {
-        self.statistics.timestamp_stats.rows_with_ttl > 0
+        matches!(self.statistics.timestamp_stats.rows_with_ttl, Some(n) if n > 0)
     }
 
-    /// Get disk space usage information
-    pub fn disk_usage(&self) -> (u64, u64, f64) {
-        (
-            self.statistics.table_stats.compressed_size,
-            self.statistics.table_stats.uncompressed_size,
-            self.statistics.table_stats.compression_ratio,
-        )
+    /// Get disk space usage as `(compressed, uncompressed, ratio)`, or `None`
+    /// when table statistics were not authoritatively parsed from
+    /// `Statistics.db` (issue #1653 — not fabricated as all-zero).
+    pub fn disk_usage(&self) -> Option<(u64, u64, f64)> {
+        self.statistics
+            .table_stats
+            .as_ref()
+            .map(|t| (t.compressed_size, t.uncompressed_size, t.compression_ratio))
     }
 
     /// Generate a detailed report
@@ -290,18 +312,21 @@ impl StatisticsReader {
             Some(pct) => format!("- **Live Data**: {:.2}%\n", pct),
             None => "- **Live Data**: unavailable\n".to_string(),
         });
-        report.push_str(&format!(
-            "- **Compression Efficiency**: {:.2}%\n",
-            summary.compression_efficiency
-        ));
+        // `None` = compression stats not authoritatively parsed (issue #1653);
+        // render "unavailable" rather than a fabricated 0.00%/100%.
+        report.push_str(&match summary.compression_efficiency {
+            Some(eff) => format!("- **Compression Efficiency**: {:.2}%\n", eff),
+            None => "- **Compression Efficiency**: unavailable\n".to_string(),
+        });
         report.push_str(&format!(
             "- **Time Range**: {:.1} days\n",
             summary.timestamp_range_days
         ));
-        report.push_str(&format!(
-            "- **Largest Partition**: {:.2} MB\n",
-            summary.largest_partition_mb
-        ));
+        // `None` = partition stats not authoritatively parsed (issue #1653).
+        report.push_str(&match summary.largest_partition_mb {
+            Some(mb) => format!("- **Largest Partition**: {:.2} MB\n", mb),
+            None => "- **Largest Partition**: unavailable\n".to_string(),
+        });
         report.push_str(&format!(
             "- **Health Score**: {:.1}/100\n\n",
             summary.health_score
@@ -354,15 +379,14 @@ impl StatisticsReader {
             let min_time = chrono::DateTime::from_timestamp_micros(
                 self.statistics.timestamp_stats.min_timestamp,
             );
-            let max_time = chrono::DateTime::from_timestamp_micros(
-                self.statistics.timestamp_stats.max_timestamp,
-            );
+            // #1729/#1653: `max_timestamp` is `None` when unavailable. Only build a
+            // datetime from an authoritative maximum — never from a sentinel.
+            let max_ts = self.max_timestamp();
+            let max_time = max_ts.and_then(chrono::DateTime::from_timestamp_micros);
 
             report.push_str("## Timestamp Range\n");
-            // #1729: `max_timestamp()` returns None for the `i64::MIN`
-            // "unavailable" sentinel — render it honestly rather than printing a
-            // bogus epoch derived from i64::MIN.
-            let max_available = self.max_timestamp().is_some();
+            // #1729/#1653: render the max honestly rather than printing a bogus
+            // epoch derived from an unavailable maximum.
             if let (Some(min), Some(max)) = (min_time, max_time) {
                 report.push_str(&format!(
                     "- From: {}\n",
@@ -374,64 +398,71 @@ impl StatisticsReader {
                     "- Min timestamp: {}\n",
                     self.statistics.timestamp_stats.min_timestamp
                 ));
-                if max_available {
-                    report.push_str(&format!(
-                        "- Max timestamp: {}\n",
-                        self.statistics.timestamp_stats.max_timestamp
-                    ));
-                } else {
-                    report.push_str("- Max timestamp: unavailable\n");
+                match max_ts {
+                    Some(max) => {
+                        report.push_str(&format!("- Max timestamp: {}\n", max));
+                    }
+                    None => {
+                        report.push_str("- Max timestamp: unavailable\n");
+                    }
                 }
             }
 
-            if self.has_ttl_data() {
-                report.push_str(&format!(
-                    "- Rows with TTL: {}\n",
-                    self.statistics.timestamp_stats.rows_with_ttl
-                ));
+            // `has_ttl_data()` is only true when `rows_with_ttl` is an
+            // authoritative positive count (issue #1653), so this render never
+            // uses the `None`/unavailable case.
+            if let Some(rows_with_ttl) = self.statistics.timestamp_stats.rows_with_ttl {
+                if rows_with_ttl > 0 {
+                    report.push_str(&format!("- Rows with TTL: {}\n", rows_with_ttl));
+                }
             }
             report.push('\n');
         }
 
-        // Compression statistics
+        // Compression statistics. `None` = not authoritatively parsed (issue
+        // #1653, the enhanced nb parser case); render "unavailable" rather than a
+        // fabricated `algorithm: unknown` + all-zero block.
         report.push_str("## Compression\n");
-        report.push_str(&format!(
-            "- Algorithm: {}\n",
-            self.statistics.compression_stats.algorithm
-        ));
-        report.push_str(&format!(
-            "- Original size: {:.2} MB\n",
-            self.statistics.compression_stats.original_size as f64 / 1_048_576.0
-        ));
-        report.push_str(&format!(
-            "- Compressed size: {:.2} MB\n",
-            self.statistics.compression_stats.compressed_size as f64 / 1_048_576.0
-        ));
-        report.push_str(&format!(
-            "- Ratio: {:.2}%\n",
-            self.statistics.compression_stats.ratio * 100.0
-        ));
-        report.push_str(&format!(
-            "- Speed: {:.1} MB/s (compress), {:.1} MB/s (decompress)\n\n",
-            self.statistics.compression_stats.compression_speed,
-            self.statistics.compression_stats.decompression_speed
-        ));
+        match self.statistics.compression_stats.as_ref() {
+            Some(c) => {
+                report.push_str(&format!("- Algorithm: {}\n", c.algorithm));
+                report.push_str(&format!(
+                    "- Original size: {:.2} MB\n",
+                    c.original_size as f64 / 1_048_576.0
+                ));
+                report.push_str(&format!(
+                    "- Compressed size: {:.2} MB\n",
+                    c.compressed_size as f64 / 1_048_576.0
+                ));
+                report.push_str(&format!("- Ratio: {:.2}%\n", c.ratio * 100.0));
+                report.push_str(&format!(
+                    "- Speed: {:.1} MB/s (compress), {:.1} MB/s (decompress)\n\n",
+                    c.compression_speed, c.decompression_speed
+                ));
+            }
+            None => report.push_str("- unavailable\n\n"),
+        }
 
-        // Partition statistics
+        // Partition statistics. `None` = not authoritatively parsed (issue #1653).
         report.push_str("## Partition Distribution\n");
-        report.push_str(&format!(
-            "- Average size: {:.2} KB\n",
-            self.statistics.partition_stats.avg_partition_size / 1024.0
-        ));
-        report.push_str(&format!(
-            "- Range: {:.2} KB - {:.2} MB\n",
-            self.statistics.partition_stats.min_partition_size as f64 / 1024.0,
-            self.statistics.partition_stats.max_partition_size as f64 / 1_048_576.0
-        ));
-        report.push_str(&format!(
-            "- Large partitions (>1MB): {:.1}%\n\n",
-            self.statistics.partition_stats.large_partition_percentage
-        ));
+        match self.statistics.partition_stats.as_ref() {
+            Some(p) => {
+                report.push_str(&format!(
+                    "- Average size: {:.2} KB\n",
+                    p.avg_partition_size / 1024.0
+                ));
+                report.push_str(&format!(
+                    "- Range: {:.2} KB - {:.2} MB\n",
+                    p.min_partition_size as f64 / 1024.0,
+                    p.max_partition_size as f64 / 1_048_576.0
+                ));
+                report.push_str(&format!(
+                    "- Large partitions (>1MB): {:.1}%\n\n",
+                    p.large_partition_percentage
+                ));
+            }
+            None => report.push_str("- unavailable\n\n"),
+        }
 
         // Column statistics
         if include_column_details && !self.statistics.column_stats.is_empty() {
@@ -487,13 +518,19 @@ impl StatisticsReader {
             0 => "?".to_string(),
             n => n.to_string(),
         };
+        // `None` = compression / table stats not authoritatively parsed (issue
+        // #1653); render "?" rather than a fabricated 0.0% / 0.00 MB.
+        let compression = match summary.compression_efficiency {
+            Some(eff) => format!("{:.1}%", eff),
+            None => "?".to_string(),
+        };
+        let size = match self.statistics.table_stats.as_ref() {
+            Some(t) => format!("{:.2} MB", t.disk_size as f64 / 1_048_576.0),
+            None => "? MB".to_string(),
+        };
         format!(
-            "Rows: {} ({}) | Compression: {:.1}% | Health: {:.0}/100 | Size: {:.2} MB",
-            rows,
-            live,
-            summary.compression_efficiency,
-            summary.health_score,
-            self.statistics.table_stats.disk_size as f64 / 1_048_576.0
+            "Rows: {} ({}) | Compression: {} | Health: {:.0}/100 | Size: {}",
+            rows, live, compression, summary.health_score, size
         )
     }
 
@@ -826,15 +863,15 @@ mod tests {
             },
             timestamp_stats: TimestampStatistics {
                 min_timestamp: 0,
-                max_timestamp: 0,
+                max_timestamp: Some(0),
                 min_deletion_time: 0,
                 max_deletion_time: 0,
                 min_ttl: None,
                 max_ttl: None,
-                rows_with_ttl: 0,
+                rows_with_ttl: Some(0),
             },
             column_stats: vec![],
-            table_stats: TableStatistics {
+            table_stats: Some(TableStatistics {
                 disk_size: 1024,
                 uncompressed_size: 1024,
                 compressed_size: 1024,
@@ -844,15 +881,15 @@ mod tests {
                 index_size: 0,
                 bloom_filter_size: 0,
                 level_count: 0,
-            },
-            partition_stats: PartitionStatistics {
+            }),
+            partition_stats: Some(PartitionStatistics {
                 avg_partition_size: 0.0,
                 min_partition_size: 0,
                 max_partition_size: 0,
                 size_histogram: vec![],
                 large_partition_percentage: 0.0,
-            },
-            compression_stats: CompressionStatistics {
+            }),
+            compression_stats: Some(CompressionStatistics {
                 algorithm: "none".to_string(),
                 original_size: 1024,
                 compressed_size: 1024,
@@ -860,7 +897,7 @@ mod tests {
                 compression_speed: 0.0,
                 decompression_speed: 0.0,
                 compressed_blocks: 0,
-            },
+            }),
             metadata: std::collections::HashMap::new(),
             serialization_header_columns: vec![],
             serialization_header_partition_keys: vec![],
@@ -937,7 +974,7 @@ mod tests {
     ) -> crate::parser::statistics::SSTableStatistics {
         let mut s = stats_with(1, 1, 1.0);
         s.timestamp_stats.min_timestamp = min_timestamp;
-        s.timestamp_stats.max_timestamp = max_timestamp;
+        s.timestamp_stats.max_timestamp = Some(max_timestamp);
         s
     }
 
@@ -960,19 +997,21 @@ mod tests {
         assert_eq!(reader.timestamp_range(), (min, max));
     }
 
-    /// #1729 fail-closed: the `i64::MIN` sentinel (Cassandra's "no max recorded"
-    /// / enhanced-parser "unavailable") surfaces as `None`, and the report
-    /// renders "unavailable" rather than a bogus epoch derived from i64::MIN.
+    /// #1729/#1653 fail-closed: an unavailable authoritative maxTimestamp
+    /// (`max_timestamp == None`) surfaces as `None` from the accessor, and the
+    /// report renders "unavailable" rather than a bogus epoch or leaked sentinel.
     #[tokio::test]
-    async fn test_max_timestamp_sentinel_is_none_and_report_unavailable() {
+    async fn test_max_timestamp_unavailable_is_none_and_report_unavailable() {
         let min = 1_000_000i64;
-        let reader =
-            super::StatisticsReader::from_statistics_for_test(stats_with_timestamps(min, i64::MIN))
-                .await;
+        // The unavailable case is now honestly `None` (issue #1653), not the old
+        // `i64::MIN` in-band sentinel.
+        let mut stats = stats_with_timestamps(min, 0);
+        stats.timestamp_stats.max_timestamp = None;
+        let reader = super::StatisticsReader::from_statistics_for_test(stats).await;
         assert_eq!(
             reader.max_timestamp(),
             None,
-            "the i64::MIN unavailable sentinel must surface as None (fail-closed)"
+            "an unavailable max_timestamp must surface as None (fail-closed)"
         );
 
         let report = reader.generate_report(false);
@@ -982,7 +1021,7 @@ mod tests {
         );
         assert!(
             !report.contains("-9223372036854775808"),
-            "report must NOT leak the raw i64::MIN sentinel:\n{report}"
+            "report must NOT leak a raw i64::MIN value:\n{report}"
         );
     }
 

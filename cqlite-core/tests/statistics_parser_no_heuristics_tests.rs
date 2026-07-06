@@ -152,16 +152,7 @@ async fn test_nb_format_data_extraction_returns_error() {
     );
 
     match result {
-        Ok((
-            _row_stats,
-            timestamp_stats,
-            _table_stats,
-            _partition_stats,
-            _compression_stats,
-            partition_columns,
-            clustering_columns,
-            columns,
-        )) => {
+        Ok((_row_stats, timestamp_stats, partition_columns, clustering_columns, columns)) => {
             // Verify we extracted real values
             assert!(
                 timestamp_stats.min_timestamp != 0 || timestamp_stats.min_deletion_time != 0,

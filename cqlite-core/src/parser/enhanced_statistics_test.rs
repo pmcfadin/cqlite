@@ -66,11 +66,17 @@ mod tests {
 
                             // Test analysis
                             let summary = StatisticsAnalyzer::analyze(&statistics);
+                            // `compression_efficiency` is `None` when compression
+                            // stats were not authoritatively parsed (issue #1653,
+                            // the enhanced nb parser case).
                             println!(
-                                "  📈 Analysis - Rows: {}, Health: {:.1}, Compression: {:.1}%",
+                                "  📈 Analysis - Rows: {}, Health: {:.1}, Compression: {}",
                                 summary.total_rows,
                                 summary.health_score,
-                                summary.compression_efficiency
+                                summary
+                                    .compression_efficiency
+                                    .map(|e| format!("{:.1}%", e))
+                                    .unwrap_or_else(|| "unavailable".to_string())
                             );
 
                             // Test report generation
@@ -149,24 +155,22 @@ mod tests {
             "Should have partitions"
         );
 
-        // Table statistics validation
+        // Table/partition/compression statistics: the enhanced (nb) parser does
+        // NOT decode these, so they must be honestly `None` rather than fabricated
+        // all-zero / "unknown" placeholders (issue #1653; no-heuristics mandate
+        // #28). This is the honest contract — asserting `None` proves the parser
+        // stopped fabricating.
         assert!(
-            stats.table_stats.disk_size > 0,
-            "Disk size should be positive"
+            stats.table_stats.is_none(),
+            "enhanced nb parser must not fabricate table_stats (issue #1653)"
         );
         assert!(
-            stats.table_stats.compression_ratio > 0.0 && stats.table_stats.compression_ratio <= 1.0,
-            "Compression ratio should be between 0 and 1"
-        );
-
-        // Metadata validation
-        assert!(
-            stats.metadata.contains_key("format"),
-            "Should have format metadata"
+            stats.partition_stats.is_none(),
+            "enhanced nb parser must not fabricate partition_stats (issue #1653)"
         );
         assert!(
-            stats.metadata.contains_key("parser_version"),
-            "Should have parser version"
+            stats.compression_stats.is_none(),
+            "enhanced nb parser must not fabricate compression_stats (issue #1653)"
         );
 
         println!(
@@ -241,44 +245,48 @@ mod tests {
         ));
         report.push('\n');
 
-        // Table statistics
+        // Table statistics — `None` when not authoritatively parsed (issue #1653).
         report.push_str("## Table Statistics\n");
-        report.push_str(&format!(
-            "- **Disk Size**: {:.2} MB\n",
-            stats.table_stats.disk_size as f64 / 1_048_576.0
-        ));
-        report.push_str(&format!(
-            "- **Compression Ratio**: {:.2}%\n",
-            stats.table_stats.compression_ratio * 100.0
-        ));
-        report.push_str(&format!(
-            "- **Block Count**: {}\n",
-            stats.table_stats.block_count
-        ));
-        report.push_str(&format!(
-            "- **Index Size**: {:.2} KB\n",
-            stats.table_stats.index_size as f64 / 1024.0
-        ));
+        match stats.table_stats.as_ref() {
+            Some(t) => {
+                report.push_str(&format!(
+                    "- **Disk Size**: {:.2} MB\n",
+                    t.disk_size as f64 / 1_048_576.0
+                ));
+                report.push_str(&format!(
+                    "- **Compression Ratio**: {:.2}%\n",
+                    t.compression_ratio * 100.0
+                ));
+                report.push_str(&format!("- **Block Count**: {}\n", t.block_count));
+                report.push_str(&format!(
+                    "- **Index Size**: {:.2} KB\n",
+                    t.index_size as f64 / 1024.0
+                ));
+            }
+            None => report.push_str("- unavailable\n"),
+        }
         report.push('\n');
 
-        // Compression statistics
+        // Compression statistics — `None` when not authoritatively parsed (#1653).
         report.push_str("## Compression Statistics\n");
-        report.push_str(&format!(
-            "- **Algorithm**: {}\n",
-            stats.compression_stats.algorithm
-        ));
-        report.push_str(&format!(
-            "- **Original Size**: {:.2} MB\n",
-            stats.compression_stats.original_size as f64 / 1_048_576.0
-        ));
-        report.push_str(&format!(
-            "- **Compressed Size**: {:.2} MB\n",
-            stats.compression_stats.compressed_size as f64 / 1_048_576.0
-        ));
-        report.push_str(&format!(
-            "- **Compression Speed**: {:.1} MB/s\n",
-            stats.compression_stats.compression_speed
-        ));
+        match stats.compression_stats.as_ref() {
+            Some(c) => {
+                report.push_str(&format!("- **Algorithm**: {}\n", c.algorithm));
+                report.push_str(&format!(
+                    "- **Original Size**: {:.2} MB\n",
+                    c.original_size as f64 / 1_048_576.0
+                ));
+                report.push_str(&format!(
+                    "- **Compressed Size**: {:.2} MB\n",
+                    c.compressed_size as f64 / 1_048_576.0
+                ));
+                report.push_str(&format!(
+                    "- **Compression Speed**: {:.1} MB/s\n",
+                    c.compression_speed
+                ));
+            }
+            None => report.push_str("- unavailable\n"),
+        }
         report.push('\n');
 
         // Metadata

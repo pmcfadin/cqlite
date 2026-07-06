@@ -1,8 +1,8 @@
 //! Core parser trait definitions for CQLite
 //!
-//! This module defines the fundamental traits that abstract over different
-//! parser implementations (nom, ANTLR, etc.), allowing the system to switch
-//! between backends transparently.
+//! This module defines the fundamental traits that abstract over parser
+//! implementations, allowing the system to switch between backends
+//! transparently.
 
 use crate::error::Result;
 use async_trait::async_trait;
@@ -13,8 +13,8 @@ use super::ast::*;
 
 /// Main trait for CQL parsing operations.
 ///
-/// Abstracts over different parser backends (nom, ANTLR) and provides a
-/// unified interface for parsing CQL statements.
+/// Abstracts over parser backends and provides a unified interface for
+/// parsing CQL statements.
 #[async_trait]
 pub trait CqlParser: Debug + Send + Sync {
     /// Parse a complete CQL statement from input text.
@@ -68,7 +68,7 @@ pub trait CqlVisitor<T>: Debug {
 /// Information about a parser backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParserBackendInfo {
-    /// Backend name (e.g., "nom", "antlr").
+    /// Backend name (e.g., "nom").
     pub name: String,
     /// Backend version.
     pub version: String,
