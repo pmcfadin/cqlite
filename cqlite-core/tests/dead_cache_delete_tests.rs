@@ -208,7 +208,14 @@ async fn stats_block_cache_hit_rate_and_occupancy_are_real() {
     let Some(_) = resolve_or_skip("test_basic", "simple_table") else {
         return;
     };
-    let Some(db) = open_fixture_db("test_basic", "simple_table", "basic-types.cql").await else {
+    let Some(db) = open_fixture_db(
+        "test_basic",
+        "simple_table",
+        "basic-types.cql",
+        Config::default(),
+    )
+    .await
+    else {
         return;
     };
 
@@ -247,6 +254,64 @@ async fn stats_block_cache_hit_rate_and_occupancy_are_real() {
     );
 }
 
+/// Issue #1568 (roborev F1): `block_cache.enabled == false` must GENUINELY
+/// disable caching, not be a decorative toggle. The contrast to
+/// `stats_block_cache_hit_rate_and_occupancy_are_real` (which opens with the
+/// default `enabled == true` and asserts hit rate > 0 / occupancy > 0): with
+/// caching disabled the SAME repeated point read is served straight from disk,
+/// so `Database::stats().memory_stats` reports a structural zero — hit rate
+/// `== 0.0` AND `total_memory_used == 0` (the cache never populates). This is the
+/// exact behavior Node's `cacheEnabled: false` maps to (→ `block_cache.enabled`).
+#[cfg(feature = "cli-helpers")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn stats_block_cache_disabled_yields_no_caching() {
+    let Some(_) = resolve_or_skip("test_basic", "simple_table") else {
+        return;
+    };
+    let mut config = Config::default();
+    config.memory.block_cache.enabled = false;
+    let Some(db) = open_fixture_db("test_basic", "simple_table", "basic-types.cql", config).await
+    else {
+        return;
+    };
+
+    // Learn a present partition key from a full scan (never a 0-row pass).
+    let scan = db
+        .execute("SELECT * FROM test_basic.simple_table")
+        .await
+        .expect("scan for a key");
+    assert!(
+        !scan.rows.is_empty(),
+        "fixture present but scan returned 0 rows"
+    );
+    let id = scan
+        .rows
+        .iter()
+        .find_map(|r| r.get("id").and_then(uuid_literal))
+        .expect("a row with a UUID id");
+
+    // The identical point read twice: with caching disabled the second read is
+    // NOT served from a warm cache — it re-reads from disk. Reads still succeed.
+    let q = format!("SELECT * FROM test_basic.simple_table WHERE id = {id}");
+    let first = db.execute(&q).await.expect("first point read");
+    assert_eq!(first.rows.len(), 1, "point read must find exactly one row");
+    let second = db.execute(&q).await.expect("second point read");
+    assert_eq!(second.rows.len(), 1, "repeat point read must be identical");
+
+    let stats = db.stats().await.expect("stats");
+    assert_eq!(
+        stats.memory_stats.block_cache_hit_rate(),
+        0.0,
+        "disabled block cache must report a structural 0.0 hit rate (no caching), got {}",
+        stats.memory_stats.block_cache_hit_rate()
+    );
+    assert_eq!(
+        stats.memory_stats.total_memory_used, 0,
+        "disabled block cache must never populate (reported occupancy stays 0)"
+    );
+}
+
 /// Spec: "stats() surface shape is unchanged" — `MemoryStats` keeps its public
 /// field names/types and the `block_cache_hit_rate()` accessor (semver). A
 /// compile-time shape assertion: renaming/removing any field or the accessor
@@ -269,7 +334,12 @@ fn memory_stats_semver_shape_preserved() {
 /// the shared corpus is never mutated. Uses the public one-shot ingestion API
 /// (`cqlite_core::ingestion::ingest`) with the table's schema.
 #[cfg(feature = "cli-helpers")]
-async fn open_fixture_db(ks: &str, tbl: &str, schema_file: &str) -> Option<cqlite_core::Database> {
+async fn open_fixture_db(
+    ks: &str,
+    tbl: &str,
+    schema_file: &str,
+    core_config: Config,
+) -> Option<cqlite_core::Database> {
     use cqlite_core::ingestion::{ingest, IngestionConfig};
 
     let root = datasets_root()?;
@@ -294,7 +364,7 @@ async fn open_fixture_db(ks: &str, tbl: &str, schema_file: &str) -> Option<cqlit
             .expect("temp/<ks>/<dir>")
             .to_path_buf(),
         version_hint: Some("5.0".to_string()),
-        core_config: Config::default(),
+        core_config,
         table_directory_filter: Some(format!("/{ks}/{tbl}")),
     };
     Some(ingest(cfg).await.expect("ingest fixture").database)

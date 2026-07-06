@@ -213,8 +213,13 @@ impl Database {
 
         // Initialize the memory-stats shell over the storage engine's live B1
         // decompressed-chunk cache (issue #1568), so `stats()` reports real cache
-        // numbers rather than the deleted always-zero counters.
-        let memory = Arc::new(MemoryManager::with_chunk_cache(storage.chunk_cache()));
+        // numbers rather than the deleted always-zero counters. When block caching
+        // is disabled (`block_cache.enabled == false`) there is no live cache, so
+        // the shell reports a structural zero.
+        let memory = Arc::new(match storage.chunk_cache() {
+            Some(cache) => MemoryManager::with_chunk_cache(cache),
+            None => MemoryManager::new(&config)?,
+        });
 
         // Initialize schema manager
         #[cfg(feature = "state_machine")]
@@ -342,7 +347,11 @@ impl Database {
         );
 
         // Memory-stats shell over the storage engine's live B1 chunk cache (#1568).
-        let memory = Arc::new(MemoryManager::with_chunk_cache(storage.chunk_cache()));
+        // No live cache when block caching is disabled → structural-zero stats.
+        let memory = Arc::new(match storage.chunk_cache() {
+            Some(cache) => MemoryManager::with_chunk_cache(cache),
+            None => MemoryManager::new(&config)?,
+        });
 
         // Initialize schema manager - use registry if provided, otherwise create empty
         let schema = if let Some(registry_rwlock) = schema_registry {
