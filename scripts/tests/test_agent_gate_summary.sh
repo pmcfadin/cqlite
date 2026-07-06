@@ -678,6 +678,87 @@ if [ "$accel_link_fail" -eq 0 ]; then
   fi
 fi
 
+# ============================================================================
+# ISSUE #2078: FULL gate fails CLOSED when the fetched dataset corpus is absent.
+# A fresh worktree carries ~19 tiny committed byte-parity reference *-Data.db, so the
+# historical "any Data.db present" preflight PASSes while the main dataset components
+# SKIP internally — a green SUMMARY that validated ZERO dataset correctness. The FULL
+# gate must FAIL; --lite/--only stay lenient; an explicit opt-out restores SKIP and
+# stamps a visible marker.
+# ============================================================================
+
+# Dummy roots: one with a Data.db but NO canonical corpus (test_basic) — the exact
+# committed-refs-only shape — and one WITH test_basic present.
+ds_nocorpus=$(mktemp -d "$tmp/ds-nocorpus.XXXXXX")
+mkdir -p "$ds_nocorpus/sstables/test_dummy/x-0001"
+: >"$ds_nocorpus/sstables/test_dummy/x-0001/nb-1-big-Data.db"
+ds_corpus=$(mktemp -d "$tmp/ds-corpus.XXXXXX")
+mkdir -p "$ds_corpus/sstables/test_basic/simple_table-0001"
+: >"$ds_corpus/sstables/test_basic/simple_table-0001/nb-1-big-Data.db"
+
+# 12a. FULL gate FAIL-CLOSED: point at the corpus-absent root and run the real full
+#      gate. apply_fixture_preflight fires BEFORE any cargo component, so this is fast
+#      (it exits at the preflight). The recovery file must show the FAIL-CLOSED marker
+#      + RESULT: FAIL and never RESULT: PASS. Cap disabled so the run never queues.
+full_fail="$tmp/2078-full-fail.txt"
+CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_nocorpus" \
+  AGENT_GATE_SUMMARY_FILE="$full_fail" bash "$GATE" >/dev/null 2>&1
+full_fail_rc=$?
+if [ "$full_fail_rc" -ne 0 ] \
+   && grep -q "missing-fixtures: FAIL-CLOSED" "$full_fail" 2>/dev/null \
+   && grep -q "^RESULT: FAIL" "$full_fail" 2>/dev/null \
+   && ! grep -q "^RESULT: PASS" "$full_fail" 2>/dev/null; then
+  ok "2078-full-fail: FULL gate FAILs CLOSED on an absent corpus (marker + RESULT: FAIL, no cargo)"
+else
+  bad "2078-full-fail: expected non-zero exit + FAIL-CLOSED marker + RESULT: FAIL (rc=$full_fail_rc)"
+  echo "------- captured -------"; cat "$full_fail" 2>/dev/null; echo "------------------------"
+fi
+
+# 12b. Opt-out restores SKIP + stamps a VISIBLE marker. First the pure decision hook,
+#      then the marker driven through the REAL emit path (--emit-summary-selftest).
+optout_status=$(CQLITE_DATASETS_ROOT="$ds_nocorpus" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
+  bash "$GATE" --preflight-fixtures 2>/dev/null | grep '^STATUS:' | sed 's/^STATUS: //')
+if [ "$optout_status" = OPTOUT ]; then
+  ok "2078-optout: corpus absent + AGENT_GATE_ALLOW_MISSING_FIXTURES=1 → STATUS OPTOUT"
+else
+  bad "2078-optout: expected STATUS OPTOUT (got '$optout_status')"
+fi
+optout_block="$tmp/2078-optout.txt"
+CQLITE_DATASETS_ROOT="$ds_nocorpus" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
+  AGENT_GATE_SUMMARY_FILE="$optout_block" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+if grep -q "^missing-fixtures: OPT-OUT" "$optout_block" 2>/dev/null \
+   && grep -q "^RESULT: PASS" "$optout_block" 2>/dev/null; then
+  ok "2078-optout: emitted SUMMARY carries the visible OPT-OUT marker line"
+else
+  bad "2078-optout: expected the OPT-OUT marker in the emitted block"
+  echo "------- captured -------"; cat "$optout_block" 2>/dev/null; echo "------------------------"
+fi
+
+# 12c. Corpus PRESENT → STATUS OK (byte-identical behavior; the guard is a no-op).
+present_status=$(CQLITE_DATASETS_ROOT="$ds_corpus" bash "$GATE" --preflight-fixtures 2>/dev/null \
+  | grep '^STATUS:' | sed 's/^STATUS: //')
+if [ "$present_status" = OK ]; then
+  ok "2078-present: canonical corpus present → STATUS OK (no FAIL, no marker)"
+else
+  bad "2078-present: expected STATUS OK with the corpus present (got '$present_status')"
+fi
+
+# 12d. --lite is UNAFFECTED: a lite run with the corpus-absent root must not fail at a
+#      preflight (the guard is full-gate-only). Drive the lite emission path and assert
+#      a clean LITE block with NO missing-fixtures line.
+lite_block="$tmp/2078-lite.txt"
+CQLITE_DATASETS_ROOT="$ds_nocorpus" AGENT_GATE_SUMMARY_FILE="$lite_block" \
+  bash "$GATE" --lite --emit-summary-selftest >/dev/null 2>&1
+lite_rc=$?
+if [ "$lite_rc" -eq 0 ] \
+   && grep -q "AGENT-GATE LITE SUMMARY" "$lite_block" 2>/dev/null \
+   && ! grep -q "missing-fixtures:" "$lite_block" 2>/dev/null; then
+  ok "2078-lite: --lite is unaffected by an absent corpus (clean LITE block, no marker)"
+else
+  bad "2078-lite: --lite should be unaffected (rc=$lite_rc)"
+  echo "------- captured -------"; cat "$lite_block" 2>/dev/null; echo "------------------------"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
