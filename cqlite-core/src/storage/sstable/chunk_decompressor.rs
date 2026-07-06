@@ -374,6 +374,7 @@ impl ChunkDecompressor {
         }
     }
 
+    #[cfg(feature = "lz4")]
     fn decompress_lz4_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
         let file_info = match &self.data_file_path {
             Some(path) => format!(" in file {}", path),
@@ -451,6 +452,15 @@ impl ChunkDecompressor {
                 file_info
             ))),
         }
+    }
+
+    /// Decompress LZ4 chunk fallback when the `lz4` feature is disabled.
+    #[cfg(not(feature = "lz4"))]
+    fn decompress_lz4_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
+        let _ = (compressed_data, chunk_index); // Suppress unused warnings
+        Err(Error::UnsupportedFormat(
+            "LZ4 support not compiled in".to_string(),
+        ))
     }
 
     /// Decompress Snappy chunk - strict mode for modern formats
@@ -628,7 +638,10 @@ impl ChunkDecompressor {
     ///
     /// A cache hit does NOT increment this, so a repeated read of a resident chunk
     /// leaves it unchanged. Exposed for wiring-evidence tests (issue #1569).
-    #[cfg(test)]
+    ///
+    /// Consumed only by the lz4-gated multichunk round-trip tests, so it is gated to
+    /// match and stay dead-code-free under single-feature test builds (issue #1873).
+    #[cfg(all(test, feature = "lz4"))]
     pub(crate) fn decompress_call_count(&self) -> u64 {
         self.decompress_calls
     }
@@ -743,17 +756,23 @@ mod tests {
     /// `seek(SeekFrom::Current(0))`). Used to prove the chunk read path does not
     /// re-derive the immutable file size with a seek probe on every chunk
     /// (issue #1586).
+    ///
+    /// Only the lz4-gated multichunk tests construct it, so it is gated to match and
+    /// stay dead-code-free under single-feature test builds (issue #1873).
+    #[cfg(feature = "lz4")]
     struct SeekCountingReader {
         inner: std::io::Cursor<Vec<u8>>,
         seeks: std::rc::Rc<std::cell::Cell<usize>>,
     }
 
+    #[cfg(feature = "lz4")]
     impl std::io::Read for SeekCountingReader {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.inner.read(buf)
         }
     }
 
+    #[cfg(feature = "lz4")]
     impl Seek for SeekCountingReader {
         fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
             self.seeks.set(self.seeks.get() + 1);
