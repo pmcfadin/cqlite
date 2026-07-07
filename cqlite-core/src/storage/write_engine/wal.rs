@@ -1327,7 +1327,7 @@ impl WriteAheadLog {
     /// # Errors
     ///
     /// Returns an error if serialization fails or the write fails.
-    #[tracing::instrument(name = "wal.append", skip(self, mutation))]
+    #[tracing::instrument(name = "wal.append", level = "debug", skip(self, mutation))]
     pub fn append(&mut self, mutation: &Mutation) -> Result<()> {
         // Fail closed if a prior truncate poisoned the WAL (issue #1392,
         // FINDING 1): appending at a stale cursor over a zeroed file would
@@ -1412,7 +1412,7 @@ impl WriteAheadLog {
     /// # Errors
     ///
     /// Returns an error if the flush or sync operation fails.
-    #[tracing::instrument(name = "wal.sync", skip(self))]
+    #[tracing::instrument(name = "wal.sync", level = "debug", skip(self))]
     pub fn sync(&mut self) -> Result<()> {
         // Fail closed if the WAL was poisoned by a partial truncate-restore
         // (issue #1392, FINDING 1): its buffered/cursor state is not trustworthy.

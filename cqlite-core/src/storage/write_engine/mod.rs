@@ -788,7 +788,7 @@ impl WriteEngine {
     /// - WAL append fails
     /// - Memtable insert fails
     /// - Automatic flush fails (sync context only)
-    #[tracing::instrument(name = "write.mutation", skip(self, mutation))]
+    #[tracing::instrument(name = "write.mutation", level = "debug", skip(self, mutation))]
     pub fn write(&mut self, mutation: Mutation) -> Result<()> {
         crate::observability::record_result("write", self.write_inner(mutation))
     }
@@ -944,7 +944,7 @@ impl WriteEngine {
     /// - WAL append fails
     /// - Memtable insert fails
     /// - Automatic flush fails
-    #[tracing::instrument(name = "write.mutation", skip(self, mutation))]
+    #[tracing::instrument(name = "write.mutation", level = "debug", skip(self, mutation))]
     pub async fn write_async(&mut self, mutation: Mutation) -> Result<()> {
         crate::observability::record_result("write", self.write_async_inner(mutation).await)
     }
@@ -1039,7 +1039,7 @@ impl WriteEngine {
     /// engine.execute("UPDATE users SET name = 'Bob' WHERE id = 1")?;
     /// engine.execute("DELETE FROM users WHERE id = 1")?;
     /// ```
-    #[tracing::instrument(name = "write.cql_execute", skip(self, statement))]
+    #[tracing::instrument(name = "write.cql_execute", level = "debug", skip(self, statement))]
     pub fn execute(&mut self, statement: &str) -> Result<()> {
         crate::observability::record_result("write", self.execute_inner(statement))
     }
@@ -1098,7 +1098,11 @@ impl WriteEngine {
     /// intentionally skipped. It restores auto-flush there WITHOUT the surprise
     /// inline-flush latency the plain sync `write()`/`execute()` path avoids.
     /// Returns the number of mutations applied (N for BATCH, else 1).
-    #[tracing::instrument(name = "write.cql_execute_flushing", skip(self, statement))]
+    #[tracing::instrument(
+        name = "write.cql_execute_flushing",
+        level = "debug",
+        skip(self, statement)
+    )]
     pub async fn execute_flushing(&mut self, statement: &str) -> Result<u64> {
         // Single-boundary error recording (issue #1036): `execute_flushing` is
         // the public Node/Python DML entry point, so — like `execute`,
@@ -1153,7 +1157,7 @@ impl WriteEngine {
     /// - Engine has been closed
     /// - SSTable write fails
     /// - WAL truncate fails
-    #[tracing::instrument(name = "flush.public", skip(self))]
+    #[tracing::instrument(name = "flush.public", level = "debug", skip(self))]
     pub async fn flush(&mut self) -> Result<Option<SSTableInfo>> {
         // Single-boundary error recording (issue #1036): `flush` is a public API
         // entry point, so it records here. The nested `flush_internal_async`
@@ -1191,7 +1195,7 @@ impl WriteEngine {
     /// at the public boundary that invoked it (`flush`, `close`, or the
     /// `write`/`write_async` auto-flush path, all of which wrap their work in
     /// `record_result`).
-    #[tracing::instrument(name = "flush.memtable", skip(self))]
+    #[tracing::instrument(name = "flush.memtable", level = "debug", skip(self))]
     async fn flush_internal_async(&mut self) -> Result<Option<SSTableInfo>> {
         // Check if memtable is empty
         if self.memtable.is_empty() {

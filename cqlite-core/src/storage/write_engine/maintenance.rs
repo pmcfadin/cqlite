@@ -185,7 +185,7 @@ impl WriteEngine {
     ///     println!("Merged {} rows in {:?}", report.rows_merged, report.time_spent);
     /// }
     /// ```
-    #[tracing::instrument(name = "compaction.maintenance_step", skip(self))]
+    #[tracing::instrument(name = "compaction.maintenance_step", level = "debug", skip(self))]
     pub fn maintenance_step(&mut self, budget: Duration) -> Result<MaintenanceReport> {
         // Budget requested for this step (issue #1037). Compared with the
         // consumed budget below (the scheduler honors a ~10% tolerance).
@@ -420,7 +420,7 @@ impl WriteEngine {
         Ok(report)
     }
 
-    #[tracing::instrument(name = "compaction.scan_candidates", skip(self))]
+    #[tracing::instrument(name = "compaction.scan_candidates", level = "debug", skip(self))]
     fn scan_sstable_candidates(&self) -> Result<Vec<PathBuf>> {
         let mut candidates = Vec::new();
 

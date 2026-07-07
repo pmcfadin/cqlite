@@ -116,6 +116,7 @@ impl StorageEngine {
     // args as fields regardless of cfg; the `fields(...)` below are set in the body.
     #[tracing::instrument(
         name = "storage.engine.open",
+        level = "debug",
         skip_all,
         fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
     )]
@@ -223,6 +224,7 @@ impl StorageEngine {
     // be named in an explicit `skip(...)` without breaking the minimal build.
     #[tracing::instrument(
         name = "storage.engine.open",
+        level = "debug",
         skip_all,
         fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
     )]
