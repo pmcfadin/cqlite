@@ -52,13 +52,10 @@
 //! - [`rows_floor`]  — O(key-length) `separatorFloor` / strict-ceiling `Rows.db`
 //!   walks (issue #1647 / L1) + the shared per-node payload primitive.
 //! - [`encoding`]    — Cassandra OSS50 byte-comparable clustering-bound encoders.
-//! - [`reader`]      — the stateful `BtiHeader` / `PartitionsParser` /
-//!   `RowsParser` navigators, their iterators, and `BtiIndexStats`.
 
 mod encoding;
 mod node_decode;
 mod partitions;
-mod reader;
 mod rows;
 mod rows_floor;
 mod slice_walk;
@@ -69,9 +66,6 @@ pub use encoding::{encode_clustering_bound_oss50, encode_clustering_bound_oss50_
 pub use partitions::{
     decode_bti_partition_payload, encode_partition_key_for_bti_trie, lookup_partition_in_bti_file,
     lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation, FLAG_HAS_HASH_BYTE,
-};
-pub use reader::{
-    BtiHeader, BtiIndexStats, PartitionIterator, PartitionsParser, RowIterator, RowsParser,
 };
 pub use rows::{
     decode_bti_row_payload, iterate_rows_for_partition, iterate_rows_in_bti_file,

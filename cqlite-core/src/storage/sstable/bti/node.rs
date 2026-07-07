@@ -409,58 +409,6 @@ impl BtiNode {
     }
 }
 
-/// Trie navigation context for tracking path through the trie
-#[derive(Debug, Clone)]
-pub struct TrieNavigator {
-    /// Current position in the file
-    pub current_offset: u64,
-    /// Path taken through the trie (for debugging/backtracking)
-    pub path: Vec<u8>,
-    /// Nodes visited (for cycle detection)
-    pub visited_offsets: std::collections::HashSet<u64>,
-}
-
-impl TrieNavigator {
-    /// Create a new navigator at the root
-    pub fn new(root_offset: u64) -> Self {
-        Self {
-            current_offset: root_offset,
-            path: Vec::new(),
-            visited_offsets: std::collections::HashSet::new(),
-        }
-    }
-
-    /// Navigate to a child node
-    pub fn navigate_to_child(&mut self, byte: u8, child_pointer: &SizedPointer) -> BtiResult<()> {
-        let target_offset = self.current_offset + child_pointer.distance;
-
-        // Check for cycles
-        if self.visited_offsets.contains(&target_offset) {
-            return Err(
-                BtiError::NavigationError("Cycle detected in trie navigation".to_string()).into(),
-            );
-        }
-
-        self.visited_offsets.insert(self.current_offset);
-        self.current_offset = target_offset;
-        self.path.push(byte);
-
-        Ok(())
-    }
-
-    /// Get the current path as a key prefix
-    pub fn current_path(&self) -> &[u8] {
-        &self.path
-    }
-
-    /// Reset to navigate from root again
-    pub fn reset(&mut self, root_offset: u64) {
-        self.current_offset = root_offset;
-        self.path.clear();
-        self.visited_offsets.clear();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,58 +520,5 @@ mod tests {
         );
         // Note: This would be invalid in practice but our implementation
         // doesn't enforce minimum children for sparse nodes in this test
-    }
-
-    #[test]
-    fn test_trie_navigator() {
-        let mut nav = TrieNavigator::new(1000);
-        assert_eq!(nav.current_offset, 1000);
-        assert_eq!(nav.current_path(), &[] as &[u8]);
-
-        let pointer = SizedPointer::new(100);
-        nav.navigate_to_child(b'a', &pointer).unwrap();
-
-        assert_eq!(nav.current_offset, 1100);
-        assert_eq!(nav.current_path(), b"a");
-    }
-
-    /// BUG(#1652), documented pre-deletion for the audit trail.
-    ///
-    /// `SizedPointer::distance` holds the child's **absolute** file offset
-    /// (see `SizedPointer::new`: "Create a pointer to the child at absolute
-    /// offset `distance`" — the backward delta `parent_offset - delta` is
-    /// resolved to an absolute position at decode time). A correct
-    /// `TrieNavigator::navigate_to_child` must therefore SET
-    /// `current_offset = child_pointer.distance`, not ADD it to the current
-    /// offset. The current impl (`self.current_offset + child_pointer.distance`)
-    /// treats the absolute offset as relative, so on any 2+-level trie every
-    /// descent past the root seeks to the wrong node.
-    ///
-    /// This test asserts the CORRECT (absolute) target offsets across a
-    /// two-level descent; it FAILS against the buggy impl and is therefore
-    /// `#[ignore]`d so the gate stays green. The follow-up commit deletes the
-    /// entire (dead, zero-production-caller) navigator stack rather than fixing
-    /// it (owner decision #9 on epic #1605 = DELETE).
-    #[test]
-    #[ignore = "BUG(#1652): navigate_to_child adds absolute offset as relative; \
-                stack is deleted in the follow-up commit rather than fixed"]
-    fn bug_1652_navigate_to_child_treats_absolute_offset_as_relative() {
-        // Two-level trie: root -> child (abs offset 100) -> grandchild (abs offset 40).
-        let mut nav = TrieNavigator::new(1000);
-
-        // Descend to the child living at ABSOLUTE offset 100.
-        nav.navigate_to_child(b'a', &SizedPointer::new(100)).unwrap();
-        assert_eq!(
-            nav.current_offset, 100,
-            "after one descent current_offset must be the child's absolute offset"
-        );
-
-        // Descend again to the grandchild living at ABSOLUTE offset 40.
-        nav.navigate_to_child(b'b', &SizedPointer::new(40)).unwrap();
-        assert_eq!(
-            nav.current_offset, 40,
-            "after two descents current_offset must be the grandchild's absolute offset"
-        );
-        assert_eq!(nav.current_path(), b"ab");
     }
 }

@@ -325,7 +325,7 @@ pub struct BtiRowIndexHeader {
     pub data_position: u64,
     /// Byte offset, within the `Rows.db` file, of this partition's row-index
     /// trie root node.  Feed this to [`iterate_rows_in_bti_trie`] /
-    /// `RowsParser::range_query` / `RowsParser::iterate_rows`.
+    /// [`resolve_rows_db_entry`] / [`select_row_index_blocks_for_range`].
     pub trie_root: usize,
     /// Number of row-index blocks indexed by this partition's trie.
     pub block_count: u32,
