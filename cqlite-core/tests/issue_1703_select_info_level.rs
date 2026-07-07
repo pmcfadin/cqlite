@@ -16,6 +16,17 @@
 //! subscriber with an `INFO` `LevelFilter` — the exact posture a CLI user /
 //! embedder runs in — not a helper or mock.
 //!
+//! Installed as the **process-global** default (`set_global_default`), not a
+//! thread-local (`set_default`). The SELECT/scan path crosses `spawn_blocking`
+//! in several places (`scan_stream_windowed.rs`'s parse/feed tasks,
+//! `delta_scan/scan.rs`), which run their closures on SEPARATE tokio
+//! blocking-pool threads. A thread-local default installed on the test's own
+//! task is NOT observed there, so it would under-count (or miss entirely) any
+//! INFO emitted on a blocking-pool thread — a vacuous-pass risk (roborev,
+//! issue #1703 fix-round 2). This file contains exactly one test, so a
+//! process-wide global default is safe (no other test in this binary competes
+//! for it).
+//!
 //! Requires `CQLITE_DATASETS_ROOT` + fetched binaries; skips (never fails) when
 //! the fixture is absent, and treats a present-but-0-rows scan as a hard failure
 //! (a real scan must run for the info lines to fire).
@@ -128,50 +139,69 @@ async fn setup(keyspace: &str, schema_file: &str) -> Option<Database> {
 }
 
 /// One full-scan SELECT, observed through a real INFO-capped subscriber, must
-/// emit AT MOST ONE INFO line. RED before the demotion (~2+ info lines: "Found
-/// schema …" + "Scan returned N rows"); GREEN after (0).
-#[tokio::test]
-async fn select_emits_at_most_one_info_line() {
-    if !fixture_data_present("test_basic", "simple_table") {
-        eprintln!("Skipping (#1703): test_basic/simple_table Data.db not present");
-        return;
-    }
-    let Some(db) = setup("test_basic", "basic-types.cql").await else {
-        eprintln!("Skipping (#1703): could not ingest test_basic");
-        return;
-    };
+/// emit AT MOST ONE INFO line. RED before the demotion (info sites fire on
+/// whichever thread runs them, including `spawn_blocking` worker threads);
+/// GREEN after (0).
+///
+/// Uses a MULTI-thread tokio runtime (not the `#[tokio::test]` default
+/// current-thread flavor) so `spawn_blocking` closures really do run on a
+/// separate OS thread from the test task — the exact cross-thread hazard this
+/// test's global subscriber must be able to observe.
+#[test]
+fn select_emits_at_most_one_info_line() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("multi-thread runtime");
 
-    let tally = EventTally::default();
-    let layer = CountingLayer {
-        tally: tally.clone(),
-    }
-    .with_filter(LevelFilter::INFO);
-    let subscriber = tracing_subscriber::registry().with(layer);
+    rt.block_on(async {
+        if !fixture_data_present("test_basic", "simple_table") {
+            eprintln!("Skipping (#1703): test_basic/simple_table Data.db not present");
+            return;
+        }
+        let Some(db) = setup("test_basic", "basic-types.cql").await else {
+            eprintln!("Skipping (#1703): could not ingest test_basic");
+            return;
+        };
 
-    // Drive the SELECT with the subscriber active across the `.await`. This test
-    // runs on the current-thread tokio runtime (`#[tokio::test]` default), so the
-    // task never migrates threads and the thread-local default subscriber applies
-    // for the whole query. The guard keeps it installed until dropped.
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let result = db
-        .execute("SELECT * FROM test_basic.simple_table")
-        .await
-        .expect("scan");
-    drop(_guard);
+        let tally = EventTally::default();
+        let layer = CountingLayer {
+            tally: tally.clone(),
+        }
+        .with_filter(LevelFilter::INFO);
+        let subscriber = tracing_subscriber::registry().with(layer);
 
-    // A present fixture must return rows — otherwise the scan info sites never
-    // fired and the assertion below would pass vacuously.
-    assert!(
-        result.rows.len() > 100,
-        "present fixture must return its full row set (got {}) — 0/low rows = read \
-         regression, not a skip",
-        result.rows.len()
-    );
+        // PROCESS-GLOBAL default (not thread-local `set_default`): the SELECT
+        // path crosses `spawn_blocking` onto separate blocking-pool OS threads
+        // (`scan_stream_windowed.rs`, `delta_scan/scan.rs`); a thread-local
+        // default installed only on this task would miss any INFO emitted
+        // there, making the assertion vacuously pass. `set_global_default` is
+        // observed by every thread in the process. This file has exactly one
+        // test, so calling it once is safe.
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("set_global_default must succeed (only test in this binary)");
 
-    let info_lines = tally.events.load(Ordering::Relaxed);
-    assert!(
-        info_lines <= 1,
-        "a single SELECT emitted {info_lines} INFO lines, expected ≤1 — the per-query \
-         SELECT `info!` chatter must be demoted to DEBUG (issue #1703)"
-    );
+        let result = db
+            .execute("SELECT * FROM test_basic.simple_table")
+            .await
+            .expect("scan");
+
+        // A present fixture must return rows — otherwise the scan info sites
+        // never fired and the assertion below would pass vacuously.
+        assert!(
+            result.rows.len() > 100,
+            "present fixture must return its full row set (got {}) — 0/low rows = read \
+             regression, not a skip",
+            result.rows.len()
+        );
+
+        let info_lines = tally.events.load(Ordering::Relaxed);
+        assert!(
+            info_lines <= 1,
+            "a single SELECT emitted {info_lines} INFO lines (observed process-wide, \
+             including spawn_blocking threads), expected ≤1 — the per-query SELECT \
+             `info!` chatter must be demoted to DEBUG (issue #1703)"
+        );
+    });
 }
