@@ -16,6 +16,11 @@
 //!   when the `test_da` corpus is absent.
 //! - `mem/open_n_readers` — opens `N` readers over the BIG fixture and records the
 //!   process RSS after, so G3 has a before/after per-reader memory gauge.
+//! - `open/metadata_parse_big` / `open/metadata_parse_bti` — the FULL Statistics.db
+//!   metadata parse cost per open (header + SerializationHeader + STATS post-passes;
+//!   issue #1658), plus the **repeated-TOC-walk count per open** via
+//!   `parser::toc_walk_metrics`. The BTI variant skip-registers when `test_da` is
+//!   absent.
 //!
 //! # Honesty (parity-is-truth)
 //!
@@ -74,6 +79,22 @@ fn data_db_path(fx: &fixtures::ReadFixture) -> Option<std::path::PathBuf> {
         .unwrap_or_else(|e| panic!("cannot read fixture dir {}: {e}", dir.display()))
         .filter_map(|e| e.ok())
         .find(|e| e.file_name().to_string_lossy().ends_with("-Data.db"));
+    entry.map(|e| e.path())
+}
+
+/// Locate the `*-Statistics.db` file inside a present fixture's table directory.
+/// Returns `None` when absent (caller skip-registers) and panics only on a
+/// genuinely broken directory it could not read.
+#[cfg(feature = "cli-helpers")]
+fn statistics_db_path(fx: &fixtures::ReadFixture) -> Option<std::path::PathBuf> {
+    if !fixtures::fixture_present(fx) {
+        return None;
+    }
+    let dir = fixtures::table_dir(fx.keyspace, fx.table);
+    let entry = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read fixture dir {}: {e}", dir.display()))
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().ends_with("-Statistics.db"));
     entry.map(|e| e.path())
 }
 
@@ -315,6 +336,129 @@ fn bench_mem_open_n_readers(c: &mut Criterion) {
     group.finish();
 }
 
+/// `open/metadata_parse` — the FULL Statistics.db metadata parse cost per open
+/// (issue #1658). This is the `Statistics.db` half of a cold open: parse the
+/// nb-format header, walk the TOC for the SerializationHeader offset, decode the
+/// EncodingStats + SerializationHeader columns, and run the best-effort STATS
+/// post-passes (`read_table_counts` + `parse_stats_extras`). It reads the whole
+/// `*-Statistics.db` file ONCE, then benches the pure in-memory parse so the
+/// number isolates parse cost from disk I/O.
+///
+/// It also records the **repeated-TOC-walk count per open** — how many times the
+/// Statistics.db TOC is walked during a single metadata parse — via the
+/// `parser::toc_walk_metrics` counter (reset before one parse, read after). This
+/// surfaces the `enhanced_statistics_parser/mod.rs:187`/`:345` redundancy (issue
+/// #1658 AC) as a measured integer rather than a guess.
+///
+/// Skip-registers (no group) when the fixture / Statistics.db is absent; panics
+/// at setup when a present Statistics.db fails to parse (present-but-broken).
+#[cfg(feature = "cli-helpers")]
+fn bench_metadata_parse(
+    c: &mut Criterion,
+    fx: fixtures::ReadFixture,
+    bench_name: &str,
+    ledger: &mut Vec<(String, f64, String)>,
+) {
+    let Some(path) = statistics_db_path(&fx) else {
+        eprintln!(
+            "open/{bench_name}: fixture {} Statistics.db not present — skipping (skip-register)",
+            fx.qualified()
+        );
+        return;
+    };
+    let buffer = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("cannot read Statistics.db {}: {e}", path.display()));
+    // Gates match the file's real on-disk version (nb / da) — the same derivation
+    // `StatisticsReader::open` uses; a below-floor/unparseable descriptor is a
+    // present-but-broken setup and panics rather than recording a bogus number.
+    let gates = cqlite_core::storage::sstable::version_gate::VersionGates::from_path(&path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "open/{bench_name}: could not derive VersionGates from {} — {e}",
+                path.display()
+            )
+        });
+
+    // Setup guard: one parse must succeed (present-but-broken → panic). `is_ok()`
+    // is read inside each call so the borrowed-buffer result never escapes.
+    if !parse_statistics_ok(&buffer, &gates) {
+        panic!(
+            "open/{bench_name}: Statistics.db {} present but the metadata parse failed — \
+             a broken component would make this a misleading measurement",
+            path.display()
+        );
+    }
+
+    // Repeated-TOC-walk count for ONE metadata parse (issue #1658 AC). Reset the
+    // process-wide counter, do exactly one parse, then read it.
+    cqlite_core::parser::toc_walk_metrics::reset_toc_walk_count();
+    let _ = parse_statistics_ok(&buffer, &gates);
+    let toc_walks_per_open = cqlite_core::parser::toc_walk_metrics::toc_walk_count();
+    eprintln!(
+        "open/{bench_name}: TOC walks per metadata parse = {toc_walks_per_open} (issue #1658)"
+    );
+    ledger.push((
+        format!("{bench_name}_toc_walks_per_open"),
+        toc_walks_per_open as f64,
+        "count".to_string(),
+    ));
+
+    // Manual median of the metadata parse (appended to the ledger).
+    let mut samples = Vec::with_capacity(MEDIAN_SAMPLES);
+    for _ in 0..MEDIAN_SAMPLES {
+        let t0 = std::time::Instant::now();
+        let ok = parse_statistics_ok(&buffer, &gates);
+        samples.push(t0.elapsed().as_nanos());
+        std::hint::black_box(ok);
+    }
+    ledger.push((
+        format!("{bench_name}_median_ns"),
+        median_ns(samples),
+        "ns".to_string(),
+    ));
+
+    let mut group = c.benchmark_group("open");
+    group.bench_function(bench_name, |bch| {
+        bch.iter(|| std::hint::black_box(parse_statistics_ok(&buffer, &gates)));
+    });
+    group.finish();
+}
+
+/// Parse `buffer` as an nb-format Statistics.db with `gates` and return only
+/// whether it succeeded — the borrowed-buffer `Ok` result never escapes, so the
+/// caller can reuse `buffer` across iterations without a lifetime tangle.
+#[cfg(feature = "cli-helpers")]
+fn parse_statistics_ok(
+    buffer: &[u8],
+    gates: &cqlite_core::storage::sstable::version_gate::VersionGates,
+) -> bool {
+    cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+        buffer,
+        Some(gates),
+    )
+    .is_ok()
+}
+
+/// `open/metadata_parse_big` over the always-present BIG (`nb`) fixture, plus
+/// `open/metadata_parse_bti` over the optional BTI (`da`) fixture.
+#[cfg(feature = "cli-helpers")]
+fn bench_metadata_parse_all(c: &mut Criterion) {
+    let mut ledger = Vec::new();
+    bench_metadata_parse(
+        c,
+        fixtures::ReadFixture::SIMPLE,
+        "metadata_parse_big",
+        &mut ledger,
+    );
+    bench_metadata_parse(
+        c,
+        fixtures::ReadFixture::SIMPLE_BTI,
+        "metadata_parse_bti",
+        &mut ledger,
+    );
+    append_ledger(&ledger);
+}
+
 /// Append `metrics` under the `open` bench id, best-effort (log, never fail).
 #[cfg(feature = "cli-helpers")]
 fn append_ledger(metrics: &[(String, f64, String)]) {
@@ -342,7 +486,7 @@ fn append_ledger(metrics: &[(String, f64, String)]) {
 criterion_group!(
     name = benches;
     config = profiling::configure();
-    targets = bench_cold_big, bench_cold_bti, bench_mem_open_n_readers
+    targets = bench_cold_big, bench_cold_bti, bench_mem_open_n_readers, bench_metadata_parse_all
 );
 
 #[cfg(not(feature = "cli-helpers"))]

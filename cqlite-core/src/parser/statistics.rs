@@ -257,31 +257,34 @@ pub struct PartitionSizeBucket {
     pub cumulative_percentage: f64,
 }
 
-/// Parse the Statistics.db file header with authoritative format detection
+/// Parse the Statistics.db file header with authoritative format detection.
 ///
-/// Statistics.db format is definitively identified by the version field:
-/// - **Version 4**: 'nb' (new big) format - Cassandra 5.0+ enhanced statistics
+/// CQLite targets Cassandra 5.0 (`na`+/`nb` BIG, `oa`/`da` BTI); the supported
+/// header is the **version-4 `nb`** layout (the one the reader open path
+/// exercises via `enhanced_statistics_parser`):
+///
+/// - **Version 4**: 'nb' enhanced-statistics header (Cassandra 5.0+)
 ///     - Structure: version(4) + statistics_kind(4) + reserved(4) + data_length(4) +
 ///       metadata1(4) + metadata2(4) + metadata3(4) + checksum(4) = 32 bytes
 ///     - Authoritative marker: version == 4
-///     - Used by: Cassandra 5.0+ with 'nb' SSTable format
 ///
-/// - **Versions 1-3**: Legacy format - pre-Cassandra 5.0 statistics
-///     - Structure: version(4) + table_id(16) + section_count(4) + file_size(8) + checksum(4) = 36 bytes
-///     - Authoritative marker: version in range 1..=3
-///     - Used by: Cassandra 3.x and 4.x
-///
-/// Any other version number is unsupported and results in a parse error.
+/// This function successfully parses `1..=3` headers (pre-`na`, Cassandra
+/// 3.x/4.x) but those versions are UNSUPPORTED and OUT OF SCOPE per the version
+/// floor — they are REJECTED downstream by `BigVersionGates::from_version` /
+/// `SSTableReader::open` with `Error::UnsupportedVersion`, not here. The `1..=3`
+/// branch exists only so this standalone helper can parse a header structure
+/// without misclassifying a lower version; it SHALL NOT be relied on for
+/// correctness. Other versions (0, 5+) return a parse error.
 pub fn parse_statistics_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> {
     let (remaining, version) = be_u32(input)?;
 
     match version {
-        // nb-format: Cassandra 5.0+ enhanced statistics (version 4)
-        // This is the authoritative format identifier - no heuristics needed
+        // nb-format: Cassandra 5.0+ enhanced statistics (version 4).
+        // The authoritative format identifier — no heuristics needed.
         4 => parse_nb_format_header(remaining, version),
 
-        // Legacy format: Cassandra 3.x/4.x statistics (versions 1-3)
-        // Definitively identified by version range
+        // Out-of-scope lower versions: parsed only so this standalone helper
+        // fails gracefully; not a supported format (see fn doc / version floor).
         1..=3 => parse_legacy_format_header(remaining, version),
 
         // Unknown/unsupported version - fail explicitly
@@ -330,11 +333,16 @@ fn parse_nb_format_header(input: &[u8], version: u32) -> IResult<&[u8], Statisti
     ))
 }
 
-/// Parse legacy format (versions 1-3) Statistics.db header
+/// Parse a version-1..=3 Statistics.db header.
 ///
-/// Format structure (Cassandra 3.x/4.x):
+/// OUT OF SCOPE (pre-`na`, Cassandra 3.x/4.x). This parser exists only so
+/// [`parse_statistics_header`] fails gracefully on a lower version rather than
+/// misclassifying it as `nb`; CQLite does not open pre-`na` SSTables and this
+/// path is not covered for correctness (version floor).
+///
+/// Byte layout of that header:
 /// ```text
-/// [0..4]   version: u32          = 1, 2, or 3 (legacy format identifier)
+/// [0..4]   version: u32          = 1, 2, or 3
 /// [4..20]  table_id: [u8; 16]    (UUID of the table)
 /// [20..24] section_count: u32    (number of statistics sections)
 /// [24..32] file_size: u64        (total file size)

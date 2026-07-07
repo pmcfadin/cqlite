@@ -199,6 +199,8 @@ struct StatsComponentBounds {
 ///     invalid (offset past EOF, inverted, or zero-length) — fail closed so a
 ///     corrupt `Statistics.db` is never silently reported as unrepaired.
 fn stats_component_bounds(input: &[u8]) -> Result<Option<StatsComponentBounds>> {
+    // Count this TOC walk (issue #1658 A5 bench instrumentation — no decode effect).
+    crate::parser::toc_walk_metrics::record_toc_walk();
     // A malformed or truncated TOC must FAIL CLOSED rather than be silently
     // reported as "no STATS component" (which would misreport corrupt repair
     // metadata as the unrepaired default). `Ok(None)` is reserved exclusively

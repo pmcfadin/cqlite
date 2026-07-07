@@ -87,6 +87,8 @@ pub fn parse_nb_format_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> 
 ///
 /// Returns the offset to the HEADER component (SerializationHeader), or None if not found.
 pub(super) fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usize> {
+    // Count this TOC walk (issue #1658 A5 bench instrumentation — no decode effect).
+    super::super::toc_walk_metrics::record_toc_walk();
     if input.len() < 8 {
         log::debug!("Statistics.db too small for TOC: {} bytes", input.len());
         return None;

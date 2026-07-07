@@ -127,6 +127,7 @@ pub mod repair_metadata;
 pub mod statistics;
 #[cfg(test)]
 pub mod statistics_test;
+pub mod toc_walk_metrics;
 pub mod types;
 #[cfg(test)]
 pub mod udt_tests;
