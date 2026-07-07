@@ -33,8 +33,10 @@ public final class SidecarClient implements SnapshotApi {
      * identifier charset so the value can never break out of the URL path or smuggle a
      * query string. The connector only ever generates {@code cqlite-<queryId>}, which is
      * a subset of this — the check is defence-in-depth (no-heuristics / fail-closed).
+     * No {@code .}: the server's {@code pathsafe::validate_snapshot} (cqlite-flight)
+     * rejects dots too, so this allowlist must not be looser than the server's.
      */
-    private static final Pattern SAFE_SNAPSHOT_NAME = Pattern.compile("[A-Za-z0-9._-]+");
+    private static final Pattern SAFE_SNAPSHOT_NAME = Pattern.compile("[A-Za-z0-9_-]+");
 
     private final HttpClient http;
     private final URI base;

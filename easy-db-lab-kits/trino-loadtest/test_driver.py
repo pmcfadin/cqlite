@@ -104,6 +104,78 @@ def test_stats_collector_accumulates_and_resets() -> None:
     assert empty_snap.latencies_ms == []
 
 
+def test_stats_collector_cumulative_snapshot_survives_interval_drains() -> None:
+    """Pins issue N2: interval drains (``snapshot_and_reset``, what
+    ``reporter_loop`` calls every ``--interval`` seconds) must not erase the
+    run's cumulative totals — ``cumulative_snapshot`` keeps accumulating
+    across them, including a still-open partial interval that never gets
+    drained before the run ends.
+    """
+    stats = driver.StatsCollector()
+
+    # Interval 1 (later drained by the reporter).
+    stats.record_success(10.0, 5)
+    stats.record_success(20.0, 7)
+    stats.record_error()
+    interval1 = stats.snapshot_and_reset()
+    assert interval1.queries == 3
+    assert interval1.rows == 12
+    assert interval1.errors == 1
+
+    # Interval 2 (also drained) — draining interval 1 must not have reset the
+    # cumulative counters, and draining interval 2 must not reset them either.
+    stats.record_success(5.0, 1)
+    stats.record_error()
+    interval2 = stats.snapshot_and_reset()
+    assert interval2.queries == 2
+    assert interval2.rows == 1
+    assert interval2.errors == 1
+
+    # Interval 3: a partial interval still open when the run "ends" — never drained.
+    stats.record_success(30.0, 3)
+
+    cumulative = stats.cumulative_snapshot()
+    assert cumulative.queries == interval1.queries + interval2.queries + 1
+    assert cumulative.rows == interval1.rows + interval2.rows + 3
+    assert cumulative.errors == interval1.errors + interval2.errors
+    assert sorted(cumulative.latencies_ms) == sorted(
+        interval1.latencies_ms + interval2.latencies_ms + [30.0]
+    )
+
+    # cumulative_snapshot is read-only: calling it again must not lose totals.
+    cumulative_again = stats.cumulative_snapshot()
+    assert cumulative_again.queries == cumulative.queries
+    assert cumulative_again.rows == cumulative.rows
+    assert cumulative_again.errors == cumulative.errors
+
+
+def test_format_final_line_reports_true_run_totals_not_last_interval() -> None:
+    """Pins issue N2 end-to-end: the ``[ final ]`` line must sum every
+    reporter interval for the whole run, not just whatever partial interval
+    was still sitting in the collector when the run ended.
+    """
+    stats = driver.StatsCollector()
+
+    # Two full reporter drains, as `reporter_loop` would perform periodically...
+    stats.record_success(10.0, 100)
+    stats.snapshot_and_reset()
+    stats.record_success(20.0, 200)
+    stats.record_error()
+    stats.snapshot_and_reset()
+
+    # ...then a third, partial interval the run ends inside of (never drained).
+    stats.record_success(30.0, 50)
+
+    final = stats.cumulative_snapshot()
+    line = driver.format_final_line(4, final)
+
+    # True run totals: 3 successes + 1 error = 4 queries; 100+200+50 = 350 rows; 1 error.
+    # (The pre-fix bug would report only the undrained partial interval: 1 query, 50 rows, 0 errors.)
+    assert "queries: 4" in line, line
+    assert "rows: 350" in line, line
+    assert "errors: 1" in line, line
+
+
 def test_stats_collector_thread_safety() -> None:
     stats = driver.StatsCollector()
 
@@ -377,6 +449,14 @@ def main() -> int:
     check("percentile: known interpolated values", test_percentile_known_values)
     check("percentile: monotonic p50 <= p99", test_percentile_monotonic)
     check("StatsCollector: accumulates and resets", test_stats_collector_accumulates_and_resets)
+    check(
+        "StatsCollector: cumulative snapshot survives interval drains",
+        test_stats_collector_cumulative_snapshot_survives_interval_drains,
+    )
+    check(
+        "format_final_line: reports true run totals, not the last interval",
+        test_format_final_line_reports_true_run_totals_not_last_interval,
+    )
     check("StatsCollector: thread safety under concurrent writers", test_stats_collector_thread_safety)
     check("format_interval_line: fields and regex shape", test_format_interval_line)
     check("format_final_line: does not match interval regex", test_format_final_line_does_not_match_interval_regex)

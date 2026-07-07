@@ -45,6 +45,16 @@ class SidecarClientTest {
                 () -> SidecarClient.snapshotPath("ks", "t", "a?b"));
     }
 
+    @Test
+    void rejectsDottedSnapshotName() {
+        // The connector's allowlist must not be looser than the server's
+        // pathsafe::validate_snapshot (cqlite-flight), which rejects '.' too.
+        assertThrows(SidecarClient.SidecarException.class,
+                () -> SidecarClient.snapshotPath("ks", "t", "cqlite-q1.bak"));
+        assertThrows(SidecarClient.SidecarException.class,
+                () -> SidecarClient.snapshotPath("ks", "t", "a.b"));
+    }
+
     // ── Snapshot HTTP round-trip against an in-process fake Sidecar ─────────────
 
     @Test

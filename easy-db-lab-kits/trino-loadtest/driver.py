@@ -125,13 +125,30 @@ class IntervalStats:
 
 
 class StatsCollector:
-    """Thread-safe accumulator for one reporting interval's worth of stats."""
+    """Thread-safe accumulator for both the current reporting interval and the
+    run's true cumulative totals (issue N2).
+
+    ``snapshot_and_reset`` drains the interval-only counters that
+    ``reporter_loop`` reads every ``--interval`` seconds to print the ``[ Ns ]``
+    rate line, then resets them to zero. A second, separate set of counters is
+    never reset by that drain — it accumulates for the whole run — so the
+    end-of-run ``[ final ]`` line (via :meth:`cumulative_snapshot`) reports real
+    totals across every interval instead of just the last partial one.
+
+    Latencies are accumulated in full for the cumulative view: at load-test
+    volumes (bounded threads/duration) keeping every sample in memory is cheap,
+    and it keeps the cumulative p50/p99 exact rather than an approximation.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._reset_locked()
+        self._reset_interval_locked()
+        self._cum_queries = 0
+        self._cum_rows = 0
+        self._cum_errors = 0
+        self._cum_latencies_ms: List[float] = []
 
-    def _reset_locked(self) -> None:
+    def _reset_interval_locked(self) -> None:
         self._queries = 0
         self._rows = 0
         self._errors = 0
@@ -142,13 +159,22 @@ class StatsCollector:
             self._queries += 1
             self._rows += row_count
             self._latencies_ms.append(latency_ms)
+            self._cum_queries += 1
+            self._cum_rows += row_count
+            self._cum_latencies_ms.append(latency_ms)
 
     def record_error(self) -> None:
         with self._lock:
             self._queries += 1
             self._errors += 1
+            self._cum_queries += 1
+            self._cum_errors += 1
 
     def snapshot_and_reset(self) -> IntervalStats:
+        """Drain and reset the current interval's counters (used by ``reporter_loop``).
+
+        Does not touch the cumulative counters — see :meth:`cumulative_snapshot`.
+        """
         with self._lock:
             snap = IntervalStats(
                 queries=self._queries,
@@ -156,8 +182,22 @@ class StatsCollector:
                 errors=self._errors,
                 latencies_ms=self._latencies_ms,
             )
-            self._reset_locked()
+            self._reset_interval_locked()
             return snap
+
+    def cumulative_snapshot(self) -> IntervalStats:
+        """Read-only snapshot of the run's true totals across every interval.
+
+        Never resets — safe to call once at end-of-run without disturbing the
+        interval counters that ``reporter_loop`` still owns.
+        """
+        with self._lock:
+            return IntervalStats(
+                queries=self._cum_queries,
+                rows=self._cum_rows,
+                errors=self._cum_errors,
+                latencies_ms=list(self._cum_latencies_ms),
+            )
 
 
 def format_interval_line(elapsed_s: int, threads: int, interval_s: float, snap: IntervalStats) -> str:
@@ -180,7 +220,11 @@ def format_interval_line(elapsed_s: int, threads: int, interval_s: float, snap: 
 
 
 def format_final_line(threads: int, snap: IntervalStats) -> str:
-    """Cumulative end-of-run summary. Deliberately does NOT match the
+    """Cumulative end-of-run summary. ``snap`` must be a true run-cumulative
+    :class:`IntervalStats` (see :meth:`StatsCollector.cumulative_snapshot`),
+    not a single interval's drain — ``reporter_loop`` resets the interval
+    counters every ``--interval`` seconds, so a snapshot taken from those would
+    only reflect the last partial interval. Deliberately does NOT match the
     ``[ Ns ]`` interval-line regex — it reports totals, not a per-interval
     rate, so start.sh must not scrape it as another metric sample.
     """
@@ -390,7 +434,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         t.join()
     reporter.join(timeout=args.interval + 5)
 
-    final = stats.snapshot_and_reset()
+    final = stats.cumulative_snapshot()
     print(format_final_line(args.threads, final), flush=True)
     return 0
 
