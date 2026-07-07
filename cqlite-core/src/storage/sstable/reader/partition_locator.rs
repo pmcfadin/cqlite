@@ -93,11 +93,22 @@ impl SSTableReader {
     /// Semantics otherwise match [`locate`](Self::locate): the C5 step-1 guard runs
     /// (a no-op for BTI, which has no Summary bound), then the pre-encoded trie
     /// resolve. BTI records no size, so a hit is `Some((offset, 0))`.
-    pub fn locate_encoded(
+    ///
+    /// BTI-only: crate-internal (`pub(crate)`) and reached solely from the BTI branch
+    /// of `SSTableManager::prune_candidates`. Never call it for a BIG reader — a BIG
+    /// prune must stay on the bloom filter, and this path would report a misleading
+    /// `Ok(None)` "absent" for a BIG `Index.db` miss (#1572).
+    pub(crate) fn locate_encoded(
         &self,
         partition_key: &[u8],
         encoded: &[u8; 9],
     ) -> Result<Option<(u64, u32)>> {
+        // BTI-only invariant: the sole caller (BTI branch of `prune_candidates`) gates
+        // on a BTI reader; a BIG reader here would yield a false-absent (see doc above).
+        debug_assert!(
+            self.bti_partitions_db.is_some(),
+            "locate_encoded is BTI-only; BIG prune must use the bloom filter"
+        );
         // Step 1: C5 (single implementation). A no-op for BTI (no Summary bound), so
         // this never short-circuits a BTI prune; kept for congruence with `locate`.
         if self.partition_key_out_of_range(partition_key) {
