@@ -586,4 +586,44 @@ mod tests {
         assert_eq!(nav.current_offset, 1100);
         assert_eq!(nav.current_path(), b"a");
     }
+
+    /// BUG(#1652), documented pre-deletion for the audit trail.
+    ///
+    /// `SizedPointer::distance` holds the child's **absolute** file offset
+    /// (see `SizedPointer::new`: "Create a pointer to the child at absolute
+    /// offset `distance`" — the backward delta `parent_offset - delta` is
+    /// resolved to an absolute position at decode time). A correct
+    /// `TrieNavigator::navigate_to_child` must therefore SET
+    /// `current_offset = child_pointer.distance`, not ADD it to the current
+    /// offset. The current impl (`self.current_offset + child_pointer.distance`)
+    /// treats the absolute offset as relative, so on any 2+-level trie every
+    /// descent past the root seeks to the wrong node.
+    ///
+    /// This test asserts the CORRECT (absolute) target offsets across a
+    /// two-level descent; it FAILS against the buggy impl and is therefore
+    /// `#[ignore]`d so the gate stays green. The follow-up commit deletes the
+    /// entire (dead, zero-production-caller) navigator stack rather than fixing
+    /// it (owner decision #9 on epic #1605 = DELETE).
+    #[test]
+    #[ignore = "BUG(#1652): navigate_to_child adds absolute offset as relative; \
+                stack is deleted in the follow-up commit rather than fixed"]
+    fn bug_1652_navigate_to_child_treats_absolute_offset_as_relative() {
+        // Two-level trie: root -> child (abs offset 100) -> grandchild (abs offset 40).
+        let mut nav = TrieNavigator::new(1000);
+
+        // Descend to the child living at ABSOLUTE offset 100.
+        nav.navigate_to_child(b'a', &SizedPointer::new(100)).unwrap();
+        assert_eq!(
+            nav.current_offset, 100,
+            "after one descent current_offset must be the child's absolute offset"
+        );
+
+        // Descend again to the grandchild living at ABSOLUTE offset 40.
+        nav.navigate_to_child(b'b', &SizedPointer::new(40)).unwrap();
+        assert_eq!(
+            nav.current_offset, 40,
+            "after two descents current_offset must be the grandchild's absolute offset"
+        );
+        assert_eq!(nav.current_path(), b"ab");
+    }
 }
