@@ -18,33 +18,33 @@ static CTOR_COUNTER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn test_decimal_to_string_positive() {
     // 123 with scale 2 = 1.23
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(2, &unscaled), "1.23");
+    assert_eq!(decimal_to_string(2, &unscaled).unwrap(), "1.23");
 }
 
 #[test]
 fn test_decimal_to_string_no_scale() {
     // 123 with scale 0 = 123
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(0, &unscaled), "123");
+    assert_eq!(decimal_to_string(0, &unscaled).unwrap(), "123");
 }
 
 #[test]
 fn test_decimal_to_string_negative_scale() {
     // 123 with scale -2 = 12300 (123e2)
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(-2, &unscaled), "123e2");
+    assert_eq!(decimal_to_string(-2, &unscaled).unwrap(), "123e2");
 }
 
 #[test]
 fn test_decimal_to_string_large_scale() {
     // 123 with scale 5 = 0.00123
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(5, &unscaled), "0.00123");
+    assert_eq!(decimal_to_string(5, &unscaled).unwrap(), "0.00123");
 }
 
 #[test]
 fn test_decimal_to_string_empty() {
-    assert_eq!(decimal_to_string(0, &[]), "0");
+    assert_eq!(decimal_to_string(0, &[]).unwrap(), "0");
 }
 
 #[test]
@@ -52,7 +52,95 @@ fn test_decimal_to_string_negative() {
     // -123 in two's complement (single byte) = 0x85 = 133, but need proper encoding
     // For -123: 256 - 123 = 133 = 0x85
     let unscaled = vec![0x85]; // -123 as two's complement byte
-    assert_eq!(decimal_to_string(2, &unscaled), "-1.23");
+    assert_eq!(decimal_to_string(2, &unscaled).unwrap(), "-1.23");
+}
+
+/// Issue #1754: a huge positive `scale` used to drive an unbounded `format!`
+/// padding width (PANIC "Formatting argument out of range" → napi worker abort).
+/// It is NOT corrupt — scale is just the decimal exponent — so it now renders
+/// faithfully in precision-preserving exponent form, never panicking. A tiny
+/// unscaled value (1) with scale `i32::MAX` → `1e-2147483647`.
+#[test]
+fn test_decimal_to_string_pathological_positive_scale_renders_exponent_form() {
+    let unscaled = vec![0x01];
+    let s = decimal_to_string(i32::MAX, &unscaled)
+        .expect("a huge scale must render faithfully, not panic/abort");
+    assert_eq!(s, format!("1e{}", -(i32::MAX as i64)));
+}
+
+/// Issue #1754: `scale == i32::MIN` exercises the `-(scale as i64)` widening (a
+/// plain `-scale` would overflow-panic under `overflow-checks`). Renders exact
+/// exponent form, never a panic.
+#[test]
+fn test_decimal_to_string_i32_min_scale_renders_exponent_form() {
+    let unscaled = vec![0x01];
+    let s = decimal_to_string(i32::MIN, &unscaled)
+        .expect("i32::MIN scale must render without overflow panic");
+    assert_eq!(s, format!("1e{}", -(i32::MIN as i64)));
+}
+
+/// Issue #1754: a genuinely pathological unscaled magnitude beyond the sanity
+/// ceiling still fails closed rather than stalling the event loop. ~1 MB of
+/// unscaled bytes is far above the 32 KB ceiling.
+#[test]
+fn test_decimal_to_string_beyond_ceiling_errors() {
+    let unscaled = vec![0x7f; 1_000_000];
+    let err = decimal_to_string(0, &unscaled)
+        .expect_err("a magnitude beyond the ceiling must fail closed");
+    assert!(err.reason.to_string().contains("issue #1754"));
+}
+
+/// Issue #1754 (follow-up correctness fix): a large-but-WELL-FORMED unscaled
+/// magnitude (thousands of digits — over the 1024-byte positional threshold but
+/// within the sanity ceiling) must render FAITHFULLY (precision-preserving
+/// exponent form) and FAST via the single `BigInt` base conversion — NOT be
+/// misclassified as corruption. A 2 KB magnitude (~4933 digits) exercises this.
+#[test]
+fn test_decimal_to_string_large_valid_renders_faithfully_fast() {
+    // 0x7f keeps the high bit clear (large POSITIVE value; all-0xff = -1).
+    let unscaled = vec![0x7f; 2048];
+    let start = std::time::Instant::now();
+    let s = decimal_to_string(2, &unscaled)
+        .expect("a well-formed large decimal must render, not error");
+    let elapsed = start.elapsed();
+    // Exponent form: all significant digits + "e-2". Every digit preserved.
+    let digits = s.strip_suffix("e-2").expect("expected exponent form");
+    assert!(
+        digits.len() >= 4900 && digits.chars().all(|c| c.is_ascii_digit()),
+        "expected full precision-preserving digit string, got {} chars",
+        digits.len()
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "expected fast single-conversion render, took {elapsed:?}"
+    );
+}
+
+/// Issue #1754: a ~415 KB magnitude (~1M digits) is beyond any realistic value
+/// and beyond the sanity ceiling; it fails closed FAST via the O(1) length
+/// check, before the superlinear base conversion.
+#[test]
+fn test_decimal_to_string_beyond_ceiling_rejected_fast() {
+    let unscaled = vec![0xff; 415_000];
+    let start = std::time::Instant::now();
+    let err = decimal_to_string(0, &unscaled)
+        .expect_err("a magnitude beyond the ceiling must fail closed");
+    let elapsed = start.elapsed();
+    assert!(err.reason.to_string().contains("issue #1754"));
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "expected fast O(1) rejection, took {elapsed:?} — the base conversion ran"
+    );
+}
+
+/// Regression guard: a large-but-representable scale at the boundary still
+/// renders (the guard must not over-reject a legitimate value).
+#[test]
+fn test_decimal_to_string_large_representable_scale_ok() {
+    let unscaled = vec![0x01]; // = 1
+                               // scale 100 → "0." followed by 99 zeros then "1".
+    let s = decimal_to_string(100, &unscaled).unwrap();
+    assert!(s.starts_with("0.0") && s.ends_with('1') && s.len() == 102);
 }
 
 #[test]

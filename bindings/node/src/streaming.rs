@@ -177,6 +177,20 @@ impl napi::Task for NextTask {
     type JsValue = JsObject;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        // Firewall the async-worker thread against a decode panic (issue #1754):
+        // a panic on this libuv threadpool thread cannot unwind across the FFI
+        // frame and would abort the whole Node process even under `panic=unwind`.
+        // Catch it here and reject with a typed error instead.
+        crate::error::catch_unwind_to_napi("executeStreaming.next", || self.compute_inner())
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        self.resolve_impl(env, output)
+    }
+}
+
+impl NextTask {
+    fn compute_inner(&mut self) -> napi::Result<NextResult> {
         use tracing::Instrument;
 
         // Acquire lock - use unwrap_or_else to handle poisoned mutex by clearing the iterator
@@ -254,7 +268,7 @@ impl napi::Task for NextTask {
         }
     }
 
-    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+    fn resolve_impl(&mut self, env: Env, output: NextResult) -> napi::Result<JsObject> {
         let mut result = env.create_object()?;
 
         match output {

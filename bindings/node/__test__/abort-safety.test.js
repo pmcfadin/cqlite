@@ -26,19 +26,20 @@
  * (`test_abort_safety.py::test_uncompressed_...`), which does reach the
  * raw-parser panic through PyO3.
  *
- * WHY NO "uncompressed" (raw parse path) FLAVOR HERE (finding, verified
- * 2026-07-02): dropping CompressionInfo.db to reach the raw VInt/row parser
- * makes the Node process ABORT even under a DEBUG (`panic=unwind`) build with
+ * UNCOMPRESSED (raw parse path) FLAVOR — issue #1754. Dropping
+ * CompressionInfo.db reaches the raw VInt/row parser, where a corrupt DECIMAL
+ * `scale` used to ABORT the Node process even under a DEBUG (`panic=unwind`)
+ * build:
  *   thread '<unnamed>' panicked at bindings/node/src/value.rs:266
  *   fatal runtime error: failed to initiate panic, error 5, aborting
- * i.e. a panic in the Node binding's own decimal formatter (unbounded
- * `format!` padding width from a corrupt DECIMAL scale) on the napi async
- * worker thread, which cannot unwind across the FFI boundary. Because it
- * aborts under unwind too, #1440's panic profile alone will NOT fix the Node
- * path — it additionally needs `scale` bounded in value.rs and/or an explicit
- * catch_unwind at the napi boundary. Asserting survival on that flavor would
- * therefore be RED under the debug gate, so it is intentionally omitted and
- * reported as a follow-up rather than run as a known-red test.
+ * The panic came from the binding's own decimal formatter (unbounded `format!`
+ * padding width from the corrupt scale) on a napi async-worker thread, which
+ * cannot unwind across the FFI boundary — so #1440's panic profile alone did
+ * NOT fix it. Issue #1754 closes the gap with TWO fixes: (1) `decimal_to_string`
+ * bounds `scale`/unscaled magnitude fail-closed (typed corruption error), and
+ * (2) an explicit `catch_unwind` at each napi Task boundary turns any residual
+ * worker-thread panic into a typed JS error. This flavor now asserts survival
+ * (RED before #1754, GREEN after) rather than being omitted.
  *
  * DATASET GATING (never false-green): when the source Data.db is present these
  * tests actually run and assert. A BROKEN source (present but empty), or a
@@ -243,6 +244,22 @@ describe('Abort safety: corrupt SSTable must not kill the host (issue #1437)', (
       for (const entry of ['executeNative', 'streaming', 'parquet']) {
         testOrSkip(`survives ${mode} via ${entry}`, () => {
           runAndAssertSurvives(mode, entry, false);
+        });
+      }
+    }
+  });
+
+  // Issue #1754: the raw/uncompressed parse path (CompressionInfo.db dropped)
+  // reaches the corrupt-DECIMAL-scale panic in the binding's decimal formatter.
+  // Before #1754 this ABORTED the host process even under panic=unwind; the
+  // scale fail-closed bound + napi catch_unwind boundary now make every entry
+  // point survive with a caught/typed error. These were the exact scenarios the
+  // #1437 harness deferred as known-red.
+  describe('uncompressed raw parse path (issue #1754; corrupt DECIMAL scale)', () => {
+    for (const mode of MODES) {
+      for (const entry of ['executeNative', 'streaming', 'parquet']) {
+        testOrSkip(`survives ${mode} via ${entry} (raw)`, () => {
+          runAndAssertSurvives(mode, entry, true);
         });
       }
     }

@@ -287,25 +287,68 @@ impl ValueFormatter {
             return "0".to_string();
         }
 
-        // Convert unscaled bytes to bigint
-        let is_negative = (unscaled[0] & 0x80) != 0;
-        let bigint = if is_negative {
-            // Two's complement for negative
-            num_bigint::BigInt::from_signed_bytes_be(unscaled)
-        } else {
-            num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, unscaled)
-        };
+        // Sanity ceiling (issue #1754), kept consistent with the Node binding's
+        // `decimal_to_string`. A Cassandra `decimal` unscaled value is a Java
+        // BigInteger, so it is legitimately arbitrary-precision; we must NOT call a
+        // merely-large-but-well-formed value "corrupt". The only hard cost is the
+        // single `BigInt` → decimal-string base conversion, which is superlinear in
+        // the digit count. A 32 KB magnitude (~79k decimal digits) still converts
+        // in tens of milliseconds; only a genuinely pathological magnitude beyond
+        // that could stall a render, so fail closed ONLY above the ceiling.
+        // Infallible signature: this stays total (never panics).
+        const DECIMAL_MAX_UNSCALED_BYTES: usize = 32 * 1024;
+        if unscaled.len() > DECIMAL_MAX_UNSCALED_BYTES {
+            return format!(
+                "<corrupt-decimal:scale={scale},unscaled_len={}bytes>",
+                unscaled.len()
+            );
+        }
 
+        // Convert the unscaled bytes to a BigInt. Cassandra encodes the unscaled
+        // value as a two's-complement big-endian BigInteger, which is exactly what
+        // `from_signed_bytes_be` decodes (positive when the high bit is clear).
+        let bigint = num_bigint::BigInt::from_signed_bytes_be(unscaled);
+        // ONE base-10 conversion — the sole superlinear step; every branch below is
+        // a single O(digits) pass over the resulting string (no repeated division,
+        // no scale-width padding blowup).
         let mut decimal_str = bigint.to_string();
         let is_neg = decimal_str.starts_with('-');
         if is_neg {
             decimal_str = decimal_str[1..].to_string();
         }
 
+        // Faithful, bounded exponent form for over-bound cases (issue #1754). Two
+        // triggers, both of which would otherwise require an O(digits)-wide
+        // positional expansion:
+        //   - a large-but-valid unscaled magnitude (thousands+ of digits), and
+        //   - a pathological `scale` used as a `repeat`/padding width (which at
+        //     `scale == i32::MIN` would also overflow `(-scale)`).
+        // Rendering `<digits>e<-scale>` (value = unscaled × 10^(−scale)) preserves
+        // EVERY digit exactly with no unbounded padding. Legitimate, normal-size
+        // decimals fall through to the byte-identical positional form below.
+        const DECIMAL_POSITIONAL_MAX_BYTES: usize = 1024;
+        const SCALE_RENDER_CAP: usize = 1_000_000;
+        if unscaled.len() > DECIMAL_POSITIONAL_MAX_BYTES
+            || scale.unsigned_abs() as usize > SCALE_RENDER_CAP
+        {
+            let body = if is_neg {
+                format!("-{decimal_str}")
+            } else {
+                decimal_str
+            };
+            // `unsigned_abs()`/`i64` avoid the `(-scale)` overflow at `i32::MIN`.
+            return if scale == 0 {
+                body
+            } else {
+                format!("{body}e{}", -(scale as i64))
+            };
+        }
+
         // Insert decimal point based on scale
         if scale <= 0 {
-            // Scale <= 0: multiply by 10^(-scale)
-            decimal_str.push_str(&"0".repeat((-scale) as usize));
+            // Scale <= 0: multiply by 10^(-scale). `unsigned_abs()` avoids the
+            // `(-scale)` overflow panic at `scale == i32::MIN`.
+            decimal_str.push_str(&"0".repeat(scale.unsigned_abs() as usize));
         } else if scale as usize >= decimal_str.len() {
             // Need leading zeros
             let leading_zeros = scale as usize - decimal_str.len() + 1;
@@ -714,6 +757,113 @@ mod tests {
         let formatted = ValueFormatter::format_value(&decimal);
         // Should contain decimal point
         assert!(formatted.contains('.'));
+    }
+
+    /// Issue #1754: a corrupt SSTable can carry a pathological DECIMAL `scale`.
+    /// `scale == i32::MIN` used to overflow-panic at `(-scale) as usize` (and
+    /// under `overflow-checks` in debug builds), and a huge positive/negative
+    /// scale would allocate an unbounded string. Formatting must stay total —
+    /// never panic — and render bounded output instead.
+    #[test]
+    fn test_decimal_pathological_scale_is_bounded_not_panic() {
+        // i32::MIN scale: the negation-overflow reproducer.
+        let d_min = Value::Decimal {
+            scale: i32::MIN,
+            unscaled: vec![0x01],
+        };
+        let s = ValueFormatter::format_value(&d_min);
+        assert!(
+            s.contains('e'),
+            "extreme scale renders in exponent form: {s}"
+        );
+        assert!(
+            s.len() < 64,
+            "must not materialize an unbounded string: {s}"
+        );
+
+        // Huge positive scale: no multi-hundred-megabyte padding allocation.
+        let d_max = Value::Decimal {
+            scale: i32::MAX,
+            unscaled: vec![0x01],
+        };
+        let s2 = ValueFormatter::format_value(&d_max);
+        assert!(
+            s2.len() < 64,
+            "must not materialize an unbounded string: {s2}"
+        );
+    }
+
+    /// Issue #1754 (follow-up correctness fix): a large-but-WELL-FORMED unscaled
+    /// magnitude (thousands of digits, above the 1024-byte positional threshold
+    /// but within the sanity ceiling) must render FAITHFULLY (precision-preserving
+    /// exponent form) and FAST — NOT be misclassified as corruption. This is the
+    /// behavior the owner mandated: an arbitrary-precision BigInteger value is not
+    /// corrupt just for being big.
+    #[test]
+    fn test_decimal_large_valid_renders_faithfully_fast() {
+        // 2 KB magnitude (~4930 decimal digits): over the positional threshold,
+        // under the ceiling. 0x7f keeps the high bit clear (a large POSITIVE
+        // value; all-0xff would be two's-complement -1). Scale 4 → ×10^-4.
+        let unscaled = vec![0x7fu8; 2048];
+        let start = std::time::Instant::now();
+        let s = ValueFormatter::format_value(&Value::Decimal { scale: 4, unscaled });
+        let elapsed = start.elapsed();
+        assert!(
+            !s.starts_with("<corrupt-decimal:"),
+            "a well-formed large decimal must not be called corrupt: {s}"
+        );
+        // Precision-preserving exponent form: all significant digits + "e-4".
+        assert!(
+            s.ends_with("e-4"),
+            "expected exponent form, got: {}",
+            &s[..40]
+        );
+        let digits = s.trim_end_matches("e-4");
+        // 2 KB of 0xff is a ~4933-digit integer — every digit is preserved.
+        assert!(
+            digits.len() >= 4900 && digits.chars().all(|c| c.is_ascii_digit()),
+            "expected full digit string, got {} chars",
+            digits.len()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "expected fast single-conversion render, took {elapsed:?}"
+        );
+    }
+
+    /// Issue #1754: a genuinely pathological magnitude beyond the sanity ceiling
+    /// still fails closed FAST (O(1) length check), without the superlinear
+    /// `BigInt` base conversion. A ~415 KB magnitude exercises this.
+    #[test]
+    fn test_decimal_beyond_ceiling_bounded_fast() {
+        let unscaled = vec![0xffu8; 415_000];
+        let start = std::time::Instant::now();
+        let s = ValueFormatter::format_value(&Value::Decimal { scale: 0, unscaled });
+        let elapsed = start.elapsed();
+        assert!(
+            s.starts_with("<corrupt-decimal:"),
+            "beyond-ceiling magnitude renders the bounded fallback: {s}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "expected fast O(1) rejection, took {elapsed:?} — the base conversion ran"
+        );
+    }
+
+    /// Regression guard: an ordinary in-range scale is byte-identical after the
+    /// #1754 bound (no behavior change for legitimate decimals).
+    #[test]
+    fn test_decimal_in_range_scale_unchanged() {
+        let d = Value::Decimal {
+            scale: 5,
+            unscaled: vec![0x7B], // 123
+        };
+        assert_eq!(ValueFormatter::format_value(&d), "0.00123");
+        let dn = Value::Decimal {
+            scale: -2,
+            unscaled: vec![0x05], // 5 → 500
+        };
+        assert_eq!(ValueFormatter::format_value(&dn), "500");
     }
 
     #[test]

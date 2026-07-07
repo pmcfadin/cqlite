@@ -1386,6 +1386,20 @@ impl napi::Task for ExecuteNativeTask {
     type JsValue = napi::JsObject;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        // Firewall the async-worker thread against a panic in the read/decode
+        // path (issue #1754): a panic here cannot unwind across the FFI frame and
+        // would abort the whole Node process even under `panic=unwind`. Catch it
+        // on the worker thread and reject the promise with a typed error instead.
+        crate::error::catch_unwind_to_napi("executeNative", || self.compute_inner())
+    }
+
+    fn resolve(&mut self, env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        self.resolve_inner(env, output)
+    }
+}
+
+impl ExecuteNativeTask {
+    fn compute_inner(&mut self) -> napi::Result<QueryResultData> {
         use tracing::Instrument;
 
         // Per-call span (issue #1040), parented under the handle's traceparent.
@@ -1467,7 +1481,11 @@ impl napi::Task for ExecuteNativeTask {
         })
     }
 
-    fn resolve(&mut self, env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+    fn resolve_inner(
+        &mut self,
+        env: napi::Env,
+        output: QueryResultData,
+    ) -> napi::Result<napi::JsObject> {
         let mut result_obj = env.create_object()?;
 
         // Create rows array with native types
