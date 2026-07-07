@@ -524,8 +524,13 @@ impl SSTableReader {
         let arc = match chunk_source.range(block_offset, size) {
             Ok(a) => a,
             Err(e) => {
-                // Preserve legacy-format fallback behavior (pre-existing)
-                if self.header.cassandra_version == CassandraVersion::Legacy {
+                // Preserve legacy-format DECOMPRESSION fallback (issue #1598 roborev Low):
+                // only catch Corruption (decompress failures), not IO errors. A positioned-read
+                // failure followed by a successful re-read could otherwise return raw compressed
+                // bytes instead of propagating the error.
+                if self.header.cassandra_version == CassandraVersion::Legacy
+                    && matches!(e, Error::Corruption(_))
+                {
                     warn!(
                         "Decompression failed for legacy format ({}), re-reading raw",
                         e
