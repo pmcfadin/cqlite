@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Idempotent kubectl-patch of trino-coordinator/trino-worker: adds an
+# initContainer that resolves the published cqlite-trino Maven artifact and
+# Syncs it (plus its runtime deps) into an emptyDir volume, then mounts that
+# volume into the main Trino container at
+# /usr/lib/trino/plugin/cqlite_flight (a SUBDIRECTORY of Trino's plugin path
+# that the trinodb/trino image does not already populate — mounting a
+# subdirectory, not /usr/lib/trino/plugin itself, so the image's own
+# baked-in plugins are never shadowed).
+#
+# Called from two places:
+#   1. bin/start.sh, right after this kit installs, which then waits for the
+#      rollout.
+#   2. This kit's post-workload-start/post-workload-stop hooks (kit.yaml),
+#      fired whenever ANY kit starts or stops. Necessary because those events
+#      can re-trigger the trino kit's own `helm upgrade` (via its
+#      bin/update-catalogs.sh hook), which re-applies the Helm chart's
+#      rendered pod template and can drop this out-of-band patch — the exact
+#      risk the trino kit itself defends against for its Pyroscope wiring by
+#      re-patching on every `trino start` (kits/trino/bin/start.sh.template).
+#      This script is cheap and safe to re-run unconditionally: strategic
+#      merge patch matches our volumes/initContainers/volumeMounts by name
+#      (volumeMounts by mountPath), so re-applying identical content is a
+#      no-op against an already-patched Deployment.
+#
+# Runs best-effort: if the trino kit isn't installed/running yet (or this
+# fires for an unrelated kit before trino ever starts), it skips quietly
+# rather than failing the triggering kit's own start/stop.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export KUBECONFIG="${SCRIPT_DIR}/../../__KUBECONFIG__"
+
+CONFIGMAP_NAME="cqlite-trino-plugin-src"
+INIT_IMAGE="gradle:9.1.0-jdk21"
+PLUGIN_MOUNT_PATH="/usr/lib/trino/plugin/cqlite_flight"
+# Same shell recipe as the connector's own documented assemblePlugin usage
+# (trino-connector/README.md "Maven Central / published artifact"): copy the
+# read-only-mounted throwaway project into a writable scratch dir (Gradle
+# needs to write build/ and its cache), run assemblePlugin, then copy the
+# result into the shared emptyDir.
+INIT_SCRIPT='set -eu; mkdir -p /tmp/build; cp /workspace/build.gradle.kts /workspace/settings.gradle.kts /tmp/build/; cd /tmp/build; gradle --no-daemon --console=plain assemblePlugin; cp -r build/plugin/cqlite_flight/. /plugin-out/'
+
+patch_deployment() {
+  local dep="$1"
+
+  if ! kubectl get deployment "${dep}" --namespace default >/dev/null 2>&1; then
+    echo "  - deployment/${dep} not found (trino kit not running here yet) — skipping"
+    return 0
+  fi
+
+  echo "  - patching deployment/${dep} (container: ${dep})..."
+  local patch
+  patch=$(jq -n \
+    --arg cm "${CONFIGMAP_NAME}" \
+    --arg img "${INIT_IMAGE}" \
+    --arg mount "${PLUGIN_MOUNT_PATH}" \
+    --arg container "${dep}" \
+    --arg script "${INIT_SCRIPT}" \
+    '{spec:{template:{spec:{
+      volumes: [
+        {name:"cqlite-plugin-src", configMap:{name:$cm}},
+        {name:"cqlite-plugin-dir", emptyDir:{}}
+      ],
+      initContainers: [
+        {
+          name:"cqlite-plugin-fetch",
+          image:$img,
+          command:["sh","-c"],
+          args:[$script],
+          volumeMounts: [
+            {name:"cqlite-plugin-src", mountPath:"/workspace", readOnly:true},
+            {name:"cqlite-plugin-dir", mountPath:"/plugin-out"}
+          ]
+        }
+      ],
+      containers: [
+        {
+          name:$container,
+          volumeMounts: [
+            {name:"cqlite-plugin-dir", mountPath:$mount, readOnly:true}
+          ]
+        }
+      ]
+    }}}}')
+  kubectl patch deployment "${dep}" --namespace default --type=strategic -p="${patch}"
+}
+
+echo "cqlite plugin patch: reapplying to trino-coordinator/trino-worker (idempotent)..."
+patch_deployment trino-coordinator
+patch_deployment trino-worker
+echo "cqlite plugin patch: done."

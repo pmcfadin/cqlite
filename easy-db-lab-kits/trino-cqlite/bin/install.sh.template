@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Runs as part of `easy-db-lab kit install --kit cqlite --from <this dir> ...`
+# (no typed `install:` steps in kit.yaml, so this script is picked up per the
+# kit contract's "matching script in bin/" fallback).
+#
+# Creates the ConfigMap holding the throwaway assemblePlugin Gradle recipe
+# (gradle-assemble-plugin/) that bin/reapply-plugin-patch.sh mounts into an
+# initContainer to resolve the published `in.mcfad:cqlite-trino` artifact
+# from Maven Central at pod-start time. Nothing here touches the Trino
+# Deployments yet — that happens in `bin/start.sh`.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export KUBECONFIG="${SCRIPT_DIR}/../../__KUBECONFIG__"
+
+CONFIGMAP_NAME="cqlite-trino-plugin-src"
+GRADLE_DIR="${SCRIPT_DIR}/../gradle-assemble-plugin"
+
+echo "Creating/updating ConfigMap ${CONFIGMAP_NAME} from ${GRADLE_DIR}..."
+kubectl create configmap "${CONFIGMAP_NAME}" \
+  --namespace default \
+  --from-file="${GRADLE_DIR}/build.gradle.kts" \
+  --from-file="${GRADLE_DIR}/settings.gradle.kts" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+echo "cqlite-trino connector version pinned: __CONNECTOR_VERSION__"
+echo "Next: run 'easy-db-lab cqlite start' (requires the trino kit already running)."
