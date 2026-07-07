@@ -557,6 +557,12 @@ impl SSTableReader {
     /// per-lookup `open(2)`, no cursor, no mutex — CRC-checks the chunk, and
     /// returns the compressed bytes (the caller decompresses). `Ok(None)` at EOF.
     /// Only called on the chunk-targeted path, where `CompressionInfo` is present.
+    ///
+    /// After the G2 single-decode-plane migration (issue #1598) the BTI point path
+    /// reads via `ChunkSource::chunk()`; the sole remaining caller is the
+    /// `#[cfg(not(feature = "tombstones"))]` seek helper `bti_pull_decompressed_chunk`,
+    /// so this method carries the same cfg to stay dead-code-free under `tombstones`.
+    #[cfg(not(feature = "tombstones"))]
     pub(super) fn point_read_compressed_chunk(&self, chunk_idx: usize) -> Result<Option<Vec<u8>>> {
         let Some(ci) = self.compression_info.as_deref() else {
             return Ok(None);
