@@ -11,7 +11,7 @@ Anchors at `main` commit `e2694ab5`. Rebase note for the later team: this spec w
       `FrozenType(ListType(FrozenType(UserType(...))))`; tuple-in-collection; malformed input →
       `None` (never panic). Surface exercised: the new extractor fn (internal), tests colocated
       per campsite rule.
-- [x] 1.2 Implement the extractor in `.../v5_compressed_legacy/udt.rs` (or a small sibling
+- [x] 1.2 Implement the extractor in `.../row_decoder/udt.rs` (or a small sibling
       module if udt.rs is over the file-size ratchet), reusing existing marshal helpers
       (`extract_frozen_inner_type` marshal handling; `parse_udt_type_definition`, udt.rs:157).
 

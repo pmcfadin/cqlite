@@ -43,7 +43,7 @@ The three pre-split giants (each > 10,000 lines) were the top refactor targets:
 
 | File | Pre-split | Post-split | How |
 |------|-----------|------------|-----|
-| `…/parsing/v5_compressed_legacy.rs` | 13,811 | split into `v5_compressed_legacy/` submodules (largest child 2,353) | #1117 |
+| `…/parsing/row_decoder.rs` | 13,811 | split into `row_decoder/` submodules (largest child 2,353) | #1117 |
 | `storage/write_engine/merge.rs` | 12,673 | `merge/mod.rs` 11,840 — **deferred exception #945** | not split |
 | `storage/sstable/writer/data_writer.rs` | 11,900 | split into `data_writer/` submodules | #1118 |
 
@@ -80,7 +80,7 @@ epic goal; this audit is the standing record that the goal is met.)
 | File | Total | Source | Inline test | Rationale | Follow-up |
 |------|------:|-------:|------------:|-----------|-----------|
 | `storage/write_engine/merge/mod.rs` | 11,840 | ~908 | ~10,932 | Compaction merge engine; deferred from the split fleet by design. Source is small; the bulk is inline tests. | **#945** (documented exception) |
-| `…/v5_compressed_legacy/row_framing.rs` | 2,353 | ~1,275 | ~1,078 | Split child (#1117); strict Data.db framing tests added by #990/#1171. Source < 2,000. | move inline tests to a sibling test file (epic #1116 "tests follow code" / **#1135**) |
+| `…/row_decoder/row_framing.rs` | 2,353 | ~1,275 | ~1,078 | Split child (#1117); strict Data.db framing tests added by #990/#1171. Source < 2,000. | move inline tests to a sibling test file (epic #1116 "tests follow code" / **#1135**) |
 | `storage/sstable/writer/mod.rs` | 2,288 | ~921 | ~1,367 | Split child (#1128). Source < 2,000; over the cap only via inline `#[cfg(all(test, feature="write-support"))]` tests. | move inline tests to a sibling test file (**#1135**) |
 | `storage/sstable/mod.rs` | 2,276 | ~2,055 | ~211 | Listed as facade exception, but holds real source (`SSTableId`, discovery). | **documented exception** + see NEEDS-YOU (re-scope or decompose) |
 | `storage/write_engine/mod.rs` | 2,070 | ~1,026 | ~1,044 | Split child (#1120). Source < 2,000; over the cap only via inline tests. | move inline tests to a sibling test file (**#1135**) |
@@ -103,14 +103,14 @@ The next refactor candidates as files are next touched (campsite rule). Files al
 | Lines | File |
 |------:|------|
 | 1,987 | `cqlite-core/src/storage/write_engine/cql_to_mutation/builders.rs` |
-| 1,984 | `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy/complex_column.rs` |
+| 1,984 | `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs` |
 | 1,976 | `cqlite-core/src/types.rs` |
 | 1,928 | `cqlite-flight/src/producer.rs` |
 | 1,922 | `cqlite-core/src/storage/sstable/reader/delta_scan/scan.rs` |
 | 1,826 | `cqlite-core/src/schema/cql_parser.rs` |
 | 1,783 | `cqlite-core/src/query/select_parser.rs` |
 | 1,783 | `cqlite-cli/src/repl/engine.rs` |
-| 1,749 | `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy/udt.rs` |
+| 1,749 | `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/udt.rs` |
 | 1,740 | `cqlite-core/src/storage/write_engine/mutation.rs` |
 | 1,691 | `cqlite-cli/src/config.rs` |
 | 1,682 | `cqlite-core/src/export/arrow_convert.rs` |

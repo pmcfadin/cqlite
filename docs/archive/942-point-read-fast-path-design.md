@@ -78,7 +78,7 @@ Believed true from external inspection; each item needs code confirmation:
 |---|-------|-------|---------------------------|
 | C1 | Summary→Index partition lookup exists and is CI-tested | `golden_path_partition_lookup_tests.rs`, `golden_path_summary_index_integration_tests.rs`, `golden_path_get_operations_tests.rs` in `cqlite-integration-tests/tests/` | Which library API do these tests exercise? Is it callable from `query/`? |
 | C2 | K-way merge with byte-for-byte Cassandra compaction parity exists | `storage/write_engine/merge.rs` (M5.2), v0.12.0 release notes | Is `merge.rs` input an iterator abstraction or whole-SSTable readers? Refactor cost? |
-| C3 | Main V5 parser is `storage/sstable/reader/parsing/v5_compressed_legacy.rs` (~2000 lines) | source-map page | Does it expose (or can it expose) a "parse one partition starting at offset X" entry, or only whole-file iteration? |
+| C3 | Main V5 parser is `storage/sstable/reader/parsing/row_decoder.rs` (~2000 lines) | source-map page | Does it expose (or can it expose) a "parse one partition starting at offset X" entry, or only whole-file iteration? |
 | C4 | BTI reader is incomplete; `da` excluded from default smoke | source-map page (may be stale vs v0.12.0 "canonical BTI read/write") | Actual state of `storage/sstable/bti/` read path: exact-key `Partitions.db` lookup usable? |
 | C5 | Filter.db (bloom) parsing status unknown | format guide Ch.7 exists; no source-map entry | `rg -ni "filter.db|bloom" cqlite-core/src/` |
 | C6 | CQLite-written SSTables are uncompressed, never emit CompressionInfo.db | CLAUDE.md issue #1406 claim boundary | Confirm reader handles absent CompressionInfo.db via direct offsets today |
@@ -212,7 +212,7 @@ Diagnostics (record method + numbers in the A1 findings on #942):
   Flat-but-slow ⇒ setup-dominated ⇒ see contingency below.
 - **Flamegraph:** `./scripts/profile.sh flame` under a repeated single-partition
   query; attribute samples to the three buckets above (expect
-  `v5_compressed_legacy.rs` iteration + merge frames if scan-dominated).
+  `row_decoder` iteration + merge frames if scan-dominated).
 - **Generation sensitivity:** same lookup at 1 vs N SSTable generations.
 
 **Contingency (in scope to spec, out of scope to build until data says so):** if
@@ -344,7 +344,7 @@ one PR). Suggested labels: `enhancement`, inherit P2; epics ordered by dependenc
   `point_read.rs`. *Depends: A1.*
 - **B2. Single-partition iterator:** "parse one partition at offset" entry into the
   V5 parser as a new module (respect file-size ratchet on
-  `v5_compressed_legacy.rs`), honoring clustering bounds + reversed; handles
+  `row_decoder`), honoring clustering bounds + reversed; handles
   compressed and uncompressed generations (C6). *Depends: B1. Likely the largest
   issue — split bounds/reversed into B2b if needed.*
 - **B3. Wire `PointRead` single-generation:** planner → locator → iterator →
@@ -412,7 +412,7 @@ benchmarks show latency and RSS wins; BTI + bloom follow-ups filed under Epic E.
   Ch.10 (Point Reads and Slices), Ch.11 (Merging/Tombstones/Shadowing), Ch.17 (BTI),
   Ch.21 (row-by-key flow card), Appendix F (known limitations)
 - Source map: `cqlite-core/src/query/`, `storage/sstable/reader/parsing/
-  v5_compressed_legacy.rs`, `storage/sstable/bti/`, `storage/write_engine/merge.rs`
+  row_decoder`, `storage/sstable/bti/`, `storage/write_engine/merge.rs`
 - Existing tests: `cqlite-integration-tests/tests/golden_path_*.rs`
 - Cassandra 5.0 source: `BigTableReader.java` (#L298–325 index entry scan),
   `IndexSummary.java` (#L127–152 binary search), `BtiTableReader.java`,

@@ -8,7 +8,7 @@ Branch: `worktree-epic-899-per-cell-merge`. Gate: `scripts/agent-gate.sh`. Revie
 Known pre-existing gate failures (ignore): python-bindings PEP604/py3.9, flush-throughput flaky — diff vs origin/main.
 
 ## Critical files (cqlite-core/src)
-- `storage/sstable/reader/parsing/v5_compressed_legacy.rs` — `parse_complex_column_inner` (5807), `parse_block_with_timestamps` (~3413), row emit (1270-1334)
+- `storage/sstable/reader/parsing/row_decoder.rs` — `parse_complex_column_inner` (5807), `parse_block_with_timestamps` (~3413), row emit (1270-1334)
 - `storage/sstable/reader/data_access.rs` — `iterate_all_partitions_for_compaction` (1277), `stream_all_partitions_for_compaction` (1345), `drain_compaction_window` (1441), `stitch_and_parse_all_chunks_for_compaction` (1181), `parse_one_partition_with_timestamps`
 - `storage/write_engine/merge.rs` — `CellData` (266), `ComplexDeletion` (329), `MergeEntry` (79), `value_to_row_data` (859), `reconcile_cluster` (1453), `merge_entry_to_mutation` (1624), `KWayMerger::merge` (1222), `estimate_entry_size` (470)
 - `storage/write_engine/mutation.rs` — `Mutation` (63), `CellOperation` (205), `RangeTombstone` (164)

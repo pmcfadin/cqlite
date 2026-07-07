@@ -7,9 +7,9 @@ dispatch as **the single biggest hot-path lever in the parser**.
 
 Type dispatch is resolved **per cell** for a type that is constant **per column**:
 
-- `v5_compressed_legacy/cell_value.rs` calls `column.data_type.to_lowercase()` on every
+- `row_decoder/cell_value.rs` calls `column.data_type.to_lowercase()` on every
   non-tombstone cell, then walks a ~30-arm string-match ladder.
-- `v5_compressed_legacy/udt.rs::is_complex_column` calls a second `to_lowercase()` on the
+- `row_decoder/udt.rs::is_complex_column` calls a second `to_lowercase()` on the
   same string, once per column **per row** (`row_data.rs`).
 
 A 1M-row × 10-col scan performs ~20M transient type-string allocations producing nothing
@@ -17,7 +17,7 @@ but a branch target. Two `to_lowercase` normalizations fire per non-key cell tod
 H5 work-counter `TYPE_NORMALIZE_CALLS` measures this and reads ≥2/cell on `main`.
 
 The correct pattern already exists in-tree: `RowColumnResolution::build`
-(`v5_compressed_legacy/mod.rs`, issue #1046) resolves the header→schema column ordering
+(`row_decoder/mod.rs`, issue #1046) resolves the header→schema column ordering
 ONCE per block. It never absorbed dispatch. This change extends it.
 
 **Routing: design-driven, owner-pre-decided.** The audit is the source of truth. This

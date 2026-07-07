@@ -55,7 +55,7 @@ estimate):
 
 ## Non-goals
 
-- **Do NOT touch the live decoder `v5_compressed_legacy`** — it is THE live decode engine for BIG and
+- **Do NOT touch the live decode engine `row_decoder`** — it is THE live decode engine for BIG and
   BTI (#1656, M3) and is entirely out of scope.
 - **Keep shared type definitions.** The `SSTableStatistics`/`StatisticsHeader`/`RowStatistics`/
   `TimestampStatistics`/`ColumnStatistics`/`TableStatistics`/`PartitionStatistics`/

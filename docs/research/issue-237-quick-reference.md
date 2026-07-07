@@ -100,7 +100,7 @@ cqlite-core/src/storage/sstable/
 ├── index_reader.rs              (Main Index.db parser)
 ├── reader/
 │   ├── parsing/
-│   │   └── v5_compressed_legacy.rs  (Data.db format parser)
+│   │   └── row_decoder  (Data.db format parser)
 │   └── block_io.rs              (NB chunk reading)
 └── summary_reader.rs            (Summary.db parser)
 ```

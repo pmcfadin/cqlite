@@ -9965,7 +9965,7 @@ scenarios:
     cqlite:
       coverage:
         tests:
-          - cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy/row_framing.rs
+          - cqlite-core/src/storage/sstable/reader/parsing/row_decoder/row_framing.rs
     fixtures: {}
     evidence:
       type: smoke

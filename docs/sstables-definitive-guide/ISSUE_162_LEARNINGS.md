@@ -4,7 +4,7 @@
 **Status**: Completed
 **Date**: 2025-10-17
 **Files Modified**:
-- `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 - `cqlite-core/tests/v5_compressed_legacy_integration_test.rs`
 
 ---
@@ -46,7 +46,7 @@ The row header follows this exact structure (validated through implementation an
 - There is NO trailing field after row data - next row/partition starts immediately
 
 **Evidence**:
-- Implementation: `v5_compressed_legacy.rs` lines 269-445, 1620-1650
+- Implementation: `row_decoder` lines 269-445, 1620-1650
 - Tests: All integration tests pass with real SSTable data
 - Validation: Parsed timestamps/TTLs match sstabledump JSON output
 
@@ -117,7 +117,7 @@ V5CompressedLegacy stores cells **without column names** in schema definition or
 ### Delta Decoding Implementation
 
 ```rust
-// From v5_compressed_legacy.rs lines 324-342
+// From row_decoder lines 324-342
 let timestamp = if (row_flags & ROW_HAS_TIMESTAMP) != 0 {
     let (remaining, delta) = parse_vint(&data[pos..]).map_err(|e| {
         Error::corruption(format!(
@@ -142,7 +142,7 @@ let timestamp = if (row_flags & ROW_HAS_TIMESTAMP) != 0 {
 ### Column Bitmap Handling
 
 ```rust
-// From v5_compressed_legacy.rs lines 402-431
+// From row_decoder lines 402-431
 if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
     // Read column count (VInt)
     let (remaining, column_count) = parse_vuint(&data[pos..]).map_err(|e| {
@@ -205,7 +205,7 @@ if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
    - Tests bitmap size calculation: `(column_count + 7) / 8`
    - **Result**: ✅ Header size includes bitmap overhead correctly
 
-### Unit Tests (`v5_compressed_legacy.rs` lines 1221-1485)
+### Unit Tests (`row_decoder` lines 1221-1485)
 
 - Partition header parsing: ✅ UUID extraction validated
 - Frozen type unwrapping: ✅ Nested frozen types handled
@@ -298,7 +298,7 @@ V5CompressedLegacy: Non-frozen collection 'scores' type 'list<int>' requires mul
 ## References
 
 ### Implementation Files
-- **Parser**: `/Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+- **Parser**: `/Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 - **Tests**: `/Users/patrick/local_projects/cqlite/cqlite-core/tests/v5_compressed_legacy_integration_test.rs`
 - **Format Spec**: `/Users/patrick/local_projects/cqlite/docs/V5_COMPRESSED_LEGACY_FORMAT_SPEC.md`
 

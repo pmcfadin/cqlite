@@ -19,7 +19,7 @@
     },
     "vint_element_count_contract": {
       "note": "The MULTI-CELL on-disk SSTable collection path reads the element/cell count with the Cassandra unsigned VInt (org.apache.cassandra.utils.VIntCoding / DataInputPlus.readUnsignedVInt). CQLite implements this as parser::vint::parse_vuint / encode_vuint. Size classes: leading-ones in byte 0 select extra-byte count; unsigned VInt of value v occupies ceil((bits_needed)/7)-style class boundaries at 2^7,2^14,2^21,... The frozen-collection serializer above uses a fixed 4-byte int instead and is unaffected by these boundaries.",
-      "source": "org/apache/cassandra/utils/VIntCoding.java; org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt(); confirmed in CQLite read path v5_compressed_legacy.rs:6821 (parse_vuint)."
+      "source": "org/apache/cassandra/utils/VIntCoding.java; org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt(); confirmed in CQLite read path row_decoder:6821 (parse_vuint)."
     },
 
     "cqlite_reader_framing": {

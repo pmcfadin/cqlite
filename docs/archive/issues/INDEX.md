@@ -183,7 +183,7 @@ This directory contains historical issue investigation files, code reviews, and 
 **1. Null Cell Values (Primary Issue)**
 - **Root Cause**: Partition keys incorrectly included in `schema.columns` list
 - **Fix**: Added filtering logic to exclude partition/clustering keys from cell parsing loop
-- **Lines**: 647-670 in v5_compressed_legacy.rs
+- **Lines**: 647-670 in row_decoder
 
 **2. Incomplete Cell Type Encodings**
 - **Root Cause**: Mixed assumptions about length prefixes in V5CompressedLegacy format

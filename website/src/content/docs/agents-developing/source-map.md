@@ -33,12 +33,12 @@ The core library. All SSTable format work lives here.
 cqlite-core/src/storage/sstable/
 ├── reader/
 │   └── parsing/
-│       └── v5_compressed_legacy.rs  # Main V5 format parser (~2000 lines)
+│       └── row_decoder  # Main V5 format parser (~2000 lines)
 ├── bti/                             # BTI (Big Table Index) trie format
 └── row_cell_state_machine.rs        # OA format state-machine parser
 ```
 
-`v5_compressed_legacy.rs` is the entry point for parsing `nb` and `oa` format
+`row_decoder` is the entry point for parsing `nb` and `oa` format
 SSTables. It handles decompression, partition iteration, row flags, cell decoding,
 and delta encoding against `EncodingStats` from `Statistics.db`.
 
@@ -93,7 +93,7 @@ SSTable data. `schema/` manages CREATE TABLE DDL and maps column names to CQL ty
 | Problem area | Start here |
 |---|---|
 | Wrong row count | `row_cell_state_machine.rs` — partition/row boundaries |
-| Wrong cell value | `v5_compressed_legacy.rs` — cell flag parsing + delta decode |
+| Wrong cell value | `row_decoder` — cell flag parsing + delta decode |
 | Wrong type decode | `cqlite-core/src/schema/` — column type → decoder mapping |
 | Query returns nothing | `cqlite-core/src/query/` — filter evaluation |
 | Write corruption | `storage/sstable/writer/data_writer.rs` |

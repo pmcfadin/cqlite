@@ -259,7 +259,7 @@ pub fn as_date(&self) -> Option<i32> {
 
 ## 5. SSTable Parsing Support
 
-**Location**: `/Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+**Location**: `/Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 ### Type Detection (Line 2767)
 
@@ -579,7 +579,7 @@ fn test_date_type_name() {
 
 - `/Users/patrick/local_projects/cqlite/cqlite-core/src/types.rs` - Value::Date definition (lines 49, 323, 571-576)
 - `/Users/patrick/local_projects/cqlite/cqlite-core/src/schema/mod.rs` - CqlType::Date (line 185)
-- `/Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs` - DATE parsing (lines 2767, 3018-3027)
+- `/Users/patrick/local_projects/cqlite/cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs` - DATE parsing (lines 2767, 3018-3027)
 
 ---
 

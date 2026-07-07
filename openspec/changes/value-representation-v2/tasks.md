@@ -21,7 +21,7 @@ implementer re-greps before editing.
 - [ ] 1.2 Fix the ~436 match/construction sites (`rg -n "Value::(Tombstone|Udt|Json)"`), keeping edits
   mechanical (box patterns / `ref`). Heaviest core files: `storage/write_engine/merge/mod.rs`,
   `storage/serialization/types.rs`, `parser/types/udt.rs`,
-  `storage/sstable/reader/parsing/v5_compressed_legacy/udt.rs`,
+  `storage/sstable/reader/parsing/row_decoder/udt.rs`,
   `.../custom_scalar.rs`, `export/arrow_convert.rs`, `parser/types/tombstones.rs`. (value-representation)
 - [ ] 1.3 Update binding conversion arms (payload now boxed → deref): Python
   `bindings/python/src/value.rs:55,60,63,109,507`; Node `bindings/node/src/value.rs:236,251,257` +
@@ -50,7 +50,7 @@ implementer re-greps before editing.
 ## Stage 3 — D3 decode (K5 / #1644): zero-copy extraction
 - [ ] 3.1 **Interim S-win (may land at Stage 1, independent of D2):** replace
   `String::from_utf8(bytes.to_vec())` with `str::from_utf8(bytes)?.to_owned()` at the decode sites —
-  `v5_compressed_legacy/raw_type_value.rs:58,118`; `raw_value.rs:139`; `cell_value.rs:369`;
+  `row_decoder/raw_type_value.rs:58,118`; `raw_value.rs:139`; `cell_value.rs:369`;
   `row_framing.rs:1398`; `udt.rs:298,550,833`; `complex_column.rs:1338`;
   `comparator_value_parsing.rs:168,229`. Guard with the UTF-8 alloc-count test. (sstable-value-decode)
 - [ ] 3.2 Borrow scalar byte payloads from the Stage-2 substrate as `Bytes::slice_ref`: Text/Blob/

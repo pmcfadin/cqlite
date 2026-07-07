@@ -7,9 +7,9 @@ found the V5CompressedLegacy row-emit path builds each decoded row as a
 `HashMap<Arc<str>, Value>` and then **alphabetically re-sorts it on EVERY row**
 solely to hide `HashMap` iteration nondeterminism:
 
-- The decoder (`v5_compressed_legacy/row_data.rs`) inserts each cell into a per-row
+- The decoder (`row_decoder/row_data.rs`) inserts each cell into a per-row
   `HashMap` even though it already iterates columns in serialization-header order.
-- The shared display-row builder (`v5_compressed_legacy/mod.rs::build_display_row`,
+- The shared display-row builder (`row_decoder/mod.rs::build_display_row`,
   into which #1334 consolidated the former three `block_emit`/`block_emit_windowed`
   sort sites) then allocates a `Vec`, bumps the H5 `ROW_SORT_INVOCATIONS` gauge, and
   runs `sort_by(|a,b| a.name.cmp(b.name))` — once per returned live row.
