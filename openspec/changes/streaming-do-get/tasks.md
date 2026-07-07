@@ -74,6 +74,18 @@
       now span-wrapped) — `tracing::Span` has no cheap "is this span active"
       test hook, so this is exercised via the unchanged behavioral assertions
       rather than a new span-presence assertion.
+- [x] 3.7 Review-first fix round 3 (roborev re-review, 1 new Medium): `do_get_setup`
+      still ran `DirSource::resolve` (filesystem `is_dir`/`read_dir`, incl. the
+      `<table>-<uuid>` layout scan) and producer/schema construction on the async
+      request task BEFORE entering `spawn_blocking` — pre-change ALL filesystem
+      access ran inside the blocking task; under slow/busy storage this stalls the
+      gRPC reactor for unrelated RPCs. Fixed by moving the ENTIRE fallible setup
+      sequence (producer/schema construction, `DirSource::resolve`,
+      `resolve_paths_cancellable`) into ONE `spawn_blocking` closure returning
+      `Result<DoGetSetup, Status>`; `do_get_inner`'s `CancelGuard` still covers the
+      whole `.await` unchanged. Pure refactor — no behavior/signature change, so
+      all existing tests (incl. the round-2 F1 tests) cover it unchanged;
+      `cargo test -p cqlite-flight` stayed at 151 passed.
 
 ## 4. Verification & delivery
 

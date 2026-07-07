@@ -450,50 +450,54 @@ impl CqliteFlightService {
     }
 
     /// Eager, fallible `do_get` setup shared by the row and aggregate paths: parse
-    /// the ticket, build the producer + Arrow schema, and resolve + token-prune the
-    /// SSTable paths off the async reactor (the prune reads `Summary.db` files).
-    /// A missing table surfaces as `not_found` here, before any stream opens.
+    /// the ticket, build the producer + Arrow schema, resolve the table's on-disk
+    /// directory, and token-prune the SSTable paths. A missing table surfaces as
+    /// `not_found` here, before any stream opens.
     ///
-    /// `cancel` is polled inside the blocking discovery/prune task (issue #1476,
-    /// roborev F1) so a client disconnect during this (potentially slow, many-
-    /// SSTable) phase stops it instead of running to completion.
+    /// The ENTIRE fallible sequence — schema/producer construction,
+    /// `DirSource::resolve` (filesystem `is_dir`/`read_dir`, including the
+    /// Cassandra `<table>-<uuid>` layout scan), and the token-prune (reads a
+    /// sibling `Summary.db` per SSTable) — runs in ONE `spawn_blocking` closure
+    /// (issue #1476, roborev round 3). Pre-change, ALL filesystem access for
+    /// `do_get` ran inside the blocking task; letting any of it run on the async
+    /// request task instead would stall the gRPC reactor for unrelated RPCs under
+    /// slow/busy storage. `cancel` is polled inside this same closure (issue
+    /// #1476, roborev F1) so a client disconnect during setup stops it instead of
+    /// running to completion; `do_get_inner`'s `CancelGuard` still covers this
+    /// whole `.await` for the future-drop case.
     async fn do_get_setup(
         &self,
         request: Request<Ticket>,
         cancel: &CancelFlag,
     ) -> Result<DoGetSetup, Status> {
         let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
-        let producer = self.build_producer(&ticket)?;
-        let schema_ref = Arc::new(producer.arrow_schema()?);
-        let source = DirSource::resolve(
-            &self.data_dir,
-            &ticket.keyspace,
-            &ticket.table,
-            ticket.snapshot.as_deref(),
-        )?;
-        let aggregating = producer.is_aggregating();
-
-        // Return the producer back out of the blocking task (it is moved in to run
-        // the blocking discovery/prune, then reused for the merge) — avoids an Arc
-        // and its Sync bound.
+        let svc = self.clone();
         let resolve_cancel = cancel.clone();
-        let (producer, paths) = tokio::task::spawn_blocking(move || {
-            let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel);
-            (producer, paths)
+
+        tokio::task::spawn_blocking(move || -> Result<DoGetSetup, Status> {
+            let producer = svc.build_producer(&ticket)?;
+            let schema_ref = Arc::new(producer.arrow_schema()?);
+            let source = DirSource::resolve(
+                &svc.data_dir,
+                &ticket.keyspace,
+                &ticket.table,
+                ticket.snapshot.as_deref(),
+            )?;
+            let aggregating = producer.is_aggregating();
+            // A cancellation here surfaces as `ProducerError::Cancelled`, mapped
+            // by `From<ProducerError> for Status` to `Status::aborted` — the same
+            // clean, expected-abort class as a merge-stage cancellation.
+            let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel)?;
+
+            Ok(DoGetSetup {
+                producer,
+                schema_ref,
+                paths,
+                aggregating,
+            })
         })
         .await
-        .map_err(|e| Status::internal(format!("path resolution panicked: {e}")))?;
-        // A cancellation here surfaces as `ProducerError::Cancelled`, mapped by
-        // `From<ProducerError> for Status` to `Status::aborted` — the same clean,
-        // expected-abort class as a merge-stage cancellation.
-        let paths = paths?;
-
-        Ok(DoGetSetup {
-            producer,
-            schema_ref,
-            paths,
-            aggregating,
-        })
+        .map_err(|e| Status::internal(format!("do_get setup panicked: {e}")))?
     }
 
     /// Body of [`FlightService::do_action`], run inside the RPC span (issue #944).
