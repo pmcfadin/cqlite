@@ -480,17 +480,26 @@ public final class PredicateTreeTranslator {
                     .map(v -> compareNode(col.name(), "Equal", v));
         }
         if (values.isDiscreteSet()) {
-            ArrayNode array = MAPPER.createArrayNode();
+            // Canonicalize: applyFilter's idempotence/accumulation guards compare
+            // SERIALIZED JSON, so the same logical multi-value domain must always emit
+            // byte-identical output regardless of the ValueSet's iteration order.
+            // Convert every element to its JSON scalar first, then sort by the
+            // serialized scalar string — a total, type-stable order that never depends
+            // on ValueSet internals (In is set membership; order is semantically free).
+            List<JsonNode> scalars = new ArrayList<>();
             for (Object element : values.getDiscreteSet()) {
                 Optional<JsonNode> v = constantToJson(type, element);
                 if (v.isEmpty()) {
                     return Optional.empty();
                 }
-                array.add(v.get());
+                scalars.add(v.get());
             }
-            if (array.isEmpty()) {
+            if (scalars.isEmpty()) {
                 return Optional.empty();
             }
+            scalars.sort(java.util.Comparator.comparing(JsonNode::toString));
+            ArrayNode array = MAPPER.createArrayNode();
+            scalars.forEach(array::add);
             ObjectNode node = MAPPER.createObjectNode();
             node.put("type", "In");
             node.put("column", col.name());

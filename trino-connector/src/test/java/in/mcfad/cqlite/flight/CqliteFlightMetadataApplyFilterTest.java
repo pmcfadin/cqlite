@@ -200,6 +200,37 @@ class CqliteFlightMetadataApplyFilterTest {
     }
 
     @Test
+    void multiValueSummaryEmitsCanonicalOrderAndGuardHolds() throws Exception {
+        // Roborev finding (#2166): the idempotence/accumulation guard compares
+        // SERIALIZED JSON, so the same logical multi-value domain must serialize
+        // byte-identically regardless of the ValueSet's iteration order. Build the
+        // SAME logical domain via two constructions with OPPOSITE insertion orders.
+        var forward = TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                PK, Domain.multipleValues(VARCHAR,
+                        List.of(Slices.utf8Slice("a"), Slices.utf8Slice("b"), Slices.utf8Slice("c")))));
+        var reversed = TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                PK, Domain.multipleValues(VARCHAR,
+                        List.of(Slices.utf8Slice("c"), Slices.utf8Slice("b"), Slices.utf8Slice("a")))));
+
+        ConnectorTableHandle handle = new CqliteFlightTableHandle("ks", "t", "ddl");
+        var first = metadata.applyFilter(null, handle, summaryOnly(forward)).orElseThrow();
+        String firstJson = ((CqliteFlightTableHandle) first.getHandle()).filterJson().orElseThrow();
+
+        // Emitted values array is in canonical sorted order (never ValueSet order).
+        JsonNode filter = MAPPER.readTree(firstJson);
+        assertEquals("In", filter.get("type").asText());
+        assertEquals("a", filter.get("values").get(0).asText());
+        assertEquals("b", filter.get("values").get(1).asText());
+        assertEquals("c", filter.get("values").get(2).asText());
+
+        // The reversed-order construction of the identical logical domain must hit
+        // the already-pushed guard: byte-identical serialization → Optional.empty()
+        // (no re-apply, no planner loop).
+        assertTrue(metadata.applyFilter(null, first.getHandle(), summaryOnly(reversed)).isEmpty(),
+                "identical logical IN domain (different construction order) must not re-apply");
+    }
+
+    @Test
     void numericRangeSummaryPushesComparison() throws Exception {
         // age > 10 delivered as a range domain.
         var summary = TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
