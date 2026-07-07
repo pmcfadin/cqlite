@@ -1430,7 +1430,7 @@ fn bare_udt_with_registry_roundtrips_sparse_out_of_order() {
     let row_ts = 1_005_000i64;
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &col, &udt, row_ts, None)
+        .write_complex_column(&mut buf, &col, &udt, row_ts, None, TEST_NOW_SECONDS)
         .expect("normalized bare UDT must write as a complex column");
 
     let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);

@@ -584,6 +584,7 @@ fn test_write_cell_with_ttl() {
             timestamp,
             ttl_seconds,
             None,
+            TEST_NOW_SECONDS,
         )
         .unwrap();
 
@@ -764,6 +765,7 @@ fn test_ttl_zero_special_case() {
             timestamp,
             ttl_seconds,
             None,
+            TEST_NOW_SECONDS,
         )
         .unwrap();
 
@@ -794,8 +796,15 @@ fn test_ttl_cell_with_null_value() {
     let writer = DataWriter::new(stats);
 
     let mut buf = Vec::new();
-    let result =
-        writer.write_cell_with_ttl(&mut buf, "test_col", &Value::Null, 1001000, 3600, None);
+    let result = writer.write_cell_with_ttl(
+        &mut buf,
+        "test_col",
+        &Value::Null,
+        1001000,
+        3600,
+        None,
+        TEST_NOW_SECONDS,
+    );
 
     assert!(result.is_err(), "NULL values should return error");
     assert!(result
@@ -825,6 +834,7 @@ fn test_ttl_cell_local_deletion_time_calculation() {
             timestamp,
             ttl_seconds,
             None,
+            TEST_NOW_SECONDS,
         )
         .unwrap();
 
