@@ -727,11 +727,14 @@ impl SSTableReader {
                     .as_ref()
                     .map(|cr| Compression::new(*cr.algorithm()))
                     .transpose()?;
+                let comp_info = self.compression_info.as_ref().ok_or_else(|| {
+                    Error::corruption(
+                        "BTI chunk_targeted path requires CompressionInfo but it is absent",
+                    )
+                })?;
                 let chunk_source = super::super::chunk_source::ChunkSource::new(
                     self.point_source.as_ref(),
-                    self.compression_info
-                        .as_ref()
-                        .expect("chunk_targeted requires CompressionInfo"),
+                    comp_info,
                     compression_opt.as_ref(),
                     &self.chunk_cache,
                     self.stats.file_size,
