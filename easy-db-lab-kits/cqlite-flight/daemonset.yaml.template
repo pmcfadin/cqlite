@@ -33,10 +33,18 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       securityContext:
-        # Do not override runAsUser/runAsGroup here — the image already runs as its
-        # fixed uid-10001 "flight" user (Dockerfile: `USER flight`). supplementalGroups
-        # adds the host GID that owns the Cassandra data dir so that uid can read it.
+        # The image's Dockerfile declares `USER flight` (a NAME, not a numeric
+        # uid: `useradd -r -u 10001 flight`). With runAsNonRoot: true but no
+        # numeric runAsUser, the kubelet cannot resolve "flight" to a uid to
+        # verify it is non-root, and refuses to create the container:
+        # "container has runAsNonRoot and image has non-numeric user (flight),
+        # cannot verify user is non-root" (issue #2118). runAsUser/runAsGroup
+        # must be stated numerically here to match the image's fixed identity.
+        # supplementalGroups adds the host GID that owns the Cassandra data
+        # dir so that uid can read it.
         runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
         supplementalGroups:
           - __CASSANDRA_DATA_GID__
       containers:

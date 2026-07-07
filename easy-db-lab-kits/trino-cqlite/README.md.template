@@ -24,11 +24,17 @@ coordinator/worker pods — Trino loads each plugin from its own isolated
 classloader directory (see `trino-connector/README.md`). Two ways to get
 there:
 
-1. **Init container** (chosen): a `gradle:9.1.0-jdk21` initContainer runs the
+1. **Init container** (chosen): a `gradle:9.1.0-jdk25` initContainer runs the
    throwaway `assemblePlugin` Sync recipe from `gradle-assemble-plugin/`
    against the published `in.mcfad:cqlite-trino:__CONNECTOR_VERSION__`
    artifact, writing the result to a shared `emptyDir` that's also mounted
-   into the main Trino container.
+   into the main Trino container. The init image's JDK level must stay in
+   lockstep with the connector's own build target — `trino-connector/build.gradle.kts`
+   targets **Java 25 / Trino SPI 481**, and the published artifact carries a
+   `org.gradle.jvm.version=25` Gradle capability attribute that a JDK-21
+   Gradle image cannot resolve at all (issue #2122). If
+   `trino-connector/build.gradle.kts`'s JDK target ever moves, bump
+   `INIT_IMAGE` in `bin/reapply-plugin-patch.sh` to match.
 2. Custom baked Trino image with the plugin pre-installed.
 
 Init container wins here: it needs no image-build/publish pipeline of its
@@ -165,7 +171,7 @@ directory, picked up automatically by the trino kit — see "Install order"):
 
 | Property | Value here | Notes |
 |---|---|---|
-| `connector.name` | `cqlite` | fixed |
+| `connector.name` | `cqlite_flight` | fixed — MUST equal the registered Trino connector factory name (`CqliteFlightConnectorFactory.getName()`), NOT this kit's catalog name. Setting it to `cqlite` crashes the coordinator at boot with "No factory for connector 'cqlite'" (issue #2123) |
 | `cqlite.sidecar-uri` | `__SIDECAR_URI__` | required; Sidecar runs as a hostNetwork DaemonSet on every db node (port 9043 fixed, no stable cluster Service) |
 | `cqlite.flight-port` | `__FLIGHT_PORT__` | matches the cqlite-flight kit's `--flight-port` |
 | `cqlite.local-datacenter` | *(commented out)* | edit `trino-catalog.properties` by hand + `../trino/bin/update-catalogs.sh` to set |

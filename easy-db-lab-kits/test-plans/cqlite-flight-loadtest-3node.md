@@ -113,7 +113,33 @@ but this cqlite-trino connector build targets Trino SPI 481 ...
 Install the `trino` kit itself with `--version 481` (see Phase 1, step 3) — this
 overlay cannot rewrite the trino kit's own `values.yaml`.
 
+**[UPDATED after the first live run] Known upstream blocker at 481 — worker
+CrashLoopBackOff (#2116).** The easy-db-lab trino kit's
+`values.yaml.template` puts `web-ui.authentication.type` / `web-ui.user` in
+top-level `additionalConfigProperties`, which the Helm chart renders into
+BOTH coordinator and worker `config.properties`. `web-ui.*` is
+coordinator-only; at Trino 481 workers fail-fast on the unused properties:
+
+```
+ERROR io.trino.server.Server Configuration is invalid
+1) Configuration property 'web-ui.authentication.type' was not used
+```
+
+**Workaround (until fixed upstream — tracked with fix guidance in
+cqlite#2116):** after `trino` kit install, remove the two `web-ui.*` lines
+from the rendered `trino/values.yaml` and re-run the kit's `helm upgrade`
+(web-ui auth is irrelevant to a JDBC load test). Verify both `trino-worker`
+pods reach `Ready` before proceeding to step 4.
+
 ### 0.4 Flight kit preflight
+
+**[UPDATED after the first live run]** The first run of this plan hit
+`CreateContainerConfigError` on every `cqlite-flight` pod: `runAsNonRoot: true`
+was set without a numeric `runAsUser`, and the image's `USER flight` directive
+is a name, not a uid, so the kubelet couldn't verify non-root and refused to
+create the container (issue #2118, fixed — the manifest now pins
+`runAsUser: 10001` / `runAsGroup: 10001` explicitly). No command in this plan
+changes; this is now expected to just work.
 
 Before `easy-db-lab cqlite-flight start`:
 
@@ -207,6 +233,31 @@ kubectl get pods -l easydblab.com/kit=cqlite-flight -o wide
 ```
 
 ### 5. Install the trino-cqlite overlay (see [0.2](#02-kit-install-path-kit-source-add-not---from) for the naming subtlety)
+
+**[UPDATED after the first live run]** This step surfaced four bugs, all now
+fixed in the kit — no command below changes, but the *observed* behavior
+during this step does:
+
+- **#2120** — `cqlite start` never created the `cqlite-trino-plugin-src`
+  ConfigMap, so both pods sat `Init:0/1` with `FailedMount`. Fixed:
+  `bin/reapply-plugin-patch.sh` now creates/refreshes the ConfigMap before
+  patching either deployment, every time it runs.
+- **#2122** — the plugin-fetch init container's `gradle:9.1.0-jdk21` image
+  couldn't resolve the connector artifact (it requires JDK 25). Fixed: bumped
+  to `gradle:9.1.0-jdk25`.
+- **#2123** — the rendered catalog used `connector.name=cqlite`, but the
+  factory registers `cqlite_flight`, so the coordinator CrashLoopBackOff'd
+  with "No factory for connector 'cqlite'". Fixed: `connector.name=cqlite_flight`
+  (the catalog name stays `cqlite` — `SHOW CATALOGS` / `cqlite.<ks>.<tbl>` are
+  unaffected).
+- **#2119** — patching the coordinator's pod template (to add the plugin
+  initContainer) started a rollout that could never converge on this plan's
+  single app node: the new pod can't bind the coordinator's `hostPort: 8080`
+  while the old one still holds it. Fixed: the reapply script now deletes the
+  old coordinator pod **only when the patch actually changed something** (not
+  on a steady-state no-op re-apply) and waits for the rollout. **Expect the
+  `trino-coordinator` pod to be deleted and recreated once** during this step
+  on a fresh install — that is now expected, not a hang.
 
 ```bash
 DB0_IP=$($EDB ip db0 --private)
