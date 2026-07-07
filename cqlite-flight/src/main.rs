@@ -125,7 +125,10 @@ fn log_observability_status(enabled: bool, endpoint: &str) {
     }
     #[cfg(feature = "observability")]
     {
-        tracing::info!(endpoint, "observability enabled, exporting to OTLP endpoint");
+        tracing::info!(
+            endpoint,
+            "observability enabled, exporting to OTLP endpoint"
+        );
     }
     #[cfg(not(feature = "observability"))]
     {
