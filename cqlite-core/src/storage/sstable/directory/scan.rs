@@ -49,7 +49,7 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
 
             // Check file accessibility
             if let Err(e) = fs::metadata(&file_path) {
-                log::warn!("Cannot access file {:?}: {}", file_path, e);
+                tracing::warn!("Cannot access file {:?}: {}", file_path, e);
                 continue;
             }
 
@@ -97,7 +97,7 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
     generations.sort_by(|a, b| b.generation.cmp(&a.generation));
 
     // Log summary for debugging
-    log::debug!(
+    tracing::debug!(
         "Directory scan completed: {} total files, {} SSTable files, {} generations found",
         found_files,
         valid_sstable_files,
@@ -148,7 +148,7 @@ pub(crate) fn parse_sstable_filename(
     let generation: u32 = match desc.sstable_id.parse() {
         Ok(n) => n,
         Err(_) => {
-            log::debug!(
+            tracing::debug!(
                 "parse_sstable_filename: skipping UUID-id file {} (not a plain integer generation)",
                 filename
             );
@@ -164,7 +164,7 @@ pub(crate) fn parse_sstable_filename(
     let component = match SSTableComponent::from_str(&desc.component) {
         Ok(c) => c,
         Err(_) => {
-            log::debug!(
+            tracing::debug!(
                 "Ignoring file with unrecognized component extension: {}",
                 filename
             );

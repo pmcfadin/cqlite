@@ -15,7 +15,7 @@ use std::sync::Arc;
 fn init_logging() {
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
+        .parse_filters("debug")
         .try_init();
 }
 

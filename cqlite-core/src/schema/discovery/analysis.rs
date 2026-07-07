@@ -35,7 +35,7 @@ impl SchemaDiscoveryEngine {
                 }
                 Err(e) => {
                     // Log error but continue with other files
-                    log::warn!("Failed to parse header from {:?}: {}", file_path, e);
+                    tracing::warn!("Failed to parse header from {:?}: {}", file_path, e);
                 }
             }
         }
@@ -82,7 +82,7 @@ impl SchemaDiscoveryEngine {
                     }
                 }
                 Err(e) => {
-                    log::warn!("Failed to sample data from {:?}: {}", file_path, e);
+                    tracing::warn!("Failed to sample data from {:?}: {}", file_path, e);
                 }
             }
         }

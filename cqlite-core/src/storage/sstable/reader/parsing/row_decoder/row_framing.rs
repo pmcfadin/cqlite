@@ -258,7 +258,7 @@ impl V5CompressedLegacyParser {
         let marker_flags = data[pos];
         pos += 1; // Skip flags byte
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Skipping range tombstone marker with flags=0x{:02x} at offset {}",
             marker_flags,
             offset
@@ -293,7 +293,7 @@ impl V5CompressedLegacyParser {
         let bound_kind = data[pos];
         pos += 1;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Range tombstone bound_kind={}",
             bound_kind,
         );
@@ -315,7 +315,7 @@ impl V5CompressedLegacyParser {
         let cluster_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Range tombstone cluster_count={}",
             cluster_count,
         );
@@ -366,7 +366,7 @@ impl V5CompressedLegacyParser {
         }
         pos = body_end;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Skipped range tombstone marker, advanced from {} to {}",
             offset,
             pos
@@ -1225,13 +1225,13 @@ impl V5CompressedLegacyParser {
     ) -> Result<(Vec<Value>, usize)> {
         // If no clustering keys, skip this section
         if schema.clustering_keys.is_empty() {
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: No clustering keys in schema, skipping clustering prefix"
             );
             return Ok((Vec::new(), offset));
         }
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsing clustering prefix at offset {} for {} clustering keys",
             offset,
             schema.clustering_keys.len()
@@ -1247,7 +1247,7 @@ impl V5CompressedLegacyParser {
         let bytes_consumed = data[offset..].len() - remaining.len();
         offset += bytes_consumed;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Clustering prefix header = 0x{:x}, consumed {} bytes",
             header_vint,
             bytes_consumed
@@ -1257,7 +1257,7 @@ impl V5CompressedLegacyParser {
         let mut clustering_values = Vec::new();
         for (i, col) in schema.clustering_keys.iter().enumerate() {
             let state = (header_vint >> (i * 2)) & 0x03;
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Clustering key {} '{}' state = {} (from bits {}..{})",
                 i,
                 col.name,
@@ -1279,7 +1279,7 @@ impl V5CompressedLegacyParser {
                 0 => {
                     // PRESENT - parse value based on type
                     let (value, new_off) = self.parse_clustering_value(data, offset, col)?;
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy:   -> PRESENT: {:?} (consumed {} bytes)",
                         value,
                         new_off - offset
@@ -1299,7 +1299,7 @@ impl V5CompressedLegacyParser {
                         "blob" => Value::Blob(vec![]),
                         _ => {
                             // Fixed-width types shouldn't have EMPTY state in normal data
-                            log::warn!(
+                            tracing::warn!(
                                 "V5CompressedLegacy: EMPTY state for clustering key '{}' (type {}), treating as NULL",
                                 col.name, col.data_type
                             );
@@ -1307,23 +1307,23 @@ impl V5CompressedLegacyParser {
                         }
                     };
                     clustering_values.push(empty_value);
-                    log::debug!("V5CompressedLegacy:   -> EMPTY");
+                    tracing::debug!("V5CompressedLegacy:   -> EMPTY");
                 }
                 2 => {
                     // NULL
                     clustering_values.push(Value::Null);
-                    log::debug!("V5CompressedLegacy:   -> NULL");
+                    tracing::debug!("V5CompressedLegacy:   -> NULL");
                 }
                 3 => {
                     // Reserved - treat as NULL for safety
-                    log::warn!("V5CompressedLegacy: Clustering key {} has reserved state 3, treating as NULL", col.name);
+                    tracing::warn!("V5CompressedLegacy: Clustering key {} has reserved state 3, treating as NULL", col.name);
                     clustering_values.push(Value::Null);
                 }
                 _ => unreachable!(),
             }
         }
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsed {} clustering values, new offset = {}",
             clustering_values.len(),
             offset
@@ -1345,7 +1345,7 @@ impl V5CompressedLegacyParser {
         col: &crate::schema::ClusteringColumn,
     ) -> Result<(Value, usize)> {
         let normalized = col.data_type.to_lowercase();
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsing clustering value '{}' type '{}' at offset {}",
             col.name,
             normalized,

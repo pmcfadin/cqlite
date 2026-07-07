@@ -116,7 +116,7 @@ impl V5CompressedLegacyParser {
                 });
             }
         }
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
             column.name, column.data_type, has_complex_deletion, offset
         );
@@ -187,7 +187,7 @@ impl V5CompressedLegacyParser {
                 complex_deletion = Some((absolute_mfda, absolute_ldt as u32 as i32));
             }
 
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Complex column '{}' deletion time parsed \
                  (absolute_mfda={} has_collection_tombstone={}), now at offset {}",
                 column.name,
@@ -207,7 +207,7 @@ impl V5CompressedLegacyParser {
         let bytes_consumed = data[offset..].len() - remaining.len();
         offset += bytes_consumed;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Complex column '{}' has {} cells, now at offset {}",
             column.name,
             cell_count,
@@ -318,7 +318,7 @@ impl V5CompressedLegacyParser {
                 // DS4: count them for the scan-summary warning counter.
                 if cell.is_deleted {
                     element_tombstone_count += 1;
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: list element {} in column '{}' is a tombstone \
                          (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
                         i,
@@ -396,7 +396,7 @@ impl V5CompressedLegacyParser {
                 // DS4: count them for the scan-summary warning counter.
                 if cell.is_deleted {
                     element_tombstone_count += 1;
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: set element {} in column '{}' is a tombstone \
                          (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
                         i,
@@ -444,7 +444,7 @@ impl V5CompressedLegacyParser {
                     ) {
                         Ok(val) => Some(val),
                         Err(e) => {
-                            log::debug!(
+                            tracing::debug!(
                                 "V5CompressedLegacy: set element {} parse failed (type={}): {}",
                                 i,
                                 element_type,
@@ -498,7 +498,7 @@ impl V5CompressedLegacyParser {
                 // the reported writetime only reflects live content (roborev Finding 2).
                 if cell.is_deleted {
                     element_tombstone_count += 1;
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: map entry {} in column '{}' is a tombstone \
                          (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
                         i,
@@ -532,7 +532,7 @@ impl V5CompressedLegacyParser {
                 // recorded on the per-element compaction entry and used to build
                 // the collapsed `Value::Map`.
                 let decoded_key = if !cell.path_bytes.is_empty() {
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
                         column.name,
                         key_type,
@@ -693,7 +693,7 @@ impl V5CompressedLegacyParser {
             Value::Null
         };
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Complex column '{}' parsed, final offset {} \
              (has_collection_tombstone={} max_element_writetime={} element_tombstone_count={})",
             column.name,
@@ -794,7 +794,7 @@ impl V5CompressedLegacyParser {
         column: &crate::schema::Column,
         cell_index: u64,
     ) -> Result<ComplexCellParse> {
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} element_type='{}' starting at offset {}",
             column.name,
             cell_index,
@@ -829,7 +829,7 @@ impl V5CompressedLegacyParser {
         let use_row_timestamp = (flags & 0x08) != 0;
         let use_row_ttl = (flags & 0x10) != 0;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} flags=0x{:02x} (deleted={}, expiring={}, empty_value={}, use_row_ts={}, use_row_ttl={})",
             column.name,
             cell_index,
@@ -942,7 +942,7 @@ impl V5CompressedLegacyParser {
 
         // Step 6: Value (if not empty and not deleted)
         let value = if is_deleted || has_empty_value {
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} is deleted or empty",
                 column.name,
                 cell_index
@@ -999,7 +999,7 @@ impl V5CompressedLegacyParser {
             Some(parsed_value)
         };
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} complete, value={:?}, final offset {}",
             column.name,
             cell_index,
@@ -1032,7 +1032,7 @@ impl V5CompressedLegacyParser {
         column_name: &str,
         cell_index: u64,
     ) -> Result<usize> {
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: skip_complex_cell '{}' cell {} starting at offset {}, bytes: {:02x?}",
             column_name,
             cell_index,
@@ -1075,7 +1075,7 @@ impl V5CompressedLegacyParser {
         let use_row_timestamp = (flags & 0x08) != 0;
         let use_row_ttl = (flags & 0x10) != 0;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: skip_complex_cell '{}' cell {} flags=0x{:02x} (deleted={}, expiring={}, empty_value={}, use_row_ts={}, use_row_ttl={})",
             column_name,
             cell_index,
@@ -1134,7 +1134,7 @@ impl V5CompressedLegacyParser {
             ))
         })?;
         let bytes_consumed = data[offset..].len() - remaining.len();
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: skip_complex_cell '{}' cell {} path_len={} at offset {}",
             column_name,
             cell_index,
@@ -1209,7 +1209,7 @@ impl V5CompressedLegacyParser {
             offset += value_len_usize;
         }
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: skip_complex_cell '{}' cell {} complete, final offset {}",
             column_name,
             cell_index,
@@ -1413,7 +1413,7 @@ impl V5CompressedLegacyParser {
 
             // Fallback: return as blob
             _ => {
-                log::debug!(
+                tracing::debug!(
                     "Map key type '{}' for column '{}' parsed as blob ({} bytes)",
                     type_str,
                     column_name,

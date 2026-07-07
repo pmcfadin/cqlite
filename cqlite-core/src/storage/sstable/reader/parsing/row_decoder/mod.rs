@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use log::{debug, warn};
+use tracing::{debug, warn};
 
 use crate::{
     parser::vint::{parse_vint, parse_vuint},
@@ -256,7 +256,7 @@ impl<'a> RowColumnResolution<'a> {
             // Fallback to schema order when header is empty (shouldn't happen for
             // real SSTables). Filter out partition/clustering keys (regular columns
             // only carry cell data) and split by row kind.
-            log::warn!("V5CompressedLegacy: reader.header.columns is empty, falling back to schema order (may cause column misalignment)");
+            tracing::warn!("V5CompressedLegacy: reader.header.columns is empty, falling back to schema order (may cause column misalignment)");
             let partition_key_names: std::collections::HashSet<&str> = schema
                 .partition_keys
                 .iter()

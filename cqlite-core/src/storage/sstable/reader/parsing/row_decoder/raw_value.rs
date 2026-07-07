@@ -460,7 +460,7 @@ impl V5CompressedLegacyParser {
                 // See Issue #481 regression fix.
                 if let Some(ref registry) = self.udt_registry {
                     if registry.get_udt(&self.keyspace, other).is_some() {
-                        log::debug!(
+                        tracing::debug!(
                             "parse_value_from_raw_bytes: type '{}' for '{}' resolved as UDT via registry, delegating to parse_raw_type_value",
                             other,
                             column_name,
@@ -471,7 +471,7 @@ impl V5CompressedLegacyParser {
                     }
                 }
                 // Truly unknown type: fall back to blob.
-                log::debug!(
+                tracing::debug!(
                     "parse_value_from_raw_bytes: unknown type '{}' for '{}', treating as blob ({} bytes)",
                     other,
                     column_name,

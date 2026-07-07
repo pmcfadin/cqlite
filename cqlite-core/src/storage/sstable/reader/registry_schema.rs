@@ -42,7 +42,7 @@ impl SSTableReader {
         let (keyspace, table_name) = match extract_keyspace_table_from_path(&self.file_path) {
             Ok(names) => names,
             Err(e) => {
-                log::debug!(
+                tracing::debug!(
                     "resolve_registry_schema: path parse failed for {}: {}. Using header names.",
                     self.file_path.display(),
                     e
@@ -59,7 +59,7 @@ impl SSTableReader {
         let registry = registry_rwlock.read().await;
         match registry.get_schema(&keyspace, &table_name).await {
             Ok(schema) => {
-                log::debug!(
+                tracing::debug!(
                     "resolve_registry_schema: cached registry schema for {}.{}",
                     keyspace,
                     table_name
@@ -67,7 +67,7 @@ impl SSTableReader {
                 self.registry_schema = Some(Arc::new(schema));
             }
             Err(e) => {
-                log::debug!(
+                tracing::debug!(
                     "resolve_registry_schema: no registry schema for {}.{}: {}",
                     keyspace,
                     table_name,

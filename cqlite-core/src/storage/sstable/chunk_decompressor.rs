@@ -293,7 +293,7 @@ impl ChunkDecompressor {
             )));
         }
 
-        log::debug!(
+        tracing::debug!(
             "Reading chunk {} at offset {} ({} bytes compressed, CRC OK)",
             chunk_index,
             compressed_offset,
@@ -305,7 +305,7 @@ impl ChunkDecompressor {
         // CompressedSequentialWriter.java:160-177: if compressedLen >= maxCompressedLen, use raw buffer.
         let max_compressed_length = self.compression_info.max_compressed_length as usize;
         if compressed_len >= max_compressed_length {
-            log::debug!(
+            tracing::debug!(
                 "Chunk {} is incompressible (compressed_len={} >= max_compressed_length={}), returning raw bytes",
                 chunk_index, compressed_len, max_compressed_length
             );
@@ -697,11 +697,11 @@ pub fn create_decompressor_from_file(
     // and has been removed.  The standard parse() is authoritative for all supported files.)
     let compression_info = CompressionInfo::parse(&compression_data)?;
 
-    log::info!("Loaded compression info:");
-    log::info!("   Algorithm: {}", compression_info.algorithm);
-    log::info!("   Chunk Length: {} bytes", compression_info.chunk_length);
-    log::info!("   Data Length: {} bytes", compression_info.data_length);
-    log::info!("   Chunk Count: {}", compression_info.chunk_offsets.len());
+    tracing::info!("Loaded compression info:");
+    tracing::info!("   Algorithm: {}", compression_info.algorithm);
+    tracing::info!("   Chunk Length: {} bytes", compression_info.chunk_length);
+    tracing::info!("   Data Length: {} bytes", compression_info.data_length);
+    tracing::info!("   Chunk Count: {}", compression_info.chunk_offsets.len());
 
     ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
 }

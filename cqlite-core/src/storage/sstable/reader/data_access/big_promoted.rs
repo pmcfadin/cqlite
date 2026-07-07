@@ -36,9 +36,9 @@ use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
 use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
-use log::debug;
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
+use tracing::debug;
 
 /// `ClusteringPrefix.Kind.CLUSTERING` ordinal (a full row clustering name). Block
 /// `firstName`/`lastName` for a row carry this kind byte; range-bound names carry a

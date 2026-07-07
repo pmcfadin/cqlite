@@ -60,10 +60,10 @@ use crate::parser::DataFormat;
 use crate::storage::cache::ChunkKey;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use log::{debug, warn};
 use std::io::SeekFrom;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncSeekExt;
+use tracing::{debug, warn};
 
 // Per-site cache key namespaces (design D4): fold a site discriminator into the
 // sstable-identity field of [`ChunkKey`] so numerically-overlapping keys from
@@ -268,7 +268,7 @@ impl SSTableReader {
 
         // Parse the stitched decompressed buffer
         let entries = parser.parse_block(&stitched_buffer, table_schema, self)?;
-        log::debug!(
+        tracing::debug!(
             "stitch_and_parse_all_chunks: Parsed {} entries from stitched buffer",
             entries.len()
         );
@@ -306,7 +306,7 @@ impl SSTableReader {
 
         let entries =
             parser.parse_block_with_cell_metadata(&stitched_buffer, table_schema, self)?;
-        log::debug!(
+        tracing::debug!(
             "stitch_and_parse_all_chunks_with_metadata: Parsed {} entries with metadata",
             entries.len()
         );
@@ -348,7 +348,7 @@ impl SSTableReader {
         while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
-                log::debug!(
+                tracing::debug!(
                     "stitch_all_chunks: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
                     chunk_count,
                     compressed_chunk.len(),
@@ -368,7 +368,7 @@ impl SSTableReader {
                 }
             } else {
                 // No compression (should not happen for V5CompressedLegacy)
-                log::warn!("stitch_all_chunks: No compression reader, using raw chunk data");
+                tracing::warn!("stitch_all_chunks: No compression reader, using raw chunk data");
                 compressed_chunk
             };
 
@@ -376,7 +376,7 @@ impl SSTableReader {
             chunk_count += 1;
         }
 
-        log::debug!(
+        tracing::debug!(
             "stitch_all_chunks: Stitched {} chunks, total buffer: {} bytes",
             chunk_count,
             stitched_buffer.len()

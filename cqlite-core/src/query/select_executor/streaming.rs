@@ -310,7 +310,7 @@ impl SelectExecutor {
                 _ => {
                     // Data-safety (issue #1694): log the step's variant name only,
                     // never its contents (which carry query literals/values).
-                    log::warn!(
+                    tracing::warn!(
                         "Streaming execution: skipping unsupported step {}",
                         step.variant_name()
                     );

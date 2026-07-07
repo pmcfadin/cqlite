@@ -8,7 +8,7 @@ use super::{IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderH
 use crate::types::{ScanRow, Value};
 use crate::Result;
 
-use log::{debug, info};
+use tracing::{debug, info};
 
 #[cfg(feature = "tombstones")]
 use super::super::tombstone_merger::GenerationValue;
@@ -17,7 +17,7 @@ use super::super::tombstone_merger::GenerationValue;
 use crate::{types::TableId, RowKey};
 
 #[cfg(feature = "tombstones")]
-use log::warn;
+use tracing::warn;
 
 impl SSTableReader {
     /// Get comprehensive reader health and performance metrics
@@ -200,7 +200,7 @@ impl SSTableReader {
     ) -> Result<Vec<(RowKey, ScanRow)>> {
         let mut results = Vec::new();
 
-        log::debug!(
+        tracing::debug!(
             "Processing {} key groups for multi-generation merge",
             entries.len()
         );
@@ -211,7 +211,7 @@ impl SSTableReader {
         let batches: Vec<_> = entries.chunks(BATCH_SIZE).collect();
 
         for (batch_idx, batch) in batches.iter().enumerate() {
-            log::debug!(
+            tracing::debug!(
                 "Processing batch {}/{} with {} entries",
                 batch_idx + 1,
                 batches.len(),
@@ -230,12 +230,12 @@ impl SSTableReader {
                     }
                 } else {
                     // Value was completely tombstoned
-                    log::debug!("Value for key {:?} was completely tombstoned", key);
+                    tracing::debug!("Value for key {:?} was completely tombstoned", key);
                 }
             }
         }
 
-        log::debug!(
+        tracing::debug!(
             "Multi-generation merge completed: {} final results from {} input groups",
             results.len(),
             entries.len()

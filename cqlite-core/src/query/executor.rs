@@ -392,7 +392,7 @@ impl QueryExecutor {
         let table = self.require_table(plan)?;
 
         #[cfg(debug_assertions)]
-        log::debug!("executor: Scanning for table: {:?}", table.name());
+        tracing::debug!("executor: Scanning for table: {:?}", table.name());
 
         // Issue #1691: a plan that requested parallelization is served by the
         // SAME bounded streaming scan the SelectExecutor uses (one whole-table

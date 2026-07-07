@@ -90,19 +90,19 @@ pub(super) fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usi
     // Count this TOC walk (issue #1658 A5 bench instrumentation — no decode effect).
     super::super::toc_walk_metrics::record_toc_walk();
     if input.len() < 8 {
-        log::debug!("Statistics.db too small for TOC: {} bytes", input.len());
+        tracing::debug!("Statistics.db too small for TOC: {} bytes", input.len());
         return None;
     }
 
     // Parse number of components
     let num_components = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
-    log::debug!("Statistics.db TOC: {} components", num_components);
+    tracing::debug!("Statistics.db TOC: {} components", num_components);
 
     // Sanity check: Cassandra has exactly 4 MetadataType enum values
     // (VALIDATION=0, COMPACTION=1, STATS=2, HEADER=3)
     // A value > 100 indicates corrupted or malicious data
     if num_components > 100 {
-        log::warn!(
+        tracing::warn!(
             "Suspicious num_components={} in Statistics.db TOC (expected <=4)",
             num_components
         );
@@ -121,7 +121,7 @@ pub(super) fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usi
         .and_then(|size| size.checked_add(toc_start))?;
 
     if input.len() < toc_size {
-        log::debug!(
+        tracing::debug!(
             "Statistics.db too small for {} TOC entries: {} bytes (need {})",
             num_components,
             input.len(),
@@ -149,7 +149,7 @@ pub(super) fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usi
             input[entry_offset + 7],
         ]) as usize;
 
-        log::debug!(
+        tracing::debug!(
             "TOC entry {}: type={} offset=0x{:x}",
             i,
             component_type,
@@ -157,7 +157,7 @@ pub(super) fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usi
         );
 
         if component_type == METADATA_TYPE_HEADER {
-            log::debug!(
+            tracing::debug!(
                 "Found HEADER component at offset 0x{:x} ({})",
                 component_offset,
                 component_offset
@@ -166,7 +166,7 @@ pub(super) fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usi
         }
     }
 
-    log::debug!("HEADER component not found in Statistics.db TOC");
+    tracing::debug!("HEADER component not found in Statistics.db TOC");
     None
 }
 

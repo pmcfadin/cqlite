@@ -137,7 +137,7 @@ pub fn build_row_from_scan(
             // Surface — never silently swallow — a decode failure, so a
             // missing partition-key column can't ship invisibly (Issue #586).
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "Failed to reconstruct partition-key columns from row key \
                      (len={} bytes) for {}.{}: {}",
                     key.0.len(),

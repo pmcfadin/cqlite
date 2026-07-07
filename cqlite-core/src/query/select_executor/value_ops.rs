@@ -63,7 +63,7 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
         });
     }
     // Data-safety (issue #1694): log the operand TYPES, never their values.
-    log::debug!(
+    tracing::debug!(
         "Cannot compare values of incompatible types: {:?} vs {:?}",
         a.data_type(),
         b.data_type()

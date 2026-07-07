@@ -563,7 +563,7 @@ impl SSTableManager {
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
 
-        log::debug!(
+        tracing::debug!(
             "SSTableManager::load_from_table_directories: processing {} directories",
             table_dirs.len()
         );
@@ -571,17 +571,17 @@ impl SSTableManager {
         for table_dir in table_dirs {
             // Check if directory exists
             if !self.platform.fs().exists(&table_dir).await? {
-                log::warn!("Table directory does not exist: {:?}", table_dir);
+                tracing::warn!("Table directory does not exist: {:?}", table_dir);
                 continue;
             }
 
-            log::debug!("SSTableManager scanning directory: {:?}", table_dir);
+            tracing::debug!("SSTableManager scanning directory: {:?}", table_dir);
 
             // Read directory contents
             let mut dir_entries = match self.platform.fs().read_dir(&table_dir).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    log::warn!("Cannot read table directory {:?}: {}", table_dir, e);
+                    tracing::warn!("Cannot read table directory {:?}: {}", table_dir, e);
                     continue;
                 }
             };
@@ -596,7 +596,7 @@ impl SSTableManager {
                     // See Issue #481.
                     if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
                         files_found += 1;
-                        log::debug!("SSTableManager found SSTable file: {:?}", path);
+                        tracing::debug!("SSTableManager found SSTable file: {:?}", path);
 
                         let sstable_id = SSTableId::from_filename(filename);
                         // Open + wire registries via the shared helper so refresh
@@ -604,7 +604,7 @@ impl SSTableManager {
                         // error is logged and skipped here (best-effort load).
                         match self.open_reader_with_schema(&path).await {
                             Ok(reader_arc) => {
-                                log::debug!(
+                                tracing::debug!(
                                     "SSTableManager successfully loaded SSTable: {}",
                                     sstable_id.0
                                 );
@@ -615,7 +615,7 @@ impl SSTableManager {
                                 // Fully-qualified "keyspace.table" key (or unqualified
                                 // fallback) via the shared keying helper (Issue #680).
                                 if let Some(key) = refresh::table_dir_table_key(&path) {
-                                    log::debug!(
+                                    tracing::debug!(
                                         "SSTableManager mapping table '{}' to SSTable '{}'",
                                         key,
                                         path.display()
@@ -625,7 +625,7 @@ impl SSTableManager {
                                         .or_insert_with(Vec::new)
                                         .push(reader_arc);
                                 } else {
-                                    log::warn!(
+                                    tracing::warn!(
                                         "SSTableManager could not extract table name from path: {}",
                                         path.display()
                                     );
@@ -633,22 +633,22 @@ impl SSTableManager {
                             }
                             Err(e) => {
                                 // Log warning but continue loading other SSTables
-                                log::warn!("Could not load SSTable file {:?}: {}", path, e);
+                                tracing::warn!("Could not load SSTable file {:?}: {}", path, e);
                             }
                         }
                     }
                 }
             }
 
-            log::debug!(
+            tracing::debug!(
                 "SSTableManager directory scan complete: found {} Data.db files in {:?}",
                 files_found,
                 table_dir
             );
         }
 
-        log::debug!("SSTableManager total SSTables loaded: {}", readers.len());
-        log::debug!(
+        tracing::debug!("SSTableManager total SSTables loaded: {}", readers.len());
+        tracing::debug!(
             "SSTableManager tables discovered: {:?}",
             table_readers.keys().collect::<Vec<_>>()
         );
@@ -709,7 +709,7 @@ impl SSTableManager {
                     );
 
                     if let Some(key) = table_key {
-                        log::debug!(
+                        tracing::debug!(
                             "SSTableManager mapping table '{}' to SSTable '{}'",
                             key,
                             path.display()
@@ -719,7 +719,7 @@ impl SSTableManager {
                             .or_insert_with(Vec::new)
                             .push(reader_arc);
                     } else {
-                        log::warn!(
+                        tracing::warn!(
                             "SSTableManager could not determine table name for: {}",
                             path.display()
                         );
@@ -727,7 +727,7 @@ impl SSTableManager {
                 }
                 Err(_) => {
                     // Skip problematic SSTable files during initialization
-                    log::warn!("Could not load SSTable file: {:?}", path);
+                    tracing::warn!("Could not load SSTable file: {:?}", path);
                 }
             }
         }
@@ -937,7 +937,7 @@ impl SSTableManager {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
-        log::debug!("SSTableManager::scan - Scanning table_id='{}'", table_id);
+        tracing::debug!("SSTableManager::scan - Scanning table_id='{}'", table_id);
 
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O. Holding it across the whole scan let one queued writer FIFO-park
@@ -945,14 +945,14 @@ impl SSTableManager {
         let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
 
         if reader_list.is_empty() {
-            log::debug!(
+            tracing::debug!(
                 "SSTableManager::scan - No readers found for table '{}'",
                 table_id
             );
             return Ok(Vec::new());
         }
 
-        log::debug!(
+        tracing::debug!(
             "SSTableManager::scan - Found {} readers for table '{}'",
             reader_list.len(),
             table_id
@@ -979,7 +979,7 @@ impl SSTableManager {
                 .await
                 {
                     Ok(merged) => {
-                        log::debug!(
+                        tracing::debug!(
                             "SSTableManager::scan - cross-generation merge produced {} rows",
                             merged.len()
                         );
@@ -988,7 +988,7 @@ impl SSTableManager {
                     Err(e) => {
                         // Never fail a read because the merge path hit an
                         // unsupported format; fall back to concatenation.
-                        log::warn!(
+                        tracing::warn!(
                             "SSTableManager::scan - cross-generation merge failed for '{}' ({}); \
                              falling back to per-reader concatenation",
                             table_id,
@@ -1023,7 +1023,7 @@ impl SSTableManager {
 
         let all_results = scan_merge::kway_merge_token_order(per_reader, limit);
 
-        log::debug!(
+        tracing::debug!(
             "SSTableManager::scan - Returning {} final results (token-ordered k-way merge)",
             all_results.len()
         );
@@ -1199,7 +1199,7 @@ impl SSTableManager {
         // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
         let candidates = Self::prune_candidates(&reader_list, partition_key);
 
-        log::debug!(
+        tracing::debug!(
             "SSTableManager::scan_partition_with_cell_metadata - {}/{} SSTables admit partition \
              key (len={}) for '{}'",
             candidates.len(),
@@ -1246,7 +1246,7 @@ impl SSTableManager {
                         return Ok((merged, true));
                     }
                     Err(e) => {
-                        log::warn!(
+                        tracing::warn!(
                             "SSTableManager::scan_partition_with_cell_metadata - cross-generation \
                              metadata merge failed for '{}' ({}); falling back to per-reader \
                              concatenation",
@@ -1363,7 +1363,7 @@ impl SSTableManager {
         // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
         let candidates = Self::prune_candidates(&reader_list, partition_key);
 
-        log::debug!(
+        tracing::debug!(
             "SSTableManager::scan_partition - {}/{} SSTables admit partition key (len={}) for '{}'",
             candidates.len(),
             reader_list.len(),
@@ -1409,7 +1409,7 @@ impl SSTableManager {
                         return Ok((merged, false));
                     }
                     Err(e) => {
-                        log::warn!(
+                        tracing::warn!(
                             "SSTableManager::scan_partition - cross-generation merge failed for \
                              '{}' ({}); falling back to per-reader concatenation",
                             table_id,
@@ -1609,7 +1609,7 @@ impl SSTableManager {
                     Err(e) => {
                         // Never fail a read because the merge path hit an
                         // unsupported format; fall back to concatenation.
-                        log::warn!(
+                        tracing::warn!(
                             "SSTableManager::scan_with_cell_metadata - cross-generation merge \
                              failed for '{}' ({}); falling back to per-reader concatenation",
                             table_id,
@@ -1871,7 +1871,7 @@ impl SSTableManager {
                 .await
                 {
                     Ok(rx) => {
-                        log::debug!(
+                        tracing::debug!(
                             "SSTableManager::scan_stream - cross-generation merge streaming \
                              (O(window), not materialized)"
                         );
@@ -1898,7 +1898,7 @@ impl SSTableManager {
                         // streaming channel's `Err` item gives the caller an honest,
                         // unambiguous cutoff instead of silently returning a
                         // half-reconciled table.
-                        log::warn!(
+                        tracing::warn!(
                             "SSTableManager::scan_stream - cross-generation merge failed for '{}' ({}); \
                              falling back to lazy per-reader streaming merge",
                             table_id,

@@ -52,7 +52,7 @@ pub use row_decoder::V5CompressedLegacyParser as PublicV5CompressedLegacyParser;
 use std::collections::HashMap;
 use std::path::Path;
 
-use log::{debug, error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     schema::{ClusteringColumn, Column, KeyColumn, TableSchema},
@@ -685,7 +685,7 @@ impl SSTableReader {
             match compression.decompress(&buffer) {
                 Ok(decompressed) => decompressed,
                 Err(e) => {
-                    log::warn!("Decompression failed at offset {}: {}", offset, e);
+                    tracing::warn!("Decompression failed at offset {}: {}", offset, e);
                     buffer // Fallback to raw data
                 }
             }

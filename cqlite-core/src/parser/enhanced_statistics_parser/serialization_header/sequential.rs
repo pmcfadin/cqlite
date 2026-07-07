@@ -23,11 +23,11 @@ pub(super) fn parse_serialization_header_at_offset(
 
     // Step 1: Expect 0x00 0x00 marker
     let (input, _) = tag(b"\x00\x00")(input)?;
-    log::debug!("Found 0x00 0x00 marker");
+    tracing::debug!("Found 0x00 0x00 marker");
 
     // Step 2: Parse partition key type (single byte length + string)
     let (input, partition_type_len) = parse_u8(input)?;
-    log::debug!("Partition key type length: {} bytes", partition_type_len);
+    tracing::debug!("Partition key type length: {} bytes", partition_type_len);
 
     let (input, partition_type_bytes) =
         nom::bytes::complete::take(partition_type_len as usize)(input)?;
@@ -35,11 +35,11 @@ pub(super) fn parse_serialization_header_at_offset(
         .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
         .to_string();
 
-    log::debug!("Partition key type: {}", partition_key_type);
+    tracing::debug!("Partition key type: {}", partition_key_type);
 
     // Step 3: Parse clustering key count (single byte)
     let (input, clustering_count) = parse_u8(input)?;
-    log::debug!("Clustering key count: {}", clustering_count);
+    tracing::debug!("Clustering key count: {}", clustering_count);
 
     // Step 4: Parse clustering key types
     let mut clustering_key_types = Vec::with_capacity(clustering_count as usize);
@@ -48,7 +48,7 @@ pub(super) fn parse_serialization_header_at_offset(
     for idx in 0..clustering_count {
         // Parse clustering type length (single byte)
         let (remaining, type_len) = parse_u8(input)?;
-        log::debug!("Clustering key {} type length: {} bytes", idx, type_len);
+        tracing::debug!("Clustering key {} type length: {} bytes", idx, type_len);
 
         let (remaining, type_bytes) = nom::bytes::complete::take(type_len as usize)(remaining)?;
         let clustering_type = std::str::from_utf8(type_bytes)
@@ -57,7 +57,7 @@ pub(super) fn parse_serialization_header_at_offset(
             })?
             .to_string();
 
-        log::debug!("Clustering key {} type: {}", idx, clustering_type);
+        tracing::debug!("Clustering key {} type: {}", idx, clustering_type);
 
         clustering_key_types.push(clustering_type);
         input = remaining;
@@ -67,7 +67,7 @@ pub(super) fn parse_serialization_header_at_offset(
     // When static_count = 0, this byte is 0x00 which made simple tables work.
     // But when static_count > 0, parsing failed.
     let (input, static_count) = parse_u8(input)?;
-    log::debug!("Static column count: {}", static_count);
+    tracing::debug!("Static column count: {}", static_count);
 
     // Step 5a: Parse static columns
     let mut static_columns = Vec::with_capacity(static_count as usize);
@@ -76,7 +76,7 @@ pub(super) fn parse_serialization_header_at_offset(
     for static_idx in 0..static_count {
         // Static column name length (single byte)
         let (remaining, name_len) = parse_u8(input)?;
-        log::debug!(
+        tracing::debug!(
             "Static column {} name length: {} bytes",
             static_idx,
             name_len
@@ -84,7 +84,7 @@ pub(super) fn parse_serialization_header_at_offset(
 
         // Validate name length (match validation in parse_regular_columns)
         if name_len == 0 || name_len > 200 {
-            log::debug!(
+            tracing::debug!(
                 "Static column {} name_len sanity check failed: {}",
                 static_idx,
                 name_len
@@ -105,7 +105,7 @@ pub(super) fn parse_serialization_header_at_offset(
 
         // Static column type length (VInt - can exceed 127 for collection types)
         let (remaining, type_len_u64) = parse_vuint(remaining)?;
-        log::debug!(
+        tracing::debug!(
             "Static column {} ('{}') type length: {} bytes",
             static_idx,
             column_name,
@@ -114,7 +114,7 @@ pub(super) fn parse_serialization_header_at_offset(
 
         // Validate type length (match validation in parse_regular_columns)
         if type_len_u64 == 0 || type_len_u64 > 5000 {
-            log::debug!(
+            tracing::debug!(
                 "Static column {} ('{}') type_len sanity check failed: {}",
                 static_idx,
                 column_name,
@@ -126,7 +126,7 @@ pub(super) fn parse_serialization_header_at_offset(
             )));
         }
         if type_len_u64 > 1000 {
-            log::warn!(
+            tracing::warn!(
                 "Unusually long static column type string: {} bytes (typical <1000)",
                 type_len_u64
             );
@@ -142,7 +142,7 @@ pub(super) fn parse_serialization_header_at_offset(
 
         let cql_type = convert_marshal_type_to_cql(&internal_type);
 
-        log::debug!(
+        tracing::debug!(
             "Static column {}: name='{}', type='{}' (CQL: '{}')",
             static_idx,
             column_name,
@@ -163,11 +163,11 @@ pub(super) fn parse_serialization_header_at_offset(
         input = remaining;
     }
 
-    log::debug!("Parsed {} static columns", static_columns.len());
+    tracing::debug!("Parsed {} static columns", static_columns.len());
 
     // Step 6: Parse regular column count (single byte)
     let (mut input, column_count) = parse_u8(input)?;
-    log::debug!("Regular column count: {}", column_count);
+    tracing::debug!("Regular column count: {}", column_count);
 
     // Step 7: Parse each regular column
     let mut columns = Vec::with_capacity(column_count as usize + static_columns.len());
@@ -175,7 +175,7 @@ pub(super) fn parse_serialization_header_at_offset(
     for col_idx in 0..column_count {
         // Column name length (single byte)
         let (remaining, name_len) = parse_u8(input)?;
-        log::debug!("Column {} name length: {} bytes", col_idx, name_len);
+        tracing::debug!("Column {} name length: {} bytes", col_idx, name_len);
 
         // Column name (UTF-8 string)
         let (remaining, name_bytes) = nom::bytes::complete::take(name_len as usize)(remaining)?;
@@ -187,7 +187,7 @@ pub(super) fn parse_serialization_header_at_offset(
 
         // Column type length (VInt - can exceed 127 for collection types)
         let (remaining, type_len_u64) = parse_vuint(remaining)?;
-        log::debug!(
+        tracing::debug!(
             "Column {} ('{}') type length: {} bytes",
             col_idx,
             column_name,
@@ -196,7 +196,7 @@ pub(super) fn parse_serialization_header_at_offset(
 
         // Validate type length (consistent with parse_regular_columns and static columns)
         if type_len_u64 == 0 || type_len_u64 > 5000 {
-            log::debug!(
+            tracing::debug!(
                 "Column {} ('{}') type_len validation failed: {}",
                 col_idx,
                 column_name,
@@ -208,7 +208,7 @@ pub(super) fn parse_serialization_header_at_offset(
             )));
         }
         if type_len_u64 > 1000 {
-            log::warn!(
+            tracing::warn!(
                 "Unusually long column type string: {} bytes (typical <1000)",
                 type_len_u64
             );
@@ -227,7 +227,7 @@ pub(super) fn parse_serialization_header_at_offset(
         // Convert to CQL type
         let cql_type = convert_marshal_type_to_cql(&internal_type);
 
-        log::debug!(
+        tracing::debug!(
             "Column {}: name='{}', type='{}' (CQL: '{}')",
             col_idx,
             column_name,
@@ -251,7 +251,7 @@ pub(super) fn parse_serialization_header_at_offset(
     let mut all_columns = static_columns;
     all_columns.append(&mut columns);
 
-    log::debug!(
+    tracing::debug!(
         "Successfully parsed SerializationHeader: {} partition keys, {} clustering keys, {} static columns, {} regular columns ({} total)",
         1, // Always 1 partition key in current implementation
         clustering_key_types.len(),
@@ -284,7 +284,7 @@ pub(super) fn parse_serialization_header_sequential(
 
     // Validate partition key type length
     if pk_type_len == 0 || pk_type_len > 5000 {
-        log::debug!(
+        tracing::debug!(
             "Invalid partition key type length: {} (expected 1-2000)",
             pk_type_len
         );
@@ -299,7 +299,7 @@ pub(super) fn parse_serialization_header_sequential(
         .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?
         .to_string();
 
-    log::debug!(
+    tracing::debug!(
         "Sequential parser: partition key type (len={}): {}",
         pk_type_len,
         partition_key_type
@@ -310,7 +310,7 @@ pub(super) fn parse_serialization_header_sequential(
     let clustering_count = clustering_count as usize;
 
     if clustering_count > 100 {
-        log::debug!(
+        tracing::debug!(
             "Invalid clustering key count: {} (expected 0-100)",
             clustering_count
         );
@@ -320,7 +320,7 @@ pub(super) fn parse_serialization_header_sequential(
         )));
     }
 
-    log::debug!(
+    tracing::debug!(
         "Sequential parser: clustering key count: {}",
         clustering_count
     );
@@ -332,7 +332,7 @@ pub(super) fn parse_serialization_header_sequential(
         let (remaining, type_len) = parse_vuint(input)?;
 
         if type_len == 0 || type_len > 5000 {
-            log::debug!("Invalid clustering key {} type length: {}", idx, type_len);
+            tracing::debug!("Invalid clustering key {} type length: {}", idx, type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
@@ -346,7 +346,7 @@ pub(super) fn parse_serialization_header_sequential(
             })?
             .to_string();
 
-        log::debug!(
+        tracing::debug!(
             "Sequential parser: clustering key {} type (len={}): {}",
             idx,
             type_len,
@@ -362,7 +362,7 @@ pub(super) fn parse_serialization_header_sequential(
     let static_count = static_count as usize;
 
     if static_count > 200 {
-        log::debug!(
+        tracing::debug!(
             "Invalid static column count: {} (expected 0-200)",
             static_count
         );
@@ -372,7 +372,7 @@ pub(super) fn parse_serialization_header_sequential(
         )));
     }
 
-    log::debug!("Sequential parser: static column count: {}", static_count);
+    tracing::debug!("Sequential parser: static column count: {}", static_count);
 
     let mut static_columns = Vec::with_capacity(static_count);
     let mut input = input;
@@ -382,7 +382,7 @@ pub(super) fn parse_serialization_header_sequential(
         let (remaining, name_len) = parse_vuint(input)?;
 
         if name_len == 0 || name_len > 200 {
-            log::debug!("Invalid static column {} name length: {}", idx, name_len);
+            tracing::debug!("Invalid static column {} name length: {}", idx, name_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
@@ -400,7 +400,7 @@ pub(super) fn parse_serialization_header_sequential(
         let (remaining, type_len) = parse_vuint(remaining)?;
 
         if type_len == 0 || type_len > 5000 {
-            log::debug!(
+            tracing::debug!(
                 "Invalid static column '{}' type length: {}",
                 column_name,
                 type_len
@@ -420,7 +420,7 @@ pub(super) fn parse_serialization_header_sequential(
 
         let cql_type = convert_marshal_type_to_cql(&internal_type);
 
-        log::debug!(
+        tracing::debug!(
             "Sequential parser: static column {}: name='{}', type='{}'",
             idx,
             column_name,
@@ -445,7 +445,7 @@ pub(super) fn parse_serialization_header_sequential(
     let regular_count = regular_count as usize;
 
     if regular_count > 500 {
-        log::debug!(
+        tracing::debug!(
             "Invalid regular column count: {} (expected 0-500)",
             regular_count
         );
@@ -455,7 +455,7 @@ pub(super) fn parse_serialization_header_sequential(
         )));
     }
 
-    log::debug!("Sequential parser: regular column count: {}", regular_count);
+    tracing::debug!("Sequential parser: regular column count: {}", regular_count);
 
     let mut regular_columns = Vec::with_capacity(regular_count);
     let mut input = input;
@@ -465,7 +465,7 @@ pub(super) fn parse_serialization_header_sequential(
         let (remaining, name_len) = parse_vuint(input)?;
 
         if name_len == 0 || name_len > 200 {
-            log::debug!("Invalid regular column {} name length: {}", idx, name_len);
+            tracing::debug!("Invalid regular column {} name length: {}", idx, name_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
@@ -483,7 +483,7 @@ pub(super) fn parse_serialization_header_sequential(
         let (remaining, type_len) = parse_vuint(remaining)?;
 
         if type_len == 0 || type_len > 5000 {
-            log::debug!(
+            tracing::debug!(
                 "Invalid regular column '{}' type length: {}",
                 column_name,
                 type_len
@@ -503,7 +503,7 @@ pub(super) fn parse_serialization_header_sequential(
 
         let cql_type = convert_marshal_type_to_cql(&internal_type);
 
-        log::debug!(
+        tracing::debug!(
             "Sequential parser: regular column {}: name='{}', type='{}'",
             idx,
             column_name,
@@ -527,7 +527,7 @@ pub(super) fn parse_serialization_header_sequential(
     let mut all_columns = static_columns;
     all_columns.extend(regular_columns);
 
-    log::debug!(
+    tracing::debug!(
         "Sequential parser complete: partition_key='{}', {} clustering keys, {} total columns",
         partition_key_type,
         clustering_key_types.len(),

@@ -321,7 +321,7 @@ pub(crate) fn finalize_flush_durability(
         Ok(()) => Ok(FlushDurabilityOutcome::Durable),
         Err(TruncateError::BeforeMutation(e)) => {
             // The WAL was never mutated; it is still a valid replay marker.
-            log::warn!(
+            tracing::warn!(
                 "WAL truncate failed before mutating the WAL ({e}). Leaving the \
                  WAL intact as a durable replay marker; the next startup will \
                  replay it idempotently (last-write-wins), so no data is lost."

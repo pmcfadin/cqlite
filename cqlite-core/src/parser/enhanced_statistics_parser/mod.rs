@@ -189,7 +189,7 @@ pub fn parse_nb_format_statistics_data(
                     // measured zero — never a guessed count (#1325, no-heuristics #28).
                     Ok(counts) => (counts.total_rows.unwrap_or(0), counts.partition_count),
                     Err(e) => {
-                        log::debug!(
+                        tracing::debug!(
                             "Best-effort authoritative row/partition-count decode failed; \
                              leaving RowStatistics counts at 0: {:?}",
                             e
@@ -262,7 +262,7 @@ pub fn parse_nb_format_statistics_data(
             ))
         }
         Err(e) => {
-            log::debug!(
+            tracing::debug!(
                 "Failed to parse minimal EncodingStats from Statistics.db: {:?}",
                 e
             );
@@ -307,7 +307,7 @@ pub fn parse_enhanced_statistics_file<'a>(
 
     match result {
         Ok((row_stats, mut timestamp_stats, partition_columns, clustering_columns, columns)) => {
-            log::debug!(
+            tracing::debug!(
                 "Successfully parsed Statistics.db serialization header: {} partition keys, {} clustering keys, {} regular columns",
                 partition_columns.len(),
                 clustering_columns.len(),
@@ -352,7 +352,7 @@ pub fn parse_enhanced_statistics_file<'a>(
                         extras.tombstone_drop_times
                     }
                     Err(e) => {
-                        log::debug!(
+                        tracing::debug!(
                             "Best-effort STATS-extras decode failed; keeping placeholders: {:?}",
                             e
                         );
@@ -382,7 +382,7 @@ pub fn parse_enhanced_statistics_file<'a>(
         }
         Err(e) => {
             // Convert Error to nom::Err
-            log::warn!("Failed to parse nb-format Statistics.db: {}", e);
+            tracing::warn!("Failed to parse nb-format Statistics.db: {}", e);
             Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,

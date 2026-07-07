@@ -244,7 +244,7 @@ impl CassandraVersion {
             // This is a modern format with VInt encoding for row data but
             // byte-comparable encoding for keys. Log for investigation.
             CassandraVersion::V5_0NewBigFormat => {
-                log::warn!("V5_0NewBigFormat detected (magic 0xD4645400), using V5CompressedLegacy classification");
+                tracing::warn!("V5_0NewBigFormat detected (magic 0xD4645400), using V5CompressedLegacy classification");
                 DataFormat::V5CompressedLegacy
             }
 
@@ -453,15 +453,15 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
     let (input, magic) = be_u32(input)?;
 
     // Log magic number for debugging
-    log::debug!("Parsed magic number: 0x{:08X}", magic);
+    tracing::debug!("Parsed magic number: 0x{:08X}", magic);
 
     // Detect Cassandra version from magic number
     let cassandra_version = CassandraVersion::from_magic_number(magic).ok_or_else(|| {
-        log::error!("Unknown magic number: 0x{:08X}", magic);
+        tracing::error!("Unknown magic number: 0x{:08X}", magic);
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
     })?;
 
-    log::debug!("Detected Cassandra version: {:?}", cassandra_version);
+    tracing::debug!("Detected Cassandra version: {:?}", cassandra_version);
 
     // Ensure we have enough data for version
     if input.len() < 2 {
@@ -475,7 +475,7 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
     // The previous hardcoded 25-byte skip was incorrect and based on misanalysis
     let (input, version) = be_u16(input)?;
 
-    log::debug!("Parsed version: 0x{:04X}", version);
+    tracing::debug!("Parsed version: 0x{:04X}", version);
 
     // Validate version - be more permissive for different Cassandra versions
     match cassandra_version {
@@ -485,7 +485,7 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
         | CassandraVersion::V5_0Release => {
             // Standard versions support 0x0001
             if version != SUPPORTED_VERSION {
-                log::warn!(
+                tracing::warn!(
                     "Unsupported version 0x{:04X} for {:?}, expected 0x{:04X}",
                     version,
                     cassandra_version,
@@ -515,7 +515,7 @@ pub fn parse_magic_and_version(input: &[u8]) -> IResult<&[u8], (CassandraVersion
             // Accept a wider range of versions for forward compatibility
             // V5_0DataFormat uses 0x0010, V5_0FormatC uses 0xF21F, V5_0FormatD uses 0xF209
             if version == 0 {
-                log::warn!(
+                tracing::warn!(
                     "Suspicious version 0x{:04X} for {:?}",
                     version,
                     cassandra_version
