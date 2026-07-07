@@ -268,11 +268,13 @@ pub struct PartitionSizeBucket {
 ///       metadata1(4) + metadata2(4) + metadata3(4) + checksum(4) = 32 bytes
 ///     - Authoritative marker: version == 4
 ///
-/// Any other version number is unsupported and results in a parse error. The
-/// `1..=3` branch below is retained only so this standalone helper fails
-/// gracefully rather than misclassifying a lower version; pre-`na` (Cassandra
-/// 3.x/4.x, `ma`–`me`) is OUT OF SCOPE per the version floor and SHALL NOT be
-/// relied on for correctness.
+/// This function successfully parses `1..=3` headers (pre-`na`, Cassandra
+/// 3.x/4.x) but those versions are UNSUPPORTED and OUT OF SCOPE per the version
+/// floor — they are REJECTED downstream by `BigVersionGates::from_version` /
+/// `SSTableReader::open` with `Error::UnsupportedVersion`, not here. The `1..=3`
+/// branch exists only so this standalone helper can parse a header structure
+/// without misclassifying a lower version; it SHALL NOT be relied on for
+/// correctness. Other versions (0, 5+) return a parse error.
 pub fn parse_statistics_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> {
     let (remaining, version) = be_u32(input)?;
 

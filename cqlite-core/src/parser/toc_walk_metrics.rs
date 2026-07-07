@@ -11,27 +11,59 @@
 //! real number rather than a guess. It is NOT a decoding heuristic: nothing in
 //! the parse path reads the count, so it has no effect on correctness (#28).
 //!
-//! The increment is a single `Relaxed` atomic add — negligible on the open path.
-
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Process-wide count of Statistics.db TOC walks since the last reset.
-static TOC_WALKS: AtomicU64 = AtomicU64::new(0);
+//! The instrumentation is gated behind `cli-helpers` (roborev #1658): the
+//! counter is only read by the cli-helpers-gated bench, so production builds
+//! (default features) carry zero overhead — `record_toc_walk()` compiles to an
+//! empty inline no-op.
 
 /// Record that a Statistics.db TOC was walked once. Called at each TOC-walk site.
+/// Gated behind cli-helpers so production builds carry zero overhead (roborev #1658).
 #[inline]
+#[cfg(feature = "cli-helpers")]
 pub(crate) fn record_toc_walk() {
-    TOC_WALKS.fetch_add(1, Ordering::Relaxed);
+    gated::TOC_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Read the current TOC-walk count (process-wide, since the last reset).
+/// No-op in production builds (when cli-helpers is disabled).
+#[inline]
+#[cfg(not(feature = "cli-helpers"))]
+pub(crate) fn record_toc_walk() {
+    // Empty — zero overhead in default/production builds.
+}
+
+// The counter and its accessors are only compiled when cli-helpers is enabled
+// (the bench that reads them is also gated on cli-helpers).
+#[cfg(feature = "cli-helpers")]
+mod gated {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Process-wide count of Statistics.db TOC walks since the last reset.
+    pub(super) static TOC_WALKS: AtomicU64 = AtomicU64::new(0);
+
+    /// Read the current TOC-walk count (process-wide, since the last reset).
+    pub fn toc_walk_count() -> u64 {
+        TOC_WALKS.load(Ordering::Relaxed)
+    }
+
+    /// Reset the TOC-walk counter to zero and return the value it held. Lets a
+    /// caller (e.g. the cold-open bench) measure the walks of a single open in
+    /// isolation: reset, do one open, then read `toc_walk_count()`.
+    pub fn reset_toc_walk_count() -> u64 {
+        TOC_WALKS.swap(0, Ordering::Relaxed)
+    }
+}
+
+#[cfg(feature = "cli-helpers")]
+pub use gated::{reset_toc_walk_count, toc_walk_count};
+
+// When cli-helpers is disabled, provide stub functions so the bench module
+// (which is itself gated on cli-helpers) still compiles if accidentally reached.
+#[cfg(not(feature = "cli-helpers"))]
 pub fn toc_walk_count() -> u64 {
-    TOC_WALKS.load(Ordering::Relaxed)
+    0
 }
 
-/// Reset the TOC-walk counter to zero and return the value it held. Lets a
-/// caller (e.g. the cold-open bench) measure the walks of a single open in
-/// isolation: reset, do one open, then read `toc_walk_count()`.
+#[cfg(not(feature = "cli-helpers"))]
 pub fn reset_toc_walk_count() -> u64 {
-    TOC_WALKS.swap(0, Ordering::Relaxed)
+    0
 }
