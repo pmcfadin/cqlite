@@ -350,16 +350,6 @@ impl SSTableReader {
             ScanAdmission::Exempt => None,
         };
 
-        // Issue #815: independent per-scan cursor — no cross-scan serialization.
-        let cursor = self.new_scan_cursor().await?;
-
-        // Position at the start of the data section (mirrors sequential_scan).
-        let header_size = self.calculate_header_size();
-        {
-            let mut file_guard = cursor.file.lock().await;
-            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-        }
-
         // Issue #1577 (owner-chosen fix, 2026-07-06): BTI (`da`) readers MUST use
         // the SAME per-reader decode path `SSTableReader::scan` uses — the trie-walk
         // `bti_scan_with_metadata` — NOT the block-by-block `read_next_block` +
@@ -397,6 +387,21 @@ impl SSTableReader {
                 }
             }
             return Ok(());
+        }
+
+        // Issue #815: independent per-scan cursor — no cross-scan serialization.
+        // Issue #1577 (rust-reviewer nit): created only for the non-BTI path — the
+        // BTI branch above mints its own cursor inside `bti_scan_with_metadata` and
+        // returned already, so opening+seeking one here for BTI was a wasted
+        // open(2)+seek. Mirrors how `scan`/`get_all_entries`/`scan_with_cell_metadata`
+        // gate cursor creation after their BTI early-return.
+        let cursor = self.new_scan_cursor().await?;
+
+        // Position at the start of the data section (mirrors sequential_scan).
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
 
         if self.requires_chunk_stitching() {
