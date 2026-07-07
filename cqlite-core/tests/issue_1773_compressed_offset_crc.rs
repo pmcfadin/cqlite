@@ -35,6 +35,7 @@
 //! on a present fixture fails regardless of the env flag.
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
+use cqlite_core::types::ScanRow;
 use cqlite_core::{Config, Error, Platform};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -182,6 +183,120 @@ async fn compressed_offset_read_on_clean_chunk_returns_some() {
         Err(e) => panic!(
             "compressed offset read on the CLEAN lz4_table chunk must succeed \
              (CRC valid, decodable), got Err: {e}"
+        ),
+    }
+}
+
+/// Unwrap a `read_value_at_offset` `Ok(Some(_))` to its raw bytes, panicking on any
+/// other shape (the offset-read path only ever emits `ScanRow::RawRow`, issue #1334).
+fn raw_bytes(row: ScanRow) -> Vec<u8> {
+    match row {
+        ScanRow::RawRow(bytes) => bytes,
+        other => panic!("expected ScanRow::RawRow from the offset-read path, got {other:?}"),
+    }
+}
+
+/// `lz4_table`'s `CompressionInfo.db` declares `chunk_length = 16384` (0x4000) — the
+/// boundary between compressed chunk 0 and chunk 1 of the uncompressed Data.db.
+const CHUNK_BOUNDARY: u64 = 16384;
+
+/// Roborev follow-up (issue #1773 HIGH blocker) — a window that STRADDLES a chunk
+/// boundary must be assembled from BOTH covering chunks in full, never silently
+/// truncated to whichever chunk decoded first. Proven without an external oracle: the
+/// straddling read's bytes must equal the concatenation of two independently-verified
+/// single-chunk reads covering the same two half-windows.
+#[tokio::test]
+async fn compressed_offset_read_spans_chunk_boundary_matches_single_chunk_reads() {
+    let Some(path) = fixture_or_gate(CLEAN_DATA_DB) else {
+        return;
+    };
+    let reader = open_reader(&path).await;
+
+    // Half A: last 4 bytes of chunk 0. Half B: first 4 bytes of chunk 1.
+    let half_a = raw_bytes(
+        reader
+            .read_value_at_offset(CHUNK_BOUNDARY - 4, 4)
+            .await
+            .expect("chunk-0-only read must succeed")
+            .expect("chunk-0-only read must return Some"),
+    );
+    let half_b = raw_bytes(
+        reader
+            .read_value_at_offset(CHUNK_BOUNDARY, 4)
+            .await
+            .expect("chunk-1-only read must succeed")
+            .expect("chunk-1-only read must return Some"),
+    );
+    assert_eq!(half_a.len(), 4);
+    assert_eq!(half_b.len(), 4);
+
+    // The spanning read covers the exact same 8 bytes across both chunks.
+    let spanning = raw_bytes(
+        reader
+            .read_value_at_offset(CHUNK_BOUNDARY - 4, 8)
+            .await
+            .expect("multi-chunk spanning read must succeed")
+            .expect("multi-chunk spanning read must return Some"),
+    );
+
+    assert_eq!(
+        spanning.len(),
+        8,
+        "spanning read must return the FULL requested length (8 bytes), not a partial \
+         window truncated to a single chunk"
+    );
+    let mut expected = half_a;
+    expected.extend_from_slice(&half_b);
+    assert_eq!(
+        spanning, expected,
+        "spanning read must equal the concatenation of the two half-windows it covers \
+         (proves multi-chunk assembly, not silent truncation to one chunk)"
+    );
+}
+
+/// Roborev follow-up (issue #1773 HIGH blocker) — an offset+size that extends past the
+/// end of the compressed Data.db's covering chunks MUST fail closed with a typed
+/// corruption error, never `Ok` with partial or empty bytes. `200000` is well past
+/// `lz4_table`'s last valid chunk (12 chunks of `chunk_length=16384`, chunk index 12
+/// does not exist), so this exercises the "requires chunk N past EOF" guard.
+///
+/// FAILS on pre-fix code: `read_compressed_chunk_at` returning `None` mid-range used
+/// to `break` and return whatever partial `assembled` bytes existed (here: none, since
+/// the very first covering chunk is already past EOF) as `Ok(Vec::new())` — this test
+/// asserts `Err` instead.
+#[tokio::test]
+async fn compressed_offset_read_past_eof_errors_not_partial() {
+    let Some(path) = fixture_or_gate(CLEAN_DATA_DB) else {
+        return;
+    };
+    let reader = open_reader(&path).await;
+
+    let result = reader.read_value_at_offset(200_000, 16).await;
+
+    match result {
+        Err(err) => {
+            assert!(
+                !err.is_recoverable(),
+                "past-EOF compressed offset read must be a non-recoverable error, got \
+                 recoverable: {err}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.to_lowercase().contains("eof")
+                    || msg.to_lowercase().contains("chunk")
+                    || msg.to_lowercase().contains("corrupt"),
+                "past-EOF error should identify itself as an out-of-range/corrupt chunk \
+                 read, got: {msg}"
+            );
+        }
+        Ok(None) => panic!(
+            "compressed offset read past EOF returned Ok(None); it must fail closed \
+             with a typed corruption error (issue #1773 roborev)."
+        ),
+        Ok(Some(v)) => panic!(
+            "compressed offset read past EOF returned Ok(Some({v:?})) — partial/garbage \
+             data past the end of the compressed chunks; it must fail closed with a \
+             typed corruption error (issue #1773 roborev)."
         ),
     }
 }

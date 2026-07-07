@@ -70,6 +70,13 @@ impl SSTableReader {
             // per-chunk CRC32 is checked HERE, before decompression. header_offset is
             // 0 for nb/BTI (CompressionInfo chunk offsets are absolute from Data.db
             // byte 0), matching the cursor and BTI point-read paths (issue #1573 C2).
+            //
+            // Fail CLOSED (issue #1773 roborev): for a VALID offset+size every chunk
+            // in `first_chunk..=last_chunk` exists, so a `None` (EOF) here means the
+            // requested range does not actually fit in this compressed Data.db — a
+            // corrupt/out-of-range offset or size. Returning the partial `assembled`
+            // bytes as `Ok` would silently truncate; this must surface as a typed,
+            // non-recoverable corruption error instead.
             let Some(compressed) = block_io::read_compressed_chunk_at(
                 self.point_source.as_ref(),
                 comp_info,
@@ -78,7 +85,10 @@ impl SSTableReader {
                 0,
             )?
             else {
-                break; // EOF — no further chunks to cover the requested window.
+                return Err(Error::corruption(format!(
+                    "compressed offset read requires chunk {chunk_idx} past EOF for range \
+                     [{start}, {end}) — corrupt or out-of-range offset/size"
+                )));
             };
 
             // Incompressible-chunk fallback (Bug #639, epic #970): Cassandra stores a
@@ -97,14 +107,25 @@ impl SSTableReader {
             assembled.extend_from_slice(&decompressed);
         }
 
-        // Slice the requested window out of the assembled uncompressed chunk bytes,
-        // clamped to what actually decoded (a short final chunk yields fewer bytes).
+        // Slice the requested window out of the assembled uncompressed chunk bytes.
+        //
+        // Fail CLOSED (issue #1773 roborev): for a VALID offset+size the assembled
+        // chunks fully cover `[start, end)`. If they do not — a short final chunk, or
+        // `within_start` itself past what decoded — the offset/size is corrupt or
+        // out-of-range; return a typed corruption error rather than truncating to
+        // `Ok(partial)` / `Ok(empty)`.
         let window_base = first_chunk * chunk_length;
         let within_start = start - window_base;
-        if within_start >= assembled.len() {
-            return Ok(Vec::new());
+        let requested_end = end - window_base;
+        if requested_end > assembled.len() {
+            return Err(Error::corruption(format!(
+                "compressed offset read range [{start}, {end}) is short by {} bytes after \
+                 decompressing chunks {first_chunk}..={last_chunk} (assembled {} bytes) — \
+                 corrupt or out-of-range offset/size",
+                requested_end - assembled.len(),
+                assembled.len()
+            )));
         }
-        let within_end = (end - window_base).min(assembled.len());
-        Ok(assembled[within_start..within_end].to_vec())
+        Ok(assembled[within_start..requested_end].to_vec())
     }
 }
