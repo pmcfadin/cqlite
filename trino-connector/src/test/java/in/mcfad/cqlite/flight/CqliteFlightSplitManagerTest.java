@@ -67,6 +67,24 @@ class CqliteFlightSplitManagerTest {
     }
 
     @Test
+    void stampsSnapshotOnEverySplit() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(range("-100", "0", Map.of("dc1", List.of("10.0.0.2:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("10.0.0.3:7000")))));
+
+        // Snapshot mode: every split carries the same snapshot name (issue #2105).
+        var snap = CqliteFlightSplitManager.buildSplits(
+                TABLE, resp, "dc1", 8815, java.util.Optional.of("cqlite-q1"));
+        assertEquals(2, snap.size());
+        snap.forEach(s -> assertEquals(java.util.Optional.of("cqlite-q1"), s.snapshot()));
+
+        // Live-dir overload: no snapshot on any split.
+        var live = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        live.forEach(s -> assertEquals(java.util.Optional.empty(), s.snapshot()));
+    }
+
+    @Test
     void skipsRangesWithNoReplica() {
         var resp = new TokenRangeReplicasResponse(
                 List.of(),

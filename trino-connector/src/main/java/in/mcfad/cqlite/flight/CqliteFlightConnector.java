@@ -15,12 +15,16 @@ import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 public class CqliteFlightConnector implements Connector {
     private final CqliteFlightConfig config;
     private final SidecarClient sidecar;
+    private final SnapshotManager snapshots;
     private final BufferAllocator allocator;
     private final CqliteFlightClient flight;
 
     public CqliteFlightConnector(CqliteFlightConfig config, SidecarClient sidecar) {
         this.config = config;
         this.sidecar = sidecar;
+        // One shared snapshot manager (issue #2105): the split manager creates the
+        // per-query snapshot, the metadata cleans it up — both must see the same registry.
+        this.snapshots = new SnapshotManager(sidecar, config.readMode(), config.snapshotTtl());
         this.allocator = new RootAllocator();
         this.flight = new CqliteFlightClient(allocator);
     }
@@ -33,12 +37,12 @@ public class CqliteFlightConnector implements Connector {
 
     @Override
     public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle) {
-        return new CqliteFlightMetadata(config, sidecar, flight);
+        return new CqliteFlightMetadata(config, sidecar, flight, snapshots);
     }
 
     @Override
     public ConnectorSplitManager getSplitManager() {
-        return new CqliteFlightSplitManager(config, sidecar);
+        return new CqliteFlightSplitManager(config, sidecar, snapshots);
     }
 
     @Override

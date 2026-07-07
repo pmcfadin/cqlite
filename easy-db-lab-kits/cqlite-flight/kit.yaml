@@ -1,0 +1,38 @@
+name: cqlite-flight
+type: db
+description: "Arrow Flight server exposing each Cassandra node's local SSTables as queryable Arrow streams (one co-located pod per db node)"
+version: "1.0.0"
+collision-check: true
+
+endpoints:
+  - name: "Arrow Flight gRPC"
+    node-type: db
+    port: 8815
+    type: native
+
+args:
+  - flag: --tag
+    variable: TAG
+    description: "cqlite-flight image tag (ghcr.io/pmcfadin/cqlite-flight:<tag>)"
+    type: string
+    default: "latest"
+  - flag: --flight-port
+    variable: FLIGHT_PORT
+    description: "Arrow Flight gRPC listen port (host + container, via hostNetwork)"
+    type: int
+    default: "8815"
+  - flag: --data-dir
+    variable: CASSANDRA_DATA_DIR
+    description: "Host path to the Cassandra data directory, mounted read-only into the pod"
+    type: string
+    default: "/mnt/db1/cassandra/data"
+  - flag: --data-gid
+    variable: CASSANDRA_DATA_GID
+    description: "Host GID that owns the Cassandra data dir; added as a pod supplementalGroup so the image's uid-10001 process can read it"
+    type: int
+    default: "999"
+  - flag: --otel-endpoint
+    variable: OTEL_ENDPOINT
+    description: "OTLP gRPC endpoint for metrics/traces (default: the node-local OTel collector, reachable at localhost since this pod also runs with hostNetwork)"
+    type: string
+    default: "http://localhost:4317"

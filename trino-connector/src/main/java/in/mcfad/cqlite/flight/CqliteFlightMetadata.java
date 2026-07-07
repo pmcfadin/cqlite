@@ -54,6 +54,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     private final CqliteFlightConfig config;
     private final SidecarClient sidecar;
     private final CqliteFlightClient flight;
+    private final SnapshotManager snapshots;
 
     /**
      * Per-{@code (keyspace, table)} memo of the non-aggregated logical row-count
@@ -76,9 +77,28 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             new ConcurrentHashMap<>();
 
     public CqliteFlightMetadata(CqliteFlightConfig config, SidecarClient sidecar, CqliteFlightClient flight) {
+        this(config, sidecar, flight, null);
+    }
+
+    public CqliteFlightMetadata(
+            CqliteFlightConfig config, SidecarClient sidecar, CqliteFlightClient flight, SnapshotManager snapshots) {
         this.config = config;
         this.sidecar = sidecar;
         this.flight = flight;
+        this.snapshots = snapshots;
+    }
+
+    /**
+     * Query teardown (issue #2105): best-effort delete any per-query Sidecar snapshot this
+     * query created. Trino calls this once when the query finishes (success or failure), so
+     * it is the lifecycle counterpart to the split manager's create. A miss is covered by
+     * the snapshot's Sidecar-side TTL backstop.
+     */
+    @Override
+    public void cleanupQuery(ConnectorSession session) {
+        if (snapshots != null) {
+            snapshots.cleanup(session.getQueryId());
+        }
     }
 
     @Override

@@ -1,12 +1,104 @@
 package in.mcfad.cqlite.flight.sidecar;
 
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
+
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SidecarClientTest {
+
+    // ── Snapshot path builders (exact Sidecar v1 wire path, no HTTP) ────────────
+
+    @Test
+    void buildsSnapshotRoutePath() {
+        // apache/cassandra-sidecar ApiEndpointsV1.SNAPSHOTS_ROUTE.
+        assertEquals("/api/v1/keyspaces/ks/tables/t/snapshots/cqlite-q1",
+                SidecarClient.snapshotPath("ks", "t", "cqlite-q1"));
+    }
+
+    @Test
+    void createPathAppendsTtlQueryParam() {
+        assertEquals("/api/v1/keyspaces/ks/tables/t/snapshots/cqlite-q1?ttl=6h",
+                SidecarClient.snapshotCreatePath("ks", "t", "cqlite-q1", Optional.of("6h")));
+    }
+
+    @Test
+    void createPathOmitsTtlWhenAbsentOrBlank() {
+        String bare = "/api/v1/keyspaces/ks/tables/t/snapshots/cqlite-q1";
+        assertEquals(bare, SidecarClient.snapshotCreatePath("ks", "t", "cqlite-q1", Optional.empty()));
+        assertEquals(bare, SidecarClient.snapshotCreatePath("ks", "t", "cqlite-q1", Optional.of("  ")));
+    }
+
+    @Test
+    void rejectsUnsafeSnapshotName() {
+        assertThrows(SidecarClient.SidecarException.class,
+                () -> SidecarClient.snapshotPath("ks", "t", "../../etc/passwd"));
+        assertThrows(SidecarClient.SidecarException.class,
+                () -> SidecarClient.snapshotPath("ks", "t", "a?b"));
+    }
+
+    @Test
+    void rejectsDottedSnapshotName() {
+        // The connector's allowlist must not be looser than the server's
+        // pathsafe::validate_snapshot (cqlite-flight), which rejects '.' too.
+        assertThrows(SidecarClient.SidecarException.class,
+                () -> SidecarClient.snapshotPath("ks", "t", "cqlite-q1.bak"));
+        assertThrows(SidecarClient.SidecarException.class,
+                () -> SidecarClient.snapshotPath("ks", "t", "a.b"));
+    }
+
+    // ── Snapshot HTTP round-trip against an in-process fake Sidecar ─────────────
+
+    @Test
+    void createAndClearSnapshotIssueCorrectMethodAndPath() throws Exception {
+        List<String> seen = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            seen.add(ex.getRequestMethod() + " " + ex.getRequestURI());
+            ex.sendResponseHeaders(200, -1);
+            ex.close();
+        });
+        server.start();
+        try {
+            SidecarClient client = new SidecarClient(
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()));
+            client.createSnapshot("ks", "t", "cqlite-q1", Optional.of("6h"));
+            client.clearSnapshot("ks", "t", "cqlite-q1");
+        } finally {
+            server.stop(0);
+        }
+
+        assertEquals(List.of(
+                "PUT /api/v1/keyspaces/ks/tables/t/snapshots/cqlite-q1?ttl=6h",
+                "DELETE /api/v1/keyspaces/ks/tables/t/snapshots/cqlite-q1"), seen);
+    }
+
+    @Test
+    void createSnapshotFailsClosedOnNon2xx() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            ex.sendResponseHeaders(500, -1);
+            ex.close();
+        });
+        server.start();
+        try {
+            SidecarClient client = new SidecarClient(
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()));
+            SidecarClient.SidecarException ex = assertThrows(SidecarClient.SidecarException.class,
+                    () -> client.createSnapshot("ks", "t", "cqlite-q1", Optional.empty()));
+            assertEquals(500, ex.statusCode());
+        } finally {
+            server.stop(0);
+        }
+    }
 
     @Test
     void parsesRingResponse() {

@@ -1,0 +1,14 @@
+# Auto-discovered by the trino kit's own bin/update-catalogs.sh, which scans
+# every sibling kit directory for a `trino-catalog.properties` file (see
+# docs/user-guide/install-trino.md "Adding Trino Catalogs for Custom Kits").
+# The catalog name Trino registers this under is this kit's INSTALLED
+# DIRECTORY name, i.e. whatever `--kit <name>` was passed to
+# `easy-db-lab kit install --from ...` — install with `--kit cqlite` to get
+# the clean `cqlite.<keyspace>.<table>` catalog name used throughout the
+# connector's own docs (see this kit's README, "Install order").
+connector.name=cqlite
+cqlite.sidecar-uri=__SIDECAR_URI__
+cqlite.flight-port=__FLIGHT_PORT__
+# Optional preferred datacenter for split placement. Left blank (commented)
+# when --local-datacenter was not passed at install time.
+# cqlite.local-datacenter=__LOCAL_DATACENTER__

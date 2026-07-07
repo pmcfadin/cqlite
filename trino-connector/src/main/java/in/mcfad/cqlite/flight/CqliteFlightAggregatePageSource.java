@@ -65,18 +65,7 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
 
         // Fan out: one DoGet per range to its pinned replica, accumulating partials.
         for (CqliteFlightSplit range : split.ranges()) {
-            byte[] ticket = FlightTicketJson.build(
-                    range.keyspace(),
-                    range.table(),
-                    range.ddl(),
-                    Optional.empty(),
-                    Optional.of(range.tokenStart()),
-                    Optional.of(range.tokenEnd()),
-                    range.wraparound(),
-                    Optional.empty(), // aggregation defines the output projection
-                    List.of(),
-                    filterNode,
-                    aggregationNode);
+            byte[] ticket = buildRangeTicket(range, filterNode, aggregationNode);
             try (CqliteFlightClient.StreamHandle handle =
                     client.openStream(range.host(), range.port(), ticket)) {
                 while (handle.stream().next()) {
@@ -87,6 +76,28 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
 
         Page page = buildPage(merger.finish());
         return SourcePage.create(page);
+    }
+
+    /**
+     * Build the DoGet ticket for one token range's finalize fan-out. Package-private
+     * (not private) so {@code CqliteFlightAggregatePageSourceTest} exercises this exact
+     * production code path — it must carry the range's {@link CqliteFlightSplit#snapshot()}
+     * through to the ticket's {@code snapshot} field: present in {@link ReadMode#SNAPSHOT},
+     * {@link Optional#empty()} in {@link ReadMode#LIVE} (issue #2105).
+     */
+    static byte[] buildRangeTicket(CqliteFlightSplit range, JsonNode filterNode, JsonNode aggregationNode) {
+        return FlightTicketJson.build(
+                range.keyspace(),
+                range.table(),
+                range.ddl(),
+                range.snapshot(), // snapshot mode names it; live mode = empty (#2105)
+                Optional.of(range.tokenStart()),
+                Optional.of(range.tokenEnd()),
+                range.wraparound(),
+                Optional.empty(), // aggregation defines the output projection
+                List.of(),
+                filterNode,
+                aggregationNode);
     }
 
     /** Read each partial row from one Arrow batch into the merger. */
