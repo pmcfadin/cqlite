@@ -494,10 +494,16 @@ impl SSTableReader {
         key: &RowKey,
         fully_qualified_match: bool,
     ) -> Result<Option<ScanRow>> {
-        // 1. Resolve the uncompressed Data.db offset via the trie.
-        let offset = match self.lookup_partition_via_bti_trie(key.as_bytes())? {
-            Some(off) => off as usize,
-            None => return Ok(None), // not in this SSTable
+        // 1. Resolve the uncompressed Data.db offset via the one `locate` façade
+        //    (issue #1599 / G3). For a BTI reader `locate` runs the C5 step (a no-op
+        //    — BTI has no Summary bound, so nothing is short-circuited or recorded)
+        //    then the `Partitions.db` trie, which is the AUTHORITATIVE presence
+        //    oracle and emits the single READ_BLOOM_CHECKS; the bloom filter is never
+        //    consulted. A trie miss is definitive absence. BTI records no size, so
+        //    `locate` returns `(offset, 0)` and we use only the offset.
+        let offset = match self.locate(key.as_bytes()).await? {
+            Some((off, _size)) => off as usize,
+            None => return Ok(None), // not in this SSTable (authoritative trie miss)
         };
 
         // 2. Obtain a DECOMPRESSED window that contains the target partition.

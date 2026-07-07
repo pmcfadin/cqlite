@@ -1169,9 +1169,24 @@ impl SSTableManager {
             .then(|| encode_partition_key_for_bti_trie(partition_key));
         readers
             .iter()
-            .filter(|r| match &encoded {
-                Some(enc) => r.might_contain_partition_encoded(partition_key, enc),
-                None => r.might_contain_partition(partition_key),
+            .filter(|r| {
+                // BTI candidates prune via the one `locate` façade (issue #1599 / G3),
+                // fed the hoisted C4 encoding: the `Partitions.db` trie is the
+                // authoritative presence oracle, so a `None` is a definitive absent
+                // (drop) and an `Err` (corrupt trie) is conservatively kept. This is
+                // congruent with the façade's resolution — a BTI trie result is
+                // authoritative. BIG candidates DELIBERATELY stay on the bloom-based
+                // `might_contain_partition`: a BIG `Index.db` miss is NOT a definitive
+                // absent (#1572 truncated-index invariant), so pruning a BIG reader on
+                // the façade's index probe would drop a candidate that actually holds
+                // the partition. Only the bloom filter never yields a false negative.
+                match (r.is_bti(), &encoded) {
+                    (true, Some(enc)) => {
+                        matches!(r.locate_encoded(partition_key, enc), Ok(Some(_)) | Err(_))
+                    }
+                    // Non-BTI reader (or, defensively, no encoding): bloom prune.
+                    _ => r.might_contain_partition(partition_key),
+                }
             })
             .cloned()
             .collect()
