@@ -733,7 +733,7 @@ impl V5CompressedLegacyParser {
         // The single legitimate key allocation: once per real header parse.
         let key_bytes = data[layout.key_range].to_vec();
         Ok((
-            RowKey(key_bytes),
+            RowKey::new(key_bytes),
             layout.next_offset,
             layout.partition_deletion,
         ))
@@ -1531,7 +1531,7 @@ mod tests {
 
         // Verify UUID bytes match
         let expected_uuid_bytes = hex::decode("15291a77d7394e738397b787442f3a1f").unwrap();
-        assert_eq!(row_key.0, expected_uuid_bytes);
+        assert_eq!(row_key.as_bytes(), expected_uuid_bytes.as_slice());
     }
 
     /// Issue #1006 (manifest: cass.data_db_decode.row_preamble_size_mismatch).
@@ -1854,7 +1854,7 @@ mod tests {
 
         // Verify correct partition key bytes
         let expected_uuid_bytes = hex::decode("245dff69026f45c6b68fba0c964df3c9").unwrap();
-        assert_eq!(row_key.0, expected_uuid_bytes);
+        assert_eq!(row_key.as_bytes(), expected_uuid_bytes.as_slice());
 
         // Verify offset: flags(1) + len(1) + uuid(16) + del_time(4) + unknown(8) = 30
         assert_eq!(offset, 30);

@@ -503,7 +503,7 @@ async fn absent_filter_db_reads_without_crash() {
 
     let want_pk: Vec<u8> = 7_i32.to_be_bytes().into();
     assert!(
-        results.iter().any(|(k, _)| k.0 == want_pk),
+        results.iter().any(|(k, _)| k.as_bytes() == want_pk),
         "partition pk=7 must be returned by a scan even with Filter.db absent; \
          got {} row(s)",
         results.len()

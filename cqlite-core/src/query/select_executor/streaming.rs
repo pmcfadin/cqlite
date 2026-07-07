@@ -123,11 +123,11 @@ impl SelectExecutor {
                                 let same = matches!(
                                     &current_partition,
                                     Some((d, bytes))
-                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                        if *d == sig && bytes.as_slice() == row.key.as_bytes()
                                 );
                                 if !same {
                                     // Clone the key bytes ONCE per boundary, not per row.
-                                    current_partition = Some((sig, row.key.0.clone()));
+                                    current_partition = Some((sig, row.key.as_bytes().to_vec()));
                                     partition_count = 0;
                                 }
                                 if partition_count >= cap {
@@ -192,11 +192,11 @@ impl SelectExecutor {
                                 let same = matches!(
                                     &current_partition,
                                     Some((d, bytes))
-                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                        if *d == sig && bytes.as_slice() == row.key.as_bytes()
                                 );
                                 if !same {
                                     // Clone the key bytes ONCE per boundary, not per row.
-                                    current_partition = Some((sig, row.key.0.clone()));
+                                    current_partition = Some((sig, row.key.as_bytes().to_vec()));
                                     partition_count = 0;
                                 }
                                 if partition_count >= cap {
@@ -265,11 +265,11 @@ impl SelectExecutor {
                                 let same = matches!(
                                     &current_partition,
                                     Some((d, bytes))
-                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                        if *d == sig && bytes.as_slice() == row.key.as_bytes()
                                 );
                                 if !same {
                                     // Clone the key bytes ONCE per boundary, not per row.
-                                    current_partition = Some((sig, row.key.0.clone()));
+                                    current_partition = Some((sig, row.key.as_bytes().to_vec()));
                                     partition_count = 0;
                                 }
                                 if partition_count >= cap {

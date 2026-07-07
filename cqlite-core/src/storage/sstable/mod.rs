@@ -2773,7 +2773,7 @@ mod tests {
         assert!(pending < BATCH_EMIT_ROWS);
         let (in_tx, in_rx) = tokio::sync::mpsc::channel::<Result<(RowKey, ScanRow)>>(16);
         for i in 0..pending {
-            let key = RowKey(vec![i as u8]);
+            let key = RowKey::new(vec![i as u8]);
             let row = ScanRow::RawRow(vec![i as u8]);
             in_tx.send(Ok((key, row))).await.unwrap();
         }
@@ -2801,7 +2801,7 @@ mod tests {
             "batch must respect the BATCH_EMIT_ROWS bound"
         );
         for (i, (key, _row)) in batch.iter().enumerate() {
-            assert_eq!(key.0, vec![i as u8], "rows must arrive in order");
+            assert_eq!(key.as_bytes(), [i as u8], "rows must arrive in order");
         }
 
         // Second item: the terminal error, AFTER the confirmed rows.

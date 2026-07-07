@@ -137,7 +137,7 @@ fn pk_bytes(id: i32) -> Vec<u8> {
 }
 
 fn row_key(id: i32) -> RowKey {
-    RowKey(pk_bytes(id))
+    RowKey::new(pk_bytes(id))
 }
 
 /// Drain a `scan_stream` receiver into a sorted (by key bytes) Vec.
@@ -147,7 +147,7 @@ async fn drain_stream(
     let mut out = Vec::new();
     while let Some(item) = rx.recv().await {
         let (k, v) = item.expect("streamed row should be Ok");
-        out.push((k.0, v));
+        out.push((k.as_bytes().to_vec(), v));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -232,7 +232,7 @@ async fn bounded_multi_generation_scan_stream_enforces_range_like_scan() {
     let unbounded_keys: Vec<i32> = {
         let mut ids: Vec<i32> = unbounded_scan
             .iter()
-            .map(|(k, _)| i32::from_be_bytes(k.0.clone().try_into().expect("4-byte int pk")))
+            .map(|(k, _)| i32::from_be_bytes(k.as_bytes().try_into().expect("4-byte int pk")))
             .collect();
         ids.sort_unstable();
         ids
@@ -255,7 +255,7 @@ async fn bounded_multi_generation_scan_stream_enforces_range_like_scan() {
     let bounded_scan_ids: Vec<i32> = {
         let mut ids: Vec<i32> = bounded_scan
             .iter()
-            .map(|(k, _)| i32::from_be_bytes(k.0.clone().try_into().expect("4-byte int pk")))
+            .map(|(k, _)| i32::from_be_bytes(k.as_bytes().try_into().expect("4-byte int pk")))
             .collect();
         ids.sort_unstable();
         ids
@@ -291,8 +291,10 @@ async fn bounded_multi_generation_scan_stream_enforces_range_like_scan() {
     );
 
     // scan and scan_stream must agree value-for-value, not just on key set.
-    let scan_map: BTreeMap<Vec<u8>, cqlite_core::ScanRow> =
-        bounded_scan.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let scan_map: BTreeMap<Vec<u8>, cqlite_core::ScanRow> = bounded_scan
+        .into_iter()
+        .map(|(k, v)| (k.as_bytes().to_vec(), v))
+        .collect();
     let stream_map: BTreeMap<Vec<u8>, cqlite_core::ScanRow> = bounded_stream.into_iter().collect();
     assert_eq!(
         scan_map, stream_map,

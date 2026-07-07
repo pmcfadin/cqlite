@@ -444,7 +444,7 @@ impl GroupState {
 
         QueryRow {
             values,
-            key: RowKey(Vec::new()),
+            key: RowKey::new(Vec::new()),
             metadata: Default::default(),
             cell_metadata: None,
         }
@@ -715,7 +715,7 @@ mod tests {
         values.insert("v".into(), Value::BigInt(v));
         QueryRow {
             values,
-            key: RowKey(Vec::new()),
+            key: RowKey::new(Vec::new()),
             metadata: Default::default(),
             cell_metadata: None,
         }
@@ -770,7 +770,7 @@ mod tests {
         values.insert("d".into(), Value::Float(d));
         QueryRow {
             values,
-            key: RowKey(Vec::new()),
+            key: RowKey::new(Vec::new()),
             metadata: Default::default(),
             cell_metadata: None,
         }

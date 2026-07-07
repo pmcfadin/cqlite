@@ -131,7 +131,7 @@ pub(super) async fn merge_generations_for_read(
         let mut merger = KWayMerger::new(paths, &schema)?;
         let mut out = Vec::new();
         while let MergeStep::Partition { key, rows } = merger.step()? {
-            let row_key = RowKey(key.key.clone());
+            let row_key = RowKey::new(key.key.clone());
 
             // Partition-targeted point read (#1579): keep ONLY the target and stop.
             if let Some(ref target) = target_key {
@@ -221,7 +221,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
         for (row_key, _value, meta) in per_reader {
             for (column, cell_meta) in meta {
                 ttl_lookup
-                    .entry((row_key.0.clone(), column))
+                    .entry((row_key.as_bytes().to_vec(), column))
                     .and_modify(|existing| {
                         if cell_meta.write_timestamp_micros > existing.write_timestamp_micros {
                             *existing = cell_meta.clone();
@@ -242,7 +242,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
         let mut merger = KWayMerger::new(paths, &merge_schema)?;
         let mut out = Vec::new();
         while let MergeStep::Partition { key, rows } = merger.step()? {
-            let row_key = RowKey(key.key.clone());
+            let row_key = RowKey::new(key.key.clone());
 
             // Partition-targeted point read (#1579): keep ONLY the target and stop.
             if let Some(ref target) = target_for_merge {
@@ -291,7 +291,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
                 },
             );
         }
-        results.push((RowKey(key_bytes), value, meta_map));
+        results.push((RowKey::new(key_bytes), value, meta_map));
     }
 
     // Stable TOKEN-order sort (issue #1580), then LIMIT — identical ordering to the
@@ -405,7 +405,7 @@ pub(super) async fn stream_generations_for_read(
                 MergeStep::Complete => return,
             };
 
-            let row_key = RowKey(key.key.clone());
+            let row_key = RowKey::new(key.key.clone());
             if let Some(ref start) = start_key {
                 if &row_key < start {
                     continue;

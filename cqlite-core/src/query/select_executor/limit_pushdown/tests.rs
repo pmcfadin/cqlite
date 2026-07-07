@@ -320,7 +320,7 @@ fn reconcile_charges_full_authoritative_count_when_over_cap() {
 
     // Results stay CAPPED: exactly the first 3 ACCEPTED rows, in scan order
     // (marker skipped). The fix must NOT change output or LIMIT/OFFSET semantics.
-    let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
+    let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.as_bytes().to_vec()).collect();
     assert_eq!(
         keys,
         vec![b"k0".to_vec(), b"k1".to_vec(), b"k2".to_vec()],
@@ -356,7 +356,7 @@ fn reconcile_short_of_cap_returns_all_accepted() {
 
     let out = reconcile(authoritative, 100, &mut ctx);
 
-    let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
+    let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.as_bytes().to_vec()).collect();
     assert_eq!(keys, vec![b"k0".to_vec(), b"k1".to_vec()]);
     assert_eq!(
         ctx.scan_rows, decoded,
@@ -417,7 +417,7 @@ fn materialized_charges_full_decoded_count_not_the_cap() {
 
     // Results + per-row build work stay CAPPED (the fix must not change output
     // or LIMIT/OFFSET semantics).
-    let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.0.clone()).collect();
+    let keys: Vec<Vec<u8>> = out.iter().map(|r| r.key.as_bytes().to_vec()).collect();
     assert_eq!(
         keys,
         vec![b"k0".to_vec(), b"k1".to_vec(), b"k2".to_vec()],

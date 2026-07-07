@@ -375,7 +375,7 @@ impl<'a> CompactionPolicy<'a> {
     fn new(parser: &'a V5CompressedLegacyParser) -> Self {
         Self {
             parser,
-            partition_key: RowKey(Vec::new()),
+            partition_key: RowKey::new(Vec::new()),
             pending_range_start: None,
         }
     }

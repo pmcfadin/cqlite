@@ -493,7 +493,7 @@ fn prefix_is_token_ordered(rows: &[QueryRow]) -> bool {
     use crate::util::cassandra_murmur3::cassandra_murmur3_token;
     let mut prev: Option<(i64, &[u8])> = None;
     for row in rows {
-        let key = row.key.0.as_slice();
+        let key = row.key.as_bytes();
         let token = cassandra_murmur3_token(key);
         if let Some(prev) = prev {
             if prev > (token, key) {

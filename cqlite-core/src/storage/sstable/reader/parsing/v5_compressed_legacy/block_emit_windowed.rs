@@ -922,7 +922,7 @@ impl<'a> TimestampPolicy<'a> {
         Self {
             parser,
             table_id: TableId::new(format!("{}.{}", parser.keyspace, parser.table_name)),
-            partition_key: RowKey(Vec::new()),
+            partition_key: RowKey::new(Vec::new()),
             shadow: None,
             static_cells: Vec::new(),
         }

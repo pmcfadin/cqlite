@@ -186,7 +186,7 @@ fn run_case(tombstone_first: bool) {
     let pk_bytes = id.to_be_bytes().to_vec();
     let row = results
         .iter()
-        .find(|(k, _)| k.0 == pk_bytes)
+        .find(|(k, _)| k.as_bytes() == pk_bytes.as_slice())
         .map(|(_, v)| v.clone())
         .expect("row must be present (kept live by the `name` cell)");
 

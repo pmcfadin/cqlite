@@ -881,7 +881,7 @@ async fn forward_row_counts_by_pk() -> BTreeMap<Vec<u8>, usize> {
 
     let mut by_pk: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
     for (_tid, key, _value) in &entries {
-        *by_pk.entry(key.0.clone()).or_default() += 1;
+        *by_pk.entry(key.as_bytes().to_vec()).or_default() += 1;
     }
     by_pk
 }

@@ -149,8 +149,10 @@ fn row_ttl_insert_round_trips_as_expiring_cell() {
 
     assert_eq!(results.len(), 1, "expected the single row written");
 
-    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> =
-        results.into_iter().map(|(k, _v, m)| (k.0, m)).collect();
+    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> = results
+        .into_iter()
+        .map(|(k, _v, m)| (k.as_bytes().to_vec(), m))
+        .collect();
 
     let meta = by_pk
         .get(1_i32.to_be_bytes().as_slice())

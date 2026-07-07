@@ -1373,21 +1373,30 @@ impl fmt::Display for DataType {
     }
 }
 
-/// Row key type - used for indexing and sorting
+/// Row key type - used for indexing and sorting.
+///
+/// Issue #1643 (K4): the raw key bytes are stored behind an `Arc<[u8]>` so that
+/// the partition key, materialized ONCE when a partition header is parsed, can be
+/// shared across every row of that partition by a pointer bump instead of a
+/// per-row heap allocation. A 10k-row partition now allocates its key once, not
+/// 10k times. This is a pure ownership/allocation change: the bytes and the
+/// derived comparison order (`Ord`/`Eq`/`Hash` all delegate to the pointed-to
+/// `[u8]`) are byte-identical to the former `Vec<u8>` representation, and serde's
+/// `rc` feature keeps the wire format unchanged (a byte sequence).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct RowKey(pub Vec<u8>);
+pub struct RowKey(pub std::sync::Arc<[u8]>);
 
 impl RowKey {
     /// Create a new row key from bytes
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(std::sync::Arc::from(bytes))
     }
 
     /// Create a row key from a value
     pub fn from_value(value: &Value) -> crate::Result<Self> {
         let bytes =
             bincode::serialize(value).map_err(|e| crate::Error::serialization(e.to_string()))?;
-        Ok(Self(bytes))
+        Ok(Self(std::sync::Arc::from(bytes)))
     }
 
     /// Get the byte representation
@@ -1404,40 +1413,62 @@ impl RowKey {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Issue #1643: pointer to the shared key buffer. Two `RowKey`s cloned from
+    /// the same partition-key `Arc` return the SAME pointer, so a test can prove
+    /// rows of a partition share one allocation rather than re-materializing the
+    /// key per row. Not part of the value contract — for allocation assertions.
+    #[doc(hidden)]
+    pub fn buffer_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+
+    /// Issue #1643: strong-count of the shared key buffer — proves that N rows of
+    /// a partition hold N pointer-clones of ONE `Arc`, not N distinct buffers.
+    #[doc(hidden)]
+    pub fn buffer_strong_count(&self) -> usize {
+        std::sync::Arc::strong_count(&self.0)
+    }
 }
 
 impl From<Vec<u8>> for RowKey {
     fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(std::sync::Arc::from(bytes))
     }
 }
 
 impl From<&[u8]> for RowKey {
     fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
+        Self(std::sync::Arc::from(bytes))
     }
 }
 
 impl From<String> for RowKey {
     fn from(s: String) -> Self {
-        Self(s.into_bytes())
+        Self(std::sync::Arc::from(s.into_bytes()))
     }
 }
 
 impl From<&str> for RowKey {
     fn from(s: &str) -> Self {
-        Self(s.as_bytes().to_vec())
+        Self(std::sync::Arc::from(s.as_bytes()))
     }
 }
 
-/// Table identifier
+/// Table identifier.
+///
+/// Issue #1643 (K4): the `keyspace.table` name is stored behind an `Arc<str>` so
+/// the identity built once per partition header is shared across every emitted
+/// row by a pointer bump, not a per-row `String` clone / `format!`. Pure
+/// ownership change: `Display`, comparison order and serde wire format are
+/// byte-identical to the former `String` representation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TableId(pub String);
+pub struct TableId(pub std::sync::Arc<str>);
 
 impl TableId {
     /// Create a new table ID
     pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
+        Self(std::sync::Arc::from(name.into()))
     }
 
     /// Get the table name
@@ -1454,13 +1485,13 @@ impl fmt::Display for TableId {
 
 impl From<String> for TableId {
     fn from(name: String) -> Self {
-        Self(name)
+        Self(std::sync::Arc::from(name))
     }
 }
 
 impl From<&str> for TableId {
     fn from(name: &str) -> Self {
-        Self(name.to_string())
+        Self(std::sync::Arc::from(name))
     }
 }
 

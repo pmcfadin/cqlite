@@ -140,11 +140,12 @@ fn pk_bytes(id: i32) -> Vec<u8> {
 }
 
 fn row_key(id: i32) -> RowKey {
-    RowKey(pk_bytes(id))
+    RowKey::new(pk_bytes(id))
 }
 
 fn id_of(key: &RowKey) -> i32 {
-    i32::from_be_bytes(key.0.clone().try_into().expect("4-byte int pk"))
+    let bytes: [u8; 4] = key.as_bytes().try_into().expect("4-byte int pk");
+    i32::from_be_bytes(bytes)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
