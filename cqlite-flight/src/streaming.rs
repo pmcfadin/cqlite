@@ -37,20 +37,43 @@ pub(crate) type DoGetStream =
 
 /// `do_get` channel capacity, in batches.
 ///
-/// Peak resident record-batch payload is bounded to roughly `(K + 2) · batch_size`
-/// — `K` batches queued in the channel, one being built by the merge, and one held
-/// in the encoder — regardless of the total result size. Deliberately a small
-/// named constant, not a config knob: the 2026-07 platform audit's "don't add
-/// tunables without a consumer" lesson applies; issue #2162 can motivate one later.
+/// Peak resident record-batch payload is bounded to roughly
+/// `(DO_GET_CHANNEL_CAPACITY + IN_FLIGHT_ALLOWANCE) · batch_size`, regardless of
+/// the total result size. Deliberately a small named constant, not a config
+/// knob: the 2026-07 platform audit's "don't add tunables without a consumer"
+/// lesson applies; issue #2162 can motivate one later.
 pub(crate) const DO_GET_CHANNEL_CAPACITY: usize = 4;
+
+/// Structural slack beyond [`DO_GET_CHANNEL_CAPACITY`] that the merge's
+/// `produced_batches` counter can legitimately reach, given the exact instant a
+/// consumer observes it (roborev N1 — the doc and the test bound must share one
+/// derivation so they cannot drift):
+///
+/// - **+1 send-in-flight**: [`ChannelSink::emit`] increments the counter BEFORE
+///   `blocking_send`, so one produced batch can be counted while still blocked
+///   trying to enter an already-full channel.
+/// - **+1 encoder prefetch**: `FlightDataEncoderBuilder`'s stream can pull one
+///   batch out of the channel into its own internal state ahead of yielding it
+///   to the gRPC consumer, freeing a channel slot the producer immediately fills.
+/// - **+1 scheduling slack**: absorbs Tokio scheduling nondeterminism between the
+///   test reading its observation messages and reading the counter (e.g. via
+///   `yield_now`), without which the bound would be exact-timing-dependent.
+///
+/// Test-only (`#[cfg(test)]`): this is a test-observation bound, not a value any
+/// production code branches on — the doc comment above is the production-facing
+/// derivation; this constant just keeps the tests from drifting from it.
+#[cfg(test)]
+pub(crate) const IN_FLIGHT_ALLOWANCE: usize = 3;
 
 /// Test-only observability handle for the streaming path.
 ///
 /// The counters are always maintained (the writes are cheap `Relaxed` atomics),
 /// so production simply passes a throwaway [`StreamProbe::default`]. Tests inject
-/// their own to assert the memory bound (batches produced) and metrics
-/// attribution (rows/bytes fed to [`RpcMetrics`]) without reaching into private
-/// state.
+/// their own to assert the memory bound (batches produced), metrics attribution
+/// (rows/bytes fed to [`RpcMetrics`]), and that a mid-stream error reaches the
+/// error-observability hook (roborev B2) — without reaching into private state
+/// or depending on the `observability` feature's OTel counters, which are a
+/// genuine no-op when the feature is off (see `cqlite_core::observability::record_error`).
 #[derive(Clone, Default)]
 pub(crate) struct StreamProbe {
     /// Batches the merge has pushed toward the channel (bounded by the backpressure).
@@ -59,6 +82,11 @@ pub(crate) struct StreamProbe {
     rows: Arc<AtomicU64>,
     /// Payload bytes attributed to metrics at stream end.
     bytes: Arc<AtomicU64>,
+    /// Incremented once per mid-stream error, alongside the
+    /// `crate::obs::record_status_error` call (roborev B2) — proves the error
+    /// arm reaches the same error-observability hook `do_get`'s eager-setup
+    /// errors always did, independent of whether OTel counters are compiled in.
+    errors_recorded: Arc<AtomicUsize>,
 }
 
 /// Sink that sends each merged batch into the bounded `do_get` channel.
@@ -80,6 +108,49 @@ impl BatchSink for ChannelSink {
         self.tx
             .blocking_send(Ok(batch))
             .map_err(|_| ProducerError::Cancelled)
+    }
+}
+
+/// Run `run` (the merge body) under [`std::panic::catch_unwind`], forwarding
+/// either the merge's own error or a caught panic as a terminal `Err` into `tx`
+/// (issue #1476, roborev B1).
+///
+/// Without this, a panic inside `spawn_blocking` simply drops `tx` when the
+/// blocking task unwinds; the receiver then sees a normal, clean channel close
+/// — indistinguishable from "the merge finished successfully" — so the client
+/// (and Trino) would silently read a TRUNCATED result as a complete one. Forcing
+/// every panic through the channel as [`ProducerError::Panicked`] makes it
+/// surface as a gRPC `Status::internal` on every profile (this is a correctness
+/// fix; `panic=abort` release profiles mask the symptom only in production).
+fn run_merge_catching_panics<F>(tx: &mpsc::Sender<Result<RecordBatch, ProducerError>>, run: F)
+where
+    F: FnOnce() -> Result<(), ProducerError>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            // Forward a terminal error to the client (matches delta_scan error
+            // forwarding). Ignored if the receiver is already gone (client left).
+            let _ = tx.blocking_send(Err(e));
+        }
+        Err(payload) => {
+            let message = panic_message(payload.as_ref());
+            let _ = tx.blocking_send(Err(ProducerError::Panicked { message }));
+        }
+    }
+}
+
+/// Best-effort extraction of a panic payload's message: the two payload shapes
+/// `std::panic!`/`.unwrap()`/`.expect()` actually produce (`&'static str` and
+/// `String`) are read verbatim; any other payload type gets a fixed placeholder
+/// (never a guess at its structure).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 
@@ -108,13 +179,15 @@ pub(crate) fn spawn_streaming(
     let produced = probe.produced_batches.clone();
 
     // Run the CPU-bound merge off the async runtime; it sends batches as it goes.
+    // `error_tx` is a clone kept OUTSIDE the (potentially unwound) merge closure so
+    // a panic can still report through it — `sink` (holding the other clone) lives
+    // inside the closure catch_unwind guards, and unwinding drops it.
     let handle = tokio::task::spawn_blocking(move || {
+        let error_tx = tx.clone();
         let mut sink = ChannelSink { tx, produced };
-        if let Err(e) = producer.produce_streaming(paths, &merge_cancel, &mut sink) {
-            // Forward a terminal error to the client (matches delta_scan error
-            // forwarding). Ignored if the receiver is already gone (client left).
-            let _ = sink.tx.blocking_send(Err(e));
-        }
+        run_merge_catching_panics(&error_tx, move || {
+            producer.produce_streaming(paths, &merge_cancel, &mut sink)
+        });
     });
 
     let inner = Box::pin(ReceiverStream { rx });
@@ -276,6 +349,11 @@ impl Stream for MeteredDoGetStream {
                 this.disarm_guard();
                 this.finalize(false);
                 let status = Status::from(err);
+                // Roborev B2: pre-change `do_get` ran `record_status_error` for
+                // EVERY error (service.rs `finish`); a mid-stream error must hit the
+                // same error-observability path, not just the per-RPC OK/error flag.
+                crate::obs::record_status_error(&status);
+                this.probe.errors_recorded.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Some(Err(FlightError::ExternalError(Box::new(status)))))
             }
             Poll::Ready(None) => {
@@ -298,488 +376,5 @@ impl Drop for MeteredDoGetStream {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::producer::DirSource;
-    use crate::testutil::{build_sstables, simple_schema, write_row};
-    use cqlite_core::schema::TableSchema;
-
-    /// Build a fixture with `n` single-row partitions across two SSTables so the
-    /// merge has real per-partition work and, at `batch_size = 1`, yields `n`
-    /// batches.
-    fn many_partition_fixture(n: i32) -> (tempfile::TempDir, std::path::PathBuf, TableSchema) {
-        let schema = simple_schema();
-        let half = n / 2;
-        let a: Vec<_> = (1..=half).map(|i| write_row(i, "a", i, 100)).collect();
-        let b: Vec<_> = (half + 1..=n).map(|i| write_row(i, "b", i, 100)).collect();
-        let (temp, _data, dir) = build_sstables(&schema, vec![a, b]);
-        (temp, dir, schema)
-    }
-
-    /// Resolve the pruned paths for a producer over `dir` (mirrors the service's
-    /// eager `resolve_paths` step).
-    fn resolved(producer: &MergeProducer, dir: &std::path::Path) -> Vec<PathBuf> {
-        producer.resolve_paths(&DirSource::new(dir)).unwrap()
-    }
-
-    fn probe() -> StreamProbe {
-        StreamProbe::default()
-    }
-
-    /// Read exactly one item from the response stream (the first Flight message is
-    /// the schema; the second carries the first record batch), proving a batch is
-    /// available before the merge has run to completion.
-    async fn read_one(stream: &mut DoGetStream) -> Option<Result<FlightData, Status>> {
-        stream.next().await
-    }
-
-    // ---- Task 1.1: do_get emits batches incrementally --------------------------
-
-    /// The first batch is available while the merge is still running: after pulling
-    /// one message, the producer has emitted far fewer than the full-scan batch
-    /// count (bounded by the channel capacity + in-flight allowance).
-    ///
-    /// FAILS on pre-change `main`: there is no `spawn_streaming`/streaming producer
-    /// there — `do_get` materializes every batch before the first is available, so
-    /// the produced count would equal the full result.
-    #[test]
-    fn first_batch_available_before_merge_completes() {
-        let n = 40;
-        let (_temp, dir, schema) = many_partition_fixture(n);
-        let producer = MergeProducer::with_spec(
-            schema,
-            1, // batch_size = 1 → one batch per partition row
-            crate::filter::ScanSpec::default(),
-        )
-        .unwrap();
-        let paths = resolved(&producer, &dir);
-        let schema_ref = Arc::new(producer.arrow_schema().unwrap());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async move {
-            let pr = probe();
-            let (mut stream, handle) = spawn_streaming(
-                producer,
-                paths,
-                schema_ref,
-                RpcMetrics::start("do_get"),
-                DO_GET_CHANNEL_CAPACITY,
-                pr.clone(),
-            );
-            // Pull the first message (schema) then the first batch.
-            let _schema_msg = read_one(&mut stream).await.expect("schema message");
-            let _first_batch = read_one(&mut stream).await.expect("first batch");
-
-            let produced = pr.produced_batches.load(Ordering::Relaxed);
-            assert!(
-                produced < n as usize,
-                "streaming must not materialize all {n} batches before batch 1 \
-                 (produced={produced})"
-            );
-            assert!(
-                produced <= DO_GET_CHANNEL_CAPACITY + 3,
-                "producer must stay within the channel bound (produced={produced})"
-            );
-
-            drop(stream);
-            let _ = handle.await;
-        });
-    }
-
-    // ---- Task 1.2: peak resident payload is bounded ----------------------------
-
-    /// A slow consumer that reads one batch and pauses does not let the producer
-    /// run ahead: it blocks after at most capacity + in-flight allowance batches,
-    /// independent of the total result size.
-    ///
-    /// FAILS on pre-change `main`: all batches materialize regardless of consumer
-    /// progress (no bounded channel exists).
-    #[test]
-    fn slow_consumer_bounds_produced_batches() {
-        let n = 60;
-        let (_temp, dir, schema) = many_partition_fixture(n);
-        let producer =
-            MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
-        let paths = resolved(&producer, &dir);
-        let schema_ref = Arc::new(producer.arrow_schema().unwrap());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async move {
-            let pr = probe();
-            let (mut stream, handle) = spawn_streaming(
-                producer,
-                paths,
-                schema_ref,
-                RpcMetrics::start("do_get"),
-                DO_GET_CHANNEL_CAPACITY,
-                pr.clone(),
-            );
-            let _schema_msg = read_one(&mut stream).await.expect("schema");
-            let _first = read_one(&mut stream).await.expect("first batch");
-
-            // Give the producer every opportunity to run ahead, then assert it is
-            // still bounded — it physically cannot exceed the channel allowance.
-            tokio::task::yield_now().await;
-            let produced = pr.produced_batches.load(Ordering::Relaxed);
-            assert!(
-                produced <= DO_GET_CHANNEL_CAPACITY + 3,
-                "slow consumer: produced {produced} exceeds the channel bound"
-            );
-
-            drop(stream);
-            let _ = handle.await;
-        });
-    }
-
-    // ---- Task 1.3: consumer disconnect stops the merge -------------------------
-
-    /// Dropping the response stream after the first batch stops the merge: the
-    /// producer never emits all partitions and the blocking task exits.
-    ///
-    /// FAILS on pre-change `main`: `do_get` runs the merge to completion before the
-    /// stream exists, so a drop cannot cut it short.
-    #[test]
-    fn dropping_stream_cancels_merge() {
-        let n = 60;
-        let (_temp, dir, schema) = many_partition_fixture(n);
-        let producer =
-            MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
-        let paths = resolved(&producer, &dir);
-        let schema_ref = Arc::new(producer.arrow_schema().unwrap());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async move {
-            let pr = probe();
-            let (mut stream, handle) = spawn_streaming(
-                producer,
-                paths,
-                schema_ref,
-                RpcMetrics::start("do_get"),
-                DO_GET_CHANNEL_CAPACITY,
-                pr.clone(),
-            );
-            let _schema_msg = read_one(&mut stream).await.expect("schema");
-            let _first = read_one(&mut stream).await.expect("first batch");
-
-            // Client disconnects: drop the stream, then await the merge task. It
-            // must terminate (send failure + cancel flag) rather than run to
-            // completion.
-            drop(stream);
-            handle.await.expect("merge task joins after cancellation");
-
-            let produced = pr.produced_batches.load(Ordering::Relaxed);
-            assert!(
-                produced < n as usize,
-                "merge must stop early on disconnect (produced={produced} of {n})"
-            );
-        });
-    }
-
-    // ---- Task 2.3 / Requirement 4: stream/collect byte-identity ----------------
-
-    fn collect_batches(producer: &MergeProducer, dir: &std::path::Path) -> Vec<RecordBatch> {
-        producer.produce(&DirSource::new(dir)).unwrap()
-    }
-
-    async fn drain_stream(stream: DoGetStream) -> Vec<RecordBatch> {
-        use arrow_flight::decode::FlightRecordBatchStream;
-        let mapped = stream.map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
-        let mut rb = FlightRecordBatchStream::new_from_flight_data(mapped);
-        let mut out = Vec::new();
-        while let Some(batch) = rb.next().await {
-            out.push(batch.expect("decode batch"));
-        }
-        out
-    }
-
-    /// Drive the streaming producer path and collect the raw batches it emits into
-    /// the channel (pre-encode). This is the true parity seam the spec names —
-    /// `produce_streaming` vs the retained `produce` collect path — without the
-    /// Flight encoder's response-schema injection (a uniform presentation concern
-    /// applied identically to every `do_get`).
-    fn stream_batches_raw(producer: MergeProducer, paths: Vec<PathBuf>) -> Vec<RecordBatch> {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async move {
-            let (tx, mut rx) =
-                mpsc::channel::<Result<RecordBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
-            let cancel = CancelFlag::new();
-            let handle = tokio::task::spawn_blocking(move || {
-                let mut sink = ChannelSink {
-                    tx,
-                    produced: Arc::new(AtomicUsize::new(0)),
-                };
-                if let Err(e) = producer.produce_streaming(paths, &cancel, &mut sink) {
-                    let _ = sink.tx.blocking_send(Err(e));
-                }
-            });
-            let mut out = Vec::new();
-            while let Some(item) = rx.recv().await {
-                out.push(item.expect("streamed batch is ok"));
-            }
-            let _ = handle.await;
-            out
-        })
-    }
-
-    /// The streamed batches are byte-identical to the collect-path batches for a
-    /// given spec: same schema, batch boundaries, and row content.
-    fn assert_stream_collect_parity(spec: crate::filter::ScanSpec, dir: &std::path::Path) {
-        let schema = simple_schema();
-        let collect_producer = MergeProducer::with_spec(schema.clone(), 4, spec.clone()).unwrap();
-        let expected = collect_batches(&collect_producer, dir);
-
-        let stream_producer = MergeProducer::with_spec(schema, 4, spec).unwrap();
-        let paths = resolved(&stream_producer, dir);
-        let streamed = stream_batches_raw(stream_producer, paths);
-
-        assert_eq!(
-            streamed.len(),
-            expected.len(),
-            "batch count (boundaries) must match"
-        );
-        for (s, e) in streamed.iter().zip(expected.iter()) {
-            assert_eq!(
-                s, e,
-                "streamed batch must be byte-identical to collect batch"
-            );
-        }
-    }
-
-    #[test]
-    fn stream_collect_parity_no_constraints() {
-        let schema = simple_schema();
-        let rows = (1..=10)
-            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
-            .collect::<Vec<_>>();
-        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
-        assert_stream_collect_parity(crate::filter::ScanSpec::default(), &dir);
-    }
-
-    #[test]
-    fn stream_collect_parity_limit_mid_batch() {
-        let schema = simple_schema();
-        let rows = (1..=10)
-            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
-            .collect::<Vec<_>>();
-        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
-        let spec = crate::filter::ScanSpec {
-            limit: Some(5),
-            ..Default::default()
-        };
-        assert_stream_collect_parity(spec, &dir);
-    }
-
-    #[test]
-    fn stream_collect_parity_predicate() {
-        use crate::ticket::{FlightTicket, Predicate, PredicateOp};
-        let schema = simple_schema();
-        let rows = (1..=10)
-            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
-            .collect::<Vec<_>>();
-        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
-        let ticket = FlightTicket {
-            predicates: vec![Predicate {
-                column: "score".into(),
-                op: PredicateOp::Gte,
-                value: serde_json::json!(40),
-            }],
-            ..Default::default()
-        };
-        let spec = crate::filter::ScanSpec::from_ticket(&ticket, &schema).unwrap();
-        assert_stream_collect_parity(spec, &dir);
-    }
-
-    #[test]
-    fn stream_collect_parity_token_range() {
-        use crate::ticket::FlightTicket;
-        let schema = simple_schema();
-        let rows = (1..=10)
-            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
-            .collect::<Vec<_>>();
-        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
-        let ticket = FlightTicket {
-            token_start: Some(i64::MIN),
-            token_end: Some(0),
-            ..Default::default()
-        };
-        let spec = crate::filter::ScanSpec::from_ticket(&ticket, &schema).unwrap();
-        assert_stream_collect_parity(spec, &dir);
-    }
-
-    // ---- Requirement 5: rows/bytes metrics reflect what was emitted ------------
-
-    /// A fully-consumed stream attributes the same rows/bytes the collect path
-    /// would for the same ticket.
-    #[test]
-    fn metrics_parity_on_full_consumption() {
-        let schema = simple_schema();
-        let rows = (1..=10)
-            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
-            .collect::<Vec<_>>();
-        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
-
-        let producer =
-            MergeProducer::with_spec(schema.clone(), 4, crate::filter::ScanSpec::default())
-                .unwrap();
-        let expected = collect_batches(&producer, &dir);
-        let expected_rows: u64 = expected.iter().map(|b| b.num_rows() as u64).sum();
-        let expected_bytes: u64 = expected
-            .iter()
-            .map(|b| b.get_array_memory_size() as u64)
-            .sum();
-
-        let stream_producer =
-            MergeProducer::with_spec(schema, 4, crate::filter::ScanSpec::default()).unwrap();
-        let paths = resolved(&stream_producer, &dir);
-        let schema_ref = Arc::new(stream_producer.arrow_schema().unwrap());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let pr = probe();
-        let pr_check = pr.clone();
-        rt.block_on(async move {
-            let (stream, handle) = spawn_streaming(
-                stream_producer,
-                paths,
-                schema_ref,
-                RpcMetrics::start("do_get"),
-                DO_GET_CHANNEL_CAPACITY,
-                pr,
-            );
-            let _ = drain_stream(stream).await;
-            let _ = handle.await;
-        });
-
-        assert_eq!(
-            pr_check.rows.load(Ordering::Relaxed),
-            expected_rows,
-            "fully-consumed rows must match the collect path"
-        );
-        assert_eq!(
-            pr_check.bytes.load(Ordering::Relaxed),
-            expected_bytes,
-            "fully-consumed bytes must match the collect path"
-        );
-        assert!(expected_rows > 0, "fixture must produce rows");
-    }
-
-    // ---- Requirement 6: aggregate path keeps materializing (unchanged content) -
-
-    /// An aggregation ticket over a multi-SSTable table serves its bounded
-    /// per-group output as a stream, byte-identical to the retained collect path
-    /// (`produce`). The aggregate route does NOT stream row-by-row — it keeps
-    /// materializing — but is still wrapped in a stream.
-    #[test]
-    fn aggregate_path_matches_collect_content() {
-        use crate::ticket::{AggFunc, AggregateSpec, Aggregation};
-        let schema = simple_schema();
-        // Two SSTables, 7 distinct partitions total after LWW (id=1 rewritten).
-        let (_temp, dir, _schema) = {
-            let a: Vec<_> = (1..=4).map(|i| write_row(i, "a", i, 100)).collect();
-            let b: Vec<_> = (4..=7).map(|i| write_row(i, "b", i, 200)).collect();
-            let (t, _d, dir) = build_sstables(&schema, vec![a, b]);
-            (t, dir, schema.clone())
-        };
-        let agg = Aggregation {
-            group_by: vec![],
-            aggregates: vec![AggregateSpec {
-                func: AggFunc::Count,
-                column: None,
-                output: "cnt".into(),
-            }],
-        };
-
-        // Collect path (the oracle): produce the partial aggregate directly.
-        let collect_producer = MergeProducer::with_spec(schema.clone(), 4, Default::default())
-            .unwrap()
-            .with_aggregation(&agg)
-            .unwrap();
-        let expected = collect_producer.produce(&DirSource::new(&dir)).unwrap();
-        assert_eq!(
-            expected.len(),
-            1,
-            "global aggregation emits one partial batch"
-        );
-        let expected_cnt = count_value(&expected[0]);
-
-        // Streaming service path (build_aggregate_response) — same content.
-        let stream_producer = MergeProducer::with_spec(schema, 4, Default::default())
-            .unwrap()
-            .with_aggregation(&agg)
-            .unwrap();
-        assert!(stream_producer.is_aggregating());
-        let paths = resolved(&stream_producer, &dir);
-        let schema_ref = Arc::new(stream_producer.arrow_schema().unwrap());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let streamed = rt.block_on(async move {
-            let stream = match build_aggregate_response(
-                stream_producer,
-                paths,
-                schema_ref,
-                RpcMetrics::start("do_get"),
-            )
-            .await
-            {
-                Ok(stream) => stream,
-                Err((status, _metrics)) => panic!("aggregate response failed: {status}"),
-            };
-            drain_stream(stream).await
-        });
-        assert_eq!(streamed.len(), 1, "aggregate output stays one batch");
-        assert_eq!(
-            count_value(&streamed[0]),
-            expected_cnt,
-            "streamed aggregate content matches the collect path"
-        );
-    }
-
-    /// Read the single global-`count(*)` partial value from a one-row batch.
-    fn count_value(batch: &RecordBatch) -> i64 {
-        use arrow::array::Array;
-        let col = batch.column_by_name("cnt").expect("cnt column");
-        col.as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .expect("count is Int64")
-            .value(0)
-    }
-
-    /// A cancelled stream (one batch read, then dropped) attributes exactly the
-    /// emitted prefix — not the full table.
-    #[test]
-    fn metrics_attribute_emitted_prefix_on_cancel() {
-        let n = 60;
-        let (_temp, dir, schema) = many_partition_fixture(n);
-        let producer =
-            MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
-        let paths = resolved(&producer, &dir);
-        let schema_ref = Arc::new(producer.arrow_schema().unwrap());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let pr = probe();
-        let pr_check = pr.clone();
-        rt.block_on(async move {
-            let (mut stream, handle) = spawn_streaming(
-                producer,
-                paths,
-                schema_ref,
-                RpcMetrics::start("do_get"),
-                DO_GET_CHANNEL_CAPACITY,
-                pr,
-            );
-            let _schema_msg = read_one(&mut stream).await.expect("schema");
-            let _first = read_one(&mut stream).await.expect("first batch");
-            drop(stream);
-            let _ = handle.await;
-        });
-
-        // The metered stream yielded exactly one batch (one row at batch_size=1)
-        // before the drop, so metrics attribute that single-row prefix — far below
-        // the full table.
-        let rows = pr_check.rows.load(Ordering::Relaxed);
-        assert_eq!(
-            rows, 1,
-            "cancelled stream attributes only the emitted prefix"
-        );
-        assert!(rows < n as u64);
-    }
-}
+#[path = "streaming_tests.rs"]
+mod tests;

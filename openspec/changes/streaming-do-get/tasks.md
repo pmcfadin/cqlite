@@ -41,16 +41,31 @@
       `metrics_attribute_emitted_prefix_on_cancel`).
 - [x] 3.4 Aggregate path: `build_aggregate_response` wraps the materialized output
       in `stream::iter`; `streaming::tests::aggregate_path_matches_collect_content`.
+- [x] 3.5 Review-first fix round (rust-reviewer APPROVE-with-Importants + roborev
+      FAIL, 2 Medium): **B1** a panic in the blocking merge task dropped `tx`
+      silently (clean EOF read as success) — fixed via `run_merge_catching_panics`
+      (`catch_unwind` + new `ProducerError::Panicked`, mapped to
+      `Status::internal`); tests `panicking_merge_forwards_a_terminal_error_not_silent_close`,
+      `do_get_stream_surfaces_panic_as_internal_status_not_eof`. **B2** mid-stream
+      errors skipped `crate::obs::record_status_error` — fixed in
+      `MeteredDoGetStream`'s error arm; observed via `StreamProbe.errors_recorded`
+      in the same panic test. **N1** in-flight allowance de-duplicated into
+      `IN_FLIGHT_ALLOWANCE` (test-only const, doc + tests share one derivation).
 
 ## 4. Verification & delivery
 
 - [x] 4.1 `--lite` each fix round (summary-file redirect); serialized own runs.
 - [x] 4.1a File-size ratchet: the new streaming machinery lives in the new
-      `streaming.rs` (785 lines, under threshold). The irreducible seam additions
-      grow `producer.rs` (2397→2485) and `service.rs` (857→893) — both already far
-      over the 800-line threshold BEFORE this change (needs the #1116/#1135 split,
-      out of scope here). Moving the sinks out would push `streaming.rs` over 800,
-      strictly worse. Lite re-run with `CQLITE_ALLOW_FILE_GROWTH=1` → PASS.
+      `streaming.rs`. The irreducible seam additions grow `producer.rs`
+      (2397→2497) and `service.rs` (857→896) — both already far over the
+      800-line threshold BEFORE this change (needs the #1116/#1135 split, out of
+      scope here). During the B1/B2/N1 fix round `streaming.rs` itself grew past
+      800 (954 lines) with the new panic/error-observability tests; split its
+      `#[cfg(test)] mod tests` out into a sibling `streaming_tests.rs` (via
+      `#[path = "streaming_tests.rs"] mod tests;`) — `streaming.rs` is now 380
+      lines (source), `streaming_tests.rs` 575 (test file, well under 1500).
+      Lite re-run with `CQLITE_ALLOW_FILE_GROWTH=1` (for the still-over-threshold
+      producer.rs/service.rs only) → PASS.
 - [ ] 4.2 Review-first: `rust-reviewer` + roborev on the lite-green diff.
 - [x] 4.3 Existing flight tests green (`do_get_streams_merged_rows`,
       `do_get_missing_table_is_not_found`, producer limit/token/predicate) — full

@@ -70,7 +70,10 @@ impl From<ProducerError> for Status {
             ProducerError::Discovery { .. }
             | ProducerError::Merge(_)
             | ProducerError::Convert(_)
-            | ProducerError::Predicate(_) => Status::internal(msg),
+            | ProducerError::Predicate(_)
+            // A panic on the blocking pool (issue #1476, roborev B1) is a server
+            // fault surfaced mid-stream, same class as any other internal error.
+            | ProducerError::Panicked { .. } => Status::internal(msg),
         }
     }
 }

@@ -82,6 +82,18 @@ pub enum ProducerError {
         /// Which ticket field produced the escaping path (`table`/`snapshot`).
         field: &'static str,
     },
+    /// The merge panicked on the blocking pool while streaming (issue #1476,
+    /// roborev B1). Forwarded into the channel as a terminal error so a
+    /// mid-stream panic surfaces as a gRPC `internal` `Status` — never a
+    /// silently truncated, clean `Ok` end-of-stream (a dropped `tx` from a
+    /// panicking task looks identical to "the merge finished" to a consumer
+    /// unless this is forwarded explicitly).
+    #[error("merge task panicked: {message}")]
+    Panicked {
+        /// Best-effort panic payload message (`&str`/`String` payloads are
+        /// extracted verbatim; anything else is a fixed placeholder).
+        message: String,
+    },
 }
 
 /// Source of the SSTable `Data.db` files to merge for one table.
