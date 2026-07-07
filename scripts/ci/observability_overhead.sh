@@ -66,6 +66,16 @@ threshold = float(threshold)
 # missing expected baseline.
 BENCH_IDS = ["observability_overhead/read_scan", "observability_overhead/write_merge"]
 
+# Issue #1703: subscriber-ON variants. These run the SAME workload with a real
+# fmt `tracing` subscriber installed at INFO — the CLI's default posture, which
+# the subscriber-less arms above never measured. Recorded ADVISORY-FIRST below
+# (printed + warned, never failing) so the previously-unmeasured default posture
+# becomes visible; a later change may promote it to a failing threshold.
+SUBSCRIBER_ON_IDS = {
+    "observability_overhead/read_scan": "observability_overhead/read_scan_subscriber_on",
+    "observability_overhead/write_merge": "observability_overhead/write_merge_subscriber_on",
+}
+
 def median_ns(bench_id, baseline):
     path = os.path.join(crit_dir, bench_id, baseline, "estimates.json")
     if not os.path.isfile(path):
@@ -106,5 +116,34 @@ if fail:
     )
 else:
     print(f"OK: all benches within the {threshold}% overhead threshold.")
+
+# ---------------------------------------------------------------------------
+# Issue #1703: subscriber-ON advisory. NEVER touches `fail` / the exit code.
+# Measured on the DEFAULT build (observability OFF) — the CLI's default posture.
+# ---------------------------------------------------------------------------
+print()
+print("== Subscriber-on posture (issue #1703, ADVISORY — does not fail the gate) ==")
+print(f"{'bench':44} {'no-sub (ns)':>14} {'sub-on (ns)':>14} {'sub cost %':>12}  note")
+print("-" * 92)
+for base_bid, sub_bid in SUBSCRIBER_ON_IDS.items():
+    no_sub = median_ns(base_bid, base_off)
+    sub_on = median_ns(sub_bid, base_off)
+    if no_sub is None or sub_on is None:
+        print(
+            f"{sub_bid:44} {'-':>14} {'-':>14} {'-':>12}  "
+            "WARN: subscriber-on baseline absent (advisory only)"
+        )
+        continue
+    sub_cost_pct = (sub_on - no_sub) / no_sub * 100.0
+    note = "advisory"
+    if sub_cost_pct > threshold:
+        note = f"WARN: subscriber-on posture > {threshold}% (advisory, not failing)"
+    print(f"{sub_bid:44} {no_sub:14.1f} {sub_on:14.1f} {sub_cost_pct:12.2f}  {note}")
+print("-" * 92)
+print(
+    "NOTE: the subscriber-on numbers are advisory-first (issue #1703). They record "
+    "the CLI's real default posture; a later change may promote them to a failing gate."
+)
+
 sys.exit(fail)
 PY

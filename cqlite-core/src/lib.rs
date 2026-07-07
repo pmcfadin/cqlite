@@ -448,7 +448,7 @@ impl Database {
         // text — a query string carries user data (WHERE-clause literals).
         #[cfg(debug_assertions)]
         if let Ok(ref query_result) = result {
-            log::debug!(
+            tracing::debug!(
                 "Database::execute returning rows_affected: {}",
                 query_result.rows_affected
             );

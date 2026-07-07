@@ -34,11 +34,39 @@
 //! `#[inline]` and branch on a `const` feature predicate) to keep the CI signal
 //! non-flaky on shared runners.
 //!
+//! # Subscriber-on variant (issue #1703, epic #1686 AI3)
+//!
+//! The arms above run **subscriber-less** — Criterion installs no `tracing`
+//! subscriber, so the `#[tracing::instrument]` spans on the workload are inert.
+//! That is NOT the posture a real CLI user runs in: the CLI installs a fmt
+//! subscriber at INFO. To measure that previously-unmeasured default posture,
+//! each workload also gets a `*_subscriber_on` variant that wraps the SAME work
+//! in `tracing::subscriber::with_default(<fmt subscriber at INFO>)` (writing to a
+//! sink so span/event formatting cost is counted without polluting output).
+//! After the #1703 uniform DEBUG demotion the write/compaction spans are DEBUG,
+//! so an INFO subscriber filters them out and this number should be close to the
+//! subscriber-less one. The comparison script records it **advisory-first**
+//! (prints + warns, never fails) so the default posture is visible.
+//!
 //! Bench group/IDs (consumed by the comparison script):
 //! - `observability_overhead/read_scan`
+//! - `observability_overhead/read_scan_subscriber_on`
 //! - `observability_overhead/write_merge`  (only when `write-support` is enabled)
+//! - `observability_overhead/write_merge_subscriber_on`  (write-support only)
 
 use criterion::{criterion_group, criterion_main, Criterion};
+
+/// A real `tracing` fmt subscriber capped at INFO — the CLI's default posture —
+/// writing to `io::sink` so span/event formatting cost is measured without
+/// polluting bench output. Installed thread-locally via `with_default` for the
+/// `*_subscriber_on` bench variants (issue #1703).
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+fn info_sink_subscriber() -> impl tracing::Subscriber + Send + Sync {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(std::io::sink)
+        .finish()
+}
 
 #[path = "fixtures/mod.rs"]
 mod fixtures;
@@ -96,6 +124,25 @@ fn bench_read_scan(c: &mut Criterion) {
                 rows += res.rows.len();
             }
             black_box(rows)
+        });
+    });
+
+    // Subscriber-on variant (issue #1703): identical work, but with a real fmt
+    // subscriber at INFO installed for the whole measurement — the CLI's default
+    // posture. Advisory number recorded by the comparison script.
+    group.bench_function("read_scan_subscriber_on", |b| {
+        let subscriber = info_sink_subscriber();
+        tracing::subscriber::with_default(subscriber, || {
+            b.iter(|| {
+                let mut rows = 0usize;
+                for _ in 0..REPEATS {
+                    let res = rt
+                        .block_on(loaded.db.execute(black_box(&sql)))
+                        .expect("overhead read scan (subscriber on)");
+                    rows += res.rows.len();
+                }
+                black_box(rows)
+            });
         });
     });
     group.finish();
@@ -158,6 +205,34 @@ fn bench_write_merge(c: &mut Criterion) {
             },
             BatchSize::SmallInput,
         );
+    });
+
+    // Subscriber-on variant (issue #1703): identical ingest, but with a real fmt
+    // subscriber at INFO installed for the whole measurement — the CLI's default
+    // posture (per-mutation write.mutation / wal.* / memtable.insert spans are
+    // DEBUG post-#1703, so an INFO subscriber filters them out). Advisory number.
+    group.bench_function("write_merge_subscriber_on", |b| {
+        let subscriber = info_sink_subscriber();
+        tracing::subscriber::with_default(subscriber, || {
+            b.iter_batched(
+                || {
+                    let tmp = tempfile::TempDir::new()
+                        .expect("temp dir for write overhead bench (subscriber on)");
+                    let engine = fixtures::open_write_engine_wal_off(tmp.path(), usize::MAX);
+                    (tmp, engine)
+                },
+                |(_tmp, mut engine)| {
+                    fill_engine(&mut engine);
+                    assert_eq!(
+                        engine.memtable_row_count(),
+                        ROWS as usize,
+                        "write_merge overhead (subscriber on): every row must reach the memtable"
+                    );
+                    black_box(engine.memtable_row_count())
+                },
+                BatchSize::SmallInput,
+            );
+        });
     });
     group.finish();
 }

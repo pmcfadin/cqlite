@@ -57,20 +57,20 @@ impl V5CompressedLegacyParser {
         // Issue #1046: build the header→schema column resolution ONCE per block.
         let resolution = RowColumnResolution::build(schema, reader);
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsing block for {}.{} ({} bytes)",
             self.keyspace,
             self.table_name,
             data.len()
         );
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Schema has {} columns",
             schema.columns.len()
         );
         for (i, col) in schema.columns.iter().enumerate() {
-            log::debug!("  Column {}: {} ({})", i, col.name, col.data_type);
+            tracing::debug!("  Column {}: {} ({})", i, col.name, col.data_type);
         }
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: First 64 bytes of data: {}",
             hex::encode(&data[..std::cmp::min(64, data.len())])
         );
@@ -100,7 +100,7 @@ impl V5CompressedLegacyParser {
         let mut partition_index = 0;
         let mut skipped_partitions = 0;
         while offset < data.len() {
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: === PARTITION {} at offset {} (block size: {}) ===",
                 partition_index,
                 offset,
@@ -127,7 +127,7 @@ impl V5CompressedLegacyParser {
             // Check if this looks like a partition header (flags byte + reasonable key length)
             // Partition keys can be up to 64KB per Cassandra spec (composite keys, text, etc.)
             if offset + 2 > data.len() {
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: Not enough bytes for partition header at offset {} (need 2, have {}), stopping",
                     offset,
                     data.len() - offset
@@ -153,7 +153,7 @@ impl V5CompressedLegacyParser {
                 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
                 || offset + header_min_size > data.len()
             {
-                log::warn!(
+                tracing::warn!(
                     "V5CompressedLegacy: Skipping malformed partition header at offset {} \
                      (flags=0x{:02x}, key_len={}, need {} bytes, have {}, partition={}): header validation failed",
                     offset,
@@ -248,20 +248,20 @@ impl V5CompressedLegacyParser {
                         _ => None,
                     };
 
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: Partition {} - Parsed partition key: {} bytes (header consumed {} bytes, now at offset {})",
                         partition_index,
                         partition_key.0.len(),
                         header_size,
                         offset
                     );
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: Partition {} - Row data starts at offset {}, remaining: {} bytes",
                         partition_index,
                         offset,
                         data.len() - offset
                     );
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: Partition {} - Row data hex (first 128 bytes): {}",
                         partition_index,
                         hex::encode(&data[offset..std::cmp::min(offset + 128, data.len())])
@@ -313,7 +313,7 @@ impl V5CompressedLegacyParser {
                         // When END_OF_PARTITION (0x01) is set in the flags byte, nothing follows.
                         // The partition is complete and we should move to the next partition.
                         if offset < data.len() && Self::is_end_of_partition(data[offset]) {
-                            log::debug!(
+                            tracing::debug!(
                                 "V5CompressedLegacy: Partition {} complete via END_OF_PARTITION marker at offset {} ({} rows parsed)",
                                 partition_index, offset, row_count
                             );
@@ -327,7 +327,7 @@ impl V5CompressedLegacyParser {
                         // When IS_MARKER (0x02) is set, this is a range tombstone boundary, not a row.
                         // We skip these markers for now (full implementation would parse deletion ranges).
                         if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
-                            log::debug!(
+                            tracing::debug!(
                                 "V5CompressedLegacy: Range tombstone marker at offset {} (partition {}), skipping",
                                 offset, partition_index
                             );
@@ -350,7 +350,7 @@ impl V5CompressedLegacyParser {
                                             del_primary,
                                             del_secondary,
                                         ) {
-                                            log::debug!(
+                                            tracing::debug!(
                                                 "V5CompressedLegacy: range tombstone FSM error at offset {}: {}",
                                                 offset, e
                                             );
@@ -360,7 +360,7 @@ impl V5CompressedLegacyParser {
                                         continue; // Continue to next row/marker
                                     }
                                     Err(e) => {
-                                        log::debug!(
+                                        tracing::debug!(
                                             "V5CompressedLegacy: Failed to parse range tombstone marker at offset {}: {}",
                                             offset, e
                                         );
@@ -374,7 +374,7 @@ impl V5CompressedLegacyParser {
                                     continue;
                                 }
                                 Err(e) => {
-                                    log::debug!(
+                                    tracing::debug!(
                                         "V5CompressedLegacy: Failed to skip range tombstone marker at offset {}: {}",
                                         offset, e
                                     );
@@ -404,7 +404,7 @@ impl V5CompressedLegacyParser {
                                 offset = next_offset;
                                 row_count += 1;
 
-                                log::debug!(
+                                tracing::debug!(
                                     "V5CompressedLegacy: Partition {} Row {} - Parsed {} cells, now at offset {} (is_static={})",
                                     partition_index,
                                     row_count,
@@ -414,7 +414,7 @@ impl V5CompressedLegacyParser {
                                 );
 
                                 if let Some(ref header) = row_header_opt {
-                                    log::debug!(
+                                    tracing::debug!(
                                         "V5CompressedLegacy: Row {} metadata - timestamp={:?}, ttl={:?}, deletion={:?}",
                                         row_count,
                                         header.timestamp, header.ttl, header.local_deletion_time
@@ -435,7 +435,7 @@ impl V5CompressedLegacyParser {
                                 // be emitted as standalone result rows. Instead, store the static
                                 // column values and merge them into each subsequent clustering row.
                                 if is_static {
-                                    log::debug!(
+                                    tracing::debug!(
                                         "V5CompressedLegacy: Partition {} - Storing {} static cells for merging into clustering rows",
                                         partition_index,
                                         cells.len()
@@ -550,7 +550,7 @@ impl V5CompressedLegacyParser {
                                 );
                                 if row_count == 0 {
                                     // If we couldn't parse even one row, log as error
-                                    log::error!(
+                                    tracing::error!(
                                         "V5CompressedLegacy: Partition {} - Failed to parse first row at offset {}: {}",
                                         partition_index, offset, e
                                     );
@@ -563,7 +563,7 @@ impl V5CompressedLegacyParser {
                     partition_index += 1;
                 }
                 Err(e) => {
-                    log::warn!(
+                    tracing::warn!(
                         "V5CompressedLegacy: Failed to parse partition header at offset {} \
                          (partition={}): {}. Attempting to continue to next partition.",
                         offset,
@@ -579,7 +579,7 @@ impl V5CompressedLegacyParser {
         }
 
         if skipped_partitions > 0 {
-            log::warn!(
+            tracing::warn!(
                 "V5CompressedLegacy: Successfully parsed {} entries, skipped {} malformed partitions",
                 emitted,
                 skipped_partitions
@@ -828,7 +828,7 @@ impl V5CompressedLegacyParser {
         }
 
         if skipped_partitions > 0 {
-            log::warn!(
+            tracing::warn!(
                 "V5CompressedLegacy (compaction): skipped {} malformed partitions",
                 skipped_partitions
             );

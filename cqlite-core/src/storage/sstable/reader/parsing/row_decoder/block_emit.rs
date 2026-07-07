@@ -230,7 +230,7 @@ impl V5CompressedLegacyParser {
                         }
 
                         if self.peek_is_partition_header(data, offset) {
-                            log::debug!(
+                            tracing::debug!(
                                 "V5CompressedLegacy: Partition {} detected at offset {} after {} rows",
                                 partition_index + 1, offset, row_count
                             );
@@ -238,7 +238,7 @@ impl V5CompressedLegacyParser {
                         }
                     }
                     Err(e) => {
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy: Row parse error in partition {} at offset {}: {}",
                             partition_index,
                             offset,
@@ -614,7 +614,7 @@ impl V5CompressedLegacyParser {
                         }
 
                         if self.peek_is_partition_header(data, offset) {
-                            log::debug!(
+                            tracing::debug!(
                                 "V5CompressedLegacy delta-scan: Partition {} detected at offset {} after {} rows",
                                 partition_index + 1, offset, row_count
                             );

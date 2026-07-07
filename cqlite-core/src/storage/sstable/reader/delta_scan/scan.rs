@@ -228,7 +228,7 @@ async fn run_scan_delta(
                     for (col_name, ccm) in &col_complex_meta {
                         if ccm.element_tombstone_count > 0 {
                             row_element_tombstones += ccm.element_tombstone_count;
-                            log::warn!(
+                            tracing::warn!(
                                 "scan_delta DS4: collection column '{}' has {} element-level tombstone(s) \
                                  that cannot be represented in v1 delta semantics (Issue #493 follow-up). \
                                  These removals are counted in the scan summary but not in the emitted records.",
@@ -409,7 +409,7 @@ fn find_data_db(dir: &std::path::Path) -> crate::Result<std::path::PathBuf> {
 
     if candidates.len() > 1 {
         candidates.sort();
-        log::warn!(
+        tracing::warn!(
             "scan_delta: {:?} contains {} Data.db files (expected 1 per generation); \
              using lexicographically first: {:?}. Consider compacting before scanning.",
             dir,

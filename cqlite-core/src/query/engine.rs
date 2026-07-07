@@ -233,7 +233,7 @@ impl QueryEngine {
         }
         #[cfg(debug_assertions)]
         if trimmed_cql.starts_with("SELECT") && is_simple_id_lookup {
-            log::debug!(
+            tracing::debug!(
                 "Routing simple SELECT through normal executor for consistent key handling"
             );
         }

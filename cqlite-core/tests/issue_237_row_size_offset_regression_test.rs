@@ -21,7 +21,7 @@ use cqlite_core::ingestion::{ingest, IngestionConfig};
 
 fn init_logging() {
     let _ = env_logger::builder()
-        .filter_level(log::LevelFilter::Warn)
+        .parse_filters("warn")
         .is_test(true)
         .try_init();
 }

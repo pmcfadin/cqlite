@@ -46,7 +46,7 @@ impl SSTableReader {
                 // Legacy formats can return raw key data as last resort
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    log::warn!(
+                    tracing::warn!(
                         "No schema available - returning raw key data for key of length {} (register a schema for schema-aware decode)",
                         key_data.len()
                     );
@@ -173,7 +173,7 @@ pub(crate) fn parse_composite_key_v5_format_impl(key_data: &[u8]) -> Result<RowK
         )));
     }
 
-    log::debug!(
+    tracing::debug!(
         "Parsing v5 composite key with {} components",
         component_count
     );
@@ -200,7 +200,7 @@ pub(crate) fn parse_composite_key_v5_format_impl(key_data: &[u8]) -> Result<RowK
         }
     }
 
-    log::debug!("Parsed v5 composite key: {} total bytes", components.len());
+    tracing::debug!("Parsed v5 composite key: {} total bytes", components.len());
     Ok(RowKey::new(components))
 }
 
@@ -243,7 +243,7 @@ pub(crate) fn parse_composite_key_legacy_format_impl(key_data: &[u8]) -> Result<
         components.pop();
     }
 
-    log::debug!(
+    tracing::debug!(
         "Parsed legacy composite key: {} total bytes",
         components.len()
     );
@@ -274,7 +274,7 @@ pub(crate) fn parse_clustering_key_format_impl(key_data: &[u8]) -> Result<RowKey
 
         if offset < key_data.len() {
             let clustering_data = &key_data[offset..];
-            log::debug!(
+            tracing::debug!(
                 "Parsed clustering key: {} bytes after {} byte type prefix",
                 clustering_data.len(),
                 offset
@@ -302,7 +302,7 @@ pub(crate) fn parse_key_with_schema_impl(
         let (_, components) = super::byte_comparable::decode_byte_comparable_key(key_data)
             .map_err(|_| Error::corruption("Failed to decode byte-comparable partition key"))?;
 
-        log::debug!(
+        tracing::debug!(
             "parse_key_with_schema: Decoded {} byte-comparable components",
             components.len()
         );
@@ -330,7 +330,7 @@ pub(crate) fn parse_key_with_schema_impl(
                 ))
             })?;
 
-        log::debug!(
+        tracing::debug!(
             "parse_key_with_schema: Single partition key column '{}' ({}), raw key length: {}",
             partition_column.name,
             partition_column.data_type,
@@ -346,7 +346,7 @@ pub(crate) fn parse_key_with_schema_impl(
     let mut offset = 0;
     let mut key_components = Vec::new();
 
-    log::debug!(
+    tracing::debug!(
         "parse_key_with_schema: Composite partition key with {} components, key length: {}",
         schema.partition_keys.len(),
         key_data.len()

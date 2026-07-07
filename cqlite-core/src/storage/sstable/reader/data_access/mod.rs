@@ -37,6 +37,9 @@ mod chunk_cache_wiring_tests;
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
 mod compaction;
+// CRC-validated compressed offset-read window (issue #1773): keeps the
+// `read_compressed_offset_window` helper out of this already-large entry-point file.
+mod compressed_offset;
 mod model;
 // First/last-key range short-circuit (issue #1576, C5): an authoritative
 // `[first_key, last_key]` bound check that answers out-of-range point reads as
@@ -53,20 +56,16 @@ pub use model::ClusteringSlice;
 // (issue #1567). `model` is a private submodule, so the raw path is not reachable
 // from `reader::scan_stream_windowed`; this widens the path exactly enough.
 pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
-// Re-export the underlying-read counter so `chunk_source` (the single decode
-// plane) increments it on its miss/read path only — a cache HIT never counts a
-// read (issue #1598, "zero underlying reads" oracle).
-pub(in crate::storage::sstable::reader) use model::CHUNK_READ_CALLS;
 
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use log::warn;
 use std::io::SeekFrom;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncSeekExt;
+use tracing::warn;
 
 // Per-site cache key namespaces (design D4): fold a site discriminator into the
 // sstable-identity field of [`ChunkKey`] so numerically-overlapping keys from
@@ -249,7 +248,7 @@ impl SSTableReader {
 
         // Parse the stitched decompressed buffer
         let entries = parser.parse_block(&stitched_buffer, table_schema, self)?;
-        log::debug!(
+        tracing::debug!(
             "stitch_and_parse_all_chunks: Parsed {} entries from stitched buffer",
             entries.len()
         );
@@ -287,7 +286,7 @@ impl SSTableReader {
 
         let entries =
             parser.parse_block_with_cell_metadata(&stitched_buffer, table_schema, self)?;
-        log::debug!(
+        tracing::debug!(
             "stitch_and_parse_all_chunks_with_metadata: Parsed {} entries with metadata",
             entries.len()
         );
@@ -329,7 +328,7 @@ impl SSTableReader {
         while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
-                log::debug!(
+                tracing::debug!(
                     "stitch_all_chunks: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
                     chunk_count,
                     compressed_chunk.len(),
@@ -354,7 +353,7 @@ impl SSTableReader {
                 })?
             } else {
                 // No compression (should not happen for V5CompressedLegacy)
-                log::warn!("stitch_all_chunks: No compression reader, using raw chunk data");
+                tracing::warn!("stitch_all_chunks: No compression reader, using raw chunk data");
                 compressed_chunk
             };
 
@@ -362,7 +361,7 @@ impl SSTableReader {
             chunk_count += 1;
         }
 
-        log::debug!(
+        tracing::debug!(
             "stitch_all_chunks: Stitched {} chunks, total buffer: {} bytes",
             chunk_count,
             stitched_buffer.len()
@@ -441,10 +440,13 @@ impl SSTableReader {
         // (compressed tables / BTI / absent-CRC.db warn-and-proceed).
         self.verify_uncompressed_range(offset, size).await?;
 
-        // Read + decompress in ONE decode plane (issue #1598, G2): `get_cached_data`
-        // routes through `ChunkSource::range`, which reads, CRC-checks, decompresses
-        // (the single query-path `Compression::decompress` call site), and B1-caches.
-        // The returned bytes are already decompressed — there is no second decode here.
+        // Read + decompress in ONE decode plane (issue #1598, G2). `get_cached_data`
+        // returns the final DECODED window: for a compressed Data.db it routes through
+        // the CRC-validated `read_compressed_offset_window` (issue #1773 — per-chunk
+        // inline CRC32 checked BEFORE decompression, whose sole `Compression::decompress`
+        // now resolves inside `ChunkSource`), or the CRC.db-verified raw bytes for an
+        // uncompressed one. There is no second decode here — doing so used to
+        // double-decompress the compressed path (and skip its inline CRC, the #1411 bug).
         let data = self.get_cached_data(offset, size).await?;
 
         // Preserve raw data until schema is available. Pre-#1334 this offset-read
@@ -487,64 +489,44 @@ impl SSTableReader {
     ///
     /// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
     async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
-        use crate::parser::header::CassandraVersion;
-        use crate::storage::sstable::compression::Compression;
-
-        // Single decode plane (issue #1598, G2): positioned read → decompress → B1
-        // cache via ChunkSource::range. The shared cache tracks hit/miss internally,
-        // and ChunkSource::range increments CHUNK_READ_CALLS on its miss/read path
-        // ONLY — a warm cache hit performs (and counts) zero underlying reads.
-
-        // Build ChunkSource for the BIG point path
-        let compression_opt = self
-            .compression_reader
-            .as_ref()
-            .map(|cr| Compression::new(*cr.algorithm()))
-            .transpose()?;
-        let comp_info_dummy = crate::storage::sstable::compression_info::CompressionInfo {
-            algorithm: String::new(),
-            option_pairs: vec![],
-            chunk_length: 0,
-            max_compressed_length: u32::MAX, // BIG point read has no incompressible-raw branch
-            data_length: 0,
-            chunk_offsets: vec![],
-        };
-        let chunk_source = super::chunk_source::ChunkSource::new(
-            self.point_source.as_ref(),
-            &comp_info_dummy,
-            compression_opt.as_ref(),
-            &self.chunk_cache,
-            self.stats.file_size,
-            0, // header_offset unused by range()
-            NS_BIG_POINT,
-            self.chunk_cache_id,
+        // The shared B1 cache tracks its own hit/miss counters (issue #1567). The
+        // ranged BIG-point key carries `size` as its aux discriminant so two reads at
+        // the same offset with different sizes can never alias (roborev #1567).
+        let key = crate::storage::cache::ChunkKey::with_aux(
+            self.chunk_cache_id ^ NS_BIG_POINT,
+            block_offset,
+            size as u64,
         );
+        if let Some(hit) = self.chunk_cache.get(&key) {
+            return Ok(hit.to_vec());
+        }
 
-        // Range read: positioned read + decompress + B1 cache in one call
-        let arc = match chunk_source.range(block_offset, size) {
-            Ok(a) => a,
-            Err(e) => {
-                // Preserve legacy-format DECOMPRESSION fallback (issue #1598 roborev Low):
-                // only catch Corruption (decompress failures), not IO errors. A positioned-read
-                // failure followed by a successful re-read could otherwise return raw compressed
-                // bytes instead of propagating the error.
-                if self.header.cassandra_version == CassandraVersion::Legacy
-                    && matches!(e, Error::Corruption(_))
-                {
-                    warn!(
-                        "Decompression failed for legacy format ({}), re-reading raw",
-                        e
-                    );
-                    let mut buffer = vec![0u8; size as usize];
-                    self.point_source.read_exact_at(block_offset, &mut buffer)?;
-                    return Ok(buffer);
-                } else {
-                    return Err(e);
-                }
-            }
+        // Produce the final DECOMPRESSED, integrity-verified window for this offset.
+        let data = if let Some(comp_info) = self.compression_info.as_deref() {
+            // COMPRESSED offset read (issue #1773): the authoritative inline per-chunk
+            // CRC32 MUST be validated before decompression. `read_compressed_offset_window`
+            // reuses the shared CRC-enforcing chunk reader (multi-chunk assembly,
+            // fail-closed past-EOF) rather than reading `size` raw bytes and blindly
+            // LZ4-decoding them — the latter re-introduced the exact #1411 CRC bypass.
+            // Its single decompress resolves inside `ChunkSource` (issue #1598, G2), so
+            // this is NOT a second decode plane.
+            self.read_compressed_offset_window(comp_info, block_offset, size)
+                .await?
+        } else {
+            // UNCOMPRESSED offset read. Positioned read on the shared point source
+            // (issue #1573, C2): no cursor mutex is held across this I/O, so
+            // concurrent point reads do not convoy. The covering CRC.db chunks were
+            // already verified by `verify_uncompressed_range` before we got here
+            // (issue #1396), so these bytes are integrity-checked too.
+            model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+            let mut buffer = vec![0u8; size as usize];
+            self.point_source.read_exact_at(block_offset, &mut buffer)?;
+            buffer
         };
 
-        // Callers consume a Vec, so convert Arc→Vec
+        // Insert into the shared cache (converts the Vec to Arc<[u8]> once) and
+        // return an owned copy (this site's callers consume a Vec).
+        let arc = self.chunk_cache.insert(key, data);
         Ok(arc.to_vec())
     }
 

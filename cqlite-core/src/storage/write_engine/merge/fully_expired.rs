@@ -75,7 +75,7 @@ fn read_timestamp_stats(data_path: &Path) -> Option<TimestampStatistics> {
     let stats_bytes = match std::fs::read(&stats_path) {
         Ok(b) => b,
         Err(e) => {
-            log::warn!(
+            tracing::warn!(
                 "Could not read Statistics.db {:?} for fully-expired check: {}",
                 stats_path,
                 e
@@ -89,7 +89,7 @@ fn read_timestamp_stats(data_path: &Path) -> Option<TimestampStatistics> {
     ) {
         Ok((_, sstable_stats)) => Some(sstable_stats.timestamp_stats),
         Err(e) => {
-            log::warn!(
+            tracing::warn!(
                 "Could not parse Statistics.db {:?} for fully-expired check: {:?}",
                 stats_path,
                 e

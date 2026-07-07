@@ -136,7 +136,7 @@ where
     match attempt().await {
         Ok(v) => Ok(v),
         Err(e) if is_transient_io(&e) => {
-            log::warn!(
+            tracing::warn!(
                 "transient I/O fault ({e}); re-seeking to offset {original_pos} and retrying once"
             );
             {
@@ -164,8 +164,8 @@ async fn read_next_block_impl(
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     _header_offset: u64, // Unused for NB format; kept for potential future BTI/Legacy use
 ) -> Result<Option<Vec<u8>>> {
-    log::debug!("block_io::read_next_block_impl: Starting block read");
-    log::debug!(
+    tracing::debug!("block_io::read_next_block_impl: Starting block read");
+    tracing::debug!(
         "block_io::read_next_block_impl: Cassandra version: {:?}",
         cassandra_version
     );
@@ -176,7 +176,7 @@ async fn read_next_block_impl(
         cassandra_version,
         crate::parser::header::CassandraVersion::V5_0Uncompressed
     ) {
-        log::debug!("block_io::read_next_block_impl: Using uncompressed direct read");
+        tracing::debug!("block_io::read_next_block_impl: Using uncompressed direct read");
         // V5_0Uncompressed is NOT stitched: its callers parse each returned block
         // as a self-contained unit, so return the whole data section contiguously
         // (issue #827 Finding 2). Piecewise here would silently truncate any
@@ -199,7 +199,7 @@ async fn read_next_block_impl(
         crate::parser::header::CassandraVersion::V5_0Bti
     );
     if is_bti && compression_info.is_none() {
-        log::debug!("block_io::read_next_block_impl: BTI without CompressionInfo, direct read");
+        tracing::debug!("block_io::read_next_block_impl: BTI without CompressionInfo, direct read");
         // BTI direct read is parsed as a self-contained unit (like V5_0Uncompressed
         // above), so return the whole data section contiguously (issue #827 Finding 2):
         // piecewise here would truncate any partition/row crossing a 64 KiB boundary.
@@ -208,7 +208,7 @@ async fn read_next_block_impl(
     }
 
     if cassandra_version.is_nb_format() || is_bti {
-        log::debug!("block_io::read_next_block_impl: Using NB/BTI format chunk reader");
+        tracing::debug!("block_io::read_next_block_impl: Using NB/BTI format chunk reader");
 
         // File size for chunk-size calculation. The SSTable is immutable, so this
         // reads the cached length instead of re-deriving it with a seek(End)/back
@@ -238,21 +238,23 @@ async fn read_next_block_impl(
     // Read block header with format-specific handling (BTI and Legacy only)
     let block_header = match cassandra_version {
         crate::parser::header::CassandraVersion::V5_0Bti => {
-            log::debug!("block_io::read_next_block_impl: Using BTI format block header reader");
+            tracing::debug!("block_io::read_next_block_impl: Using BTI format block header reader");
             read_bti_format_block_header(file).await?
         }
         _ => {
-            log::debug!("block_io::read_next_block_impl: Using legacy format block header reader");
+            tracing::debug!(
+                "block_io::read_next_block_impl: Using legacy format block header reader"
+            );
             read_legacy_format_block_header(file).await?
         }
     };
 
     let Some((compressed_size, checksum, current_pos)) = block_header else {
-        log::debug!("block_io::read_next_block_impl: Block header returned None (EOF)");
+        tracing::debug!("block_io::read_next_block_impl: Block header returned None (EOF)");
         return Ok(None); // EOF
     };
 
-    log::debug!(
+    tracing::debug!(
         "block_io::read_next_block_impl: Block header: compressed_size={}, checksum={}, pos={}",
         compressed_size,
         checksum,
@@ -277,7 +279,7 @@ async fn read_next_block_impl(
     }
 
     if compressed_size == 0 {
-        log::info!("Encountered empty block at position {}", current_pos);
+        tracing::info!("Encountered empty block at position {}", current_pos);
         return Ok(Some(Vec::new()));
     }
 
@@ -297,10 +299,10 @@ async fn read_next_block_impl(
                 current_pos, checksum, computed_checksum
             )));
         }
-        log::debug!("Block checksum validated: 0x{:08x}", checksum);
+        tracing::debug!("Block checksum validated: 0x{:08x}", checksum);
     }
 
-    log::debug!(
+    tracing::debug!(
         "Successfully read block: {} bytes at position {}",
         block_data.len(),
         current_pos
@@ -337,12 +339,12 @@ async fn read_nb_format_chunk_data(
     file_size: u64,
     header_offset: u64,
 ) -> Result<Option<Vec<u8>>> {
-    log::debug!("read_nb_format_chunk_data: Starting chunk read");
+    tracing::debug!("read_nb_format_chunk_data: Starting chunk read");
 
     // If no CompressionInfo.db, the NB format SSTable is uncompressed.
     // Fall back to reading raw data directly (same as V5_0Uncompressed).
     let Some(comp_info) = compression_info else {
-        log::debug!(
+        tracing::debug!(
             "read_nb_format_chunk_data: No CompressionInfo.db, falling back to raw data read"
         );
         // NB-without-CompressionInfo IS stitched (requires_chunk_stitching() is
@@ -360,7 +362,7 @@ async fn read_nb_format_chunk_data(
 
     // Check if all chunks read
     if chunk_idx >= comp_info.chunk_offsets.len() {
-        log::debug!(
+        tracing::debug!(
             "read_nb_format_chunk_data: All chunks read ({}/{})",
             chunk_idx,
             comp_info.chunk_offsets.len()
@@ -368,7 +370,7 @@ async fn read_nb_format_chunk_data(
         return Ok(None); // EOF
     }
 
-    log::debug!(
+    tracing::debug!(
         "read_nb_format_chunk_data: Reading chunk {}/{}",
         chunk_idx,
         comp_info.chunk_offsets.len()
@@ -379,7 +381,7 @@ async fn read_nb_format_chunk_data(
         .compressed_chunk_offset(chunk_idx)
         .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {}", chunk_idx)))?;
 
-    log::debug!(
+    tracing::debug!(
         "read_nb_format_chunk_data: Chunk {} offset: 0x{:x}",
         chunk_idx,
         chunk_offset
@@ -426,7 +428,7 @@ async fn read_nb_format_chunk_data(
     // Chunk data size = total_chunk_size - 4 bytes for trailing CRC
     let chunk_data_size = (total_chunk_size - 4) as usize;
 
-    log::debug!(
+    tracing::debug!(
         "read_nb_format_chunk_data: Chunk {} total_size={}, data_size={}, offset=0x{:x}",
         chunk_idx,
         total_chunk_size,
@@ -508,12 +510,12 @@ async fn read_nb_format_chunk_data(
         )));
     }
 
-    log::debug!(
+    tracing::debug!(
         "read_nb_format_chunk_data: CRC32 validated for chunk {}: 0x{:08x}",
         chunk_idx,
         expected_crc
     );
-    log::debug!(
+    tracing::debug!(
         "read_nb_format_chunk_data: Successfully read chunk {}: {} bytes (compressed)",
         chunk_idx,
         chunk_data.len()
@@ -786,7 +788,7 @@ async fn read_large_block_streaming(
     config: &SSTableReaderConfig,
 ) -> Result<Vec<u8>> {
     let buffer_size = config.read_buffer_size.min(size.max(1));
-    log::info!(
+    tracing::info!(
         "Reading large block ({} bytes) using streaming with {} byte buffer",
         size,
         buffer_size
@@ -848,7 +850,7 @@ async fn read_uncompressed_data_block(
     let remaining = file_size.saturating_sub(current_pos) as usize;
 
     if remaining == 0 {
-        log::debug!(
+        tracing::debug!(
             "read_uncompressed_data_block: EOF reached at position {}",
             current_pos
         );
@@ -891,7 +893,7 @@ async fn read_uncompressed_data_block(
         remaining
     };
 
-    log::debug!(
+    tracing::debug!(
         "read_uncompressed_data_block: Reading {} of {} remaining bytes from position {}",
         to_read,
         remaining,
@@ -912,7 +914,7 @@ async fn read_uncompressed_data_block(
             })?
     };
 
-    log::debug!(
+    tracing::debug!(
         "read_uncompressed_data_block: Successfully read {} bytes",
         data.len()
     );

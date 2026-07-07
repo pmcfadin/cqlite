@@ -40,7 +40,7 @@ impl SSTableWriter {
     /// let info = writer.finish().await?;
     /// println!("SSTable written to {}", info.data_path.display());
     /// ```
-    #[tracing::instrument(name = "writer.finish", skip(self))]
+    #[tracing::instrument(name = "writer.finish", level = "debug", skip(self))]
     pub async fn finish(mut self) -> Result<SSTableInfo> {
         // Create keyspace/table subdirectory structure so the reader can
         // extract the table name from the parent directory path. Owned clone so

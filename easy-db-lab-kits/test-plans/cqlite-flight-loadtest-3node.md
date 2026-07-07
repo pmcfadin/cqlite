@@ -236,7 +236,9 @@ kubectl get pods -l easydblab.com/kit=cqlite-flight -o wide
 
 **[UPDATED after the first live run]** This step surfaced four bugs, all now
 fixed in the kit — no command below changes, but the *observed* behavior
-during this step does:
+during this step does. **[UPDATED after the second live run]** two more bugs
+(#2158, #2159) surfaced on a re-run after #2119's fix proved insufficient —
+see those two entries below, both now fixed:
 
 - **#2120** — `cqlite start` never created the `cqlite-trino-plugin-src`
   ConfigMap, so both pods sat `Init:0/1` with `FailedMount`. Fixed:
@@ -253,11 +255,37 @@ during this step does:
 - **#2119** — patching the coordinator's pod template (to add the plugin
   initContainer) started a rollout that could never converge on this plan's
   single app node: the new pod can't bind the coordinator's `hostPort: 8080`
-  while the old one still holds it. Fixed: the reapply script now deletes the
-  old coordinator pod **only when the patch actually changed something** (not
-  on a steady-state no-op re-apply) and waits for the rollout. **Expect the
-  `trino-coordinator` pod to be deleted and recreated once** during this step
-  on a fresh install — that is now expected, not a hang.
+  while the old one still holds it. First fix attempt: the reapply script
+  deleted the old coordinator pod **only when the patch actually changed
+  something**. **[UPDATED after the second live run]** That delete-pod fix
+  was insufficient — under `strategy: RollingUpdate` the surviving
+  ReplicaSet just recreates the deleted pod and re-grabs `hostPort: 8080`,
+  reproducing the deadlock (**#2158**). The kit now ensures
+  `strategy: Recreate` on `trino-coordinator` before every pod-template patch
+  (`bin/reapply-plugin-patch.sh`), so the controller tears down the old pod
+  before starting the new one. **Expect the `trino-coordinator` pod to be
+  recreated once** during this step on a fresh install — that is now
+  expected, not a hang. This manual workaround is no longer needed:
+  ```bash
+  # no longer required — the kit ensures strategy: Recreate itself
+  kubectl patch deployment trino-coordinator -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+  ```
+- **#2159** — **[UPDATED after the second live run]** when `cqlite start`
+  aborted on the #2158 deadlock above, the `cqlite` Trino catalog was never
+  registered, because registration relied entirely on the trino kit's
+  `post-workload-start` hook firing on a *clean* completion — a partial
+  failure left `SHOW CATALOGS` without `cqlite` and no automatic recovery
+  path. Fixed: `bin/start.sh` and `bin/verify.sh` both now call
+  `bin/ensure-catalog-registered.sh`, which checks `SHOW CATALOGS` and, if
+  `cqlite` is missing, registers it by invoking the trino kit's own
+  `bin/update-catalogs.sh` directly. The manual recovery recipe from the
+  first live run is no longer needed:
+  ```bash
+  # no longer required — bin/start.sh / bin/verify.sh self-heal this
+  bash trino/bin/update-catalogs.sh
+  ```
+  Re-running `easy-db-lab cqlite start` (or `bin/verify.sh`) alone now
+  recovers a partial failure with no manual steps.
 
 ```bash
 DB0_IP=$($EDB ip db0 --private)

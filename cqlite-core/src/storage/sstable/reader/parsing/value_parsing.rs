@@ -745,7 +745,7 @@ impl SSTableReader {
             crate::parser::header::CassandraVersion::V5_0NewBig
             | crate::parser::header::CassandraVersion::V5_0Bti => {
                 // Modern formats should not use this placeholder implementation
-                log::error!(
+                tracing::error!(
                     "Column name extraction from key context requires schema-aware decode (registered schema) for modern format {:?}",
                     self.header.cassandra_version
                 );

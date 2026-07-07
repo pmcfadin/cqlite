@@ -86,7 +86,7 @@ impl WriteEngine {
     /// SSTables — see [`merge::compute_max_purgeable_timestamp`]. When `Some`, a
     /// tombstone older than every outside SSTable is purged even in a partial
     /// compaction; `None` keeps the conservative #921 behavior (no purging).
-    #[tracing::instrument(name = "compaction.start_merge", skip(self, input_paths, max_purgeable_timestamp, outside_paths), fields(inputs = input_paths.len()))]
+    #[tracing::instrument(name = "compaction.start_merge", level = "debug", skip(self, input_paths, max_purgeable_timestamp, outside_paths), fields(inputs = input_paths.len()))]
     pub(crate) fn start_merge(
         &mut self,
         input_paths: Vec<PathBuf>,
@@ -94,7 +94,7 @@ impl WriteEngine {
         max_purgeable_timestamp: Option<i64>,
         outside_paths: Vec<PathBuf>,
     ) -> Result<()> {
-        log::info!(
+        tracing::info!(
             "Starting compaction merge of {} SSTables",
             input_paths.len()
         );
@@ -345,7 +345,7 @@ impl WriteEngine {
     /// `maintenance_step_inner` to the public `maintenance_step`, which wraps the
     /// whole step in `record_result("compaction", ..)` and counts it exactly
     /// once. Recording here too would double-count finalize failures.
-    #[tracing::instrument(name = "compaction.finalize", skip(self, report))]
+    #[tracing::instrument(name = "compaction.finalize", level = "debug", skip(self, report))]
     async fn finalize_merge_async(&mut self, report: &mut MaintenanceReport) -> Result<()> {
         let merge = match self.active_merge.take() {
             Some(m) => m,
@@ -355,7 +355,7 @@ impl WriteEngine {
         let input_count = merge.input_paths.len() as u64;
         let merge_rows = merge.rows_merged;
         let elapsed = merge.started_at.elapsed();
-        log::info!(
+        tracing::info!(
             "Finalizing compaction merge: {} rows, {:?} elapsed",
             merge.rows_merged,
             elapsed
@@ -375,7 +375,7 @@ impl WriteEngine {
             }
         };
 
-        log::info!(
+        tracing::info!(
             "Compaction tmp output: {} bytes, {} partitions",
             tmp_info.data_size,
             tmp_info.partition_count
@@ -510,7 +510,7 @@ impl WriteEngine {
                 rollback(&renamed, &merge.tmp_dir);
                 return Err(err);
             }
-            log::debug!(
+            tracing::debug!(
                 "Renamed {:?} → {:?}",
                 src.file_name().unwrap_or_default(),
                 dst.file_name().unwrap_or_default()
@@ -609,7 +609,7 @@ impl WriteEngine {
         // than a hard failure or a source of duplicate rows.
         for input_path in &merge.input_paths {
             if let Err(e) = self.delete_sstable_files(input_path) {
-                log::warn!(
+                tracing::warn!(
                     "Failed to delete compaction input {:?}: {} \
                      (merge output is valid; inputs will be re-evaluated next cycle)",
                     input_path,
@@ -634,7 +634,7 @@ impl WriteEngine {
             &merge.input_paths,
             |dropped| {
                 if let Err(e) = self.delete_sstable_files(dropped) {
-                    log::warn!(
+                    tracing::warn!(
                         "Failed to delete dropped-whole compaction input {:?}: {} \
                          (merge output is valid; leftover is an invisible orphan)",
                         dropped,
@@ -646,7 +646,7 @@ impl WriteEngine {
 
         // Step 4: Remove the now-empty tmp directory (best effort).
         if let Err(e) = std::fs::remove_dir_all(&merge.tmp_dir) {
-            log::debug!(
+            tracing::debug!(
                 "Failed to remove compaction tmp directory {:?}: {}",
                 merge.tmp_dir,
                 e
@@ -729,7 +729,7 @@ impl WriteEngine {
             obs::add_counter(catalog::COMPACTION_SSTABLES_OUT, 1, &[]);
         }
 
-        log::info!(
+        tracing::info!(
             "Compaction complete: merged {} inputs → 1 output ({} bytes total across all components, {} rows, {:?})",
             merge.input_paths.len(),
             total_bytes_written,

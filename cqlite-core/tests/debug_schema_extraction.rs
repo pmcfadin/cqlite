@@ -13,7 +13,7 @@ async fn debug_schema_extraction() {
     // Initialize logging
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
+        .parse_filters("debug")
         .try_init();
 
     let config = Config::default();

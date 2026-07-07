@@ -194,7 +194,7 @@ impl ScanSource {
                 match DirectCursor::open(path, *window) {
                     Ok(cursor) => BlockSource::direct(cursor),
                     Err(e) => {
-                        log::warn!(
+                        tracing::warn!(
                             "Direct-I/O reopen of {} for scan failed ({}); using buffered I/O",
                             path.display(),
                             e

@@ -110,7 +110,7 @@ use crate::{
 };
 
 // Structured logging
-use log::debug;
+use tracing::debug;
 
 #[cfg(feature = "tombstones")]
 use super::tombstone_merger::TombstoneMerger;
@@ -423,7 +423,7 @@ impl SSTableReader {
             // A parsed-but-below-floor version is FATAL — never degrade it.
             Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
             Err(e) => {
-                log::debug!(
+                tracing::debug!(
                     "SSTableReader::open: could not derive VersionGates from {:?} ({}); \
                      defaulting to nb-compatible BIG gates",
                     path,
@@ -491,7 +491,7 @@ impl SSTableReader {
             ScanSource::Direct { .. } => match read_at::DirectReadAt::open(path, file_size) {
                 Ok(d) => Arc::new(d) as Arc<dyn read_at::ReadAt>,
                 Err(e) => {
-                    log::warn!(
+                    tracing::warn!(
                         "Direct-I/O point source for {} failed ({}); using buffered pread",
                         path.display(),
                         e
@@ -638,7 +638,7 @@ impl SSTableReader {
         if !components.is_empty() {
             let integrity_issues = Self::validate_component_integrity(path, &components).await?;
             if !integrity_issues.is_empty() {
-                log::warn!(
+                tracing::warn!(
                     "Component integrity issues detected but proceeding with loading: {:?}",
                     integrity_issues
                 );
@@ -681,7 +681,7 @@ impl SSTableReader {
                 || !clustering_columns.is_empty()
                 || !regular_columns.is_empty()
             {
-                log::debug!(
+                tracing::debug!(
                     "Populating header columns from Statistics.db SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
                     partition_columns.len(),
                     clustering_columns.len(),
@@ -713,7 +713,7 @@ impl SSTableReader {
         ) {
             match TableSchema::from_sstable_header(&header) {
                 Ok(s) => {
-                    log::debug!(
+                    tracing::debug!(
                         "Extracted schema from SSTable header: {}.{} ({} columns, {} partition keys, {} clustering keys)",
                         s.keyspace,
                         s.table,
@@ -724,7 +724,7 @@ impl SSTableReader {
                     Some(Arc::new(s))
                 }
                 Err(e) => {
-                    log::warn!(
+                    tracing::warn!(
                         "Failed to extract schema from SSTable header for {}: {}. Schema-aware parsing will not be available.",
                         path.display(),
                         e
@@ -922,7 +922,7 @@ impl SSTableReader {
             DiskAccessMode::Buffered => Self::open_buffered_sources(path, file_size).await,
             DiskAccessMode::Mmap => match Self::map_file(path) {
                 Ok(mmap) => {
-                    log::debug!(
+                    tracing::debug!(
                         "Opened {} via memory map ({} bytes)",
                         path.display(),
                         file_size
@@ -932,7 +932,7 @@ impl SSTableReader {
                     #[cfg(unix)]
                     if let Some(advice) = mmap_advice_for(prefetch) {
                         if let Err(e) = mmap.advise(advice) {
-                            log::debug!(
+                            tracing::debug!(
                                 "madvise({:?}) on {} failed: {}",
                                 advice,
                                 path.display(),
@@ -944,7 +944,7 @@ impl SSTableReader {
                     Ok((BlockSource::mapped(mmap.clone()), ScanSource::Mapped(mmap)))
                 }
                 Err(e) => {
-                    log::warn!(
+                    tracing::warn!(
                         "Memory-mapping {} failed ({}); falling back to buffered I/O",
                         path.display(),
                         e
@@ -957,7 +957,7 @@ impl SSTableReader {
                 {
                     match source::DirectCursor::open(path, direct_window) {
                         Ok(cursor) => {
-                            log::debug!(
+                            tracing::debug!(
                                 "Opened {} via direct I/O ({} bytes, {}-byte window)",
                                 path.display(),
                                 file_size,
@@ -972,7 +972,7 @@ impl SSTableReader {
                             ))
                         }
                         Err(e) => {
-                            log::warn!(
+                            tracing::warn!(
                                 "Direct I/O on {} failed ({}); falling back to buffered I/O",
                                 path.display(),
                                 e
@@ -984,7 +984,7 @@ impl SSTableReader {
                 #[cfg(not(unix))]
                 {
                     let _ = direct_window;
-                    log::warn!(
+                    tracing::warn!(
                         "Direct I/O is unavailable on this platform; using buffered I/O for {}",
                         path.display()
                     );
@@ -1062,7 +1062,7 @@ impl SSTableReader {
                         e
                     ))
                 })?;
-                log::debug!(
+                tracing::debug!(
                     "Loaded CompressionInfo: algorithm={}, chunk_length={}, chunks={}",
                     info.algorithm,
                     info.chunk_length,
@@ -1085,7 +1085,7 @@ impl SSTableReader {
     ///   then default-on for every uncompressed chunk read.
     /// - `None` for BTI (`da`) tables (Cassandra emits no `CRC.db`) or an
     ///   uncompressed BIG table whose `CRC.db` is absent. The absent case is the
-    ///   owner-pinned **warn-and-proceed** decision (design D4): a `log::warn!` is
+    ///   owner-pinned **warn-and-proceed** decision (design D4): a `tracing::warn!` is
     ///   emitted so the missing integrity component is visible, and the read
     ///   proceeds unverified rather than hard-failing.
     ///
@@ -1112,7 +1112,7 @@ impl SSTableReader {
             // (owner-pinned, design D4). Cassandra 5.0 writes a CRC.db for every
             // uncompressed BIG SSTable, so its absence is notable but not fatal —
             // reads proceed unverified rather than hard-failing.
-            log::warn!(
+            tracing::warn!(
                 "CRC.db absent for uncompressed SSTable {} — proceeding without \
                  read-time per-chunk CRC verification (warn-and-proceed, issue #1396)",
                 path.display()
@@ -1127,7 +1127,7 @@ impl SSTableReader {
                 e
             ))
         })?;
-        log::debug!(
+        tracing::debug!(
             "Loaded CRC.db for {}: chunk_size={}, chunks={}",
             path.display(),
             crc.chunk_size(),
@@ -1169,7 +1169,7 @@ impl SSTableReader {
         // resolved a schema that no longer applies. It is re-populated only by an
         // explicit `resolve_registry_schema()` / `attach_schema_registry()`.
         self.registry_schema = None;
-        log::debug!(
+        tracing::debug!(
             "Schema registry set for {}.{} - enabling schema-driven digest computation",
             self.header.keyspace,
             self.header.table_name
@@ -1200,7 +1200,7 @@ impl SSTableReader {
     #[cfg(not(feature = "state_machine"))]
     pub fn set_schema_registry(&mut self, schema_registry: Arc<crate::schema::SchemaRegistry>) {
         self.schema_registry = Some(schema_registry);
-        log::debug!(
+        tracing::debug!(
             "Schema registry set for {}.{} - enabling schema-driven digest computation",
             self.header.keyspace,
             self.header.table_name
@@ -1213,7 +1213,7 @@ impl SSTableReader {
     /// by providing the UDT field definitions needed for nested type resolution.
     pub fn set_udt_registry(&mut self, registry: crate::schema::UdtRegistry) {
         self.udt_registry = Some(registry);
-        log::debug!(
+        tracing::debug!(
             "UDT registry set for {}.{} - enabling UDT-aware collection parsing",
             self.header.keyspace,
             self.header.table_name
@@ -1319,7 +1319,7 @@ impl SSTableReader {
 
     /// Extract write time from entry metadata
     pub fn extract_write_time_from_entry(&self, _key: &RowKey, row: &ScanRow) -> i64 {
-        use log::warn;
+        use tracing::warn;
 
         match row {
             ScanRow::Marker(Value::Tombstone(info)) => info.deletion_time,

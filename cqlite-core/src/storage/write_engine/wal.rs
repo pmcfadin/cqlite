@@ -1059,7 +1059,7 @@ impl WriteAheadLog {
             if let Some(parent) = path.parent() {
                 sync_directory(parent)?;
             }
-            log::warn!(
+            tracing::warn!(
                 "WAL {:?} had a torn tail: trimmed {} byte(s) ({} -> {})",
                 path,
                 file_len - valid_end,
@@ -1073,7 +1073,7 @@ impl WriteAheadLog {
                 // disk so the caller can preserve it aside first, and record the
                 // valid-prefix boundary so `reset_to_valid_prefix` can trim the
                 // live log once the evidence is safe.
-                log::error!(
+                tracing::error!(
                     "WAL {:?} has corruption at offset {} ({} valid prefix byte(s) of {}); \
                      leaving the segment intact for evidence preservation before reset",
                     path,
@@ -1173,7 +1173,7 @@ impl WriteAheadLog {
             sync_directory(parent)?;
         }
 
-        log::warn!(
+        tracing::warn!(
             "WAL {:?} reset to last valid prefix after lossy recovery: {} -> {} \
              ({} corrupt byte(s) dropped from the LIVE log; evidence preserved aside)",
             self.path,
@@ -1327,7 +1327,7 @@ impl WriteAheadLog {
     /// # Errors
     ///
     /// Returns an error if serialization fails or the write fails.
-    #[tracing::instrument(name = "wal.append", skip(self, mutation))]
+    #[tracing::instrument(name = "wal.append", level = "debug", skip(self, mutation))]
     pub fn append(&mut self, mutation: &Mutation) -> Result<()> {
         // Fail closed if a prior truncate poisoned the WAL (issue #1392,
         // FINDING 1): appending at a stale cursor over a zeroed file would
@@ -1412,7 +1412,7 @@ impl WriteAheadLog {
     /// # Errors
     ///
     /// Returns an error if the flush or sync operation fails.
-    #[tracing::instrument(name = "wal.sync", skip(self))]
+    #[tracing::instrument(name = "wal.sync", level = "debug", skip(self))]
     pub fn sync(&mut self) -> Result<()> {
         // Fail closed if the WAL was poisoned by a partial truncate-restore
         // (issue #1392, FINDING 1): its buffered/cursor state is not trustworthy.
@@ -1562,7 +1562,7 @@ impl WriteAheadLog {
             // entry, so fail fast and report rather than skipping by a bogus
             // length into arbitrary bytes.
             if entry_length > MAX_ENTRY_LENGTH {
-                log::error!(
+                tracing::error!(
                     "WAL entry at offset {} declares implausible length {} (> {}) - stopping \
                      replay; {} trailing byte(s) not recovered",
                     offset,
@@ -1593,7 +1593,7 @@ impl WriteAheadLog {
                     // as clean. Report it (stop early) so `is_clean()` is false and
                     // the caller preserves the tail aside. Only a torn HEADER
                     // (< 8 bytes, the header read above) is a clean torn tail.
-                    log::error!(
+                    tracing::error!(
                         "WAL entry at offset {} has a complete header declaring length {} but \
                          only {} payload byte(s) remain to EOF - stopping replay; {} trailing \
                          byte(s) not recovered (corruption, not a clean torn tail)",
@@ -1623,7 +1623,7 @@ impl WriteAheadLog {
                 // CRC mismatch on a fully-present entry: the length we just
                 // trusted is unreliable, so the offset of the next entry is
                 // unknown. Fail fast and report; do NOT advance-and-continue.
-                log::error!(
+                tracing::error!(
                     "WAL entry at offset {} has CRC mismatch (expected 0x{:08x}, got 0x{:08x}) - \
                      stopping replay; {} trailing byte(s) not recovered",
                     offset,
@@ -1648,7 +1648,7 @@ impl WriteAheadLog {
                     f(mutation)?;
                 }
                 Err(e) => {
-                    log::error!(
+                    tracing::error!(
                         "WAL entry at offset {} passed CRC but failed to deserialize: {} - \
                          skipping this entry and continuing",
                         offset,

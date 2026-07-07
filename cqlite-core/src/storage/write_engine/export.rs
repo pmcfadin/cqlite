@@ -294,7 +294,7 @@ impl crate::storage::write_engine::WriteEngine {
         validate_export_name(&options.keyspace, "keyspace")?;
         validate_export_name(&options.table, "table")?;
 
-        log::info!(
+        tracing::info!(
             "Starting SSTable export to {} with keyspace={}, table={}, generation={}",
             output_dir.display(),
             options.keyspace,
@@ -313,19 +313,19 @@ impl crate::storage::write_engine::WriteEngine {
 
         // Step 1: Flush memtable if not empty
         if !self.memtable.is_empty() {
-            log::info!(
+            tracing::info!(
                 "Flushing memtable before export ({} rows, {} bytes)",
                 self.memtable_row_count(),
                 self.memtable_size()
             );
             self.flush_internal_async().await?;
         } else {
-            log::info!("Memtable is empty, skipping flush");
+            tracing::info!("Memtable is empty, skipping flush");
         }
 
         // Step 2: Compaction (deprecated on ExportOptions — use maintenance_step() instead)
         if options.compact_before_export {
-            log::warn!(
+            tracing::warn!(
                 "compact_before_export on ExportOptions is deprecated. \
                  Use WriteEngine::maintenance_step() before export instead."
             );
@@ -363,7 +363,7 @@ impl crate::storage::write_engine::WriteEngine {
             let source_path = source_dir.join(&source_filename);
 
             if !source_path.exists() {
-                log::warn!(
+                tracing::warn!(
                     "Component {} not found at {}, skipping",
                     component_name,
                     source_path.display()
@@ -386,7 +386,7 @@ impl crate::storage::write_engine::WriteEngine {
                     ))
                 })?;
 
-            log::debug!(
+            tracing::debug!(
                 "Copied {} to {}",
                 source_path.display(),
                 dest_path.display()
@@ -416,12 +416,12 @@ impl crate::storage::write_engine::WriteEngine {
 
         // Step 5: Validate exported SSTable (if enabled)
         if options.validate_after_export {
-            log::info!("Validating exported SSTable");
+            tracing::info!("Validating exported SSTable");
             report.validate_components()?;
-            log::info!("Validation passed");
+            tracing::info!("Validation passed");
         }
 
-        log::info!(
+        tracing::info!(
             "Export complete: {} partitions, {} rows, {} total bytes",
             report.partition_count,
             report.row_count,
@@ -563,7 +563,7 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
     {
         Ok(counts) => counts,
         Err(e) => {
-            log::warn!("Failed to read counts from Statistics.db: {e}; defaulting to 0");
+            tracing::warn!("Failed to read counts from Statistics.db: {e}; defaulting to 0");
             crate::parser::repair_metadata::TableCounts {
                 partition_count: 0,
                 total_rows: None,
@@ -576,11 +576,11 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
         // field 12 (e.g. unmodeled improved-min-max bounds). `nb` exports use
         // the legacy min/max branch, which is always traversable, so this is a
         // fail-safe rather than an expected path.
-        log::warn!("Statistics.db STATS walk could not reach totalRows; defaulting to 0");
+        tracing::warn!("Statistics.db STATS walk could not reach totalRows; defaulting to 0");
         0
     });
 
-    log::info!(
+    tracing::info!(
         "Read from export: row_count={}, partition_count={}",
         row_count,
         partition_count

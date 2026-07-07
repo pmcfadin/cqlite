@@ -252,7 +252,7 @@ impl KeyDigestComputer {
             | ComparatorType::Decimal
             | ComparatorType::Duration
             | ComparatorType::Json => {
-                log::warn!(
+                tracing::warn!(
                     "Complex type {} in partition key - using blob fallback",
                     comparator.type_name()
                 );

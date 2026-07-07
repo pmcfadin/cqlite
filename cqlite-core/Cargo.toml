@@ -101,7 +101,6 @@ async-trait = "0.1.88"
 colored = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-log = "0.4"
 
 # Observability / OpenTelemetry — optional, behind the `observability` feature
 # (epic #1031, issue #1032). NONE of these are pulled into the default build:

@@ -45,7 +45,7 @@ fn split_type_arguments(input: &str) -> Vec<&str> {
                 if depth > 0 {
                     depth -= 1;
                 } else {
-                    log::warn!(
+                    tracing::warn!(
                         "Unmatched closing parenthesis at position {} in type arguments: '{}'",
                         idx,
                         input
@@ -300,7 +300,7 @@ pub(super) fn build_column_infos(
     let partition_key_columns = build_partition_key_columns(partition_types);
     let clustering_key_columns = build_clustering_key_columns(clustering_types);
 
-    log::debug!(
+    tracing::debug!(
         "Constructed ColumnInfo entries from SerializationHeader: {} partition keys, {} clustering keys",
         partition_key_columns.len(),
         clustering_key_columns.len()

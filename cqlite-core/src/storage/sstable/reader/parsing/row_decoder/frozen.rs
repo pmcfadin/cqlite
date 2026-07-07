@@ -142,7 +142,7 @@ impl V5CompressedLegacyParser {
         let kind = if as_set { "set" } else { "list" };
         let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, kind, &column.name)?;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Frozen {} '{}' with {} elements, element_type='{}'",
             kind,
             column.name,
@@ -155,7 +155,7 @@ impl V5CompressedLegacyParser {
             let desc = format!("{} '{}' element {}", kind, column.name, i);
             let value =
                 self.read_frozen_element(data, &mut offset, blob_end, element_type, &desc, 0)?;
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Frozen {} element {}: {:?}",
                 kind,
                 i,
@@ -213,7 +213,7 @@ impl V5CompressedLegacyParser {
     ) -> Result<(Value, usize)> {
         let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, "map", &column.name)?;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Frozen map '{}' with {} entries, key_type='{}', value_type='{}'",
             column.name,
             count,
@@ -231,7 +231,7 @@ impl V5CompressedLegacyParser {
             let val_value =
                 self.read_frozen_element(data, &mut offset, blob_end, value_type, &val_desc, 0)?;
 
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Frozen map entry {}: {:?} -> {:?}",
                 i,
                 key_value,
@@ -260,7 +260,7 @@ impl V5CompressedLegacyParser {
         let kind = if as_set { "set" } else { "list" };
         let count = Self::read_frozen_count(data, &mut offset, data.len(), kind, column_name)?;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsing frozen {} '{}' with {} elements (raw)",
             kind,
             column_name,
@@ -352,7 +352,7 @@ impl V5CompressedLegacyParser {
     ) -> Result<(Value, usize)> {
         let count = Self::read_frozen_count(data, &mut offset, data.len(), "map", column_name)?;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsing frozen map '{}' with {} entries (raw)",
             column_name,
             count
@@ -529,7 +529,7 @@ impl V5CompressedLegacyParser {
             // Need at least 4 bytes for the element length
             if *offset + 4 > blob_end {
                 // Trailing elements are implicitly null (matches UDT behaviour)
-                log::debug!(
+                tracing::debug!(
                     "Tuple '{}': element {} beyond blob_end, treating as null",
                     column_name,
                     idx

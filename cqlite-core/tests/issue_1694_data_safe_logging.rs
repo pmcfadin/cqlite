@@ -10,12 +10,12 @@
 //!      7 `eprintln!("DEBUG: …")` printf-debugging sites (the only runtime,
 //!      non-`#[cfg(test)]`, `eprintln!` in library code); assert they are gone.
 //!   2. `no_stdio_writes_in_query_execution_path` — the whole SELECT execution
-//!      path must diagnose via `log`, never stdout/stderr, so `Database::execute`
+//!      path must diagnose via `tracing`, never stdout/stderr, so `Database::execute`
 //!      cannot leak to stderr. (In-process fd capture of `eprintln!` is not
 //!      viable here because libtest intercepts the print macros at the Rust
 //!      level, bypassing fd 2 — so this is enforced at the source.)
 //!   3. `where_clause_literal_is_never_logged` — run a `WHERE name = <sentinel>`
-//!      scan with a capturing `log` logger at the CLI-default (and stricter)
+//!      scan with a capturing `tracing` subscriber at the CLI-default (and stricter)
 //!      level; the captured records must not contain the sentinel. Pre-fix, the
 //!      `Executing SSTableScan … predicates={:?}` INFO log AND the
 //!      `Database::execute('{sql}')` DEBUG log both leaked it.
@@ -29,7 +29,7 @@
 const SENTINEL: &str = "CQLITE_SENTINEL_1694_DO_NOT_LOG";
 
 /// Runtime source modules on the `Database::execute` SELECT path. They diagnose
-/// exclusively through `log`; none may contain a stdout/stderr write macro.
+/// exclusively through `tracing`; none may contain a stdout/stderr write macro.
 /// `src/lib.rs` is included because it hosts `Database::execute` itself — the
 /// SQL-leak fix removed a raw-SQL log from that function (see
 /// `lib_execute_does_not_log_raw_sql` for the value-bearing-log guard).
@@ -76,7 +76,7 @@ fn no_runtime_eprintln_in_query_executor_source() {
 }
 
 /// Issue #1694: no module on the `Database::execute` SELECT path may write to
-/// stdout/stderr — diagnostics go through `log` (whose records carry only shapes
+/// stdout/stderr — diagnostics go through `tracing` (whose records carry only shapes
 /// after this fix). This is the source-level guarantee behind "execute emits no
 /// stderr".
 #[test]
@@ -89,7 +89,7 @@ fn no_stdio_writes_in_query_execution_path() {
     }
     assert!(
         all.is_empty(),
-        "Query-execution modules must diagnose via `log`, never stdout/stderr \
+        "Query-execution modules must diagnose via `tracing`, never stdout/stderr \
          (data-safety #1694); found: {all:#?}"
     );
 }
@@ -123,15 +123,16 @@ fn fn_body(src: &str, sig: &str) -> String {
 }
 
 /// Return the full parenthesized argument text of every diagnostic/print macro
-/// call in `text` (multi-line aware via paren balancing). Covers both `log::`
-/// macros (the leak's actual channel) and the stdout/stderr macros.
+/// call in `text` (multi-line aware via paren balancing). Covers both `tracing::`
+/// event macros (the leak's actual channel after the #1706 facade migration) and
+/// the stdout/stderr macros.
 fn diagnostic_macro_args(text: &str) -> Vec<String> {
     const MACROS: &[&str] = &[
-        "log::error!",
-        "log::warn!",
-        "log::info!",
-        "log::debug!",
-        "log::trace!",
+        "tracing::error!",
+        "tracing::warn!",
+        "tracing::info!",
+        "tracing::debug!",
+        "tracing::trace!",
         "eprintln!",
         "eprint!",
         "println!",
@@ -283,44 +284,70 @@ fn execute_sstable_scan_does_not_log_predicate_values() {
 mod integration {
     use super::SENTINEL;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, Once, OnceLock};
 
     use cqlite_core::ingestion::{ingest, IngestionConfig};
     use cqlite_core::Database;
     use serial_test::serial;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::Registry;
 
-    // ---- capturing `log` logger --------------------------------------------
+    // ---- capturing `tracing` subscriber (issue #1706 facade migration) ------
+    // The library emits diagnostics through `tracing` (no `log`). Capture them
+    // with a plain tracing subscriber and NO `tracing-log` bridge — exactly what
+    // a modern embedder wires — so the data-safety assertions observe the real
+    // emitted events, not a bridged copy.
 
     static LOG_BUFFER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
-    struct CapturingLogger;
-    impl log::Log for CapturingLogger {
-        fn enabled(&self, _: &log::Metadata) -> bool {
-            true
-        }
-        fn log(&self, record: &log::Record) {
-            if let Some(buf) = LOG_BUFFER.get() {
-                if let Ok(mut v) = buf.lock() {
-                    v.push(format!(
-                        "{} [{}] {}",
-                        record.level(),
-                        record.target(),
-                        record.args()
-                    ));
-                }
+    /// Extracts the rendered `message` field of an event.
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: String,
+    }
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
             }
         }
-        fn flush(&self) {}
     }
 
-    /// Install the capturing logger once for this test binary. We capture at
-    /// `Trace` (a superset of the CLI-default `Info`), so "no sentinel at the
-    /// CLI-default level" is proven and strengthened to "no sentinel at ANY
-    /// level" — matching the shapes-not-values mandate.
+    /// Records every event as `"{level} [{target}] {message}"` into `LOG_BUFFER`.
+    struct CapturingLayer;
+    impl<S: Subscriber> Layer<S> for CapturingLayer {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let Some(buf) = LOG_BUFFER.get() else {
+                return;
+            };
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            let meta = event.metadata();
+            if let Ok(mut v) = buf.lock() {
+                v.push(format!(
+                    "{} [{}] {}",
+                    meta.level(),
+                    meta.target(),
+                    visitor.message
+                ));
+            }
+        }
+    }
+
+    static INSTALL: Once = Once::new();
+
+    /// Install the capturing subscriber once for this test binary. It has no
+    /// level filter, so it captures at every level (a superset of the CLI-default
+    /// `Info`): "no sentinel at the CLI-default level" is proven and strengthened
+    /// to "no sentinel at ANY level" — matching the shapes-not-values mandate.
     fn install_logger() {
         LOG_BUFFER.get_or_init(|| Mutex::new(Vec::new()));
-        let _ = log::set_boxed_logger(Box::new(CapturingLogger)); // idempotent
-        log::set_max_level(log::LevelFilter::Trace);
+        INSTALL.call_once(|| {
+            let subscriber = Registry::default().with(CapturingLayer);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
     }
 
     fn clear_logs() {

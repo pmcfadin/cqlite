@@ -632,7 +632,7 @@ impl V5CompressedLegacyParser {
             // Handle UDT (User-Defined Type) inside frozen collections
             // Note: We match against normalized (lowercased) but need original case for parsing
             normalized if Self::is_udt_type(normalized) => {
-                log::debug!(
+                tracing::debug!(
                     "Frozen element '{}': parsing UDT type '{}'",
                     column_name,
                     type_str
@@ -647,14 +647,14 @@ impl V5CompressedLegacyParser {
                 // The data slice passed to parse_raw_type_value is already the raw UDT bytes.
                 let udt_data = &data[offset..];
 
-                if log::log_enabled!(log::Level::Debug) {
+                if tracing::enabled!(tracing::Level::DEBUG) {
                     let hex: String = udt_data
                         .iter()
                         .take(64)
                         .map(|b| format!("{:02x}", b))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    log::debug!(
+                    tracing::debug!(
                         "Frozen UDT '{}': data_len={}, hex dump: {}",
                         column_name,
                         udt_data.len(),
@@ -686,7 +686,7 @@ impl V5CompressedLegacyParser {
                     // Check bounds for field length (4 bytes BE i32)
                     if current_offset + 4 > udt_data.len() {
                         // Trailing fields can be omitted (implicit null)
-                        log::debug!(
+                        tracing::debug!(
                             "Frozen UDT field '{}' omitted (implicit null)",
                             field_def.name
                         );
@@ -707,7 +707,7 @@ impl V5CompressedLegacyParser {
                         udt_data[current_offset + 2],
                         udt_data[current_offset + 3],
                     ]);
-                    log::debug!(
+                    tracing::debug!(
                         "Frozen UDT field '{}' at offset {}: length bytes={:02x} {:02x} {:02x} {:02x}, parsed length={}",
                         field_def.name,
                         current_offset,
@@ -721,11 +721,11 @@ impl V5CompressedLegacyParser {
 
                     let field_value = if field_len == -1 {
                         // Null field
-                        log::debug!("Frozen UDT field '{}' is null", field_def.name);
+                        tracing::debug!("Frozen UDT field '{}' is null", field_def.name);
                         None
                     } else if field_len == 0 {
                         // Empty field
-                        log::debug!("Frozen UDT field '{}' is empty", field_def.name);
+                        tracing::debug!("Frozen UDT field '{}' is empty", field_def.name);
                         Some(Self::create_empty_value_for_type(&field_def.field_type))
                     } else if field_len < 0 {
                         // Validation: reject other negative values
@@ -748,7 +748,7 @@ impl V5CompressedLegacyParser {
                         let field_data = &udt_data[current_offset..current_offset + field_len];
                         current_offset += field_len;
 
-                        log::debug!(
+                        tracing::debug!(
                             "Frozen UDT field '{}' has {} bytes of data, type: {:?}",
                             field_def.name,
                             field_len,
@@ -915,7 +915,7 @@ impl V5CompressedLegacyParser {
                 // This handles cases like "address_type" which aren't in full marshal format
                 if let Some(ref registry) = self.udt_registry {
                     if let Some(udt_def) = registry.get_udt(&self.keyspace, type_str) {
-                        log::debug!(
+                        tracing::debug!(
                             "Frozen element '{}': found UDT '{}' in registry, parsing {} fields",
                             column_name,
                             type_str,
@@ -933,7 +933,7 @@ impl V5CompressedLegacyParser {
                             // Check bounds for field length (4 bytes BE i32)
                             if current_offset + 4 > udt_data.len() {
                                 // Trailing fields can be omitted (implicit null)
-                                log::debug!(
+                                tracing::debug!(
                                     "Frozen UDT field '{}' omitted (implicit null)",
                                     field_def.name
                                 );
@@ -1098,7 +1098,7 @@ impl V5CompressedLegacyParser {
                         Value::Udt(Box::new(udt_value))
                     } else {
                         // Not found in registry - parse as blob
-                        log::debug!(
+                        tracing::debug!(
                             "Frozen element '{}': unknown type '{}', parsing as blob",
                             column_name,
                             type_str
@@ -1129,7 +1129,7 @@ impl V5CompressedLegacyParser {
                     }
                 } else {
                     // No registry available - parse as blob
-                    log::debug!(
+                    tracing::debug!(
                         "Frozen element '{}': unknown type '{}', no UDT registry available, parsing as blob",
                         column_name,
                         type_str

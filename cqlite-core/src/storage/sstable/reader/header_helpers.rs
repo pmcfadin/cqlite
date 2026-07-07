@@ -7,8 +7,8 @@ use crate::{
     parser::header::{parse_sstable_header, CassandraVersion, SSTableHeader},
     Result,
 };
-use log::{debug, warn};
 use std::path::Path;
+use tracing::{debug, warn};
 
 /// Extract generation number from SSTable file path
 pub(crate) fn extract_generation_from_path(path: &Path) -> u64 {
@@ -47,7 +47,7 @@ pub(crate) fn extract_generation_from_path(path: &Path) -> u64 {
         for i in 0..parts.len() - 2 {
             if SUPPORTED_VERSION_PREFIXES.contains(&parts[i]) && i + 1 < parts.len() {
                 if let Ok(generation) = parts[i + 1].parse::<u64>() {
-                    log::debug!(
+                    tracing::debug!(
                         "Extracted generation {} from pattern 2: {}",
                         generation,
                         filename

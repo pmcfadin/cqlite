@@ -36,7 +36,7 @@ impl SSTableReader {
                 let mut file_guard = file.lock().await;
                 file_guard.seek(std::io::SeekFrom::Start(offset)).await?;
                 let index = SSTableIndex::load(&mut *file_guard).await?;
-                log::debug!("Loaded integrated index from Data.db at offset {}", offset);
+                tracing::debug!("Loaded integrated index from Data.db at offset {}", offset);
                 return Ok(Some(index));
             }
         }
@@ -53,7 +53,7 @@ impl SSTableReader {
             if tokio::fs::metadata(&index_path).await.is_ok() {
                 match IndexReader::open(&index_path, platform.clone()).await {
                     Ok(index_reader) => {
-                        log::debug!(
+                        tracing::debug!(
                             "Found separate Index.db component at {}",
                             index_path.display()
                         );
@@ -66,13 +66,13 @@ impl SSTableReader {
                         .await
                         {
                             Ok(sstable_index) => {
-                                log::debug!(
+                                tracing::debug!(
                                     "Successfully converted Index.db component to SSTableIndex"
                                 );
                                 return Ok(Some(sstable_index));
                             }
                             Err(e) => {
-                                log::warn!(
+                                tracing::warn!(
                                     "Failed to convert Index.db component to SSTableIndex: {}. This may indicate an incompatible Index.db format or corruption.",
                                     e
                                 );
@@ -81,7 +81,7 @@ impl SSTableReader {
                         }
                     }
                     Err(e) => {
-                        log::debug!(
+                        tracing::debug!(
                             "Failed to load Index.db component: {}. This may indicate file corruption, permission issues, or format incompatibility.",
                             e
                         );
@@ -89,14 +89,14 @@ impl SSTableReader {
                     }
                 }
             } else {
-                log::debug!(
+                tracing::debug!(
                     "No Index.db component file found at {}",
                     index_path.display()
                 );
             }
         }
 
-        log::debug!("No index source available (neither header offset nor Index.db component)");
+        tracing::debug!("No index source available (neither header offset nor Index.db component)");
         Ok(None)
     }
 
@@ -118,7 +118,7 @@ impl SSTableReader {
                 let mut file_guard = file.lock().await;
                 file_guard.seek(std::io::SeekFrom::Start(offset)).await?;
                 let bloom_filter = BloomFilter::load(&mut *file_guard).await?;
-                log::debug!(
+                tracing::debug!(
                     "Loaded integrated bloom filter from Data.db at offset {}",
                     offset
                 );
@@ -141,14 +141,14 @@ impl SSTableReader {
                         let mut reader = BufReader::new(filter_file);
                         match BloomFilter::load(&mut reader).await {
                             Ok(bloom_filter) => {
-                                log::debug!(
+                                tracing::debug!(
                                     "Loaded separate Filter.db component from {}",
                                     filter_path.display()
                                 );
                                 return Ok(Some(bloom_filter));
                             }
                             Err(e) => {
-                                log::warn!(
+                                tracing::warn!(
                                     "Failed to parse Filter.db component: {}. Bloom filter functionality will be unavailable.",
                                     e
                                 );
@@ -156,21 +156,21 @@ impl SSTableReader {
                         }
                     }
                     Err(e) => {
-                        log::debug!(
+                        tracing::debug!(
                             "Failed to open Filter.db component: {}. Bloom filter functionality will be unavailable.",
                             e
                         );
                     }
                 }
             } else {
-                log::debug!(
+                tracing::debug!(
                     "No Filter.db component file found at {}",
                     filter_path.display()
                 );
             }
         }
 
-        log::debug!(
+        tracing::debug!(
             "No bloom filter source available (neither header offset nor Filter.db component)"
         );
         Ok(None)
@@ -186,11 +186,11 @@ impl SSTableReader {
 
         match IndexReader::open(&index_path, platform.clone()).await {
             Ok(reader) => {
-                log::debug!("Loaded Index.db reader for {}", index_path.display());
+                tracing::debug!("Loaded Index.db reader for {}", index_path.display());
                 Some(reader)
             }
             Err(e) => {
-                log::debug!("Failed to load Index.db reader: {}", e);
+                tracing::debug!("Failed to load Index.db reader: {}", e);
                 None
             }
         }
@@ -206,11 +206,11 @@ impl SSTableReader {
 
         match SummaryReader::open(&summary_path, platform.clone()).await {
             Ok(reader) => {
-                log::debug!("Loaded Summary.db reader for {}", summary_path.display());
+                tracing::debug!("Loaded Summary.db reader for {}", summary_path.display());
                 Some(reader)
             }
             Err(e) => {
-                log::debug!("Failed to load Summary.db reader: {}", e);
+                tracing::debug!("Failed to load Summary.db reader: {}", e);
                 None
             }
         }
@@ -244,7 +244,7 @@ impl SSTableReader {
 
         match StatisticsReader::open(&statistics_path, platform.clone()).await {
             Ok(reader) => {
-                log::debug!(
+                tracing::debug!(
                     "Loaded Statistics.db reader for {}",
                     statistics_path.display()
                 );
@@ -307,7 +307,7 @@ impl SSTableReader {
                 ))
             })?;
 
-        log::debug!(
+        tracing::debug!(
             "Extracted keyspace='{}', table='{}' from path: {}",
             keyspace,
             table_name,
@@ -351,7 +351,7 @@ impl SSTableReader {
             index.add_entry(index_entry);
         }
 
-        log::debug!(
+        tracing::debug!(
             "Converted {} partition entries from IndexReader to SSTableIndex for table '{}' (keyspace: {}, table: {})",
             partition_entries.len(),
             table_id.name(),
@@ -371,7 +371,7 @@ impl SSTableReader {
         let base_name = match extract_sstable_base_name(data_path) {
             Some(name) => name,
             None => {
-                log::warn!(
+                tracing::warn!(
                     "Could not extract base name from path: {}. Component file discovery requires standard SSTable naming convention.",
                     data_path.display()
                 );
@@ -402,12 +402,12 @@ impl SSTableReader {
             match tokio::fs::metadata(&component_path).await {
                 Ok(metadata) => {
                     if metadata.len() == 0 {
-                        log::warn!("Component file is empty: {}", component_path.display());
+                        tracing::warn!("Component file is empty: {}", component_path.display());
                         if *is_critical {
                             critical_missing.push(component_type.to_string());
                         }
                     } else {
-                        log::debug!(
+                        tracing::debug!(
                             "Found component file: {} (size: {} bytes)",
                             component_path.display(),
                             metadata.len()
@@ -416,7 +416,7 @@ impl SSTableReader {
                     }
                 }
                 Err(_) => {
-                    log::debug!("Component file not found: {}", component_path.display());
+                    tracing::debug!("Component file not found: {}", component_path.display());
                     if *is_critical {
                         critical_missing.push(component_type.to_string());
                     }
@@ -426,19 +426,19 @@ impl SSTableReader {
 
         // Log component architecture analysis
         if components.is_empty() {
-            log::debug!(
+            tracing::debug!(
                 "No component files found for base name: {}. This SSTable likely uses integrated format (all data in Data.db).",
                 base_name
             );
         } else {
-            log::debug!(
+            tracing::debug!(
                 "Detected {} component files for {} (component-based architecture)",
                 components.len(),
                 base_name
             );
 
             if !critical_missing.is_empty() {
-                log::warn!(
+                tracing::warn!(
                     "Missing critical component files: {:?}. Index-based lookups may be unavailable.",
                     critical_missing
                 );
@@ -496,12 +496,12 @@ impl SSTableReader {
         }
 
         if issues.is_empty() {
-            log::debug!(
+            tracing::debug!(
                 "Component integrity validation passed for {}",
                 data_path.display()
             );
         } else {
-            log::warn!(
+            tracing::warn!(
                 "Component integrity issues detected for {}: {:?}",
                 data_path.display(),
                 issues

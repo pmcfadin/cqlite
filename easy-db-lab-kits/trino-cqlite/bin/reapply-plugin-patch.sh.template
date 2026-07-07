@@ -76,30 +76,39 @@ ensure_configmap() {
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
-# Issue #2119: the trino kit runs trino-coordinator with `hostPort: 8080`. On
-# a single app node, patching the pod template starts a rollout whose new pod
-# can never schedule while the old pod still holds that hostPort — the exact
-# deadlock the trino kit's own bin/start.sh already avoids for itself by
-# deleting the coordinator pod after a template change. Mirror that here, but
-# ONLY when this patch actually changed the pod template: `kubectl patch`
-# prints "... (no change)" when the strategic-merge patch was a no-op against
-# an already-patched Deployment, and re-applying identical content (the
-# steady-state case — this script fires on every kit start/stop) must NOT
-# bounce an already-healthy coordinator.
-bounce_coordinator_if_changed() {
-  local patch_output="$1"
+# Issue #2158 (supersedes the #2119 delete-pod workaround): the trino kit runs
+# trino-coordinator with `hostPort: 8080` under `strategy: RollingUpdate` +
+# maxSurge. On a single app node that deadlocks *unconditionally* once the pod
+# template changes — the surge pod can never bind hostPort:8080 while the old
+# ReplicaSet (still desired=1) holds it, and deleting the stuck pod (#2119)
+# doesn't help because the surviving ReplicaSet just recreates it. The only
+# fix is `strategy: Recreate`: the controller then terminates the old pod
+# BEFORE creating the new one, so hostPort:8080 is always free when the new
+# pod needs it. Ensure this on every invocation, BEFORE the pod-template patch
+# below — cheap and idempotent (`kubectl get -o jsonpath` short-circuits to a
+# no-op patch when already Recreate). Helm-templated fields don't include
+# `strategy`, so this out-of-band patch survives the trino kit's own
+# `helm upgrade` (via its bin/update-catalogs.sh hook) once applied.
+ensure_recreate_strategy() {
+  local dep="$1"
 
-  if [[ "${patch_output}" == *"(no change)"* ]]; then
-    echo "    trino-coordinator pod template unchanged — not bouncing the pod."
+  if ! kubectl get deployment "${dep}" --namespace default >/dev/null 2>&1; then
     return 0
   fi
 
-  echo "    trino-coordinator pod template changed — deleting the old pod so the"
-  echo "    controller can recreate it on the now-free hostPort 8080..."
-  kubectl delete pod --namespace default \
-    -l 'app.kubernetes.io/name=trino,app.kubernetes.io/component=coordinator' \
-    --ignore-not-found
-  kubectl rollout status deployment/trino-coordinator --namespace default --timeout=180s
+  local current_strategy
+  current_strategy=$(kubectl get deployment "${dep}" --namespace default \
+    -o jsonpath='{.spec.strategy.type}')
+  if [ "${current_strategy}" = "Recreate" ]; then
+    echo "  - deployment/${dep}: strategy already Recreate — no change."
+    return 0
+  fi
+
+  echo "  - deployment/${dep}: setting strategy to Recreate (issue #2158 — a"
+  echo "    hostPort-bound single-replica deployment can never complete a"
+  echo "    RollingUpdate surge on a single app node)..."
+  kubectl patch deployment "${dep}" --namespace default \
+    -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
 }
 
 patch_deployment() {
@@ -108,6 +117,10 @@ patch_deployment() {
   if ! kubectl get deployment "${dep}" --namespace default >/dev/null 2>&1; then
     echo "  - deployment/${dep} not found (trino kit not running here yet) — skipping"
     return 0
+  fi
+
+  if [ "${dep}" = "trino-coordinator" ]; then
+    ensure_recreate_strategy "${dep}"
   fi
 
   echo "  - patching deployment/${dep} (container: ${dep})..."
@@ -148,8 +161,14 @@ patch_deployment() {
   patch_output=$(kubectl patch deployment "${dep}" --namespace default --type=strategic -p="${patch}")
   echo "    ${patch_output}"
 
-  if [ "${dep}" = "trino-coordinator" ]; then
-    bounce_coordinator_if_changed "${patch_output}"
+  if [ "${dep}" = "trino-coordinator" ] && [[ "${patch_output}" != *"(no change)"* ]]; then
+    # With strategy: Recreate now ensured above, the controller itself tears
+    # down the old pod before creating the new one on this template change —
+    # no manual `kubectl delete pod` needed (that was the insufficient #2119
+    # workaround). Just wait for the rollout to converge.
+    echo "    trino-coordinator pod template changed — waiting for the Recreate"
+    echo "    rollout (old pod terminates, then the new one starts)..."
+    kubectl rollout status deployment/trino-coordinator --namespace default --timeout=180s
   fi
 }
 

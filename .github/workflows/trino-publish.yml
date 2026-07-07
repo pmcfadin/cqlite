@@ -4,19 +4,25 @@ name: Publish Trino Connector
 # every v* release tag, so the connector releases in lockstep with the crate and
 # the cqlite-flight image. The version is derived from the tag (v0.13.0 → 0.13.0).
 #
-# The publish is GATED on the Maven Central + GPG signing secrets being present:
-# a tag pushed before those secrets land must NOT fail the release run. Secrets
-# are not addressable in a job-level `if:`, so a guard step checks them and
-# exposes a boolean output that the publish step keys off; when absent the job
-# logs a notice and succeeds without publishing.
+# Automatic release (issue #2156): `trino-connector/build.gradle.kts` configures
+# `publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)`,
+# so a successful `./gradlew publishToMavenCentral` run here fully releases the
+# artifact — no manual "Publish" click in the Central Portal UI.
+#
+# Secrets are not addressable in a job-level `if:`, so a guard step checks the
+# Maven Central + GPG signing secrets and exposes a boolean output the publish
+# step keys off. THIS IS FAIL-CLOSED (issue #2156): if it's not an explicit
+# dry run and the secrets are absent, the job FAILS loudly rather than
+# succeeding with the Central publish silently skipped — a prior
+# `workflow_dispatch` run reported "success" while the Central step never ran,
+# which is exactly the failure mode this closes.
 #
 # A `workflow_dispatch` trigger allows exercising the publish on demand. Manual
 # runs have no tag to derive the version from, so the `version` input supplies
-# it. By default `dry_run` is true: the connector is published to the local
-# Maven repo (publishToMavenLocal) — no Central upload, no signing/Central
-# secrets needed — so the pipeline can be validated without cutting a release.
-# Set `dry_run=false` to perform the real Central publish (still gated on the
-# secrets being present, exactly like the tag path).
+# it. `dry_run` now DEFAULTS TO FALSE (issue #2156) — dry-run behavior (publish
+# only to the local Maven repo via publishToMavenLocal, no Central upload, no
+# secrets needed) must be explicitly requested with `dry_run=true`. Omitting
+# the flag means "really publish," gated on the secrets check above.
 
 on:
   push:
@@ -29,9 +35,9 @@ on:
         type: string
         required: true
       dry_run:
-        description: 'Dry run: publishToMavenLocal only (no Central upload, no secrets needed)'
+        description: 'Dry run: publishToMavenLocal only (no Central upload, no secrets needed). Must be set explicitly — omitting this means a real publish.'
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -113,6 +119,12 @@ jobs:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
         run: ./gradlew --no-daemon publishToMavenCentral -Pversion="$PUBLISH_VERSION"
 
-      - name: Skip notice (secrets absent)
+      # Issue #2156: this used to be a "Skip notice" that logged and let the job
+      # succeed — that is exactly how a workflow_dispatch run reported "success"
+      # while the Central publish silently never happened. A skip that isn't an
+      # explicit dry run is now unmissable: the job FAILS instead of going green.
+      - name: Fail — Central publish skipped (secrets absent, not a dry run)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.guard.outputs.should_publish != 'true' }}
-        run: echo "::notice::Maven Central secrets absent — skipping connector publish"
+        run: |
+          echo "::error::Maven Central secrets absent and this is not an explicit dry run (dry_run=true) — failing instead of silently skipping the connector publish. Set MAVEN_CENTRAL_USERNAME/MAVEN_CENTRAL_PASSWORD/SIGNING_KEY/SIGNING_PASSWORD, or dispatch with dry_run=true to validate the build without publishing."
+          exit 1

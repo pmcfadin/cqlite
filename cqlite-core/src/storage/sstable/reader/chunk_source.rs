@@ -12,7 +12,7 @@ use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
 use crate::storage::sstable::compression::Compression;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::block_io::read_compressed_chunk_at;
-use crate::storage::sstable::reader::data_access::{CHUNK_READ_CALLS, DECOMPRESS_CALLS};
+use crate::storage::sstable::reader::data_access::DECOMPRESS_CALLS;
 use crate::storage::sstable::reader::read_at::ReadAt;
 use crate::{Error, Result};
 use std::sync::atomic::Ordering;
@@ -22,10 +22,13 @@ use std::sync::Arc;
 ///
 /// Composes the C2 read+CRC primitive (`read_compressed_chunk_at`) + the best-of-breed
 /// decompress+cache tail (moved from the BTI block). Every query-path chunk read funnels
-/// through one of three entry points:
-/// - `chunk(index)`: whole-chunk read for the BTI/windowed-scan paths
-/// - `range(offset, size)`: ranged read for the BIG point path (aux-keyed)
-/// - `decode_and_cache`: shared decompress+cache tail for sites that already have compressed bytes
+/// through one of these entry points, each of which decompresses ONLY CRC-validated bytes:
+/// - `chunk(index)`: whole-chunk read (self read+CRC) for the BTI/windowed-scan paths
+/// - `decode_and_cache`: shared decompress+cache tail for sites that already have
+///   CRC-validated compressed bytes (windowed-scan blocking half; the compressed
+///   offset-read window of `read_compressed_offset_window`, issue #1773)
+/// - `decompress_only`: uncached decompress for the BIG reverse path and the
+///   compressed offset-read window (both already CRC-validated upstream)
 pub(crate) struct ChunkSource<'a> {
     /// Positioned read source (C2)
     source: &'a dyn ReadAt,
@@ -104,37 +107,12 @@ impl<'a> ChunkSource<'a> {
         )?))
     }
 
-    /// Ranged (offset, size) read for the BIG point path (aux-keyed by size).
-    ///
-    /// The decompressed bytes depend on BOTH offset and size, so `size` is carried as
-    /// the key's aux discriminant (roborev #1567).
-    pub(crate) fn range(&self, offset: u64, size: u32) -> Result<Arc<[u8]>> {
-        // Build ranged cache key (aux = size)
-        let key = ChunkKey::with_aux(self.cache_id ^ self.namespace, offset, size as u64);
-
-        // B1 cache hit: Arc clone, no read, no decompress
-        if let Some(hit) = self.cache.get(&key) {
-            return Ok(hit);
-        }
-
-        // Cache miss: positioned read at (offset, size). Count the underlying read
-        // ONLY here (issue #1598): a cache HIT above returns before this and must
-        // leave CHUNK_READ_CALLS unchanged (the "zero underlying reads" oracle).
-        CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
-        let mut buffer = vec![0u8; size as usize];
-        self.source.read_exact_at(offset, &mut buffer)?;
-
-        // BIG point read is always compressible (no incompressible-raw branch here)
-        self.decode_and_cache(key, buffer, false)
-    }
-
     /// Shared decompress+cache tail: decompress (or raw-passthrough) → insert → Arc.
     ///
-    /// Called by `chunk()`/`range()` after their own read+CRC, and directly by the
-    /// windowed-scan blocking half (which receives compressed bytes over a channel) and
-    /// the BIG reverse seek (which reads via a cursor). This is the ONLY place on the
-    /// query path where `Compression::decompress` is called — the architecture test
-    /// proves it.
+    /// Called by `chunk()` after its own read+CRC, and directly by the windowed-scan
+    /// blocking half (which receives CRC-validated compressed bytes over a channel).
+    /// Together with `decompress_only`, this is the ONLY place on the query path where
+    /// `Compression::decompress` is called — the architecture test proves it.
     pub(crate) fn decode_and_cache(
         &self,
         key: ChunkKey,

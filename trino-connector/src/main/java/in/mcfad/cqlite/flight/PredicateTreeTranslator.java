@@ -12,6 +12,11 @@ import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.FunctionName;
 import io.trino.spi.expression.StandardFunctions;
 import io.trino.spi.expression.Variable;
+import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
+import io.trino.spi.predicate.SortedRangeSet;
+import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DoubleType;
@@ -387,15 +392,217 @@ public final class PredicateTreeTranslator {
     }
 
     /**
+     * Translate a Trino {@code Constraint.getSummary()} {@link TupleDomain} into a
+     * pushable predicate tree (issue #2164).
+     *
+     * <p>Trino represents simple, domain-expressible predicates — e.g. a
+     * single-partition point read {@code key = '001.25.535688'} — as a
+     * {@link TupleDomain} in the summary, leaving {@code getExpression()} as
+     * {@code TRUE}. The {@link ConnectorExpression} path therefore finds nothing
+     * pushable, so this path converts each column {@link Domain} into the same
+     * {@code PredicateExpr} node shapes the expression path emits:
+     * <ul>
+     *   <li>single value → {@code Compare Equal},</li>
+     *   <li>discrete set → {@code In},</li>
+     *   <li>ranges → {@code Compare Gt/Gte/Lt/Lte} (a bounded range becomes an
+     *       {@code And} of two; multiple ranges become an {@code Or}).</li>
+     * </ul>
+     *
+     * <p>Capability gating mirrors the expression path EXACTLY (see
+     * {@link #translateCompare}): {@code NONE} pushes nothing; {@code EQUALITY}
+     * pushes only exact match / membership; ordering (ranges) requires
+     * {@code FULL}. A column whose domain also admits {@code NULL} is left entirely
+     * unpushed: the server applies the pushed filter destructively, so pushing only
+     * the non-null values would wrongly drop null rows. Anything not translatable
+     * stays unpushed (the caller returns the summary unchanged so Trino still
+     * enforces it — pushdown is a pure optimization).
+     *
+     * @return the pushable tree (columns ANDed in a stable, column-name order for
+     *     idempotent serialization), or empty if nothing is pushable
+     */
+    public static Optional<JsonNode> translateSummary(TupleDomain<ColumnHandle> summary) {
+        if (summary == null || summary.isAll() || summary.isNone()) {
+            return Optional.empty();
+        }
+        Optional<Map<ColumnHandle, Domain>> domains = summary.getDomains();
+        if (domains.isEmpty()) {
+            return Optional.empty();
+        }
+        // Sort by column name so the emitted AND has a deterministic shape regardless
+        // of the summary map's iteration order — required for the applyFilter
+        // idempotence guards (identical re-invocation must serialize identically).
+        List<Map.Entry<String, JsonNode>> named = new ArrayList<>();
+        for (Map.Entry<ColumnHandle, Domain> entry : domains.get().entrySet()) {
+            if (!(entry.getKey() instanceof CqliteFlightColumnHandle col)) {
+                continue; // unknown handle → leave to Trino
+            }
+            translateDomain(col, entry.getValue())
+                    .ifPresent(node -> named.add(Map.entry(col.name(), node)));
+        }
+        if (named.isEmpty()) {
+            return Optional.empty();
+        }
+        named.sort(Map.Entry.comparingByKey());
+        if (named.size() == 1) {
+            return Optional.of(named.get(0).getValue());
+        }
+        List<JsonNode> conjuncts = new ArrayList<>();
+        for (Map.Entry<String, JsonNode> e : named) {
+            conjuncts.add(e.getValue());
+        }
+        return Optional.of(andNode(conjuncts));
+    }
+
+    /** Translate ONE column's {@link Domain} into a pushable node, or empty. */
+    private static Optional<JsonNode> translateDomain(CqliteFlightColumnHandle col, Domain domain) {
+        PushdownCapability capability = col.capability();
+        if (capability == PushdownCapability.NONE || domain.isNone() || domain.isAll()) {
+            return Optional.empty();
+        }
+        // col IS NULL (only-null domain) is a definite, exact test — safe for
+        // EQUALITY and FULL, same as the expression path's IS NULL leaf.
+        if (domain.isOnlyNull()) {
+            ObjectNode node = MAPPER.createObjectNode();
+            node.put("type", "IsNull");
+            node.put("column", col.name());
+            return Optional.of(node);
+        }
+        // A domain that ALSO admits null (col = x OR col IS NULL): pushing just the
+        // values excludes null rows the predicate keeps → over-restrictive against a
+        // destructive server filter. Leave the whole column to Trino.
+        if (domain.isNullAllowed()) {
+            return Optional.empty();
+        }
+        ValueSet values = domain.getValues();
+        Type type = domain.getType();
+        if (values.isSingleValue()) {
+            return constantToJson(type, values.getSingleValue())
+                    .map(v -> compareNode(col.name(), "Equal", v));
+        }
+        if (values.isDiscreteSet()) {
+            // Canonicalize: applyFilter's idempotence/accumulation guards compare
+            // SERIALIZED JSON, so the same logical multi-value domain must always emit
+            // byte-identical output regardless of the ValueSet's iteration order.
+            // Convert every element to its JSON scalar first, then sort by the
+            // serialized scalar string — a total, type-stable order that never depends
+            // on ValueSet internals (In is set membership; order is semantically free).
+            List<JsonNode> scalars = new ArrayList<>();
+            for (Object element : values.getDiscreteSet()) {
+                Optional<JsonNode> v = constantToJson(type, element);
+                if (v.isEmpty()) {
+                    return Optional.empty();
+                }
+                scalars.add(v.get());
+            }
+            if (scalars.isEmpty()) {
+                return Optional.empty();
+            }
+            scalars.sort(java.util.Comparator.comparing(JsonNode::toString));
+            ArrayNode array = MAPPER.createArrayNode();
+            scalars.forEach(array::add);
+            ObjectNode node = MAPPER.createObjectNode();
+            node.put("type", "In");
+            node.put("column", col.name());
+            node.set("values", array);
+            return Optional.of(node);
+        }
+        // Ranges → ordering comparisons; ordering is only safe for FULL columns
+        // (EQUALITY types like uuid order by the CQL type server-side, so an ordered
+        // push would filter incorrectly — identical to translateCompare's gate).
+        if (capability != PushdownCapability.FULL || !(values instanceof SortedRangeSet sorted)) {
+            return Optional.empty();
+        }
+        List<JsonNode> rangeNodes = new ArrayList<>();
+        for (Range range : sorted.getOrderedRanges()) {
+            Optional<JsonNode> node = translateRange(col.name(), type, range);
+            if (node.isEmpty()) {
+                return Optional.empty(); // all-or-nothing for this column's value set
+            }
+            rangeNodes.add(node.get());
+        }
+        if (rangeNodes.isEmpty()) {
+            return Optional.empty();
+        }
+        if (rangeNodes.size() == 1) {
+            return Optional.of(rangeNodes.get(0));
+        }
+        return Optional.of(orNode(rangeNodes)); // union of disjoint ranges
+    }
+
+    /** Translate one {@link Range} into a Compare (single value) or bounded And. */
+    private static Optional<JsonNode> translateRange(String column, Type type, Range range) {
+        if (range.isAll()) {
+            return Optional.empty();
+        }
+        if (range.isSingleValue()) {
+            return constantToJson(type, range.getSingleValue())
+                    .map(v -> compareNode(column, "Equal", v));
+        }
+        List<JsonNode> bounds = new ArrayList<>();
+        if (!range.isLowUnbounded()) {
+            Optional<JsonNode> v = constantToJson(type, range.getLowBoundedValue());
+            if (v.isEmpty()) {
+                return Optional.empty();
+            }
+            bounds.add(compareNode(column, range.isLowInclusive() ? "Gte" : "Gt", v.get()));
+        }
+        if (!range.isHighUnbounded()) {
+            Optional<JsonNode> v = constantToJson(type, range.getHighBoundedValue());
+            if (v.isEmpty()) {
+                return Optional.empty();
+            }
+            bounds.add(compareNode(column, range.isHighInclusive() ? "Lte" : "Lt", v.get()));
+        }
+        if (bounds.isEmpty()) {
+            return Optional.empty();
+        }
+        if (bounds.size() == 1) {
+            return Optional.of(bounds.get(0));
+        }
+        return Optional.of(andNode(bounds));
+    }
+
+    /** Build a {@code Compare} leaf node. */
+    private static ObjectNode compareNode(String column, String op, JsonNode value) {
+        ObjectNode node = MAPPER.createObjectNode();
+        node.put("type", "Compare");
+        node.put("column", column);
+        node.put("op", op);
+        node.set("value", value);
+        return node;
+    }
+
+    /**
+     * Convert a domain's native Trino operand into the JSON scalar the server
+     * decodes, reusing the expression path's {@link #constantValue} type mapping so
+     * both paths emit identical wire values.
+     */
+    private static Optional<JsonNode> constantToJson(Type type, Object value) {
+        if (value == null) {
+            return Optional.empty();
+        }
+        return constantValue(new Constant(value, type));
+    }
+
+    /**
      * Combine two already-translated predicate trees with a logical {@code And},
      * flattening either side that is itself an {@code And} so repeated
-     * accumulation across {@code applyFilter} calls does not nest unboundedly.
+     * accumulation across {@code applyFilter} calls does not nest unboundedly, and
+     * dropping exact-duplicate conjuncts so re-pushing an already-present predicate
+     * (e.g. the unchanged {@code TupleDomain} summary re-passed every iteration) is
+     * a no-op rather than an ever-growing tree (issue #2164 idempotence).
      */
     public static JsonNode and(JsonNode left, JsonNode right) {
         List<JsonNode> children = new ArrayList<>();
         appendConjuncts(left, children);
         appendConjuncts(right, children);
-        return andNode(children);
+        List<JsonNode> deduped = new ArrayList<>();
+        for (JsonNode child : children) {
+            if (!deduped.contains(child)) {
+                deduped.add(child);
+            }
+        }
+        return andNode(deduped);
     }
 
     private static void appendConjuncts(JsonNode expr, List<JsonNode> out) {

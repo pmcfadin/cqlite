@@ -7,7 +7,7 @@ use super::SSTableReader;
 use crate::schema::registry::ParsingContext;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use log::debug;
+use tracing::debug;
 
 impl SSTableReader {
     /// Enhanced partition lookup using Index.db reader with promoted index support.
@@ -567,7 +567,7 @@ impl SSTableReader {
                         }
                     }
                 } else {
-                    log::error!("Index reader not available for partition iteration");
+                    tracing::error!("Index reader not available for partition iteration");
                     return Err(Error::corruption(
                         "Index reader required for partition iteration - synthetic data not allowed for Issue #35",
                     ));

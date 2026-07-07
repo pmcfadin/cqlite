@@ -306,7 +306,7 @@ impl CompressedDataWriter {
     /// Write uncompressed data
     ///
     /// Data is buffered until chunk_size is reached, then compressed and written.
-    #[tracing::instrument(name = "compression.write_chunk", skip(self, data))]
+    #[tracing::instrument(name = "compression.write_chunk", level = "debug", skip(self, data))]
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         let mut remaining = data;
 

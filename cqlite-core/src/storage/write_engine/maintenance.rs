@@ -185,7 +185,7 @@ impl WriteEngine {
     ///     println!("Merged {} rows in {:?}", report.rows_merged, report.time_spent);
     /// }
     /// ```
-    #[tracing::instrument(name = "compaction.maintenance_step", skip(self))]
+    #[tracing::instrument(name = "compaction.maintenance_step", level = "debug", skip(self))]
     pub fn maintenance_step(&mut self, budget: Duration) -> Result<MaintenanceReport> {
         // Budget requested for this step (issue #1037). Compared with the
         // consumed budget below (the scheduler honors a ~10% tolerance).
@@ -420,7 +420,7 @@ impl WriteEngine {
         Ok(report)
     }
 
-    #[tracing::instrument(name = "compaction.scan_candidates", skip(self))]
+    #[tracing::instrument(name = "compaction.scan_candidates", level = "debug", skip(self))]
     fn scan_sstable_candidates(&self) -> Result<Vec<PathBuf>> {
         let mut candidates = Vec::new();
 
@@ -463,7 +463,7 @@ impl WriteEngine {
                 if toc_path.exists() {
                     candidates.push(path);
                 } else {
-                    log::debug!(
+                    tracing::debug!(
                         "scan_data_files: skipping unpublished SSTable (no TOC.txt): {:?}",
                         path
                     );
@@ -544,12 +544,12 @@ impl WriteEngine {
             let component_path = parent_dir.join(format!("{}-{}", base, component));
             if component_path.exists() {
                 match std::fs::remove_file(&component_path) {
-                    Ok(()) => log::debug!("Deleted compaction input: {:?}", component_path),
+                    Ok(()) => tracing::debug!("Deleted compaction input: {:?}", component_path),
                     Err(e) => {
                         // Best-effort: do not abort. A leftover data component
                         // whose TOC.txt is already gone is an invisible orphan
                         // reclaimed by the startup sweep (Issue #591).
-                        log::warn!(
+                        tracing::warn!(
                             "Deferred delete of {:?}: {} (component left as orphan; \
                              unpublished via TOC.txt removal, reclaimed on next startup)",
                             component_path,

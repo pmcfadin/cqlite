@@ -55,7 +55,7 @@ pub fn parse_toc_file_detailed<P: AsRef<Path>>(
                 if !components.contains(&component) {
                     components.push(component);
                 } else {
-                    log::warn!(
+                    tracing::warn!(
                         "Duplicate component in TOC.txt line {}: {}",
                         line_number,
                         line
@@ -64,7 +64,7 @@ pub fn parse_toc_file_detailed<P: AsRef<Path>>(
             }
             Err(_) => {
                 unknown_components.push(line.to_string());
-                log::warn!(
+                tracing::warn!(
                     "Unknown component in TOC.txt line {}: {}",
                     line_number,
                     line
