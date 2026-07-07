@@ -539,7 +539,7 @@ impl TypeSerializer {
     ///     .with_field("street".to_string(), Some(Value::Text("Main St".to_string())))
     ///     .with_field("city".to_string(), Some(Value::Text("NYC".to_string())));
     ///
-    /// let bytes = serializer.serialize_udt(&Value::Udt(udt), &schema).unwrap();
+    /// let bytes = serializer.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
     /// ```
     pub fn serialize_udt(&self, value: &Value, schema: &UdtTypeDef) -> Result<Vec<u8>> {
         let udt = match value {
