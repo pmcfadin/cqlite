@@ -150,8 +150,10 @@ fn live_cell_writetime_and_ttl_resolve_under_tombstones() {
 
     assert_eq!(results.len(), 2, "expected the two live rows written");
 
-    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> =
-        results.into_iter().map(|(k, _v, m)| (k.0, m)).collect();
+    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> = results
+        .into_iter()
+        .map(|(k, _v, m)| (k.as_bytes().to_vec(), m))
+        .collect();
 
     for id in [1_i32, 2] {
         let meta = by_pk

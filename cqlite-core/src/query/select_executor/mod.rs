@@ -1477,7 +1477,7 @@ mod tests {
             row_with_key(b),
         ];
         let out = SelectExecutor::execute_per_partition_limit(rows, 2);
-        let count = |p: &[u8]| out.iter().filter(|r| r.key.0 == p).count();
+        let count = |p: &[u8]| out.iter().filter(|r| r.key.as_bytes() == p).count();
         assert_eq!(
             count(a),
             2,
@@ -1593,8 +1593,8 @@ mod tests {
 
         // Key PRESERVED (the core regression): not the empty `vec![]`.
         assert_eq!(
-            r.key.0,
-            vec![7, 8, 9],
+            r.key.as_bytes(),
+            [7, 8, 9],
             "trim must preserve the real RowKey, not destroy it to vec![]"
         );
         // Row metadata preserved.
@@ -1650,7 +1650,7 @@ mod tests {
         let out = executor.trim_projection(vec![build_row()], &columns);
         assert_eq!(out.len(), 1);
         let r = &out[0];
-        assert_eq!(r.key.0, vec![1], "sparse row keeps its real key");
+        assert_eq!(r.key.as_bytes(), [1], "sparse row keeps its real key");
         assert_eq!(r.values.get("a"), Some(&Value::Integer(10)));
         assert!(
             !r.values.contains_key("b"),
@@ -1784,7 +1784,7 @@ mod tests {
             let mut out = Vec::with_capacity(rows.len());
             let mut counts: HashMap<Vec<u8>, u64> = HashMap::new();
             for row in rows {
-                let seen = counts.entry(row.key.0.clone()).or_insert(0);
+                let seen = counts.entry(row.key.as_bytes().to_vec()).or_insert(0);
                 if *seen < count {
                     *seen += 1;
                     out.push(row);
@@ -1972,7 +1972,8 @@ mod tests {
             access_path: None,
             reverse_served: false,
         };
-        let tags = |rows: &[QueryRow]| -> Vec<u8> { rows.iter().map(|r| r.key.0[0]).collect() };
+        let tags =
+            |rows: &[QueryRow]| -> Vec<u8> { rows.iter().map(|r| r.key.as_bytes()[0]).collect() };
 
         // --- Part A: NaN present → decorate-sort is order-identical to reference.
         // Tags 2 (-0.0) and 4 (+0.0) compare Equal; NaN appears twice (tags 1, 6).

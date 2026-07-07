@@ -214,7 +214,7 @@ fn metadata_scan_merges_generations_with_lww_and_tombstone_suppression() {
     // ── Reconciled state: live rows are exactly {1, 3, 4, 5, 6} ───────────────
     let by_pk: HashMap<Vec<u8>, (ScanRow, HashMap<String, CellWriteMetadata>)> = results
         .iter()
-        .map(|(k, v, m)| (k.0.clone(), (v.clone(), m.clone())))
+        .map(|(k, v, m)| (k.as_bytes().to_vec(), (v.clone(), m.clone())))
         .collect();
 
     assert_eq!(

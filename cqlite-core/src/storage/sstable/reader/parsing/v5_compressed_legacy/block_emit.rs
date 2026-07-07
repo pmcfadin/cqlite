@@ -93,7 +93,7 @@ impl V5CompressedLegacyParser {
                     Err(_) => break,
                 };
 
-            let table_id = TableId(format!("{}.{}", self.keyspace, self.table_name));
+            let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
             offset = next_data_offset;
             partition_index += 1;
 

@@ -492,7 +492,7 @@ mod tests {
         values.insert(column.into(), value);
         QueryRow {
             values,
-            key: cqlite_core::RowKey(Vec::new()),
+            key: cqlite_core::RowKey::new(Vec::new()),
             metadata: Default::default(),
             cell_metadata: None,
         }
@@ -501,7 +501,7 @@ mod tests {
     fn empty_row() -> QueryRow {
         QueryRow {
             values: std::collections::HashMap::new(),
-            key: cqlite_core::RowKey(Vec::new()),
+            key: cqlite_core::RowKey::new(Vec::new()),
             metadata: Default::default(),
             cell_metadata: None,
         }

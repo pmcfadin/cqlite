@@ -310,7 +310,7 @@ fn read_back(
         .expect("scan");
     results
         .into_iter()
-        .map(|(k, v)| (k.0, format!("{v:?}")))
+        .map(|(k, v)| (k.as_bytes().to_vec(), format!("{v:?}")))
         .collect()
 }
 

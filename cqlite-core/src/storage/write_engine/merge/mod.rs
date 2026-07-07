@@ -549,7 +549,7 @@ impl SSTableRowIteratorAdapter {
             row_timestamp,
             row_data,
         } = compaction_row;
-        let decorated_key = DecoratedKey::from_key_bytes(key.0)?;
+        let decorated_key = DecoratedKey::from_key_bytes(key.as_bytes().to_vec())?;
 
         // Issue #1072: a partition-level tombstone surfaces as a self-contained
         // carrier `MergeEntry` (empty live row + `partition_deletion`, no
@@ -9762,7 +9762,7 @@ mod issue_912_row_tombstone_clustering_identity {
     #[test]
     fn two_row_tombstones_do_not_collapse_in_merge() {
         let schema = clustered_schema();
-        let pk = RowKey(vec![0, 0, 0, 7]);
+        let pk = RowKey::new(vec![0, 0, 0, 7]);
 
         let e5 = SSTableRowIteratorAdapter::build_merge_entry(
             0,

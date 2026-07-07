@@ -626,7 +626,7 @@ impl MergeProducer {
             .map(|c| (std::sync::Arc::from(c.column.as_str()), c.value))
             .collect();
 
-        let key = RowKey(partition_key.to_vec());
+        let key = RowKey::new(partition_key.to_vec());
         build_row_from_scan(key, ScanRow::Row(row_cells), &[], Some(&self.schema))
     }
 

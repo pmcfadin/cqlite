@@ -246,7 +246,10 @@ async fn run_compaction_from_async_context() {
     );
 
     // Spot-check that every original partition key survived the merge.
-    let keys: std::collections::HashSet<Vec<u8>> = results.into_iter().map(|(k, _)| k.0).collect();
+    let keys: std::collections::HashSet<Vec<u8>> = results
+        .into_iter()
+        .map(|(k, _)| k.as_bytes().to_vec())
+        .collect();
     for id in 1..=(SSTABLE_COUNT * ROWS_PER_SSTABLE) {
         let key: Vec<u8> = id.to_be_bytes().into();
         assert!(

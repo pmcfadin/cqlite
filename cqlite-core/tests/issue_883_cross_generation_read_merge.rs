@@ -210,7 +210,7 @@ fn select_star_merges_generations_with_lww_and_tombstone_suppression() {
     // generations) and resurrected PK2/score@PK4 from gen1.
     let by_pk: HashMap<Vec<u8>, ScanRow> = results
         .iter()
-        .map(|(k, v)| (k.0.clone(), v.clone()))
+        .map(|(k, v)| (k.as_bytes().to_vec(), v.clone()))
         .collect();
 
     assert_eq!(

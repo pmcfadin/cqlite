@@ -262,7 +262,7 @@ fn scan_reconciled(
                     .into_iter()
                     .map(|(name, v)| (Value::Text(name.to_string()), v))
                     .collect();
-                (k.0, Value::Map(map))
+                (k.as_bytes().to_vec(), Value::Map(map))
             })
         })
         .collect();

@@ -477,11 +477,15 @@ async fn test_streaming_parity_multi_row_partition_chunk_straddle() {
     // that is not also duplicated in the Vec read (catches re-emission directly).
     let mut seen: HashMap<(Vec<u8>, i64), usize> = HashMap::new();
     for e in &stream_entries {
-        *seen.entry((e.key.0.clone(), e.row_timestamp)).or_insert(0) += 1;
+        *seen
+            .entry((e.key.as_bytes().to_vec(), e.row_timestamp))
+            .or_insert(0) += 1;
     }
     let mut want: HashMap<(Vec<u8>, i64), usize> = HashMap::new();
     for e in &vec_entries {
-        *want.entry((e.key.0.clone(), e.row_timestamp)).or_insert(0) += 1;
+        *want
+            .entry((e.key.as_bytes().to_vec(), e.row_timestamp))
+            .or_insert(0) += 1;
     }
     assert_eq!(
         seen, want,
@@ -506,7 +510,7 @@ async fn test_streaming_break_stops_early() {
     let mut collected: Vec<Vec<u8>> = Vec::new();
     reader
         .stream_all_partitions_for_compaction(Some(&schema), |row| {
-            collected.push(row.key.0);
+            collected.push(row.key.as_bytes().to_vec());
             if collected.len() >= 5 {
                 Ok(std::ops::ControlFlow::Break(()))
             } else {
