@@ -259,22 +259,20 @@ pub struct PartitionSizeBucket {
 
 /// Parse the Statistics.db file header with authoritative format detection.
 ///
-/// CQLite targets Cassandra 5.0 (`na`+/`nb` BIG and `oa`/`da` BTI); the
-/// supported Statistics.db header is the **version-4 `nb`** layout:
+/// CQLite targets Cassandra 5.0 (`na`+/`nb` BIG, `oa`/`da` BTI); the supported
+/// header is the **version-4 `nb`** layout (the one the reader open path
+/// exercises via `enhanced_statistics_parser`):
 ///
-/// - **Version 4**: 'nb' (new big) enhanced-statistics header (Cassandra 5.0+)
+/// - **Version 4**: 'nb' enhanced-statistics header (Cassandra 5.0+)
 ///     - Structure: version(4) + statistics_kind(4) + reserved(4) + data_length(4) +
 ///       metadata1(4) + metadata2(4) + metadata3(4) + checksum(4) = 32 bytes
 ///     - Authoritative marker: version == 4
-///     - This is the format the reader open path exercises (via
-///       `enhanced_statistics_parser`).
 ///
-/// Any other version number is unsupported and results in a parse error.
-///
-/// The `1..=3` branch below is retained only so this standalone header parser
-/// fails gracefully rather than misclassifying a lower version; it is NOT a
-/// supported format target. Pre-`na` (Cassandra 3.x/4.x, `ma`–`me`) is out of
-/// scope per the version floor and SHALL NOT be relied on for correctness.
+/// Any other version number is unsupported and results in a parse error. The
+/// `1..=3` branch below is retained only so this standalone helper fails
+/// gracefully rather than misclassifying a lower version; pre-`na` (Cassandra
+/// 3.x/4.x, `ma`–`me`) is OUT OF SCOPE per the version floor and SHALL NOT be
+/// relied on for correctness.
 pub fn parse_statistics_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> {
     let (remaining, version) = be_u32(input)?;
 
