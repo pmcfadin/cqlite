@@ -66,7 +66,7 @@ use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncSeekExt;
-use tracing::{debug, warn};
+use tracing::warn;
 
 // Per-site cache key namespaces (design D4): fold a site discriminator into the
 // sstable-identity field of [`ChunkKey`] so numerically-overlapping keys from
