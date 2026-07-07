@@ -2034,7 +2034,7 @@ impl KWayMerger {
     /// * `schema` - Table schema for schema-aware merging
     /// * `gc_before_secs` - gc_grace cutoff (seconds since epoch), or `None` to not purge
     /// * `now_secs` - "now" (seconds since epoch) for TTL expiry, or `None` for engine default
-    #[tracing::instrument(name = "merger.new", skip(input_paths, schema, gc_before_secs, now_secs), fields(inputs = input_paths.len()))]
+    #[tracing::instrument(name = "merger.new", level = "debug", skip(input_paths, schema, gc_before_secs, now_secs), fields(inputs = input_paths.len()))]
     pub fn new_with_gc(
         input_paths: Vec<PathBuf>,
         schema: &TableSchema,
@@ -2050,7 +2050,7 @@ impl KWayMerger {
     /// structurally (issue #1234). The one-shot `compact_sstables_with_registry`
     /// and the WriteEngine background compaction pass their configured registry
     /// here; the registry-free `new`/`new_with_gc` paths pass `None`.
-    #[tracing::instrument(name = "merger.new_registry", skip(input_paths, schema, gc_before_secs, now_secs, udt_registry), fields(inputs = input_paths.len()))]
+    #[tracing::instrument(name = "merger.new_registry", level = "debug", skip(input_paths, schema, gc_before_secs, now_secs, udt_registry), fields(inputs = input_paths.len()))]
     pub fn new_with_gc_and_registry(
         input_paths: Vec<PathBuf>,
         schema: &TableSchema,
@@ -2238,7 +2238,7 @@ impl KWayMerger {
     /// # Errors
     ///
     /// Returns an error if reading fails.
-    #[tracing::instrument(name = "merger.step", skip(self))]
+    #[tracing::instrument(name = "merger.step", level = "debug", skip(self))]
     pub fn step(&mut self) -> Result<MergeStep> {
         // Initialize heap on first call
         if self.heap.is_empty() && self.current_partition.is_none() {

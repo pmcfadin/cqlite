@@ -480,7 +480,7 @@ impl SelectExecutor {
 
         // Check if query requires full materialization (ORDER BY, GROUP BY, projection trim)
         if self.requires_materialization(&plan) {
-            tracing::info!("Query requires materialization (ORDER BY/GROUP BY/projection trim), using execute-then-stream");
+            tracing::debug!("Query requires materialization (ORDER BY/GROUP BY/projection trim), using execute-then-stream");
             return self.execute_and_stream(plan, config).await;
         }
 

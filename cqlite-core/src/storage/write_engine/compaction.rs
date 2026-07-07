@@ -86,7 +86,7 @@ impl WriteEngine {
     /// SSTables — see [`merge::compute_max_purgeable_timestamp`]. When `Some`, a
     /// tombstone older than every outside SSTable is purged even in a partial
     /// compaction; `None` keeps the conservative #921 behavior (no purging).
-    #[tracing::instrument(name = "compaction.start_merge", skip(self, input_paths, max_purgeable_timestamp, outside_paths), fields(inputs = input_paths.len()))]
+    #[tracing::instrument(name = "compaction.start_merge", level = "debug", skip(self, input_paths, max_purgeable_timestamp, outside_paths), fields(inputs = input_paths.len()))]
     pub(crate) fn start_merge(
         &mut self,
         input_paths: Vec<PathBuf>,
@@ -345,7 +345,7 @@ impl WriteEngine {
     /// `maintenance_step_inner` to the public `maintenance_step`, which wraps the
     /// whole step in `record_result("compaction", ..)` and counts it exactly
     /// once. Recording here too would double-count finalize failures.
-    #[tracing::instrument(name = "compaction.finalize", skip(self, report))]
+    #[tracing::instrument(name = "compaction.finalize", level = "debug", skip(self, report))]
     async fn finalize_merge_async(&mut self, report: &mut MaintenanceReport) -> Result<()> {
         let merge = match self.active_merge.take() {
             Some(m) => m,

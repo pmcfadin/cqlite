@@ -595,7 +595,7 @@ impl SSTableWriter {
     /// ];
     /// writer.write_partition(key, mutations)?;
     /// ```
-    #[tracing::instrument(name = "writer.write_partition", skip(self, key, mutations))]
+    #[tracing::instrument(name = "writer.write_partition", level = "debug", skip(self, key, mutations))]
     pub fn write_partition(&mut self, key: DecoratedKey, mutations: Vec<Mutation>) -> Result<()> {
         // Validate token ordering
         if let Some(last_token) = self.last_token {

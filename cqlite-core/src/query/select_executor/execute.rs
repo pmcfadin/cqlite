@@ -437,13 +437,13 @@ impl SelectExecutor {
         let (keyspace, table_name) = parse_table_id(table);
 
         match schema_opt {
-            Some(schema) => tracing::info!(
+            Some(schema) => tracing::debug!(
                 "Found schema for {}.{} with {} columns",
                 schema.keyspace,
                 schema.table,
                 schema.columns.len()
             ),
-            None => tracing::info!(
+            None => tracing::debug!(
                 "No schema found for {}.{}, proceeding without schema-aware parsing",
                 keyspace.as_deref().unwrap_or("unknown"),
                 table_name
@@ -463,7 +463,7 @@ impl SelectExecutor {
             // correctness backstop and any bloom/BTI over-inclusion is filtered out.
             let scan_results = match classify_partition_lookup(predicates, schema_opt) {
                 PartitionLookupOutcome::Targeted(pk_bytes) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "SSTableScan(metadata): partition-key point lookup (key len={}) for \"{}\"",
                         pk_bytes.len(),
                         table
@@ -499,7 +499,7 @@ impl SelectExecutor {
                 }
             };
 
-            tracing::info!("Scan (with metadata) returned {} rows", scan_results.len());
+            tracing::debug!("Scan (with metadata) returned {} rows", scan_results.len());
 
             // Issue #1577 (D1 + roborev metric-accounting fix): this metadata scan
             // is ALREADY fully materialized — the storage layer decoded every row
@@ -532,7 +532,7 @@ impl SelectExecutor {
             // still applied (and any over-inclusion is filtered out).
             let scan_results = match classify_partition_lookup(predicates, schema_opt) {
                 PartitionLookupOutcome::Targeted(pk_bytes) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
                         pk_bytes.len(),
                         table
@@ -576,7 +576,7 @@ impl SelectExecutor {
                     }
                 }
                 PartitionLookupOutcome::MultiTargeted(pk_keys) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "SSTableScan: multi-partition lookup ({} keys) for \"{}\"",
                         pk_keys.len(),
                         table
@@ -633,7 +633,7 @@ impl SelectExecutor {
                 }
             };
 
-            tracing::info!("Scan returned {} rows", scan_results.len());
+            tracing::debug!("Scan returned {} rows", scan_results.len());
 
             // Issue #1577 (D1 + roborev metric-accounting fix): these results are
             // ALREADY materialized — the partition-targeted paths decoded their
