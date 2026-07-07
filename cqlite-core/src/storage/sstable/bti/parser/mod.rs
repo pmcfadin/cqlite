@@ -87,6 +87,9 @@ pub use rows::{
 // (issue #1575 / C4): every BTI partition lookup now encodes then walks via this
 // single primitive.
 pub(crate) use slice_walk::lookup_partition_in_bti_slice;
+// Test-only hooks for the issue #1650 (L3) targeted-descent counter invariants.
+#[doc(hidden)]
+pub use slice_walk::{find_child_offset_for_test, parse_bti_node_for_test};
 // Crate-internal only: the O(key-length) Rows.db floor/ceiling walks (issue #1647
 // / L1). Their sole consumer is the SSTable reader's clustering-window path
 // (data_access::bti), which is compiled out under `tombstones`; kept off the

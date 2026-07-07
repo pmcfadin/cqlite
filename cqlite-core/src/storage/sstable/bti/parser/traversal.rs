@@ -169,7 +169,10 @@ pub(crate) fn dfs_visit_in_order<T, F, V>(
     mut visit: V,
 ) -> BtiResult<()>
 where
-    F: FnMut(&[u8], usize) -> BtiResult<Option<T>>,
+    // Issue #1650 (L3): the DFS parses each node ONCE and hands the borrowed
+    // `&BtiNode` to `decode_payload`, so a payload-bearing internal node is no
+    // longer parsed twice (once for its payload, once for its children).
+    F: FnMut(&[u8], usize, &BtiNode) -> BtiResult<Option<T>>,
     V: FnMut(&[u8], T),
 {
     // Op-based iterative DFS.  A SINGLE mutable `path` accumulates the transition
@@ -284,11 +287,16 @@ where
         }
         visited[word] |= bit;
 
+        // Parse this node ONCE (issue #1650 / L3): the parsed node drives BOTH the
+        // payload decode below and the child descent, so a payload-bearing internal
+        // node is no longer parsed twice per visit.
+        let node = parse_bti_node_for_traversal(trie_data, node_offset)?;
+
         // 1) Emit this node's own payload (if any) BEFORE descending — the key
         //    terminating here sorts before any continuation.  The visitor receives
         //    `path` as a borrowed slice; any copy is the visitor's choice (per
         //    emitted result), never per child edge.
-        if let Some(payload) = decode_payload(trie_data, node_offset)? {
+        if let Some(payload) = decode_payload(trie_data, node_offset, &node)? {
             visit(&path, payload);
         }
 
@@ -296,7 +304,6 @@ where
         //    stack is LIFO, push their `Enter` ops in DESCENDING order.  The `Pop`
         //    scheduled above already sits below these ops, so it fires after the
         //    entire subtree and backtracks this node's transition byte.
-        let node = parse_bti_node_for_traversal(trie_data, node_offset)?;
         let children = ordered_children(&node);
         let child_depth = node_depth.saturating_add(1);
         for &(transition_byte, child_offset) in children.iter().rev() {
@@ -322,7 +329,7 @@ pub(crate) fn dfs_collect_in_order<T, F>(
     decode_payload: F,
 ) -> BtiResult<Vec<(Vec<u8>, T)>>
 where
-    F: FnMut(&[u8], usize) -> BtiResult<Option<T>>,
+    F: FnMut(&[u8], usize, &BtiNode) -> BtiResult<Option<T>>,
 {
     let mut results: Vec<(Vec<u8>, T)> = Vec::new();
     dfs_visit_in_order(trie_data, root_offset, decode_payload, |key, payload| {
@@ -337,8 +344,8 @@ pub(crate) fn dfs_collect_partition_entries(
     trie_data: &[u8],
     root_offset: usize,
 ) -> BtiResult<Vec<(Vec<u8>, BtiPartitionLocation)>> {
-    dfs_collect_in_order(trie_data, root_offset, |data, off| {
-        read_node_payload(data, off)
+    dfs_collect_in_order(trie_data, root_offset, |data, off, node| {
+        read_node_payload(data, off, Some(node))
     })
 }
 
@@ -358,7 +365,7 @@ pub(crate) fn dfs_collect_partition_locations(
     dfs_visit_in_order(
         trie_data,
         root_offset,
-        read_node_payload,
+        |data, off, node| read_node_payload(data, off, Some(node)),
         |_key, location| locations.push(location),
     )?;
     Ok(locations)

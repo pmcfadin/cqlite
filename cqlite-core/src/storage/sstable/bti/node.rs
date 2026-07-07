@@ -99,70 +99,35 @@ impl fmt::Display for BtiNodeType {
     }
 }
 
-/// Sized pointer for encoding distances between parent and child nodes
+/// Resolved child pointer: the ABSOLUTE trie offset of a child node.
+///
+/// The on-disk backward-delta is resolved to an absolute offset
+/// (`parent_offset - delta`) at decode time and stored in `distance`.
+///
+/// Issue #1650 (L3) removed the dead `size` field (the pointer-encoding width, in
+/// bytes) and its `to_bytes`/`from_bytes` helpers: nothing on the read path or the
+/// canonical BTI (`da`) write path ever consumed them — the width is derived from
+/// the node-type ordinal during (de)serialization, never from a per-pointer field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SizedPointer {
-    /// Distance from current position to target
+    /// Absolute offset of the target child node (`parent_offset - backward_delta`).
     pub distance: u64,
-    /// Size of the pointer encoding (1, 2, 4, or 8 bytes)
-    pub size: u8,
 }
 
 // Struct-size regression guard (issue #1616, Epic H/H3; see
 // docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)). BTI trie
 // pointer decoded once per transition during partition lookup on the read hot
-// path. Measured 16 bytes today (u64 + u8, padded) on 64-bit targets. Update
-// this pin DELIBERATELY, never silently: any change — growth or shrink — must
-// be a reviewed edit here.
+// path. Measured 8 bytes today (a single u64) on 64-bit targets after issue #1650
+// (L3) dropped the dead 1-byte `size` field (was 16 padded). Update this pin
+// DELIBERATELY, never silently: any change — growth or shrink — must be a
+// reviewed edit here.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<SizedPointer>() == 16);
+const _: () = assert!(std::mem::size_of::<SizedPointer>() == 8);
 
 impl SizedPointer {
-    /// Create a new sized pointer
+    /// Create a pointer to the child at absolute offset `distance`.
     pub fn new(distance: u64) -> Self {
-        let size = if distance <= 0xFF {
-            1
-        } else if distance <= 0xFFFF {
-            2
-        } else if distance <= 0xFFFF_FFFF {
-            4
-        } else {
-            8
-        };
-
-        Self { distance, size }
-    }
-
-    /// Encode the pointer to bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        match self.size {
-            1 => vec![self.distance as u8],
-            2 => (self.distance as u16).to_be_bytes().to_vec(),
-            4 => (self.distance as u32).to_be_bytes().to_vec(),
-            8 => self.distance.to_be_bytes().to_vec(),
-            _ => panic!("Invalid pointer size: {}", self.size),
-        }
-    }
-
-    /// Decode pointer from bytes
-    pub fn from_bytes(data: &[u8], size: u8) -> BtiResult<Self> {
-        let distance = match size {
-            1 if !data.is_empty() => data[0] as u64,
-            2 if data.len() >= 2 => u16::from_be_bytes([data[0], data[1]]) as u64,
-            4 if data.len() >= 4 => u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64,
-            8 if data.len() >= 8 => u64::from_be_bytes([
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            ]),
-            _ => {
-                return Err(BtiError::Parse(format!(
-                    "Invalid pointer size {} or insufficient data",
-                    size
-                ))
-                .into());
-            }
-        };
-
-        Ok(Self { distance, size })
+        Self { distance }
     }
 }
 
@@ -178,11 +143,12 @@ pub struct Transition {
 // Struct-size regression guard (issue #1616, Epic H/H3; see
 // docs/reports/parser-performance-audit-2026-07-01.md §Epic H (finding H3)). One BTI
 // `Transition` is decoded per trie edge walked during partition lookup on the
-// read hot path. Measured 24 bytes today (u8 + `SizedPointer`, padded) on
-// 64-bit targets. Update this pin DELIBERATELY, never silently: any change —
-// growth or shrink — must be a reviewed edit here.
+// read hot path. Measured 16 bytes today (u8 + `SizedPointer`{u64}, padded) on
+// 64-bit targets after issue #1650 (L3) shrank `SizedPointer` to a bare u64.
+// Update this pin DELIBERATELY, never silently: any change — growth or shrink —
+// must be a reviewed edit here.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Transition>() == 24);
+const _: () = assert!(std::mem::size_of::<Transition>() == 16);
 
 impl Transition {
     pub fn new(byte: u8, child: SizedPointer) -> Self {
@@ -501,13 +467,13 @@ mod tests {
 
     #[test]
     fn test_sized_pointer() {
+        // Issue #1650 (L3): `SizedPointer` is now a bare absolute-offset holder;
+        // the dead `size`/`to_bytes`/`from_bytes` encoding path was removed.
         let small = SizedPointer::new(100);
-        assert_eq!(small.size, 1);
-        assert_eq!(small.to_bytes(), vec![100]);
+        assert_eq!(small.distance, 100);
 
         let large = SizedPointer::new(0x10000);
-        assert_eq!(large.size, 4);
-        assert_eq!(large.to_bytes(), vec![0x00, 0x01, 0x00, 0x00]);
+        assert_eq!(large.distance, 0x10000);
     }
 
     #[test]

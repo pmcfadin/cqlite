@@ -96,6 +96,7 @@ fn parse_payload_only_node(data: &[u8], has_payload: bool) -> BtiResult<BtiNode>
 ///     bytes 2..(2+ptr_bytes): backward delta (unsigned big-endian)
 ///     [payload if has_payload]
 fn parse_single_node(data: &[u8], offset: u64, ordinal: u8, header_byte: u8) -> BtiResult<BtiNode> {
+    crate::storage::sstable::read_work_counters::record_bti_pointer_decode(); // H5 (#1650): 1 child
     let transition = match ordinal {
         1 => {
             // SingleNoPayload4
@@ -181,6 +182,7 @@ fn parse_sparse_node(data: &[u8], offset: u64, ordinal: u8) -> BtiResult<BtiNode
             )));
         }
         for i in 0..count {
+            crate::storage::sstable::read_work_counters::record_bti_pointer_decode(); // H5 (#1650)
             let t_byte = data[bytes_start + i];
             let delta = read_12bit_packed(&data[pointers_start..], i);
             let child_offset = offset.saturating_sub(delta);
@@ -198,6 +200,7 @@ fn parse_sparse_node(data: &[u8], offset: u64, ordinal: u8) -> BtiResult<BtiNode
             )));
         }
         for i in 0..count {
+            crate::storage::sstable::read_work_counters::record_bti_pointer_decode(); // H5 (#1650)
             let t_byte = data[bytes_start + i];
             let ptr_off = pointers_start + i * ptr_bytes;
             let delta = read_be_unsigned(&data[ptr_off..ptr_off + ptr_bytes]);
@@ -215,13 +218,9 @@ fn parse_sparse_node(data: &[u8], offset: u64, ordinal: u8) -> BtiResult<BtiNode
 
 /// Parse a `Dense` (ordinals 10-15) node.
 ///
-/// Layout (ordinals 11-14 — full-byte pointers):
-///   byte 0: [ordinal|payload_flags]
-///   byte 1: start byte (first transition character)
-///   byte 2: (end - start), i.e. (range_len - 1)  → range_len = byte2+1
-///   then range_len × ptr_bytes: backward deltas; 0 means "no transition"
-///   [payload if has_payload]
-///
+/// Layout (ordinals 11-14 — full-byte pointers): byte 0 `[ordinal|payload_flags]`,
+/// byte 1 start byte, byte 2 `(range_len - 1)`, then `range_len × ptr_bytes` backward
+/// deltas (`0` means "no transition"), then `[payload if has_payload]`.
 /// ordinal 10 (Dense12): packed 12-bit deltas; ordinal 15 (LongDense): 8-byte.
 fn parse_dense_node(data: &[u8], offset: u64, ordinal: u8) -> BtiResult<BtiNode> {
     if data.len() < 3 {
@@ -243,6 +242,7 @@ fn parse_dense_node(data: &[u8], offset: u64, ordinal: u8) -> BtiResult<BtiNode>
             )));
         }
         for i in 0..range_len {
+            crate::storage::sstable::read_work_counters::record_bti_pointer_decode(); // H5 (#1650)
             let delta = read_12bit_packed(&data[3..], i);
             children.push(dense_child(offset, delta));
         }
@@ -258,6 +258,7 @@ fn parse_dense_node(data: &[u8], offset: u64, ordinal: u8) -> BtiResult<BtiNode>
             )));
         }
         for i in 0..range_len {
+            crate::storage::sstable::read_work_counters::record_bti_pointer_decode(); // H5 (#1650)
             let ptr_off = 3 + i * ptr_bytes;
             let delta = read_be_unsigned(&data[ptr_off..ptr_off + ptr_bytes]);
             children.push(dense_child(offset, delta));
@@ -303,9 +304,6 @@ fn dense_child(offset: u64, delta: u64) -> Option<SizedPointer> {
 /// node-type nibble is out of range, or any other structural invariant is
 /// violated.
 pub(crate) fn parse_bti_node(data: &[u8], offset: u64) -> BtiResult<BtiNode> {
-    // Issue #1618 (H5): count every node/pointer decode (L1/L3: pairs with
-    // BTI_NODES_VISITED to prove the descent does not re-decode nodes).
-    crate::storage::sstable::read_work_counters::record_bti_pointer_decode();
     if data.is_empty() {
         return Err(Error::Parse("Empty BTI node data".to_string()));
     }
