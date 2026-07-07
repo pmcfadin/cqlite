@@ -777,7 +777,9 @@ impl SSTableReader {
             // half), so it routes through `decode_and_cache` directly (no self-read).
             // Build a minimal CompressionInfo for max_compressed_length (the only field
             // the decode path needs); Compression is built once outside the loop.
-            let compression_opt = self.compression_reader.as_ref()
+            let compression_opt = self
+                .compression_reader
+                .as_ref()
                 .map(|cr| Compression::new(*cr.algorithm()))
                 .transpose()?;
             let comp_info_dummy = crate::storage::sstable::compression_info::CompressionInfo {

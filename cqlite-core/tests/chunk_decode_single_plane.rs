@@ -40,7 +40,8 @@ fn scan_file(path: &Path, sites: &mut Vec<(String, usize)>, root: &Path) {
         || rel_str.contains("bulletproof_reader.rs")
         || rel_str.contains("benchmarks/") // benchmarks are not query-path
         || rel_str.contains("compaction.rs") // compaction read: out of scope (design.md)
-        || rel_str.contains("parsing/") // parsing helpers: not decompress sites
+        || rel_str.contains("parsing/")
+    // parsing helpers: not decompress sites
     {
         return;
     }
@@ -104,7 +105,10 @@ fn query_path_decompress_in_exactly_one_module() {
     }
 
     if by_module.len() > 1 {
-        eprintln!("ERROR: decompress calls found in {} modules (expected exactly 1):", by_module.len());
+        eprintln!(
+            "ERROR: decompress calls found in {} modules (expected exactly 1):",
+            by_module.len()
+        );
         for (module, module_sites) in &by_module {
             eprintln!("  Module: {}", module);
             for (file, line) in module_sites {
@@ -124,7 +128,8 @@ fn query_path_decompress_in_exactly_one_module() {
         panic!(
             "Query-path decompress is in module '{}', expected 'chunk_source'. Sites:\n{}",
             module,
-            module_sites.iter()
+            module_sites
+                .iter()
                 .map(|(f, l)| format!("  {}:{}", f, l))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -208,14 +213,10 @@ async fn warm_cache_skips_decompress() {
         .read_dir()
         .ok()
         .and_then(|mut entries| {
-            entries
-                .find_map(|e| {
-                    let p = e.ok()?.path();
-                    p.file_name()?
-                        .to_str()?
-                        .ends_with("-Data.db")
-                        .then_some(p)
-                })
+            entries.find_map(|e| {
+                let p = e.ok()?.path();
+                p.file_name()?.to_str()?.ends_with("-Data.db").then_some(p)
+            })
         });
 
     let Some(data_db) = data_db else {
@@ -236,10 +237,7 @@ async fn warm_cache_skips_decompress() {
     let cold = reader.get(&table_id, &key).await.expect("cold get");
     let cold_decompress = SSTableReader::decompress_call_count();
     assert!(cold.is_some(), "fixture must have key1");
-    assert!(
-        cold_decompress >= 1,
-        "cold read must decompress >=1 chunk"
-    );
+    assert!(cold_decompress >= 1, "cold read must decompress >=1 chunk");
 
     // Warm read: same key, cache hit, ZERO decompress
     SSTableReader::reset_decompress_calls();

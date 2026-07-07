@@ -94,7 +94,11 @@ impl<'a> ChunkSource<'a> {
 
         // Incompressible-raw passthrough or decompress, then cache
         let incompressible = compressed.len() >= self.comp_info.max_compressed_length as usize;
-        Ok(Some(self.decode_and_cache(key, compressed, incompressible)?))
+        Ok(Some(self.decode_and_cache(
+            key,
+            compressed,
+            incompressible,
+        )?))
     }
 
     /// Ranged (offset, size) read for the BIG point path (aux-keyed by size).
@@ -165,7 +169,10 @@ impl<'a> ChunkSource<'a> {
     ) -> Result<Vec<u8>> {
         if let Some(c) = compression {
             c.decompress(&compressed).map_err(|e| {
-                Error::corruption(format!("ChunkSource: reverse-path decompress failed: {}", e))
+                Error::corruption(format!(
+                    "ChunkSource: reverse-path decompress failed: {}",
+                    e
+                ))
             })
         } else {
             Ok(compressed)

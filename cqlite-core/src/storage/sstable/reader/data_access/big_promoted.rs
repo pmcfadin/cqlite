@@ -591,7 +591,9 @@ impl SSTableReader {
         match self.read_next_block(cursor).await? {
             Some(compressed_chunk) => {
                 // Build Compression once per call (same as before)
-                let compression_opt = self.compression_reader.as_ref()
+                let compression_opt = self
+                    .compression_reader
+                    .as_ref()
                     .map(|cr| Compression::new(*cr.algorithm()))
                     .transpose()?;
                 // Decompress-only: no cache, keeps work_counters separate

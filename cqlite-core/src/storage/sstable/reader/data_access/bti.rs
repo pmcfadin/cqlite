@@ -716,12 +716,16 @@ impl SSTableReader {
             if chunk_targeted {
                 // Single decode plane (issue #1598, G2): positioned read → CRC →
                 // decompress → B1 cache via `ChunkSource`.
-                let compression_opt = self.compression_reader.as_ref()
+                let compression_opt = self
+                    .compression_reader
+                    .as_ref()
                     .map(|cr| Compression::new(*cr.algorithm()))
                     .transpose()?;
                 let chunk_source = super::super::chunk_source::ChunkSource::new(
                     self.point_source.as_ref(),
-                    self.compression_info.as_ref().expect("chunk_targeted requires CompressionInfo"),
+                    self.compression_info
+                        .as_ref()
+                        .expect("chunk_targeted requires CompressionInfo"),
                     compression_opt.as_ref(),
                     &self.chunk_cache,
                     self.stats.file_size,
@@ -1090,7 +1094,9 @@ impl SSTableReader {
             Some(compressed_chunk) => {
                 *chunk_index += 1;
                 // Build Compression once per call (same as before)
-                let compression_opt = self.compression_reader.as_ref()
+                let compression_opt = self
+                    .compression_reader
+                    .as_ref()
                     .map(|cr| Compression::new(*cr.algorithm()))
                     .transpose()?;
                 // Decompress-only: no cache, keeps work_counters separate

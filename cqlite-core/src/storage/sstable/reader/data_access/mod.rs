@@ -549,7 +549,9 @@ impl SSTableReader {
         model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
 
         // Build ChunkSource for the BIG point path
-        let compression_opt = self.compression_reader.as_ref()
+        let compression_opt = self
+            .compression_reader
+            .as_ref()
             .map(|cr| Compression::new(*cr.algorithm()))
             .transpose()?;
         let comp_info_dummy = crate::storage::sstable::compression_info::CompressionInfo {
@@ -577,7 +579,10 @@ impl SSTableReader {
             Err(e) => {
                 // Preserve legacy-format fallback behavior (pre-existing)
                 if self.header.cassandra_version == CassandraVersion::Legacy {
-                    warn!("Decompression failed for legacy format ({}), re-reading raw", e);
+                    warn!(
+                        "Decompression failed for legacy format ({}), re-reading raw",
+                        e
+                    );
                     let mut buffer = vec![0u8; size as usize];
                     self.point_source.read_exact_at(block_offset, &mut buffer)?;
                     return Ok(buffer);
