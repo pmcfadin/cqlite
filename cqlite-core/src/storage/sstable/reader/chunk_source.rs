@@ -119,7 +119,7 @@ impl<'a> ChunkSource<'a> {
         self.source.read_exact_at(offset, &mut buffer)?;
 
         // BIG point read is always compressible (no incompressible-raw branch here)
-        Ok(self.decode_and_cache(key, buffer, false)?)
+        self.decode_and_cache(key, buffer, false)
     }
 
     /// Shared decompress+cache tail: decompress (or raw-passthrough) → insert → Arc.
