@@ -117,7 +117,7 @@ bindings/python/
 ├── python/cqlite/
 │   ├── __init__.py        # Python package wrapper
 │   └── __init__.pyi       # Type stubs for IDE support
-├── tests/                 # 17 test files, 360+ tests
+├── tests/                 # pytest suite (counts churn — `ls tests/test_*.py`)
 │   └── conftest.py        # Shared fixtures and path constants (Issue #330)
 ├── pyproject.toml         # Maturin build configuration
 └── Cargo.toml             # Rust dependencies
@@ -130,8 +130,8 @@ Primary E2E tests (`bindings/python/tests/`):
   - `TestRowCountParity`, `TestValueParity`, `TestE2ESummary`
 - `test_cli_parity.py`: Python vs CLI output equivalence
 
-Known issues (tracked as XFail): none as of Dec 2025. Issue #493 (set element
-tombstones) is out-of-scope for v0.9.1.
+Known issues (tracked as XFail): none currently (issue #493, set element tombstones,
+was the last and is closed).
 
 ## Node.js bindings
 
@@ -190,7 +190,7 @@ bindings/node/
 │   ├── index.js           # Enhanced entry point with error wrapper
 │   ├── index.d.ts         # Complete TypeScript definitions (Issue #312)
 │   └── error-wrapper.js   # JavaScript error enhancement layer
-├── __test__/              # 13 test files, 255 tests (Jest)
+├── __test__/              # Jest suite (counts churn — `ls __test__/*.test.js`)
 ├── jest.config.js         # Jest configuration
 ├── Cargo.toml             # napi-rs dependencies
 ├── package.json           # npm package config (@cqlite/node)
