@@ -1,9 +1,12 @@
 //! Single chunk decode plane: read → CRC → decompress → B1 cache (issue #1598, Epic G).
 //!
-//! Every query-path `Compression::decompress` call resolves here — the BTI target-chunk
-//! read, the windowed streaming scan, the BIG point-read path, and the BIG reverse seek.
-//! This is the ONLY module on the query path allowed to call `decompress`, proven by the
-//! architecture test `tests/chunk_decode_single_plane.rs`.
+//! The point-read (BTI get, BIG point), windowed-scan, and BIG-reverse decode paths all
+//! resolve their `Compression::decompress` here. The `iterate_all_partitions` and
+//! `sequential_scan` decode sites (`parse_partition_at_offset` in `parsing/mod.rs`,
+//! `parse_block_entries` in `parsing/block_entries.rs`) remain on the legacy
+//! `self.file` + `compression_reader` model (not `ReadAt` + `CompressionInfo` + chunk-index)
+//! and are a scoped follow-up (#2165) to route through ChunkSource. Architecture test:
+//! `tests/chunk_decode_single_plane.rs`.
 
 use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
 use crate::storage::sstable::compression::Compression;
