@@ -9,7 +9,7 @@ use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
 use crate::storage::sstable::compression::Compression;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::block_io::read_compressed_chunk_at;
-use crate::storage::sstable::reader::data_access::DECOMPRESS_CALLS;
+use crate::storage::sstable::reader::data_access::{CHUNK_READ_CALLS, DECOMPRESS_CALLS};
 use crate::storage::sstable::reader::read_at::ReadAt;
 use crate::{Error, Result};
 use std::sync::atomic::Ordering;
@@ -114,7 +114,10 @@ impl<'a> ChunkSource<'a> {
             return Ok(hit);
         }
 
-        // Cache miss: positioned read at (offset, size)
+        // Cache miss: positioned read at (offset, size). Count the underlying read
+        // ONLY here (issue #1598): a cache HIT above returns before this and must
+        // leave CHUNK_READ_CALLS unchanged (the "zero underlying reads" oracle).
+        CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
         let mut buffer = vec![0u8; size as usize];
         self.source.read_exact_at(offset, &mut buffer)?;
 

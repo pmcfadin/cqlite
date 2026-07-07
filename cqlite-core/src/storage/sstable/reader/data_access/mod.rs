@@ -53,13 +53,17 @@ pub use model::ClusteringSlice;
 // (issue #1567). `model` is a private submodule, so the raw path is not reachable
 // from `reader::scan_stream_windowed`; this widens the path exactly enough.
 pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
+// Re-export the underlying-read counter so `chunk_source` (the single decode
+// plane) increments it on its miss/read path only — a cache HIT never counts a
+// read (issue #1598, "zero underlying reads" oracle).
+pub(in crate::storage::sstable::reader) use model::CHUNK_READ_CALLS;
 
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use log::{debug, warn};
+use log::warn;
 use std::io::SeekFrom;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncSeekExt;
@@ -333,16 +337,21 @@ impl SSTableReader {
                 );
                 compressed_chunk
             } else if let Some(compression_reader) = &self.compression_reader {
+                // Single decode plane (issue #1598, G2): route the stitch-path
+                // decompress through ChunkSource so it is the ONLY query-path module
+                // that calls Compression::decompress. Behavior-identical (no cache,
+                // no counter) to the prior inline call.
                 let compression = Compression::new(*compression_reader.algorithm())?;
-                match compression.decompress(&compressed_chunk) {
-                    Ok(decompressed) => decompressed,
-                    Err(e) => {
-                        return Err(Error::corruption(format!(
-                            "stitch_all_chunks: Failed to decompress chunk {}: {}",
-                            chunk_count, e
-                        )));
-                    }
-                }
+                super::chunk_source::ChunkSource::decompress_only(
+                    Some(&compression),
+                    compressed_chunk,
+                )
+                .map_err(|e| {
+                    Error::corruption(format!(
+                        "stitch_all_chunks: Failed to decompress chunk {}: {}",
+                        chunk_count, e
+                    ))
+                })?
             } else {
                 // No compression (should not happen for V5CompressedLegacy)
                 log::warn!("stitch_all_chunks: No compression reader, using raw chunk data");
@@ -415,9 +424,6 @@ impl SSTableReader {
 
     /// Read value at a specific offset with caching
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<ScanRow>> {
-        use crate::parser::header::CassandraVersion;
-        use crate::storage::sstable::compression::Compression;
-
         // Size must be non-zero for offset-based reading
         if size == 0 {
             return Err(Error::corruption(format!(
@@ -435,48 +441,11 @@ impl SSTableReader {
         // (compressed tables / BTI / absent-CRC.db warn-and-proceed).
         self.verify_uncompressed_range(offset, size).await?;
 
-        // Use cached reading with metrics tracking
-        let buffer = self.get_cached_data(offset, size).await?;
-
-        // Decompress if needed
-        let data = if let Some(compression_reader) = &self.compression_reader {
-            let compression = Compression::new(*compression_reader.algorithm())?;
-            match compression.decompress(&buffer) {
-                Ok(decompressed) => {
-                    debug!(
-                        "Successfully decompressed {} bytes to {} bytes",
-                        buffer.len(),
-                        decompressed.len()
-                    );
-                    decompressed
-                }
-                Err(e) => {
-                    // For modern formats (4.x/5.x), decompression failure is an error
-                    if self.header.cassandra_version != CassandraVersion::Legacy {
-                        return Err(Error::corruption(format!(
-                            "Decompression failed for modern format at offset={}, size={}, algorithm={:?}: {}",
-                            offset,
-                            size,
-                            compression_reader.algorithm(),
-                            e
-                        )));
-                    } else {
-                        // Only allow fallback for legacy formats
-                        warn!(
-                            "Decompression failed for legacy format ({}), using raw data",
-                            e
-                        );
-                        debug!(
-                            "First 32 bytes of raw data: {:02x?}",
-                            &buffer[..std::cmp::min(32, buffer.len())]
-                        );
-                        buffer
-                    }
-                }
-            }
-        } else {
-            buffer
-        };
+        // Read + decompress in ONE decode plane (issue #1598, G2): `get_cached_data`
+        // routes through `ChunkSource::range`, which reads, CRC-checks, decompresses
+        // (the single query-path `Compression::decompress` call site), and B1-caches.
+        // The returned bytes are already decompressed — there is no second decode here.
+        let data = self.get_cached_data(offset, size).await?;
 
         // Preserve raw data until schema is available. Pre-#1334 this offset-read
         // placeholder returned a bare `Value::Blob` of the row's raw value bytes,
@@ -522,8 +491,9 @@ impl SSTableReader {
         use crate::storage::sstable::compression::Compression;
 
         // Single decode plane (issue #1598, G2): positioned read → decompress → B1
-        // cache via ChunkSource::range. The shared cache tracks hit/miss internally.
-        model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+        // cache via ChunkSource::range. The shared cache tracks hit/miss internally,
+        // and ChunkSource::range increments CHUNK_READ_CALLS on its miss/read path
+        // ONLY — a warm cache hit performs (and counts) zero underlying reads.
 
         // Build ChunkSource for the BIG point path
         let compression_opt = self
