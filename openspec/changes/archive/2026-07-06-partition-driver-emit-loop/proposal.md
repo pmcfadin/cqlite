@@ -38,7 +38,7 @@ stay green through the refactor.
 ## What Changes
 
 - **Add** a single `PartitionDriver` seam in a new
-  `row_decoder/partition_driver.rs` that owns the shared sliding-window
+  `v5_compressed_legacy/partition_driver.rs` that owns the shared sliding-window
   partition/row framing skeleton (header readiness → header parse → per-row loop
   with EOP / range-marker / row-decode / boundary-peek → `pending` buffering →
   `flush_and_emitted`) and drives it via a `SlidingPartitionPolicy` trait whose

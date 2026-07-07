@@ -3,7 +3,7 @@
 Follow-up from #1046 (PR #1332). dhat heap profiling of the read path ranks the per-cell
 column-name `String` clone as allocation **rank ~3**: the row decoder clones the schema's
 column-name `String` into the returned cells map **once per cell, per row**
-(`cqlite-core/.../row_decoder/row_data.rs:458` and `:514`). A full scan of a wide table
+(`cqlite-core/.../v5_compressed_legacy/row_data.rs:458` and `:514`). A full scan of a wide table
 therefore allocates `#rows × #columns` short-lived `String`s whose contents are identical to the
 long-lived schema column names.
 

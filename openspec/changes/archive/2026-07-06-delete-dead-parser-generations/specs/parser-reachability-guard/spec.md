@@ -34,12 +34,12 @@ function or analyzer that retains a compiled (non-test) caller. Specifically `SS
 - **THEN** `parse_statistics_header` and `parse_timestamp_statistics` are still present and the tests pass
 
 ### Requirement: The live decode path is unchanged
-The removal SHALL NOT alter the live decode engine `row_decoder` or any production
+The removal SHALL NOT alter the live decode engine `v5_compressed_legacy` or any production
 read/decode behavior; the 33-table golden parity harness SHALL remain green.
 
-#### Scenario: row_decoder is untouched
+#### Scenario: v5_compressed_legacy is untouched
 - **WHEN** the change's diff is inspected
-- **THEN** no file under `storage/sstable/reader/parsing/row_decoder` is modified
+- **THEN** no file under `storage/sstable/reader/parsing/v5_compressed_legacy` is modified
 
 #### Scenario: Golden parity is preserved
 - **WHEN** the SSTable read/parity tests run against the real test datasets after the removal

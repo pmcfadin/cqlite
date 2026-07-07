@@ -69,11 +69,11 @@ embedder that never built a registry from DDL.
 
 - Affected specs: **frozen-inner-udt-decode** (new capability).
 - Affected code (anchors at `e2694ab5`):
-  - `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value.rs:846-916`
+  - `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy/cell_value.rs:846-916`
     (frozen-collection dispatch; where the marshal type must start being threaded)
-  - `.../row_decoder/frozen.rs:83-172` (element loop / `read_frozen_element`)
-  - `.../row_decoder/raw_value.rs:89-467` (recursive element decoder; Blob fallback at 457-464)
-  - `.../row_decoder/udt.rs` (`decode_frozen_udt_from_header_type`, marshal helpers — reuse)
+  - `.../v5_compressed_legacy/frozen.rs:83-172` (element loop / `read_frozen_element`)
+  - `.../v5_compressed_legacy/raw_value.rs:89-467` (recursive element decoder; Blob fallback at 457-464)
+  - `.../v5_compressed_legacy/udt.rs` (`decode_frozen_udt_from_header_type`, marshal helpers — reuse)
   - `cqlite-core/tests/issue_1240_nested_frozen_collection_udt_parity.rs` (tripwire update)
 - Doctrine impact: none beyond this spec; CLAUDE.md/site untouched (no workflow change).
 - Consumers seeing a contract change: registry-less `iterate_all_partitions_for_compaction`

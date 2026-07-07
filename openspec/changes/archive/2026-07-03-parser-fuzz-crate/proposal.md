@@ -22,7 +22,7 @@ proves (never panic/hang/OOM on arbitrary input), and the harness layout/wiring 
   - `fuzz_value_decode` — the schema-typed value decoder over a fixed type list (every scalar +
     `list<int>`, `set<text>`, `map<text,int>`, a tuple, nested `frozen<list<list<int>>>`).
   - `fuzz_block_emit` — the decompressed-block partition-loop entry (`parse_block_emit`,
-    `.../row_decoder/`) against one fixed simple schema (`test_basic.simple_table`).
+    `.../v5_compressed_legacy/`) against one fixed simple schema (`test_basic.simple_table`).
   - `fuzz_bti` — BTI node decode + DFS traversal (`.../bti/parser/node_decode.rs`, `traversal.rs`).
   - `fuzz_schema_parse` — arbitrary strings to `parse_create_table` / `cql_type` / `cql_type_to_type_id`
     (`cqlite-core/src/schema/cql_parser.rs`). **Queued from #1690** (schema type-parser depth-guard,

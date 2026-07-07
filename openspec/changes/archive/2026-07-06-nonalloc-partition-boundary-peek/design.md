@@ -2,7 +2,7 @@
 
 ## Context
 
-`parse_partition_header_full` (`row_decoder/row_framing.rs`) is the
+`parse_partition_header_full` (`v5_compressed_legacy/row_framing.rs`) is the
 single partition-header parse primitive. It does three things: (1) records the H5
 `PARTITION_HEADER_TRY_PARSES` gauge, (2) validates the header structure (bounds,
 non-zero `u8` key length, per-format DeletionTime framing incl. the oa/da

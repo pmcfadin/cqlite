@@ -8,7 +8,7 @@ Byte-carrying scalar values SHALL be extracted as refcounted subslices of the de
 substrate rather than copied out per cell. This covers the `Text`, `Blob`, `Varint`, and
 `Decimal`-unscaled payloads: the decoder SHALL slice the chunk (`bytes::Bytes` / `Bytes::slice_ref`)
 instead of calling `.to_vec()` or `String::from_utf8(bytes.to_vec())`. This applies to the decode paths
-in `reader/parsing/row_decoder/` (`cell_value`, `raw_value`, `raw_type_value`, `udt`,
+in `reader/parsing/v5_compressed_legacy/` (`cell_value`, `raw_value`, `raw_type_value`, `udt`,
 `complex_column`) and `parsing/comparator_value_parsing.rs`. UTF-8 validation for `Text` SHALL
 be performed in place on the borrowed slice (`str::from_utf8`) — validation without a copy — and the
 validated `Bytes` stored. The extracted value SHALL never be inferred from byte patterns; the decode

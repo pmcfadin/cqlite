@@ -8,7 +8,7 @@ The decode entry points the targets must reach have mixed visibility from outsid
 |--------|----------------|------------------------------------------|
 | `fuzz_vint` | `parser::parse_vint` / `parse_vuint` / `parse_vint_length` | **Yes** — `pub mod parser` + `pub use vint::*` |
 | `fuzz_value_decode` | schema-typed value decode (`parse_value_with_comparator` is `pub`; the per-type `parse_*_value` are `pub(crate)`) | **No** — the module chain / items are `pub(crate)` |
-| `fuzz_block_emit` | `parse_block_emit` (`.../row_decoder/block_emit.rs`) | **No** — `mod row_decoder` is private |
+| `fuzz_block_emit` | `parse_block_emit` (`.../v5_compressed_legacy/block_emit.rs`) | **No** — `mod v5_compressed_legacy` is private |
 | `fuzz_bti` | `iterate_partitions_in_bti_file` + `node_decode` | **No** — module chain is private |
 | `fuzz_schema_parse` | `schema::cql_parser::{parse_create_table, cql_type_to_type_id}`; `cql_type` is `fn` (private) | Partial |
 

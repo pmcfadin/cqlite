@@ -12,7 +12,7 @@
 - [ ] 2.1 Add `CellKind` (small enum, scalar variants 1:1 with the `cell_value.rs` decode
   arms + `Complex(Arc<str>)`), with `#[must_use] fn from_type(&str) -> CellKind` that
   lowercases once and maps from authoritative metadata (no byte inspection). New file
-  `row_decoder/cell_kind.rs`; `pub(super) use` from the module.
+  `v5_compressed_legacy/cell_kind.rs`; `pub(super) use` from the module.
   *Surface exercised:* `CellKind::from_type` (unit-tested for the full type map).
 
 ## 3. Extend the once-per-block resolution
