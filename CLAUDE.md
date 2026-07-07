@@ -86,8 +86,8 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 | Mode | Command | Use |
 |------|---------|-----|
 | **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
-| **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
-| **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
+| **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
+| **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 
@@ -100,11 +100,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   watchdog-killed (#1855). A queued gate ≠ hung gate: under load it prints `waiting for gate slot`.
 - Defaults if `AGENT_GATE_SUMMARY_FILE` unset (per-checkout; give concurrent gates in ONE checkout
   unique paths): `.agent-gate-summary.txt` / `.agent-gate-lite-summary.txt` / `.agent-gate-delta-summary.txt`.
-- clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the DuckDB
-  amalgamation + OTel stack; `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`) runs the full matrix.
-- The FULL gate FAILs CLOSED when the fetched validation corpus is absent (#2078);
-  `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opts out visibly in the SUMMARY. Remedy:
-  `bash test-data/scripts/fetch-datasets.sh`. `--lite`/`--only` stay lenient.
+- clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
+  DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
+  `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)
+  runs the full matrix.
+- The FULL gate FAILs CLOSED when the fetched validation corpus is absent (#2078), stamping
+  `missing-fixtures: FAIL-CLOSED (#2078)`; `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opts out visibly
+  (`missing-fixtures: OPT-OUT (...)`). Remedy: `bash test-data/scripts/fetch-datasets.sh`.
+  `--lite`/`--only` stay lenient.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state) — degradation there is
   actionable, not noise. Self-test: `bash scripts/tests/test_agent_gate_summary.sh`.
 
@@ -147,8 +150,9 @@ when schema present. Legacy heuristics live only behind the opt-in `experimental
 Doctrine: [no-heuristics](https://pmcfadin.github.io/cqlite/agents-developing/no-heuristics/).
 
 ### Supported formats (version floor)
-CQLite targets Cassandra 5.0 — `na`+/`nb` BIG and `oa`/`da` BTI in scope; pre-`na` (Cassandra 3.x)
-is out of scope and SHALL NOT be introduced or reviewed for correctness (reviewers incl. roborev).
+CQLite targets Cassandra 5.0 — `na`+/`nb` BIG and `oa`/`da` BTI in scope; pre-`na` (`ma`–`me`,
+Cassandra 3.x) is out of scope and SHALL NOT be introduced, supported, or reviewed for correctness
+(reviewers incl. roborev).
 Enforced in code: `BigVersionGates::from_version` rejects `< na`, `BtiVersionGates::from_version`
 rejects non-`da` (`Error::UnsupportedVersion`); `SSTableReader::open` propagates. Do not re-litigate
 pre-`na` "regressions."
@@ -197,7 +201,7 @@ Without Data.db files, query tests pass but return 0 rows. Dataset pins:
 
 ## Feature Flags
 
-Default (cqlite-core): `all-compression`, `state_machine`.
+Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_machine`.
 Non-default: `cli-helpers` (#249), `parquet` (#682), `delta-scan` / `delta-export` (#696/#705),
 `metrics`, `experimental`. Build recipes: `docs/development/dev-cookbook.md`.
 
@@ -243,7 +247,8 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
   summary-file path, ≤10 lines residual), never gate stdout or review churn.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
-  are fixed pre-merge — each re-triggers `fix → --lite → re-review` (#2087). **Nits** never trigger
+  are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration
+  target) → re-review` (#2087). **Nits** never trigger
   a re-verify round: batch all of a PR's nits into ONE linked follow-up issue at merge time. When in
   doubt, blocker. Every pre-roborev self-check class below is BLOCKER by definition.
 - **Post-gate polish (#1892)**: after a full PASS at `X`, a test/docs-only diff `X..Y` re-certifies
@@ -305,7 +310,10 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   **serializes its own full gates** (the #1825 machine cap is a backstop, not a license) and
   pre-claims by checking for ANY `issue-<N>-*` branch. Multiple independent sessions → separate
   machines, each claim-protocol-gated; NEVER N bare leads without the protocol. Unattended runs:
-  `scripts/local/worker-supervisor.sh` (#2090; `docs/development/fleet-runbook.md`).
+  `scripts/local/worker-supervisor.sh` (#2090) recycles ONE worker process per issue (hard context
+  bound = process exit; the worker writes `.worker-last-iteration.json` then EXITs — never a second
+  issue per session), with flock single-instance + preflight + crash-loop breaker + budgets + ntfy
+  (`docs/development/fleet-runbook.md`).
 - **Inter-issue reset (#2085)**: after each `flow-finalize` the lead drops ALL prior-issue context
   (board renders, gate summaries, roborev findings, PR bodies, Seam-1 spec renders) and re-hydrates
   the next item from **board + disk alone**. Seam-1 spec bodies are not retained after approval —
@@ -313,7 +321,8 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `process_improvements.md`, never the live window.
 - Spawn subagents with an explicit accessible model (e.g. opus).
 - **Telemetry**: `flow-finalize` stamps one record per issue into
-  `docs/reports/delivery-telemetry.jsonl` via `scripts/delivery-telemetry.py record` — authoritative
+  `docs/reports/delivery-telemetry.jsonl` (schema `docs/reports/delivery-telemetry.schema.json`)
+  via `scripts/delivery-telemetry.py record` — authoritative
   data only (a counter not observed is an error, never a fabricated 0). On a cadence the manager
   runs `retro` and files a deduped `flow-meta` issue. The SKIP-aware `delivery-telemetry` gate
   component covers the tool. Doctrine: `docs/development/pm-operating-loop.md`.
