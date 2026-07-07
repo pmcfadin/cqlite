@@ -38,6 +38,11 @@
 #[cfg(feature = "arrow")]
 pub mod arrow_convert;
 
+// CQL decimal rescaling for Arrow/Parquet export (split out of `arrow_convert`,
+// epic #1116; issue #1755 bounded/fail-closed fix).
+#[cfg(feature = "arrow")]
+mod arrow_decimal;
+
 #[cfg(feature = "parquet")]
 pub mod parquet;
 
