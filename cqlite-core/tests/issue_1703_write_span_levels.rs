@@ -168,7 +168,12 @@ fn write_batch_emits_no_info_spans() {
     );
 
     // None of the demoted write-side spans may be observed at INFO.
-    for name in ["write.mutation", "wal.append", "wal.sync", "memtable.insert"] {
+    for name in [
+        "write.mutation",
+        "wal.append",
+        "wal.sync",
+        "memtable.insert",
+    ] {
         assert!(
             !info_spans.iter().any(|s| s == name),
             "span `{name}` was emitted at INFO but MUST be DEBUG (issue #1703); \

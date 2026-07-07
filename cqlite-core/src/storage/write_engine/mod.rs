@@ -1098,7 +1098,11 @@ impl WriteEngine {
     /// intentionally skipped. It restores auto-flush there WITHOUT the surprise
     /// inline-flush latency the plain sync `write()`/`execute()` path avoids.
     /// Returns the number of mutations applied (N for BATCH, else 1).
-    #[tracing::instrument(name = "write.cql_execute_flushing", level = "debug", skip(self, statement))]
+    #[tracing::instrument(
+        name = "write.cql_execute_flushing",
+        level = "debug",
+        skip(self, statement)
+    )]
     pub async fn execute_flushing(&mut self, statement: &str) -> Result<u64> {
         // Single-boundary error recording (issue #1036): `execute_flushing` is
         // the public Node/Python DML entry point, so — like `execute`,
