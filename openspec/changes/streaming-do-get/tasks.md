@@ -45,6 +45,12 @@
 ## 4. Verification & delivery
 
 - [x] 4.1 `--lite` each fix round (summary-file redirect); serialized own runs.
+- [x] 4.1a File-size ratchet: the new streaming machinery lives in the new
+      `streaming.rs` (785 lines, under threshold). The irreducible seam additions
+      grow `producer.rs` (2397→2485) and `service.rs` (857→893) — both already far
+      over the 800-line threshold BEFORE this change (needs the #1116/#1135 split,
+      out of scope here). Moving the sinks out would push `streaming.rs` over 800,
+      strictly worse. Lite re-run with `CQLITE_ALLOW_FILE_GROWTH=1` → PASS.
 - [ ] 4.2 Review-first: `rust-reviewer` + roborev on the lite-green diff.
 - [x] 4.3 Existing flight tests green (`do_get_streams_merged_rows`,
       `do_get_missing_table_is_not_found`, producer limit/token/predicate) — full
