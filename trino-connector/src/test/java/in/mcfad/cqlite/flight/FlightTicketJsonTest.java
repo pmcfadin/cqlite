@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -91,6 +92,34 @@ class FlightTicketJsonTest {
         assertEquals(0, node.get("predicates").size());
         // A null aggregation is omitted entirely (server's #[serde(default)] Option).
         assertFalse(node.has("aggregation"));
+        // The 11-arg overload omits `limit` (server's #[serde(default)] Option<u64>).
+        assertFalse(node.has("limit"));
+    }
+
+    @Test
+    void emitsLimitWhenPresentAndOmitsWhenEmpty() throws Exception {
+        // Present cap → `limit` field carries it (issue #2129).
+        byte[] withLimit = FlightTicketJson.build(
+                "ks", "t", "ddl",
+                Optional.empty(), Optional.empty(), Optional.empty(), false,
+                Optional.empty(), List.of(), null, null, OptionalLong.of(5));
+        JsonNode node = parse(withLimit);
+        assertTrue(node.has("limit"));
+        assertEquals(5, node.get("limit").asLong());
+
+        // limit == 0 is a distinct valid value, still emitted (SELECT ... LIMIT 0).
+        byte[] zero = FlightTicketJson.build(
+                "ks", "t", "ddl",
+                Optional.empty(), Optional.empty(), Optional.empty(), false,
+                Optional.empty(), List.of(), null, null, OptionalLong.of(0));
+        assertEquals(0, parse(zero).get("limit").asLong());
+
+        // Empty cap → field omitted (server defaults to None = full scan).
+        byte[] none = FlightTicketJson.build(
+                "ks", "t", "ddl",
+                Optional.empty(), Optional.empty(), Optional.empty(), false,
+                Optional.empty(), List.of(), null, null, OptionalLong.empty());
+        assertFalse(parse(none).has("limit"));
     }
 
     @Test

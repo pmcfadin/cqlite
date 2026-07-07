@@ -12,6 +12,7 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
@@ -37,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -198,8 +200,12 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             return Optional.empty();
         }
 
+        // Preserve any pushed-down LIMIT (#2129): this branch only runs for a
+        // non-aggregated handle, so aggregation/finalize stay empty, but a prior
+        // applyLimit's cap must NOT be dropped when the handle is rebuilt.
         CqliteFlightTableHandle newHandle = new CqliteFlightTableHandle(
-                table.keyspace(), table.table(), table.ddl(), Optional.of(filterJson));
+                table.keyspace(), table.table(), table.ddl(),
+                Optional.of(filterJson), Optional.empty(), Optional.empty(), table.limit());
 
         // The residual expression Trino must still evaluate (the untranslatable
         // conjuncts, ANDed). Empty residual => TRUE (fully pushed).
@@ -210,6 +216,53 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                 constraint.getSummary(), // domain returned unchanged; we don't consume it
                 remainingExpression,
                 false));
+    }
+
+    /**
+     * Push a {@code LIMIT} down to the cqlite-flight server (issue #2129).
+     *
+     * <p>Records the row cap on the handle so every split's Flight ticket carries
+     * it and the server stops its k-way compaction-merge after {@code limit}
+     * post-filter rows — turning {@code LIMIT k} into bounded per-split work
+     * instead of a full range scan (the reported 235s {@code LIMIT 5}).
+     *
+     * <p>The returned {@link LimitApplicationResult} sets
+     * {@code limitGuaranteed = false}: each of the (token-range) splits caps at
+     * {@code limit} INDEPENDENTLY, so their union can exceed {@code limit}. This
+     * is the standard bounded-scan pattern — correct because Trino keeps its
+     * {@code Limit}/{@code LimitPartial} above the scan to do the final global
+     * cut. {@code precalculateStatistics = false}: we do not re-derive stats.
+     *
+     * <p>Declines (returns {@link Optional#empty()}) for an already-aggregated
+     * handle (the aggregate already collapses the row set; the server ignores a
+     * limit under aggregation), and is idempotent: if the handle already carries
+     * a cap at least as tight as {@code limit}, there is nothing new to push, so
+     * it returns empty and the optimizer stops iterating.
+     */
+    @Override
+    public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(
+            ConnectorSession session, ConnectorTableHandle handle, long limit) {
+        CqliteFlightTableHandle table = (CqliteFlightTableHandle) handle;
+
+        // A row cap under an aggregation is meaningless (partial rows already
+        // collapse the set) and the server ignores limit+aggregation — decline.
+        if (table.isAggregated()) {
+            return Optional.empty();
+        }
+
+        // Idempotency / termination: an existing cap at least as tight leaves
+        // nothing to improve. Returning empty stops the optimizer re-applying the
+        // same limit in a loop.
+        if (table.limit().isPresent() && table.limit().getAsLong() <= limit) {
+            return Optional.empty();
+        }
+
+        CqliteFlightTableHandle newHandle = new CqliteFlightTableHandle(
+                table.keyspace(), table.table(), table.ddl(),
+                table.filterJson(), table.aggregationJson(), table.finalizePlanJson(),
+                OptionalLong.of(limit));
+
+        return Optional.of(new LimitApplicationResult<>(newHandle, false, false));
     }
 
     private static String serialize(JsonNode node) {
