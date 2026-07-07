@@ -50,7 +50,19 @@ echo ""
 echo "cqlite plugin loaded into trino-coordinator/trino-worker at"
 echo "  /usr/lib/trino/plugin/cqlite_flight"
 echo ""
-echo "The cqlite catalog is registered by the trino kit's own post-workload-start hook, which"
-echo "just fired (it re-runs trino/bin/update-catalogs.sh on ANY kit start, including this one)."
+
+# Issue #2159: don't just assume the trino kit's post-workload-start hook (which
+# re-runs trino/bin/update-catalogs.sh on ANY kit start, including this one) fired
+# and registered the catalog — verify it, and self-heal if it didn't. Independent
+# of plugin-patch/rollout success above, so a prior partial 'cqlite start' failure
+# (e.g. the #2158 coordinator deadlock aborting before this point) is recoverable
+# by simply re-running 'cqlite start'.
+if ! "${SCRIPT_DIR}/ensure-catalog-registered.sh"; then
+  echo "ERROR: cqlite plugin loaded, but catalog registration failed — see the" >&2
+  echo "  'ensure-catalog-registered' message above for the exact failing step and" >&2
+  echo "  what to rerun." >&2
+  exit 1
+fi
+
 echo "Verify with:"
 echo "  ${SCRIPT_DIR}/verify.sh <keyspace> <table>"

@@ -124,12 +124,18 @@ this; it falls out of the POM's dependency scoping for free. Do not add
    `SELECT * FROM cqlite.<keyspace>.<table>` (not a quoted
    `"trino-cqlite".<keyspace>.<table>`) work.
    `cqlite start` patches `trino-coordinator`/`trino-worker` with the plugin
-   initContainer + volume, waits for the rollout, and — as a side effect of
-   any kit starting — triggers the trino kit's own `post-workload-start` hook,
-   which re-runs `trino/bin/update-catalogs.sh` and picks up this kit's
-   `trino-catalog.properties` (sibling-directory auto-discovery; see
+   initContainer + volume, waits for the rollout, and then verifies the
+   `cqlite` catalog is registered — normally a side effect of any kit starting
+   triggering the trino kit's own `post-workload-start` hook (which re-runs
+   `trino/bin/update-catalogs.sh` and picks up this kit's
+   `trino-catalog.properties`; sibling-directory auto-discovery, see
    `docs/user-guide/install-trino.md` "Adding Trino Catalogs for Custom
-   Kits"). No manual catalog step is needed.
+   Kits"). If that hook never fired — e.g. `cqlite start` aborted partway
+   through on the #2158 coordinator deadlock — `bin/start.sh` registers the
+   catalog itself by invoking `trino/bin/update-catalogs.sh` directly (issue
+   #2159; see `bin/ensure-catalog-registered.sh`), so no manual catalog step
+   is ever needed and a partial failure is recoverable by simply re-running
+   `easy-db-lab cqlite start` (or `bin/verify.sh`, which runs the same check).
 3. **cqlite-flight** must be running on the db nodes this connector reads
    from (see `../cqlite-flight/README.md` if present) — it is what actually
    serves Arrow Flight; this overlay only wires the Trino side.
@@ -149,6 +155,37 @@ re-patching unconditionally on every `trino start`
 any kit event) re-run `bin/reapply-plugin-patch.sh`, which is a cheap,
 idempotent `kubectl patch --type=strategic` — safe to run on every event,
 even ones unrelated to Trino or Cassandra.
+
+## Resiliency: coordinator rollout strategy (issue #2158)
+
+The trino kit runs `trino-coordinator` with `hostPort: 8080`. On a single app
+node, a `strategy: RollingUpdate` (the Helm chart's default, with maxSurge)
+can **never** converge once the pod template changes: the surge pod can't
+bind `hostPort: 8080` while the old pod still holds it, and the old
+ReplicaSet just keeps recreating that old pod — deleting the stuck pod alone
+doesn't help (this was the insufficient #2119 fix). `bin/reapply-plugin-patch.sh`
+now ensures `strategy: Recreate` (`rollingUpdate: null`) on
+`trino-coordinator` before every pod-template patch, idempotently. Because
+the Helm chart doesn't template a `strategy` field at all, this out-of-band
+patch survives every subsequent `helm upgrade` from `trino/bin/update-catalogs.sh`
+once applied. With `Recreate`, the controller tears down the old pod before
+starting the new one, so `hostPort: 8080` is always free — no manual pod
+deletion needed.
+
+## Resiliency: catalog registration is decoupled from a clean start (issue #2159)
+
+Catalog registration used to depend entirely on the trino kit's
+`post-workload-start` hook firing, which only happens on a **clean**
+`cqlite start`/`stop` (of this or any other kit). If `cqlite start` aborted
+partway — e.g. on the #2158 deadlock above — the hook never ran and the
+`cqlite` catalog was left unregistered with no automatic recovery path.
+`bin/start.sh` now calls `bin/ensure-catalog-registered.sh` after the plugin
+rollout: it checks `SHOW CATALOGS` on the coordinator and, if `cqlite` is
+missing, registers it itself by invoking the trino kit's own
+`bin/update-catalogs.sh` (never edited, only invoked). `bin/verify.sh` runs
+the same check first. Net effect: a partial `cqlite start` failure is
+recoverable by simply re-running `easy-db-lab cqlite start` or `bin/verify.sh`
+— no manual `update-catalogs.sh` invocation required.
 
 ## Verify
 
