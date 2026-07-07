@@ -438,9 +438,6 @@ impl SSTableReader {
 
     /// Read value at a specific offset with caching
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<ScanRow>> {
-        use crate::parser::header::CassandraVersion;
-        use crate::storage::sstable::compression::Compression;
-
         // Size must be non-zero for offset-based reading
         if size == 0 {
             return Err(Error::corruption(format!(
@@ -458,48 +455,11 @@ impl SSTableReader {
         // (compressed tables / BTI / absent-CRC.db warn-and-proceed).
         self.verify_uncompressed_range(offset, size).await?;
 
-        // Use cached reading with metrics tracking
-        let buffer = self.get_cached_data(offset, size).await?;
-
-        // Decompress if needed
-        let data = if let Some(compression_reader) = &self.compression_reader {
-            let compression = Compression::new(*compression_reader.algorithm())?;
-            match compression.decompress(&buffer) {
-                Ok(decompressed) => {
-                    debug!(
-                        "Successfully decompressed {} bytes to {} bytes",
-                        buffer.len(),
-                        decompressed.len()
-                    );
-                    decompressed
-                }
-                Err(e) => {
-                    // For modern formats (4.x/5.x), decompression failure is an error
-                    if self.header.cassandra_version != CassandraVersion::Legacy {
-                        return Err(Error::corruption(format!(
-                            "Decompression failed for modern format at offset={}, size={}, algorithm={:?}: {}",
-                            offset,
-                            size,
-                            compression_reader.algorithm(),
-                            e
-                        )));
-                    } else {
-                        // Only allow fallback for legacy formats
-                        warn!(
-                            "Decompression failed for legacy format ({}), using raw data",
-                            e
-                        );
-                        debug!(
-                            "First 32 bytes of raw data: {:02x?}",
-                            &buffer[..std::cmp::min(32, buffer.len())]
-                        );
-                        buffer
-                    }
-                }
-            }
-        } else {
-            buffer
-        };
+        // `get_cached_data` returns the final DECODED window: CRC-validated +
+        // decompressed for a compressed Data.db (issue #1773), or the CRC.db-verified
+        // raw bytes for an uncompressed one. There is no second decode here — doing so
+        // used to double-decompress the compressed path (and skip its inline CRC).
+        let data = self.get_cached_data(offset, size).await?;
 
         // Preserve raw data until schema is available. Pre-#1334 this offset-read
         // placeholder returned a bare `Value::Blob` of the row's raw value bytes,
@@ -541,9 +501,6 @@ impl SSTableReader {
     ///
     /// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
     async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
-        use crate::parser::header::CassandraVersion;
-        use crate::storage::sstable::compression::Compression;
-
         // The shared B1 cache tracks its own hit/miss counters (issue #1567); the
         // dead per-reader `record_cache_hit`/`record_cache_miss` atomics were
         // removed (issue #1568).
@@ -552,34 +509,25 @@ impl SSTableReader {
             return Ok(hit.to_vec());
         }
 
-        // Read from disk (counted so a repeat read can prove zero underlying reads).
-        // Positioned read on the shared point source (issue #1573, C2): no cursor
-        // mutex is held across this I/O, so concurrent point reads do not convoy.
-        model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
-        let mut buffer = vec![0u8; size as usize];
-        self.point_source.read_exact_at(block_offset, &mut buffer)?;
-
-        // Decompress if needed
-        let data = if let Some(compression_reader) = &self.compression_reader {
-            let compression = Compression::new(*compression_reader.algorithm())?;
-            match compression.decompress(&buffer) {
-                Ok(decompressed) => {
-                    model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
-                    decompressed
-                }
-                Err(e) => {
-                    // Handle decompression errors based on format
-                    if self.header.cassandra_version != CassandraVersion::Legacy {
-                        return Err(Error::corruption(format!(
-                            "Decompression failed at offset={}, size={}: {}",
-                            block_offset, size, e
-                        )));
-                    } else {
-                        buffer // Fall back to raw data for legacy formats
-                    }
-                }
-            }
+        // Produce the final DECOMPRESSED, integrity-verified window for this offset.
+        let data = if let Some(comp_info) = self.compression_info.as_deref() {
+            // COMPRESSED offset read (issue #1773): the authoritative inline per-chunk
+            // CRC32 MUST be validated before decompression. Reuse the shared
+            // CRC-enforcing chunk reader rather than reading `size` raw bytes and
+            // blindly LZ4-decoding them — the latter re-introduced the exact #1411
+            // CRC bypass (a bit-flipped chunk decoding to garbage instead of the
+            // typed Error::InvalidFormat that scan/scan_for_key surface).
+            self.read_compressed_offset_window(comp_info, block_offset, size)
+                .await?
         } else {
+            // UNCOMPRESSED offset read. Positioned read on the shared point source
+            // (issue #1573, C2): no cursor mutex is held across this I/O, so
+            // concurrent point reads do not convoy. The covering CRC.db chunks were
+            // already verified by `verify_uncompressed_range` before we got here
+            // (issue #1396), so these bytes are integrity-checked too.
+            model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+            let mut buffer = vec![0u8; size as usize];
+            self.point_source.read_exact_at(block_offset, &mut buffer)?;
             buffer
         };
 
@@ -587,6 +535,97 @@ impl SSTableReader {
         // return an owned copy (this site's callers consume a Vec).
         let arc = self.chunk_cache.insert(key, data);
         Ok(arc.to_vec())
+    }
+
+    /// Decompress the uncompressed byte window `[block_offset, block_offset + size)`
+    /// out of a COMPRESSED Data.db, validating each covering chunk's authoritative
+    /// inline per-chunk CRC32 BEFORE decompression (issue #1773).
+    ///
+    /// Reuses [`block_io::read_compressed_chunk_at`] — the positional, CRC-enforcing
+    /// chunk reader also used by the BTI point-read path — so the CRC-then-decompress
+    /// ordering (guardrail #1411) is honored on this path too: a bit-flipped chunk
+    /// surfaces the SAME typed `Error::InvalidFormat` (naming the chunk index +
+    /// offset) that scan / `scan_for_key` return, never garbage. No heuristics: the
+    /// authoritative CRC trailer is checked, never inferred.
+    async fn read_compressed_offset_window(
+        &self,
+        comp_info: &crate::storage::sstable::compression_info::CompressionInfo,
+        block_offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>> {
+        use super::block_io;
+        use crate::storage::sstable::compression::Compression;
+
+        let chunk_length = comp_info.chunk_length as usize;
+        if chunk_length == 0 {
+            return Err(Error::corruption(
+                "CompressionInfo chunk_length is zero; cannot map a Data.db offset to a \
+                 compressed chunk"
+                    .to_string(),
+            ));
+        }
+
+        let start = block_offset as usize;
+        let end = start.checked_add(size as usize).ok_or_else(|| {
+            Error::corruption(format!(
+                "compressed offset read range [{start}, +{size}) overflows"
+            ))
+        })?;
+        // `size >= 1` (callers reject size == 0), so `end > start` and `end - 1`
+        // never underflows; `first_chunk <= last_chunk`.
+        let first_chunk = start / chunk_length;
+        let last_chunk = (end - 1) / chunk_length;
+
+        let max_compressed_length = comp_info.max_compressed_length as usize;
+        let compression = self
+            .compression_reader
+            .as_ref()
+            .map(|r| Compression::new(*r.algorithm()))
+            .transpose()?;
+
+        let mut assembled =
+            Vec::with_capacity(last_chunk.saturating_sub(first_chunk).saturating_add(1) * chunk_length);
+        for chunk_idx in first_chunk..=last_chunk {
+            // CRC-validated compressed bytes (guardrail #1411): the trailing inline
+            // per-chunk CRC32 is checked HERE, before decompression. header_offset is
+            // 0 for nb/BTI (CompressionInfo chunk offsets are absolute from Data.db
+            // byte 0), matching the cursor and BTI point-read paths (issue #1573 C2).
+            let Some(compressed) = block_io::read_compressed_chunk_at(
+                self.point_source.as_ref(),
+                comp_info,
+                chunk_idx,
+                self.stats.file_size,
+                0,
+            )?
+            else {
+                break; // EOF — no further chunks to cover the requested window.
+            };
+
+            // Incompressible-chunk fallback (Bug #639, epic #970): Cassandra stores a
+            // chunk RAW (not compressed) when its compressed length would meet or
+            // exceed `max_compressed_length`; those bytes are already plaintext.
+            // Authority: CompressedSequentialWriter.java:160-177.
+            let decompressed = if compressed.len() >= max_compressed_length {
+                compressed
+            } else if let Some(compression) = &compression {
+                let out = compression.decompress(&compressed)?;
+                model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
+                out
+            } else {
+                compressed
+            };
+            assembled.extend_from_slice(&decompressed);
+        }
+
+        // Slice the requested window out of the assembled uncompressed chunk bytes,
+        // clamped to what actually decoded (a short final chunk yields fewer bytes).
+        let window_base = first_chunk * chunk_length;
+        let within_start = start - window_base;
+        if within_start >= assembled.len() {
+            return Ok(Vec::new());
+        }
+        let within_end = (end - window_base).min(assembled.len());
+        Ok(assembled[within_start..within_end].to_vec())
     }
 
     /// Verify the `CRC.db` chunk(s) covering the uncompressed Data.db byte range
