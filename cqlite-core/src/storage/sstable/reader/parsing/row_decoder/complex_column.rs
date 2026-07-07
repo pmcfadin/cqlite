@@ -249,6 +249,12 @@ impl V5CompressedLegacyParser {
         // explicit per-element expiries. Scalar-only, no per-cell allocation.
         let mut has_live_forever_element = false;
         let mut max_element_expires_at: Option<i64> = None;
+        // Issue #2038: the per-element TTL (seconds) paired with the element that
+        // owns `max_element_expires_at`. Together they let the read path surface an
+        // authoritative `CellExpiration { ttl_seconds, expires_at_seconds }` for a
+        // TTL'd non-frozen collection/UDT column (the complex-cell analogue of the
+        // scalar #1743 fix), instead of hardcoding `expiration: None`.
+        let mut max_element_ttl: Option<i32> = None;
 
         // Issue #1741 (per-element filtering): count of LIVE elements dropped from
         // the emitted container by the read-side shadow/TTL filter. Stays `0` when
@@ -282,6 +288,7 @@ impl V5CompressedLegacyParser {
         fn fold_element_expiry(
             has_live_forever: &mut bool,
             max_exp: &mut Option<i64>,
+            max_exp_ttl: &mut Option<i32>,
             cell: &ComplexCellParse,
             dropped: bool,
         ) {
@@ -291,7 +298,17 @@ impl V5CompressedLegacyParser {
                 }
             } else if let Some(ldt) = cell.element_local_deletion_time {
                 let e = ldt as u32 as i64;
+                // Issue #2038: keep the TTL paired with the element that owns the
+                // MAX expiry (ties refresh the pairing), so the read path can build
+                // an authoritative `CellExpiration`. `element_ttl` is the explicit
+                // per-element TTL decoded alongside `element_local_deletion_time`
+                // (both present iff IS_EXPIRING and NOT USE_ROW_TTL — the exact
+                // shape the writer emits for a `USING TTL` collection).
+                let is_new_max = max_exp.map_or(true, |m: i64| e >= m);
                 *max_exp = Some(max_exp.map_or(e, |m: i64| m.max(e)));
+                if is_new_max {
+                    *max_exp_ttl = cell.element_ttl.map(|t| t as i32);
+                }
             }
         }
 
@@ -346,6 +363,7 @@ impl V5CompressedLegacyParser {
                 fold_element_expiry(
                     &mut has_live_forever_element,
                     &mut max_element_expires_at,
+                    &mut max_element_ttl,
                     &cell,
                     dropped,
                 );
@@ -421,6 +439,7 @@ impl V5CompressedLegacyParser {
                 fold_element_expiry(
                     &mut has_live_forever_element,
                     &mut max_element_expires_at,
+                    &mut max_element_ttl,
                     &cell,
                     dropped,
                 );
@@ -519,6 +538,7 @@ impl V5CompressedLegacyParser {
                     fold_element_expiry(
                         &mut has_live_forever_element,
                         &mut max_element_expires_at,
+                        &mut max_element_ttl,
                         &cell,
                         dropped,
                     );
@@ -625,6 +645,7 @@ impl V5CompressedLegacyParser {
                 fold_element_expiry(
                     &mut has_live_forever_element,
                     &mut max_element_expires_at,
+                    &mut max_element_ttl,
                     &cell,
                     dropped,
                 );
@@ -713,6 +734,7 @@ impl V5CompressedLegacyParser {
                 complex_deletion,
                 has_live_forever_element,
                 max_element_expires_at,
+                max_element_ttl,
                 shadow_filtered_element_count,
             },
         ))

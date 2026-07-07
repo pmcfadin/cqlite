@@ -562,11 +562,32 @@ impl V5CompressedLegacyParser {
                             if !collection_absent {
                                 if let Some(ref mut meta_map) = cell_meta {
                                     let row_ts = row_header.timestamp.unwrap_or(0);
+                                    // Issue #2038: surface the collection's expiry so
+                                    // `TTL(non_frozen_collection/UDT)` is not always
+                                    // `null` (the complex-cell analogue of the scalar
+                                    // #1743 fix at ~line 736 below). Authoritative,
+                                    // no-heuristics: `max_element_expires_at` /
+                                    // `max_element_ttl` are the explicit per-element
+                                    // localExpirationTime + TTL decoded from the cell
+                                    // (IS_EXPIRING and NOT USE_ROW_TTL — exactly what a
+                                    // `USING TTL` collection write emits). Both must be
+                                    // present to build a `CellExpiration`; a collection
+                                    // with no expiring element stays `None` (live).
+                                    let expiration = match (
+                                        col_meta.max_element_expires_at,
+                                        col_meta.max_element_ttl,
+                                    ) {
+                                        (Some(exp_s), Some(ttl_s)) => Some(CellExpiration {
+                                            ttl_seconds: ttl_s,
+                                            expires_at_seconds: exp_s,
+                                        }),
+                                        _ => None,
+                                    };
                                     meta_map.insert(
                                         column.name.clone(),
                                         CellWriteMetadata {
                                             write_timestamp_micros: row_ts,
-                                            expiration: None,
+                                            expiration,
                                         },
                                     );
                                 }
