@@ -149,9 +149,17 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * post-filtering them — results are always correct; pushdown is a pure
      * optimization.
      *
-     * <p>The {@code TupleDomain} summary is returned unchanged (we do not consume
-     * it), and partial-AND pushdown leaves the untranslatable conjuncts in the
-     * residual expression.
+     * <p>Trino delivers simple, domain-expressible predicates (e.g. a single-partition
+     * point read {@code key = 'v'}) not in the expression but as a {@link
+     * io.trino.spi.predicate.TupleDomain} in {@code constraint.getSummary()}, leaving
+     * the expression {@code TRUE} (issue #2164). We therefore ALSO translate the
+     * summary into pushable nodes and merge (AND) them with the expression path's
+     * tree. The summary is still returned <em>unchanged</em> as the remaining filter:
+     * the server applies the pushed tree best-effort post-decode and Trino keeps its
+     * {@code ScanFilter} above, so {@code filterJson} is a pure optimization, never an
+     * enforcement guarantee (same honesty posture as {@code applyLimit}'s
+     * {@code limitGuaranteed = false}, #2129). Untranslatable expression conjuncts are
+     * returned as the residual expression.
      */
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
@@ -170,8 +178,14 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
 
         PredicateTreeTranslator.Result result =
                 PredicateTreeTranslator.translate(expression, constraint.getAssignments());
-        if (result.pushed().isEmpty()) {
-            return Optional.empty(); // nothing translatable to push
+
+        // Also translate the TupleDomain summary (how Trino actually delivers simple
+        // col = literal / IN / range predicates). Merge (AND) with the expression tree.
+        Optional<JsonNode> domainPushed =
+                PredicateTreeTranslator.translateSummary(constraint.getSummary());
+        Optional<JsonNode> newlyPushedOpt = combinePushed(result.pushed(), domainPushed);
+        if (newlyPushedOpt.isEmpty()) {
+            return Optional.empty(); // nothing translatable to push from either path
         }
 
         // Trino calls applyFilter iteratively, passing only the predicate at the
@@ -180,7 +194,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         // with whatever the handle already carries. Replacing would silently drop
         // an earlier condition whose residual we already reported as satisfied,
         // returning too many rows.
-        JsonNode newlyPushed = result.pushed().get();
+        JsonNode newlyPushed = newlyPushedOpt.get();
         Optional<String> existing = table.filterJson();
         String newlyPushedJson = serialize(newlyPushed);
 
@@ -213,9 +227,25 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
 
         return Optional.of(new ConstraintApplicationResult<>(
                 newHandle,
-                constraint.getSummary(), // domain returned unchanged; we don't consume it
+                // The summary is returned UNCHANGED as the remaining (unenforced) filter:
+                // its predicates are pushed into filterJson only as a best-effort server-
+                // side optimization, so Trino must keep applying the full domain itself
+                // (honesty contract — filterJson is not an enforcement guarantee, #2164).
+                constraint.getSummary(),
                 remainingExpression,
                 false));
+    }
+
+    /**
+     * AND the expression-path and summary-path pushed trees, or return whichever is
+     * present (empty if neither). Kept tiny and pure so applyFilter stays readable.
+     */
+    private static Optional<JsonNode> combinePushed(
+            Optional<JsonNode> expressionPushed, Optional<JsonNode> domainPushed) {
+        if (expressionPushed.isPresent() && domainPushed.isPresent()) {
+            return Optional.of(PredicateTreeTranslator.and(expressionPushed.get(), domainPushed.get()));
+        }
+        return expressionPushed.isPresent() ? expressionPushed : domainPushed;
     }
 
     /**
