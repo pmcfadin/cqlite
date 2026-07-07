@@ -200,8 +200,10 @@ fn collection_ttl_write_round_trips_as_expiring_cell() {
 
     assert_eq!(results.len(), 1, "expected the single row written");
 
-    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> =
-        results.into_iter().map(|(k, _v, m)| (k.0.to_vec(), m)).collect();
+    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> = results
+        .into_iter()
+        .map(|(k, _v, m)| (k.0.to_vec(), m))
+        .collect();
 
     let meta = by_pk
         .get(1_i32.to_be_bytes().as_slice())
@@ -288,8 +290,10 @@ fn collection_row_ttl_write_round_trips_as_expiring_cell() {
 
     assert_eq!(results.len(), 1, "expected the single row written");
 
-    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> =
-        results.into_iter().map(|(k, _v, m)| (k.0.to_vec(), m)).collect();
+    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> = results
+        .into_iter()
+        .map(|(k, _v, m)| (k.0.to_vec(), m))
+        .collect();
     let meta = by_pk
         .get(1_i32.to_be_bytes().as_slice())
         .expect("row for id=1 present");
@@ -558,8 +562,10 @@ fn test_heterogeneous_element_ttls_surface_no_expiration() {
 
     assert_eq!(results.len(), 1, "expected the single row written");
 
-    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> =
-        results.into_iter().map(|(k, _v, m)| (k.0.to_vec(), m)).collect();
+    let by_pk: HashMap<Vec<u8>, HashMap<String, CellWriteMetadata>> = results
+        .into_iter()
+        .map(|(k, _v, m)| (k.0.to_vec(), m))
+        .collect();
     let meta = by_pk
         .get(1_i32.to_be_bytes().as_slice())
         .expect("row for id=1 present");
