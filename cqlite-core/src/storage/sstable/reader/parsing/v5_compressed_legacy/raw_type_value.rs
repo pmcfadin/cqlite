@@ -906,7 +906,7 @@ impl V5CompressedLegacyParser {
                 // Update offset to point after the UDT data we consumed
                 offset += current_offset;
 
-                Value::Udt(udt_value)
+                Value::Udt(Box::new(udt_value))
             }
 
             // Default: check if it's a short UDT name in the registry, otherwise treat as blob
@@ -1095,7 +1095,7 @@ impl V5CompressedLegacyParser {
                         };
 
                         offset += current_offset;
-                        Value::Udt(udt_value)
+                        Value::Udt(Box::new(udt_value))
                     } else {
                         // Not found in registry - parse as blob
                         log::debug!(

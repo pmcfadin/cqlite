@@ -3614,23 +3614,23 @@ CREATE TABLE test_phase3.issue_434_complex_types (
 }
 
 fn issue_434_address_value(street: &str, city: &str) -> Value {
-    Value::Udt(
+    Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("address".to_string(), "test_phase3".to_string())
             .with_field("street".to_string(), Some(Value::Text(street.to_string())))
             .with_field("city".to_string(), Some(Value::Text(city.to_string()))),
-    )
+    ))
 }
 
 fn issue_434_phone_value(label: &str, number: &str) -> Value {
-    Value::Udt(
+    Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("phone_number".to_string(), "test_phase3".to_string())
             .with_field("label".to_string(), Some(Value::Text(label.to_string())))
             .with_field("number".to_string(), Some(Value::Text(number.to_string()))),
-    )
+    ))
 }
 
 fn issue_434_person_value(name: &str) -> Value {
-    Value::Udt(
+    Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("person".to_string(), "test_phase3".to_string())
             .with_field("name".to_string(), Some(Value::Text(name.to_string())))
             .with_field(
@@ -3645,12 +3645,12 @@ fn issue_434_person_value(name: &str) -> Value {
                     "Main St", "Seattle",
                 )))),
             ),
-    )
+    ))
 }
 
 fn issue_434_company_value() -> Value {
     let person = issue_434_person_value("Alice");
-    Value::Udt(
+    Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("company".to_string(), "test_phase3".to_string())
             .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
             .with_field(
@@ -3664,7 +3664,7 @@ fn issue_434_company_value() -> Value {
                     Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(person))]))),
                 )])),
             ),
-    )
+    ))
 }
 
 fn issue_434_phase3_complex_mutation(id: &str, timestamp_micros: i64) -> Mutation {

@@ -353,11 +353,11 @@ fn udt_to_value(udt: &CqlUdtLiteral, target: &CqlType) -> Result<Value, Error> {
                     value: Some(value),
                 });
             }
-            Ok(Value::Udt(UdtValue {
+            Ok(Value::Udt(Box::new(UdtValue {
                 type_name: type_name.clone(),
                 keyspace: String::new(),
                 fields,
-            }))
+            })))
         }
         _ => Err(type_mismatch("udt", target)),
     }

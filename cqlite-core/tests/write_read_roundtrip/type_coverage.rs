@@ -1399,7 +1399,7 @@ async fn test_type_frozen_udt() {
     udt_registry.register_udt(udt_def);
 
     // Build a simple two-field UDT value.
-    let inner_udt = Value::Udt(UdtValue {
+    let inner_udt = Value::Udt(Box::new(UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_types".to_string(),
         fields: vec![
@@ -1412,7 +1412,7 @@ async fn test_type_frozen_udt() {
                 value: Some(Value::Integer(30)),
             },
         ],
-    });
+    }));
     let original = Value::Frozen(Box::new(inner_udt.clone()));
 
     let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;

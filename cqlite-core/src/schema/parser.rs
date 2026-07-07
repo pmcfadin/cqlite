@@ -448,11 +448,11 @@ impl SchemaParser {
         }
 
         Ok((
-            Value::Udt(crate::types::UdtValue {
+            Value::Udt(Box::new(crate::types::UdtValue {
                 type_name: type_name.to_string(),
                 keyspace: self.context.schema.keyspace.clone(),
                 fields: field_values,
-            }),
+            })),
             offset,
         ))
     }

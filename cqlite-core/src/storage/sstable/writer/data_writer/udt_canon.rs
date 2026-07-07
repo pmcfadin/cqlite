@@ -271,11 +271,11 @@ fn canonicalize_udt(user_type_marshal: &str, value: &Value) -> Result<Value> {
         });
     }
 
-    Ok(Value::Udt(UdtValue {
+    Ok(Value::Udt(Box::new(UdtValue {
         type_name: udt.type_name.clone(),
         keyspace: udt.keyspace.clone(),
         fields,
-    }))
+    })))
 }
 
 fn canonicalize_seq(value: &Value, elem_marshal: &str, kind: SeqKind) -> Result<Value> {
@@ -717,7 +717,7 @@ mod tests {
     }
 
     fn udt(fields: Vec<(&str, Option<Value>)>) -> Value {
-        Value::Frozen(Box::new(Value::Udt(UdtValue {
+        Value::Frozen(Box::new(Value::Udt(Box::new(UdtValue {
             type_name: "person".into(),
             keyspace: KS.into(),
             fields: fields
@@ -727,7 +727,7 @@ mod tests {
                     value,
                 })
                 .collect(),
-        })))
+        }))))
     }
 
     fn declared_order(v: &Value) -> Vec<(String, Option<Value>)> {
@@ -882,7 +882,7 @@ mod tests {
              66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type)))",
             p = MARSHAL_PREFIX
         );
-        let person = Value::Udt(UdtValue {
+        let person = Value::Udt(Box::new(UdtValue {
             type_name: "person".into(),
             keyspace: KS.into(),
             // out-of-order fields
@@ -896,7 +896,7 @@ mod tests {
                     value: Some(Value::Text("Grace".into())),
                 },
             ],
-        });
+        }));
         let v = Value::Frozen(Box::new(Value::Tuple(vec![Value::Integer(1), person])));
         let canon = canonicalize_udt_value(&tuple_marshal, &v).unwrap();
         let Value::Frozen(inner) = canon.as_ref() else {
@@ -927,7 +927,7 @@ mod tests {
              66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type)))",
             p = MARSHAL_PREFIX
         );
-        let element = Value::Udt(UdtValue {
+        let element = Value::Udt(Box::new(UdtValue {
             type_name: "person".into(),
             keyspace: KS.into(),
             // out-of-order element fields
@@ -941,7 +941,7 @@ mod tests {
                     value: Some(Value::Text("Alan".into())),
                 },
             ],
-        });
+        }));
         let v = Value::Frozen(Box::new(Value::List(vec![element])));
         let canon = canonicalize_udt_value(&list_marshal, &v).unwrap();
         let Value::Frozen(inner) = canon.as_ref() else {
@@ -1018,14 +1018,14 @@ mod tests {
     }
 
     fn person_value() -> Value {
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             type_name: "person".into(),
             keyspace: KS.into(),
             fields: vec![UdtField {
                 name: "first_name".into(),
                 value: Some(Value::Text("Ada".into())),
             }],
-        })
+        }))
     }
 
     #[test]
@@ -1063,14 +1063,14 @@ mod tests {
     }
 
     fn named_person(first: &str) -> Value {
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             type_name: "person".into(),
             keyspace: KS.into(),
             fields: vec![UdtField {
                 name: "first_name".into(),
                 value: Some(Value::Text(first.into())),
             }],
-        })
+        }))
     }
 
     #[test]

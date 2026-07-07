@@ -447,14 +447,14 @@ impl ReconcileState {
             // timestamp (unchanged). Step 3c then purges it exactly like any other
             // cell tombstone once its LDT is < gcBefore and the overlap gate
             // allows. `ttl` is cleared: a tombstone carries no TTL.
-            cell.value = crate::types::Value::Tombstone(crate::types::TombstoneInfo {
+            cell.value = crate::types::Value::Tombstone(Box::new(crate::types::TombstoneInfo {
                 deletion_time: cell.timestamp,
                 tombstone_type: crate::types::TombstoneType::CellTombstone,
                 local_deletion_time: tombstone_ldt,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            });
+            }));
             cell.ttl = None;
             // A complex ELEMENT additionally carries its deletion via the
             // authoritative IS_DELETED flag (epic #899). Set it so the per-element

@@ -202,7 +202,7 @@ impl V5CompressedLegacyParser {
                 column.name, deletion_time
             );
             return Ok((
-                Value::Tombstone(TombstoneInfo {
+                Value::Tombstone(Box::new(TombstoneInfo {
                     deletion_time,
                     tombstone_type: TombstoneType::CellTombstone,
                     // On-disk `localDeletionTime` (GC clock, seconds) for the cell
@@ -211,7 +211,7 @@ impl V5CompressedLegacyParser {
                     ttl: None,
                     range_start: None,
                     range_end: None,
-                }),
+                })),
                 cell_timestamp,
                 cell_expiration,
                 offset,

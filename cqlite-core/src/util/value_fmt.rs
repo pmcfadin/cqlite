@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_udt() {
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "person".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![
@@ -633,7 +633,7 @@ mod tests {
                     value: None,
                 },
             ],
-        });
+        }));
         assert_eq!(
             ValueFormatter::format_value(&udt),
             "{name: Alice, age: 30, email: null}"
@@ -683,10 +683,10 @@ mod tests {
 
     #[test]
     fn test_json() {
-        let json = Value::Json(serde_json::json!({
+        let json = Value::Json(Box::new(serde_json::json!({
             "name": "Alice",
             "age": 30
-        }));
+        })));
         let formatted = ValueFormatter::format_value(&json);
         assert!(formatted.contains("Alice"));
         assert!(formatted.contains("30"));

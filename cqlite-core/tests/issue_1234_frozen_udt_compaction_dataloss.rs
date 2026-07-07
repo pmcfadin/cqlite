@@ -88,7 +88,7 @@ fn registry() -> UdtRegistry {
 // ── Value builders ──────────────────────────────────────────────────────────────
 
 fn person_value(name: &str, age: i32) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "person".to_string(),
         keyspace: KS.to_string(),
         fields: vec![
@@ -101,11 +101,11 @@ fn person_value(name: &str, age: i32) -> Value {
                 value: Some(Value::Integer(age)),
             },
         ],
-    })
+    }))
 }
 
 fn address_value(street: &str, zip: i32) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "address".to_string(),
         keyspace: KS.to_string(),
         fields: vec![
@@ -118,11 +118,11 @@ fn address_value(street: &str, zip: i32) -> Value {
                 value: Some(Value::Integer(zip)),
             },
         ],
-    })
+    }))
 }
 
 fn employee_value(name: &str, street: &str, zip: i32) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "employee".to_string(),
         keyspace: KS.to_string(),
         fields: vec![
@@ -135,7 +135,7 @@ fn employee_value(name: &str, street: &str, zip: i32) -> Value {
                 value: Some(address_value(street, zip)),
             },
         ],
-    })
+    }))
 }
 
 // ── Schema builders ─────────────────────────────────────────────────────────────

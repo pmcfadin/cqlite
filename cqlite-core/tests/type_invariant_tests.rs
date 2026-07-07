@@ -165,7 +165,7 @@ fn test_null_udt_field_returns_text() {
         ],
     };
 
-    let data_type = Value::Udt(udt).data_type();
+    let data_type = Value::Udt(Box::new(udt)).data_type();
 
     match data_type {
         CqlType::Udt(name, fields) => {
@@ -208,7 +208,7 @@ fn test_udt_with_values_preserves_types() {
         ],
     };
 
-    let data_type = Value::Udt(udt).data_type();
+    let data_type = Value::Udt(Box::new(udt)).data_type();
 
     match data_type {
         CqlType::Udt(name, fields) => {

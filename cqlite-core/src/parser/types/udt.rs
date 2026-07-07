@@ -140,7 +140,7 @@ pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
         fields,
     };
 
-    Ok((remaining, Value::Udt(udt)))
+    Ok((remaining, Value::Udt(Box::new(udt))))
 }
 
 /// Parse UDT value with schema context (preferred method for production)
@@ -192,7 +192,7 @@ pub fn parse_udt_with_schema<'a>(
         fields,
     };
 
-    Ok((remaining, Value::Udt(udt)))
+    Ok((remaining, Value::Udt(Box::new(udt))))
 }
 
 /// Parse UDT value by looking up schema from registry with enhanced dependency resolution
@@ -346,7 +346,7 @@ pub fn parse_udt_with_schema_and_registry<'a>(
         fields,
     };
 
-    Ok((remaining, Value::Udt(udt)))
+    Ok((remaining, Value::Udt(Box::new(udt))))
 }
 
 /// Parse CQL value for a specific CQL type with registry support for nested UDTs
@@ -512,7 +512,7 @@ mod tests {
             ],
         };
 
-        let serialized = serialize_cql_value(&Value::Udt(udt)).unwrap();
+        let serialized = serialize_cql_value(&Value::Udt(Box::new(udt))).unwrap();
         assert!(!serialized.is_empty());
 
         // Should start with UDT type ID

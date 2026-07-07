@@ -1259,7 +1259,7 @@ mod tests {
 
         let table_id = TableId::new("test_ks", "test_table");
         let pk = PartitionKey::single("id", Value::Integer(1));
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "person".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![
@@ -1272,7 +1272,7 @@ mod tests {
                     value: Some(Value::Integer(30)),
                 },
             ],
-        });
+        }));
         let mutation = Mutation::new(
             table_id,
             pk,

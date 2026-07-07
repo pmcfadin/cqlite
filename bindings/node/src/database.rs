@@ -1664,8 +1664,8 @@ fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
         }
         Value::Frozen(inner) => value_to_json(inner),
         Value::Json(json_value) => {
-            // Value::Json contains serde_json::Value, return it directly
-            json_value.clone()
+            // Value::Json contains a boxed serde_json::Value, return it directly
+            (**json_value).clone()
         }
         Value::Tombstone(_) => serde_json::Value::Null,
         Value::Counter(c) => serde_json::Value::Number((*c).into()),

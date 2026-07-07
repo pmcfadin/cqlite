@@ -759,7 +759,7 @@ mod tests {
                     value: Some(nested_value),
                 }],
             };
-            nested_value = Value::Udt(udt);
+            nested_value = Value::Udt(Box::new(udt));
         }
 
         let size = Memtable::estimate_value_size(&nested_value);
@@ -801,14 +801,14 @@ mod tests {
                 1 => Value::Set(vec![nested_value]),
                 2 => Value::Map(vec![(Value::Integer(i), nested_value)]),
                 3 => Value::Tuple(vec![nested_value]),
-                4 => Value::Udt(UdtValue {
+                4 => Value::Udt(Box::new(UdtValue {
                     type_name: format!("type_{}", i),
                     keyspace: "test_ks".to_string(),
                     fields: vec![UdtField {
                         name: "f".to_string(),
                         value: Some(nested_value),
                     }],
-                }),
+                })),
                 _ => unreachable!(),
             };
         }
@@ -1011,7 +1011,7 @@ mod tests {
         assert_eq!(Memtable::estimate_value_size(&map), usize::MAX);
 
         // UDT enqueue site (field values).
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "t".to_string(),
             keyspace: "ks".to_string(),
             fields: (0..over)
@@ -1020,7 +1020,7 @@ mod tests {
                     value: Some(Value::Integer(i as i32)),
                 })
                 .collect(),
-        });
+        }));
         assert_eq!(Memtable::estimate_value_size(&udt), usize::MAX);
     }
 

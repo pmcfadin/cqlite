@@ -259,7 +259,7 @@ fn collections_schema() -> TableSchema {
 // ── Value builders (must match the #1020 fixture inputs exactly) ──────────────
 
 fn person_inner(first: &str, last: &str, age: i32) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "person".into(),
         keyspace: KEYSPACE.into(),
         fields: vec![
@@ -276,11 +276,11 @@ fn person_inner(first: &str, last: &str, age: i32) -> Value {
                 value: Some(Value::Integer(age)),
             },
         ],
-    })
+    }))
 }
 
 fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "address".into(),
         keyspace: KEYSPACE.into(),
         fields: vec![
@@ -297,7 +297,7 @@ fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
                 value: Some(Value::Text(zip.into())),
             },
         ],
-    })
+    }))
 }
 
 fn flist(ns: &[i32]) -> Value {
@@ -524,7 +524,7 @@ fn null_inner_groups() -> (Vec<Mutation>, Vec<Mutation>) {
 /// A `person` with a NULL `last_name` middle field (the absent-field encoding
 /// under test on the winning side of the merge).
 fn person_null_last(first: &str, age: i32) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "person".into(),
         keyspace: KEYSPACE.into(),
         fields: vec![
@@ -541,7 +541,7 @@ fn person_null_last(first: &str, age: i32) -> Value {
                 value: Some(Value::Integer(age)),
             },
         ],
-    })
+    }))
 }
 
 // ════════════════════════════════════════════════════════════════════════════

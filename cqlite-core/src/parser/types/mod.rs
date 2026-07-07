@@ -277,10 +277,10 @@ pub(super) fn create_empty_value_for_cql_type(cql_type: &CqlType) -> Result<Valu
         CqlType::Set(_) => Ok(Value::Set(Vec::new())),
         CqlType::Map(_, _) => Ok(Value::Map(Vec::new())),
         CqlType::Tuple(_) => Ok(Value::Tuple(Vec::new())),
-        CqlType::Udt(name, _) => Ok(Value::Udt(UdtValue::new(
+        CqlType::Udt(name, _) => Ok(Value::Udt(Box::new(UdtValue::new(
             name.clone(),
             "unknown".to_string(),
-        ))),
+        )))),
         CqlType::Frozen(inner) => create_empty_value_for_cql_type(inner),
         _ => Ok(Value::Null),
     }

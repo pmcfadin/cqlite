@@ -664,7 +664,7 @@ impl ComplexTypePerformanceBenchmark {
                     .with_field("id".to_string(), Some(Value::Integer(i as i32)))
                     .with_field("name".to_string(), Some(Value::Text(format!("user_{}", i))))
                     .with_field("active".to_string(), Some(Value::Boolean(true)));
-                Value::Udt(udt_value)
+                Value::Udt(Box::new(udt_value))
             })
             .collect()
     }

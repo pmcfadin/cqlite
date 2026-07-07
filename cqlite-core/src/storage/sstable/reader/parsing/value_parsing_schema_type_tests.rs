@@ -328,7 +328,7 @@ mod always_run {
         // Json: UTF-8 JSON text parsed to a serde_json::Value.
         assert_eq!(
             parse_value_with_comparator(b"123", &ComparatorType::Json).unwrap(),
-            Value::Json(serde_json::json!(123)),
+            Value::Json(Box::new(serde_json::json!(123))),
         );
 
         // time: 8-byte big-endian nanoseconds-since-midnight (Custom("time")).
@@ -352,7 +352,7 @@ mod always_run {
         // Custom dispatch must route it to the typed JSON decoder, not a blob.
         assert_eq!(
             decode_custom_scalar("json", br#"{"a":1}"#).unwrap(),
-            Value::Json(serde_json::json!({"a": 1})),
+            Value::Json(Box::new(serde_json::json!({"a": 1}))),
         );
     }
 

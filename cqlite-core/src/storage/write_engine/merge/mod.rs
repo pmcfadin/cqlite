@@ -835,7 +835,7 @@ impl SSTableRowIteratorAdapter {
                     // so the writer reproduces it byte-for-byte).
                     for elem in col.elements {
                         let value = if elem.is_deleted {
-                            Value::Tombstone(crate::types::TombstoneInfo {
+                            Value::Tombstone(Box::new(crate::types::TombstoneInfo {
                                 deletion_time: elem.timestamp,
                                 tombstone_type: crate::types::TombstoneType::CellTombstone,
                                 // Element's on-disk localDeletionTime (GC clock,
@@ -844,7 +844,7 @@ impl SSTableRowIteratorAdapter {
                                 ttl: None,
                                 range_start: None,
                                 range_end: None,
-                            })
+                            }))
                         } else {
                             elem.value.unwrap_or(Value::Null)
                         };
@@ -4345,14 +4345,14 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "score".to_string(),
-                    value: Value::Tombstone(TombstoneInfo {
+                    value: Value::Tombstone(Box::new(TombstoneInfo {
                         deletion_time: 100,
                         tombstone_type: TombstoneType::CellTombstone,
                         local_deletion_time: 0,
                         ttl: None,
                         range_start: None,
                         range_end: None,
-                    }),
+                    })),
                     timestamp: 100,
                     ttl: None,
                     cell_path: None,
@@ -6913,14 +6913,14 @@ mod issue_823_complex_column_merge {
     #[test]
     fn nonfrozen_udt_collapses_whole_column_not_per_field() {
         let mk_udt = |field: &str, v: &str| {
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 type_name: "addr".to_string(),
                 keyspace: "ks".to_string(),
                 fields: vec![UdtField {
                     name: field.to_string(),
                     value: Some(Value::Text(v.to_string())),
                 }],
-            })
+            }))
         };
 
         // Newer run wrote field "city"; older run wrote field "zip".
@@ -7055,14 +7055,14 @@ mod issue_823_complex_column_merge {
             100,
             vec![CellData {
                 column: "tags".to_string(),
-                value: Value::Tombstone(TombstoneInfo {
+                value: Value::Tombstone(Box::new(TombstoneInfo {
                     deletion_time: 100,
                     tombstone_type: TombstoneType::CellTombstone,
                     local_deletion_time: 0,
                     ttl: None,
                     range_start: None,
                     range_end: None,
-                }),
+                })),
                 timestamp: 100,
                 ttl: None,
                 cell_path: None,
@@ -7119,14 +7119,14 @@ mod issue_823_complex_column_merge {
     fn cell_tombstone(ts: i64, ldt: i32) -> CellData {
         CellData {
             column: "v".to_string(),
-            value: Value::Tombstone(TombstoneInfo {
+            value: Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: ts,
                 tombstone_type: TombstoneType::CellTombstone,
                 local_deletion_time: ldt as i64,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
             timestamp: ts,
             ttl: None,
             cell_path: None,
@@ -8792,14 +8792,14 @@ mod issue_822_merge_ordering_semantics {
                     ck_cell(),
                     CellData {
                         column: "v".to_string(),
-                        value: Value::Tombstone(TombstoneInfo {
+                        value: Value::Tombstone(Box::new(TombstoneInfo {
                             deletion_time: TS,
                             tombstone_type: TombstoneType::CellTombstone,
                             local_deletion_time: 0,
                             ttl: None,
                             range_start: None,
                             range_end: None,
-                        }),
+                        })),
                         timestamp: TS,
                         ttl: None,
                         cell_path: None,
@@ -8873,14 +8873,14 @@ mod issue_822_merge_ordering_semantics {
                     ck_cell(),
                     CellData {
                         column: "v".to_string(),
-                        value: Value::Tombstone(TombstoneInfo {
+                        value: Value::Tombstone(Box::new(TombstoneInfo {
                             deletion_time: TS,
                             tombstone_type: TombstoneType::CellTombstone,
                             local_deletion_time: 0,
                             ttl: None,
                             range_start: None,
                             range_end: None,
-                        }),
+                        })),
                         timestamp: TS,
                         ttl: None,
                         cell_path: None,
@@ -9202,14 +9202,14 @@ mod issue_822_merge_ordering_semantics {
     fn issue_3_merge_layer_tombstone_carries_no_ttl_precondition() {
         let tomb = CellData {
             column: "v".to_string(),
-            value: Value::Tombstone(TombstoneInfo {
+            value: Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: 1,
                 tombstone_type: TombstoneType::CellTombstone,
                 local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
             timestamp: 1,
             ttl: None,
             cell_path: None,
@@ -10304,14 +10304,14 @@ mod issue_845_gc_grace_purge {
     fn cell_tombstone(ts: i64, ldt: i32) -> CellData {
         CellData {
             column: "v".to_string(),
-            value: Value::Tombstone(TombstoneInfo {
+            value: Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: ts,
                 tombstone_type: TombstoneType::CellTombstone,
                 local_deletion_time: ldt as i64,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
             timestamp: ts,
             ttl: None,
             cell_path: None,
@@ -11429,7 +11429,7 @@ mod issue_929_bare_udt_compaction {
                 Some(&registry),
             )
             .expect("input writer");
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "person".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![
@@ -11442,7 +11442,7 @@ mod issue_929_bare_udt_compaction {
                     value: Some(Value::Integer(30)),
                 },
             ],
-        });
+        }));
         let mutation = Mutation::new(
             TableId::new("test_ks", "test_table"),
             PartitionKey::single("id", Value::Integer(1)),
@@ -11578,14 +11578,14 @@ mod issue_929_bare_udt_compaction {
             1,
         )
         .expect("input writer");
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "person".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
                 value: Some(Value::Text("Bob".to_string())),
             }],
-        });
+        }));
         let mutation = Mutation::new(
             TableId::new("test_ks", "test_table"),
             PartitionKey::single("id", Value::Integer(2)),
@@ -11655,14 +11655,14 @@ mod issue_929_bare_udt_compaction {
                 Some(&registry),
             )
             .expect("writer a");
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "person".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
                 value: Some(Value::Text("Carol".to_string())),
             }],
-        });
+        }));
         let ma = Mutation::new(
             TableId::new("test_ks", "test_table"),
             PartitionKey::single("id", Value::Integer(1)),
@@ -11782,14 +11782,14 @@ mod issue_929_bare_udt_compaction {
                 Some(&registry),
             )
             .expect("writer a");
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "person".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
                 value: Some(Value::Text("Dave".to_string())),
             }],
-        });
+        }));
         let ma = Mutation::new(
             TableId::new("test_ks", "test_table"),
             PartitionKey::single("id", Value::Integer(1)),
@@ -11814,14 +11814,14 @@ mod issue_929_bare_udt_compaction {
             1,
         )
         .expect("writer b");
-        let udt_b = Value::Udt(UdtValue {
+        let udt_b = Value::Udt(Box::new(UdtValue {
             type_name: "person".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
                 value: Some(Value::Text("Eve".to_string())),
             }],
-        });
+        }));
         let mb = Mutation::new(
             TableId::new("test_ks", "test_table"),
             PartitionKey::single("id", Value::Integer(2)),
@@ -11922,21 +11922,21 @@ mod issue_929_bare_udt_compaction {
         )
         .expect("input writer");
         // `addr` = outer{ i: inner{ x: 5 } }.
-        let addr = Value::Udt(UdtValue {
+        let addr = Value::Udt(Box::new(UdtValue {
             type_name: "outer".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "i".to_string(),
-                value: Some(Value::Udt(UdtValue {
+                value: Some(Value::Udt(Box::new(UdtValue {
                     type_name: "inner".to_string(),
                     keyspace: "test_ks".to_string(),
                     fields: vec![UdtField {
                         name: "x".to_string(),
                         value: Some(Value::Integer(5)),
                     }],
-                })),
+                }))),
             }],
-        });
+        }));
         let mutation = Mutation::new(
             TableId::new("test_ks", "test_table"),
             PartitionKey::single("id", Value::Integer(1)),

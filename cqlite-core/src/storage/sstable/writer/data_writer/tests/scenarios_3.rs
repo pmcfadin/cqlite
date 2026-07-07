@@ -1278,9 +1278,9 @@ fn test_serialize_udt_with_nested_collections_matches_schema_aware_bytes() {
     let serializer = TypeSerializer::new();
     let company = phase3_company_value();
 
-    let bytes = serialize_value(&Value::Udt(company.clone())).unwrap();
+    let bytes = serialize_value(&Value::Udt(Box::new(company.clone()))).unwrap();
     let expected = serializer
-        .serialize_udt(&Value::Udt(company), &phase3_company_schema())
+        .serialize_udt(&Value::Udt(Box::new(company)), &phase3_company_schema())
         .unwrap();
 
     assert_eq!(bytes, expected);
@@ -1291,12 +1291,15 @@ fn test_serialize_collection_containing_nested_udts() {
     let serializer = TypeSerializer::new();
     let company = phase3_company_value();
     let company_bytes = serializer
-        .serialize_udt(&Value::Udt(company.clone()), &phase3_company_schema())
+        .serialize_udt(
+            &Value::Udt(Box::new(company.clone())),
+            &phase3_company_schema(),
+        )
         .unwrap();
 
     let value = Value::Map(vec![(
         Value::Text("empresa_日本".to_string()),
-        Value::Frozen(Box::new(Value::Udt(company))),
+        Value::Frozen(Box::new(Value::Udt(Box::new(company)))),
     )]);
     let bytes = serialize_value(&value).unwrap();
 
@@ -1317,10 +1320,16 @@ fn test_serialize_tuple_with_collection_fields_and_udt() {
     let address = phase3_address_value();
     let person = phase3_person_value("Tuple User");
     let address_bytes = serializer
-        .serialize_udt(&Value::Udt(address.clone()), &phase3_address_schema())
+        .serialize_udt(
+            &Value::Udt(Box::new(address.clone())),
+            &phase3_address_schema(),
+        )
         .unwrap();
     let person_bytes = serializer
-        .serialize_udt(&Value::Udt(person.clone()), &phase3_person_schema())
+        .serialize_udt(
+            &Value::Udt(Box::new(person.clone())),
+            &phase3_person_schema(),
+        )
         .unwrap();
 
     let tuple = Value::Tuple(vec![
@@ -1332,9 +1341,9 @@ fn test_serialize_tuple_with_collection_fields_and_udt() {
         ]))),
         Value::Frozen(Box::new(Value::Map(vec![(
             Value::Text("home".to_string()),
-            Value::Frozen(Box::new(Value::Udt(address))),
+            Value::Frozen(Box::new(Value::Udt(Box::new(address)))),
         )]))),
-        Value::Frozen(Box::new(Value::Udt(person))),
+        Value::Frozen(Box::new(Value::Udt(Box::new(person)))),
     ]);
     let bytes = serialize_value(&tuple).unwrap();
 

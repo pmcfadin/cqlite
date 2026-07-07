@@ -1258,14 +1258,14 @@ fn udt_whole_write_roundtrips_sparse_out_of_order() {
     let writer = DataWriter::new(create_test_stats());
     let col = udt_column("addr", &person_udt_marshal());
     // Literal lists email THEN name (out of order) and OMITS age (sparse).
-    let udt = Value::Udt(crate::types::UdtValue {
+    let udt = Value::Udt(Box::new(crate::types::UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![
             udt_field("email", Some(Value::Text("a@b.com".to_string()))),
             udt_field("name", Some(Value::Text("Alice".to_string()))),
         ],
-    });
+    }));
 
     let row_ts = 1_005_000i64;
     let mut buf = Vec::new();
@@ -1319,14 +1319,14 @@ fn udt_whole_write_roundtrips_sparse_out_of_order() {
 fn udt_whole_write_propagates_row_ttl() {
     let writer = DataWriter::new(create_test_stats());
     let col = udt_column("addr", &person_udt_marshal());
-    let udt = Value::Udt(crate::types::UdtValue {
+    let udt = Value::Udt(Box::new(crate::types::UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![
             udt_field("name", Some(Value::Text("Bob".to_string()))),
             udt_field("age", Some(Value::Integer(42))),
         ],
-    });
+    }));
 
     let mut buf = Vec::new();
     writer
@@ -1353,11 +1353,11 @@ fn udt_whole_write_propagates_row_ttl() {
 fn udt_whole_write_rejects_unknown_field() {
     let writer = DataWriter::new(create_test_stats());
     let col = udt_column("addr", &person_udt_marshal());
-    let udt = Value::Udt(crate::types::UdtValue {
+    let udt = Value::Udt(Box::new(crate::types::UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![udt_field("nope", Some(Value::Text("x".to_string())))],
-    });
+    }));
     let mut buf = Vec::new();
     let err = writer
         .write_complex_column(&mut buf, &col, &udt, 1_005_000, None)
@@ -1425,11 +1425,11 @@ fn udt_mixed_stream_reconciliation_newer_wins() {
         None,
         vec![CellOperation::Write {
             column: "addr".to_string(),
-            value: Value::Udt(crate::types::UdtValue {
+            value: Value::Udt(Box::new(crate::types::UdtValue {
                 type_name: "person".to_string(),
                 keyspace: "test_ks".to_string(),
                 fields: vec![udt_field("name", Some(Value::Text("Old".to_string())))],
-            }),
+            })),
         }],
         1_000_000,
         None,

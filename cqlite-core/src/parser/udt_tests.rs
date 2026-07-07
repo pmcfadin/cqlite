@@ -362,7 +362,7 @@ mod tests {
 
         // Create a list of address UDTs
         let addresses = vec![
-            Value::Udt(create_sample_address_udt()),
+            Value::Udt(Box::new(create_sample_address_udt())),
             Value::Udt({
                 let mut addr = create_sample_address_udt();
                 addr.set_field(
@@ -373,7 +373,7 @@ mod tests {
                     "city".to_string(),
                     Some(Value::Text("Other City".to_string())),
                 );
-                addr
+                Box::new(addr)
             }),
         ];
 
@@ -402,7 +402,7 @@ mod tests {
         let people_map = vec![
             (
                 Value::Text("employee1".to_string()),
-                Value::Udt(create_sample_person_udt()),
+                Value::Udt(Box::new(create_sample_person_udt())),
             ),
             (
                 Value::Text("employee2".to_string()),
@@ -416,7 +416,7 @@ mod tests {
                         "last_name".to_string(),
                         Some(Value::Text("Smith".to_string())),
                     );
-                    person
+                    Box::new(person)
                 }),
             ),
         ];
@@ -450,11 +450,11 @@ mod tests {
         let empty_list = Value::List(Vec::new());
         assert_eq!(empty_list, Value::List(Vec::new()));
 
-        let empty_udt = Value::Udt(UdtValue {
+        let empty_udt = Value::Udt(Box::new(UdtValue {
             type_name: "test".to_string(),
             keyspace: "test_ks".to_string(),
             fields: vec![],
-        });
+        }));
         if let Value::Udt(udt) = &empty_udt {
             assert_eq!(udt.type_name, "test");
             assert_eq!(udt.fields.len(), 0);

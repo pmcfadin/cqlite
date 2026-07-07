@@ -331,7 +331,7 @@ mod tests {
     fn double_nan_sorts_last_and_signed_zero() {
         let neg_nan = f64::from_bits(0xFFF8_0000_0000_0000); // a NEGATIVE quiet NaN
         assert!(neg_nan.is_nan() && neg_nan.is_sign_negative());
-        let mut v = vec![
+        let mut v = [
             Value::Float(neg_nan),
             Value::Float(2.0),
             Value::Float(0.0),  // +0.0
@@ -352,7 +352,7 @@ mod tests {
     fn float32_nan_sorts_last_and_signed_zero() {
         let neg_nan = f32::from_bits(0xFFC0_0000); // a NEGATIVE quiet NaN
         assert!(neg_nan.is_nan() && neg_nan.is_sign_negative());
-        let mut v = vec![
+        let mut v = [
             Value::Float32(neg_nan),
             Value::Float32(1.0),
             Value::Float32(0.0),

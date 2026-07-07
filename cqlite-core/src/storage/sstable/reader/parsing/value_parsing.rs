@@ -569,11 +569,11 @@ impl SSTableReader {
                     offset += field_len;
                 }
 
-                Ok(Value::Udt(UdtValue {
+                Ok(Value::Udt(Box::new(UdtValue {
                     keyspace: keyspace.clone().unwrap_or_else(|| "unknown".to_string()),
                     type_name: type_name.clone(),
                     fields,
-                }))
+                })))
             }
             ComparatorType::Frozen(inner_comparator) => {
                 let inner_value = self.parse_value_with_comparator_at_depth(
@@ -718,11 +718,11 @@ impl SSTableReader {
                 // Legacy formats can use generic UDT fabrication as last resort
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    Ok(Value::Udt(UdtValue {
+                    Ok(Value::Udt(Box::new(UdtValue {
                         keyspace: "unknown".to_string(),
                         type_name: "unknown".to_string(),
                         fields,
-                    }))
+                    })))
                 }
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {

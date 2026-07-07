@@ -58,8 +58,8 @@ pub enum Value {
     Decimal { scale: i32, unscaled: Vec<u8> },
     /// Duration value with months, days, and nanoseconds
     Duration { months: i32, days: i32, nanos: i64 },
-    /// JSON value
-    Json(serde_json::Value),
+    /// JSON value (boxed: rare/large cold variant, kept off the hot inline path — #1583)
+    Json(Box<serde_json::Value>),
     /// 8-bit signed integer (for exact Cassandra compatibility)
     TinyInt(i8),
     /// 16-bit signed integer (for exact Cassandra compatibility)
@@ -74,26 +74,28 @@ pub enum Value {
     Map(Vec<(Value, Value)>),
     /// Tuple with fixed-size heterogeneous types
     Tuple(Vec<Value>),
-    /// User defined type with structured fields
-    Udt(UdtValue),
+    /// User defined type with structured fields (boxed: rare/large cold variant — #1583)
+    Udt(Box<UdtValue>),
     /// Frozen wrapper for collections (immutable)
     Frozen(Box<Value>),
-    /// Tombstone marker indicating deleted data
-    Tombstone(TombstoneInfo),
+    /// Tombstone marker indicating deleted data (boxed: rare/large cold variant — #1583)
+    Tombstone(Box<TombstoneInfo>),
     /// IP address (4 bytes for IPv4, 16 bytes for IPv6)
     Inet(Vec<u8>),
 }
 
-// size_of::<Value>() layout pin (issue #1565, Epic A A4 ratchet). Measured 88
-// bytes today; Epic E #1517 E1 shrinks the three inlined rare variants (Decimal,
-// Duration, the widest inline payload) toward <= 40. If Value grows past this,
-// the build fails — measure and tighten, do not just bump.
+// size_of::<Value>() layout pin (issue #1565, Epic A A4 ratchet; tightened by
+// Epic E #1583 / value-representation-v2 D1). The three fat cold variants
+// (`Tombstone`, `Udt`, `Json`) are boxed so every hot `Value` slot/clone stays
+// small. Measured 32 bytes after boxing (`Text(String)`/`Blob(Vec<u8>)` are the
+// 24-byte inline floor + tag). If Value grows past this ceiling the build fails
+// — measure and box the next-widest variant, do not just bump the pin.
 //
 // Epic H/H3 (issue #1616) deliberately does NOT duplicate this `Value` pin —
 // the parser-side struct-size guards live next to their own types
 // (ComparatorType, ParseStep, ScanCursor, and the BTI SizedPointer/Transition/
 // PayloadRef). This assertion remains the single owner of the `Value` layout.
-const _: () = assert!(std::mem::size_of::<Value>() <= 88);
+const _: () = assert!(std::mem::size_of::<Value>() <= 40);
 
 /// Ordered interned cells of a single decoded row (issue #1334).
 ///
@@ -644,7 +646,7 @@ impl Value {
         range_start: Option<RowKey>,
         range_end: Option<RowKey>,
     ) -> Self {
-        Value::Tombstone(TombstoneInfo {
+        Value::Tombstone(Box::new(TombstoneInfo {
             deletion_time,
             tombstone_type,
             // No GC-clock LDT is supplied by this constructor; default to 0.
@@ -652,7 +654,7 @@ impl Value {
             ttl,
             range_start,
             range_end,
-        })
+        }))
     }
 
     /// Create a row tombstone with the given timestamp
@@ -1320,25 +1322,25 @@ impl DataType {
             DataType::Blob => Value::Blob(Vec::new()),
             DataType::Timestamp => Value::Timestamp(0),
             DataType::Uuid => Value::Uuid([0; 16]),
-            DataType::Json => Value::Json(serde_json::Value::Null),
+            DataType::Json => Value::Json(Box::new(serde_json::Value::Null)),
             DataType::List => Value::List(Vec::new()),
             DataType::Set => Value::Set(Vec::new()),
             DataType::Map => Value::Map(Vec::new()),
             DataType::Tuple => Value::Tuple(Vec::new()),
-            DataType::Udt => Value::Udt(UdtValue {
+            DataType::Udt => Value::Udt(Box::new(UdtValue {
                 type_name: String::new(),
                 keyspace: String::new(),
                 fields: Vec::new(),
-            }),
+            })),
             DataType::Frozen => Value::Frozen(Box::new(Value::Null)),
-            DataType::Tombstone => Value::Tombstone(TombstoneInfo {
+            DataType::Tombstone => Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: 0,
                 tombstone_type: TombstoneType::RowTombstone,
                 local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
         }
     }
 }
@@ -1577,6 +1579,72 @@ impl std::hash::Hash for TombstoneInfo {
 mod tests {
     use super::*;
 
+    /// Value-representation-v2 D1 (issue #1583): the boxed layout keeps every hot
+    /// `Value` slot small. This runtime measurement mirrors the compile-time pin
+    /// in `types.rs` and fails on `main` (88 bytes) before the fat cold variants
+    /// (`Tombstone`, `Udt`, `Json`) are boxed.
+    #[test]
+    fn value_layout_is_bounded() {
+        let sz = std::mem::size_of::<Value>();
+        assert!(
+            sz <= 40,
+            "size_of::<Value>() = {sz}, expected <= 40 (box the next-widest variant)"
+        );
+        // The boxed fat variants must not re-inflate the enum: each carries a
+        // single pointer, so it can never be the layout maximum.
+        assert!(std::mem::size_of::<Box<TombstoneInfo>>() <= 8);
+        assert!(std::mem::size_of::<Box<UdtValue>>() <= 8);
+        assert!(std::mem::size_of::<Box<serde_json::Value>>() <= 8);
+    }
+
+    /// Value-representation-v2 D1 (issue #1583): boxing the fat cold variants is
+    /// representation-internal ONLY. `serde` serializes `Box<T>` transparently as
+    /// `T`, so the wire bytes, the round-trip, and `Display` are byte-identical to
+    /// the pre-boxing enum. This locks the spec scenario "Ordering and serde are
+    /// byte-identical".
+    #[test]
+    fn boxed_variants_preserve_serde_and_display() {
+        let udt = Value::Udt(Box::new(
+            UdtValue::new("Person".to_string(), "ks".to_string())
+                .with_field("name".to_string(), Some(Value::Text("Jo".to_string()))),
+        ));
+        let json = Value::Json(Box::new(serde_json::json!({"a": 1, "b": [true, null]})));
+        let tomb = Value::row_tombstone(1234);
+
+        for v in [&udt, &json, &tomb] {
+            // serde_json round-trip is lossless and preserves Display.
+            let s = serde_json::to_string(v).expect("serialize");
+            let back: Value = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(&back, v, "serde round-trip must be identity");
+            assert_eq!(back.to_string(), v.to_string(), "Display must be stable");
+        }
+
+        // bincode round-trip (the RowKey path) is lossless for the non-self-
+        // describing boxed variants. `Value::Json` is intentionally excluded: a
+        // `serde_json::Value` needs `deserialize_any` (a self-describing format),
+        // which bincode does not support — this is a pre-existing property of the
+        // inner type, unchanged by boxing.
+        for v in [&udt, &tomb] {
+            let b = bincode::serialize(v).expect("bincode serialize");
+            let back2: Value = bincode::deserialize(&b).expect("bincode deserialize");
+            assert_eq!(&back2, v);
+        }
+
+        // `serde` serializes `Box<T>` transparently, so the externally-tagged
+        // `Json` payload is byte-identical to the unboxed enum's: the inner JSON
+        // rides directly under the `Json` tag with no `Box` wrapper.
+        assert_eq!(
+            serde_json::to_string(&json).unwrap(),
+            "{\"Json\":{\"a\":1,\"b\":[true,null]}}"
+        );
+
+        // Ordering is unchanged: complex variants fall back to Display-string order,
+        // and a scalar still sorts against them exactly as before boxing.
+        let mut vals = [tomb.clone(), udt.clone(), json.clone(), Value::Integer(5)];
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(vals[0], Value::Integer(5));
+    }
+
     #[test]
     fn test_value_types() {
         assert_eq!(Value::Integer(42).data_type(), CqlType::Int);
@@ -1661,7 +1729,7 @@ mod tests {
         assert_eq!(tuple.to_string(), "(42, 'hello', true)");
 
         // Test UDT
-        let udt = Value::Udt(UdtValue {
+        let udt = Value::Udt(Box::new(UdtValue {
             type_name: "Person".to_string(),
             keyspace: "test".to_string(),
             fields: vec![
@@ -1674,7 +1742,7 @@ mod tests {
                     value: Some(Value::Integer(30)),
                 },
             ],
-        });
+        }));
         assert!(matches!(udt.data_type(), CqlType::Udt(_, _)));
         assert!(udt.to_string().contains("Person{"));
 
@@ -1699,7 +1767,7 @@ mod tests {
         assert_eq!(DataType::Tuple.default_value(), Value::Tuple(Vec::new()));
         assert_eq!(
             DataType::Udt.default_value(),
-            Value::Udt(UdtValue::new(String::new(), String::new()))
+            Value::Udt(Box::new(UdtValue::new(String::new(), String::new())))
         );
         assert_eq!(
             DataType::Frozen.default_value(),
@@ -1735,7 +1803,7 @@ mod tests {
                 days: 30,
                 nanos: 1000000000,
             },
-            Value::Json(serde_json::Value::String("test".to_string())),
+            Value::Json(Box::new(serde_json::Value::String("test".to_string()))),
             Value::TinyInt(127i8),
             Value::SmallInt(32767i16),
             Value::Float32(std::f32::consts::PI),
@@ -1746,16 +1814,19 @@ mod tests {
             ]),
             Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(42))]),
             Value::Tuple(vec![Value::Integer(1), Value::Text("test".to_string())]),
-            Value::Udt(UdtValue::new("TestType".to_string(), "test_ks".to_string())),
+            Value::Udt(Box::new(UdtValue::new(
+                "TestType".to_string(),
+                "test_ks".to_string(),
+            ))),
             Value::Frozen(Box::new(Value::Integer(42))),
-            Value::Tombstone(TombstoneInfo {
+            Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: 1000,
                 tombstone_type: TombstoneType::RowTombstone,
                 local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
         ];
 
         // Test data_type() for all variants
@@ -2121,7 +2192,7 @@ mod tests {
             ],
         };
 
-        let data_type = Value::Udt(udt).data_type();
+        let data_type = Value::Udt(Box::new(udt)).data_type();
 
         match data_type {
             CqlType::Udt(name, fields) => {

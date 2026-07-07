@@ -252,7 +252,7 @@ mod tests {
     /// `Value::Float32` (CQL `float`) shares the same ordering semantics.
     #[test]
     fn order_by_float32_sort_matches_oracle() {
-        let mut v = vec![
+        let mut v = [
             Value::Float32(f32::NAN),
             Value::Float32(0.0),
             Value::Float32(-0.0),

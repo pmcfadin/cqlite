@@ -70,7 +70,7 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
         range_end: range_end.map(RowKey::new),
     };
 
-    Ok((input, Value::Tombstone(tombstone_info)))
+    Ok((input, Value::Tombstone(Box::new(tombstone_info))))
 }
 
 #[cfg(test)]
@@ -131,7 +131,7 @@ mod tests {
         // A length of 1 encodes as ZigZag 0x02; decoding it as UNSIGNED would
         // yield 2 and corrupt the round-trip (take too many bytes / mismatch).
         use crate::types::{TombstoneInfo, TombstoneType};
-        let range_tombstone = Value::Tombstone(TombstoneInfo {
+        let range_tombstone = Value::Tombstone(Box::new(TombstoneInfo {
             deletion_time: 4242,
             tombstone_type: TombstoneType::RangeTombstone,
             local_deletion_time: 0,
@@ -139,7 +139,7 @@ mod tests {
             // Byte length exactly 1 so ZigZag (0x02) vs unsigned (0x01) disagree.
             range_start: Some(RowKey::new(vec![0xAB])),
             range_end: Some(RowKey::new(vec![0xCD])),
-        });
+        }));
         let serialized = serialize_cql_value(&range_tombstone).unwrap();
 
         let (remaining, parsed) = parse_tombstone(&serialized[1..]).unwrap(); // Skip type ID
@@ -172,14 +172,14 @@ mod tests {
         // Serializing one must return an explicit error, not silently alias to
         // RowTombstone (byte 0) — that would be a silent lossy round-trip.
         use crate::types::{TombstoneInfo, TombstoneType};
-        let partition_tombstone = Value::Tombstone(TombstoneInfo {
+        let partition_tombstone = Value::Tombstone(Box::new(TombstoneInfo {
             deletion_time: 9999,
             tombstone_type: TombstoneType::PartitionTombstone,
             local_deletion_time: 0,
             ttl: None,
             range_start: None,
             range_end: None,
-        });
+        }));
         let result = serialize_cql_value(&partition_tombstone);
         assert!(
             result.is_err(),

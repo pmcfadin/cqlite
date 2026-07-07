@@ -280,7 +280,7 @@ fn estimate_of(m: Mutation) -> usize {
 
 #[test]
 fn estimate_within_documented_factor_for_representative_corpus() {
-    let udt = Value::Udt(UdtValue {
+    let udt = Value::Udt(Box::new(UdtValue {
         type_name: "addr".to_string(),
         keyspace: "ks_1404".to_string(),
         fields: vec![
@@ -293,7 +293,7 @@ fn estimate_within_documented_factor_for_representative_corpus() {
                 value: Some(Value::Integer(94105)),
             },
         ],
-    });
+    }));
 
     // A corpus of representative mutations (text / blob / collections / UDT /
     // tombstones). Each entry is (label, mutation).

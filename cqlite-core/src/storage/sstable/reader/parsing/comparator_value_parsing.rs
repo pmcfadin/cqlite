@@ -230,7 +230,7 @@ fn parse_value_with_comparator_at_depth(
                 .map_err(|_| Error::corruption("Invalid UTF-8 in JSON value"))?;
             let json_value: serde_json::Value = serde_json::from_str(&json_text)
                 .map_err(|_| Error::corruption("Invalid JSON value"))?;
-            Ok(Value::Json(json_value))
+            Ok(Value::Json(Box::new(json_value)))
         }
         // Structural types route through the ONE shared structural body in
         // `value_parsing` (issue #1636 / J2). Non-frozen collections use VInt
@@ -272,11 +272,11 @@ fn parse_value_with_comparator_at_depth(
             )?;
             // Preserve decoder #2's provenance (type_name/keyspace from the
             // comparator) rather than the helper's "unknown" placeholders.
-            Ok(Value::Udt(UdtValue {
+            Ok(Value::Udt(Box::new(UdtValue {
                 keyspace: keyspace.clone().unwrap_or_else(|| "unknown".to_string()),
                 type_name: type_name.to_string(),
                 fields: udt.fields,
-            }))
+            })))
         }
         ComparatorType::Frozen(inner_comparator) => {
             let inner_value =
@@ -643,7 +643,7 @@ mod tests {
             result,
             Value::Map(vec![(
                 Value::Text("k".to_string()),
-                Value::Json(serde_json::json!([1, 2, 3])),
+                Value::Json(Box::new(serde_json::json!([1, 2, 3]))),
             )])
         );
     }

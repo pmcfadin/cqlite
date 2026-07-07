@@ -1,7 +1,6 @@
 ---
 source: cqlite-core/tests/contract_stability_tests.rs
-assertion_line: 303
-expression: "Value::Udt(udt)"
+expression: "Value::Udt(Box::new(udt))"
 ---
 {
   "Udt": {
