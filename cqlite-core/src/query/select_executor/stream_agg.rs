@@ -157,36 +157,40 @@ impl SelectExecutor {
         let mut accumulators = init_aggregate_accumulators(&agg_plan.aggregates);
         let mut folded_any = false;
 
+        // Issue #1592: fold over the BATCHED streaming surface — one async wake per
+        // batch, not per row. Flattening each batch yields the same rows in the
+        // same order as `scan_stream`, so the aggregate result is unchanged.
         let mut scan_stream = self
             .storage
-            .scan_stream(table, None, None, schema_opt, AGG_FOLD_SCAN_BUFFER)
+            .scan_stream_batched(table, None, None, schema_opt, AGG_FOLD_SCAN_BUFFER)
             .await?;
-        while let Some(item) = scan_stream.recv().await {
-            let (key, value) = item?;
-            context.rows_processed += 1;
-            context.scan_rows += 1;
+        while let Some(batch) = scan_stream.recv().await {
+            for (key, value) in batch? {
+                context.rows_processed += 1;
+                context.scan_rows += 1;
 
-            let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
-                continue;
-            };
-            if !evaluate_predicates(&row, predicates)? {
-                continue;
-            }
-            // Apply any residual (non-pushed) WHERE as a per-row filter.
-            let mut keep = true;
-            for filter in &filters {
-                if !self.evaluate_where_expression(filter, &row)? {
-                    keep = false;
-                    break;
+                let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
+                    continue;
+                };
+                if !evaluate_predicates(&row, predicates)? {
+                    continue;
                 }
-            }
-            if !keep {
-                continue;
-            }
+                // Apply any residual (non-pushed) WHERE as a per-row filter.
+                let mut keep = true;
+                for filter in &filters {
+                    if !self.evaluate_where_expression(filter, &row)? {
+                        keep = false;
+                        break;
+                    }
+                }
+                if !keep {
+                    continue;
+                }
 
-            folded_any = true;
-            for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
-                update_aggregate(&mut accumulators[i], agg_comp, &row);
+                folded_any = true;
+                for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
+                    update_aggregate(&mut accumulators[i], agg_comp, &row);
+                }
             }
         }
 

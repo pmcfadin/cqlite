@@ -487,6 +487,31 @@ impl StorageEngine {
             .await
     }
 
+    /// Batched streaming scan (issue #1592, Epic F/F2): additive companion to
+    /// [`scan_stream`](Self::scan_stream) that yields a `Vec` BATCH of
+    /// `(RowKey, ScanRow)` entries per channel item instead of one entry, so a
+    /// full-scan consumer is woken once per batch rather than once per row.
+    ///
+    /// Content and order are identical to [`scan_stream`](Self::scan_stream) —
+    /// flattening the batches reproduces the per-row stream exactly. Backpressure
+    /// is preserved (bounded channel). Delegates to
+    /// [`SSTableManager::scan_stream_batched`].
+    ///
+    /// [`SSTableManager::scan_stream_batched`]: sstable::SSTableManager::scan_stream_batched
+    pub async fn scan_stream_batched(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        schema: Option<&crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>> {
+        record_table_scan_call();
+        self.sstables
+            .scan_stream_batched(table_id, start_key, end_key, schema, buffer_size)
+            .await
+    }
+
     /// Flush MemTable to SSTable
     ///
     /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).

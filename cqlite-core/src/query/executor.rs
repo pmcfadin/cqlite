@@ -494,15 +494,20 @@ impl QueryExecutor {
     /// old unbounded `crossbeam` channel that held the entire result set at once.
     #[tracing::instrument(name = "query.table_scan_stream", skip_all)]
     async fn streaming_scan_rows(&self, table: &TableId) -> Result<Vec<QueryRow>> {
+        // Issue #1592: consume the BATCHED streaming surface so the reader wakes
+        // this task once per batch of rows, not once per row (the F2 win). Each
+        // channel item is a `Vec` of entries; flattening it yields the same rows
+        // in the same order as the per-row `scan_stream`.
         let mut scan_stream = self
             .storage
-            .scan_stream(table, None, None, None, TABLE_SCAN_STREAM_BUFFER)
+            .scan_stream_batched(table, None, None, None, TABLE_SCAN_STREAM_BUFFER)
             .await?;
 
         let mut rows = Vec::new();
-        while let Some(item) = scan_stream.recv().await {
-            let (row_key, row_data) = item?;
-            rows.push(self.storage_data_to_query_row(row_data, &row_key)?);
+        while let Some(batch) = scan_stream.recv().await {
+            for (row_key, row_data) in batch? {
+                rows.push(self.storage_data_to_query_row(row_data, &row_key)?);
+            }
         }
         Ok(rows)
     }
