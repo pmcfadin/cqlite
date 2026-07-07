@@ -456,6 +456,13 @@ fn metrics_parity_on_full_consumption() {
         "fully-consumed bytes must match the collect path"
     );
     assert!(expected_rows > 0, "fixture must produce rows");
+    // Roborev round 4: a normal, fully-consumed completion must NOT record an
+    // error — only an actual mid-stream error or an unclean early drop does.
+    assert_eq!(
+        pr_check.errors_recorded.load(Ordering::Relaxed),
+        0,
+        "normal completion must not record an error"
+    );
 }
 
 // ---- Requirement 6: aggregate path keeps materializing (unchanged content) -
@@ -541,7 +548,10 @@ fn count_value(batch: &RecordBatch) -> i64 {
 }
 
 /// A cancelled stream (one batch read, then dropped) attributes exactly the
-/// emitted prefix — not the full table.
+/// emitted prefix — not the full table, and records exactly ONE error (roborev
+/// round 4: pre-change a disconnect surfaced as `aborted` through the handler's
+/// `Err` path and hit the same error-observability hook as any other failure —
+/// `Drop` must reproduce that, not let a disconnect vanish from the signal).
 #[test]
 fn metrics_attribute_emitted_prefix_on_cancel() {
     let n = 60;
@@ -578,4 +588,10 @@ fn metrics_attribute_emitted_prefix_on_cancel() {
         "cancelled stream attributes only the emitted prefix"
     );
     assert!(rows < n as u64);
+    assert_eq!(
+        pr_check.errors_recorded.load(Ordering::Relaxed),
+        1,
+        "an early drop (client disconnect) must record exactly one error, \
+         same as a returned Err used to before this rewrite"
+    );
 }

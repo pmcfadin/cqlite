@@ -404,9 +404,32 @@ impl Drop for MeteredDoGetStream {
         // immutably while `finalize` needs `&mut self`).
         let span = self.span.clone();
         let _entered = span.enter();
+
+        // Roborev round 4: `self.metrics` is still `Some` here ONLY when this
+        // stream is being dropped BEFORE it ever reached its own terminal poll
+        // (normal end via `Poll::Ready(None)`, or an error via
+        // `Poll::Ready(Some(Err(_)))`) — i.e. an unclean early drop, the client
+        // disconnecting mid-stream. Both of those poll_next arms call
+        // `finalize`, which `take()`s `metrics`, so a stream that already ended
+        // (successfully or with a recorded error) always has `metrics == None`
+        // by the time `Drop` runs — this check can never double-record.
+        //
+        // Pre-change, a disconnect surfaced as `aborted` through the handler's
+        // `Err` path and hit `record_status_error` there; the streaming rewrite
+        // must not let that vanish from the flight error-rate signal / RPC-span
+        // error marking just because the failure now arrives via `Drop` instead
+        // of a returned `Err`.
+        if self.metrics.is_some() {
+            let status =
+                Status::aborted("do_get stream dropped before completion (client disconnected)");
+            crate::obs::record_status_error(&status);
+            self.probe.errors_recorded.fetch_add(1, Ordering::Relaxed);
+        }
+
         // Early drop (client disconnect): attribute the emitted prefix, then the
-        // still-armed guard cancels the merge. `finalize` is idempotent, so a
-        // stream that already ended normally records nothing more here.
+        // still-armed guard cancels the merge (dropped as a struct field right
+        // after this fn body runs). `finalize` is idempotent, so a stream that
+        // already ended normally records nothing more here.
         self.finalize(false);
     }
 }

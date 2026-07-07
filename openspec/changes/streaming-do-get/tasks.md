@@ -86,6 +86,27 @@
       whole `.await` unchanged. Pure refactor — no behavior/signature change, so
       all existing tests (incl. the round-2 F1 tests) cover it unchanged;
       `cargo test -p cqlite-flight` stayed at 151 passed.
+- [x] 3.8 Review-first fix round 4 (roborev, 1 blocker + 1 triaged NIT deferred
+      to a follow-up issue, not fixed): **blocker** — an early stream drop
+      (client disconnect) finalized `RpcMetrics` but never called
+      `record_status_error`, so a disconnect vanished from the flight error-rate
+      signal / RPC-span error marking (pre-change a disconnect surfaced as
+      `aborted` through the handler's `Err` path and DID hit that hook). Fixed
+      in `MeteredDoGetStream`'s `Drop`: `self.metrics.is_some()` at drop-time
+      distinguishes an unclean early drop (neither `poll_next` terminal arm ran)
+      from an already-finalized stream (normal end or an already-recorded
+      mid-stream error) — idempotent via the same `metrics.take()` guard
+      `finalize` already used, so no double-recording. Extended
+      `metrics_attribute_emitted_prefix_on_cancel` (asserts `errors_recorded ==
+      1` on early drop) and `metrics_parity_on_full_consumption` (asserts
+      `errors_recorded == 0` on normal completion); the existing panic test's
+      `errors_recorded == 1` assertion continues to pass unchanged (no double
+      count from the later `Drop`). **NIT, deferred** —
+      `producer.rs` `data_paths()`/`table_base_dir()`'s `read_dir` calls are not
+      cancellation-aware; NOT a regression (pre-change resolution was equally
+      uncancellable inside the same blocking task) and enumeration is
+      milliseconds vs multi-second merges — left as-is, to be batched into a
+      follow-up issue at merge time per the nit-batching policy.
 
 ## 4. Verification & delivery
 
