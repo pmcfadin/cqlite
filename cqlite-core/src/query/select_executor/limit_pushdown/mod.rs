@@ -106,9 +106,12 @@ impl SelectExecutor {
     ///
     /// Some [`scan_stream`](crate::storage::StorageEngine::scan_stream) branches
     /// PRE-MATERIALIZE the whole reconciled result before returning the channel —
-    /// the `write-support` cross-generation merge (more than one generation + a
-    /// resolved schema, via `merge_generations_for_read`) and the whole-scan
-    /// `tombstones` build. For those the storage layer decodes the ENTIRE table, so
+    /// any BTI (`da`) reader (whose trie-walk `bti_scan_with_metadata` decodes the
+    /// whole index-less reconciled table before streaming) and the whole-scan
+    /// `tombstones` build. (The `write-support` cross-generation merge is NOT one:
+    /// since #1579 it streams lazily via `stream_generations_for_read`, so a bounded
+    /// consumer decode-stops there.) For the pre-materializing branches the storage
+    /// layer decodes the ENTIRE table, so
     /// the lazy per-received-row accounting below would under-report
     /// `QUERY_ROWS_SCANNED` to ~`cap`. This method asks the storage layer
     /// ([`scan_stream_materializes`](crate::storage::StorageEngine::scan_stream_materializes),
@@ -179,11 +182,13 @@ impl SelectExecutor {
         // The lazy fast path below assumes `scan_stream` is LAZY: it charges
         // `context.scan_rows` per RECEIVED row and drops the stream at the cap, so
         // dropping the channel stops the producer decoding the tail. That is TRUE
-        // only for the genuinely-streaming single-generation merge. But some
-        // `scan_stream` branches PRE-MATERIALIZE the entire reconciled result before
-        // handing back the channel — the `write-support` cross-generation merge
-        // (`readers.len() > 1 && schema present`, via `merge_generations_for_read`)
-        // and the whole-scan `tombstones` build. For those the storage layer decodes
+        // for the genuinely-streaming single-generation merge AND, since #1579, for
+        // the lazy `write-support` cross-generation merge (which streams via
+        // `generation_merge::stream_generations_for_read`). But some `scan_stream`
+        // branches PRE-MATERIALIZE the entire reconciled result before handing back
+        // the channel — any BTI (`da`) reader (trie-walk `bti_scan_with_metadata`
+        // decodes the whole index-less table before streaming) and the whole-scan
+        // `tombstones` build. For those the storage layer decodes
         // the ENTIRE table regardless of the cap, so consuming lazily and charging
         // per-received-row would report only ~`cap` rows to `QUERY_ROWS_SCANNED`
         // while the true decode work is the full table — a metric regression.

@@ -1743,9 +1743,10 @@ impl SSTableManager {
     ///   the trie-walk `bti_scan_with_metadata`, which fully materializes the
     ///   (index-less) reconciled table before streaming — so a bounded consumer
     ///   never decode-stops for a BTI table, regardless of generation count;
-    /// * the default (non-`tombstones`) build additionally materializes the
-    ///   `write-support` cross-generation reconciliation branch, taken when
-    ///   `resolve_table_readers(table).len() > 1 && schema.is_some()`.
+    /// * the default (non-`tombstones`) build's `write-support` cross-generation
+    ///   branch is LAZY since #1579 (streams via
+    ///   `generation_merge::stream_generations_for_read`), so a bounded consumer
+    ///   DOES decode-stop there — that branch is NOT reported as materializing.
     #[cfg(feature = "tombstones")]
     pub async fn scan_stream_materializes(
         &self,
@@ -1762,7 +1763,7 @@ impl SSTableManager {
     pub async fn scan_stream_materializes(
         &self,
         table_id: &TableId,
-        schema: Option<&crate::schema::TableSchema>,
+        _schema: Option<&crate::schema::TableSchema>,
     ) -> bool {
         let readers = self.resolve_table_readers(table_id).await;
 
@@ -1775,15 +1776,20 @@ impl SSTableManager {
             return true;
         }
 
-        // Only the write-support cross-generation merge branch pre-materializes,
-        // and only when it is actually taken: more than one generation AND a
-        // resolved schema (the exact guard `scan_stream` re-uses from `scan`).
-        #[cfg(feature = "write-support")]
-        if schema.is_some() {
-            return readers.len() > 1;
-        }
-        #[cfg(not(feature = "write-support"))]
-        let _ = schema;
+        // Issue #1579 / D3 (roborev job 3669, Medium): the `not(tombstones)`
+        // write-support multi-generation branch NO LONGER pre-materializes. Since
+        // #1579 `scan_stream` routes the cross-generation case through the LAZY,
+        // backpressure-bounded `generation_merge::stream_generations_for_read`
+        // (`KWayMerger` driven on a blocking task, live rows fed STRAIGHT into the
+        // bounded channel) — NOT the materializing `merge_generations_for_read`. The
+        // merger reconciles every generation for a partition at the moment its key is
+        // stepped (LWW + tombstone shadowing applied before emission) and emits
+        // partitions in strictly increasing `(token, key)` order, so a bounded LIMIT
+        // consumer can decode-stop after the authoritative first `cap` rows. Returning
+        // `false` restores D1's decode-stop for multi-gen LIMIT and makes the
+        // per-received-row `QUERY_ROWS_SCANNED` accounting MORE accurate (only ~`cap`
+        // rows decoded). BTI is still handled above (`true`) — its own branch
+        // materializes regardless of generation count.
         false
     }
 

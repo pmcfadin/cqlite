@@ -491,26 +491,37 @@ fn materialized_uncapped_counts_and_returns_all_accepted() {
     );
 }
 
-// ── Multi-generation pre-materializing accounting (issue #1577 roborev
-//    round-4 finding) ─────────────────────────────────────────────────────
+// ── Multi-generation LIMIT decode-stop (issue #1577; roborev job 3669, Medium)
+//    ───────────────────────────────────────────────────────────────────────
 //
-// ORIGINAL BUG: `capped_fallback_scan`'s "trusted full-cap stream fast path"
-// assumed `scan_stream` is LAZY and charged `scan_rows` per RECEIVED row,
-// stopping at the cap. But the `write-support` cross-generation `scan_stream`
-// branch (>1 generation + schema present) PRE-MATERIALIZES the entire
-// reconciled result via `merge_generations_for_read` before returning the
-// channel. So a multi-generation `SELECT ... LIMIT n` decoded the WHOLE table
-// but `QUERY_ROWS_SCANNED` reported only ~n — a metric regression.
+// HISTORY: roborev round-4 flagged that `capped_fallback_scan`'s "trusted
+// full-cap stream fast path" charged `scan_rows` per RECEIVED row while the
+// then-current `write-support` cross-generation `scan_stream` branch
+// PRE-MATERIALIZED the whole reconciled table (via `merge_generations_for_read`)
+// before returning the channel — so a multi-generation `LIMIT n` decoded the
+// WHOLE table but `QUERY_ROWS_SCANNED` reported only ~n. That was fixed by
+// routing multi-gen through the materializing accounting path.
 //
-// This test builds a REAL 2-generation table (write path is byte-parity with
+// SINCE #1579 (D3) `scan_stream` no longer pre-materializes the multi-generation
+// case: it streams LAZILY via `generation_merge::stream_generations_for_read`
+// (the `KWayMerger` driven on a blocking task, feeding reconciled partitions
+// STRAIGHT into the bounded channel). So `scan_stream_materializes` returning
+// `true` for multi-gen became a STALE over-conservative default that needlessly
+// forced `capped_fallback_scan` through the full materializing `scan`, throwing
+// away D1's decode-stop. The Medium fix returns `false` for that arm.
+//
+// This test builds a REAL multi-generation table (write path is byte-parity with
 // Cassandra, M5), calls `capped_fallback_scan` directly with a resolved schema,
-// and asserts the scan-work metric charges the FULL decoded count (not ~cap)
-// while the returned window stays correctly capped. It complements the
-// result-parity coverage in `tests/issue_1577_capped_fallback_branches.rs`
-// (which cannot observe `context.scan_rows`).
+// and proves the multi-gen LIMIT now DECODE-STOPS: the scan-work metric is
+// BOUNDED by the cap (NOT the full decoded count), the returned window equals the
+// authoritative oracle prefix, and per-row build work stays capped. The vacuity
+// guard now asserts `scan_stream_materializes == false` — the exact condition the
+// fix flipped; if it regressed to `true` this test would fail loudly rather than
+// pass vacuously. Complements the result-parity coverage in
+// `tests/issue_1577_capped_fallback_branches.rs`.
 #[cfg(feature = "write-support")]
 #[tokio::test]
-async fn multi_generation_capped_scan_charges_full_decoded_count() {
+async fn multi_generation_capped_scan_decode_stops() {
     use crate::query::select_executor::SelectExecutor;
     use crate::schema::{Column, KeyColumn, SchemaManager, TableSchema};
     use crate::storage::write_engine::{
@@ -615,24 +626,28 @@ async fn multi_generation_capped_scan_charges_full_decoded_count() {
     let schema = items_schema();
     let table_id = TableId::new(format!("{KEYSPACE}.{TABLE}"));
 
-    // Guard: the storage layer must report that `scan_stream` PRE-MATERIALIZES
-    // for this multi-generation + schema table — the exact condition the fix
-    // routes on. If this ever became false the test would be vacuous.
+    // Guard: the storage layer must report that `scan_stream` does NOT
+    // pre-materialize for this multi-generation + schema table — the exact
+    // condition the Medium fix flipped (it now streams lazily via
+    // `stream_generations_for_read`). If this regressed to `true` the multi-gen
+    // decode-stop this test proves could not happen, so this asserts non-vacuity.
     assert!(
-        storage
+        !storage
             .scan_stream_materializes(&table_id, Some(&schema))
             .await,
-        "multi-generation + schema table must pre-materialize scan_stream \
-             (else the round-4 metric bug cannot occur and this test is vacuous)"
+        "multi-generation + schema table must NOT pre-materialize scan_stream \
+             since #1579 (it streams lazily), else the decode-stop cannot occur \
+             and this test is vacuous"
     );
 
-    // Oracle: the authoritative reconciled decode count (what the storage layer
-    // actually decodes) — exact, never `>=`, so a 0/low-rows regression fails.
-    let decoded = storage
+    // Oracle: the authoritative reconciled rows (what the non-pushdown path
+    // returns), in token order — exact count, never `>=`, so a 0/low-rows read
+    // regression fails loudly.
+    let oracle_rows = storage
         .scan(&table_id, None, None, None, Some(&schema))
         .await
-        .expect("oracle scan")
-        .len() as u64;
+        .expect("oracle scan");
+    let decoded = oracle_rows.len() as u64;
     assert_eq!(
         decoded,
         (N_GENS * ROWS_PER_GEN) as u64,
@@ -640,8 +655,10 @@ async fn multi_generation_capped_scan_charges_full_decoded_count() {
     );
     assert!(
         decoded > CAP as u64,
-        "the table must hold more than `cap` rows to expose the metric bug"
+        "the table must hold more than `cap` rows for the decode-stop to be observable"
     );
+    let oracle_prefix_keys: Vec<RowKey> =
+        oracle_rows.iter().take(CAP).map(|(k, _)| k.clone()).collect();
 
     let schema_mgr = Arc::new(
         SchemaManager::new_with_storage(Arc::clone(&storage), &config)
@@ -667,27 +684,43 @@ async fn multi_generation_capped_scan_charges_full_decoded_count() {
         .await
         .expect("capped fallback scan");
 
-    // RESULTS stay CAPPED — the fix must not change LIMIT/OFFSET semantics.
+    // RESULTS stay CAPPED and are PREFIX-CORRECT — the fix must not change
+    // LIMIT/OFFSET semantics. The returned window equals the first `cap` rows of
+    // the authoritative token-ordered oracle (the lazy `KWayMerger` reconciles
+    // every generation for a partition before emission, and later stream positions
+    // are strictly higher tokens, so the first `cap` rows ARE the authoritative
+    // prefix — the `prefix_is_token_ordered` guard passes by construction).
     assert_eq!(
         out.len(),
         CAP,
         "the returned window must remain bounded by the cap"
     );
-    // ROUND-4 FIX: the multi-generation stream pre-materialized the whole table,
-    // so `scan_rows` (→ QUERY_ROWS_SCANNED) must charge the FULL decoded count,
-    // NOT ~cap as the lazy per-received-row fast path did before the fix.
+    let out_keys: Vec<RowKey> = out.iter().map(|r| r.key.clone()).collect();
     assert_eq!(
-        ctx.scan_rows, decoded,
-        "multi-generation capped scan must charge the FULL decoded count to \
-             QUERY_ROWS_SCANNED, not the LIMIT cap"
+        out_keys, oracle_prefix_keys,
+        "multi-generation capped result must equal the first `cap` rows of the \
+             authoritative oracle, in token order"
+    );
+    // MEDIUM FIX (job 3669): the multi-generation stream is LAZY since #1579, so
+    // the LIMIT DECODE-STOPS — `scan_rows` (→ QUERY_ROWS_SCANNED) is BOUNDED by the
+    // cap, NOT the full decoded count. This is the exact opposite of the round-4
+    // pre-materializing assertion, and is safe because accounting now reflects the
+    // TRUE (bounded) decode work.
+    assert!(
+        ctx.scan_rows <= CAP as u64,
+        "multi-generation capped scan must DECODE-STOP: scan_rows ({}) must be \
+             bounded by the cap ({CAP}), not the full decoded count ({decoded})",
+        ctx.scan_rows
     );
     assert!(
-        ctx.scan_rows > out.len() as u64,
-        "scan-work metric must exceed the capped/returned row count"
+        ctx.scan_rows < decoded,
+        "the decode-stop must charge strictly fewer rows ({}) than the full table \
+             ({decoded}) — proving the tail was never decoded",
+        ctx.scan_rows
     );
-    // Per-row BUILD work stays bounded by the cap.
+    // Per-row BUILD work also stays bounded by the cap.
     assert_eq!(
         ctx.rows_processed, CAP as u64,
-        "per-row build work stays bounded by the cap even though scan_rows is full"
+        "per-row build work stays bounded by the cap"
     );
 }
