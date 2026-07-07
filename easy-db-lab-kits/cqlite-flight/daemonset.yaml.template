@@ -50,6 +50,10 @@ spec:
       containers:
         - name: cqlite-flight
           image: "ghcr.io/pmcfadin/cqlite-flight:__TAG__"
+          # Always: the harness iterates on MOVING tags (dev, latest). The k8s
+          # default (IfNotPresent for non-latest tags) would pin the first pull
+          # of a reused tag forever and silently ignore rebuilt dev images.
+          imagePullPolicy: Always
           args:
             - "--data-dir=/data"
             - "--listen=0.0.0.0:__FLIGHT_PORT__"

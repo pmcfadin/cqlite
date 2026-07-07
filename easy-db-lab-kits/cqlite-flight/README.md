@@ -155,3 +155,24 @@ never by resource name, matching the issue's requirement.
   Re-run the dry-run against the real lab cluster before first use.
 - **GHCR image pull**: the kit assumes the `ghcr.io/pmcfadin/cqlite-flight`
   package is public (no `imagePullSecrets` wired) per the image's own README.
+
+## Fast iteration with a dev image (outside the release train)
+
+When the harness surfaces a flight/core bug, iterate WITHOUT minting release
+versions — the `flight-image.yml` workflow's free-form `image_tag` dispatch is
+the dev channel, and it builds from any ref:
+
+```bash
+# 1. Build + push ghcr.io/pmcfadin/cqlite-flight:dev from your fix branch
+gh workflow run flight-image.yml --repo pmcfadin/cqlite \
+  --ref <fix-branch> -f image_tag=dev
+
+# 2. Roll the DaemonSet onto the rebuilt image (imagePullPolicy is Always,
+#    so a restart re-pulls the moving tag)
+kubectl rollout restart daemonset/cqlite-flight
+kubectl rollout status daemonset/cqlite-flight --timeout=180s
+```
+
+`dev` never touches `latest` or any `vX.Y*` tag; release images stay on the
+tag-push / `version`-dispatch path. If two people iterate at once, use
+distinct tags (`-f image_tag=dev-<yourname>`).
