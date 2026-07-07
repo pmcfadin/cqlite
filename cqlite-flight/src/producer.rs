@@ -10,9 +10,15 @@
 //! clustering and regular columns taken from the decoded cells, row/cell
 //! tombstones suppressed.
 //!
-//! Phase 1 collects all batches in memory; this matches the merge engine, which
-//! already drains every input SSTable into memory (see `merge.rs` issue #591).
-//! True streaming is a later optimization.
+//! The retained `produce`/`produce_cancellable` collect all batches into a `Vec`
+//! (the byte-identity parity oracle + aggregate path). The streaming `do_get`
+//! path (issue #1476) drives the SAME merge through [`produce_streaming`], which
+//! emits each batch into a bounded channel via a [`BatchSink`] as it is produced
+//! — bounding resident payload to the channel capacity, independent of result
+//! size. Batch emission is factored behind [`BatchSink`] so both paths share one
+//! merge loop.
+//!
+//! [`produce_streaming`]: MergeProducer::produce_streaming
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +81,18 @@ pub enum ProducerError {
     UnsafePath {
         /// Which ticket field produced the escaping path (`table`/`snapshot`).
         field: &'static str,
+    },
+    /// The merge panicked on the blocking pool while streaming (issue #1476,
+    /// roborev B1). Forwarded into the channel as a terminal error so a
+    /// mid-stream panic surfaces as a gRPC `internal` `Status` — never a
+    /// silently truncated, clean `Ok` end-of-stream (a dropped `tx` from a
+    /// panicking task looks identical to "the merge finished" to a consumer
+    /// unless this is forwarded explicitly).
+    #[error("merge task panicked: {message}")]
+    Panicked {
+        /// Best-effort panic payload message (`&str`/`String` payloads are
+        /// extracted verbatim; anything else is a fixed placeholder).
+        message: String,
     },
 }
 
@@ -295,6 +313,32 @@ impl PartitionStepper for KWayMerger {
     }
 }
 
+/// Sink for record batches emitted by the merge loop (issue #1476).
+///
+/// The merge is driven once by [`MergeProducer::drive_merge`]; the sink decides
+/// what happens to each batch. The retained collect path uses [`CollectSink`]
+/// (push into a `Vec`, the byte-identity parity oracle); the streaming `do_get`
+/// path (see `crate::streaming`) sends each batch into a bounded channel as it is
+/// produced. A sink `emit` may report [`ProducerError::Cancelled`] to stop the
+/// merge — the streaming sink returns it when the consumer (client) is gone.
+pub(crate) trait BatchSink {
+    /// Accept one produced batch, or return [`ProducerError::Cancelled`] to stop
+    /// the merge (the consumer has disconnected).
+    fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError>;
+}
+
+/// Collect-into-`Vec` sink — the retained, byte-identical parity path used by
+/// [`MergeProducer::produce`]/[`produce_cancellable`](MergeProducer::produce_cancellable),
+/// the aggregate route, and the existing tests. Never signals cancellation.
+pub(crate) struct CollectSink<'a>(pub(crate) &'a mut Vec<RecordBatch>);
+
+impl BatchSink for CollectSink<'_> {
+    fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError> {
+        self.0.push(batch);
+        Ok(())
+    }
+}
+
 impl MergeProducer {
     /// Build an unfiltered producer for `schema` (emits all rows and columns).
     pub fn new(schema: TableSchema, batch_size: usize) -> Result<Self, ProducerError> {
@@ -419,26 +463,117 @@ impl MergeProducer {
         self.merge_paths(paths, &CancelFlag::new())
     }
 
+    /// Resolve and token-prune the SSTable `Data.db` paths for `source`.
+    ///
+    /// Surfaces the discovery `NotFound` (missing table) eagerly and performs the
+    /// (potentially I/O-heavy) `Summary.db` token prune, so the streaming `do_get`
+    /// path (issue #1476) can settle these fallible/blocking steps BEFORE opening
+    /// the response stream — a missing table stays a clean `not_found`, not a
+    /// mid-stream error. Runs blocking filesystem I/O; call off the async reactor.
+    pub fn resolve_paths(&self, source: &dyn SstableSource) -> Result<Vec<PathBuf>, ProducerError> {
+        self.resolve_paths_cancellable(source, &CancelFlag::new())
+    }
+
+    /// Like [`Self::resolve_paths`], but cooperatively cancellable (issue #1476,
+    /// roborev F1): the pre-change single merge `spawn_blocking` was covered by a
+    /// `CancelGuard` across its ENTIRE await, so a client disconnect during that
+    /// call stopped the work. The streaming rewrite's separate eager-setup phase
+    /// (discovery + token prune, which can be slow over MANY SSTables) needs the
+    /// same coverage — otherwise a disconnect before the response stream even
+    /// exists leaves this phase running to completion, pinning a blocking-pool
+    /// thread under churn. Polls `cancel` before listing and (via
+    /// [`Self::prune_paths_cancellable`]) once per SSTable during the prune.
+    pub fn resolve_paths_cancellable(
+        &self,
+        source: &dyn SstableSource,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<PathBuf>, ProducerError> {
+        if cancel.is_cancelled() {
+            return Err(ProducerError::Cancelled);
+        }
+        let paths = source.data_paths()?;
+        self.prune_paths_cancellable(paths, cancel)
+    }
+
+    /// Merge already-resolved (data-listed + token-pruned) `paths` into a `Vec`
+    /// of Arrow batches, cooperatively cancellable. Used by the aggregate `do_get`
+    /// route, whose bounded per-group output stays materialized (issue #1476).
+    pub fn produce_from_resolved(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
+        self.merge_paths(paths, cancel)
+    }
+
+    /// Whether this producer emits partial-aggregate rows (issue #841). The
+    /// streaming `do_get` path keeps aggregation materialized (bounded output).
+    pub fn is_aggregating(&self) -> bool {
+        self.agg.is_some()
+    }
+
+    /// Stream the row-merge of already-resolved `paths` into `sink` (issue #1476),
+    /// one batch at a time, instead of collecting into a `Vec`. `paths` MUST come
+    /// from [`Self::resolve_paths`] (already token-pruned). The merge stops when
+    /// `sink.emit` reports [`ProducerError::Cancelled`] (client gone) or `cancel`
+    /// is set — both within a bounded number of merge steps.
+    ///
+    /// Aggregation is NOT streamed here (its output is bounded); the service routes
+    /// aggregating tickets to [`Self::produce_from_resolved`]. Called defensively,
+    /// this returns without emitting for an aggregating producer.
+    pub(crate) fn produce_streaming(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+        sink: &mut dyn BatchSink,
+    ) -> Result<(), ProducerError> {
+        if self.agg.is_some() || paths.is_empty() {
+            return Ok(());
+        }
+        let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        self.drive_merge(&mut merger, cancel, sink)
+    }
+
     /// Prune `paths` to those whose token span overlaps the spec's token range.
     ///
     /// Returns `paths` unchanged when there is no token filter. A path is kept
     /// (fail open) whenever its sibling `Summary.db` is missing or unreadable, so
     /// pruning can never drop an SSTable that might contain matching partitions.
     pub(crate) fn prune_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, ProducerError> {
+        self.prune_paths_cancellable(paths, &CancelFlag::new())
+    }
+
+    /// Like [`Self::prune_paths`], but polls `cancel` before each per-SSTable
+    /// `Summary.db` read (issue #1476, roborev F1) — the only potentially I/O-heavy
+    /// per-item work in path resolution, and so the natural cancellation boundary
+    /// for a table with many SSTables. A fresh, never-cancelled [`CancelFlag`]
+    /// (as `prune_paths` passes) makes this identical to the original
+    /// filter-based implementation.
+    pub(crate) fn prune_paths_cancellable(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<PathBuf>, ProducerError> {
         let Some(token) = &self.spec.token else {
             return Ok(paths);
         };
 
         let total = paths.len();
-        let kept: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|path| match sstable_token_span(path) {
+        let mut kept: Vec<PathBuf> = Vec::with_capacity(total);
+        for path in paths {
+            if cancel.is_cancelled() {
+                return Err(ProducerError::Cancelled);
+            }
+            let keep = match sstable_token_span(&path) {
                 // Span known: keep only if it overlaps the split's range.
                 Some((min_token, max_token)) => token.overlaps(min_token, max_token),
                 // Span unknown (missing/unreadable Summary.db): fail open.
                 None => true,
-            })
-            .collect();
+            };
+            if keep {
+                kept.push(path);
+            }
+        }
 
         tracing::debug!(
             kept = kept.len(),
@@ -470,7 +605,8 @@ impl MergeProducer {
         }
 
         let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
-        self.drive_merge(&mut merger, cancel, &mut batches)?;
+        let mut sink = CollectSink(&mut batches);
+        self.drive_merge(&mut merger, cancel, &mut sink)?;
         Ok(batches)
     }
 
@@ -493,7 +629,7 @@ impl MergeProducer {
         &self,
         merger: &mut dyn PartitionStepper,
         cancel: &CancelFlag,
-        batches: &mut Vec<RecordBatch>,
+        sink: &mut dyn BatchSink,
     ) -> Result<(), ProducerError> {
         let limit = self.spec.limit;
         // A zero cap produces no rows without touching the merge.
@@ -535,7 +671,7 @@ impl MergeProducer {
                 buffer.push(row);
                 emitted += 1;
                 if buffer.len() >= self.batch_size {
-                    batches.push(self.flush_buffer(&mut buffer)?);
+                    sink.emit(self.flush_buffer(&mut buffer)?)?;
                 }
                 // LIMIT reached (counted post-filter): stop the merge early.
                 if let Some(cap) = limit {
@@ -547,7 +683,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            batches.push(self.flush_buffer(&mut buffer)?);
+            sink.emit(self.flush_buffer(&mut buffer)?)?;
         }
         Ok(())
     }
@@ -894,9 +1030,13 @@ mod tests {
         let cancelled = CancelFlag::new();
         cancelled.cancel();
         let mut batches = Vec::new();
-        let err = producer
-            .drive_merge(&mut counting, &cancelled, &mut batches)
-            .expect_err("pre-cancelled merge aborts");
+        // Scope the sink so its `&mut batches` borrow ends before we inspect it.
+        let err = {
+            let mut sink = CollectSink(&mut batches);
+            producer
+                .drive_merge(&mut counting, &cancelled, &mut sink)
+                .expect_err("pre-cancelled merge aborts")
+        };
 
         assert!(
             matches!(err, ProducerError::Cancelled),
@@ -909,6 +1049,76 @@ mod tests {
         assert!(
             batches.is_empty(),
             "no output batch is produced when cancelled before the first step"
+        );
+    }
+
+    // ---- Issue #1476 roborev F1: cancellable path resolution/prune ------------
+
+    /// [`MergeProducer::resolve_paths_cancellable`] must reject an
+    /// already-cancelled flag BEFORE even listing the directory — the fast-path
+    /// check `do_get_setup`'s eager phase relies on to stop instantly on a
+    /// disconnect that fires the setup-phase `CancelGuard` before the blocking
+    /// task starts.
+    #[test]
+    fn resolve_paths_cancellable_rejects_before_listing() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+
+        let cancelled = CancelFlag::new();
+        cancelled.cancel();
+        let err = producer
+            .resolve_paths_cancellable(&DirSource::new(&dir), &cancelled)
+            .expect_err("pre-cancelled resolution aborts");
+        assert!(
+            matches!(err, ProducerError::Cancelled),
+            "expected ProducerError::Cancelled, got {err:?}"
+        );
+    }
+
+    /// [`MergeProducer::prune_paths_cancellable`] must stop BEFORE reading any
+    /// SSTable's `Summary.db` when pre-cancelled — proven against a REAL
+    /// multi-SSTable, token-filtered spec where an uncancelled run would read
+    /// every one (same token-filter setup as the plain `prune_paths` coverage),
+    /// so this isn't a vacuous check against an empty/no-op path.
+    #[test]
+    fn prune_paths_cancellable_stops_before_any_summary_read_when_pre_cancelled() {
+        use crate::ticket::FlightTicket;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        // Two SSTables so the prune loop has more than one item to (not) visit.
+        let (_temp, _data, dir) =
+            build_sstables(&schema, vec![rows[..2].to_vec(), rows[2..].to_vec()]);
+
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MIN),
+                token_end: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+        assert_eq!(paths.len(), 2, "fixture has two SSTables to prune over");
+
+        // Baseline: uncancelled, a full-ring token filter keeps both.
+        let cancelled = CancelFlag::new();
+        let kept = producer
+            .prune_paths_cancellable(paths.clone(), &cancelled)
+            .expect("uncancelled prune succeeds");
+        assert_eq!(kept.len(), 2, "full-ring token filter keeps every SSTable");
+
+        // Pre-cancelled: must abort before visiting the first path.
+        cancelled.cancel();
+        let err = producer
+            .prune_paths_cancellable(paths, &cancelled)
+            .expect_err("pre-cancelled prune aborts");
+        assert!(
+            matches!(err, ProducerError::Cancelled),
+            "expected ProducerError::Cancelled, got {err:?}"
         );
     }
 
