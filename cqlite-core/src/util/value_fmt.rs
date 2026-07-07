@@ -287,17 +287,16 @@ impl ValueFormatter {
             return "0".to_string();
         }
 
-        // Fail-closed bound (issue #1754), kept consistent with the Node binding's
+        // Sanity ceiling (issue #1754), kept consistent with the Node binding's
         // `decimal_to_string`. A Cassandra `decimal` unscaled value is a Java
-        // BigInteger; legitimate financial/scientific decimals carry at most a few
-        // dozen significant digits, so a 1024-byte magnitude (up to ~2466 decimal
-        // digits) is orders of magnitude beyond any real value and cannot reject
-        // one. An oversized magnitude only arises from a corrupt SSTable and would
-        // otherwise cost a `BigInt::from_*_bytes` + `to_string` base conversion
-        // that is superlinear in the byte length. Render a bounded, exact hex
-        // fallback WITHOUT the expensive decimal conversion. Infallible signature:
-        // this stays total (never panics).
-        const DECIMAL_MAX_UNSCALED_BYTES: usize = 1024;
+        // BigInteger, so it is legitimately arbitrary-precision; we must NOT call a
+        // merely-large-but-well-formed value "corrupt". The only hard cost is the
+        // single `BigInt` → decimal-string base conversion, which is superlinear in
+        // the digit count. A 32 KB magnitude (~79k decimal digits) still converts
+        // in tens of milliseconds; only a genuinely pathological magnitude beyond
+        // that could stall a render, so fail closed ONLY above the ceiling.
+        // Infallible signature: this stays total (never panics).
+        const DECIMAL_MAX_UNSCALED_BYTES: usize = 32 * 1024;
         if unscaled.len() > DECIMAL_MAX_UNSCALED_BYTES {
             return format!(
                 "<corrupt-decimal:scale={scale},unscaled_len={}bytes>",
@@ -305,40 +304,44 @@ impl ValueFormatter {
             );
         }
 
-        // Convert unscaled bytes to bigint
-        let is_negative = (unscaled[0] & 0x80) != 0;
-        let bigint = if is_negative {
-            // Two's complement for negative
-            num_bigint::BigInt::from_signed_bytes_be(unscaled)
-        } else {
-            num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, unscaled)
-        };
-
+        // Convert the unscaled bytes to a BigInt. Cassandra encodes the unscaled
+        // value as a two's-complement big-endian BigInteger, which is exactly what
+        // `from_signed_bytes_be` decodes (positive when the high bit is clear).
+        let bigint = num_bigint::BigInt::from_signed_bytes_be(unscaled);
+        // ONE base-10 conversion — the sole superlinear step; every branch below is
+        // a single O(digits) pass over the resulting string (no repeated division,
+        // no scale-width padding blowup).
         let mut decimal_str = bigint.to_string();
         let is_neg = decimal_str.starts_with('-');
         if is_neg {
             decimal_str = decimal_str[1..].to_string();
         }
 
-        // Fail-closed guard (issue #1754). A corrupt SSTable can carry a
-        // pathological DECIMAL `scale`; used below as a `String::repeat` count or
-        // `format!` padding it would allocate an unbounded string (and `(-scale)`
-        // would overflow-panic at `scale == i32::MIN`). Real decimals are tiny, so
-        // an absurd scale is rendered in scientific-ish form rather than
-        // materializing millions of zero characters. `unsigned_abs()` avoids the
-        // negation overflow. This keeps display total (never panics/aborts) while
-        // leaving every legitimate value byte-identical.
+        // Faithful, bounded exponent form for over-bound cases (issue #1754). Two
+        // triggers, both of which would otherwise require an O(digits)-wide
+        // positional expansion:
+        //   - a large-but-valid unscaled magnitude (thousands+ of digits), and
+        //   - a pathological `scale` used as a `repeat`/padding width (which at
+        //     `scale == i32::MIN` would also overflow `(-scale)`).
+        // Rendering `<digits>e<-scale>` (value = unscaled × 10^(−scale)) preserves
+        // EVERY digit exactly with no unbounded padding. Legitimate, normal-size
+        // decimals fall through to the byte-identical positional form below.
+        const DECIMAL_POSITIONAL_MAX_BYTES: usize = 1024;
         const SCALE_RENDER_CAP: usize = 1_000_000;
-        if scale.unsigned_abs() as usize > SCALE_RENDER_CAP {
-            // Represent as "<digits>e<-scale>" (or "e<scale>" for large positive
-            // scale): exact and bounded, no unbounded padding.
-            let exp = -(scale as i64);
+        if unscaled.len() > DECIMAL_POSITIONAL_MAX_BYTES
+            || scale.unsigned_abs() as usize > SCALE_RENDER_CAP
+        {
             let body = if is_neg {
                 format!("-{decimal_str}")
             } else {
                 decimal_str
             };
-            return format!("{body}e{exp}");
+            // `unsigned_abs()`/`i64` avoid the `(-scale)` overflow at `i32::MIN`.
+            return if scale == 0 {
+                body
+            } else {
+                format!("{body}e{}", -(scale as i64))
+            };
         }
 
         // Insert decimal point based on scale
@@ -790,20 +793,56 @@ mod tests {
         );
     }
 
-    /// Issue #1754 (follow-up liveness fix): an oversized unscaled magnitude
-    /// (byte length beyond the 1024-byte cap) must be rejected FAST via the O(1)
-    /// length check, WITHOUT the superlinear `BigInt` base conversion, and must
-    /// stay total (never panics — infallible signature). A ~415 KB magnitude
-    /// (well under the old digit-oriented cap) exercises this.
+    /// Issue #1754 (follow-up correctness fix): a large-but-WELL-FORMED unscaled
+    /// magnitude (thousands of digits, above the 1024-byte positional threshold
+    /// but within the sanity ceiling) must render FAITHFULLY (precision-preserving
+    /// exponent form) and FAST — NOT be misclassified as corruption. This is the
+    /// behavior the owner mandated: an arbitrary-precision BigInteger value is not
+    /// corrupt just for being big.
     #[test]
-    fn test_decimal_oversized_unscaled_bounded_fast() {
+    fn test_decimal_large_valid_renders_faithfully_fast() {
+        // 2 KB magnitude (~4930 decimal digits): over the positional threshold,
+        // under the ceiling. 0x7f keeps the high bit clear (a large POSITIVE
+        // value; all-0xff would be two's-complement -1). Scale 4 → ×10^-4.
+        let unscaled = vec![0x7fu8; 2048];
+        let start = std::time::Instant::now();
+        let s = ValueFormatter::format_value(&Value::Decimal { scale: 4, unscaled });
+        let elapsed = start.elapsed();
+        assert!(
+            !s.starts_with("<corrupt-decimal:"),
+            "a well-formed large decimal must not be called corrupt: {s}"
+        );
+        // Precision-preserving exponent form: all significant digits + "e-4".
+        assert!(
+            s.ends_with("e-4"),
+            "expected exponent form, got: {}",
+            &s[..40]
+        );
+        let digits = s.trim_end_matches("e-4");
+        // 2 KB of 0xff is a ~4933-digit integer — every digit is preserved.
+        assert!(
+            digits.len() >= 4900 && digits.chars().all(|c| c.is_ascii_digit()),
+            "expected full digit string, got {} chars",
+            digits.len()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "expected fast single-conversion render, took {elapsed:?}"
+        );
+    }
+
+    /// Issue #1754: a genuinely pathological magnitude beyond the sanity ceiling
+    /// still fails closed FAST (O(1) length check), without the superlinear
+    /// `BigInt` base conversion. A ~415 KB magnitude exercises this.
+    #[test]
+    fn test_decimal_beyond_ceiling_bounded_fast() {
         let unscaled = vec![0xffu8; 415_000];
         let start = std::time::Instant::now();
         let s = ValueFormatter::format_value(&Value::Decimal { scale: 0, unscaled });
         let elapsed = start.elapsed();
         assert!(
             s.starts_with("<corrupt-decimal:"),
-            "oversized magnitude renders the bounded fallback: {s}"
+            "beyond-ceiling magnitude renders the bounded fallback: {s}"
         );
         assert!(
             elapsed < std::time::Duration::from_millis(500),

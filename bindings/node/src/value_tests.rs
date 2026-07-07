@@ -55,70 +55,81 @@ fn test_decimal_to_string_negative() {
     assert_eq!(decimal_to_string(2, &unscaled).unwrap(), "-1.23");
 }
 
-/// Issue #1754: a pathological positive `scale` (used directly as an unbounded
-/// `format!` padding width) must fail closed with a typed error rather than
-/// PANIC ("Formatting argument out of range"). On the napi async-worker thread
-/// that panic cannot unwind across FFI and the process `abort()`s, defeating
-/// #1440's `panic=unwind` profile. This is the direct Rust reproduction of the
-/// corrupt-DECIMAL abort; it PANICS on the pre-fix code and returns `Err` now.
+/// Issue #1754: a huge positive `scale` used to drive an unbounded `format!`
+/// padding width (PANIC "Formatting argument out of range" → napi worker abort).
+/// It is NOT corrupt — scale is just the decimal exponent — so it now renders
+/// faithfully in precision-preserving exponent form, never panicking. A tiny
+/// unscaled value (1) with scale `i32::MAX` → `1e-2147483647`.
 #[test]
-fn test_decimal_to_string_pathological_positive_scale_errors_not_panics() {
-    // A tiny 1-byte unscaled value but an absurd scale that would drive a
-    // ~2.1-billion-wide `format!("0.{digits:0>width$}")` padding.
+fn test_decimal_to_string_pathological_positive_scale_renders_exponent_form() {
     let unscaled = vec![0x01];
-    let err = decimal_to_string(i32::MAX, &unscaled)
-        .expect_err("a pathological scale must fail closed, not panic/abort");
-    let msg = err.reason.to_string();
+    let s = decimal_to_string(i32::MAX, &unscaled)
+        .expect("a huge scale must render faithfully, not panic/abort");
+    assert_eq!(s, format!("1e{}", -(i32::MAX as i64)));
+}
+
+/// Issue #1754: `scale == i32::MIN` exercises the `-(scale as i64)` widening (a
+/// plain `-scale` would overflow-panic under `overflow-checks`). Renders exact
+/// exponent form, never a panic.
+#[test]
+fn test_decimal_to_string_i32_min_scale_renders_exponent_form() {
+    let unscaled = vec![0x01];
+    let s = decimal_to_string(i32::MIN, &unscaled)
+        .expect("i32::MIN scale must render without overflow panic");
+    assert_eq!(s, format!("1e{}", -(i32::MIN as i64)));
+}
+
+/// Issue #1754: a genuinely pathological unscaled magnitude beyond the sanity
+/// ceiling still fails closed rather than stalling the event loop. ~1 MB of
+/// unscaled bytes is far above the 32 KB ceiling.
+#[test]
+fn test_decimal_to_string_beyond_ceiling_errors() {
+    let unscaled = vec![0x7f; 1_000_000];
+    let err = decimal_to_string(0, &unscaled)
+        .expect_err("a magnitude beyond the ceiling must fail closed");
+    assert!(err.reason.to_string().contains("issue #1754"));
+}
+
+/// Issue #1754 (follow-up correctness fix): a large-but-WELL-FORMED unscaled
+/// magnitude (thousands of digits — over the 1024-byte positional threshold but
+/// within the sanity ceiling) must render FAITHFULLY (precision-preserving
+/// exponent form) and FAST via the single `BigInt` base conversion — NOT be
+/// misclassified as corruption. A 2 KB magnitude (~4933 digits) exercises this.
+#[test]
+fn test_decimal_to_string_large_valid_renders_faithfully_fast() {
+    // 0x7f keeps the high bit clear (large POSITIVE value; all-0xff = -1).
+    let unscaled = vec![0x7f; 2048];
+    let start = std::time::Instant::now();
+    let s = decimal_to_string(2, &unscaled)
+        .expect("a well-formed large decimal must render, not error");
+    let elapsed = start.elapsed();
+    // Exponent form: all significant digits + "e-2". Every digit preserved.
+    let digits = s.strip_suffix("e-2").expect("expected exponent form");
     assert!(
-        msg.contains("corrupt SSTable") && msg.contains("issue #1754"),
-        "expected a typed corruption error, got: {msg}"
+        digits.len() >= 4900 && digits.chars().all(|c| c.is_ascii_digit()),
+        "expected full precision-preserving digit string, got {} chars",
+        digits.len()
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "expected fast single-conversion render, took {elapsed:?}"
     );
 }
 
-/// Issue #1754: `scale == i32::MIN` exercises `unsigned_abs()` (a plain
-/// `-scale` would overflow-panic under `overflow-checks`). Still fail-closed,
-/// never a panic.
+/// Issue #1754: a ~415 KB magnitude (~1M digits) is beyond any realistic value
+/// and beyond the sanity ceiling; it fails closed FAST via the O(1) length
+/// check, before the superlinear base conversion.
 #[test]
-fn test_decimal_to_string_i32_min_scale_errors_not_panics() {
-    let unscaled = vec![0x01];
-    let err = decimal_to_string(i32::MIN, &unscaled)
-        .expect_err("i32::MIN scale must fail closed without overflow panic");
-    assert!(err.reason.to_string().contains("issue #1754"));
-}
-
-/// Issue #1754: an oversized unscaled magnitude (byte length beyond the cap)
-/// also fails closed rather than allocating an unbounded string.
-#[test]
-fn test_decimal_to_string_oversized_unscaled_errors() {
-    // ~1 MB of unscaled bytes, far above the 1024-byte cap.
-    let unscaled = vec![0x7f; 1_000_000];
-    let err = decimal_to_string(0, &unscaled)
-        .expect_err("an oversized unscaled magnitude must fail closed");
-    assert!(err.reason.to_string().contains("issue #1754"));
-}
-
-/// Issue #1754 (follow-up liveness fix): a ~415 KB unscaled magnitude PASSED the
-/// old 1M-digit cap yet drives the O(digits²) repeated-division renderer to
-/// ~1e11 u32 ops — a multi-second-to-minute freeze on the JS event-loop
-/// resolve() thread. The tightened byte-length bound must reject it FAST (an
-/// O(1) length check, before any render). We assert both the typed error AND
-/// that it completes near-instantly, which is only possible if the bound rejects
-/// before entering the quadratic loop.
-#[test]
-fn test_decimal_to_string_near_old_cap_rejected_fast_no_quadratic_render() {
-    // 415 KB → ~1M decimal digits: under the OLD 1M-digit cap, over the new
-    // 1024-byte cap. The old renderer would burn ~1e11 ops here.
+fn test_decimal_to_string_beyond_ceiling_rejected_fast() {
     let unscaled = vec![0xff; 415_000];
     let start = std::time::Instant::now();
     let err = decimal_to_string(0, &unscaled)
-        .expect_err("a magnitude above the byte cap must fail closed");
+        .expect_err("a magnitude beyond the ceiling must fail closed");
     let elapsed = start.elapsed();
     assert!(err.reason.to_string().contains("issue #1754"));
-    // The quadratic render on this input takes seconds+; an O(1) bound check is
-    // sub-millisecond. A generous ceiling still proves the loop was never entered.
     assert!(
         elapsed < std::time::Duration::from_millis(500),
-        "expected fast O(1) rejection, took {elapsed:?} — the O(n^2) renderer ran"
+        "expected fast O(1) rejection, took {elapsed:?} — the base conversion ran"
     );
 }
 

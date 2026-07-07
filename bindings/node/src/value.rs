@@ -320,26 +320,31 @@ fn varint_to_bigint(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
         .into_unknown()
 }
 
-/// Hard upper bound on the unscaled-magnitude byte length this converter will
+/// Sanity ceiling on the unscaled-magnitude byte length this converter will
 /// render (issue #1754). A Cassandra `decimal` unscaled value is a Java
-/// `BigInteger`; legitimate financial/scientific decimals carry at most a few
-/// dozen significant digits, so 1024 bytes — a magnitude up to `2^8191`, i.e. a
-/// ~2466-digit integer — is orders of magnitude beyond any real value and cannot
-/// reject one. It is, however, tight enough to bound the O(digits²)
-/// repeated-division renderer below: at the cap the render costs ~1.3M u32 ops
-/// (sub-millisecond), whereas the *old* 1M-digit cap (~415 KB of bytes) admitted
-/// magnitudes costing ~1e11 ops — a multi-second-to-minute freeze. Critically
-/// this converter runs via `row_to_object` on the JS event-loop resolve() thread
-/// (database.rs), NOT inside the catch_unwind-firewalled worker, so an oversized
-/// magnitude would freeze the Node event loop. Fail closed with a typed
-/// corruption error so the boundary surfaces a catchable JS error instead.
-const DECIMAL_MAX_UNSCALED_BYTES: usize = 1024;
+/// `BigInteger` — legitimately arbitrary-precision — so a merely-large value is
+/// NOT corrupt and must render faithfully. The only hard cost is the single
+/// `BigInt` → decimal-string base conversion (superlinear in digit count); a
+/// 32 KB magnitude (~79k digits) still converts in tens of milliseconds even in
+/// a debug build. Only a genuinely pathological magnitude beyond that could
+/// stall the JS event-loop resolve() thread (`row_to_object`, database.rs, NOT
+/// inside the catch_unwind-firewalled worker), so we fail closed with a typed
+/// corruption error ONLY above this ceiling.
+const DECIMAL_MAX_UNSCALED_BYTES: usize = 32 * 1024;
 
-/// Hard upper bound on `scale.abs()` (issue #1754). `scale` drives a `format!`
-/// padding width / leading-zero `repeat`; a corrupt absurd scale (e.g.
-/// `i32::MAX`) would panic with "Formatting argument out of range" or allocate
-/// an unbounded string. Padding up to a million zeros is linear and bounded;
-/// beyond that only a corrupt SSTable can reach, so fail closed.
+/// Byte-length threshold above which a well-formed magnitude is rendered in
+/// precision-preserving exponent form rather than an O(digits)-wide positional
+/// expansion (issue #1754). At/under 1024 bytes (~2466 digits) the positional
+/// render is cheap and byte-identical to the historical output; beyond it we
+/// emit `<digits>e<-scale>` (exact, bounded) to avoid superlinear padding work.
+const DECIMAL_POSITIONAL_MAX_BYTES: usize = 1024;
+
+/// Threshold on `scale.abs()` above which the value is rendered in exponent form
+/// instead of positional (issue #1754). `scale` would otherwise drive a
+/// `format!` padding width / leading-zero `repeat`; a huge scale (e.g.
+/// `i32::MAX`) would panic ("Formatting argument out of range") or allocate an
+/// unbounded string. Exponent form is exact and bounded, so no scale value is
+/// rejected — a well-formed decimal always renders.
 const DECIMAL_MAX_SCALE_DIGITS: usize = 1_000_000;
 
 /// Convert decimal to string representation for arbitrary precision.
@@ -349,96 +354,71 @@ const DECIMAL_MAX_SCALE_DIGITS: usize = 1_000_000;
 ///
 /// # Errors
 ///
-/// Returns a typed corruption error (never panics/aborts) when `scale` or the
-/// unscaled magnitude is so large it could only come from a corrupt SSTable
-/// (issue #1754): rendering it would overflow an unbounded `format!` padding
-/// width (a panic that aborts the process on the napi worker thread) or allocate
-/// an unbounded string. Well-formed decimals are unaffected.
+/// Returns a typed corruption error (never panics/aborts) ONLY when the unscaled
+/// magnitude exceeds the sanity ceiling — a size that could not come from a
+/// legitimate value and whose single base-10 conversion would stall the event
+/// loop (issue #1754). A merely-large-but-well-formed decimal is NOT corrupt: it
+/// renders faithfully in precision-preserving exponent form.
 fn decimal_to_string(scale: i32, unscaled: &[u8]) -> Result<String> {
     if unscaled.is_empty() {
         return Ok("0".to_string());
     }
 
-    // Fail-closed guard (issue #1754). Bound BOTH inputs BEFORE any rendering, so
-    // the O(digits²) repeated-division loop below never runs on an oversized
-    // magnitude and no width-driven `format!`/`repeat` can allocate unbounded:
-    //   - the unscaled-magnitude byte length (bounds the render cost), and
-    //   - the scale magnitude (used directly as a `format!` width / repeat count).
-    // Checking the raw byte length is O(1) and rejects long before the quadratic
-    // renderer is entered.
-    if unscaled.len() > DECIMAL_MAX_UNSCALED_BYTES
-        || (scale.unsigned_abs() as usize) > DECIMAL_MAX_SCALE_DIGITS
-    {
+    // Sanity ceiling (issue #1754): O(1) length check BEFORE the one superlinear
+    // base conversion. Only a genuinely pathological magnitude is rejected; a
+    // well-formed arbitrary-precision value renders below.
+    if unscaled.len() > DECIMAL_MAX_UNSCALED_BYTES {
         return Err(to_napi_error(cqlite_core::Error::corruption(format!(
             "DECIMAL cell not representable (scale={scale}, unscaled_len={} bytes, \
              max_unscaled={DECIMAL_MAX_UNSCALED_BYTES} bytes): corrupt SSTable — \
-             refusing to materialize an unbounded string / enter an O(n^2) render \
+             refusing to enter a superlinear render on a pathological magnitude \
              (issue #1754)",
             unscaled.len()
         ))));
     }
 
-    // Determine sign from high bit (two's complement)
-    let is_negative = (unscaled[0] & 0x80) != 0;
+    // Cassandra encodes the unscaled value as a two's-complement big-endian Java
+    // BigInteger. ONE base-10 conversion (the sole superlinear step) yields the
+    // digit string; every branch below is a single O(digits) pass over it — no
+    // repeated division, no scale-width padding blowup.
+    let bigint = num_bigint::BigInt::from_signed_bytes_be(unscaled);
+    let full = bigint.to_string();
+    let (is_negative, digits) = match full.strip_prefix('-') {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, full),
+    };
 
-    // Convert bytes to absolute magnitude
-    let mut magnitude = unscaled.to_vec();
-    if is_negative {
-        // Two's complement negation
-        let mut carry = true;
-        for byte in magnitude.iter_mut().rev() {
-            *byte = !*byte;
-            if carry {
-                let (new_val, new_carry) = byte.overflowing_add(1);
-                *byte = new_val;
-                carry = new_carry;
-            }
+    // Precision-preserving exponent form for over-bound cases (issue #1754): a
+    // large magnitude (thousands+ of digits) or a pathological scale (which as a
+    // padding width would panic / allocate unbounded, and at `i32::MIN` would
+    // overflow `-scale`). `<digits>e<-scale>` preserves every digit exactly.
+    let result = if unscaled.len() > DECIMAL_POSITIONAL_MAX_BYTES
+        || (scale.unsigned_abs() as usize) > DECIMAL_MAX_SCALE_DIGITS
+    {
+        if scale == 0 {
+            digits
+        } else {
+            // `i64` avoids the `(-scale)` overflow at `scale == i32::MIN`.
+            format!("{digits}e{}", -(scale as i64))
         }
-    }
-
-    // Convert bytes to decimal string using repeated division
-    let mut digits = String::new();
-    while !magnitude.is_empty() && magnitude.iter().any(|&b| b != 0) {
-        let mut remainder = 0u32;
-        for byte in &mut magnitude {
-            let dividend = remainder * 256 + (*byte as u32);
-            *byte = (dividend / 10) as u8;
-            remainder = dividend % 10;
-        }
-        digits.push(char::from_digit(remainder, 10).unwrap());
-        // Remove leading zeros from magnitude
-        while magnitude.first() == Some(&0) {
-            magnitude.remove(0);
-        }
-    }
-
-    if digits.is_empty() {
-        digits = "0".to_string();
-    } else {
-        // Reverse since we built it backwards
-        digits = digits.chars().rev().collect();
-    }
-
-    // Apply scale
-    let result = if scale == 0 {
+    } else if scale == 0 {
         digits
     } else if scale > 0 {
-        // Positive scale means decimal point moves left
+        // Positive scale means decimal point moves left.
         let scale_usize = scale as usize;
         if digits.len() <= scale_usize {
             // Need leading zeros: 123 with scale 5 -> 0.00123
             format!("0.{digits:0>scale_usize$}")
         } else {
-            // Insert decimal point
+            // Insert decimal point.
             let split_point = digits.len() - scale_usize;
             let int_part = &digits[..split_point];
             let frac_part = &digits[split_point..];
             format!("{int_part}.{frac_part}")
         }
     } else {
-        // Negative scale means multiply by power of 10
-        let neg_scale = -scale;
-        format!("{digits}e{neg_scale}")
+        // Negative scale means multiply by power of 10.
+        format!("{digits}e{}", -scale)
     };
 
     if is_negative {

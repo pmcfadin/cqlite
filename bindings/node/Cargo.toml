@@ -33,6 +33,9 @@ chrono = { workspace = true }
 uuid = { version = "1.6", features = ["v4"] }
 base64 = "0.22"
 hex = "0.4"
+# Single, reasonably-optimized base-10 conversion for arbitrary-precision DECIMAL
+# unscaled magnitudes (issue #1754) — replaces a hand-rolled O(digits^2) render.
+num-bigint = "0.4"
 # Always-on: span macros (`tracing::info_span!`, `.instrument`) are used at the
 # binding boundary regardless of the `observability` feature. The OTel layer
 # that bridges these spans to OTLP is only composed when `observability` is on.
