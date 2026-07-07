@@ -343,3 +343,109 @@ async fn multi_generation_limit_offset_matches_oracle_slice() {
         );
     }
 }
+
+/// Write ONE SSTable generation with `n` DISTINCT partitions (`id = 1..=n`), then
+/// flush once, so the table directory holds a SINGLE generation / SINGLE reader.
+/// That is the GENUINELY-LAZY `scan_stream` path: `scan_stream_materializes` is
+/// `false` (no cross-generation pre-materialization), so `capped_fallback_scan`
+/// takes its trusted full-cap stream fast path — the only branch NOT prefix-correct
+/// by construction, and the one the RELEASE-active token-order guard protects.
+async fn build_single_generation(root: &Path, n: i32) {
+    let data_dir = root.join("data");
+    let wal_dir = root.join("wal");
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, items_schema());
+    let mut engine = WriteEngine::new(config).expect("write engine");
+    for id in 1..=n {
+        let m = Mutation::new(
+            TableId::new(KEYSPACE, TABLE),
+            PartitionKey::single("id", Value::Integer(id)),
+            None,
+            vec![CellOperation::Write {
+                column: "value".to_string(),
+                value: Value::Text(format!("v{id}")),
+            }],
+            1_000 + id as i64,
+            None,
+        );
+        engine.write_async(m).await.expect("write partition");
+    }
+    engine.flush().await.expect("flush single generation");
+
+    let table_dir = data_dir.join(KEYSPACE).join(TABLE);
+    assert!(
+        table_dir.join("nb-1-big-Data.db").exists(),
+        "the single generation must exist on disk"
+    );
+    assert!(
+        !table_dir.join("nb-2-big-Data.db").exists(),
+        "the fixture must be a SINGLE generation (the lazy path); a 2nd generation \
+         would route through the multi-generation pre-materializing branch instead"
+    );
+}
+
+/// RELEASE-active guard, end-to-end (issue #1577, owner 2026-07-06). The
+/// single-generation lazy `scan_stream` full-cap path is the ONLY branch of
+/// `capped_fallback_scan` NOT prefix-correct by construction: the materializing
+/// `scan` (token-sorted via `sort_by_token_order`) and the SEPARATE lazy
+/// `run_scan_stream` pipeline are kept in parity only by tests + a RELEASE-active
+/// `(token, key)`-monotonicity guard (`prefix_is_token_ordered`) that falls back to
+/// the authoritative `scan` on any divergence.
+///
+/// This drives that exact path through the PUBLIC query API and asserts every
+/// bounded result is byte-identical to the matching prefix of the unbounded,
+/// authoritative oracle. It runs in a normal (release-representative) test build —
+/// NOT gated behind `debug_assertions` — so a `scan_stream`/`scan` divergence on the
+/// single-generation lazy prefix (the exact regression #1577's release guard exists
+/// to catch) fails HERE loudly instead of silently returning the wrong rows. The
+/// oracle row count is an exact assertion, so a 0-rows-on-present-data read
+/// regression (cf. related #1897) also fails here.
+#[tokio::test]
+async fn single_generation_lazy_limit_matches_unbounded_oracle_prefix() {
+    const ROWS: i32 = 8;
+
+    let tmp = TempDir::new().unwrap();
+    build_single_generation(tmp.path(), ROWS).await;
+    let db = open_with_schema(tmp.path()).await;
+
+    // Oracle: the UNBOUNDED authoritative scan over the single generation.
+    let full = db
+        .execute(&format!("SELECT * FROM {KEYSPACE}.{TABLE}"))
+        .await
+        .expect("unbounded single-generation scan");
+    let oracle = ordered_rows(&full.rows);
+    assert_eq!(
+        oracle.len(),
+        ROWS as usize,
+        "the single generation holds {ROWS} distinct partitions; {} rows means a \
+         0/low-rows read regression on the lazy path",
+        oracle.len()
+    );
+
+    // TRUSTED full-cap stream fast path (LIMIT n, n <= rows): drives the single-gen
+    // lazy stream to the cap; the release-active guard verifies the returned prefix
+    // is token-ordered before trusting it. It must equal the first n oracle rows.
+    for n in [1usize, 3, 5, ROWS as usize] {
+        let limited = db
+            .execute(&format!("SELECT * FROM {KEYSPACE}.{TABLE} LIMIT {n}"))
+            .await
+            .expect("bounded single-generation scan");
+        assert_eq!(
+            ordered_rows(&limited.rows),
+            oracle[..n].to_vec(),
+            "single-generation LIMIT {n} must equal the first {n} oracle rows, in token order"
+        );
+    }
+
+    // LIMIT + OFFSET: the cap is limit+offset, so the downstream slice always has
+    // enough token-ordered rows; each slice must equal oracle[k..k+n].
+    for (n, k) in [(2usize, 0usize), (2, 1), (3, 3), (2, 6)] {
+        let q = format!("SELECT * FROM {KEYSPACE}.{TABLE} LIMIT {n} OFFSET {k}");
+        let limited = db.execute(&q).await.expect("limit+offset single-gen scan");
+        assert_eq!(
+            ordered_rows(&limited.rows),
+            oracle[k..(k + n)].to_vec(),
+            "single-generation LIMIT {n} OFFSET {k} must equal oracle[{k}..{}]",
+            k + n
+        );
+    }
+}
