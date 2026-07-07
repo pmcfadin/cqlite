@@ -268,7 +268,15 @@ mod fixtures {
 // Public-API wiring: a BTI point read descends targeted, not decode-all.
 // ------------------------------------------------------------------------------
 
-#[cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+// Excluded under `tombstones` (that build serves point reads by a full-scan filter
+// rather than the targeted BTI seek this evidences, so `BTI_POINTER_DECODES` can be 0
+// under `--all-features` + `test_da`) — matches the existing work-counter/BTI wiring
+// tests (issue #1618, #1647). See roborev finding on PR #2138.
+#[cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    not(feature = "tombstones")
+))]
 mod public_api {
     use super::*;
     use cqlite_core::ingestion::{ingest, IngestionConfig};
