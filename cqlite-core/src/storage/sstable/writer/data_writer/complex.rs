@@ -111,7 +111,23 @@ impl DataWriter {
                     return Ok(0);
                 }
                 if is_complex {
-                    self.write_complex_column(buf, col, value, mop.timestamp_micros, None)?;
+                    // Issue #2038 (Scope B, write-path): thread the mutation's
+                    // ROW-level `USING TTL` (`mop.row_ttl_seconds`, sourced from
+                    // `Mutation::ttl_seconds`) into the complex column instead of
+                    // dropping it (`None`). This mirrors the SCALAR arm below,
+                    // which writes each cell as expiring when `row_ttl_seconds` is
+                    // present; `write_complex_column` -> `write_complex_cell_header`
+                    // stamps every element cell IS_EXPIRING with
+                    // localDeletionTime = now + ttl (Cassandra's derivation), so a
+                    // row-level `USING TTL` collection/UDT write round-trips as an
+                    // expiring column and `TTL(col)` resolves to the written value.
+                    self.write_complex_column(
+                        buf,
+                        col,
+                        value,
+                        mop.timestamp_micros,
+                        mop.row_ttl_seconds,
+                    )?;
                 } else {
                     // roborev #1020 Finding 1: a frozen-UDT (or UDT-bearing frozen
                     // collection/tuple) simple-cell value is canonicalized against
