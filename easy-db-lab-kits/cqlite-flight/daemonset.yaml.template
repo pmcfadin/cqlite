@@ -1,0 +1,82 @@
+# cqlite-flight DaemonSet — one Arrow Flight server pod per Cassandra ("db") node.
+#
+# Runs with hostNetwork so the Flight gRPC port is reachable at <db-node-ip>:__FLIGHT_PORT__
+# (the same node-IP-addressing model the Cassandra sidecar DaemonSet and the OTel collector
+# DaemonSet already use in this lab), and so CQLITE_OTEL_ENDPOINT can point at
+# "localhost:4317" to reach the co-located, node-local OTel collector without any extra
+# Service/DNS hop.
+#
+# Reads the Cassandra data dir directly off the host (read-only) — no data of its own.
+# Default read path here is the LIVE data dir; a Sidecar-snapshot read (for a stable file
+# set while compaction runs underneath) is driven by the trino-connector's ticket
+# ("snapshot" field), not by this kit — see cqlite-flight/README.md.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cqlite-flight
+  namespace: default
+  labels:
+    app.kubernetes.io/name: cqlite-flight
+    easydblab.com/kit: cqlite-flight
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cqlite-flight
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cqlite-flight
+        easydblab.com/kit: cqlite-flight
+    spec:
+      nodeSelector:
+        type: db
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        # Do not override runAsUser/runAsGroup here — the image already runs as its
+        # fixed uid-10001 "flight" user (Dockerfile: `USER flight`). supplementalGroups
+        # adds the host GID that owns the Cassandra data dir so that uid can read it.
+        runAsNonRoot: true
+        supplementalGroups:
+          - __CASSANDRA_DATA_GID__
+      containers:
+        - name: cqlite-flight
+          image: "ghcr.io/pmcfadin/cqlite-flight:__TAG__"
+          args:
+            - "--data-dir=/data"
+            - "--listen=0.0.0.0:__FLIGHT_PORT__"
+          ports:
+            - name: flight-grpc
+              containerPort: __FLIGHT_PORT__
+              hostPort: __FLIGHT_PORT__
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: CQLITE_OTEL_ENABLED
+              value: "true"
+            - name: CQLITE_OTEL_ENDPOINT
+              value: "__OTEL_ENDPOINT__"
+            - name: CQLITE_OTEL_PROTOCOL
+              value: "grpc"
+            - name: CQLITE_OTEL_SERVICE_NAME
+              value: "cqlite-flight"
+          volumeMounts:
+            - name: cassandra-data
+              mountPath: /data
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: __FLIGHT_PORT__
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: __FLIGHT_PORT__
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: cassandra-data
+          hostPath:
+            path: "__CASSANDRA_DATA_DIR__"
+            type: Directory
