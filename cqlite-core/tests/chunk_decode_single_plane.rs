@@ -257,6 +257,77 @@ async fn warm_cache_skips_decompress() {
     );
 }
 
+/// Runtime check: warm windowed scan (repeat full scan) skips decompress.
+#[tokio::test]
+#[serial_test::serial]
+async fn warm_windowed_scan_skips_decompress() {
+    use cqlite_core::storage::sstable::SSTableReader;
+    use cqlite_core::{Config, Platform};
+    use std::sync::Arc;
+
+    let Some(datasets_root) = datasets_root() else {
+        if require_fixtures() {
+            panic!("CQLITE_REQUIRE_FIXTURES=1 but datasets absent");
+        }
+        eprintln!("SKIP: datasets absent");
+        return;
+    };
+
+    let data_db = datasets_root
+        .join("sstables/test_basic/simple_table")
+        .read_dir()
+        .ok()
+        .and_then(|mut entries| {
+            entries.find_map(|e| {
+                let p = e.ok()?.path();
+                p.file_name()?.to_str()?.ends_with("-Data.db").then_some(p)
+            })
+        });
+
+    let Some(data_db) = data_db else {
+        eprintln!("SKIP: simple_table Data.db not found");
+        return;
+    };
+
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let reader = SSTableReader::open(&data_db, &config, platform)
+        .await
+        .expect("open simple_table");
+
+    // Cold scan: populates the decompressed-chunk cache
+    SSTableReader::reset_decompress_calls();
+    let table_id = cqlite_core::TableId::from("test_basic.simple_table");
+    let cold_rows = reader
+        .scan(&table_id, None, None, None, None)
+        .await
+        .expect("cold scan");
+    let cold_decompress = SSTableReader::decompress_call_count();
+    assert!(!cold_rows.is_empty(), "fixture must have rows");
+    assert!(
+        cold_decompress >= 1,
+        "cold scan must decompress >=1 chunk (got {})",
+        cold_decompress
+    );
+
+    // Warm scan: same table, full windowed scan, cache hits, ZERO decompress
+    SSTableReader::reset_decompress_calls();
+    let warm_rows = reader
+        .scan(&table_id, None, None, None, None)
+        .await
+        .expect("warm scan");
+    let warm_decompress = SSTableReader::decompress_call_count();
+    assert_eq!(
+        format!("{:?}", cold_rows),
+        format!("{:?}", warm_rows),
+        "cache must not change scan result"
+    );
+    assert_eq!(
+        warm_decompress, 0,
+        "warm windowed scan must skip decompress (all chunks resident)"
+    );
+}
+
 fn datasets_root() -> Option<std::path::PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()

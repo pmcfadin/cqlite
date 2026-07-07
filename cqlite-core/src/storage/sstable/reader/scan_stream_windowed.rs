@@ -814,7 +814,14 @@ impl SSTableReader {
                         self.chunk_cache_id ^ super::data_access::NS_WINDOWED_CHUNK,
                         chunk_count as u64,
                     );
-                    chunk_source.decode_and_cache(key, compressed_chunk, false)?
+                    // Check cache BEFORE decode_and_cache (issue #1598 roborev Medium):
+                    // warm scans must take the hit, not re-decompress and overwrite.
+                    // Mirror what chunk()/range() do: hit → Arc clone, miss → decode.
+                    if let Some(hit) = self.chunk_cache.get(&key) {
+                        hit
+                    } else {
+                        chunk_source.decode_and_cache(key, compressed_chunk, false)?
+                    }
                 };
                 window.refill(&chunk);
                 chunk_count += 1;
