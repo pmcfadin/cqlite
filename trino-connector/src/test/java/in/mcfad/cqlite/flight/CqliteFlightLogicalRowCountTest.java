@@ -46,7 +46,8 @@ class CqliteFlightLogicalRowCountTest {
     private static CqliteFlightConfig config(String localDatacenter) {
         return new CqliteFlightConfig(
                 URI.create("http://sidecar:9043"), 8815, localDatacenter,
-                GroupByPushdownPolicy.AUTOMATIC, 0.5, 3000);
+                GroupByPushdownPolicy.AUTOMATIC, 0.5, 3000,
+                ReadMode.SNAPSHOT, java.util.Optional.of("6h"));
     }
 
     private static CqliteFlightTableHandle plainHandle() {

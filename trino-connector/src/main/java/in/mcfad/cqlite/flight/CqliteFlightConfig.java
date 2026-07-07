@@ -2,6 +2,7 @@ package in.mcfad.cqlite.flight;
 
 import java.net.URI;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Connector configuration from the catalog properties file.
@@ -11,6 +12,12 @@ import java.util.Map;
  * cqlite.sidecar-uri=http://cassandra:9043
  * cqlite.flight-port=8815
  * cqlite.local-datacenter=dc1
+ * # Read mode (issue #2105): snapshot (default; stable file set via a Sidecar snapshot)
+ * # or live (current data dir, races compaction).
+ * cqlite.read-mode=snapshot                         # snapshot | live
+ * # Backstop TTL for per-query snapshots so a coordinator crash can't leak them
+ * # (Cassandra auto-drops after this). Blank disables the TTL. Cassandra 4.1+ syntax.
+ * cqlite.snapshot-ttl=6h
  * # Aggregation-pushdown gate (issue #893); GROUP BY only — globals always push.
  * cqlite.aggregation-pushdown-group-by=automatic   # automatic | always | never
  * cqlite.aggregation-pushdown-max-group-ratio=0.5   # decline above this groups/rows ratio
@@ -25,9 +32,20 @@ public record CqliteFlightConfig(
         String localDatacenter,
         GroupByPushdownPolicy groupByPushdown,
         double maxGroupRatio,
-        long tableStatsTimeoutMillis) {
+        long tableStatsTimeoutMillis,
+        ReadMode readMode,
+        Optional<String> snapshotTtl) {
 
     public static final int DEFAULT_FLIGHT_PORT = 8815;
+
+    /**
+     * Default backstop TTL for per-query snapshots (issue #2105). Explicit best-effort
+     * cleanup runs at query end, but a coordinator crash between snapshot-create and
+     * cleanup would otherwise leak the snapshot forever; a Sidecar-side TTL lets
+     * Cassandra auto-drop it. Uses Cassandra 4.1+ TTL syntax ({@code d}/{@code h}/
+     * {@code m}/{@code s} units). Set {@code cqlite.snapshot-ttl} blank to disable.
+     */
+    public static final String DEFAULT_SNAPSHOT_TTL = "6h";
 
     /**
      * Default deadline (milliseconds) for the optional planning-time {@code table_stats}
@@ -71,7 +89,22 @@ public record CqliteFlightConfig(
         long statsTimeoutMs = config.containsKey("cqlite.table-stats-timeout-ms")
                 ? Long.parseLong(config.get("cqlite.table-stats-timeout-ms"))
                 : DEFAULT_TABLE_STATS_TIMEOUT_MILLIS;
-        return new CqliteFlightConfig(URI.create(sidecar), port, dc, policy, ratio, statsTimeoutMs);
+        ReadMode readMode = ReadMode.fromConfig(config.get("cqlite.read-mode"));
+        Optional<String> snapshotTtl = parseSnapshotTtl(config.get("cqlite.snapshot-ttl"));
+        return new CqliteFlightConfig(
+                URI.create(sidecar), port, dc, policy, ratio, statsTimeoutMs, readMode, snapshotTtl);
+    }
+
+    /**
+     * A snapshot TTL of {@code null} (key absent) → the default backstop; a present but
+     * blank value → no TTL (empty); otherwise the given duration string, passed through
+     * verbatim to the Sidecar create-snapshot {@code ?ttl=} query parameter.
+     */
+    private static Optional<String> parseSnapshotTtl(String value) {
+        if (value == null) {
+            return Optional.of(DEFAULT_SNAPSHOT_TTL);
+        }
+        return value.isBlank() ? Optional.empty() : Optional.of(value.trim());
     }
 
     private static String require(Map<String, String> config, String key) {

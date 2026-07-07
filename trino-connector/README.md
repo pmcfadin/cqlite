@@ -99,6 +99,8 @@ Catalog properties (`etc/catalog/cqlite.properties`):
 | `cqlite.sidecar-uri` | *(required)* | Cassandra Sidecar base URI for DDL/ring discovery. |
 | `cqlite.flight-port` | `8815` | Arrow Flight port on each Cassandra node. |
 | `cqlite.local-datacenter` | *(none)* | Preferred datacenter for split placement. |
+| `cqlite.read-mode` | `snapshot` | `snapshot` (default) reads a consistent, per-query Sidecar snapshot; `live` reads the current data dir (races compaction). See [Read mode](#read-mode-snapshot-vs-live). |
+| `cqlite.snapshot-ttl` | `6h` | `snapshot` mode only: a Cassandra 4.1+ TTL on each per-query snapshot so a coordinator crash between create and cleanup can't leak it (Cassandra auto-drops it). Set blank to disable. |
 | `cqlite.aggregation-pushdown-group-by` | `automatic` | GROUP BY aggregation-pushdown policy: `automatic`, `always`, or `never`. Global aggregates (no GROUP BY) are an unconditional win and always push regardless of this setting. |
 | `cqlite.aggregation-pushdown-max-group-ratio` | `0.5` | `automatic` only: decline GROUP BY pushdown once the estimated distinct-groups / rows ratio exceeds this. Must be in `(0.0, 1.0]`. |
 
@@ -112,6 +114,47 @@ Flight/Sidecar path yet (Cassandra's `Statistics.db` does not store it), so toda
 `automatic` always pushes. Operators who hit the high-cardinality loss can force
 the gate with `cqlite.aggregation-pushdown-group-by=never`; `always` restores the
 unconditional pre-gate behavior.
+
+## Read mode (snapshot vs live)
+
+`cqlite-flight` compaction-merges a node's SSTables on **every** read, and Cassandra
+compacts and flushes those files continuously underneath. `cqlite.read-mode` picks which
+file set a scan sees:
+
+| Mode | File set | Consistency | Use when |
+|------|----------|-------------|----------|
+| `snapshot` (default) | A **Cassandra Sidecar snapshot** — a hard-linked, immutable copy of the SSTable set taken at planning time. | **Stable file set, bounded staleness.** Every split of the query reads the same immutable files; data is "as of" snapshot time. No mid-scan file churn. | You want a consistent, repeatable read (the safe default). |
+| `live` | The node's current data directory. | **Most current, but races compaction.** A long scan can have files compacted/removed under it. | You are stress-hunting the read path, or want the absolute latest flushed data and accept the race. |
+
+Both modes only ever see **flushed** SSTables — memtable rows are invisible until a
+`nodetool flush` (a property of the SSTable-based server, not of read mode).
+
+### Snapshot lifecycle (per-query, `cqlite-<queryId>`)
+
+In `snapshot` mode the connector, at **split-planning time** (once per query, per table):
+
+1. Creates a Sidecar snapshot named `cqlite-<queryId>` of the scanned table
+   (`PUT /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`, with the
+   configured `?ttl=` backstop).
+2. Names that snapshot in **every** Flight ticket, so all splits read the one immutable
+   file set.
+3. Best-effort **deletes** the snapshot when the query finishes — success or failure —
+   via Trino's `cleanupQuery` hook
+   (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`).
+
+Why per-query rather than a long-lived reusable snapshot: it needs no background reaper,
+each query gets an isolated consistent view, and the queryId makes the name collision-free
+and traceable. The `cqlite.snapshot-ttl` backstop means even a coordinator crash between
+create and cleanup can't leak the snapshot — Cassandra auto-drops it.
+
+**Fail-closed:** if snapshot creation fails in `snapshot` mode, the query **fails** — the
+connector does **not** silently fall back to a live read. Falling back would hand back a
+compaction-racing result the operator explicitly asked to avoid. Switch to
+`cqlite.read-mode=live` to opt into that behavior deliberately.
+
+The Sidecar endpoint paths and HTTP verbs above match apache/cassandra-sidecar
+`ApiEndpointsV1.SNAPSHOTS_ROUTE` (`CreateSnapshotRequest` → `PUT`, `ClearSnapshotRequest`
+→ `DELETE`).
 
 ## Load testing (optional `loadtest` profile)
 

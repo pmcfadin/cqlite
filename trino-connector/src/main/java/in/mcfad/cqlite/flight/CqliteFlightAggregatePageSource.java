@@ -69,7 +69,7 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
                     range.keyspace(),
                     range.table(),
                     range.ddl(),
-                    Optional.empty(),
+                    range.snapshot(), // snapshot mode names it; live mode = empty (#2105)
                     Optional.of(range.tokenStart()),
                     Optional.of(range.tokenEnd()),
                     range.wraparound(),

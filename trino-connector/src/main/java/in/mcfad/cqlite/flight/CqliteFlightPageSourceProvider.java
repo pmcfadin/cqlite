@@ -66,7 +66,7 @@ public class CqliteFlightPageSourceProvider implements ConnectorPageSourceProvid
                 flightSplit.keyspace(),
                 flightSplit.table(),
                 flightSplit.ddl(),
-                Optional.empty(), // live data dir (no snapshot) for the first E2E
+                flightSplit.snapshot(), // snapshot mode names it; live mode = empty (#2105)
                 Optional.of(flightSplit.tokenStart()),
                 Optional.of(flightSplit.tokenEnd()),
                 flightSplit.wraparound(),

@@ -12,6 +12,7 @@ import io.trino.spi.connector.FixedSplitSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
@@ -24,10 +25,12 @@ import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
 public class CqliteFlightSplitManager implements ConnectorSplitManager {
     private final CqliteFlightConfig config;
     private final SidecarClient sidecar;
+    private final SnapshotManager snapshots;
 
-    public CqliteFlightSplitManager(CqliteFlightConfig config, SidecarClient sidecar) {
+    public CqliteFlightSplitManager(CqliteFlightConfig config, SidecarClient sidecar, SnapshotManager snapshots) {
         this.config = config;
         this.sidecar = sidecar;
+        this.snapshots = snapshots;
     }
 
     @Override
@@ -39,8 +42,14 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             Constraint constraint) {
         CqliteFlightTableHandle handle = (CqliteFlightTableHandle) table;
         TokenRangeReplicasResponse replicas = sidecar.tokenRangeReplicas(handle.keyspace());
+        // Read-mode wiring (issue #2105): in snapshot mode create (once per query) a
+        // Sidecar snapshot and stamp its name into every split's ticket so the whole
+        // scan reads one immutable file set; in live mode this is Optional.empty().
+        // Fails closed — a snapshot-create error propagates and the query fails.
+        Optional<String> snapshot =
+                snapshots.snapshotFor(session.getQueryId(), handle.keyspace(), handle.table());
         List<CqliteFlightSplit> ranges =
-                buildSplits(handle, replicas, config.localDatacenter(), config.flightPort());
+                buildSplits(handle, replicas, config.localDatacenter(), config.flightPort(), snapshot);
 
         // Aggregated handle: Trino does not re-aggregate across splits, so return
         // ONE finalize split carrying all range→replica assignments. Its PageSource
@@ -61,15 +70,29 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
     }
 
     /**
-     * Pure split-building: one split per read-replica token range, each pinned to
-     * a single deterministically-chosen replica. Static for unit testing without
-     * a live Sidecar or Trino session.
+     * Backward-compatible overload for a live-dir scan (no snapshot). Delegates with
+     * {@link Optional#empty()}.
      */
     public static List<CqliteFlightSplit> buildSplits(
             CqliteFlightTableHandle table,
             TokenRangeReplicasResponse replicas,
             String localDatacenter,
             int flightPort) {
+        return buildSplits(table, replicas, localDatacenter, flightPort, Optional.empty());
+    }
+
+    /**
+     * Pure split-building: one split per read-replica token range, each pinned to
+     * a single deterministically-chosen replica, all stamped with the same
+     * {@code snapshot} (issue #2105). Static for unit testing without a live Sidecar
+     * or Trino session.
+     */
+    public static List<CqliteFlightSplit> buildSplits(
+            CqliteFlightTableHandle table,
+            TokenRangeReplicasResponse replicas,
+            String localDatacenter,
+            int flightPort,
+            Optional<String> snapshot) {
         List<CqliteFlightSplit> splits = new ArrayList<>();
         for (ReplicaInfo range : replicas.readReplicas()) {
             String replica = pickReplica(range.replicasByDatacenter(), localDatacenter);
@@ -89,7 +112,8 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                     flightPort,
                     start,
                     end,
-                    start > end));
+                    start > end,
+                    snapshot));
         }
         return splits;
     }

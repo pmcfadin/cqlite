@@ -4,6 +4,7 @@ import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * One unit of work: scan a single token range from a single replica's
@@ -12,6 +13,9 @@ import java.util.List;
  *
  * <p>{@code tokenStart} is exclusive, {@code tokenEnd} inclusive; {@code wraparound}
  * is set when the range crosses the ring's min-token boundary ({@code start > end}).
+ *
+ * <p>{@code snapshot} is the Sidecar snapshot name the ticket reads (issue #2105):
+ * present in {@link ReadMode#SNAPSHOT}, {@link Optional#empty()} in {@link ReadMode#LIVE}.
  */
 public record CqliteFlightSplit(
         String keyspace,
@@ -21,7 +25,8 @@ public record CqliteFlightSplit(
         int port,
         long tokenStart,
         long tokenEnd,
-        boolean wraparound)
+        boolean wraparound,
+        Optional<String> snapshot)
         implements ConnectorSplit {
 
     @Override

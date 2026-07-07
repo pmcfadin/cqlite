@@ -28,6 +28,45 @@ class CqliteFlightConfigTest {
         assertEquals(CqliteFlightConfig.DEFAULT_FLIGHT_PORT, config.flightPort());
         assertEquals(CqliteFlightConfig.DEFAULT_TABLE_STATS_TIMEOUT_MILLIS,
                 config.tableStatsTimeoutMillis());
+        // read-mode defaults to snapshot with the backstop TTL (issue #2105).
+        assertEquals(ReadMode.SNAPSHOT, config.readMode());
+        assertEquals(java.util.Optional.of(CqliteFlightConfig.DEFAULT_SNAPSHOT_TTL),
+                config.snapshotTtl());
+    }
+
+    @Test
+    void parsesReadModeLive() {
+        Map<String, String> m = base();
+        m.put("cqlite.read-mode", "LIVE");
+        assertEquals(ReadMode.LIVE, CqliteFlightConfig.fromMap(m).readMode());
+    }
+
+    @Test
+    void parsesReadModeSnapshotCaseInsensitively() {
+        Map<String, String> m = base();
+        m.put("cqlite.read-mode", "SnApShOt");
+        assertEquals(ReadMode.SNAPSHOT, CqliteFlightConfig.fromMap(m).readMode());
+    }
+
+    @Test
+    void rejectsInvalidReadMode() {
+        Map<String, String> m = base();
+        m.put("cqlite.read-mode", "sometimes");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void parsesExplicitSnapshotTtl() {
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-ttl", "2d");
+        assertEquals(java.util.Optional.of("2d"), CqliteFlightConfig.fromMap(m).snapshotTtl());
+    }
+
+    @Test
+    void blankSnapshotTtlDisablesIt() {
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-ttl", "   ");
+        assertEquals(java.util.Optional.empty(), CqliteFlightConfig.fromMap(m).snapshotTtl());
     }
 
     @Test
