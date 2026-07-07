@@ -302,10 +302,32 @@ impl ValueFormatter {
             decimal_str = decimal_str[1..].to_string();
         }
 
+        // Fail-closed guard (issue #1754). A corrupt SSTable can carry a
+        // pathological DECIMAL `scale`; used below as a `String::repeat` count or
+        // `format!` padding it would allocate an unbounded string (and `(-scale)`
+        // would overflow-panic at `scale == i32::MIN`). Real decimals are tiny, so
+        // an absurd scale is rendered in scientific-ish form rather than
+        // materializing millions of zero characters. `unsigned_abs()` avoids the
+        // negation overflow. This keeps display total (never panics/aborts) while
+        // leaving every legitimate value byte-identical.
+        const SCALE_RENDER_CAP: usize = 1_000_000;
+        if scale.unsigned_abs() as usize > SCALE_RENDER_CAP {
+            // Represent as "<digits>e<-scale>" (or "e<scale>" for large positive
+            // scale): exact and bounded, no unbounded padding.
+            let exp = -(scale as i64);
+            let body = if is_neg {
+                format!("-{decimal_str}")
+            } else {
+                decimal_str
+            };
+            return format!("{body}e{exp}");
+        }
+
         // Insert decimal point based on scale
         if scale <= 0 {
-            // Scale <= 0: multiply by 10^(-scale)
-            decimal_str.push_str(&"0".repeat((-scale) as usize));
+            // Scale <= 0: multiply by 10^(-scale). `unsigned_abs()` avoids the
+            // `(-scale)` overflow panic at `scale == i32::MIN`.
+            decimal_str.push_str(&"0".repeat(scale.unsigned_abs() as usize));
         } else if scale as usize >= decimal_str.len() {
             // Need leading zeros
             let leading_zeros = scale as usize - decimal_str.len() + 1;
@@ -714,6 +736,56 @@ mod tests {
         let formatted = ValueFormatter::format_value(&decimal);
         // Should contain decimal point
         assert!(formatted.contains('.'));
+    }
+
+    /// Issue #1754: a corrupt SSTable can carry a pathological DECIMAL `scale`.
+    /// `scale == i32::MIN` used to overflow-panic at `(-scale) as usize` (and
+    /// under `overflow-checks` in debug builds), and a huge positive/negative
+    /// scale would allocate an unbounded string. Formatting must stay total —
+    /// never panic — and render bounded output instead.
+    #[test]
+    fn test_decimal_pathological_scale_is_bounded_not_panic() {
+        // i32::MIN scale: the negation-overflow reproducer.
+        let d_min = Value::Decimal {
+            scale: i32::MIN,
+            unscaled: vec![0x01],
+        };
+        let s = ValueFormatter::format_value(&d_min);
+        assert!(
+            s.contains('e'),
+            "extreme scale renders in exponent form: {s}"
+        );
+        assert!(
+            s.len() < 64,
+            "must not materialize an unbounded string: {s}"
+        );
+
+        // Huge positive scale: no multi-hundred-megabyte padding allocation.
+        let d_max = Value::Decimal {
+            scale: i32::MAX,
+            unscaled: vec![0x01],
+        };
+        let s2 = ValueFormatter::format_value(&d_max);
+        assert!(
+            s2.len() < 64,
+            "must not materialize an unbounded string: {s2}"
+        );
+    }
+
+    /// Regression guard: an ordinary in-range scale is byte-identical after the
+    /// #1754 bound (no behavior change for legitimate decimals).
+    #[test]
+    fn test_decimal_in_range_scale_unchanged() {
+        let d = Value::Decimal {
+            scale: 5,
+            unscaled: vec![0x7B], // 123
+        };
+        assert_eq!(ValueFormatter::format_value(&d), "0.00123");
+        let dn = Value::Decimal {
+            scale: -2,
+            unscaled: vec![0x05], // 5 → 500
+        };
+        assert_eq!(ValueFormatter::format_value(&dn), "500");
     }
 
     #[test]

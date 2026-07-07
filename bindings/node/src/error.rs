@@ -220,6 +220,47 @@ pub fn simple_error(message: impl Into<String>) -> napi::Error {
     napi::Error::new(napi::Status::GenericFailure, formatted_message)
 }
 
+/// Run `f` on a napi async-worker thread and convert ANY panic it raises into a
+/// typed `napi::Error` rather than letting it abort the host process (issue
+/// #1754).
+///
+/// A `napi::Task::compute` body runs on a libuv threadpool thread that has NO
+/// unwind boundary above it. Even under the binding cdylib's `panic=unwind`
+/// profile (issue #1440), a panic there cannot unwind across the FFI frame — the
+/// Rust runtime instead calls `abort()` (`fatal runtime error: failed to
+/// initiate panic, error 5, aborting`), killing the whole Node process. Wrapping
+/// the worker body in [`std::panic::catch_unwind`] catches the panic ON the
+/// worker thread (before it reaches the un-unwindable FFI frame) and turns it
+/// into a rejected promise / thrown JS `Error`, preserving the abort-safety
+/// guarantee (#1431/#1440) for the raw-parse path.
+///
+/// The closure is wrapped in [`AssertUnwindSafe`] because the task state it
+/// borrows is not used again after a panic (the panic aborts the compute and the
+/// error is returned), so the standard unwind-safety concern (observing a
+/// broken invariant post-panic) does not apply here.
+pub fn catch_unwind_to_napi<T>(what: &str, f: impl FnOnce() -> napi::Result<T>) -> napi::Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => Err(to_napi_error(Error::corruption(format!(
+            "{what} panicked while decoding a corrupt SSTable: {} — recovered at the \
+             napi boundary instead of aborting the process (issue #1754)",
+            panic_message(&payload)
+        )))),
+    }
+}
+
+/// Best-effort extraction of a human-readable message from a caught panic
+/// payload (`&str` or `String`), falling back to a generic label.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

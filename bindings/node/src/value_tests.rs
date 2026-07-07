@@ -18,33 +18,33 @@ static CTOR_COUNTER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn test_decimal_to_string_positive() {
     // 123 with scale 2 = 1.23
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(2, &unscaled), "1.23");
+    assert_eq!(decimal_to_string(2, &unscaled).unwrap(), "1.23");
 }
 
 #[test]
 fn test_decimal_to_string_no_scale() {
     // 123 with scale 0 = 123
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(0, &unscaled), "123");
+    assert_eq!(decimal_to_string(0, &unscaled).unwrap(), "123");
 }
 
 #[test]
 fn test_decimal_to_string_negative_scale() {
     // 123 with scale -2 = 12300 (123e2)
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(-2, &unscaled), "123e2");
+    assert_eq!(decimal_to_string(-2, &unscaled).unwrap(), "123e2");
 }
 
 #[test]
 fn test_decimal_to_string_large_scale() {
     // 123 with scale 5 = 0.00123
     let unscaled = vec![123];
-    assert_eq!(decimal_to_string(5, &unscaled), "0.00123");
+    assert_eq!(decimal_to_string(5, &unscaled).unwrap(), "0.00123");
 }
 
 #[test]
 fn test_decimal_to_string_empty() {
-    assert_eq!(decimal_to_string(0, &[]), "0");
+    assert_eq!(decimal_to_string(0, &[]).unwrap(), "0");
 }
 
 #[test]
@@ -52,7 +52,59 @@ fn test_decimal_to_string_negative() {
     // -123 in two's complement (single byte) = 0x85 = 133, but need proper encoding
     // For -123: 256 - 123 = 133 = 0x85
     let unscaled = vec![0x85]; // -123 as two's complement byte
-    assert_eq!(decimal_to_string(2, &unscaled), "-1.23");
+    assert_eq!(decimal_to_string(2, &unscaled).unwrap(), "-1.23");
+}
+
+/// Issue #1754: a pathological positive `scale` (used directly as an unbounded
+/// `format!` padding width) must fail closed with a typed error rather than
+/// PANIC ("Formatting argument out of range"). On the napi async-worker thread
+/// that panic cannot unwind across FFI and the process `abort()`s, defeating
+/// #1440's `panic=unwind` profile. This is the direct Rust reproduction of the
+/// corrupt-DECIMAL abort; it PANICS on the pre-fix code and returns `Err` now.
+#[test]
+fn test_decimal_to_string_pathological_positive_scale_errors_not_panics() {
+    // A tiny 1-byte unscaled value but an absurd scale that would drive a
+    // ~2.1-billion-wide `format!("0.{digits:0>width$}")` padding.
+    let unscaled = vec![0x01];
+    let err = decimal_to_string(i32::MAX, &unscaled)
+        .expect_err("a pathological scale must fail closed, not panic/abort");
+    let msg = err.reason.to_string();
+    assert!(
+        msg.contains("corrupt SSTable") && msg.contains("issue #1754"),
+        "expected a typed corruption error, got: {msg}"
+    );
+}
+
+/// Issue #1754: `scale == i32::MIN` exercises `unsigned_abs()` (a plain
+/// `-scale` would overflow-panic under `overflow-checks`). Still fail-closed,
+/// never a panic.
+#[test]
+fn test_decimal_to_string_i32_min_scale_errors_not_panics() {
+    let unscaled = vec![0x01];
+    let err = decimal_to_string(i32::MIN, &unscaled)
+        .expect_err("i32::MIN scale must fail closed without overflow panic");
+    assert!(err.reason.to_string().contains("issue #1754"));
+}
+
+/// Issue #1754: an oversized unscaled magnitude (digit count beyond the cap)
+/// also fails closed rather than allocating an unbounded string.
+#[test]
+fn test_decimal_to_string_oversized_unscaled_errors() {
+    // ~1 MB of unscaled bytes → ~2.4M decimal digits, above the 1M cap.
+    let unscaled = vec![0x7f; 1_000_000];
+    let err = decimal_to_string(0, &unscaled)
+        .expect_err("an oversized unscaled magnitude must fail closed");
+    assert!(err.reason.to_string().contains("issue #1754"));
+}
+
+/// Regression guard: a large-but-representable scale at the boundary still
+/// renders (the guard must not over-reject a legitimate value).
+#[test]
+fn test_decimal_to_string_large_representable_scale_ok() {
+    let unscaled = vec![0x01]; // = 1
+                               // scale 100 → "0." followed by 99 zeros then "1".
+    let s = decimal_to_string(100, &unscaled).unwrap();
+    assert!(s.starts_with("0.0") && s.ends_with('1') && s.len() == 102);
 }
 
 #[test]

@@ -28,6 +28,7 @@
 //! | Tuple | `Array` |
 //! | Udt | `object` with `_type`, `_keyspace`, and field properties |
 
+use crate::error::to_napi_error;
 use cqlite_core::types::Value;
 use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result};
 use std::cell::OnceCell;
@@ -218,7 +219,7 @@ pub fn value_to_napi(ctx: &ConvCtx, value: &Value) -> Result<JsUnknown> {
 
         // Decimal -> string (preserves arbitrary precision)
         Value::Decimal { scale, unscaled } => {
-            let decimal_str = decimal_to_string(*scale, unscaled);
+            let decimal_str = decimal_to_string(*scale, unscaled)?;
             env.create_string(&decimal_str).map(|s| s.into_unknown())
         }
 
@@ -319,13 +320,59 @@ fn varint_to_bigint(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
         .into_unknown()
 }
 
+/// Hard upper bound on the decimal digit-count this converter will materialize
+/// (issue #1754). Real Cassandra DECIMAL values are tiny; a padding width or
+/// unscaled magnitude beyond this only arises from a CORRUPT SSTable, where the
+/// scale/unscaled fields were read as garbage on the raw/uncompressed parse
+/// path. Rendering such a value would otherwise blow up an unbounded `format!`
+/// padding width (which PANICS with "Formatting argument out of range") or
+/// allocate a multi-hundred-megabyte string — and because the conversion runs on
+/// a napi async-worker thread, the panic cannot unwind across the FFI boundary
+/// and the runtime `abort()`s the whole host process (`fatal runtime error:
+/// failed to initiate panic, error 5, aborting`). Fail closed with a typed
+/// corruption error instead so the boundary surfaces a catchable JS error.
+///
+/// One million digits is orders of magnitude beyond any real decimal yet still a
+/// bounded allocation, so a legitimate value is never rejected.
+const DECIMAL_HARD_DIGIT_CAP: usize = 1_000_000;
+
 /// Convert decimal to string representation for arbitrary precision.
 ///
 /// Format: Represents the decimal as an exact string.
 /// For example: scale=2, unscaled=[1, 23] (123) -> "1.23"
-fn decimal_to_string(scale: i32, unscaled: &[u8]) -> String {
+///
+/// # Errors
+///
+/// Returns a typed corruption error (never panics/aborts) when `scale` or the
+/// unscaled magnitude is so large it could only come from a corrupt SSTable
+/// (issue #1754): rendering it would overflow an unbounded `format!` padding
+/// width (a panic that aborts the process on the napi worker thread) or allocate
+/// an unbounded string. Well-formed decimals are unaffected.
+fn decimal_to_string(scale: i32, unscaled: &[u8]) -> Result<String> {
     if unscaled.is_empty() {
-        return "0".to_string();
+        return Ok("0".to_string());
+    }
+
+    // Fail-closed guard (issue #1754). Bound BOTH inputs before any width-driven
+    // `format!` or `repeat`:
+    //   - the padding/scale magnitude (used directly as a `format!` width), and
+    //   - the unscaled magnitude's decimal digit count.
+    // A TIGHT upper bound on the digit count of an N-byte signed two's-complement
+    // integer is ceil((8N - 1) * log10(2)) — one bit is the sign, so the
+    // magnitude is at most 2^(8N-1). Compute the bit count in f64 so `8*len - 1`
+    // cannot underflow; the float->int `as` saturates in Rust, so the guard never
+    // wraps or under-counts an oversized value.
+    let magnitude_bits = 8.0 * (unscaled.len() as f64) - 1.0;
+    let max_digits = (magnitude_bits * std::f64::consts::LOG10_2).ceil().max(0.0) as usize;
+    if max_digits > DECIMAL_HARD_DIGIT_CAP
+        || (scale.unsigned_abs() as usize) > DECIMAL_HARD_DIGIT_CAP
+    {
+        return Err(to_napi_error(cqlite_core::Error::corruption(format!(
+            "DECIMAL cell not representable (scale={scale}, unscaled_len={} bytes, \
+             cap={DECIMAL_HARD_DIGIT_CAP} digits): corrupt SSTable — refusing to \
+             materialize an unbounded string (issue #1754)",
+            unscaled.len()
+        ))));
     }
 
     // Determine sign from high bit (two's complement)
@@ -392,9 +439,9 @@ fn decimal_to_string(scale: i32, unscaled: &[u8]) -> String {
     };
 
     if is_negative {
-        format!("-{result}")
+        Ok(format!("-{result}"))
     } else {
-        result
+        Ok(result)
     }
 }
 
