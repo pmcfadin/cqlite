@@ -27,7 +27,7 @@
 //!   * The MULTI-CELL on-disk SSTable collection path reads the element/cell count with the
 //!     Cassandra unsigned VInt (`DataInputPlus.readUnsignedVInt`, `VIntCoding`), implemented
 //!     in CQLite as `parser::vint::parse_vuint` / `encode_vuint`
-//!     (see `storage/.../v5_compressed_legacy.rs:6821`).
+//!     (see `storage/.../row_decoder.rs:6821`).
 //!
 //! The tests reimplement the Cassandra scan/lookup/range algorithms over the committed
 //! byte-vectors and assert positionally (order-sensitive), proving concrete byte ranges

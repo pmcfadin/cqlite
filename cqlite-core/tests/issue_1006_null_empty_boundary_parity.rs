@@ -49,7 +49,7 @@
 //!   * cass.data_db_decode.row_preamble_size_mismatch
 //!     (the malformed/truncated row-preamble guard is unit-tested directly
 //!     against the private row-preamble parser in
-//!     `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+//!     `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 //!     — see the `row_preamble_*` tests there — because the preamble decoder is
 //!     module-private and reader-free; this file documents that ownership.)
 //!
@@ -452,7 +452,7 @@ async fn run_parity(manifest_id: &str, table: &str, schema: TableSchema) {
 /// value of the column's DECLARED type — an empty `blob` reads back as an empty
 /// BLOB (`Blob([])` → golden `"0x"`), an empty text/ascii/varchar as `Text("")`.
 /// The golden renders the empty blob as `"0x"` and this comparison verifies it
-/// (v5_compressed_legacy.rs HAS_EMPTY_VALUE path). Empty STRING, ABSENT, and NULL
+/// (row_decoder.rs HAS_EMPTY_VALUE path). Empty STRING, ABSENT, and NULL
 /// are all decoded distinctly (see the absent_vs_null lane below).
 #[tokio::test]
 async fn null_empty_text_blob_parity() {

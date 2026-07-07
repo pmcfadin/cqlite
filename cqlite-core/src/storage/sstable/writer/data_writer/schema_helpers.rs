@@ -10,7 +10,7 @@ use super::*;
 ///
 /// Complex columns are stored as multiple cells with cell paths, unlike
 /// frozen collections which are stored as a single cell with blob value.
-/// Matches the reader logic in `v5_compressed_legacy.rs`.
+/// Matches the reader logic in `row_decoder.rs`.
 pub(crate) fn is_complex_column(data_type: &str) -> bool {
     let dt = data_type.to_lowercase();
 

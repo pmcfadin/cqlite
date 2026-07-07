@@ -376,7 +376,7 @@ async fn subset_below_boundary_multiple_missing_including_tail() {
 
 /// DECODE-SIDE divergence guard for #12: CQLite's V5 reader parses the subset
 /// field as a single unsigned VInt regardless of superset size (see
-/// `reader/parsing/v5_compressed_legacy.rs::parse_row_metadata`, which calls
+/// `reader/parsing/row_decoder.rs::parse_row_metadata`, which calls
 /// `parse_vuint` once and stores a `u64` bitmap). For a >=64-column superset the
 /// on-disk field is `count + index-deltas`, so a single-VInt read consumes ONLY
 /// the count and then mis-aligns on the following index VInt(s)/cells.

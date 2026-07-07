@@ -1266,7 +1266,7 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
-    async fn test_format_dispatch_v5_compressed_legacy() {
+    async fn test_format_dispatch_row_decoder() {
         let reader = match create_test_reader("test_basic", "simple_table").await {
             Some(r) => r,
             None => {

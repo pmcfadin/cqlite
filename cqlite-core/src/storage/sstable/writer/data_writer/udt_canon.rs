@@ -18,7 +18,7 @@
 //! The absent-field encoding (`-1` i32 length) is verified against the Cassandra
 //! wire format: `serialize_udt` (types.rs) writes a 4-byte BE i32 length per
 //! declared field, `-1` for null, and the reader
-//! (`v5_compressed_legacy::udt::parse_udt_value`) reads `-1` back as a null
+//! (`row_decoder::udt::parse_udt_value`) reads `-1` back as a null
 //! field. Canonicalizing the literal to declared order + `None` padding therefore
 //! makes the value bytes self-consistent with the declared `UserType(...)` header.
 //!

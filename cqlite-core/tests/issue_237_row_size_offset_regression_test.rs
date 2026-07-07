@@ -110,7 +110,7 @@ async fn test_issue_237_composite_key_table_full_parsing() {
                 row_count >= 90,
                 "Issue #237 REGRESSION: composite_key_table should parse at least 90 rows, got {}. \
                  This indicates the row_size offset calculation is broken for tables with clustering keys. \
-                 Check v5_compressed_legacy.rs row_size_vint_len handling.",
+                 Check row_decoder.rs row_size_vint_len handling.",
                 row_count
             );
 

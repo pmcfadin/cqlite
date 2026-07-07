@@ -9,7 +9,7 @@
 //!
 //! **Element length encoding**: Uses VInt-encoded lengths for non-frozen
 //! collection elements. This differs from frozen collections in
-//! `v5_compressed_legacy.rs` which use i32 BE lengths per Cassandra's
+//! `row_decoder.rs` which use i32 BE lengths per Cassandra's
 //! `AbstractType.writeValue()`.
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Maximum nesting depth for recursive value decoding, mirroring the V5 frozen
-/// guard (`MAX_TYPE_NESTING_DEPTH` in `v5_compressed_legacy::mod`). A corrupt or
+/// guard (`MAX_TYPE_NESTING_DEPTH` in `row_decoder::mod`). A corrupt or
 /// adversarial deeply-nested type (e.g. `frozen<frozen<frozen<...>>>`) must
 /// return `Err` rather than recurse until the stack overflows and aborts the
 /// process (issue #1632). Shared by both exact-slice decoders — the standalone

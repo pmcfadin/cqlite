@@ -3217,7 +3217,7 @@ impl KWayMerger {
     /// [`CellData::local_deletion_time`], but a simple cell TOMBSTONE carries its
     /// LDT inside its `Value::Tombstone(CellTombstone)` payload
     /// (`TombstoneInfo::local_deletion_time`, seconds) — `CellData::local_deletion_time`
-    /// stays `None` for it (`v5_compressed_legacy` only fills that field from
+    /// stays `None` for it (`row_decoder` only fills that field from
     /// `cell_meta` expiration). Without consulting the tombstone payload, the
     /// purge stage would always see `None` for a cell tombstone and conservatively
     /// retain it, so a purgeable dropped-column tombstone would be (wrongly)

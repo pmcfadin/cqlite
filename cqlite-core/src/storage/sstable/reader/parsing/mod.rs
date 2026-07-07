@@ -24,9 +24,9 @@ mod key_parsing;
 // can reach `V5CompressedLegacyParser::parse_block_emit` for the block-emit fuzz
 // target. This widens crate-internal visibility only — the module and its
 // `parse_block_emit` remain unreachable from outside cqlite-core.
+pub(crate) mod row_decoder;
 #[cfg(test)]
 mod schema_fallback_stall_tests;
-pub(crate) mod v5_compressed_legacy;
 mod value_parsing;
 #[cfg(test)]
 mod value_parsing_schema_type_tests;
@@ -35,19 +35,19 @@ mod value_parsing_schema_type_tests;
 // No explicit re-exports needed since they're all impl blocks on SSTableReader
 
 // Re-export V5CompressedLegacy parser for internal use
-pub(in crate::storage::sstable::reader) use v5_compressed_legacy::V5CompressedLegacyParser;
-// ComplexColumnMeta is used internally within v5_compressed_legacy.rs;
+pub(in crate::storage::sstable::reader) use row_decoder::V5CompressedLegacyParser;
+// ComplexColumnMeta is used internally within row_decoder.rs;
 // delta_scan.rs accesses it via the parse_block_emit_delta closure type
 // without needing an explicit re-export (Issue #700, DS4).
 
 // Re-export the sliding-window parse outcome enum (issue #827) so the
 // compaction-read streaming driver in data_access.rs can match on it.
-pub(in crate::storage::sstable::reader) use v5_compressed_legacy::ParseStep;
+pub(in crate::storage::sstable::reader) use row_decoder::ParseStep;
 
 // Re-export publicly for integration tests (Issue #166 regression tests)
 // Using doc(hidden) to keep it out of public documentation but available for testing
 #[doc(hidden)]
-pub use v5_compressed_legacy::V5CompressedLegacyParser as PublicV5CompressedLegacyParser;
+pub use row_decoder::V5CompressedLegacyParser as PublicV5CompressedLegacyParser;
 
 use std::collections::HashMap;
 use std::path::Path;

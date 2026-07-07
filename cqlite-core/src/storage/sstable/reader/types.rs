@@ -339,7 +339,7 @@ pub struct SSTableReader {
     ///
     /// Computed once in `SSTableReader::open` via `VersionGates::from_path` and
     /// stored here so every downstream consumer (header parsing,
-    /// enhanced_statistics_parser, v5_compressed_legacy row parsing) can read the
+    /// enhanced_statistics_parser, row_decoder row parsing) can read the
     /// gate values without re-deriving them from the filename each time.
     ///
     /// Decision points that WILL be gated in VG3 are annotated with

@@ -47,7 +47,7 @@ use serial_test::serial;
 // ---------------------------------------------------------------------------
 
 /// `#[doc(hidden)]` reader seam consumed by `now_epoch_secs()` in
-/// `v5_compressed_legacy`: when set to a valid `i64` (epoch seconds), it pins the
+/// `row_decoder`: when set to a valid `i64` (epoch seconds), it pins the
 /// read-time TTL shadowing clock so a long-expired fixture can be read "as of" its
 /// capture time. Set/removed only by `#[serial]` tests here to avoid env races.
 const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
@@ -408,7 +408,7 @@ async fn writetime_parity_test_basic_ttl_test_table() {
 
     // Issue #1853 roborev finding 1: the pinned-now override seam
     // (CQLITE_TTL_NOW_OVERRIDE_SECS, consumed by now_epoch_secs() in
-    // v5_compressed_legacy) is `#[cfg(debug_assertions)]`-only in library code —
+    // row_decoder) is `#[cfg(debug_assertions)]`-only in library code —
     // it compiles out entirely in `--release`. Under a release-mode test binary
     // the guard below would be a no-op, every row would be TTL-shadowed as
     // expired at the real wall clock, and the query would return 0 rows,
