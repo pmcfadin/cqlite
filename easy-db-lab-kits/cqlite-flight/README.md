@@ -85,10 +85,18 @@ The published image runs as a fixed non-root user (`uid 10001`, `useradd -r -u
 10001 flight` — see `cqlite-flight/Dockerfile`). On the host, Cassandra's data
 directory is owned by `cassandra:cassandra` at `uid/gid 999`
 (`useradd -m -u 999 cassandra` in `packer/cassandra/install/install_cassandra.sh`,
-"to match the cassandra-sidecar container image"). The manifest does **not**
-override `runAsUser`/`runAsGroup` (the image's own `USER flight` directive
-stands); it adds `supplementalGroups: [<data-gid>]` (default `999`) to the pod
-security context so the uid-10001 process can read files owned by gid 999.
+"to match the cassandra-sidecar container image").
+
+The manifest sets `runAsUser: 10001` / `runAsGroup: 10001` explicitly (issue
+#2118) — it does **not** rely on the image's own `USER flight` directive to
+satisfy `runAsNonRoot: true`. `USER flight` is a **name**, not a numeric uid;
+with `runAsNonRoot: true` and no numeric `runAsUser`, the kubelet cannot
+resolve "flight" to a uid to verify it's non-root and refuses to create the
+container (`CreateContainerConfigError`: "container has runAsNonRoot and
+image has non-numeric user (flight), cannot verify user is non-root"). Stating
+the uid numerically in the pod spec is what actually satisfies the check; it
+also adds `supplementalGroups: [<data-gid>]` (default `999`) so the uid-10001
+process can read files owned by gid 999.
 
 This assumes the host directory is at least group-readable
 (`rwxr-x---` or looser) for gid 999. `fsGroup` was deliberately **not** used —
@@ -147,3 +155,24 @@ never by resource name, matching the issue's requirement.
   Re-run the dry-run against the real lab cluster before first use.
 - **GHCR image pull**: the kit assumes the `ghcr.io/pmcfadin/cqlite-flight`
   package is public (no `imagePullSecrets` wired) per the image's own README.
+
+## Fast iteration with a dev image (outside the release train)
+
+When the harness surfaces a flight/core bug, iterate WITHOUT minting release
+versions — the `flight-image.yml` workflow's free-form `image_tag` dispatch is
+the dev channel, and it builds from any ref:
+
+```bash
+# 1. Build + push ghcr.io/pmcfadin/cqlite-flight:dev from your fix branch
+gh workflow run flight-image.yml --repo pmcfadin/cqlite \
+  --ref <fix-branch> -f image_tag=dev
+
+# 2. Roll the DaemonSet onto the rebuilt image (imagePullPolicy is Always,
+#    so a restart re-pulls the moving tag)
+kubectl rollout restart daemonset/cqlite-flight
+kubectl rollout status daemonset/cqlite-flight --timeout=180s
+```
+
+`dev` never touches `latest` or any `vX.Y*` tag; release images stay on the
+tag-push / `version`-dispatch path. If two people iterate at once, use
+distinct tags (`-f image_tag=dev-<yourname>`).

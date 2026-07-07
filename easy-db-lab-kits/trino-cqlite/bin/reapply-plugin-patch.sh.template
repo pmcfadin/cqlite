@@ -23,6 +23,18 @@
 #      (volumeMounts by mountPath), so re-applying identical content is a
 #      no-op against an already-patched Deployment.
 #
+# Also ensures the ConfigMap the initContainer mounts (${CONFIGMAP_NAME})
+# exists BEFORE either deployment is patched (issue #2120). Nothing else in
+# the `cqlite start` flow reliably creates it: `bin/install.sh` does, but it
+# is not wired as a kit `install:` hook and the easy-db-lab kit runner does
+# not auto-run a script merely named `install.sh` — so on the real
+# `kit install trino-cqlite` + `cqlite start` path it was never executed and
+# the mount failed with `configmap "cqlite-trino-plugin-src" not found`. This
+# script is the one thing guaranteed to run on every `cqlite start` AND on
+# every post-workload hook, so the create/refresh belongs here, not in
+# `install.sh` (kept only for manual/standalone convenience — see its own
+# header comment).
+#
 # Runs best-effort: if the trino kit isn't installed/running yet (or this
 # fires for an unrelated kit before trino ever starts), it skips quietly
 # rather than failing the triggering kit's own start/stop.
@@ -32,7 +44,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export KUBECONFIG="${SCRIPT_DIR}/../../__KUBECONFIG__"
 
 CONFIGMAP_NAME="cqlite-trino-plugin-src"
-INIT_IMAGE="gradle:9.1.0-jdk21"
+GRADLE_DIR="${SCRIPT_DIR}/../gradle-assemble-plugin"
+# JDK level MUST be >= the connector's own build target (Java 25 / Trino SPI
+# 481 — see trino-connector/build.gradle.kts: `trinoVersion = "481"` and its
+# toolchain languageVersion). The published `in.mcfad:cqlite-trino` artifact
+# carries a `org.gradle.jvm.version=25` capability attribute; a JDK-21 Gradle
+# (e.g. `gradle:9.1.0-jdk21`) REFUSES to resolve it at all ("Dependency
+# resolution is looking for a library compatible with JVM runtime version 21,
+# but ... is only compatible with JVM runtime version 25 or newer" — issue
+# #2122). Keep this in lockstep with the connector's JDK/trinoVersion target
+# going forward.
+INIT_IMAGE="gradle:9.1.0-jdk25"
 PLUGIN_MOUNT_PATH="/usr/lib/trino/plugin/cqlite_flight"
 # Same shell recipe as the connector's own documented assemblePlugin usage
 # (trino-connector/README.md "Maven Central / published artifact"): copy the
@@ -40,6 +62,45 @@ PLUGIN_MOUNT_PATH="/usr/lib/trino/plugin/cqlite_flight"
 # needs to write build/ and its cache), run assemblePlugin, then copy the
 # result into the shared emptyDir.
 INIT_SCRIPT='set -eu; mkdir -p /tmp/build; cp /workspace/build.gradle.kts /workspace/settings.gradle.kts /tmp/build/; cd /tmp/build; gradle --no-daemon --console=plain assemblePlugin; cp -r build/plugin/cqlite_flight/. /plugin-out/'
+
+# Issue #2120: create/refresh the ConfigMap the initContainer mounts BEFORE
+# either deployment is patched to reference it. Same recipe as
+# bin/install.sh (kept in sync deliberately) — idempotent create-or-update
+# via the dry-run|apply pattern, safe to run on every invocation.
+ensure_configmap() {
+  echo "cqlite plugin patch: ensuring ConfigMap ${CONFIGMAP_NAME} exists..."
+  kubectl create configmap "${CONFIGMAP_NAME}" \
+    --namespace default \
+    --from-file="${GRADLE_DIR}/build.gradle.kts" \
+    --from-file="${GRADLE_DIR}/settings.gradle.kts" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
+
+# Issue #2119: the trino kit runs trino-coordinator with `hostPort: 8080`. On
+# a single app node, patching the pod template starts a rollout whose new pod
+# can never schedule while the old pod still holds that hostPort — the exact
+# deadlock the trino kit's own bin/start.sh already avoids for itself by
+# deleting the coordinator pod after a template change. Mirror that here, but
+# ONLY when this patch actually changed the pod template: `kubectl patch`
+# prints "... (no change)" when the strategic-merge patch was a no-op against
+# an already-patched Deployment, and re-applying identical content (the
+# steady-state case — this script fires on every kit start/stop) must NOT
+# bounce an already-healthy coordinator.
+bounce_coordinator_if_changed() {
+  local patch_output="$1"
+
+  if [[ "${patch_output}" == *"(no change)"* ]]; then
+    echo "    trino-coordinator pod template unchanged — not bouncing the pod."
+    return 0
+  fi
+
+  echo "    trino-coordinator pod template changed — deleting the old pod so the"
+  echo "    controller can recreate it on the now-free hostPort 8080..."
+  kubectl delete pod --namespace default \
+    -l 'app.kubernetes.io/name=trino,app.kubernetes.io/component=coordinator' \
+    --ignore-not-found
+  kubectl rollout status deployment/trino-coordinator --namespace default --timeout=180s
+}
 
 patch_deployment() {
   local dep="$1"
@@ -83,10 +144,17 @@ patch_deployment() {
         }
       ]
     }}}}')
-  kubectl patch deployment "${dep}" --namespace default --type=strategic -p="${patch}"
+  local patch_output
+  patch_output=$(kubectl patch deployment "${dep}" --namespace default --type=strategic -p="${patch}")
+  echo "    ${patch_output}"
+
+  if [ "${dep}" = "trino-coordinator" ]; then
+    bounce_coordinator_if_changed "${patch_output}"
+  fi
 }
 
 echo "cqlite plugin patch: reapplying to trino-coordinator/trino-worker (idempotent)..."
+ensure_configmap
 patch_deployment trino-coordinator
 patch_deployment trino-worker
 echo "cqlite plugin patch: done."

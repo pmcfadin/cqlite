@@ -109,12 +109,41 @@ the manual workflow (see [below](#cutting-a-one-off-image-no-release-tag)):
 ghcr.io/pmcfadin/cqlite-flight
 ```
 
+**Canonical tag scheme (issue #2117):** every version tag is **v-prefixed**,
+matching this repo's own git tag convention (`v0.13.0`, `v0.13.1`, ...) and the
+version the connector JAR ships under on the release's git tag:
+
 | Tag | Points at |
 |-----|-----------|
-| `vX.Y.Z` | An exact release (e.g. `v0.13.0`). |
-| `X.Y` | The latest patch on a minor line (e.g. `0.13`). |
+| `vX.Y.Z` | An exact release (e.g. `v0.13.1`). |
+| `vX.Y` | The latest patch on a minor line (e.g. `v0.13`). |
 | `latest` | The most recent **stable** release (prereleases excluded). |
 | custom | One-off images cut via the manual workflow (see below). |
+
+The publishing contract: `.github/workflows/flight-image.yml` builds and pushes
+this set two ways —
+
+1. **Tag push** (`git push origin vX.Y.Z`): automatic, pushes `vX.Y.Z` + `vX.Y`,
+   and moves `latest` (unless the tag has a prerelease suffix, e.g. `v0.13.1-rc1`).
+2. **Manual dispatch with `version`** (`gh workflow run flight-image.yml -f
+   version=X.Y.Z`, no leading `v`): pushes the identical `vX.Y.Z` + `vX.Y` set a
+   tag push would. `latest` is **not** moved unless `move_latest=true` is also
+   passed — a dispatch can build from an arbitrary ref, so silently retargeting
+   the floating `latest` pointer would be surprising. Use this to backfill a
+   release image when the tag-push run didn't produce one (e.g. the connector
+   JAR published to Maven Central but the container never ran — issue #2117).
+
+A manual dispatch can *also* be given a free-form `image_tag` (e.g. `dev`,
+`0.13.0-rc1`) instead of `version`, for a one-off custom tag unrelated to any
+release — see [below](#cutting-a-one-off-image-no-release-tag). `image_tag` is
+ignored when `version` is set.
+
+**Historical inconsistency (issue #2117):** before this scheme was normalized,
+some releases were manually re-tagged by hand and ended up with a mix of
+v-prefixed and bare tags (`v0.12.0`; `v0.13.0` **and** bare `0.13.0`/`0.13`).
+Those older bare tags are left in place on GHCR (not deleted) but are **not**
+part of the contract — only `vX.Y.Z` / `vX.Y` / `latest` are current and
+guaranteed going forward.
 
 Once the GHCR package is public, pulling needs **no authentication** (no
 `docker login`):
@@ -158,13 +187,29 @@ architectures — it is pulled and run, and the publish fails unless the contain
 serves the Flight listener on `:8815` — so a tag that lands in GHCR is one that
 boots and serves.
 
+### Backfilling a release image
+
+If a `v*` tag was pushed (and the connector JAR published to Maven Central) but
+the `cqlite-flight` container was never built — the tag-triggered run didn't
+fire or failed silently (issue #2117) — republish it without cutting a new
+release, by dispatching the same workflow with the `version` input:
+
+```bash
+gh workflow run flight-image.yml --repo pmcfadin/cqlite -f version=0.13.1
+```
+
+This builds from the current default-branch ref and pushes the identical
+`v0.13.1` + `v0.13` tags a `v0.13.1` tag push would have produced. It does
+**not** move `latest` unless you also pass `-f move_latest=true` — pass that
+only if this backfilled version is genuinely the most recent stable release.
+
 ### Cutting a one-off image (no release tag)
 
 Maintainers can build and push an image on demand without tagging a release:
 run the **“cqlite-flight image”** GitHub Actions workflow via *Run workflow*
-(`workflow_dispatch`) and supply an `image_tag` (e.g. `dev`). It publishes
-`ghcr.io/pmcfadin/cqlite-flight:<image_tag>`. The same workflow also runs
-automatically on every `v*` tag.
+(`workflow_dispatch`) and supply an `image_tag` (e.g. `dev`), leaving `version`
+blank. It publishes `ghcr.io/pmcfadin/cqlite-flight:<image_tag>`. The same
+workflow also runs automatically on every `v*` tag.
 
 To build locally instead (requires Docker Buildx and a GHCR login with
 `write:packages`):

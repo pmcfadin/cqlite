@@ -2,8 +2,21 @@ name: cqlite-flight image
 
 # Build and publish the cqlite-flight Arrow Flight (gRPC) server container to
 # GHCR. Runs automatically on every v* release tag, and on demand via the
-# "Run workflow" button (workflow_dispatch) with a custom image tag — so you
-# can cut a one-off image without tagging a release.
+# "Run workflow" button (workflow_dispatch) two ways:
+#   - `version` (e.g. 0.13.1, no leading v): builds from the dispatched ref and
+#     pushes the SAME tag set a `v0.13.1` tag push would (vX.Y.Z + vX.Y) — use
+#     this to backfill/republish a release image when the tag-push run didn't
+#     produce one (issue #2117). `latest` is NOT moved unless `move_latest` is
+#     also set — a dispatch can build from an arbitrary ref, so silently
+#     retargeting the floating `latest` pointer would be surprising.
+#   - `image_tag` (e.g. dev, 0.13.0-rc1): a free-form one-off tag, unrelated to
+#     any release version. Ignored when `version` is set.
+#
+# Canonical tag scheme (issue #2117): every version tag this workflow emits is
+# v-prefixed (vX.Y.Z, vX.Y), matching this repo's own git tag convention
+# (v0.10.0, v0.11.0, ...). Older bare tags (0.13.0, 0.13) published before this
+# was normalized are left in place on GHCR (not deleted) but are not part of
+# the contract going forward — see cqlite-flight/README.md.
 #
 # The image exposes the Flight gRPC listener on :8815 and reads SSTables from a
 # directory mounted at runtime (--data-dir). The Trino connector is released
@@ -15,8 +28,16 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Release version to publish (no leading v), e.g. 0.13.1 — mirrors a vX.Y.Z tag push (emits vX.Y.Z + vX.Y). Leave blank to use `image_tag` instead.'
+        type: string
+        required: false
+      move_latest:
+        description: 'Also move the `latest` tag to this build (only applies when `version` is set)'
+        type: boolean
+        default: false
       image_tag:
-        description: 'Tag to publish the image under (e.g. dev, 0.13.0-rc1)'
+        description: 'One-off custom tag, used only when `version` is blank (e.g. dev, 0.13.0-rc1)'
         required: true
         default: 'dev'
 
@@ -93,8 +114,10 @@ jobs:
         retention-days: 1
 
   # Assemble the per-arch digests into one multi-arch manifest list and apply
-  # the human tags. On a v* tag: vX.Y.Z, X.Y, and `latest` (non-prerelease).
-  # On a manual run: the `image_tag` input.
+  # the human tags. On a v* tag: vX.Y.Z, vX.Y, and `latest` (non-prerelease).
+  # On a manual `version` dispatch: the SAME vX.Y.Z + vX.Y set (`latest` only
+  # if `move_latest` is also set). On a manual `image_tag`-only dispatch (no
+  # `version`): just that one custom tag, unchanged from before.
   merge:
     name: Publish multi-arch image
     runs-on: ubuntu-latest
@@ -118,16 +141,85 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
+    # Resolve a single (version, major_minor, move_latest) triple for BOTH
+    # trigger types, so the tags step below has one uniform source of truth
+    # instead of duplicating semver-vs-raw logic per event. A tag push derives
+    # the version from the git ref; a manual dispatch derives it from the
+    # `version` input (blank means "use `image_tag` instead", the legacy
+    # one-off path). Inputs are read via env vars, never interpolated inline
+    # into the script, per this repo's command-injection guard (see
+    # trino-publish.yml's Resolve version step, which this mirrors).
+    - name: Resolve version and latest-move decision
+      id: version
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        REF_NAME: ${{ github.ref_name }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_MOVE_LATEST: ${{ inputs.move_latest }}
+      run: |
+        set -euo pipefail
+        if [ "$EVENT_NAME" = "push" ]; then
+          resolved="${REF_NAME#v}"
+        else
+          resolved="${INPUT_VERSION#v}"
+        fi
+
+        if [ -z "$resolved" ]; then
+          # workflow_dispatch with no `version` input: the legacy one-off
+          # `image_tag`-only path. No version/latest tags here — the raw
+          # `image_tag` tag below covers it.
+          {
+            echo "resolved="
+            echo "major_minor="
+            echo "move_latest=false"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Strict allowlist mirrors trino-publish.yml's Resolve version step:
+        # semver core with an optional pre-release suffix (e.g. 0.13.1,
+        # 0.13.1-rc1). Reject anything else so a crafted `version` input can't
+        # inject into the raw tag values computed below.
+        if ! printf '%s' "$resolved" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+          echo "::error::Refusing to publish: version '$resolved' is not a valid release version (expected ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$)"
+          exit 1
+        fi
+
+        major_minor="$(printf '%s' "$resolved" | cut -d. -f1,2)"
+
+        move_latest=false
+        if [ "$EVENT_NAME" = "push" ]; then
+          # Tag push: move `latest` for a stable release only (no `-`
+          # prerelease suffix) — same gate the prior
+          # `!contains(github.ref_name, '-')` expression implemented.
+          case "$resolved" in
+            *-*) move_latest=false ;;
+            *) move_latest=true ;;
+          esac
+        elif [ "$INPUT_MOVE_LATEST" = "true" ]; then
+          # Manual dispatch: never move `latest` unless explicitly requested —
+          # a dispatch can build from an arbitrary ref, so silently retargeting
+          # the floating `latest` pointer from an ad-hoc run would be
+          # surprising.
+          move_latest=true
+        fi
+
+        {
+          echo "resolved=$resolved"
+          echo "major_minor=$major_minor"
+          echo "move_latest=$move_latest"
+        } >> "$GITHUB_OUTPUT"
+
     - name: Docker metadata (tags)
       id: meta
       uses: docker/metadata-action@v5
       with:
         images: ${{ env.REGISTRY_IMAGE }}
         tags: |
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=raw,value=latest,enable=${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
-          type=raw,value=${{ github.event.inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+          type=raw,value=v${{ steps.version.outputs.resolved }},enable=${{ steps.version.outputs.resolved != '' }},priority=900
+          type=raw,value=v${{ steps.version.outputs.major_minor }},enable=${{ steps.version.outputs.resolved != '' }},priority=800
+          type=raw,value=latest,enable=${{ steps.version.outputs.move_latest == 'true' }},priority=700
+          type=raw,value=${{ github.event.inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' && steps.version.outputs.resolved == '' }},priority=600
 
     - name: Log in to GHCR
       uses: docker/login-action@v3
