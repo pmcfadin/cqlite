@@ -917,6 +917,7 @@ DELTA_COMPONENTS=(file-size fmt scoped-tests)
 ONLY=""
 SELFTEST=0
 LITE=0
+LITE_AGG_SELFTEST=0
 DELTA=0
 DELTA_ANCHOR=""
 DELTA_ANCHOR_RUN_ID=""
@@ -936,6 +937,14 @@ case "${1:-}" in
   # running any component.
   --lite) LITE=1; [ "${2:-}" = --emit-summary-selftest ] && SELFTEST=1 ;;
   --lite-list) printf '%s\n' "${LITE_COMPONENTS[@]}"; exit 0 ;;
+  # Hidden self-test hook (issue #2121): drive the --lite OVERALL aggregation
+  # (aggregate_lite_components) hermetically. Seeds per-component .result files from
+  # AGENT_GATE_TEST_LITE_RESULTS ("name:status ..."), plus the scoped-tests NAMES entry
+  # (AGENT_GATE_TEST_LITE_SCOPED, default PASS), then emits the LITE block and exits on
+  # OVERALL — proving a component FAIL flips RESULT + exit WITHOUT running cargo. The
+  # execution block lives near the --lite dispatch (aggregate_lite_components must be
+  # defined first).
+  --lite-aggregate-selftest) LITE=1; LITE_AGG_SELFTEST=1 ;;
   --delta-list) printf '%s\n' "${DELTA_COMPONENTS[@]}"; exit 0 ;;
   # --delta <anchor> [--anchor-run-id <id>] [--anchor-summary-file <path>]
   #                  [--emit-summary-selftest]
@@ -2053,6 +2062,49 @@ run_scoped_tests() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# aggregate_lite_components (issue #2121): the --lite OVERALL aggregator, mirroring
+# the full gate's per-component reconstruction (see the `for _c in "${COMPONENTS[@]}"`
+# loop) and run_delta's (the `for c in file-size fmt` loop). file-size + fmt + clippy
+# run in the FOREGROUND under --lite and record ONLY to their per-component `.result`
+# files — run_component/run_file_size are display-only, they never touch OVERALL, the
+# same single-source contract the full gate relies on. run_lite previously iterated
+# NAMES directly, but NAMES held ONLY the scoped-tests entry run_scoped_tests appended,
+# so a fmt/clippy/file-size FAIL neither appeared in the block NOR flipped OVERALL — a
+# false-green lite report (the #2121 bug). This rebuilds NAMES/STATUSES/TIMES in
+# canonical order (file-size fmt clippy, then the scoped-tests entry) and sets
+# OVERALL=FAIL on ANY of those components that FAILED.
+#
+# PRESENT-ONLY (not fail-closed on a missing result): a component that did not run is
+# skipped, never force-failed. This preserves the lenient `--lite --only <c>` contract
+# (e.g. bootstrap-agent-machine.sh runs `--lite --only fmt`, which skips file-size and
+# clippy). Fail-open is not a risk here because these components run in the foreground
+# and always reach record_result; the only way a `.result` is absent is a deliberate
+# --only skip. The full gate keeps its own fail-closed missing-result guard for its
+# backgrounded pool, which is where a crash-before-record_result can actually happen.
+aggregate_lite_components() {
+  local -a LN=() LS=() LT=()
+  local c rf st secs i
+  for c in file-size fmt clippy; do
+    rf="$LOG_DIR/$c.result"
+    [ -f "$rf" ] || continue   # not run (e.g. --only skip) — do not add, do not fail
+    st=""; secs=""
+    read -r st secs < "$rf" || true
+    [ -n "$st" ] || { st=FAIL; secs=0; }
+    LN+=("$c"); LS+=("$st"); LT+=("${secs}s")
+    [ "$st" = FAIL ] && OVERALL=FAIL
+  done
+  # Preserve the scoped-tests (+ any python/node) entries run_scoped_tests appended to
+  # NAMES; run_scoped_tests already set OVERALL=FAIL itself on a test failure.
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for i in "${!NAMES[@]}"; do
+      LN+=("${NAMES[$i]}"); LS+=("${STATUSES[$i]}"); LT+=("${TIMES[$i]}")
+    done
+  fi
+  NAMES=("${LN[@]+"${LN[@]}"}")
+  STATUSES=("${LS[@]+"${LS[@]}"}")
+  TIMES=("${LT[@]+"${LT[@]}"}")
+}
+
 # run_lite (issue #1821): the FAST ITERATION gate. Runs file-size + fmt +
 # FULL-workspace clippy + blast-radius-scoped tests, emits a DISTINCTLY-labeled
 # LITE summary, and EXITS — it never falls through to the full-gate flow below, so
@@ -2072,6 +2124,11 @@ run_lite() {
   run_component fmt cargo fmt --all --check
   run_component clippy run_clippy
   run_scoped_tests
+
+  # Aggregate the foreground components (file-size/fmt/clippy) into NAMES + OVERALL
+  # BEFORE building the summary (issue #2121). Without this, a fmt/clippy/file-size
+  # FAIL was invisible in the block and left OVERALL=PASS → a false-green lite report.
+  aggregate_lite_components
 
   declare -a SUMMARY_META=()
   SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
@@ -2575,6 +2632,34 @@ if [ -n "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
   sleep "${CQLITE_GATE_STUB_SLEEP:-2}"
   rm -f "$_stub_marker" 2>/dev/null || true
   exit 0
+fi
+
+# Hidden self-test hook (issue #2121): exercise the --lite OVERALL aggregation in
+# isolation. Seeds the per-component .result files + the scoped-tests NAMES entry the
+# real run_lite would produce, runs the SAME aggregate_lite_components, emits the LITE
+# summary, and exits on OVERALL exactly as run_lite does — so the regression test can
+# pin "any component FAIL ⇒ RESULT: FAIL + non-zero exit" without a cargo build.
+if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
+  # Seed per-component result files from AGENT_GATE_TEST_LITE_RESULTS="name:status ...".
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated pairs
+  for _pair in ${AGENT_GATE_TEST_LITE_RESULTS:-}; do
+    printf '%s 0\n' "${_pair#*:}" > "$LOG_DIR/${_pair%%:*}.result"
+  done
+  # Seed the scoped-tests entry run_scoped_tests appends (and flip OVERALL as it does).
+  _scoped_st="${AGENT_GATE_TEST_LITE_SCOPED:-PASS}"
+  NAMES+=("scoped-tests"); STATUSES+=("$_scoped_st"); TIMES+=("0s")
+  [ "$_scoped_st" = FAIL ] && OVERALL=FAIL
+  aggregate_lite_components
+  declare -a SUMMARY_META=()
+  SUMMARY_META+=("commit: selftest branch: selftest dirty: no")
+  SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (aggregate selftest)")
+  SUMMARY_META+=("$(accelerators_line)")
+  for _i in "${!NAMES[@]}"; do
+    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$_i]}:" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
+  done
+  emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+  [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || exit 1
+  case "$OVERALL" in PASS) exit 0 ;; *) exit 1 ;; esac
 fi
 
 # --lite (issue #1821): run the fast subset and EXIT before the full-gate flow.

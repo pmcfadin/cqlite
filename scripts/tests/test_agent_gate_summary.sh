@@ -759,6 +759,96 @@ else
   echo "------- captured -------"; cat "$lite_block" 2>/dev/null; echo "------------------------"
 fi
 
+# ============================================================================
+# ISSUE #2121: --lite OVERALL must aggregate the file-size/fmt/clippy verdicts.
+# Before the fix, run_lite iterated NAMES directly (which held ONLY the scoped-tests
+# entry), so a real clippy -D warnings / fmt --check / file-size ratchet FAIL emitted
+# RESULT: PASS + exit 0 — a trust-critical false-green lite report (agents key on the
+# RESULT line). The aggregation now lives in aggregate_lite_components and is exercised
+# HERMETICALLY (no cargo) via the hidden --lite-aggregate-selftest hook: it seeds the
+# per-component .result files run_lite's foreground components would write, seeds the
+# scoped-tests NAMES entry run_scoped_tests appends, then runs the SAME aggregator +
+# emit + exit path run_lite uses.
+# ============================================================================
+
+# 13a. A single component FAIL flips RESULT: FAIL + non-zero exit, for EACH of the
+#      three foreground lite components (file-size, fmt, clippy), and the failing
+#      component line now appears in the block (it did not, pre-fix).
+for comp in file-size fmt clippy; do
+  agg_results="file-size:PASS fmt:PASS clippy:PASS"
+  agg_results="${agg_results/$comp:PASS/$comp:FAIL}"
+  agg_file="$tmp/2121-$comp-fail.txt"
+  AGENT_GATE_SUMMARY_FILE="$agg_file" \
+    AGENT_GATE_TEST_LITE_RESULTS="$agg_results" AGENT_GATE_TEST_LITE_SCOPED=PASS \
+    bash "$GATE" --lite-aggregate-selftest >/dev/null 2>&1
+  agg_rc=$?
+  if [ "$agg_rc" -ne 0 ] \
+     && grep -q "^RESULT: FAIL" "$agg_file" 2>/dev/null \
+     && ! grep -q "^RESULT: PASS" "$agg_file" 2>/dev/null \
+     && grep -qE "^$comp: +FAIL" "$agg_file" 2>/dev/null; then
+    ok "2121-$comp-fail: $comp FAIL -> RESULT: FAIL + exit $agg_rc + '$comp' line shown"
+  else
+    bad "2121-$comp-fail: expected RESULT: FAIL + non-zero exit + '$comp: FAIL' line (rc=$agg_rc)"
+    echo "------- captured -------"; cat "$agg_file" 2>/dev/null; echo "------------------------"
+  fi
+done
+
+# 13b. All components PASS -> RESULT: PASS + exit 0 (the aggregator must not over-fail).
+agg_pass="$tmp/2121-all-pass.txt"
+AGENT_GATE_SUMMARY_FILE="$agg_pass" \
+  AGENT_GATE_TEST_LITE_RESULTS="file-size:PASS fmt:PASS clippy:PASS" \
+  AGENT_GATE_TEST_LITE_SCOPED=PASS \
+  bash "$GATE" --lite-aggregate-selftest >/dev/null 2>&1
+agg_pass_rc=$?
+if [ "$agg_pass_rc" -eq 0 ] && grep -q "^RESULT: PASS" "$agg_pass" 2>/dev/null; then
+  ok "2121-all-pass: every component PASS -> RESULT: PASS + exit 0"
+else
+  bad "2121-all-pass: expected RESULT: PASS + exit 0 (rc=$agg_pass_rc)"
+  echo "------- captured -------"; cat "$agg_pass" 2>/dev/null; echo "------------------------"
+fi
+
+# 13c. The scoped-tests FAIL path (the only one that flipped OVERALL pre-fix) must
+#      still flip it — a regression guard that the fix preserves existing behavior.
+agg_scoped="$tmp/2121-scoped-fail.txt"
+AGENT_GATE_SUMMARY_FILE="$agg_scoped" \
+  AGENT_GATE_TEST_LITE_RESULTS="file-size:PASS fmt:PASS clippy:PASS" \
+  AGENT_GATE_TEST_LITE_SCOPED=FAIL \
+  bash "$GATE" --lite-aggregate-selftest >/dev/null 2>&1
+agg_scoped_rc=$?
+if [ "$agg_scoped_rc" -ne 0 ] && grep -q "^RESULT: FAIL" "$agg_scoped" 2>/dev/null; then
+  ok "2121-scoped-fail: scoped-tests FAIL still -> RESULT: FAIL (existing path preserved)"
+else
+  bad "2121-scoped-fail: expected RESULT: FAIL + non-zero exit (rc=$agg_scoped_rc)"
+  echo "------- captured -------"; cat "$agg_scoped" 2>/dev/null; echo "------------------------"
+fi
+
+# 13d. PRESENT-ONLY contract (the `--lite --only fmt` shape bootstrap-agent-machine.sh
+#      runs): only fmt actually ran, so only fmt.result exists. The aggregator must
+#      NOT force-fail the unselected file-size/clippy — it PASSes and shows neither.
+agg_only="$tmp/2121-only-fmt.txt"
+AGENT_GATE_SUMMARY_FILE="$agg_only" \
+  AGENT_GATE_TEST_LITE_RESULTS="fmt:PASS" AGENT_GATE_TEST_LITE_SCOPED=PASS \
+  bash "$GATE" --lite-aggregate-selftest >/dev/null 2>&1
+agg_only_rc=$?
+if [ "$agg_only_rc" -eq 0 ] && grep -q "^RESULT: PASS" "$agg_only" 2>/dev/null \
+   && ! grep -qE "^(file-size|clippy): " "$agg_only" 2>/dev/null; then
+  ok "2121-present-only: --only fmt shape PASSes; unselected components not force-failed"
+else
+  bad "2121-present-only: --only fmt shape must PASS with only fmt+scoped-tests shown (rc=$agg_only_rc)"
+  echo "------- captured -------"; cat "$agg_only" 2>/dev/null; echo "------------------------"
+fi
+
+# 13e. STRUCTURAL single-source guard (mirrors test 7e): the hermetic cases above
+#      exercise aggregate_lite_components, so assert the REAL executor (run_lite) still
+#      invokes it — otherwise an executor edit could silently drop aggregation while
+#      these cases stay green. Extract the function body with awk (top-level `}` ends it).
+rl_body=$(awk '/^run_lite\(\)/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
+if printf '%s\n' "$rl_body" | grep -v '^[[:space:]]*#' | grep -q 'aggregate_lite_components'; then
+  ok "2121-structural: run_lite invokes aggregate_lite_components (lite OVERALL aggregation single-sourced)"
+else
+  bad "2121-structural: run_lite no longer calls aggregate_lite_components — lite OVERALL aggregation lost"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
