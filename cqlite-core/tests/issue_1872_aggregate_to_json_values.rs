@@ -26,6 +26,32 @@ use std::path::{Path, PathBuf};
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::Database;
 
+/// Extract the `name` field of every entry in `to_json()`'s serialized
+/// `"columns"` metadata array — i.e. what `metadata.columns` actually
+/// serializes to, NOT the row payload.
+///
+/// This is the guard against a false-positive hole (roborev finding on this
+/// PR): `row_to_json_deterministic` falls back to serializing the row's raw
+/// value map (sorted keys) whenever `metadata.columns` is EMPTY, so asserting
+/// only on `to_json()["rows"]` can pass even if the metadata/naming contract
+/// regressed to empty metadata — the fallback path would still produce
+/// `Sum_value`/`total_value` fields from the row map, masking the regression.
+/// Asserting the serialized `"columns"` array explicitly proves the name came
+/// from the metadata path, not the fallback.
+fn json_column_names(json: &serde_json::Value) -> Vec<String> {
+    json.get("columns")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("to_json must emit a `columns` array; json was {json}"))
+        .iter()
+        .map(|c| {
+            c.get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_else(|| panic!("each columns[] entry must have a `name`; got {c}"))
+                .to_string()
+        })
+        .collect()
+}
+
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -107,6 +133,19 @@ async fn sum_aggregate_to_json_carries_value_under_stable_name() {
     }
 
     let json = result.to_json();
+
+    // Guard against the false-positive hole: assert the serialized `columns`
+    // metadata section itself carries the aggregate name — proving the JSON
+    // field name below comes from the metadata path, not the row-map fallback
+    // that `row_to_json_deterministic` uses when `metadata.columns` is empty.
+    let meta_names = json_column_names(&json);
+    assert_eq!(
+        meta_names,
+        vec!["Sum_value".to_string()],
+        "issue #1872: to_json's serialized `columns` metadata must name the \
+         aggregate `Sum_value` (not empty/col_N); got {meta_names:?}"
+    );
+
     let first_row = json
         .get("rows")
         .and_then(|r| r.as_array())
@@ -149,6 +188,18 @@ async fn aliased_sum_aggregate_to_json_uses_alias() {
         .expect("aliased SUM must execute");
 
     let json = result.to_json();
+
+    // Guard against the false-positive hole: the serialized `columns` metadata
+    // section must name the aggregate `total_value` (the alias), not fall back
+    // to an empty/synthetic name that the row-map fallback would mask.
+    let meta_names = json_column_names(&json);
+    assert_eq!(
+        meta_names,
+        vec!["total_value".to_string()],
+        "issue #1872: to_json's serialized `columns` metadata must name the \
+         aliased aggregate `total_value`; got {meta_names:?}"
+    );
+
     let first_row = json
         .get("rows")
         .and_then(|r| r.as_array())
@@ -198,6 +249,19 @@ async fn grouped_sum_to_json_all_fields_named_and_valued() {
     ];
 
     let json = result.to_json();
+
+    // Guard against the false-positive hole: the serialized `columns` metadata
+    // section must name BOTH the grouped dimension and the aggregate, in
+    // SELECT order, proving the JSON field names below come from the metadata
+    // path rather than the row-map fallback that would mask empty metadata.
+    let meta_names = json_column_names(&json);
+    assert_eq!(
+        meta_names,
+        vec!["category".to_string(), "Sum_value".to_string()],
+        "issue #1872: to_json's serialized `columns` metadata must name the \
+         grouped dimension and aggregate; got {meta_names:?}"
+    );
+
     let rows = json
         .get("rows")
         .and_then(|r| r.as_array())
