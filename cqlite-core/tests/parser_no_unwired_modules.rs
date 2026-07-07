@@ -158,17 +158,20 @@ fn is_own_source(path: &Path, parser_dir: &Path, module: &str) -> bool {
     path.starts_with(&dir)
 }
 
-#[test]
-fn every_parser_module_has_a_caller() {
+/// Shared helper: verify all non-test modules in `module_dir` have at least
+/// one production caller. Used by both the `parser/` and `bti/parser/` guards.
+fn check_module_dir_wiring(module_dir: &Path, context: &str) {
     let root = workspace_root();
-    let parser_dir = root.join("cqlite-core/src/parser");
-    let mod_rs = parser_dir.join("mod.rs");
-    assert!(mod_rs.is_file(), "parser/mod.rs must exist at {mod_rs:?}");
+    let mod_rs = module_dir.join("mod.rs");
+    assert!(
+        mod_rs.is_file(),
+        "{context} mod.rs must exist at {mod_rs:?}"
+    );
 
     let (modules, facade_reexports) = parse_mod_rs(&mod_rs);
     assert!(
         !modules.is_empty(),
-        "expected to discover parser modules in mod.rs"
+        "expected to discover modules in {context} mod.rs"
     );
 
     // Source dirs that may contain callers (never `tests/` — excluded in the walk).
@@ -204,10 +207,10 @@ fn every_parser_module_has_a_caller() {
             continue;
         }
         // Mode (a): a `<module>::` path reference in a non-test/non-bench file
-        // other than the module's own source and parser/mod.rs.
+        // other than the module's own source and the directory's mod.rs.
         let needle = format!("{module}::");
         let wired = sources.iter().any(|(path, text)| {
-            if path == &mod_rs || is_own_source(path, &parser_dir, module) {
+            if path == &mod_rs || is_own_source(path, module_dir, module) {
                 return false;
             }
             path_reference(text, &needle)
@@ -219,10 +222,27 @@ fn every_parser_module_has_a_caller() {
 
     assert!(
         orphaned.is_empty(),
-        "unwired parser module(s) with no non-test/non-bench caller: {orphaned:?}. \
-         Every non-test, non-benchmark module under cqlite-core/src/parser/ must have at least one \
-         caller (a `<module>::` path use, or a non-gated facade re-export in parser/mod.rs). \
-         Delete the dead module or wire it in (issue #1637, finding J3)."
+        "unwired {context} module(s) with no non-test/non-bench caller: {orphaned:?}. \
+         Every non-test, non-benchmark module under {context} must have at least one \
+         caller (a `<module>::` path use, or a non-gated facade re-export in mod.rs). \
+         Delete the dead module or wire it in (issue #1637 / issue #1652, finding J3)."
+    );
+}
+
+#[test]
+fn every_parser_module_has_a_caller() {
+    let root = workspace_root();
+    let parser_dir = root.join("cqlite-core/src/parser");
+    check_module_dir_wiring(&parser_dir, "cqlite-core/src/parser");
+}
+
+#[test]
+fn every_bti_parser_module_has_a_caller() {
+    let root = workspace_root();
+    let bti_parser_dir = root.join("cqlite-core/src/storage/sstable/bti/parser");
+    check_module_dir_wiring(
+        &bti_parser_dir,
+        "cqlite-core/src/storage/sstable/bti/parser",
     );
 }
 
