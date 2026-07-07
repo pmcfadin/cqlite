@@ -29,9 +29,7 @@ use parse::parse_index_data_with_summary;
 #[cfg(test)]
 pub(crate) use parse::parse_all_partition_keys;
 #[cfg(test)]
-use parse::{
-    parse_all_partition_keys_with_summary, parse_index_data, parse_simple_partition_key,
-};
+use parse::{parse_all_partition_keys_with_summary, parse_index_data, parse_simple_partition_key};
 
 /// Index.db file header
 #[derive(Debug, Clone, Serialize, Deserialize)]

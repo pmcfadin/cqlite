@@ -242,4 +242,3 @@ pub(super) fn parse_simple_partition_key(input: &[u8]) -> IResult<&[u8], Partiti
 
 // Note: Promoted index parsing removed as it's not present in the simple Index.db format
 // Real Cassandra 5 Index.db files only contain partition key digests
-

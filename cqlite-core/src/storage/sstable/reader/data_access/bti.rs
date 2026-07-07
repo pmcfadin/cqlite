@@ -18,13 +18,13 @@ use tokio::io::AsyncSeekExt;
 // `not(tombstones)`-gated; the point-read decoders that also used them moved to
 // `bti_point.rs` (issue #1599 / G3 split).
 #[cfg(not(feature = "tombstones"))]
+use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
+#[cfg(not(feature = "tombstones"))]
 use crate::types::TableId;
 #[cfg(not(feature = "tombstones"))]
 use crate::Error;
 #[cfg(not(feature = "tombstones"))]
 use log::debug;
-#[cfg(not(feature = "tombstones"))]
-use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
 
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
@@ -462,7 +462,6 @@ impl SSTableReader {
             body_end_rel,
         }))
     }
-
 
     /// BTI ("da") full scan: decompress the whole Data.db section and parse
     /// every partition in token order (issue #660).

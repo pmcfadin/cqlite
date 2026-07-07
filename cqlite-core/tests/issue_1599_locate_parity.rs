@@ -257,8 +257,16 @@ async fn big_locate_out_of_range_short_circuits_zero_downstream() {
         eprintln!("Skipping (G3 C5 counter): no Index.db raw keys");
         return;
     };
-    let min_token = keys.iter().map(|k| cassandra_murmur3_token(k)).min().unwrap();
-    let max_token = keys.iter().map(|k| cassandra_murmur3_token(k)).max().unwrap();
+    let min_token = keys
+        .iter()
+        .map(|k| cassandra_murmur3_token(k))
+        .min()
+        .unwrap();
+    let max_token = keys
+        .iter()
+        .map(|k| cassandra_murmur3_token(k))
+        .max()
+        .unwrap();
     let Some(oor) = find_out_of_range_key(min_token, max_token) else {
         eprintln!("Skipping (G3 C5 counter): fixture token range covers the ring");
         return;
@@ -414,7 +422,10 @@ async fn bti_locate_matches_legacy(keyspace: &str, table: &str) {
 
     // B4 repeat: the second locate is cache-served with zero new trie walks.
     rwc::reset();
-    let _ = reader.locate(&present).await.expect("locate present repeat");
+    let _ = reader
+        .locate(&present)
+        .await
+        .expect("locate present repeat");
     assert_eq!(
         rwc::trie_walks(),
         0,
