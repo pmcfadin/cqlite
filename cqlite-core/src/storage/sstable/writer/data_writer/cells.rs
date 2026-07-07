@@ -159,7 +159,14 @@ impl DataWriter {
     /// (Cassandra `localExpirationTime`) is stamped VERBATIM from this authoritative
     /// per-cell value (e.g. a surviving expiring cell preserved through compaction),
     /// so the emitted bytes are byte-identical to the source cell. When `None`, the
-    /// LDT is derived from `SystemTime::now() + ttl` (historical fresh-write behavior).
+    /// LDT is derived from `now_seconds + ttl` (historical fresh-write behavior).
+    ///
+    /// `now_seconds` (issue #2038 Scope B, roborev): the CALLER's single captured
+    /// wall-clock reading for this whole write operation (mirrors Cassandra's
+    /// `FBUtilities.nowInSeconds()`, captured once per mutation) — NOT a fresh
+    /// `SystemTime::now()` read here. Passing a shared value keeps every
+    /// expiring cell/row/element of one write on the identical clock reading;
+    /// see `DataWriter::capture_now_seconds`.
     pub(super) fn write_cell_with_ttl(
         &self,
         buf: &mut Vec<u8>,
@@ -168,6 +175,7 @@ impl DataWriter {
         timestamp: i64,
         ttl_seconds: u32,
         explicit_ldt: Option<i32>,
+        now_seconds: i32,
     ) -> Result<()> {
         // NULL values should not be written as cells
         if matches!(value, Value::Null) {
@@ -179,7 +187,7 @@ impl DataWriter {
 
         let local_deletion_time = match explicit_ldt {
             Some(ldt) => ldt,
-            None => self.expiring_local_deletion_time(ttl_seconds)?,
+            None => self.expiring_local_deletion_time(now_seconds, ttl_seconds),
         };
 
         // Cell flags - CELL_IS_EXPIRING, NO USE_ROW_TIMESTAMP or USE_ROW_TTL
@@ -285,12 +293,35 @@ impl DataWriter {
         Ok(())
     }
 
-    pub(super) fn expiring_local_deletion_time(&self, ttl_seconds: u32) -> Result<i32> {
+    /// Capture the wall-clock "now" (seconds since epoch) ONCE per write
+    /// operation — the single fallible clock read for a whole row/mutation
+    /// write, mirroring Cassandra's `FBUtilities.nowInSeconds()` (captured
+    /// once per mutation apply, not once per cell).
+    ///
+    /// Issue #2038 Scope B (roborev blocker): `expiring_local_deletion_time`
+    /// used to read `SystemTime::now()` on every call, so a multi-element
+    /// complex column (or a multi-field UDT) written under one uniform TTL
+    /// could get a DIFFERENT `localDeletionTime` per element if the wall
+    /// clock ticked mid-write. The read-side `ExpiryHomogeneity` check
+    /// requires an EXACT match across all elements to surface `TTL(col)`, so
+    /// that skew silently defeated the whole feature. Callers now capture
+    /// `now_seconds` ONCE at the top of a row/static-row write and thread it
+    /// through every expiring cell of that write (row liveness, complex
+    /// column elements, UDT fields).
+    pub(super) fn capture_now_seconds(&self) -> Result<i32> {
         let now_seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| Error::Storage(format!("System time error: {}", e)))?
             .as_secs() as i32;
-        Ok(now_seconds.saturating_add(ttl_seconds as i32))
+        Ok(now_seconds)
+    }
+
+    /// Derive an expiring cell's `localDeletionTime` from a SHARED
+    /// `now_seconds` (see [`Self::capture_now_seconds`]) plus its TTL —
+    /// infallible now that the clock read happens exactly once per write,
+    /// upstream of every call site.
+    pub(super) fn expiring_local_deletion_time(&self, now_seconds: i32, ttl_seconds: u32) -> i32 {
+        now_seconds.saturating_add(ttl_seconds as i32)
     }
 
     /// Write a tombstone cell

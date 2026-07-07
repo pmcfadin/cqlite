@@ -31,7 +31,14 @@ fn test_map_complex_column_with_ttl() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, Some(7200))
+        .write_complex_column(
+            &mut buf,
+            &column,
+            &value,
+            1001000,
+            Some(7200),
+            TEST_NOW_SECONDS,
+        )
         .unwrap();
 
     // Parse cell flags structurally so wall-clock LDT bytes cannot be
@@ -83,12 +90,26 @@ fn test_list_complex_column_with_ttl() {
 
     let mut buf_ttl = Vec::new();
     writer_ttl
-        .write_complex_column(&mut buf_ttl, &column, &value, 1001000, Some(1800))
+        .write_complex_column(
+            &mut buf_ttl,
+            &column,
+            &value,
+            1001000,
+            Some(1800),
+            TEST_NOW_SECONDS,
+        )
         .unwrap();
 
     let mut buf_no_ttl = Vec::new();
     writer_no_ttl
-        .write_complex_column(&mut buf_no_ttl, &column, &value, 1001000, None)
+        .write_complex_column(
+            &mut buf_no_ttl,
+            &column,
+            &value,
+            1001000,
+            None,
+            TEST_NOW_SECONDS,
+        )
         .unwrap();
 
     // TTL version must be larger: each cell gets timestamp + LDT + TTL deltas
@@ -143,7 +164,7 @@ fn test_complex_column_no_ttl_uses_row_timestamp() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, None)
+        .write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     // Without TTL: USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE = 0x0C.
@@ -1270,7 +1291,7 @@ fn udt_whole_write_roundtrips_sparse_out_of_order() {
     let row_ts = 1_005_000i64;
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &col, &udt, row_ts, None)
+        .write_complex_column(&mut buf, &col, &udt, row_ts, None, TEST_NOW_SECONDS)
         .unwrap();
 
     // Decode the raw bytes: two cells (name idx 0, email idx 2), ascending
@@ -1315,6 +1336,17 @@ fn udt_whole_write_roundtrips_sparse_out_of_order() {
 
 /// Row TTL on a whole-UDT write must propagate to every emitted field cell as
 /// an expiring cell (issue #927 item 4 / roborev job 929).
+///
+/// Issue #2038 Scope B (roborev blocker): also pins that every field cell's
+/// `localDeletionTime` delta is IDENTICAL, not merely present. Before the
+/// fix, `write_udt_complex_cells` read `SystemTime::now()` independently for
+/// EACH field, so a multi-field UDT under one uniform TTL could get a
+/// different LDT per field if the wall clock ticked mid-write — silently
+/// defeating the read-side `ExpiryHomogeneity` uniformity check. With a
+/// SHARED `now_seconds` this is now guaranteed deterministically, not just
+/// "the clock happened not to tick" (multiple fields written in one call
+/// with a fixed `TEST_NOW_SECONDS` would already coincidentally match even
+/// pre-fix within a test run, so the deterministic guarantee is the point).
 #[test]
 fn udt_whole_write_propagates_row_ttl() {
     let writer = DataWriter::new(create_test_stats());
@@ -1330,11 +1362,19 @@ fn udt_whole_write_propagates_row_ttl() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &col, &udt, 1_005_000, Some(3_600))
+        .write_complex_column(
+            &mut buf,
+            &col,
+            &udt,
+            1_005_000,
+            Some(3_600),
+            TEST_NOW_SECONDS,
+        )
         .unwrap();
 
     let (_d, _l, cells) = decode_complex_column(&buf);
     assert_eq!(cells.len(), 2);
+    let mut ldt_deltas = Vec::new();
     for c in &cells {
         assert_ne!(
             c.flags & CELL_IS_EXPIRING,
@@ -1344,7 +1384,13 @@ fn udt_whole_write_propagates_row_ttl() {
         );
         assert!(c.ttl_delta.is_some(), "expiring cell carries a TTL delta");
         assert!(c.ldt_delta.is_some(), "expiring cell carries an LDT delta");
+        ldt_deltas.push(c.ldt_delta.unwrap());
     }
+    assert!(
+        ldt_deltas.windows(2).all(|w| w[0] == w[1]),
+        "Issue #2038 Scope B: every field cell of a uniform-TTL UDT write must \
+         share the IDENTICAL localDeletionTime delta, got {ldt_deltas:?}"
+    );
 }
 
 /// A whole-UDT literal naming a field that is not declared is authoritative
@@ -1360,7 +1406,7 @@ fn udt_whole_write_rejects_unknown_field() {
     }));
     let mut buf = Vec::new();
     let err = writer
-        .write_complex_column(&mut buf, &col, &udt, 1_005_000, None)
+        .write_complex_column(&mut buf, &col, &udt, 1_005_000, None, TEST_NOW_SECONDS)
         .unwrap_err();
     assert!(
         matches!(err, Error::InvalidInput(_)),

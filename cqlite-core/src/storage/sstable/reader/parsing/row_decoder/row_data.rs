@@ -489,6 +489,12 @@ impl V5CompressedLegacyParser {
                                 }
                             })
                         }),
+                        // Issue #2038 (round 3): row-liveness TTL seconds, paired
+                        // with `row_expires_at` above so a `USE_ROW_TTL` collection
+                        // element's per-cell-metadata expiry can be resolved
+                        // EXACTLY like the scalar `USE_ROW_TTL` cell path's
+                        // `(row_header.ttl, row_expiry)` pairing (~line 726 below).
+                        row_ttl_seconds: row_header.ttl,
                     });
                     self.parse_complex_column(
                         data,
@@ -562,11 +568,23 @@ impl V5CompressedLegacyParser {
                             if !collection_absent {
                                 if let Some(ref mut meta_map) = cell_meta {
                                     let row_ts = row_header.timestamp.unwrap_or(0);
+                                    // Issue #2038: surface the collection's expiry so
+                                    // `TTL(non_frozen_collection/UDT)` is not always
+                                    // `null` (the complex-cell analogue of the scalar
+                                    // #1743 fix at ~line 736 below). Authoritative,
+                                    // no-heuristics: `visible_uniform_expiration` is
+                                    // `Some` ONLY when every VISIBLE element shares the
+                                    // identical explicit expiry (the `ExpiryHomogeneity`
+                                    // tracker in `complex_column.rs` — roborev Medium
+                                    // finding); a mixed/heterogeneous collection, or one
+                                    // with no expiring element, stays `None` rather than
+                                    // over-approximating with a single element's TTL.
+                                    let expiration = col_meta.visible_uniform_expiration.clone();
                                     meta_map.insert(
                                         column.name.clone(),
                                         CellWriteMetadata {
                                             write_timestamp_micros: row_ts,
-                                            expiration: None,
+                                            expiration,
                                         },
                                     );
                                 }

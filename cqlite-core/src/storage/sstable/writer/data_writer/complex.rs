@@ -26,11 +26,15 @@ impl DataWriter {
     /// ops are skipped; deletes and non-null writes are written), so we return
     /// the count from here — the caller threads it straight into the emit tally,
     /// making the column count impossible to drift from Data.db.
+    /// `now_seconds`: the caller's single captured wall-clock reading for this
+    /// row write (issue #2038 Scope B) — threaded to every expiring cell
+    /// derived below instead of each one reading the clock independently.
     pub(super) fn write_merged_cells(
         &self,
         buf: &mut Vec<u8>,
         row: &RowWrite<'_>,
         schema: &TableSchema,
+        now_seconds: i32,
     ) -> Result<u64> {
         use crate::storage::write_engine::mutation::CellOperation;
 
@@ -71,7 +75,7 @@ impl DataWriter {
         for col in self.regular_columns(schema) {
             let name = col.name.as_str();
             if let Some(mop) = whole_by_col.get(name) {
-                cells_written += self.emit_whole_column_op(buf, row, col, mop)?;
+                cells_written += self.emit_whole_column_op(buf, row, col, mop, now_seconds)?;
             }
             if let Some((complex_deletion, elements)) = per_element_by_col.remove(name) {
                 self.write_complex_column_per_element(
@@ -97,6 +101,7 @@ impl DataWriter {
         row: &RowWrite<'_>,
         col: &Column,
         mop: &MergedOp<'_>,
+        now_seconds: i32,
     ) -> Result<u64> {
         use crate::storage::write_engine::mutation::CellOperation;
 
@@ -111,7 +116,20 @@ impl DataWriter {
                     return Ok(0);
                 }
                 if is_complex {
-                    self.write_complex_column(buf, col, value, mop.timestamp_micros, None)?;
+                    // Issue #2038 (Scope B): thread the mutation's row-level
+                    // `USING TTL` (`mop.row_ttl_seconds`) instead of dropping it
+                    // (`None`), mirroring the scalar arm below. Every element cell
+                    // is stamped IS_EXPIRING with localDeletionTime = now + ttl, so
+                    // a row-level `USING TTL` collection/UDT write round-trips.
+                    let row_ttl = mop.row_ttl_seconds;
+                    self.write_complex_column(
+                        buf,
+                        col,
+                        value,
+                        mop.timestamp_micros,
+                        row_ttl,
+                        now_seconds,
+                    )?;
                 } else {
                     // roborev #1020 Finding 1: a frozen-UDT (or UDT-bearing frozen
                     // collection/tuple) simple-cell value is canonicalized against
@@ -134,7 +152,7 @@ impl DataWriter {
                             )?;
                         } else {
                             // Row-level `USING TTL` write (no per-cell LDT source):
-                            // derive `now + ttl` (historical behavior).
+                            // derive `now_seconds + ttl` (historical behavior).
                             self.write_cell_with_ttl(
                                 buf,
                                 column,
@@ -142,6 +160,7 @@ impl DataWriter {
                                 mop.timestamp_micros,
                                 ttl_seconds,
                                 None,
+                                now_seconds,
                             )?;
                         }
                     } else if row.liveness_ts == Some(mop.timestamp_micros) {
@@ -169,13 +188,14 @@ impl DataWriter {
                         value,
                         mop.timestamp_micros,
                         Some(*ttl_seconds),
+                        now_seconds,
                     )?;
                 } else {
                     // roborev #1020 Finding 1: schema-aware frozen-UDT value.
                     let canon = canonicalize_udt_value(&col.data_type, value)?;
                     // Issue #1538: stamp the authoritative per-cell LDT verbatim
                     // when present (a surviving expiring cell preserved through
-                    // compaction), else derive `now + ttl`.
+                    // compaction), else derive `now_seconds + ttl`.
                     self.write_cell_with_ttl(
                         buf,
                         column,
@@ -183,6 +203,7 @@ impl DataWriter {
                         mop.timestamp_micros,
                         *ttl_seconds,
                         *local_deletion_time,
+                        now_seconds,
                     )?;
                 }
                 Ok(1)
@@ -295,6 +316,11 @@ impl DataWriter {
     /// - SET<T>: cell_path = serialized element, value = empty (HAS_EMPTY_VALUE)
     /// - MAP<K,V>: cell_path = serialized key, value = serialized value
     /// - LIST<T>: cell_path = 16-byte TimeUUID, value = serialized element
+    ///
+    /// `now_seconds`: the caller's single captured wall-clock reading for this
+    /// write (issue #2038 Scope B) — shared by every element cell so a
+    /// multi-element collection under one uniform TTL gets an IDENTICAL
+    /// `localDeletionTime` across all elements (see `capture_now_seconds`).
     pub(super) fn write_complex_column(
         &self,
         buf: &mut Vec<u8>,
@@ -302,6 +328,7 @@ impl DataWriter {
         value: &Value,
         timestamp_micros: i64,
         ttl_seconds: Option<u32>,
+        now_seconds: i32,
     ) -> Result<()> {
         // Write complex deletion time: DeletionTime.LIVE
         // Cassandra canonical order: markedForDeleteAt first, then localDeletionTime
@@ -317,22 +344,29 @@ impl DataWriter {
         let dt = column.data_type.to_lowercase();
 
         if dt.starts_with("set<") || dt.starts_with("org.apache.cassandra.db.marshal.settype(") {
-            self.write_set_complex_cells(buf, value, timestamp_micros, ttl_seconds)?;
+            self.write_set_complex_cells(buf, value, timestamp_micros, ttl_seconds, now_seconds)?;
         } else if dt.starts_with("map<")
             || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
         {
-            self.write_map_complex_cells(buf, value, timestamp_micros, ttl_seconds)?;
+            self.write_map_complex_cells(buf, value, timestamp_micros, ttl_seconds, now_seconds)?;
         } else if dt.starts_with("list<")
             || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
         {
-            self.write_list_complex_cells(buf, value, timestamp_micros, ttl_seconds)?;
+            self.write_list_complex_cells(buf, value, timestamp_micros, ttl_seconds, now_seconds)?;
         } else if is_udt_marshal(&dt) {
             // Issue #927: decompose a whole-`Value::Udt` literal into per-field
             // cells (cell_path = 2-byte signed-short DECLARED field index, value =
             // field datum). Field index comes from the column's declared order, NOT
             // the literal's position — a sparse / reordered literal lands each field
             // at its correct index.
-            self.write_udt_complex_cells(buf, column, value, timestamp_micros, ttl_seconds)?;
+            self.write_udt_complex_cells(
+                buf,
+                column,
+                value,
+                timestamp_micros,
+                ttl_seconds,
+                now_seconds,
+            )?;
         } else {
             return Err(Error::InvalidInput(format!(
                 "Column '{}' has type '{}' which is not a recognized complex column type",
@@ -359,6 +393,7 @@ impl DataWriter {
         value: &Value,
         timestamp_micros: i64,
         ttl_seconds: Option<u32>,
+        now_seconds: i32,
     ) -> Result<()> {
         let udt = match value {
             Value::Udt(udt) => udt,
@@ -400,10 +435,11 @@ impl DataWriter {
                     ))
                 })?;
             let cell_path = (idx as u16).to_be_bytes().to_vec();
-            let local_deletion_time = match ttl_seconds {
-                Some(ttl) => Some(self.expiring_local_deletion_time(ttl)?),
-                None => None,
-            };
+            // Issue #2038 Scope B: derive from the SHARED `now_seconds` (not a
+            // fresh clock read per field) so every field of a multi-field UDT
+            // written under one uniform TTL gets an identical LDT.
+            let local_deletion_time =
+                ttl_seconds.map(|ttl| self.expiring_local_deletion_time(now_seconds, ttl));
             elements.push(ComplexElementWrite {
                 cell_path,
                 value: Some(field_value.clone()),
@@ -492,12 +528,22 @@ impl DataWriter {
     /// - flags: base_flags | CELL_USE_ROW_TIMESTAMP (0x08)
     ///
     /// Returns the flags byte written (for caller to check HAS_EMPTY_VALUE etc.).
+    ///
+    /// `now_seconds` (issue #2038 Scope B, roborev): the caller's SHARED
+    /// captured wall-clock reading for this write — NOT a fresh
+    /// `SystemTime::now()` read per cell. This function used to read the
+    /// clock independently on every call, so a multi-element collection
+    /// written under one uniform TTL could get a different
+    /// `local_deletion_time` per element if the clock ticked mid-write,
+    /// defeating the read-side `ExpiryHomogeneity` check (which requires an
+    /// EXACT match to surface `TTL(col)`).
     pub(super) fn write_complex_cell_header(
         &self,
         buf: &mut Vec<u8>,
         base_flags: u8,
         timestamp_micros: i64,
         ttl_seconds: Option<u32>,
+        now_seconds: i32,
     ) -> Result<()> {
         match ttl_seconds {
             Some(ttl) => {
@@ -510,11 +556,7 @@ impl DataWriter {
                 let timestamp_delta = (timestamp_micros - self.stats.min_timestamp) as u64;
                 encode_unsigned(timestamp_delta, buf);
 
-                // local_deletion_time = now + ttl
-                let now_seconds = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| Error::Storage(format!("System time error: {}", e)))?
-                    .as_secs() as i32;
+                // local_deletion_time = now_seconds + ttl (shared `now_seconds`).
                 let local_deletion_time = now_seconds.saturating_add(ttl as i32);
                 let ldt_delta =
                     (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
@@ -554,6 +596,7 @@ impl DataWriter {
         value: &Value,
         timestamp_micros: i64,
         ttl_seconds: Option<u32>,
+        now_seconds: i32,
     ) -> Result<()> {
         let elements = match value {
             Value::Set(elements) => elements,
@@ -583,6 +626,7 @@ impl DataWriter {
                 CELL_HAS_EMPTY_VALUE,
                 timestamp_micros,
                 ttl_seconds,
+                now_seconds,
             )?;
 
             // Cell path: serialized element value
@@ -604,6 +648,7 @@ impl DataWriter {
         value: &Value,
         timestamp_micros: i64,
         ttl_seconds: Option<u32>,
+        now_seconds: i32,
     ) -> Result<()> {
         let entries = match value {
             Value::Map(entries) => entries,
@@ -635,7 +680,7 @@ impl DataWriter {
         encode_unsigned(serialized.len() as u64, buf); // cell count
         for (path_bytes, value_bytes) in &serialized {
             // Cell header: flags + optional TTL fields
-            self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds)?;
+            self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds, now_seconds)?;
 
             // Cell path: serialized key
             encode_unsigned(path_bytes.len() as u64, buf);
@@ -659,6 +704,7 @@ impl DataWriter {
         value: &Value,
         timestamp_micros: i64,
         ttl_seconds: Option<u32>,
+        now_seconds: i32,
     ) -> Result<()> {
         let elements = match value {
             Value::List(elements) => elements,
@@ -682,7 +728,7 @@ impl DataWriter {
             }
 
             // Cell header: flags + optional TTL fields
-            self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds)?;
+            self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds, now_seconds)?;
 
             // Cell path: 16-byte TimeUUID
             let timeuuid = generate_list_cell_path_timeuuid(timestamp_micros, i as u64);

@@ -200,6 +200,11 @@ impl DataWriter {
     ) -> Result<(Vec<u8>, u64)> {
         let mut body = Vec::new();
 
+        // Issue #2038 Scope B: capture "now" ONCE for this static row write and
+        // share it with every expiring cell derived below (mirrors
+        // `build_merged_row_body`; see `DataWriter::capture_now_seconds`).
+        let now_seconds = self.capture_now_seconds()?;
+
         // Write timestamp delta (if HAS_TIMESTAMP)
         //
         // Fix #644 (S6): Cassandra writes UNSIGNED VInt for all temporal deltas.
@@ -225,7 +230,7 @@ impl DataWriter {
                 }
                 encode_unsigned(ttl_delta as u64, &mut body);
 
-                let local_deletion_time = self.expiring_local_deletion_time(ttl)?;
+                let local_deletion_time = self.expiring_local_deletion_time(now_seconds, ttl);
                 let ldt_delta =
                     (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
                 if ldt_delta < 0 {
@@ -301,7 +306,8 @@ impl DataWriter {
         }
 
         // Write cell data for static columns only
-        let cells_written = self.write_static_cells(&mut body, static_ops, liveness_ts, schema)?;
+        let cells_written =
+            self.write_static_cells(&mut body, static_ops, liveness_ts, schema, now_seconds)?;
 
         Ok((body, cells_written))
     }
@@ -353,6 +359,7 @@ impl DataWriter {
         static_ops: &[StaticMergedOp],
         liveness_ts: i64,
         schema: &TableSchema,
+        now_seconds: i32,
     ) -> Result<u64> {
         // Get set of static column names for validation
         let static_column_names: std::collections::HashSet<_> = schema
@@ -395,7 +402,8 @@ impl DataWriter {
                                              // stays byte-identical (explicit-ts, flags 0x00).
                         match mop.row_ttl_seconds {
                             // Row-level `USING TTL` static write (no per-cell LDT
-                            // source): derive `now + ttl` (historical behavior).
+                            // source): derive `now_seconds + ttl` (historical
+                            // behavior).
                             Some(ttl) => self.write_cell_with_ttl(
                                 buf,
                                 column,
@@ -403,6 +411,7 @@ impl DataWriter {
                                 mop.timestamp_micros,
                                 ttl,
                                 None,
+                                now_seconds,
                             )?,
                             None => self.write_cell_explicit_ts(
                                 buf,
@@ -432,6 +441,7 @@ impl DataWriter {
                             mop.timestamp_micros,
                             *ttl_seconds,
                             *local_deletion_time,
+                            now_seconds,
                         )?;
                     }
                 }

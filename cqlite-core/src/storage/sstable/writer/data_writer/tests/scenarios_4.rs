@@ -104,7 +104,7 @@ fn test_write_set_complex_column() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, None)
+        .write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     assert!(!buf.is_empty());
@@ -118,6 +118,78 @@ fn test_write_set_complex_column() {
         cell_flags.iter().all(|&f| f == expected_cell_flags),
         "Should have 2 SET cells with USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE flags, got: {:?}",
         cell_flags
+    );
+}
+
+/// Issue #2038 Scope B (roborev blocker): a multi-element SET written under
+/// one uniform TTL must give EVERY element cell the IDENTICAL
+/// `localDeletionTime` delta — not merely "present". Before the fix,
+/// `write_complex_cell_header` read `SystemTime::now()` independently on
+/// EVERY cell, so a multi-element collection could get a DIFFERENT LDT per
+/// element if the wall clock ticked mid-write; the read-side
+/// `ExpiryHomogeneity` check requires an EXACT match to surface `TTL(col)`,
+/// so that skew silently defeated the whole #2038 feature for any collection
+/// unlucky enough to straddle a clock tick.
+///
+/// This test calls `write_complex_column` with an EXPLICIT `now_seconds`
+/// (the same parameter production code now threads down from
+/// `capture_now_seconds`, captured once per row write) and decodes the raw
+/// cell wire format to assert every one of 5 elements carries the SAME
+/// `ldt_delta` — deterministic, no wall-clock race. A revert to the old
+/// per-call `SystemTime::now()` behavior cannot be exercised through this
+/// signature at all (the shared `now_seconds` parameter did not exist before
+/// this fix), which is itself the structural guarantee: there is no code
+/// path left that can read the clock more than once per row write.
+#[test]
+fn set_complex_column_uniform_ttl_shares_identical_ldt_across_elements() {
+    let mut stats = create_test_stats();
+    stats.min_timestamp = 1_000_000;
+    stats.min_local_deletion_time = 0;
+    stats.min_ttl = 0;
+    let writer = DataWriter::new(stats);
+
+    let column = Column {
+        name: "tags".to_string(),
+        data_type: "set<int>".to_string(),
+        nullable: true,
+        default: None,
+        is_static: false,
+    };
+
+    let value = Value::Set((0..5).map(Value::Integer).collect::<Vec<_>>());
+
+    let mut buf = Vec::new();
+    writer
+        .write_complex_column(
+            &mut buf,
+            &column,
+            &value,
+            1_001_000,
+            Some(3_600),
+            TEST_NOW_SECONDS,
+        )
+        .unwrap();
+
+    let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+    assert_eq!(cells.len(), 5, "5 SET elements => 5 cells");
+
+    let ldt_deltas: Vec<u64> = cells
+        .iter()
+        .map(|c| {
+            c.ldt_delta
+                .expect("Issue #2038 Scope B: every element of a uniform-TTL SET must be expiring")
+        })
+        .collect();
+    assert!(
+        ldt_deltas.windows(2).all(|w| w[0] == w[1]),
+        "Issue #2038 Scope B: every element of a uniform-TTL SET must share the \
+         IDENTICAL localDeletionTime delta, got {ldt_deltas:?}"
+    );
+    // With min_local_deletion_time == 0, the delta IS the absolute LDT.
+    let expected_ldt = (TEST_NOW_SECONDS as i64 + 3_600) as u64;
+    assert_eq!(
+        ldt_deltas[0], expected_ldt,
+        "localDeletionTime must equal the shared now_seconds + ttl"
     );
 }
 
@@ -141,7 +213,7 @@ fn test_write_map_complex_column() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, None)
+        .write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     assert!(!buf.is_empty());
@@ -174,7 +246,7 @@ fn test_write_list_complex_column() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, None)
+        .write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     assert!(!buf.is_empty());
@@ -496,7 +568,7 @@ fn test_set_canonical_ordering() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, None)
+        .write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     // Extract cell paths from the binary output.
@@ -538,7 +610,7 @@ fn test_map_canonical_ordering() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, None)
+        .write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     let buf_str = String::from_utf8_lossy(&buf);
@@ -569,7 +641,8 @@ fn test_set_rejects_list_value() {
     // Pass a List value to a SET column — should be rejected
     let value = Value::List(vec![Value::Text("x".to_string())]);
     let mut buf = Vec::new();
-    let result = writer.write_complex_column(&mut buf, &column, &value, 1001000, None);
+    let result =
+        writer.write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS);
     assert!(result.is_err(), "SET column should reject Value::List");
 }
 
@@ -589,7 +662,8 @@ fn test_list_rejects_set_value() {
     // Pass a Set value to a LIST column — should be rejected
     let value = Value::Set(vec![Value::Text("x".to_string())]);
     let mut buf = Vec::new();
-    let result = writer.write_complex_column(&mut buf, &column, &value, 1001000, None);
+    let result =
+        writer.write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS);
     assert!(result.is_err(), "LIST column should reject Value::Set");
 }
 
@@ -1129,7 +1203,14 @@ fn test_set_complex_column_with_ttl() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1001000, Some(3600))
+        .write_complex_column(
+            &mut buf,
+            &column,
+            &value,
+            1001000,
+            Some(3600),
+            TEST_NOW_SECONDS,
+        )
         .unwrap();
 
     // Parse cell flags structurally so wall-clock LDT bytes in the header and
@@ -1329,7 +1410,7 @@ fn test_nonfrozen_set_int_negative_sorts_signed() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1_001_000, None)
+        .write_complex_column(&mut buf, &column, &value, 1_001_000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     let (_, _, cells) = decode_complex_column(&buf);
@@ -1369,7 +1450,7 @@ fn test_nonfrozen_map_int_key_negative_sorts_signed() {
 
     let mut buf = Vec::new();
     writer
-        .write_complex_column(&mut buf, &column, &value, 1_001_000, None)
+        .write_complex_column(&mut buf, &column, &value, 1_001_000, None, TEST_NOW_SECONDS)
         .unwrap();
 
     let (_, _, cells) = decode_complex_column(&buf);

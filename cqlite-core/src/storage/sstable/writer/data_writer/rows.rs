@@ -893,6 +893,12 @@ impl DataWriter {
     ) -> Result<(Vec<u8>, u64)> {
         let mut body = Vec::new();
 
+        // Issue #2038 Scope B: capture "now" ONCE for this entire row write and
+        // share it with every expiring cell derived below (row liveness AND,
+        // via `write_merged_cells`, every complex-column element / UDT field) —
+        // see `DataWriter::capture_now_seconds`.
+        let now_seconds = self.capture_now_seconds()?;
+
         // Write timestamp delta (if HAS_TIMESTAMP)
         //
         // Fix #644 (S6): Cassandra writes UNSIGNED VInt for all temporal deltas.
@@ -923,7 +929,7 @@ impl DataWriter {
                 }
                 encode_unsigned(ttl_delta as u64, &mut body);
 
-                let local_deletion_time = self.expiring_local_deletion_time(ttl)?;
+                let local_deletion_time = self.expiring_local_deletion_time(now_seconds, ttl);
                 let ldt_delta =
                     (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
                 if ldt_delta < 0 {
@@ -973,7 +979,7 @@ impl DataWriter {
         }
 
         // Write cell data (none survive for pure row tombstones)
-        let cells_written = self.write_merged_cells(&mut body, row, schema)?;
+        let cells_written = self.write_merged_cells(&mut body, row, schema, now_seconds)?;
 
         Ok((body, cells_written))
     }
