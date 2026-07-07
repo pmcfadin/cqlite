@@ -1,4 +1,3 @@
-
 use super::{
     build_row_from_scan, collect_capped_materialized, prefix_is_token_ordered, scan_pushdown_cap,
     ExecutionContext, QueryRow,

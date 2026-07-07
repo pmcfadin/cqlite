@@ -1735,12 +1735,16 @@ impl SSTableManager {
     /// the FULL decoded row count to the scan-work metric and take a materializing
     /// accounting path instead.
     ///
-    /// The condition mirrors EXACTLY the materializing branch `scan_stream` takes,
-    /// so the two can never disagree:
+    /// The condition mirrors EXACTLY the materializing branches `scan_stream`
+    /// takes, so the two can never disagree:
     /// * the `tombstones` build's `scan_stream` delegates wholesale to the
     ///   materializing [`scan`](Self::scan) — always `true`;
-    /// * the default (non-`tombstones`) build materializes only the `write-support`
-    ///   cross-generation reconciliation branch, taken when
+    /// * any BTI (`da`) reader: `run_scan_stream`'s BTI branch (issue #1577) drives
+    ///   the trie-walk `bti_scan_with_metadata`, which fully materializes the
+    ///   (index-less) reconciled table before streaming — so a bounded consumer
+    ///   never decode-stops for a BTI table, regardless of generation count;
+    /// * the default (non-`tombstones`) build additionally materializes the
+    ///   `write-support` cross-generation reconciliation branch, taken when
     ///   `resolve_table_readers(table).len() > 1 && schema.is_some()`.
     #[cfg(feature = "tombstones")]
     pub async fn scan_stream_materializes(
@@ -1760,15 +1764,26 @@ impl SSTableManager {
         table_id: &TableId,
         schema: Option<&crate::schema::TableSchema>,
     ) -> bool {
+        let readers = self.resolve_table_readers(table_id).await;
+
+        // Issue #1577: any BTI (`da`) reader makes `scan_stream` pre-materialize
+        // (the trie-walk BTI branch decodes the whole reconciled table before
+        // streaming), so a bounded LIMIT consumer must charge the full decoded
+        // count — the exact condition `run_scan_stream` gates its BTI branch on
+        // (`bti_partitions_db.is_some()`, surfaced as `reader.is_bti()`).
+        if readers.iter().any(|r| r.is_bti()) {
+            return true;
+        }
+
         // Only the write-support cross-generation merge branch pre-materializes,
         // and only when it is actually taken: more than one generation AND a
         // resolved schema (the exact guard `scan_stream` re-uses from `scan`).
         #[cfg(feature = "write-support")]
         if schema.is_some() {
-            return self.resolve_table_readers(table_id).await.len() > 1;
+            return readers.len() > 1;
         }
         #[cfg(not(feature = "write-support"))]
-        let _ = (table_id, schema);
+        let _ = schema;
         false
     }
 

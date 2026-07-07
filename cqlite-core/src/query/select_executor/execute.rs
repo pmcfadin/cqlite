@@ -16,9 +16,9 @@
 
 use super::{
     build_row_from_scan, classify_partition_lookup, collect_capped_materialized,
-    column_info_from_type_str, evaluate_predicates, honest_targeted_path, parse_table_id,
-    partition_key_digest, project_expr_reshapes_row, scan_pushdown_cap, select_has_writetime_ttl,
-    sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
+    column_info_from_type_str, honest_targeted_path, parse_table_id, project_expr_reshapes_row,
+    scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
+    PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
