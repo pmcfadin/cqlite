@@ -350,7 +350,51 @@ impl SSTableReader {
             ScanAdmission::Exempt => None,
         };
 
+        // Issue #1577 (owner-chosen fix, 2026-07-06): BTI (`da`) readers MUST use
+        // the SAME per-reader decode path `SSTableReader::scan` uses — the trie-walk
+        // `bti_scan_with_metadata` — NOT the block-by-block `read_next_block` +
+        // `parse_block_entries_with_schema` decoder below. The block-by-block path
+        // diverges for BTI: it can under/over-produce, reorder, or (as here) fail
+        // outright ("Blob fallback not allowed for V5_0Bti"), while D1's LIMIT
+        // pushdown (`capped_fallback_scan`) trusts the streamed first-`cap` rows to
+        // be byte-identical to `scan`'s first-`cap` rows. Driving the identical
+        // authoritative decoder makes `scan_stream` PREFIX-AUTHORITATIVE with `scan`
+        // for BTI BY CONSTRUCTION (same rows, same `sort_by_token_order`, same
+        // key-range + `filter_tombstone` filtering — all applied INSIDE
+        // `bti_scan_with_metadata`), so no runtime reconcile against `scan` is
+        // needed. This gates on the SAME `self.bti_partitions_db.is_some()`
+        // condition `scan` uses, so the two can never disagree on which readers are
+        // BTI. BTI decode fully materializes the (small, index-less) reconciled
+        // table before streaming — mirrored by `scan_stream_materializes` returning
+        // `true` for BTI, so a bounded LIMIT consumer charges the true decoded count
+        // rather than assuming a lazy decode-stop.
+        if self.bti_partitions_db.is_some() {
+            let entries = self
+                .bti_scan_with_metadata(
+                    start_key.as_ref(),
+                    end_key.as_ref(),
+                    None,
+                    schema.as_ref(),
+                    true,
+                )
+                .await?;
+            for (entry_key, entry_value, _meta) in entries {
+                // `bti_scan_with_metadata` already applied the key-range and
+                // tombstone filters and token-ordered the rows; forward as-is so
+                // the stream is byte-identical to `scan`'s BTI path.
+                if tx.send(Ok((entry_key, entry_value))).await.is_err() {
+                    return Ok(()); // consumer dropped
+                }
+            }
+            return Ok(());
+        }
+
         // Issue #815: independent per-scan cursor — no cross-scan serialization.
+        // Issue #1577 (rust-reviewer nit): created only for the non-BTI path — the
+        // BTI branch above mints its own cursor inside `bti_scan_with_metadata` and
+        // returned already, so opening+seeking one here for BTI was a wasted
+        // open(2)+seek. Mirrors how `scan`/`get_all_entries`/`scan_with_cell_metadata`
+        // gate cursor creation after their BTI early-return.
         let cursor = self.new_scan_cursor().await?;
 
         // Position at the start of the data section (mirrors sequential_scan).

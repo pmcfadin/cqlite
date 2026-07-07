@@ -1721,6 +1721,78 @@ impl SSTableManager {
         list.cloned().unwrap_or_default()
     }
 
+    /// Reports whether [`scan_stream`](Self::scan_stream) PRE-MATERIALIZES the
+    /// full reconciled result for this table before returning the channel, rather
+    /// than yielding rows lazily (issue #1577, roborev round-4).
+    ///
+    /// A bounded LIMIT consumer of `scan_stream` (see
+    /// [`SelectExecutor::capped_fallback_scan`](crate::query)) may drop the stream
+    /// once `cap` rows arrive to stop the producer decoding the tail — but that
+    /// decode-stop win, and the per-received-row `QUERY_ROWS_SCANNED` accounting it
+    /// implies, are ONLY valid when the stream is genuinely lazy. When this returns
+    /// `true`, the storage layer has already decoded EVERY row of the table (the
+    /// channel is just replaying a materialized `Vec`), so the caller must charge
+    /// the FULL decoded row count to the scan-work metric and take a materializing
+    /// accounting path instead.
+    ///
+    /// The condition mirrors EXACTLY the materializing branches `scan_stream`
+    /// takes, so the two can never disagree:
+    /// * the `tombstones` build's `scan_stream` delegates wholesale to the
+    ///   materializing [`scan`](Self::scan) — always `true`;
+    /// * any BTI (`da`) reader: `run_scan_stream`'s BTI branch (issue #1577) drives
+    ///   the trie-walk `bti_scan_with_metadata`, which fully materializes the
+    ///   (index-less) reconciled table before streaming — so a bounded consumer
+    ///   never decode-stops for a BTI table, regardless of generation count;
+    /// * the default (non-`tombstones`) build's `write-support` cross-generation
+    ///   branch is LAZY since #1579 (streams via
+    ///   `generation_merge::stream_generations_for_read`), so a bounded consumer
+    ///   DOES decode-stop there — that branch is NOT reported as materializing.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_stream_materializes(
+        &self,
+        _table_id: &TableId,
+        _schema: Option<&crate::schema::TableSchema>,
+    ) -> bool {
+        // The `tombstones` build's `scan_stream` forwards a fully-materialized
+        // `scan` result, so a bounded consumer never decode-stops.
+        true
+    }
+
+    /// See the `tombstones` variant above.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_stream_materializes(
+        &self,
+        table_id: &TableId,
+        _schema: Option<&crate::schema::TableSchema>,
+    ) -> bool {
+        let readers = self.resolve_table_readers(table_id).await;
+
+        // Issue #1577: any BTI (`da`) reader makes `scan_stream` pre-materialize
+        // (the trie-walk BTI branch decodes the whole reconciled table before
+        // streaming), so a bounded LIMIT consumer must charge the full decoded
+        // count — the exact condition `run_scan_stream` gates its BTI branch on
+        // (`bti_partitions_db.is_some()`, surfaced as `reader.is_bti()`).
+        if readers.iter().any(|r| r.is_bti()) {
+            return true;
+        }
+
+        // Issue #1579 / D3 (roborev job 3669, Medium): the `not(tombstones)`
+        // write-support multi-generation branch NO LONGER pre-materializes. Since
+        // #1579 `scan_stream` routes the cross-generation case through the LAZY,
+        // backpressure-bounded `generation_merge::stream_generations_for_read`
+        // (`KWayMerger` driven on a blocking task, live rows fed STRAIGHT into the
+        // bounded channel) — NOT the materializing `merge_generations_for_read`. The
+        // merger reconciles every generation for a partition at the moment its key is
+        // stepped (LWW + tombstone shadowing applied before emission) and emits
+        // partitions in strictly increasing `(token, key)` order, so a bounded LIMIT
+        // consumer can decode-stop after the authoritative first `cap` rows. Returning
+        // `false` restores D1's decode-stop for multi-gen LIMIT and makes the
+        // per-received-row `QUERY_ROWS_SCANNED` accounting MORE accurate (only ~`cap`
+        // rows decoded). BTI is still handled above (`true`) — its own branch
+        // materializes regardless of generation count.
+        false
+    }
+
     /// Streaming scan (issue #790): merge per-SSTable streams lazily into a
     /// bounded output channel, in key (token) order, without materializing the
     /// whole result.
