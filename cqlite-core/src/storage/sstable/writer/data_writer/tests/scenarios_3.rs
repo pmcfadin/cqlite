@@ -310,6 +310,7 @@ fn static_using_ttl_write_emits_expiring_cell_1196() {
             std::slice::from_ref(&static_op),
             1_001_000,
             &schema,
+            TEST_NOW_SECONDS,
         )
         .unwrap();
 
@@ -361,6 +362,7 @@ fn static_write_without_ttl_stays_non_expiring_1196() {
             std::slice::from_ref(&static_op),
             1_001_000,
             &schema,
+            TEST_NOW_SECONDS,
         )
         .unwrap();
 
@@ -424,6 +426,14 @@ fn static_using_ttl_write_byte_parity_1210() {
         .unwrap()
         .as_secs() as i64;
 
+    // Issue #2038 Scope B: `write_static_cells` no longer reads the clock
+    // itself — the caller (normally `build_static_row_body`) captures
+    // `now_seconds` ONCE and passes it in. Mirror that here with a single
+    // capture shared by BOTH calls below, so their LDTs land in the SAME
+    // `[before, after]` window (and, being identical, trivially satisfy the
+    // cross-check further down).
+    let now_seconds = writer.capture_now_seconds().unwrap();
+
     // Path under test: row-level USING TTL arrives as a plain `Write` carrying
     // the statement TTL in `row_ttl_seconds` (how the CQL builders shape it).
     let row_ttl_op = StaticMergedOp {
@@ -442,6 +452,7 @@ fn static_using_ttl_write_byte_parity_1210() {
             std::slice::from_ref(&row_ttl_op),
             timestamp,
             &schema,
+            now_seconds,
         )
         .unwrap();
 
@@ -512,6 +523,7 @@ fn static_using_ttl_write_byte_parity_1210() {
             std::slice::from_ref(&ref_op),
             timestamp,
             &schema,
+            now_seconds,
         )
         .unwrap();
 

@@ -12,6 +12,12 @@ use crate::storage::write_engine::mutation::{CellOperation, ClusteringKey, Parti
 use crate::types::UdtValue;
 use std::collections::HashMap;
 
+/// Fixed `now_seconds` (issue #2038 Scope B) for tests that call the
+/// TTL-deriving writer helpers directly (bypassing the row-write entry points
+/// that now capture the wall clock once via `capture_now_seconds`). A pinned
+/// value keeps LDT-derived assertions deterministic.
+pub(super) const TEST_NOW_SECONDS: i32 = 1_700_000_000;
+
 /// Whether a simple (non-complex) cell value has a fixed byte size or a variable
 /// length encoded by a preceding unsigned VInt.
 ///

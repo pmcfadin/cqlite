@@ -608,6 +608,15 @@ pub(crate) struct ElementShadow {
     /// carries no liveness expiry, in which case such an element has no
     /// authoritative expiry and is never TTL-expired here (no-heuristics, issue #28).
     pub row_expires_at: Option<i64>,
+    /// Issue #2038 (round 3): row-liveness TTL in SECONDS — `row_header.ttl`,
+    /// paired with `row_expires_at` above to resolve a `USE_ROW_TTL` element's
+    /// EFFECTIVE `CellExpiration` for the per-cell-metadata `TTL()` value (a
+    /// statement-level `INSERT ... USING TTL n` on a non-frozen collection/UDT
+    /// column). `None` when the row carries no liveness TTL (`HAS_TTL` unset),
+    /// in which case such an element's expiry cannot be resolved here
+    /// (no-heuristics, issue #28) — mirrors the scalar `USE_ROW_TTL` cell
+    /// path's `(row_header.ttl, row_expiry)` pairing (row_data.rs ~line 726).
+    pub row_ttl_seconds: Option<i32>,
 }
 
 /// Extra metadata produced by `parse_complex_column_inner` for delta-scan callers
@@ -651,6 +660,23 @@ pub(crate) struct ComplexColumnMeta {
     /// Folded into the row's `max_data_cell_expires_at` so a collection whose
     /// elements are all expired does not keep an otherwise-expired row alive.
     pub max_element_expires_at: Option<i64>,
+    /// Issue #2038 (roborev Medium finding): the `CellExpiration` surfaced in
+    /// per-cell metadata for `TTL(non_frozen_collection/UDT)`, IFF every VISIBLE
+    /// (post shadow/TTL-filter, non-tombstone) element shares the IDENTICAL
+    /// explicit `(ttl_seconds, expires_at_seconds)` pair. Decoded from the
+    /// authoritative per-element cell fields (no heuristics, #28) via the
+    /// `ExpiryHomogeneity` tracker.
+    ///
+    /// Deliberately NARROWER than `max_element_expires_at` above: a dropped
+    /// (shadow/TTL-filtered) element never contributes here (it does for
+    /// `max_element_expires_at`, which drives the orthogonal #1741 row-hidden
+    /// decision), and a MIXED collection (elements with different TTLs, or a
+    /// live-forever element mixed with an expiring one) has no single TTL that
+    /// describes it — this is `None` in that case, correctness over
+    /// over-approximating with one element's expiry. This is the complex-cell
+    /// analogue of the scalar #1743 fix, which surfaces a single-cell expiry
+    /// unambiguously.
+    pub visible_uniform_expiration: Option<CellExpiration>,
     /// Issue #1741 (per-element filtering): number of LIVE (non-tombstone)
     /// elements DROPPED from the emitted container by the read-side per-element
     /// shadow/TTL filter — i.e. elements shadowed by the covering deletion (own
