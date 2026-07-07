@@ -358,7 +358,7 @@ pub(crate) fn dfs_collect_partition_locations(
     dfs_visit_in_order(
         trie_data,
         root_offset,
-        |data, off| read_node_payload(data, off),
+        read_node_payload,
         |_key, location| locations.push(location),
     )?;
     Ok(locations)

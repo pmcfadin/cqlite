@@ -219,7 +219,10 @@ fn offset_only_matches_owned_on_real_test_da_fixtures() {
     // counts, so simply excluding overlap with the other test's window suffices.
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let Some(root) = std::env::var("CQLITE_DATASETS_ROOT").ok().map(PathBuf::from) else {
+    let Some(root) = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)
+    else {
         eprintln!("SKIP: CQLITE_DATASETS_ROOT not set; needs real BTI fixtures");
         return;
     };
