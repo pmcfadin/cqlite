@@ -1297,66 +1297,10 @@ pub(crate) fn convert_column_to_array(
 // Rescaling helper
 // =========================================================================
 
-/// Rescale a CQL decimal value to the fixed column scale (`DECIMAL_FIXED_SCALE`).
-///
-/// Returns the rescaled `i128` value, or an error if:
-/// - The input scale exceeds `DECIMAL_FIXED_SCALE` (would require truncation /
-///   silent precision loss — fail closed instead of divide-and-truncate).
-/// - The rescaled magnitude exceeds 38 decimal digits (overflow of `Decimal128`).
-/// - Checked multiplication overflows `i128` when scaling up.
-///
-/// Follow-up option (not implemented here per owner decision 2026-07-01): derive
-/// a per-column target scale from schema / `Statistics.db` metadata so that
-/// higher-scale decimals can be represented without loss instead of erroring.
-pub(crate) fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, ArrowConvertError> {
-    use num_bigint::BigInt;
-
-    if unscaled.is_empty() {
-        return Ok(0i128);
-    }
-
-    // Fail closed: a scale greater than the fixed target scale can only be
-    // reconciled by dividing (truncating toward zero), which silently drops
-    // precision from an authoritative export. Error instead — mirror the
-    // over-magnitude guard below rather than truncate.
-    if scale > DECIMAL_FIXED_SCALE {
-        return Err(ArrowConvertError::InvalidValue(format!(
-            "decimal scale {scale} exceeds the fixed export scale {DECIMAL_FIXED_SCALE}; \
-             refusing to truncate (would lose precision)"
-        )));
-    }
-
-    // Decode big-endian two's-complement signed integer.
-    let bigint = BigInt::from_signed_bytes_be(unscaled);
-
-    // Compute scale delta: positive means we must multiply (scale up).
-    // A negative delta (scale > DECIMAL_FIXED_SCALE) is rejected above.
-    let delta = DECIMAL_FIXED_SCALE - scale;
-
-    let rescaled = if delta == 0 {
-        bigint
-    } else {
-        // Scale up: multiply by 10^delta.
-        let factor = BigInt::from(10i64).pow(delta as u32);
-        bigint * factor
-    };
-
-    // Verify the result fits in Decimal128(38, …).
-    // 10^38 − 1 is the maximum absolute value representable.
-    let max_abs = BigInt::from(10i64).pow(38u32) - BigInt::from(1i64);
-    let abs_rescaled = if rescaled.sign() == num_bigint::Sign::Minus {
-        -rescaled.clone()
-    } else {
-        rescaled.clone()
-    };
-    if abs_rescaled > max_abs {
-        return Err(ArrowConvertError::InvalidValue(format!(
-            "Decimal value exceeds Decimal128(38, {DECIMAL_FIXED_SCALE}) range after rescaling"
-        )));
-    }
-
-    bigint_to_i128(&rescaled)
-}
+// `rescale_decimal` lives in the sibling `arrow_decimal` module (epic #1116
+// split; issue #1755 bounded/fail-closed fix). Re-imported so the two
+// `Decimal128` array builders below call it unqualified, unchanged.
+pub(crate) use super::arrow_decimal::rescale_decimal;
 
 // =========================================================================
 // Type-specific array builders (flat / column-based)
