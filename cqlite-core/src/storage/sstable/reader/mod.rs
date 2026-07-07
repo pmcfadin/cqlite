@@ -28,6 +28,9 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+// One format-tagged partition-location façade (issue #1599 / G3): `locate` /
+// `locate_encoded` compose the C5 range short-circuit + per-format offset resolve.
+mod partition_locator;
 // Next-partition (successor) seek-window offset resolution (issue #953 / #951),
 // split out of `partition_lookup` for the campsite source-size rule (#1116).
 mod partition_successor;
