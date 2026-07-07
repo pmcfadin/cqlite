@@ -97,7 +97,9 @@ impl SSTableReader {
         // Legacy path: only allow simple digest when legacy-heuristics feature is enabled
         #[cfg(feature = "legacy-heuristics")]
         {
-            tracing::warn!("Falling back to simple digest - this may cause incorrect Index.db lookups");
+            tracing::warn!(
+                "Falling back to simple digest - this may cause incorrect Index.db lookups"
+            );
             computer.compute_simple_digest(partition_key)
         }
 

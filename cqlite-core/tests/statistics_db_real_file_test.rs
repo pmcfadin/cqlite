@@ -9,7 +9,7 @@ fn test_real_statistics_db_parsing() {
     // Initialize env_logger to see debug output
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
+        .parse_filters("debug")
         .try_init();
 
     let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")

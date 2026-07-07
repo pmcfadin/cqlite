@@ -13,9 +13,9 @@ use super::model::{
 };
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use tracing::debug;
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
+use tracing::debug;
 
 #[cfg(not(feature = "tombstones"))]
 use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};

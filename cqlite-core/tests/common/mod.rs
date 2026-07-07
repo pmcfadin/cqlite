@@ -38,7 +38,7 @@ pub fn create_test_config() -> Config {
 /// Initialize logging for tests if not already configured
 pub fn init_test_logging() {
     let _ = env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .parse_filters("debug")
         .is_test(true)
         .try_init();
 }

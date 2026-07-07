@@ -24,10 +24,10 @@
 // Allow deprecated warnings within this module since the entire module is deprecated
 #![allow(deprecated)]
 
-use tracing::{debug, info, warn};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use tracing::{debug, info, warn};
 
 use super::{
     chunk_decompressor::{create_decompressor_from_file, ChunkDecompressor},

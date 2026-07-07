@@ -10,7 +10,7 @@ fn test_statistics_roundtrip() {
     // Initialize logging to see debug output
     let _ = env_logger::builder()
         .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
+        .parse_filters("debug")
         .try_init();
     // Create test file in /tmp for debugging
     let stats_path = std::path::PathBuf::from("/tmp/test-roundtrip-Statistics.db");

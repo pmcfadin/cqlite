@@ -60,10 +60,10 @@ use crate::parser::DataFormat;
 use crate::storage::cache::ChunkKey;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use tracing::{debug, warn};
 use std::io::SeekFrom;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncSeekExt;
+use tracing::{debug, warn};
 
 // Per-site cache key namespaces (design D4): fold a site discriminator into the
 // sstable-identity field of [`ChunkKey`] so numerically-overlapping keys from

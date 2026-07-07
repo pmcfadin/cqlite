@@ -242,7 +242,9 @@ async fn read_next_block_impl(
             read_bti_format_block_header(file).await?
         }
         _ => {
-            tracing::debug!("block_io::read_next_block_impl: Using legacy format block header reader");
+            tracing::debug!(
+                "block_io::read_next_block_impl: Using legacy format block header reader"
+            );
             read_legacy_format_block_header(file).await?
         }
     };

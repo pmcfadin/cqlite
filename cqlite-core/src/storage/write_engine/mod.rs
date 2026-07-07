@@ -3297,18 +3297,13 @@ mod tests {
         );
     }
 
-    /// Minimal thread-local `tracing` WARN capturer for the Drop-warn tests
-    /// (issue #1693).
-    ///
-    /// `start()` installs a thread-local `tracing` default subscriber (via
-    /// `set_default`) with **no** `tracing-log` bridge — the same tracing-only
-    /// path a modern embedder wires — and records WARN events into a
-    /// thread-local buffer. cargo runs each test on its own thread, so both the
-    /// subscriber and the buffer are per-thread, isolating concurrent tests.
+    /// Thread-local `tracing` WARN capturer for the Drop-warn tests (#1693).
+    /// `start()` installs a thread-local `tracing` subscriber with NO
+    /// `tracing-log` bridge (the tracing-only path an embedder wires) that
+    /// records WARN messages per-thread, isolating concurrent tests.
     mod drop_warn_capture {
         use std::cell::RefCell;
         use std::fmt;
-
         use tracing::field::{Field, Visit};
         use tracing::subscriber::{set_default, DefaultGuard};
         use tracing::{Event, Level, Subscriber};
@@ -3319,13 +3314,10 @@ mod tests {
             static BUFFER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
             static GUARD: RefCell<Option<DefaultGuard>> = const { RefCell::new(None) };
         }
-
-        /// Extracts the rendered `message` field of an event.
         #[derive(Default)]
         struct MessageVisitor {
             message: String,
         }
-
         impl Visit for MessageVisitor {
             fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
                 if field.name() == "message" {
@@ -3333,11 +3325,7 @@ mod tests {
                 }
             }
         }
-
-        /// A `tracing` layer that records every WARN event's message into the
-        /// current thread's buffer.
         struct WarnCaptureLayer;
-
         impl<S: Subscriber> Layer<S> for WarnCaptureLayer {
             fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
                 if *event.metadata().level() != Level::WARN {
@@ -3353,18 +3341,12 @@ mod tests {
             }
         }
 
-        /// Begin capturing `tracing` WARN events on the current thread. The
-        /// thread-local default subscriber is kept alive by storing its guard;
-        /// `take_warnings()` drops it so later tests on this thread are
-        /// unaffected.
         pub(super) fn start() {
             BUFFER.with(|b| *b.borrow_mut() = Some(Vec::new()));
-            let subscriber = Registry::default().with(WarnCaptureLayer);
-            let guard = set_default(subscriber);
+            let guard = set_default(Registry::default().with(WarnCaptureLayer));
             GUARD.with(|g| *g.borrow_mut() = Some(guard));
         }
 
-        /// Take the warnings captured on the current thread since `start()`.
         pub(super) fn take_warnings() -> Vec<String> {
             GUARD.with(|g| *g.borrow_mut() = None);
             BUFFER.with(|b| b.borrow_mut().take().unwrap_or_default())
