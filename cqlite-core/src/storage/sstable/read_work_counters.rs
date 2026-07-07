@@ -109,9 +109,9 @@
 //!   one per node the BTI DFS enters (`bti/parser/traversal.rs`). Consumer **L1/L3**
 //!   (<40 BTI nodes visited): flips to the bounded-descent count.
 //! - [`record_bti_pointer_decode`] / [`bti_pointer_decodes`] — **`BTI_POINTER_DECODES`**:
-//!   one per BTI node/pointer decode (`bti/parser/node_decode.rs::parse_bti_node`).
-//!   Consumer **L1/L3**: pairs with `BTI_NODES_VISITED` to prove the descent does not
-//!   re-decode nodes.
+//!   one per BTI CHILD-pointer decode (`node_decode.rs` records one per materialized child
+//!   slot; `slice_walk.rs` records exactly one for the single matching child). Consumer
+//!   **L1/L3**: a targeted descent decodes ONE pointer per byte (Dense-256 node = 1, not 256).
 //! - [`record_row_sort`] / [`row_sort_invocations`] — **`ROW_SORT_INVOCATIONS`**:
 //!   the per-row cell `sort_by` gauge at the shared display-row builder
 //!   (`v5_compressed_legacy/mod.rs::build_display_row`, which #1334 consolidated the
@@ -503,12 +503,12 @@ pub fn record_bti_node_visited() {
     COUNTERS.record_bti_node_visited();
 }
 
-/// Record one BTI node/pointer decode (`BTI_POINTER_DECODES`; consumers L1/L3,
-/// Issue #1618).
+/// Record one BTI child-pointer decode (`BTI_POINTER_DECODES`; consumers L1/L3,
+/// Issue #1618 / #1650).
 ///
-/// Called unconditionally at the single node-decode entry
-/// (`bti/parser/node_decode.rs::parse_bti_node`); the body compiles to a no-op in a
-/// release build.
+/// Counts **individual child pointers**, not nodes: `node_decode.rs` records once per
+/// materialized child slot (Dense-256 → 256), the borrow-only single-child descent
+/// (`slice_walk.rs`) records exactly 1 — the L3 win.  No-op in a release build.
 #[inline(always)]
 pub fn record_bti_pointer_decode() {
     #[cfg(any(test, feature = "work-counters"))]

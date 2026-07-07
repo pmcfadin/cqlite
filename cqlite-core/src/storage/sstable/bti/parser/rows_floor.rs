@@ -32,7 +32,10 @@
 //! `goMin` / `goMax`), `RowIndexReader.java` (`separatorFloor`);
 //! docs/sstables-definitive-guide chapter 17.
 
-use crate::{error::Error, storage::sstable::bti::node::BtiResult};
+use crate::{
+    error::Error,
+    storage::sstable::bti::node::{BtiNode, BtiResult},
+};
 
 use super::node_decode::parse_bti_node;
 use super::partitions::payload_start_in_node;
@@ -48,23 +51,22 @@ use super::partitions::parse_bti_node_for_traversal;
 use super::traversal::ordered_children;
 
 /// Read the `BtiRowIndexEntry` from the payload attached to a `Rows.db` node at
-/// `node_offset`, or `None` if the node carries no payload.
+/// `node_offset` (`None` if it carries no payload).  Pass `parsed = Some(&node)` when
+/// the caller already parsed the node (the DFS single parse, issue #1650 / L3) so a
+/// payload-bearing internal node is not re-parsed; `None` parses it lazily here.
 ///
-/// Structurally parallels
-/// [`read_node_payload`](super::partitions::read_node_payload) but decodes the
-/// Rows.db payload format via [`decode_bti_row_payload`].  Shared by the
-/// full-partition DFS ([`super::rows::dfs_collect_row_entries`]) and the
-/// floor/ceiling walks below.
+/// Structurally parallels [`read_node_payload`](super::partitions::read_node_payload)
+/// but decodes the Rows.db payload format via [`decode_bti_row_payload`].
 pub(super) fn read_row_node_payload(
     trie_data: &[u8],
     node_offset: usize,
+    node: Option<&BtiNode>,
 ) -> BtiResult<Option<BtiRowIndexEntry>> {
     if node_offset >= trie_data.len() {
         return Err(Error::Parse(format!(
             "Rows.db payload read: node_offset {node_offset} out of bounds"
         )));
     }
-
     let header_byte = trie_data[node_offset];
     let ordinal = (header_byte >> 4) & 0x0F;
     let payload_flags = header_byte & 0x0F;
@@ -88,9 +90,17 @@ pub(super) fn read_row_node_payload(
             payload_flags,
         )?))
     } else if payload_flags != 0 {
-        // Slice must start at the node (see note in `read_node_payload`).
-        let node = parse_bti_node(&trie_data[node_offset..], node_offset as u64)?;
-        let payload_start = payload_start_in_node(&node, trie_data, node_offset)?;
+        // Use the caller's pre-parsed node when supplied (the DFS single parse,
+        // issue #1650), else parse here.  Slice must start at the node.
+        let owned;
+        let node = match node {
+            Some(n) => n,
+            None => {
+                owned = parse_bti_node(&trie_data[node_offset..], node_offset as u64)?;
+                &owned
+            }
+        };
+        let payload_start = payload_start_in_node(node, trie_data, node_offset)?;
         Ok(Some(decode_bti_row_payload(
             trie_data,
             payload_start,
@@ -150,7 +160,7 @@ fn go_max_payload(trie_data: &[u8], mut node_offset: usize) -> BtiResult<BtiRowI
             None => break,
         }
     }
-    read_row_node_payload(trie_data, node_offset)?.ok_or_else(|| {
+    read_row_node_payload(trie_data, node_offset, None)?.ok_or_else(|| {
         Error::Parse(format!(
             "Rows.db floor: max leaf at offset {node_offset} carries no row-index payload \
              (corrupt trie)"
@@ -166,7 +176,7 @@ fn go_min_payload(trie_data: &[u8], mut node_offset: usize) -> BtiResult<BtiRowI
     let mut steps = 0usize;
     loop {
         record_visit(trie_data, &mut steps)?;
-        if let Some(payload) = read_row_node_payload(trie_data, node_offset)? {
+        if let Some(payload) = read_row_node_payload(trie_data, node_offset, None)? {
             return Ok(payload);
         }
         let node = parse_bti_node_for_traversal(trie_data, node_offset)?;
@@ -242,7 +252,7 @@ pub(crate) fn rows_floor_block(
         if insertion == 0 {
             // `search` in {0 (exact-first), -1 (below all)}: the current node's
             // separator is still a valid prefix floor candidate — keep it.
-            if let Some(p) = read_row_node_payload(trie_data, node_offset)? {
+            if let Some(p) = read_row_node_payload(trie_data, node_offset, None)? {
                 payload = Some(p);
             }
         } else {

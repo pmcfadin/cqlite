@@ -29,6 +29,9 @@ pub use parser::{
 // PRE-ENCODED byte-comparable key so callers hoist the key hash+encoding out of the
 // candidate-prune loop (issue #1575 / C4).
 pub(crate) use parser::lookup_partition_in_bti_slice;
+// Test-only hooks for the issue #1650 (L3) targeted-descent counter invariants.
+#[doc(hidden)]
+pub use parser::{find_child_offset_for_test, parse_bti_node_for_test};
 // Crate-internal O(key-length) Rows.db floor/ceiling walks (issue #1647 / L1),
 // consumed only by the reader's clustering-window path (compiled out under
 // `tombstones`).

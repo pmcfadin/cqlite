@@ -17,10 +17,24 @@
 //! Node-type decoding follows `TrieNode.java` exactly; a structurally invalid or
 //! truncated node is an error, never a silent miss (no-heuristics).
 
-use crate::{error::Error, storage::sstable::bti::node::BtiResult};
+use crate::{
+    error::Error,
+    storage::sstable::bti::node::{BtiNode, BtiResult},
+};
 
-use super::node_decode::{classify_node_nibble, read_12bit_packed, read_be_unsigned};
+use super::node_decode::{
+    classify_node_nibble, parse_bti_node, read_12bit_packed, read_be_unsigned,
+};
 use super::partitions::{walk_bti_trie, BtiPartitionLocation};
+
+/// Test-only hook exposing the whole-child-table decoder
+/// ([`super::node_decode::parse_bti_node`]) so the serial `issue_1650_bti_child_lookup`
+/// integration binary can assert the decode-all baseline (`BTI_POINTER_DECODES == 256`
+/// for a Dense-256 node) against the process-global counter. Not on the semver surface.
+#[doc(hidden)]
+pub fn parse_bti_node_for_test(data: &[u8], offset: u64) -> BtiResult<BtiNode> {
+    parse_bti_node(data, offset)
+}
 
 /// Resolve the absolute trie offset of the child reachable from the node at
 /// `node_offset` via `search_byte`, decoding ONLY that one child pointer in place.
@@ -69,6 +83,7 @@ pub(crate) fn find_child_offset(
             if data[1] != search_byte {
                 return Ok(None);
             }
+            record_pointer_decode();
             let delta = (header_byte & 0x0F) as u64;
             Ok(Some(off.saturating_sub(delta) as usize))
         }
@@ -80,6 +95,7 @@ pub(crate) fn find_child_offset(
             if data[2] != search_byte {
                 return Ok(None);
             }
+            record_pointer_decode();
             let delta = (((header_byte & 0x0F) as u64) << 8) | (data[1] as u64);
             Ok(Some(off.saturating_sub(delta) as usize))
         }
@@ -106,6 +122,19 @@ pub(crate) fn find_child_offset(
     }
 }
 
+/// Test-only hook exposing the borrow-only single-child descent
+/// ([`find_child_offset`]) so the serial `issue_1650_bti_child_lookup` integration
+/// binary can assert the `BTI_POINTER_DECODES == 1` (not 256) invariant against the
+/// process-global counter in its own process. Not part of the semver surface.
+#[doc(hidden)]
+pub fn find_child_offset_for_test(
+    trie_data: &[u8],
+    node_offset: usize,
+    search_byte: u8,
+) -> BtiResult<Option<usize>> {
+    find_child_offset(trie_data, node_offset, search_byte)
+}
+
 /// Pointer encoding width for a node's child deltas.
 #[derive(Clone, Copy)]
 enum PtrWidth {
@@ -117,6 +146,15 @@ enum PtrWidth {
 
 fn ptr_width(n: usize) -> PtrWidth {
     PtrWidth::Fixed(n)
+}
+
+/// Record the ONE child-pointer decode a targeted descent performs for the byte it
+/// follows (`BTI_POINTER_DECODES`, issue #1650 / L3). Called only when the matching
+/// child slot is found and its delta is decoded — so a Dense-256 descent records 1,
+/// not 256 (a no-op in release builds).
+#[inline]
+fn record_pointer_decode() {
+    crate::storage::sstable::read_work_counters::record_bti_pointer_decode();
 }
 
 fn require_len(data: &[u8], needed: usize, what: &str) -> BtiResult<()> {
@@ -141,14 +179,16 @@ fn single_child(
     if data[1] != search_byte {
         return Ok(None);
     }
+    record_pointer_decode();
     let delta = read_be_unsigned(&data[2..2 + ptr_bytes]);
     Ok(Some(off.saturating_sub(delta) as usize))
 }
 
-/// Sparse node: read `count`, scan the transition bytes for `search_byte`, and
-/// decode only that index's delta. Cassandra stores the transition bytes sorted
-/// and unique, so a linear scan for the first match is equivalent to the binary
-/// search `BtiNode::find_child` performs.
+/// Sparse node: read `count`, **binary-search** the sorted transition-byte array
+/// for `search_byte`, and decode only that index's delta (issue #1650 / L3).
+/// Cassandra stores the transition bytes sorted and unique, so the binary search is
+/// equivalent to (and matches) the one `BtiNode::find_child` performs — but touches
+/// only O(log count) bytes and decodes at most ONE pointer.
 fn sparse_child(
     data: &[u8],
     off: u64,
@@ -173,12 +213,12 @@ fn sparse_child(
     };
     require_len(data, pointers_start + ptr_area, what)?;
 
-    let Some(idx) = data[bytes_start..pointers_start]
-        .iter()
-        .position(|&b| b == search_byte)
-    else {
+    // The transition bytes are stored sorted ascending and unique; binary-search
+    // them in place (matches `BtiNode::find_child`'s `binary_search_by_key`).
+    let Ok(idx) = data[bytes_start..pointers_start].binary_search(&search_byte) else {
         return Ok(None);
     };
+    record_pointer_decode();
     let delta = match width {
         PtrWidth::Fixed(n) => {
             let p = pointers_start + idx * n;
@@ -214,6 +254,8 @@ fn dense_child(
     if idx >= range_len {
         return Ok(None);
     }
+    // Index arithmetic (`search_byte - start`) selects the single slot; decode only
+    // that one delta (issue #1650 / L3 — never the whole 1..=256-slot range).
     let delta = match width {
         PtrWidth::Fixed(n) => {
             let p = 3 + idx * n;
@@ -221,6 +263,10 @@ fn dense_child(
         }
         PtrWidth::Packed12 => read_12bit_packed(&data[3..], idx),
     };
+    // Every Dense slot access decodes exactly one pointer delta — count it here,
+    // BEFORE the delta==0 sentinel branch, so a covered-range miss (delta==0) still
+    // counts as real decode work (issue #1650 review).
+    record_pointer_decode();
     // delta 0 is the sentinel for "no child at this byte" (a real child may live at
     // absolute offset 0 only via a non-zero delta equal to `off`).
     if delta == 0 {
@@ -510,5 +556,42 @@ mod tests {
         let node = [0x50u8, 0x02, 0x10, 0x20, 0x05, 0x0A];
         let parsed = parse_bti_node(&node, 0).unwrap();
         assert!(matches!(parsed.data, BtiNodeData::Sparse { .. }));
+    }
+
+    // ----- issue #1650 (L3): targeted single-child decode equivalence -----
+
+    /// Build a Dense16 node covering the FULL 256-byte range (start=0x00, len=256),
+    /// every slot a distinct non-zero backward delta. Placed at a large offset so
+    /// every child resolves in-bounds. Returns `(trie, node_offset)`.
+    fn dense256_node() -> (Vec<u8>, usize) {
+        let node_offset = 100_000usize;
+        let mut node = vec![0xB0u8, 0x00, 0xFF]; // Dense16, start 0x00, len-1 = 255
+        for i in 0..256u32 {
+            // delta i+1 → child at node_offset-(i+1); all distinct, none the sentinel.
+            node.extend_from_slice(&((i + 1) as u16).to_be_bytes());
+        }
+        let mut trie = vec![0u8; node_offset];
+        trie.extend_from_slice(&node);
+        (trie, node_offset)
+    }
+
+    /// L3 equivalence: for a full-range Dense-256 node and ALL 256 possible key
+    /// bytes, the in-place `find_child_offset` result matches the decode-all-then-pick
+    /// baseline (`parse_bti_node(...).find_child(byte)`). (The `== 1` pointer-decode
+    /// count is asserted in the serial integration binary `issue_1650_bti_child_lookup`,
+    /// where the process-global counter is not raced by parallel lib tests.)
+    #[test]
+    fn dense256_find_child_equivalence_all_bytes() {
+        let (trie, node_offset) = dense256_node();
+        let parsed = parse_bti_node(&trie[node_offset..], node_offset as u64).unwrap();
+        for b in 0u16..=255 {
+            let b = b as u8;
+            let via_parse = parsed.find_child(b).map(|p| p.distance as usize);
+            let in_place = find_child_offset(&trie, node_offset, b).unwrap();
+            assert_eq!(
+                in_place, via_parse,
+                "L3: find_child_offset must equal decode-all baseline for byte {b:#04x}",
+            );
+        }
     }
 }

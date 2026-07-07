@@ -260,8 +260,8 @@ pub(crate) fn dfs_collect_row_entries(
     trie_data: &[u8],
     root_offset: usize,
 ) -> BtiResult<Vec<(Vec<u8>, BtiRowIndexEntry)>> {
-    dfs_collect_in_order(trie_data, root_offset, |data, off| {
-        super::rows_floor::read_row_node_payload(data, off)
+    dfs_collect_in_order(trie_data, root_offset, |data, off, node| {
+        super::rows_floor::read_row_node_payload(data, off, Some(node))
     })
 }
 

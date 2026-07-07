@@ -242,23 +242,21 @@ fn find_next_child_offset(
     super::slice_walk::find_child_offset(trie_data, node_offset, search_byte)
 }
 
-/// Read the `BtiPartitionLocation` from the payload attached to the BTI node
-/// at `node_offset`.  Returns `None` if the node has no payload.
-///
-/// For `PayloadOnly` nodes the payload immediately follows the 1-byte header.
-/// For other node types (Single/Sparse/Dense with a non-zero `payloadBits`
-/// low nibble) the payload appears *after* all the pointer/transition bytes;
-/// this function delegates correctly to [`decode_bti_partition_payload`].
+/// Read the `BtiPartitionLocation` from the payload attached to the BTI node at
+/// `node_offset` (`None` if it has no payload).  Pass `parsed = Some(&node)` when the
+/// caller already parsed the node (the DFS single parse, issue #1650 / L3) so a
+/// payload-bearing internal node is not re-parsed; `None` parses it lazily here.
 pub(crate) fn read_node_payload(
     trie_data: &[u8],
     node_offset: usize,
+    parsed: Option<&BtiNode>,
 ) -> BtiResult<Option<BtiPartitionLocation>> {
+    let node = parsed;
     if node_offset >= trie_data.len() {
         return Err(Error::Parse(format!(
             "BTI payload read: node_offset {node_offset} out of bounds"
         )));
     }
-
     let header_byte = trie_data[node_offset];
     let ordinal = (header_byte >> 4) & 0x0F;
     let payload_flags = header_byte & 0x0F; // aka payloadBits
@@ -287,20 +285,18 @@ pub(crate) fn read_node_payload(
             payload_flags,
         )?))
     } else if payload_flags != 0 {
-        // Non-leaf node with an embedded payload (prefix match for short keys).
-        // We need to skip over the node's own pointer/transition data to reach
-        // the payload.  Reuse `parse_bti_node` to find the payload start.
-        //
-        // NOTE: `parse_bti_node` reads its header from `data[0]`, so it must be
-        // passed the slice STARTING at the node (`&trie_data[node_offset..]`),
-        // while the absolute `node_offset` drives child-position arithmetic.
-        // Passing the whole `trie_data` here was a latent bug (it parsed the
-        // node at offset 0 instead) — only exposed once a non-leaf node carries
-        // an embedded payload at a non-zero offset (issue #832).
-        let node = parse_bti_node(&trie_data[node_offset..], node_offset as u64)?;
-        // Determine where the payload bytes start: after all transition/pointer bytes.
-        // payload_position = node_offset + node_byte_size_without_payload
-        let payload_start = payload_start_in_node(&node, trie_data, node_offset)?;
+        // Non-leaf node with an embedded payload: skip its pointer/transition bytes
+        // to reach the payload.  Use the caller's pre-parsed node (DFS single parse,
+        // issue #1650) when supplied, else parse here.
+        let owned;
+        let node = match node {
+            Some(n) => n,
+            None => {
+                owned = parse_bti_node(&trie_data[node_offset..], node_offset as u64)?;
+                &owned
+            }
+        };
+        let payload_start = payload_start_in_node(node, trie_data, node_offset)?;
         Ok(Some(decode_bti_partition_payload(
             trie_data,
             payload_start,
@@ -411,13 +407,13 @@ pub(crate) fn walk_bti_trie(
             // Note: the original implementation required the key to be fully consumed
             // at the leaf (return Ok(None) otherwise), which is incorrect for
             // path-compressed tries.  Issue #755 corrects this.
-            return read_node_payload(trie_data, current_offset);
+            return read_node_payload(trie_data, current_offset, None);
         }
 
         // Non-leaf node: if key exhausted, check for an embedded payload
         if key_pos >= encoded_key.len() {
             if payload_flags != 0 {
-                return read_node_payload(trie_data, current_offset);
+                return read_node_payload(trie_data, current_offset, None);
             }
             return Ok(None);
         }
