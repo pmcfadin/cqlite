@@ -519,7 +519,13 @@ fn materialized_uncapped_counts_and_returns_all_accepted() {
 // fix flipped; if it regressed to `true` this test would fail loudly rather than
 // pass vacuously. Complements the result-parity coverage in
 // `tests/issue_1577_capped_fallback_branches.rs`.
-#[cfg(feature = "write-support")]
+//
+// FEATURE GATE (roborev job 3672, Medium): the `false` guard only holds for the
+// `not(tombstones)` build — the `tombstones` `scan_stream_materializes` arm always
+// returns `true` (it forwards a materialized `scan`). So this test is additionally
+// gated on `not(feature = "tombstones")`; under `--all-features` it is skipped
+// rather than failing on the (correct) `true` there.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 #[tokio::test]
 async fn multi_generation_capped_scan_decode_stops() {
     use crate::query::select_executor::SelectExecutor;
@@ -657,8 +663,11 @@ async fn multi_generation_capped_scan_decode_stops() {
         decoded > CAP as u64,
         "the table must hold more than `cap` rows for the decode-stop to be observable"
     );
-    let oracle_prefix_keys: Vec<RowKey> =
-        oracle_rows.iter().take(CAP).map(|(k, _)| k.clone()).collect();
+    let oracle_prefix_keys: Vec<RowKey> = oracle_rows
+        .iter()
+        .take(CAP)
+        .map(|(k, _)| k.clone())
+        .collect();
 
     let schema_mgr = Arc::new(
         SchemaManager::new_with_storage(Arc::clone(&storage), &config)
