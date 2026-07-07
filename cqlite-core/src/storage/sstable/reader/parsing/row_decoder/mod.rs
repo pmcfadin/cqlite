@@ -608,6 +608,15 @@ pub(crate) struct ElementShadow {
     /// carries no liveness expiry, in which case such an element has no
     /// authoritative expiry and is never TTL-expired here (no-heuristics, issue #28).
     pub row_expires_at: Option<i64>,
+    /// Issue #2038 (round 3): row-liveness TTL in SECONDS — `row_header.ttl`,
+    /// paired with `row_expires_at` above to resolve a `USE_ROW_TTL` element's
+    /// EFFECTIVE `CellExpiration` for the per-cell-metadata `TTL()` value (a
+    /// statement-level `INSERT ... USING TTL n` on a non-frozen collection/UDT
+    /// column). `None` when the row carries no liveness TTL (`HAS_TTL` unset),
+    /// in which case such an element's expiry cannot be resolved here
+    /// (no-heuristics, issue #28) — mirrors the scalar `USE_ROW_TTL` cell
+    /// path's `(row_header.ttl, row_expiry)` pairing (row_data.rs ~line 726).
+    pub row_ttl_seconds: Option<i32>,
 }
 
 /// Extra metadata produced by `parse_complex_column_inner` for delta-scan callers

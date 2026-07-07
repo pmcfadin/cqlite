@@ -4,14 +4,19 @@ use super::*;
 /// element's expiry, as input to [`ExpiryHomogeneity::fold`].
 ///
 /// `LiveForever` is a live element with no TTL of any kind (`!is_expiring`).
-/// `Explicit` is an element with an EXPLICIT per-element TTL (both
-/// `element_ttl` and `element_local_deletion_time` decoded — the shape a
-/// `USING TTL` collection write emits). `Unresolvable` is `is_expiring` but
-/// missing the explicit fields — the on-disk shape of a collection element
-/// that INHERITS the row's TTL (`USE_ROW_TTL`). CQLite's own writer never
-/// emits this shape for a complex cell today, but a real Cassandra-written
-/// SSTable could; since its real expiry cannot be resolved from the element
-/// alone, it always forces the homogeneity tracker to `Mixed` rather than
+/// `Explicit` is an element's EFFECTIVE `(ttl_seconds, expires_at_seconds)` —
+/// either its OWN explicit per-element TTL (both `element_ttl` and
+/// `element_local_deletion_time` decoded — the shape a per-element `USING
+/// TTL` write emits), or, for a `USE_ROW_TTL` element (a statement-level
+/// `INSERT ... USING TTL n` on a collection column — issue #2038 acceptance
+/// criteria), the INHERITED row-liveness expiry threaded in via
+/// `ElementShadow::row_ttl_seconds`/`row_expires_at` (mirroring the scalar
+/// `USE_ROW_TTL` cell path's `effective_exp = cell_exp.or(row_level_exp)`,
+/// row_data.rs ~line 736). `Unresolvable` is `is_expiring`, no explicit
+/// per-element fields, AND no row-level expiry available to inherit (e.g. a
+/// physical consumer with `element_filter: None`, or a genuinely corrupt
+/// on-disk state) — its real expiry cannot be resolved from the element
+/// alone, so it forces the homogeneity tracker to `Mixed` rather than
 /// silently treating it as live-forever or omitting it (no-heuristics, #28).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ElementExpiryShape {
@@ -21,13 +26,35 @@ enum ElementExpiryShape {
 }
 
 impl ElementExpiryShape {
+    /// `row_ttl_seconds`/`row_expires_at` are the row-liveness TTL/expiry a
+    /// `USE_ROW_TTL` element inherits (from `ElementShadow`, `None` when no
+    /// shadow context is active — i.e. every physical consumer, byte-unchanged
+    /// behavior). Both come from authoritative row-header fields (no
+    /// heuristics): `row_header.ttl` and the SAME `liveness_expires_at_seconds`
+    /// fallback the scalar `USE_ROW_TTL` cell path and the #1741 shadow filter
+    /// both use.
     #[inline]
-    fn from_cell(cell: &ComplexCellParse) -> Self {
+    fn from_cell(
+        cell: &ComplexCellParse,
+        row_ttl_seconds: Option<i32>,
+        row_expires_at: Option<i64>,
+    ) -> Self {
         if !cell.is_expiring {
             return Self::LiveForever;
         }
         match (cell.element_ttl, cell.element_local_deletion_time) {
             (Some(ttl), Some(ldt)) => Self::Explicit(ttl as i32, ldt as u32 as i64),
+            // USE_ROW_TTL shape (issue #2038 round 3): no explicit per-element
+            // TTL/LDT — both are decoded ONLY when NOT USE_ROW_TTL, so this
+            // combination unambiguously means the element inherits the row's
+            // expiry. Resolve it from the row-level values when both are
+            // available; otherwise the real expiry is unknown here.
+            (None, None) => match (row_ttl_seconds, row_expires_at) {
+                (Some(ttl_s), Some(exp_s)) => Self::Explicit(ttl_s, exp_s),
+                _ => Self::Unresolvable,
+            },
+            // Should not occur (ttl/ldt are always decoded together), but stay
+            // conservative rather than guessing (no-heuristics, #28).
             _ => Self::Unresolvable,
         }
     }
@@ -351,6 +378,15 @@ impl V5CompressedLegacyParser {
         // fix, instead of hardcoding `expiration: None`. Deliberately separate
         // from `max_element_expires_at` above (see `ExpiryHomogeneity` doc).
         let mut expiry_homogeneity = ExpiryHomogeneity::Unseen;
+        // Issue #2038 round 3: the row-liveness TTL/expiry a `USE_ROW_TTL`
+        // element inherits, threaded from the SAME `ElementShadow` the #1741
+        // shadow filter already carries (`None` for every physical consumer —
+        // byte-unchanged; `element_filter` is `Some` only on the user-facing
+        // SELECT read path).
+        let (row_ttl_seconds, row_expires_at) = element_filter
+            .as_ref()
+            .map(|f| (f.row_ttl_seconds, f.row_expires_at))
+            .unwrap_or((None, None));
 
         // Issue #1741 (per-element filtering): count of LIVE elements dropped from
         // the emitted container by the read-side shadow/TTL filter. Stays `0` when
@@ -381,12 +417,18 @@ impl V5CompressedLegacyParser {
         /// Far-future `localDeletionTime` in `[2^31, 2^32)` is recovered via
         /// `as u32 as i64`, matching the row-liveness expiry clock.
         #[inline]
+        #[allow(clippy::too_many_arguments)]
         fn fold_element_expiry(
             has_live_forever: &mut bool,
             max_exp: &mut Option<i64>,
             homogeneity: &mut ExpiryHomogeneity,
             cell: &ComplexCellParse,
             dropped: bool,
+            // Issue #2038 round 3: the inherited row-liveness TTL/expiry a
+            // `USE_ROW_TTL` element resolves against (from `ElementShadow`,
+            // `None` for every physical consumer).
+            row_ttl_seconds: Option<i32>,
+            row_expires_at: Option<i64>,
         ) {
             // Issue #2038 (roborev Medium finding): fold this element into the
             // VISIBLE-only homogeneity tracker BEFORE the `dropped`-tolerant
@@ -394,7 +436,11 @@ impl V5CompressedLegacyParser {
             // contribute to the per-cell-metadata TTL (see `ExpiryHomogeneity`
             // doc for why this is a separate, narrower aggregate).
             if !dropped {
-                *homogeneity = homogeneity.fold(ElementExpiryShape::from_cell(cell));
+                *homogeneity = homogeneity.fold(ElementExpiryShape::from_cell(
+                    cell,
+                    row_ttl_seconds,
+                    row_expires_at,
+                ));
             }
 
             if !cell.is_expiring {
@@ -461,6 +507,8 @@ impl V5CompressedLegacyParser {
                     &mut expiry_homogeneity,
                     &cell,
                     dropped,
+                    row_ttl_seconds,
+                    row_expires_at,
                 );
                 if dropped {
                     shadow_filtered_element_count += 1;
@@ -537,6 +585,8 @@ impl V5CompressedLegacyParser {
                     &mut expiry_homogeneity,
                     &cell,
                     dropped,
+                    row_ttl_seconds,
+                    row_expires_at,
                 );
                 if dropped {
                     shadow_filtered_element_count += 1;
@@ -636,6 +686,8 @@ impl V5CompressedLegacyParser {
                         &mut expiry_homogeneity,
                         &cell,
                         dropped,
+                        row_ttl_seconds,
+                        row_expires_at,
                     );
                     if dropped {
                         shadow_filtered_element_count += 1;
@@ -743,6 +795,8 @@ impl V5CompressedLegacyParser {
                     &mut expiry_homogeneity,
                     &cell,
                     dropped,
+                    row_ttl_seconds,
+                    row_expires_at,
                 );
                 if dropped {
                     shadow_filtered_element_count += 1;
@@ -1845,6 +1899,7 @@ mod tests {
             now: 200,
             row_ts: Some(5),
             row_expires_at: None,
+            row_ttl_seconds: None,
         };
         let (value, _off, meta) = parser
             .parse_complex_column_inner(
@@ -1924,6 +1979,7 @@ mod tests {
             now: 0,
             row_ts: None,
             row_expires_at: None,
+            row_ttl_seconds: None,
         };
         let (value, _off, meta) = parser
             .parse_complex_column_inner(
@@ -2028,6 +2084,7 @@ mod tests {
             now: 200,
             row_ts: Some(5),
             row_expires_at: Some(100),
+            row_ttl_seconds: Some(50),
         };
         let (value, _off, meta) = parser
             .parse_complex_column_inner(
@@ -2066,6 +2123,173 @@ mod tests {
             "the physical (no-filter) parse keeps BOTH elements (byte-unchanged)"
         );
         assert_eq!(meta_unfiltered.shadow_filtered_element_count, 0);
+    }
+
+    /// Issue #2038 (roborev 1503, round 3): #2038's acceptance criteria
+    /// explicitly require `USING TTL n` support on a non-frozen collection —
+    /// a STATEMENT-LEVEL TTL INSERT, which is exactly the `USE_ROW_TTL`
+    /// on-disk encoding (no explicit per-element TTL/LDT; the element
+    /// inherits the row's liveness expiry). Round 2's `ElementExpiryShape`
+    /// classified this shape as `Unresolvable` unconditionally, forcing
+    /// `TTL(collection)` to `None` even for a single, unambiguous, live
+    /// USE_ROW_TTL element — an unmet acceptance criterion.
+    ///
+    /// Scenario: a `list<blob>` with ONE USE_ROW_TTL element, NOT expired
+    /// (`now` < inherited row expiry). `visible_uniform_expiration` must
+    /// resolve to `Some(CellExpiration { ttl_seconds: 50, expires_at_seconds:
+    /// 1000 })` — the row-level TTL/expiry threaded via
+    /// `ElementShadow::row_ttl_seconds`/`row_expires_at`.
+    ///
+    /// Revert-verify: reverting `ElementExpiryShape::from_cell`'s `(None,
+    /// None)` arm to unconditionally return `Unresolvable` (round 2's
+    /// behavior) makes this test FAIL (`visible_uniform_expiration` becomes
+    /// `None`) — confirmed by hand before this fix landed.
+    #[test]
+    fn test_2038_use_row_ttl_element_surfaces_inherited_expiration() {
+        use super::super::test_support::helpers::encode_unsigned;
+
+        let parser = V5CompressedLegacyParser::new("k".to_string(), "t".to_string(), 0, 0, Some(0));
+        let column = crate::schema::Column {
+            name: "c".to_string(),
+            data_type: "list<blob>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        // USE_ROW_TTL element (flags 0x12 = IS_EXPIRING 0x02 | USE_ROW_TTL 0x10):
+        // own timestamp, NO per-element localDeletionTime/TTL.
+        let use_row_ttl = |val: u8| {
+            let mut b = vec![0x12u8];
+            encode_unsigned(1, &mut b); // timestamp delta
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        let mut data = Vec::new();
+        encode_unsigned(1, &mut data); // cell_count
+        data.extend_from_slice(&use_row_ttl(0xAA));
+
+        // Row liveness TTL=50s, expiry=1000 (epoch s); now=500 (< 1000) → LIVE
+        // (not expired, not shadowed).
+        let filter = ElementShadow {
+            cover: None,
+            now: 500,
+            row_ts: Some(5),
+            row_expires_at: Some(1000),
+            row_ttl_seconds: Some(50),
+        };
+        let (value, _off, meta) = parser
+            .parse_complex_column_inner(
+                &data,
+                0,
+                &column,
+                "list<blob>",
+                false,
+                0,
+                None,
+                Some(filter),
+            )
+            .expect("parse list<blob>");
+        assert_eq!(
+            value,
+            Value::List(vec![Value::Blob(vec![0xAA])]),
+            "the live USE_ROW_TTL element survives (not expired)"
+        );
+        assert_eq!(
+            meta.visible_uniform_expiration,
+            Some(CellExpiration {
+                ttl_seconds: 50,
+                expires_at_seconds: 1000,
+            }),
+            "Issue #2038: a statement-level USING TTL n collection element \
+             (USE_ROW_TTL encoding) must surface its inherited expiry, not None"
+        );
+    }
+
+    /// Issue #2038 (roborev 1503, round 3): PRESERVE the round-2 no-over-
+    /// approximation invariant when the mix is EXPLICIT-per-element vs
+    /// INHERITED-row-TTL, not just explicit-vs-explicit (round 2 already pins
+    /// the explicit-only heterogeneous case in the integration test
+    /// `issue_2038_collection_ttl_expiring_cell.rs`).
+    ///
+    /// Scenario: a `list<blob>` with element A (EXPLICIT ttl=100,
+    /// expires_at=100) and element B (USE_ROW_TTL inheriting ttl=200,
+    /// expires_at=200) — two DIFFERENT effective expiries. Neither is
+    /// expired/shadowed at `now=50`. `visible_uniform_expiration` must be
+    /// `None`: the collection has no single TTL that describes both elements.
+    #[test]
+    fn test_2038_mixed_explicit_and_inherited_expiry_surfaces_no_expiration() {
+        use super::super::test_support::helpers::encode_unsigned;
+
+        let parser = V5CompressedLegacyParser::new("k".to_string(), "t".to_string(), 0, 0, Some(0));
+        let column = crate::schema::Column {
+            name: "c".to_string(),
+            data_type: "list<blob>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        // Element A: EXPLICIT expiring (flags 0x02), own ts, ldt=100, ttl=100.
+        let explicit_expiring = |val: u8| {
+            let mut b = vec![0x02u8];
+            encode_unsigned(1, &mut b); // timestamp delta
+            encode_unsigned(100, &mut b); // localDeletionTime (absolute, min_ldt=0)
+            encode_unsigned(100, &mut b); // ttl (absolute, min_ttl=0)
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        // Element B: USE_ROW_TTL (flags 0x12), own ts, NO per-element ldt/ttl —
+        // inherits the row's expiry via `ElementShadow`.
+        let use_row_ttl = |val: u8| {
+            let mut b = vec![0x12u8];
+            encode_unsigned(1, &mut b); // timestamp delta
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        let mut data = Vec::new();
+        encode_unsigned(2, &mut data); // cell_count
+        data.extend_from_slice(&explicit_expiring(0xAA)); // effective (100, 100)
+        data.extend_from_slice(&use_row_ttl(0xBB)); // effective (200, 200) via row
+
+        // Row liveness TTL=200s, expiry=200 (epoch s); now=50 (< 100 and < 200)
+        // → BOTH elements are LIVE (neither expired/shadowed).
+        let filter = ElementShadow {
+            cover: None,
+            now: 50,
+            row_ts: Some(5),
+            row_expires_at: Some(200),
+            row_ttl_seconds: Some(200),
+        };
+        let (value, _off, meta) = parser
+            .parse_complex_column_inner(
+                &data,
+                0,
+                &column,
+                "list<blob>",
+                false,
+                0,
+                None,
+                Some(filter),
+            )
+            .expect("parse list<blob>");
+        assert_eq!(
+            value,
+            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])]),
+            "both elements are live and survive"
+        );
+        assert_eq!(
+            meta.visible_uniform_expiration, None,
+            "Issue #2038 (roborev 1503): an explicit-100 element mixed with an \
+             inherited-200 element has no single TTL that describes the \
+             collection — must surface None, not over-approximate with either \
+             element's expiry, got {:?}",
+            meta.visible_uniform_expiration
+        );
     }
 
     /// Regression test for Issue #481 regression: `list<frozen<udt>>` elements

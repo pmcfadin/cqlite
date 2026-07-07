@@ -489,6 +489,12 @@ impl V5CompressedLegacyParser {
                                 }
                             })
                         }),
+                        // Issue #2038 (round 3): row-liveness TTL seconds, paired
+                        // with `row_expires_at` above so a `USE_ROW_TTL` collection
+                        // element's per-cell-metadata expiry can be resolved
+                        // EXACTLY like the scalar `USE_ROW_TTL` cell path's
+                        // `(row_header.ttl, row_expiry)` pairing (~line 726 below).
+                        row_ttl_seconds: row_header.ttl,
                     });
                     self.parse_complex_column(
                         data,
