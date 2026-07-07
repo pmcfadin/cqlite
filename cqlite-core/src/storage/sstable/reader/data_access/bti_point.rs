@@ -11,7 +11,7 @@ use super::super::SSTableReader;
 use super::model::{bti_lookup_step, table_header_consistent_for_seek, BtiLookupStep};
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use log::debug;
+use tracing::debug;
 
 impl SSTableReader {
     /// BTI ("da") point lookup: resolve a partition key via the Partitions.db

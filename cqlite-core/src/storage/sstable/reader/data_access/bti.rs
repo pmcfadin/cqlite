@@ -24,7 +24,7 @@ use crate::types::TableId;
 #[cfg(not(feature = "tombstones"))]
 use crate::Error;
 #[cfg(not(feature = "tombstones"))]
-use log::debug;
+use tracing::debug;
 
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
@@ -548,7 +548,7 @@ impl SSTableReader {
             results.truncate(lim);
         }
 
-        log::debug!(
+        tracing::debug!(
             "SSTableReader::bti_scan_with_metadata - Returning {} results",
             results.len()
         );
