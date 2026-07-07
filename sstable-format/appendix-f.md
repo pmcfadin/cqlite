@@ -466,7 +466,7 @@ With Issue #218 fixed, Summary.db now parses correctly. The remaining collection
 **Fix Details**:
 - Split `parse_row_header()` into `parse_row_flags()` + `parse_row_metadata()`
 - Parse clustering prefix immediately after flags, before row_size
-- File: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+- File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 **Results**:
 - Smoke test pass rate improved from 27% (9/33) to 79% (26/33)
@@ -724,7 +724,7 @@ When `HAS_ALL_COLUMNS` (0x20) is clear, Cassandra's `Columns.Serializer.serializ
 unsigned-VInt bitmap for `< 64` regular columns, and a **large-subset** form (VInt count +
 smaller-of present/missing **absolute** column indices, each an unsigned VInt — not deltas) for
 `≥ 64`. CQLite's reader
-(`reader/parsing/v5_compressed_legacy.rs::parse_row_metadata`) always reads a single
+(`reader/parsing/row_decoder.rs::parse_row_metadata`) always reads a single
 `parse_vuint` into a `u64` `missing_columns_bitmap` and has no `≥ 64` branch, so for a
 `≥ 64`-column table it consumes only the missing-count VInt and then mis-reads the trailing
 index VInts as cell data, corrupting the row stream. The reader also treats any column at
@@ -1136,24 +1136,24 @@ cargo build --no-default-features --features all-compression
 - **Issue #258**: V5CompressedLegacy Parser Errors for 15/33 Tables - **FIXED**
   - Status: ✅ FIXED - Two root causes identified and resolved
   - Root cause 1: Timestamp units mismatch in `parser/types.rs` - `parse_timestamp()` multiplied milliseconds by 1000 (converting to microseconds) but `Value::Timestamp(i64)` stores milliseconds. This caused overflow → negative values → `<invalid-timestamp:...>` markers.
-  - Root cause 2: Partition header flags heuristic in `v5_compressed_legacy.rs` - `flags > 0x20` check rejected valid partition headers with higher flag values, causing single-byte offset skip and cascading misalignment errors. Violated Issue #28 no-heuristics mandate.
+  - Root cause 2: Partition header flags heuristic in `row_decoder` - `flags > 0x20` check rejected valid partition headers with higher flag values, causing single-byte offset skip and cascading misalignment errors. Violated Issue #28 no-heuristics mandate.
   - Fix 1: Removed `* 1000` multiplication in `parser/types.rs:289` - now stores milliseconds directly
-  - Fix 2: Removed `flags > 0x20` heuristic check in `v5_compressed_legacy.rs:292` - validation now format-based only
+  - Fix 2: Removed `flags > 0x20` heuristic check in `row_decoder:292` - validation now format-based only
   - Result: All 33 test tables pass comprehensive SELECT tests with no ERROR messages or invalid data markers
-  - Files: `cqlite-core/src/parser/types.rs`, `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+  - Files: `cqlite-core/src/parser/types.rs`, `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 - **Issue #240**: DATE Type Values Display as `<invalid-date:...>` - **FIXED**
   - Status: ✅ FIXED - DATE type now parses correctly in all contexts including map keys
-  - Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")` in `comparator.rs`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths (parser/types.rs, v5_compressed_legacy.rs) read DATE as raw i32 without Cassandra's Integer.MIN_VALUE offset decoding.
+  - Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")` in `comparator.rs`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths (parser/types.rs, row_decoder) read DATE as raw i32 without Cassandra's Integer.MIN_VALUE offset decoding.
   - Fix:
     1. Added `ComparatorType::Date` variant to comparator.rs with proper comparison support
     2. Updated `from_cql_type()` and `from_cql_type_with_registry()` to map `CqlType::Date` → `ComparatorType::Date`
     3. Added DATE parsing arm to `parse_value_with_schema_type()` and `parse_value_with_comparator()` in value_parsing.rs
     4. Fixed `parse_date()` in parser/types.rs to apply Cassandra DATE encoding: `stored.wrapping_add(i32::MIN as u32) as i32`
-    5. Fixed map key DATE parsing in v5_compressed_legacy.rs line 5327
+    5. Fixed map key DATE parsing in row_decoder line 5327
   - Cassandra DATE encoding: 4-byte big-endian unsigned int shifted by Integer.MIN_VALUE (2^31) for byte-order comparability. Decoding adds i32::MIN back.
   - Result: DATE columns and DATE keys in maps now display as `YYYY-MM-DD` format (e.g., `2025-10-05`) instead of `<invalid-date:...>`
-  - Files: `comparator.rs`, `value_parsing.rs`, `comparator_value_parsing.rs`, `key_digest.rs`, `parser/types.rs`, `v5_compressed_legacy.rs`
+  - Files: `comparator.rs`, `value_parsing.rs`, `comparator_value_parsing.rs`, `key_digest.rs`, `parser/types.rs`, `row_decoder`
 
 - **Issue #238**: UDTs Inside Collections Not Parsed - **FIXED**
   - Status: ✅ FIXED - Extended `parse_value_with_comparator` for recursive type parsing
@@ -1172,7 +1172,7 @@ cargo build --no-default-features --features all-compression
     2. Added `parse_inline_udt_value()` function to parse UDTs using inline field definitions when registry lookup fails
     3. Modified all `CqlType::Udt(udt_name, inline_fields)` pattern matches to use `inline_fields` as fallback
   - Result: Nested UDTs like `contact_info.address` now show parsed field values (`{street, city, state, zip_code, country}`) instead of `0x...` blobs
-  - File: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+  - File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 ### Completed Issues (Fixed - Dec 2025)
 

@@ -458,7 +458,7 @@ Key Cassandra source files:
 Add temporary logging to the parser:
 
 ```rust
-// In v5_compressed_legacy.rs — for a single debugging session
+// In row_decoder — for a single debugging session
 eprintln!("[debug] offset={} flags={:#04x}", offset, flags);
 ```
 
@@ -540,7 +540,7 @@ Compression block layout (Ch.9):
 * Body: array of chunk offsets (uncompressed offsets, 8 bytes each)
 * Compressed data: each chunk independently compressed
 
-The parser decompresses each chunk to a flat buffer before parsing rows. If rows span chunk boundaries, the merge is done in `v5_compressed_legacy.rs` before the row parser is called.
+The parser decompresses each chunk to a flat buffer before parsing rows. If rows span chunk boundaries, the merge is done in `row_decoder` before the row parser is called.
 
 # Gate Contract
 
@@ -1017,12 +1017,12 @@ The core library. All SSTable format work lives here.
 cqlite-core/src/storage/sstable/
 ├── reader/
 │   └── parsing/
-│       └── v5_compressed_legacy.rs  # Main V5 format parser (~2000 lines)
+│       └── row_decoder  # Main V5 format parser (~2000 lines)
 ├── bti/                             # BTI (Big Table Index) trie format
 └── row_cell_state_machine.rs        # OA format state-machine parser
 ```
 
-`v5_compressed_legacy.rs` is the entry point for parsing `nb` and `oa` format SSTables. It handles decompression, partition iteration, row flags, cell decoding, and delta encoding against `EncodingStats` from `Statistics.db`.
+`row_decoder` is the entry point for parsing `nb` and `oa` format SSTables. It handles decompression, partition iteration, row flags, cell decoding, and delta encoding against `EncodingStats` from `Statistics.db`.
 
 `bti/` implements the BTI (trie-based) index format used by `da` SSTables. Parser is incomplete — da tables are excluded from the default smoke run.
 
@@ -1074,14 +1074,14 @@ cqlite-core/src/
 
 [Section titled “Key files to read first when debugging”](#key-files-to-read-first-when-debugging)
 
-| Problem area          | Start here                                                   |
-| --------------------- | ------------------------------------------------------------ |
-| Wrong row count       | `row_cell_state_machine.rs` — partition/row boundaries       |
-| Wrong cell value      | `v5_compressed_legacy.rs` — cell flag parsing + delta decode |
-| Wrong type decode     | `cqlite-core/src/schema/` — column type → decoder mapping    |
-| Query returns nothing | `cqlite-core/src/query/` — filter evaluation                 |
-| Write corruption      | `storage/sstable/writer/data_writer.rs`                      |
-| Compaction issues     | `storage/write_engine/merge.rs`                              |
+| Problem area          | Start here                                                |
+| --------------------- | --------------------------------------------------------- |
+| Wrong row count       | `row_cell_state_machine.rs` — partition/row boundaries    |
+| Wrong cell value      | `row_decoder` — cell flag parsing + delta decode          |
+| Wrong type decode     | `cqlite-core/src/schema/` — column type → decoder mapping |
+| Query returns nothing | `cqlite-core/src/query/` — filter evaluation              |
+| Write corruption      | `storage/sstable/writer/data_writer.rs`                   |
+| Compaction issues     | `storage/write_engine/merge.rs`                           |
 
 ## Python bindings (`bindings/python/`)
 
@@ -5974,7 +5974,7 @@ With Issue #218 fixed, Summary.db now parses correctly. The remaining collection
 
 * Split `parse_row_header()` into `parse_row_flags()` + `parse_row_metadata()`
 * Parse clustering prefix immediately after flags, before row\_size
-* File: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+* File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 **Results**:
 
@@ -6257,7 +6257,7 @@ These limitations were surfaced and byte-verified during Epic #817 (compaction f
 
 **Status**: 🐛 **OPEN**
 
-When `HAS_ALL_COLUMNS` (0x20) is clear, Cassandra’s `Columns.Serializer.serializeSubset` (`Columns.java:503-531`) selects the columns-subset encoding by superset size: a single unsigned-VInt bitmap for `< 64` regular columns, and a **large-subset** form (VInt count + smaller-of present/missing **absolute** column indices, each an unsigned VInt — not deltas) for `≥ 64`. CQLite’s reader (`reader/parsing/v5_compressed_legacy.rs::parse_row_metadata`) always reads a single `parse_vuint` into a `u64` `missing_columns_bitmap` and has no `≥ 64` branch, so for a `≥ 64`-column table it consumes only the missing-count VInt and then mis-reads the trailing index VInts as cell data, corrupting the row stream. The reader also treats any column at `idx >= 64` as present regardless of the field. The **writer** implements both modes correctly (`data_writer.rs::write_column_subset`), pinned at the 63/64/65 boundary by `cqlite-core/tests/issue_824_column_subset_and_filter.rs`. **Workaround**: tables with fewer than 64 regular columns are unaffected (the common case).
+When `HAS_ALL_COLUMNS` (0x20) is clear, Cassandra’s `Columns.Serializer.serializeSubset` (`Columns.java:503-531`) selects the columns-subset encoding by superset size: a single unsigned-VInt bitmap for `< 64` regular columns, and a **large-subset** form (VInt count + smaller-of present/missing **absolute** column indices, each an unsigned VInt — not deltas) for `≥ 64`. CQLite’s reader (`reader/parsing/row_decoder.rs::parse_row_metadata`) always reads a single `parse_vuint` into a `u64` `missing_columns_bitmap` and has no `≥ 64` branch, so for a `≥ 64`-column table it consumes only the missing-count VInt and then mis-reads the trailing index VInts as cell data, corrupting the row stream. The reader also treats any column at `idx >= 64` as present regardless of the field. The **writer** implements both modes correctly (`data_writer.rs::write_column_subset`), pinned at the 63/64/65 boundary by `cqlite-core/tests/issue_824_column_subset_and_filter.rs`. **Workaround**: tables with fewer than 64 regular columns are unaffected (the common case).
 
 ### Complex-column merge is whole-column, not per-cell-path (#14/#17/#18) — RESOLVED in epic #921
 
@@ -6650,17 +6650,17 @@ cargo build --no-default-features --features all-compression
 
   * Status: ✅ FIXED - Two root causes identified and resolved
   * Root cause 1: Timestamp units mismatch in `parser/types.rs` - `parse_timestamp()` multiplied milliseconds by 1000 (converting to microseconds) but `Value::Timestamp(i64)` stores milliseconds. This caused overflow → negative values → `<invalid-timestamp:...>` markers.
-  * Root cause 2: Partition header flags heuristic in `v5_compressed_legacy.rs` - `flags > 0x20` check rejected valid partition headers with higher flag values, causing single-byte offset skip and cascading misalignment errors. Violated Issue #28 no-heuristics mandate.
+  * Root cause 2: Partition header flags heuristic in `row_decoder` - `flags > 0x20` check rejected valid partition headers with higher flag values, causing single-byte offset skip and cascading misalignment errors. Violated Issue #28 no-heuristics mandate.
   * Fix 1: Removed `* 1000` multiplication in `parser/types.rs:289` - now stores milliseconds directly
-  * Fix 2: Removed `flags > 0x20` heuristic check in `v5_compressed_legacy.rs:292` - validation now format-based only
+  * Fix 2: Removed `flags > 0x20` heuristic check in `row_decoder:292` - validation now format-based only
   * Result: All 33 test tables pass comprehensive SELECT tests with no ERROR messages or invalid data markers
-  * Files: `cqlite-core/src/parser/types.rs`, `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+  * Files: `cqlite-core/src/parser/types.rs`, `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 * **Issue #240**: DATE Type Values Display as `<invalid-date:...>` - **FIXED**
 
   * Status: ✅ FIXED - DATE type now parses correctly in all contexts including map keys
 
-  * Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")` in `comparator.rs`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths (parser/types.rs, v5\_compressed\_legacy.rs) read DATE as raw i32 without Cassandra’s Integer.MIN\_VALUE offset decoding.
+  * Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")` in `comparator.rs`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths (parser/types.rs, row\_decoder) read DATE as raw i32 without Cassandra’s Integer.MIN\_VALUE offset decoding.
 
   * Fix:
 
@@ -6668,13 +6668,13 @@ cargo build --no-default-features --features all-compression
     2. Updated `from_cql_type()` and `from_cql_type_with_registry()` to map `CqlType::Date` → `ComparatorType::Date`
     3. Added DATE parsing arm to `parse_value_with_schema_type()` and `parse_value_with_comparator()` in value\_parsing.rs
     4. Fixed `parse_date()` in parser/types.rs to apply Cassandra DATE encoding: `stored.wrapping_add(i32::MIN as u32) as i32`
-    5. Fixed map key DATE parsing in v5\_compressed\_legacy.rs line 5327
+    5. Fixed map key DATE parsing in row\_decoder line 5327
 
   * Cassandra DATE encoding: 4-byte big-endian unsigned int shifted by Integer.MIN\_VALUE (2^31) for byte-order comparability. Decoding adds i32::MIN back.
 
   * Result: DATE columns and DATE keys in maps now display as `YYYY-MM-DD` format (e.g., `2025-10-05`) instead of `<invalid-date:...>`
 
-  * Files: `comparator.rs`, `value_parsing.rs`, `comparator_value_parsing.rs`, `key_digest.rs`, `parser/types.rs`, `v5_compressed_legacy.rs`
+  * Files: `comparator.rs`, `value_parsing.rs`, `comparator_value_parsing.rs`, `key_digest.rs`, `parser/types.rs`, `row_decoder`
 
 * **Issue #238**: UDTs Inside Collections Not Parsed - **FIXED**
 
@@ -6701,7 +6701,7 @@ cargo build --no-default-features --features all-compression
 
   * Result: Nested UDTs like `contact_info.address` now show parsed field values (`{street, city, state, zip_code, country}`) instead of `0x...` blobs
 
-  * File: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+  * File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 ### Completed Issues (Fixed - Dec 2025)
 
@@ -8709,7 +8709,7 @@ absolute_local_deletion_time   = min_local_deletion_time + local_deletion_time_d
 
 [Section titled “previousUnfilteredSize (the prev\_size chain)”](#previousunfilteredsize-the-prev_size-chain)
 
-The `prev_size` VInt inside each row body is Cassandra’s `previousUnfilteredSize` (`UnfilteredSerializer`). It records the serialized byte length of the *previous* unfiltered in the partition so a reader can iterate backwards. CQLite’s reader parses but discards it (`v5_compressed_legacy.rs::parse_row_metadata` reads it into `_prev_size`); the writer must still emit the byte-correct value so the file matches Cassandra and round-trips through `sstabledump`.
+The `prev_size` VInt inside each row body is Cassandra’s `previousUnfilteredSize` (`UnfilteredSerializer`). It records the serialized byte length of the *previous* unfiltered in the partition so a reader can iterate backwards. CQLite’s reader parses but discards it (`row_decoder::parse_row_metadata` reads it into `_prev_size`); the writer must still emit the byte-correct value so the file matches Cassandra and round-trips through `sstabledump`.
 
 Exact convention (verified in `cqlite-core/src/storage/sstable/writer/data_writer.rs` — `write_partition` / `write_partition_with_index_blocks` — and pinned by `cqlite-core/tests/issue_821_writer_byte_invariants.rs`, which anchors against real Cassandra “nb” SSTables):
 
@@ -8752,7 +8752,7 @@ CQLite’s writer (`data_writer.rs::write_column_subset`) follows this authorita
 
 This format specification is confirmed through:
 
-* Implementation: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+* Implementation: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 * Cassandra Source: `org.apache.cassandra.db.rows.UnfilteredSerializer.java` (lines 151-210)
 * Integration tests: All 26/33 test tables pass (tables with clustering keys now work)
 * Test data: Real Cassandra 5.0 SSTables including sensor\_data, wide\_partition\_table, app\_metrics
@@ -9186,7 +9186,7 @@ This write specification is validated through:
 [Section titled “References”](#references-2)
 
 * **Implementation**: `cqlite-core/src/storage/sstable/writer/data_writer.rs`
-* **Parser**: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+* **Parser**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 * **Cassandra Source**: `org.apache.cassandra.db.rows.UnfilteredSerializer` (lines 151-475)
 * **Issue Tracking**: Issue #237 (row\_size measurement), Issue #401 (tombstone encoding)
 
