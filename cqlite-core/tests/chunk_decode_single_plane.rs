@@ -40,8 +40,11 @@ fn scan_file(path: &Path, sites: &mut Vec<(String, usize)>, root: &Path) {
         || rel_str.contains("bulletproof_reader.rs")
         || rel_str.contains("benchmarks/") // benchmarks are not query-path
         || rel_str.contains("compaction.rs") // compaction read: out of scope (design.md)
-        || rel_str.contains("parsing/")
-    // parsing helpers: not decompress sites
+        // parsing/mod.rs and parsing/block_entries.rs: iterate_all_partitions / sequential_scan
+        // decode path (self.file + compression_reader model, not ReadAt+CompressionInfo+chunk-index).
+        // Migrating them to ChunkSource is a scoped follow-up (see design.md "Deferred / follow-up").
+        || rel_str.contains("parsing/mod.rs")
+        || rel_str.contains("parsing/block_entries.rs")
     {
         return;
     }

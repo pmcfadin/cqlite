@@ -100,3 +100,13 @@ Deterministic (static source scan + one runtime counter probe), low false-positi
 - **Deferred (follow-up issue):** deletion of both, after migrating the 7 non-query
   consumers (CLI inspect/info/read/export/benchmark/support, `sstable_data_manager`,
   `oa_format_compliance_test`). Compaction read side untouched.
+
+## Deferred / follow-up
+
+The `iterate_all_partitions` and `sequential_scan` decode sites
+(`parse_partition_at_offset` in `parsing/mod.rs:685`,
+`parse_block_entries` in `parsing/block_entries.rs:111`) remain on the legacy
+`self.file` + `compression_reader` model (not `ReadAt` + `CompressionInfo` +
+chunk-index). Migrating them to route through `ChunkSource` is a scoped
+follow-up (they need an adaptation layer for the different I/O model). See
+follow-up issue #2165.
