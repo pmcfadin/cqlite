@@ -84,11 +84,16 @@ impl SSTableReader {
             }
         }
 
-        // 2. Fast path: resolve the partition offset via the raw-key Index.db map
-        //    and decode ONLY the covering chunk(s). The Index.db map is the
-        //    complete, authoritative partition set for a BIG SSTable.
+        // 2. Fast path: resolve the partition offset via the one `locate` façade
+        //    (issue #1599 / G3) and decode ONLY the covering chunk(s). For a BIG
+        //    reader `locate` composes the C5 step (a no-op here — the point read
+        //    already cleared the `get_with_resolution` pre-dispatch C5 guard, so the
+        //    key is in range and nothing is re-recorded) and the raw-key `Index.db`
+        //    map, which is the complete authoritative partition set for a BIG
+        //    SSTable. Bloom-first ordering above is unchanged. An `Index.db` MISS is
+        //    still NOT a definitive absent (#1572), so it falls to `scan_for_key`.
         if self.index_reader.is_some() {
-            match self.lookup_partition_with_index(key.as_bytes()).await? {
+            match self.locate(key.as_bytes()).await? {
                 Some((data_offset, _size)) => {
                     // `_size` (Index.db does not store partition size) is unused:
                     // the shared chunk-targeted decode parses forward from the
