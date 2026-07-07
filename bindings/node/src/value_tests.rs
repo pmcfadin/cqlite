@@ -86,15 +86,40 @@ fn test_decimal_to_string_i32_min_scale_errors_not_panics() {
     assert!(err.reason.to_string().contains("issue #1754"));
 }
 
-/// Issue #1754: an oversized unscaled magnitude (digit count beyond the cap)
+/// Issue #1754: an oversized unscaled magnitude (byte length beyond the cap)
 /// also fails closed rather than allocating an unbounded string.
 #[test]
 fn test_decimal_to_string_oversized_unscaled_errors() {
-    // ~1 MB of unscaled bytes → ~2.4M decimal digits, above the 1M cap.
+    // ~1 MB of unscaled bytes, far above the 1024-byte cap.
     let unscaled = vec![0x7f; 1_000_000];
     let err = decimal_to_string(0, &unscaled)
         .expect_err("an oversized unscaled magnitude must fail closed");
     assert!(err.reason.to_string().contains("issue #1754"));
+}
+
+/// Issue #1754 (follow-up liveness fix): a ~415 KB unscaled magnitude PASSED the
+/// old 1M-digit cap yet drives the O(digits²) repeated-division renderer to
+/// ~1e11 u32 ops — a multi-second-to-minute freeze on the JS event-loop
+/// resolve() thread. The tightened byte-length bound must reject it FAST (an
+/// O(1) length check, before any render). We assert both the typed error AND
+/// that it completes near-instantly, which is only possible if the bound rejects
+/// before entering the quadratic loop.
+#[test]
+fn test_decimal_to_string_near_old_cap_rejected_fast_no_quadratic_render() {
+    // 415 KB → ~1M decimal digits: under the OLD 1M-digit cap, over the new
+    // 1024-byte cap. The old renderer would burn ~1e11 ops here.
+    let unscaled = vec![0xff; 415_000];
+    let start = std::time::Instant::now();
+    let err = decimal_to_string(0, &unscaled)
+        .expect_err("a magnitude above the byte cap must fail closed");
+    let elapsed = start.elapsed();
+    assert!(err.reason.to_string().contains("issue #1754"));
+    // The quadratic render on this input takes seconds+; an O(1) bound check is
+    // sub-millisecond. A generous ceiling still proves the loop was never entered.
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "expected fast O(1) rejection, took {elapsed:?} — the O(n^2) renderer ran"
+    );
 }
 
 /// Regression guard: a large-but-representable scale at the boundary still

@@ -320,21 +320,27 @@ fn varint_to_bigint(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
         .into_unknown()
 }
 
-/// Hard upper bound on the decimal digit-count this converter will materialize
-/// (issue #1754). Real Cassandra DECIMAL values are tiny; a padding width or
-/// unscaled magnitude beyond this only arises from a CORRUPT SSTable, where the
-/// scale/unscaled fields were read as garbage on the raw/uncompressed parse
-/// path. Rendering such a value would otherwise blow up an unbounded `format!`
-/// padding width (which PANICS with "Formatting argument out of range") or
-/// allocate a multi-hundred-megabyte string — and because the conversion runs on
-/// a napi async-worker thread, the panic cannot unwind across the FFI boundary
-/// and the runtime `abort()`s the whole host process (`fatal runtime error:
-/// failed to initiate panic, error 5, aborting`). Fail closed with a typed
-/// corruption error instead so the boundary surfaces a catchable JS error.
-///
-/// One million digits is orders of magnitude beyond any real decimal yet still a
-/// bounded allocation, so a legitimate value is never rejected.
-const DECIMAL_HARD_DIGIT_CAP: usize = 1_000_000;
+/// Hard upper bound on the unscaled-magnitude byte length this converter will
+/// render (issue #1754). A Cassandra `decimal` unscaled value is a Java
+/// `BigInteger`; legitimate financial/scientific decimals carry at most a few
+/// dozen significant digits, so 1024 bytes — a magnitude up to `2^8191`, i.e. a
+/// ~2466-digit integer — is orders of magnitude beyond any real value and cannot
+/// reject one. It is, however, tight enough to bound the O(digits²)
+/// repeated-division renderer below: at the cap the render costs ~1.3M u32 ops
+/// (sub-millisecond), whereas the *old* 1M-digit cap (~415 KB of bytes) admitted
+/// magnitudes costing ~1e11 ops — a multi-second-to-minute freeze. Critically
+/// this converter runs via `row_to_object` on the JS event-loop resolve() thread
+/// (database.rs), NOT inside the catch_unwind-firewalled worker, so an oversized
+/// magnitude would freeze the Node event loop. Fail closed with a typed
+/// corruption error so the boundary surfaces a catchable JS error instead.
+const DECIMAL_MAX_UNSCALED_BYTES: usize = 1024;
+
+/// Hard upper bound on `scale.abs()` (issue #1754). `scale` drives a `format!`
+/// padding width / leading-zero `repeat`; a corrupt absurd scale (e.g.
+/// `i32::MAX`) would panic with "Formatting argument out of range" or allocate
+/// an unbounded string. Padding up to a million zeros is linear and bounded;
+/// beyond that only a corrupt SSTable can reach, so fail closed.
+const DECIMAL_MAX_SCALE_DIGITS: usize = 1_000_000;
 
 /// Convert decimal to string representation for arbitrary precision.
 ///
@@ -353,24 +359,21 @@ fn decimal_to_string(scale: i32, unscaled: &[u8]) -> Result<String> {
         return Ok("0".to_string());
     }
 
-    // Fail-closed guard (issue #1754). Bound BOTH inputs before any width-driven
-    // `format!` or `repeat`:
-    //   - the padding/scale magnitude (used directly as a `format!` width), and
-    //   - the unscaled magnitude's decimal digit count.
-    // A TIGHT upper bound on the digit count of an N-byte signed two's-complement
-    // integer is ceil((8N - 1) * log10(2)) — one bit is the sign, so the
-    // magnitude is at most 2^(8N-1). Compute the bit count in f64 so `8*len - 1`
-    // cannot underflow; the float->int `as` saturates in Rust, so the guard never
-    // wraps or under-counts an oversized value.
-    let magnitude_bits = 8.0 * (unscaled.len() as f64) - 1.0;
-    let max_digits = (magnitude_bits * std::f64::consts::LOG10_2).ceil().max(0.0) as usize;
-    if max_digits > DECIMAL_HARD_DIGIT_CAP
-        || (scale.unsigned_abs() as usize) > DECIMAL_HARD_DIGIT_CAP
+    // Fail-closed guard (issue #1754). Bound BOTH inputs BEFORE any rendering, so
+    // the O(digits²) repeated-division loop below never runs on an oversized
+    // magnitude and no width-driven `format!`/`repeat` can allocate unbounded:
+    //   - the unscaled-magnitude byte length (bounds the render cost), and
+    //   - the scale magnitude (used directly as a `format!` width / repeat count).
+    // Checking the raw byte length is O(1) and rejects long before the quadratic
+    // renderer is entered.
+    if unscaled.len() > DECIMAL_MAX_UNSCALED_BYTES
+        || (scale.unsigned_abs() as usize) > DECIMAL_MAX_SCALE_DIGITS
     {
         return Err(to_napi_error(cqlite_core::Error::corruption(format!(
             "DECIMAL cell not representable (scale={scale}, unscaled_len={} bytes, \
-             cap={DECIMAL_HARD_DIGIT_CAP} digits): corrupt SSTable — refusing to \
-             materialize an unbounded string (issue #1754)",
+             max_unscaled={DECIMAL_MAX_UNSCALED_BYTES} bytes): corrupt SSTable — \
+             refusing to materialize an unbounded string / enter an O(n^2) render \
+             (issue #1754)",
             unscaled.len()
         ))));
     }

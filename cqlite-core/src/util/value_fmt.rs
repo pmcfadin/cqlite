@@ -287,6 +287,24 @@ impl ValueFormatter {
             return "0".to_string();
         }
 
+        // Fail-closed bound (issue #1754), kept consistent with the Node binding's
+        // `decimal_to_string`. A Cassandra `decimal` unscaled value is a Java
+        // BigInteger; legitimate financial/scientific decimals carry at most a few
+        // dozen significant digits, so a 1024-byte magnitude (up to ~2466 decimal
+        // digits) is orders of magnitude beyond any real value and cannot reject
+        // one. An oversized magnitude only arises from a corrupt SSTable and would
+        // otherwise cost a `BigInt::from_*_bytes` + `to_string` base conversion
+        // that is superlinear in the byte length. Render a bounded, exact hex
+        // fallback WITHOUT the expensive decimal conversion. Infallible signature:
+        // this stays total (never panics).
+        const DECIMAL_MAX_UNSCALED_BYTES: usize = 1024;
+        if unscaled.len() > DECIMAL_MAX_UNSCALED_BYTES {
+            return format!(
+                "<corrupt-decimal:scale={scale},unscaled_len={}bytes>",
+                unscaled.len()
+            );
+        }
+
         // Convert unscaled bytes to bigint
         let is_negative = (unscaled[0] & 0x80) != 0;
         let bigint = if is_negative {
@@ -769,6 +787,27 @@ mod tests {
         assert!(
             s2.len() < 64,
             "must not materialize an unbounded string: {s2}"
+        );
+    }
+
+    /// Issue #1754 (follow-up liveness fix): an oversized unscaled magnitude
+    /// (byte length beyond the 1024-byte cap) must be rejected FAST via the O(1)
+    /// length check, WITHOUT the superlinear `BigInt` base conversion, and must
+    /// stay total (never panics — infallible signature). A ~415 KB magnitude
+    /// (well under the old digit-oriented cap) exercises this.
+    #[test]
+    fn test_decimal_oversized_unscaled_bounded_fast() {
+        let unscaled = vec![0xffu8; 415_000];
+        let start = std::time::Instant::now();
+        let s = ValueFormatter::format_value(&Value::Decimal { scale: 0, unscaled });
+        let elapsed = start.elapsed();
+        assert!(
+            s.starts_with("<corrupt-decimal:"),
+            "oversized magnitude renders the bounded fallback: {s}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "expected fast O(1) rejection, took {elapsed:?} — the base conversion ran"
         );
     }
 
