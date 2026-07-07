@@ -403,7 +403,10 @@ async fn bti_narrow_locate_parity() {
     );
     // ...and the B4 repeat is cache-served with zero new trie walks.
     rwc::reset();
-    let _ = reader.locate(&present).await.expect("locate present repeat");
+    let _ = reader
+        .locate(&present)
+        .await
+        .expect("locate present repeat");
     assert_eq!(
         rwc::trie_walks(),
         0,

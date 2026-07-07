@@ -98,6 +98,11 @@ impl SSTableReader {
     /// of `SSTableManager::prune_candidates`. Never call it for a BIG reader — a BIG
     /// prune must stay on the bloom filter, and this path would report a misleading
     /// `Ok(None)` "absent" for a BIG `Index.db` miss (#1572).
+    ///
+    /// Gated to mirror its sole caller `SSTableManager::prune_candidates`, which is
+    /// `cfg(not(tombstones))` (the `tombstones` build has no single-partition prune
+    /// fast path) — otherwise this would be dead code under `--features tombstones`.
+    #[cfg(not(feature = "tombstones"))]
     pub(crate) fn locate_encoded(
         &self,
         partition_key: &[u8],
