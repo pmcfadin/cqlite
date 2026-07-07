@@ -1291,7 +1291,10 @@ fn test_serialize_collection_containing_nested_udts() {
     let serializer = TypeSerializer::new();
     let company = phase3_company_value();
     let company_bytes = serializer
-        .serialize_udt(&Value::Udt(Box::new(company.clone())), &phase3_company_schema())
+        .serialize_udt(
+            &Value::Udt(Box::new(company.clone())),
+            &phase3_company_schema(),
+        )
         .unwrap();
 
     let value = Value::Map(vec![(
@@ -1317,10 +1320,16 @@ fn test_serialize_tuple_with_collection_fields_and_udt() {
     let address = phase3_address_value();
     let person = phase3_person_value("Tuple User");
     let address_bytes = serializer
-        .serialize_udt(&Value::Udt(Box::new(address.clone())), &phase3_address_schema())
+        .serialize_udt(
+            &Value::Udt(Box::new(address.clone())),
+            &phase3_address_schema(),
+        )
         .unwrap();
     let person_bytes = serializer
-        .serialize_udt(&Value::Udt(Box::new(person.clone())), &phase3_person_schema())
+        .serialize_udt(
+            &Value::Udt(Box::new(person.clone())),
+            &phase3_person_schema(),
+        )
         .unwrap();
 
     let tuple = Value::Tuple(vec![

@@ -1640,7 +1640,7 @@ mod tests {
 
         // Ordering is unchanged: complex variants fall back to Display-string order,
         // and a scalar still sorts against them exactly as before boxing.
-        let mut vals = vec![tomb.clone(), udt.clone(), json.clone(), Value::Integer(5)];
+        let mut vals = [tomb.clone(), udt.clone(), json.clone(), Value::Integer(5)];
         vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(vals[0], Value::Integer(5));
     }
@@ -1814,7 +1814,10 @@ mod tests {
             ]),
             Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(42))]),
             Value::Tuple(vec![Value::Integer(1), Value::Text("test".to_string())]),
-            Value::Udt(Box::new(UdtValue::new("TestType".to_string(), "test_ks".to_string()))),
+            Value::Udt(Box::new(UdtValue::new(
+                "TestType".to_string(),
+                "test_ks".to_string(),
+            ))),
             Value::Frozen(Box::new(Value::Integer(42))),
             Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: 1000,

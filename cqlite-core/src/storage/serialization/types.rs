@@ -921,7 +921,9 @@ mod tests {
                 Some(Value::Text("Main St".to_string())),
             );
 
-        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
+        let bytes = ser
+            .serialize_udt(&Value::Udt(Box::new(udt)), &schema)
+            .unwrap();
 
         // CRITICAL: Must be in schema order (street, city), NOT value order (city, street)
         let expected = vec![
@@ -951,7 +953,9 @@ mod tests {
                 Some(Value::Text("john@example.com".to_string())),
             );
 
-        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
+        let bytes = ser
+            .serialize_udt(&Value::Udt(Box::new(udt)), &schema)
+            .unwrap();
 
         let expected = vec![
             0x00, 0x00, 0x00, 0x04, // name len = 4
@@ -993,7 +997,10 @@ mod tests {
 
         let _person = UdtValue::new("person".to_string(), "test_ks".to_string())
             .with_field("name".to_string(), Some(Value::Text("John".to_string())))
-            .with_field("address".to_string(), Some(Value::Udt(Box::new(address.clone()))));
+            .with_field(
+                "address".to_string(),
+                Some(Value::Udt(Box::new(address.clone()))),
+            );
 
         // Serialize inner UDT first
         let address_bytes = ser
@@ -1030,7 +1037,9 @@ mod tests {
             .with_field("field_b".to_string(), Some(Value::Integer(2)))
             .with_field("field_a".to_string(), Some(Value::Integer(1)));
 
-        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
+        let bytes = ser
+            .serialize_udt(&Value::Udt(Box::new(udt)), &schema)
+            .unwrap();
 
         // CRITICAL: Must serialize in schema order (a, b, c), not value order (c, b, a)
         let expected = vec![
@@ -1067,7 +1076,9 @@ mod tests {
                 ])),
             );
 
-        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
+        let bytes = ser
+            .serialize_udt(&Value::Udt(Box::new(udt)), &schema)
+            .unwrap();
 
         // Serialize list manually for expected
         let mut list_bytes = Vec::new();
@@ -1154,7 +1165,9 @@ mod tests {
             )
             .with_field(
                 "home_address".to_string(),
-                Some(Value::Frozen(Box::new(Value::Udt(Box::new(address.clone()))))),
+                Some(Value::Frozen(Box::new(Value::Udt(Box::new(
+                    address.clone(),
+                ))))),
             );
         let company = UdtValue::new("company".to_string(), "test_ks".to_string())
             .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
@@ -1183,7 +1196,9 @@ mod tests {
             .unwrap();
         let employees_bytes = ser
             .serialize_typed_value(
-                &Value::List(vec![Value::Frozen(Box::new(Value::Udt(Box::new(person.clone()))))]),
+                &Value::List(vec![Value::Frozen(Box::new(Value::Udt(Box::new(
+                    person.clone(),
+                ))))]),
                 &CqlType::List(Box::new(CqlType::Frozen(Box::new(CqlType::Udt(
                     "person".to_string(),
                     vec![],
@@ -1249,8 +1264,8 @@ mod tests {
 
         let value = Value::Map(vec![(
             Value::Text("cidade_日本".to_string()),
-            Value::Frozen(Box::new(Value::Udt(
-                Box::new(UdtValue::new("address".to_string(), "test_ks".to_string())
+            Value::Frozen(Box::new(Value::Udt(Box::new(
+                UdtValue::new("address".to_string(), "test_ks".to_string())
                     .with_field(
                         "street".to_string(),
                         Some(Value::Text("Rua Sao Joao".to_string())),
@@ -1258,8 +1273,8 @@ mod tests {
                     .with_field(
                         "city".to_string(),
                         Some(Value::Text("Sao Paulo".to_string())),
-                    )),
-            ))),
+                    ),
+            )))),
         )]);
 
         let bytes = ser

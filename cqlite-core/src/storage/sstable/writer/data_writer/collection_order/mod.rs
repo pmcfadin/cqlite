@@ -166,7 +166,7 @@ mod tests {
     /// NaN sorts last; raw big-endian bytes would put negatives high.
     #[test]
     fn floats_sort_by_total_order() {
-        let mut v = vec![
+        let mut v = [
             Value::Float(2.0),
             Value::Float(f64::NAN),
             Value::Float(-1.5),

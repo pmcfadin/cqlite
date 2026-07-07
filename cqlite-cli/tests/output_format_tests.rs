@@ -673,7 +673,8 @@ fn test_udt_renders_field_names_not_indices() {
         ],
     };
 
-    let result = create_single_value_result("address_col", Value::Udt(Box::new(udt)), DataType::Udt);
+    let result =
+        create_single_value_result("address_col", Value::Udt(Box::new(udt)), DataType::Udt);
 
     let json = JSONWriter::write(&result, &default_config()).unwrap();
 

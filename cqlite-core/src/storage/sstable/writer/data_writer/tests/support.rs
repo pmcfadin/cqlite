@@ -216,7 +216,9 @@ pub(super) fn phase3_person_value(name: &str) -> UdtValue {
         )
         .with_field(
             "home_address".to_string(),
-            Some(Value::Frozen(Box::new(Value::Udt(Box::new(phase3_address_value()))))),
+            Some(Value::Frozen(Box::new(Value::Udt(Box::new(
+                phase3_address_value(),
+            ))))),
         )
 }
 

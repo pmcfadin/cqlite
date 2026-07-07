@@ -2224,7 +2224,10 @@ mod tests {
     #[test]
     fn authoritative_text_column_rejects_json() {
         let columns = vec![col("s", DataType::Text, Some(CqlType::Text))];
-        let rows = vec![row_one("s", Value::Json(Box::new(serde_json::json!({"a": 1}))))];
+        let rows = vec![row_one(
+            "s",
+            Value::Json(Box::new(serde_json::json!({"a": 1}))),
+        )];
         assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
     }
 

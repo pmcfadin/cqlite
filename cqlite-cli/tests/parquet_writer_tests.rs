@@ -182,8 +182,11 @@ fn test_parquet_json_values() {
         "count": 42,
         "nested": {"key": "value"}
     });
-    let result =
-        create_single_value_result("json_col", Value::Json(Box::new(json_value.clone())), DataType::Json);
+    let result = create_single_value_result(
+        "json_col",
+        Value::Json(Box::new(json_value.clone())),
+        DataType::Json,
+    );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     verify_parquet_magic(&bytes);
