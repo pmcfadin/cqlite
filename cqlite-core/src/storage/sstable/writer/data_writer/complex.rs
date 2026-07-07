@@ -316,6 +316,7 @@ impl DataWriter {
     /// - SET<T>: cell_path = serialized element, value = empty (HAS_EMPTY_VALUE)
     /// - MAP<K,V>: cell_path = serialized key, value = serialized value
     /// - LIST<T>: cell_path = 16-byte TimeUUID, value = serialized element
+    ///
     /// `now_seconds`: the caller's single captured wall-clock reading for this
     /// write (issue #2038 Scope B) — shared by every element cell so a
     /// multi-element collection under one uniform TTL gets an IDENTICAL
