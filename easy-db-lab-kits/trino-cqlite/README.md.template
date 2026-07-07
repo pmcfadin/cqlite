@@ -97,21 +97,26 @@ this; it falls out of the POM's dependency scoping for free. Do not add
    easy-db-lab kit install trino --version __TRINO_IMAGE_TAG__
    easy-db-lab trino start
    ```
-2. **This overlay.** `--kit cqlite` is the recommended install name — the
-   trino kit's `update-catalogs.sh` names the catalog after this kit's
-   *installed directory*, and `cqlite` is what makes
-   `SELECT * FROM cqlite.<keyspace>.<table>` (not a quoted
-   `"trino-cqlite".<keyspace>.<table>`) work. `--size` is required by
-   `easy-db-lab kit install --from` for every ad-hoc kit even though this one
-   has no persistent storage — pass any placeholder value.
+2. **This overlay — install via a kit source, NOT `--from`.** The ad-hoc
+   `kit install --from <dir>` path never substitutes a kit's declared
+   `args:` (verified against `Install.kt` — `renderAndWrite` gets no
+   `extraVars`), so `__CONNECTOR_VERSION__`/`__SIDECAR_URI__`/
+   `__FLIGHT_PORT__` would stay literally unresolved. Register the kits
+   directory as a source once, then install by name:
    ```bash
-   easy-db-lab kit install --from ./easy-db-lab-kits/trino-cqlite \
-     --kit cqlite --size 1Gi \
+   easy-db-lab kit source add cqlite /path/to/cqlite/easy-db-lab-kits
+   easy-db-lab kit install trino-cqlite \
      --sidecar-uri "http://$(easy-db-lab ip db0 --private):9043" \
      --connector-version __CONNECTOR_VERSION__ \
      --flight-port __FLIGHT_PORT__
    easy-db-lab cqlite start
    ```
+   Naming subtlety: the install verb is the *source directory* name
+   (`trino-cqlite`), but the installed directory/runner — and therefore the
+   catalog name derived by the trino kit's `update-catalogs.sh` — is this
+   kit's `kit.yaml` `name: cqlite`. That is what makes
+   `SELECT * FROM cqlite.<keyspace>.<table>` (not a quoted
+   `"trino-cqlite".<keyspace>.<table>`) work.
    `cqlite start` patches `trino-coordinator`/`trino-worker` with the plugin
    initContainer + volume, waits for the rollout, and — as a side effect of
    any kit starting — triggers the trino kit's own `post-workload-start` hook,
