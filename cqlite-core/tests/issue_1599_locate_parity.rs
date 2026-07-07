@@ -353,12 +353,29 @@ async fn big_locate_b4_repeat_zero_reprobe() {
 
 // ---------------------------------------------------------------------------
 // BTI (`da`) parity + counter-delta scenarios (self-skip when binaries absent)
+//
+// BTI (`da`) SSTables have NO `Index.db`, so `learn_all_raw_keys` cannot source
+// keys for them. Instead we use the SAME schema-free VERIFIED GOLDEN oracle
+// `issue_831_bti_reader_point_lookup.rs` pins for `test_da/simple_table`: three
+// raw 16-byte partition keys `[uuid_byte; 16]` and their trie-resolved
+// `Data.db` offsets (0 / 63 / 125), plus an absent key. When the fixture is
+// present these MUST resolve (a `None` where `Some(offset)` is expected is a
+// FAILURE, not a skip), so the BTI façade parity runs non-vacuously.
 // ---------------------------------------------------------------------------
 
-/// Scenario: `locate` parity with the legacy BTI trie for present / absent keys,
-/// and exactly one trie walk (the BTI presence oracle, which emits the single
-/// `READ_BLOOM_CHECKS`) per resolve.
-async fn bti_locate_matches_legacy(keyspace: &str, table: &str) {
+/// Verified golden `test_da/simple_table` partition keys: `(uuid_byte, expected
+/// uncompressed Data.db offset)`. Identical to the issue_755 / issue_831 oracle.
+const DA_SIMPLE_GOLDEN: &[(u8, u64)] = &[(0x22, 0), (0x11, 63), (0x33, 125)];
+
+/// A raw 16-byte key guaranteed ABSENT from the golden set (used for the trie-miss
+/// / authoritative-absence branch).
+const DA_ABSENT_KEY: [u8; 16] = [0xEE; 16];
+
+#[tokio::test]
+#[serial]
+async fn bti_narrow_locate_parity() {
+    let keyspace = "test_da";
+    let table = "simple_table";
     if !has_partitions_db(keyspace, table) {
         eprintln!("Skipping (G3 BTI parity {keyspace}/{table}): optional Partitions.db absent");
         return;
@@ -368,49 +385,14 @@ async fn bti_locate_matches_legacy(keyspace: &str, table: &str) {
         return;
     };
     let platform = platform().await;
-    let Some(keys) = learn_all_raw_keys(&data_db, platform.clone()).await else {
-        eprintln!("Skipping (G3 BTI parity {keyspace}/{table}): no raw keys");
-        return;
-    };
     let config = cqlite_core::Config::default();
     let reader = SSTableReader::open(&data_db, &config, platform)
         .await
         .expect("open BTI reader");
 
-    for k in &keys {
-        let legacy = reader
-            .lookup_partition_via_bti_trie(k)
-            .expect("legacy trie lookup");
-        let via_locate = reader.locate(k).await.expect("locate");
-        // BTI records no size, so the façade returns size == 0; the offset must
-        // byte-match the legacy trie resolve.
-        assert_eq!(
-            via_locate.map(|(off, _)| off),
-            legacy,
-            "G3: locate() must byte-match the legacy BTI trie offset for a present key"
-        );
-        assert_eq!(
-            via_locate.map(|(_, size)| size),
-            legacy.map(|_| 0u32),
-            "G3: a BTI locate() must report size == 0 (the format records none)"
-        );
-    }
-
-    // Absent key: a trie miss is authoritative absence — identical None.
-    let absent = vec![0xFFu8; 16];
-    let legacy = reader
-        .lookup_partition_via_bti_trie(&absent)
-        .expect("legacy trie absent");
-    let via_locate = reader.locate(&absent).await.expect("locate absent");
-    assert_eq!(
-        via_locate.map(|(off, _)| off),
-        legacy,
-        "G3: an absent BTI key must resolve to the same None the legacy trie returned"
-    );
-
-    // Counter: a single present-key locate() descends the trie exactly once (the
-    // trie is the BTI presence oracle and emits the single READ_BLOOM_CHECKS).
-    let present = keys[0].clone();
+    // Counters FIRST, before the parity loop warms the B4 cache for these keys.
+    // A single present-key locate() descends the trie exactly once...
+    let present = [DA_SIMPLE_GOLDEN[0].0; 16];
     rwc::reset();
     let _ = reader.locate(&present).await.expect("locate present");
     assert_eq!(
@@ -419,29 +401,66 @@ async fn bti_locate_matches_legacy(keyspace: &str, table: &str) {
         "G3: a BTI locate() must descend the Partitions.db trie exactly once; got {}",
         rwc::trie_walks()
     );
-
-    // B4 repeat: the second locate is cache-served with zero new trie walks.
+    // ...and the B4 repeat is cache-served with zero new trie walks.
     rwc::reset();
-    let _ = reader
-        .locate(&present)
-        .await
-        .expect("locate present repeat");
+    let _ = reader.locate(&present).await.expect("locate present repeat");
     assert_eq!(
         rwc::trie_walks(),
         0,
         "G3/B4: a repeated present-key BTI locate must re-walk the trie zero times; got {}",
         rwc::trie_walks()
     );
+
+    // Present golden keys: locate() byte-matches BOTH the golden offset AND the
+    // legacy trie resolve, with size == 0 (the trie records none). A None here is
+    // a FAILURE (the fixture is present), never a skip.
+    for &(uuid_byte, expected_offset) in DA_SIMPLE_GOLDEN {
+        let raw = [uuid_byte; 16];
+        let legacy = reader
+            .lookup_partition_via_bti_trie(&raw)
+            .expect("legacy trie lookup");
+        assert_eq!(
+            legacy,
+            Some(expected_offset),
+            "oracle: legacy trie must resolve uuid 0x{uuid_byte:02x} to golden offset \
+             {expected_offset}"
+        );
+        let via_locate = reader.locate(&raw).await.expect("locate");
+        assert_eq!(
+            via_locate,
+            Some((expected_offset, 0u32)),
+            "G3: locate() must resolve uuid 0x{uuid_byte:02x} to the golden BTI shape \
+             (offset {expected_offset}, size 0)"
+        );
+        // Façade == legacy trie path, byte-identical offset.
+        assert_eq!(
+            via_locate.map(|(off, _)| off),
+            legacy,
+            "G3: locate() must byte-match the legacy BTI trie offset for a present key"
+        );
+    }
+
+    // Absent key: a trie miss is authoritative absence — identical None both ways.
+    let legacy_absent = reader
+        .lookup_partition_via_bti_trie(&DA_ABSENT_KEY)
+        .expect("legacy trie absent");
+    assert_eq!(
+        legacy_absent, None,
+        "oracle: an absent key must miss the legacy trie"
+    );
+    let via_locate = reader.locate(&DA_ABSENT_KEY).await.expect("locate absent");
+    assert_eq!(
+        via_locate, None,
+        "G3: an absent BTI key must resolve to the same None the legacy trie returned"
+    );
+
+    eprintln!(
+        "bti_narrow_locate_parity PASSED: golden offsets 0/63/125 resolve via locate() == \
+         legacy trie (size 0), absent key None, 1 trie walk then 0 on B4 repeat"
+    );
 }
 
-#[tokio::test]
-#[serial]
-async fn bti_narrow_locate_parity() {
-    bti_locate_matches_legacy("test_da", "simple_table").await;
-}
-
-#[tokio::test]
-#[serial]
-async fn bti_wide_locate_parity() {
-    bti_locate_matches_legacy("test_da", "wide_table").await;
-}
+// Note: `test_da/wide_table` has no published verified-golden offsets, so its BTI
+// locate() parity is intentionally NOT asserted here (guessing offsets would
+// fabricate the oracle). The `simple_table` scenario above is sufficient proof of
+// the BTI façade == legacy-trie equivalence.
