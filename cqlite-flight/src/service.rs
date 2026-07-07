@@ -19,22 +19,17 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::ipc::writer::IpcWriteOptions;
-use arrow::record_batch::RecordBatch;
-use arrow_flight::encode::FlightDataEncoderBuilder;
-use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaAsIpc, SchemaResult, Ticket,
 };
 use futures::Stream;
-use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
 use tracing::Instrument;
 
-use crate::cancel::CancelFlag;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
@@ -104,6 +99,17 @@ impl From<StatsError> for Status {
             StatsError::Discovery { .. } => Status::internal(msg),
         }
     }
+}
+
+/// Resolved, ready-to-serve `do_get` inputs produced by the eager setup step
+/// (issue #1476): the built producer, its Arrow schema, the token-pruned SSTable
+/// paths, and whether the ticket aggregates. Kept together so the row and
+/// aggregate response builders share one setup path.
+struct DoGetSetup {
+    producer: MergeProducer,
+    schema_ref: Arc<ArrowSchema>,
+    paths: Vec<PathBuf>,
+    aggregating: bool,
 }
 
 /// Flight service over a node-local SSTable data directory.
@@ -197,15 +203,23 @@ impl FlightService for CqliteFlightService {
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let span = rpc_span("do_get", &request);
-        let mut metrics = RpcMetrics::start("do_get");
-        // Run the read body AND finish() within the RPC span so the core
-        // query.execute / read-path spans nest under `flight.do_get`, and so
-        // error/status recording in finish() tags this span (not a stale current
-        // span after `.instrument` completes). The merge eagerly drains SSTables
-        // into memory, so the row/byte totals are known here and attributed here.
-        async {
-            let result = self.do_get_inner(request, &mut metrics).await;
-            finish(&mut metrics, result)
+        let metrics = RpcMetrics::start("do_get");
+        // The merge now STREAMS through a bounded channel (issue #1476): batches
+        // reach the wire while it is still running, so the row/byte totals are not
+        // known here. `metrics` moves INTO the response stream, which accumulates
+        // per batch and records the terminal RPC counters when the stream ends
+        // (including the emitted prefix for a cancelled stream). On a setup error
+        // (before the stream exists) the metrics come back so we record the error
+        // and close the RPC within this span.
+        async move {
+            match self.do_get_inner(request, metrics).await {
+                Ok(response) => Ok(response),
+                Err((status, metrics)) => {
+                    crate::obs::record_status_error(&status);
+                    drop(metrics);
+                    Err(status)
+                }
+            }
         }
         .instrument(span)
         .await
@@ -366,13 +380,59 @@ impl CqliteFlightService {
         Ok(Response::new(schema_result))
     }
 
-    /// Body of [`FlightService::do_get`], run inside the RPC span. Reports the
-    /// rows + payload bytes produced by the merge into `metrics`.
+    /// Body of [`FlightService::do_get`], run inside the RPC span. Streams the
+    /// merge through a bounded channel (issue #1476). On a setup error (before the
+    /// response stream exists) `metrics` is returned so the caller can record the
+    /// error; on success `metrics` moves into the stream (recorded at stream end).
     async fn do_get_inner(
         &self,
         request: Request<Ticket>,
-        metrics: &mut RpcMetrics,
-    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        metrics: RpcMetrics,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, (Status, RpcMetrics)> {
+        // Fallible eager setup: parse the ticket, build the producer + schema, and
+        // resolve/token-prune the SSTable paths off the reactor. A missing table
+        // surfaces here as a clean `not_found` BEFORE the stream opens.
+        let setup = match self.do_get_setup(request).await {
+            Ok(setup) => setup,
+            Err(status) => return Err((status, metrics)),
+        };
+        let DoGetSetup {
+            producer,
+            schema_ref,
+            paths,
+            aggregating,
+        } = setup;
+
+        if aggregating {
+            // Aggregate output is bounded (one row per group): keep materializing
+            // and serve it as a stream, unchanged in content (issue #1476).
+            return Ok(Response::new(
+                crate::streaming::build_aggregate_response(producer, paths, schema_ref, metrics)
+                    .await?,
+            ));
+        }
+
+        // Row path: the merge runs on the blocking pool and sends each batch into a
+        // bounded channel; the response wraps the receiver. Peak resident payload
+        // is O(channel capacity · batch_size), not O(result). The merge task handle
+        // is detached (dropping it does not cancel `spawn_blocking`; a dropped
+        // response stream cancels the merge cooperatively).
+        let (stream, _merge_handle) = crate::streaming::spawn_streaming(
+            producer,
+            paths,
+            schema_ref,
+            metrics,
+            crate::streaming::DO_GET_CHANNEL_CAPACITY,
+            crate::streaming::StreamProbe::default(),
+        );
+        Ok(Response::new(stream))
+    }
+
+    /// Eager, fallible `do_get` setup shared by the row and aggregate paths: parse
+    /// the ticket, build the producer + Arrow schema, and resolve + token-prune the
+    /// SSTable paths off the async reactor (the prune reads `Summary.db` files).
+    /// A missing table surfaces as `not_found` here, before any stream opens.
+    async fn do_get_setup(&self, request: Request<Ticket>) -> Result<DoGetSetup, Status> {
         let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
         let producer = self.build_producer(&ticket)?;
         let schema_ref = Arc::new(producer.arrow_schema()?);
@@ -382,52 +442,25 @@ impl CqliteFlightService {
             &ticket.table,
             ticket.snapshot.as_deref(),
         )?;
+        let aggregating = producer.is_aggregating();
 
-        // The merge drains SSTables into memory and is CPU-bound — run it off the
-        // async runtime so it cannot stall the gRPC reactor. A missing table
-        // directory surfaces as `not_found`; an existing table with no SSTables
-        // yields an empty result (schema only).
-        //
-        // Cancellation (issue #1473): `spawn_blocking` is NOT cancelled when this
-        // future is dropped, so a client that disconnects mid-`do_get` would
-        // otherwise leave the merge running to completion, pinning a blocking-pool
-        // thread. We hold a `CancelGuard` across the `.await`: if the future is
-        // dropped (client gone) the guard cancels the flag, and the merge loop —
-        // which polls it between partition steps — aborts early with `Aborted`.
-        // On success we disarm the guard (the merge is done; nothing to cancel).
-        // The merge fully materializes its batches BEFORE the response stream is
-        // built, so the future-drop during this `.await` is the meaningful
-        // cancellation point; wrapping the post-materialization stream would have
-        // nothing left to cancel.
-        let cancel = CancelFlag::new();
-        let mut guard = cancel.drop_guard();
-        let merge_cancel = cancel.clone();
-        let batches = tokio::task::spawn_blocking(move || {
-            producer.produce_cancellable(&source, &merge_cancel)
+        // Return the producer back out of the blocking task (it is moved in to run
+        // the blocking discovery/prune, then reused for the merge) — avoids an Arc
+        // and its Sync bound.
+        let (producer, paths) = tokio::task::spawn_blocking(move || {
+            let paths = producer.resolve_paths(&source);
+            (producer, paths)
         })
         .await
-        .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
-        guard.disarm();
+        .map_err(|e| Status::internal(format!("path resolution panicked: {e}")))?;
+        let paths = paths?;
 
-        // Attribute rows + in-memory payload bytes to this RPC. `get_array_memory_size`
-        // is the buffer footprint of the batch (pre-IPC framing) — a bounded, cheap
-        // count, never the payload contents.
-        let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
-        let bytes: u64 = batches
-            .iter()
-            .map(|b| b.get_array_memory_size() as u64)
-            .sum();
-        metrics.add_rows_bytes(rows, bytes);
-
-        // `with_schema` emits the Arrow schema as the first Flight message even
-        // when no record batches follow, so an empty result still carries the schema.
-        let input = futures::stream::iter(batches.into_iter().map(Ok::<RecordBatch, FlightError>));
-        let encoded = FlightDataEncoderBuilder::new()
-            .with_schema(schema_ref)
-            .build(input)
-            .map(|res| res.map_err(|e| Status::internal(e.to_string())));
-
-        Ok(Response::new(Box::pin(encoded)))
+        Ok(DoGetSetup {
+            producer,
+            schema_ref,
+            paths,
+            aggregating,
+        })
     }
 
     /// Body of [`FlightService::do_action`], run inside the RPC span (issue #944).
@@ -496,7 +529,10 @@ mod tests {
         build_sstables, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL,
     };
     use arrow::array::Array;
+    use arrow::record_batch::RecordBatch;
     use arrow_flight::decode::FlightRecordBatchStream;
+    use arrow_flight::error::FlightError;
+    use futures::StreamExt;
 
     fn ticket(keyspace: &str, table: &str) -> FlightTicket {
         FlightTicket {

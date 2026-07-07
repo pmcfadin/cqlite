@@ -10,9 +10,15 @@
 //! clustering and regular columns taken from the decoded cells, row/cell
 //! tombstones suppressed.
 //!
-//! Phase 1 collects all batches in memory; this matches the merge engine, which
-//! already drains every input SSTable into memory (see `merge.rs` issue #591).
-//! True streaming is a later optimization.
+//! The retained `produce`/`produce_cancellable` collect all batches into a `Vec`
+//! (the byte-identity parity oracle + aggregate path). The streaming `do_get`
+//! path (issue #1476) drives the SAME merge through [`produce_streaming`], which
+//! emits each batch into a bounded channel via a [`BatchSink`] as it is produced
+//! — bounding resident payload to the channel capacity, independent of result
+//! size. Batch emission is factored behind [`BatchSink`] so both paths share one
+//! merge loop.
+//!
+//! [`produce_streaming`]: MergeProducer::produce_streaming
 
 use std::path::{Path, PathBuf};
 
@@ -295,6 +301,32 @@ impl PartitionStepper for KWayMerger {
     }
 }
 
+/// Sink for record batches emitted by the merge loop (issue #1476).
+///
+/// The merge is driven once by [`MergeProducer::drive_merge`]; the sink decides
+/// what happens to each batch. The retained collect path uses [`CollectSink`]
+/// (push into a `Vec`, the byte-identity parity oracle); the streaming `do_get`
+/// path (see `crate::streaming`) sends each batch into a bounded channel as it is
+/// produced. A sink `emit` may report [`ProducerError::Cancelled`] to stop the
+/// merge — the streaming sink returns it when the consumer (client) is gone.
+pub(crate) trait BatchSink {
+    /// Accept one produced batch, or return [`ProducerError::Cancelled`] to stop
+    /// the merge (the consumer has disconnected).
+    fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError>;
+}
+
+/// Collect-into-`Vec` sink — the retained, byte-identical parity path used by
+/// [`MergeProducer::produce`]/[`produce_cancellable`](MergeProducer::produce_cancellable),
+/// the aggregate route, and the existing tests. Never signals cancellation.
+pub(crate) struct CollectSink<'a>(pub(crate) &'a mut Vec<RecordBatch>);
+
+impl BatchSink for CollectSink<'_> {
+    fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError> {
+        self.0.push(batch);
+        Ok(())
+    }
+}
+
 impl MergeProducer {
     /// Build an unfiltered producer for `schema` (emits all rows and columns).
     pub fn new(schema: TableSchema, batch_size: usize) -> Result<Self, ProducerError> {
@@ -419,6 +451,57 @@ impl MergeProducer {
         self.merge_paths(paths, &CancelFlag::new())
     }
 
+    /// Resolve and token-prune the SSTable `Data.db` paths for `source`.
+    ///
+    /// Surfaces the discovery `NotFound` (missing table) eagerly and performs the
+    /// (potentially I/O-heavy) `Summary.db` token prune, so the streaming `do_get`
+    /// path (issue #1476) can settle these fallible/blocking steps BEFORE opening
+    /// the response stream — a missing table stays a clean `not_found`, not a
+    /// mid-stream error. Runs blocking filesystem I/O; call off the async reactor.
+    pub fn resolve_paths(&self, source: &dyn SstableSource) -> Result<Vec<PathBuf>, ProducerError> {
+        let paths = source.data_paths()?;
+        self.prune_paths(paths)
+    }
+
+    /// Merge already-resolved (data-listed + token-pruned) `paths` into a `Vec`
+    /// of Arrow batches, cooperatively cancellable. Used by the aggregate `do_get`
+    /// route, whose bounded per-group output stays materialized (issue #1476).
+    pub fn produce_from_resolved(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
+        self.merge_paths(paths, cancel)
+    }
+
+    /// Whether this producer emits partial-aggregate rows (issue #841). The
+    /// streaming `do_get` path keeps aggregation materialized (bounded output).
+    pub fn is_aggregating(&self) -> bool {
+        self.agg.is_some()
+    }
+
+    /// Stream the row-merge of already-resolved `paths` into `sink` (issue #1476),
+    /// one batch at a time, instead of collecting into a `Vec`. `paths` MUST come
+    /// from [`Self::resolve_paths`] (already token-pruned). The merge stops when
+    /// `sink.emit` reports [`ProducerError::Cancelled`] (client gone) or `cancel`
+    /// is set — both within a bounded number of merge steps.
+    ///
+    /// Aggregation is NOT streamed here (its output is bounded); the service routes
+    /// aggregating tickets to [`Self::produce_from_resolved`]. Called defensively,
+    /// this returns without emitting for an aggregating producer.
+    pub(crate) fn produce_streaming(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+        sink: &mut dyn BatchSink,
+    ) -> Result<(), ProducerError> {
+        if self.agg.is_some() || paths.is_empty() {
+            return Ok(());
+        }
+        let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        self.drive_merge(&mut merger, cancel, sink)
+    }
+
     /// Prune `paths` to those whose token span overlaps the spec's token range.
     ///
     /// Returns `paths` unchanged when there is no token filter. A path is kept
@@ -470,7 +553,8 @@ impl MergeProducer {
         }
 
         let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
-        self.drive_merge(&mut merger, cancel, &mut batches)?;
+        let mut sink = CollectSink(&mut batches);
+        self.drive_merge(&mut merger, cancel, &mut sink)?;
         Ok(batches)
     }
 
@@ -493,7 +577,7 @@ impl MergeProducer {
         &self,
         merger: &mut dyn PartitionStepper,
         cancel: &CancelFlag,
-        batches: &mut Vec<RecordBatch>,
+        sink: &mut dyn BatchSink,
     ) -> Result<(), ProducerError> {
         let limit = self.spec.limit;
         // A zero cap produces no rows without touching the merge.
@@ -535,7 +619,7 @@ impl MergeProducer {
                 buffer.push(row);
                 emitted += 1;
                 if buffer.len() >= self.batch_size {
-                    batches.push(self.flush_buffer(&mut buffer)?);
+                    sink.emit(self.flush_buffer(&mut buffer)?)?;
                 }
                 // LIMIT reached (counted post-filter): stop the merge early.
                 if let Some(cap) = limit {
@@ -547,7 +631,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            batches.push(self.flush_buffer(&mut buffer)?);
+            sink.emit(self.flush_buffer(&mut buffer)?)?;
         }
         Ok(())
     }
@@ -894,9 +978,13 @@ mod tests {
         let cancelled = CancelFlag::new();
         cancelled.cancel();
         let mut batches = Vec::new();
-        let err = producer
-            .drive_merge(&mut counting, &cancelled, &mut batches)
-            .expect_err("pre-cancelled merge aborts");
+        // Scope the sink so its `&mut batches` borrow ends before we inspect it.
+        let err = {
+            let mut sink = CollectSink(&mut batches);
+            producer
+                .drive_merge(&mut counting, &cancelled, &mut sink)
+                .expect_err("pre-cancelled merge aborts")
+        };
 
         assert!(
             matches!(err, ProducerError::Cancelled),
