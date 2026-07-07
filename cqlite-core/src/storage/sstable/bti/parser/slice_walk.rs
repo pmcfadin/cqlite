@@ -263,12 +263,15 @@ fn dense_child(
         }
         PtrWidth::Packed12 => read_12bit_packed(&data[3..], idx),
     };
+    // Every Dense slot access decodes exactly one pointer delta — count it here,
+    // BEFORE the delta==0 sentinel branch, so a covered-range miss (delta==0) still
+    // counts as real decode work (issue #1650 review).
+    record_pointer_decode();
     // delta 0 is the sentinel for "no child at this byte" (a real child may live at
     // absolute offset 0 only via a non-zero delta equal to `off`).
     if delta == 0 {
         Ok(None)
     } else {
-        record_pointer_decode();
         Ok(Some(off.saturating_sub(delta) as usize))
     }
 }

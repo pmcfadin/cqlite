@@ -10,7 +10,7 @@
 //!      arithmetic and decodes only that slot; the whole-child-table decoder
 //!      (`parse_bti_node`) materializes all 256. FAILS on pre-L3 code, where the
 //!      descent went through `parse_bti_node_for_traversal` (decoding all 256).
-//!   2. **`find_child_in_raw` equivalence over ALL 256 key bytes** on both a
+//!   2. **`find_child_offset` equivalence over ALL 256 key bytes** on both a
 //!      synthetic Dense-256 node and every node of the real `test_da`
 //!      `Partitions.db`/`Rows.db` fixtures: the in-place result equals the
 //!      decode-all-then-pick baseline (`parse_bti_node(...).find_child(byte)`), and
@@ -102,6 +102,44 @@ fn dense256_find_child_equivalence_and_single_decode_all_bytes() {
              {b:#04x}; got {decodes}",
         );
     }
+    rwc::reset();
+}
+
+/// Build a Dense16 node covering bytes [0x00, 0x02] where the middle slot (byte
+/// 0x01) carries the `delta == 0` "no transition" sentinel (a covered-range miss),
+/// placed at a large offset so the real slots resolve in-bounds.
+fn dense_with_zero_delta_slot() -> (Vec<u8>, usize) {
+    let node_offset = 100_000usize;
+    let mut node = vec![0xB0u8, 0x00, 0x02]; // Dense16, start 0x00, len-1 = 2
+    node.extend_from_slice(&10u16.to_be_bytes()); // byte 0x00 → real child
+    node.extend_from_slice(&0u16.to_be_bytes()); // byte 0x01 → delta 0 sentinel
+    node.extend_from_slice(&20u16.to_be_bytes()); // byte 0x02 → real child
+    let mut trie = vec![0u8; node_offset];
+    trie.extend_from_slice(&node);
+    (trie, node_offset)
+}
+
+/// A Dense slot that lands on the `delta == 0` sentinel (a covered-range miss) still
+/// performs one pointer decode — the counter must increment by exactly ONE and the
+/// lookup result must be `None` (issue #1650 review: counter moved before the
+/// sentinel branch so covered-range misses are not undercounted).
+#[test]
+#[serial]
+fn dense_zero_delta_slot_counts_one_decode_and_returns_none() {
+    let (trie, node_offset) = dense_with_zero_delta_slot();
+
+    rwc::reset();
+    let miss =
+        find_child_offset_for_test(&trie, node_offset, 0x01).expect("descent must not error");
+    let decodes = rwc::bti_pointer_decodes();
+    assert_eq!(
+        miss, None,
+        "a delta==0 Dense slot is the no-transition sentinel and must resolve to None",
+    );
+    assert_eq!(
+        decodes, 1,
+        "a covered-range Dense miss still decodes exactly ONE pointer delta; got {decodes}",
+    );
     rwc::reset();
 }
 
