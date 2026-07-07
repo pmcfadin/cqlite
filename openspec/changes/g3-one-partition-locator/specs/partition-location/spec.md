@@ -6,9 +6,24 @@ Partition location SHALL be resolved through ONE format-tagged façade,
 partition's uncompressed `Data.db` offset (and its size where the format records
 one; `0` where it does not). The BIG (`nb`/uncompressed) implementation SHALL
 compose the Summary-derived range bound and the raw-key `Index.db` map; the BTI
-(`da`) implementation SHALL walk the `Partitions.db` trie. The point-read path and
-the candidate-prune path SHALL both resolve partitions through this façade, and the
+(`da`) implementation SHALL walk the `Partitions.db` trie. The BIG **point-read**
+path SHALL resolve the partition OFFSET through this façade, and the
 now-unreachable per-path entry points SHALL be deleted.
+
+**Ordering-preservation carve-outs (behavior-preserving, verified against the
+existing counter gate tests):**
+- The C5 range short-circuit's PRE-DISPATCH guard SHALL remain in
+  `get_with_resolution` ahead of the BIG bloom pre-check, preserving today's
+  `C5 → bloom → index` order for BIG (moving C5 wholly inside `locate` would make
+  the order `bloom → C5`, flipping `issue_1576`'s `range_short_circuits()==1`
+  assertion to `0`). `partition_key_out_of_range` remains a SINGLE implementation
+  reached both from that guard and as `locate`'s step 1; an out-of-range point read
+  returns at the pre-dispatch guard, so C5 is never double-recorded.
+- The BIG **candidate-prune** path SHALL remain BLOOM-based (`might_contain_partition`),
+  NOT routed through `locate_encoded`'s index probe: a BIG `Index.db` miss is not a
+  definitive absent (#1572 truncated-index invariant), so pruning on an index miss
+  would drop a candidate that actually holds the partition. Only the BTI prune path
+  is congruent with the façade's trie resolution and MAY use it.
 
 #### Scenario: locate() parity with the legacy BIG path for present keys
 - **WHEN** `locate` is called for every partition key present in each BIG (`nb` and
@@ -73,8 +88,10 @@ SHALL remain green.
 
 ### Requirement: B4 key cache and C5 range short-circuit live in the façade, written once
 The system SHALL provide a single implementation of the B4 key→partition-offset cache
-and a single implementation of the C5 `[first_key, last_key]` range short-circuit, both
-reachable only through the façade and serving both formats, with unchanged semantics: the
+and a single implementation of the C5 `[first_key, last_key]` range short-circuit, each
+with ONE implementation serving both formats (the C5 predicate is reached both from the
+`get_with_resolution` pre-dispatch guard — which preserves BIG's C5-before-bloom order —
+and as `locate`'s step 1; it is never double-recorded), with unchanged semantics: the
 B4 cache MUST be positive-only (an absent key is never cached), and the C5 short-circuit
 MUST be inclusive at both ends, MUST compare in Cassandra Murmur3 token order, and MUST be
 a no-op when no authoritative Summary bound exists (e.g. BTI).
