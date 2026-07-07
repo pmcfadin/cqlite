@@ -1404,7 +1404,11 @@ mod tests {
 
         let p = MergeProducer::with_spec(schema, 4, spec_with_limit(Some(100))).unwrap();
         let batches = p.produce(&DirSource::new(&dir)).unwrap();
-        assert_eq!(total_rows(&batches), 10, "LIMIT past the row count keeps all");
+        assert_eq!(
+            total_rows(&batches),
+            10,
+            "LIMIT past the row count keeps all"
+        );
     }
 
     #[test]
