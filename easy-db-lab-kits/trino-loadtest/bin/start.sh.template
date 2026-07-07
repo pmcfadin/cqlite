@@ -29,7 +29,13 @@ TRINO_LOADTEST_USER="${TARGET_JDBC_USER:-cqlite-loadtest}"
 
 QUERIES_FLAG=""
 CONFIGMAP_FILE_ARGS=(--from-file="driver.py=${SCRIPT_DIR}/../driver.py")
-if [ -n "${TRINO_LOADTEST_QUERIES_FILE:-}" ]; then
+# Issue #2132: an unset optional --queries-file arrives here as the literal
+# string "null" (the easy-db-lab kit runner injects "null", not empty, for an
+# unset arg whose kit.yaml default is ""), not an empty/unset var. `[ -n ... ]`
+# alone is true for "null", so it must be rejected explicitly — otherwise this
+# tries `--from-file=queries.txt=null` (no such file) and the whole configmap
+# pipeline produces nothing for `kubectl apply -f -` to consume.
+if [ -n "${TRINO_LOADTEST_QUERIES_FILE:-}" ] && [ "${TRINO_LOADTEST_QUERIES_FILE}" != "null" ]; then
   CONFIGMAP_FILE_ARGS+=(--from-file="queries.txt=${TRINO_LOADTEST_QUERIES_FILE}")
   QUERIES_FLAG="--queries-file /driver/queries.txt"
 fi

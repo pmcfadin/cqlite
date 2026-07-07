@@ -392,6 +392,32 @@ Compare the Cassandra-side CQL count against the `cqlite.${KEYSPACE}.${TABLE}`
 count Trino returns. They must match exactly; a mismatch here is Phase 5's
 "wrong row counts" class before you've even started the concurrent runs.
 
+**[UPDATED after the first live run]** The first run of this plan hit two
+`trino-loadtest` driver bugs before any query was ever issued, both now fixed
+— no command below changes:
+
+- **#2130** — the driver crashed immediately with
+  `ValueError: invalid literal for int() with base 10: 'tcp://10.43.73.27:8080'`.
+  Kubernetes auto-injects Docker-link-style Service env vars into every pod
+  (the Trino Helm chart creates a Service named `trino`, so every pod sees
+  `TRINO_PORT=tcp://<ip>:8080`), and the driver's argparse defaults called
+  `int()` on that at parser-construction time — before `start.sh`'s explicit
+  `--port` flag ever got a chance to win. Fixed: the driver now reads
+  `TRINO_LOADTEST_HOST`/`TRINO_LOADTEST_PORT`/`TRINO_LOADTEST_USER`/
+  `TRINO_LOADTEST_CATALOG` (namespaced, not the Kubernetes-reserved bare
+  names) and falls back to the documented default instead of raising on any
+  unparseable numeric env value.
+- **#2132** — with no `--queries-file` passed (the normal case for this
+  plan's built-in query set), `start.sh` failed before the pod was even
+  created: `error: error reading null: no such file or directory` /
+  `error: no objects passed to apply`. The easy-db-lab kit runner injects the
+  literal string `null` for an unset optional arg rather than leaving it
+  empty, and `[ -n "$VAR" ]` alone is true for `"null"`. Fixed: `start.sh`
+  now also rejects the literal `"null"` before treating the var as set. **The
+  loadtest start below no longer needs a `--queries-file` workaround** —
+  omitting it (as both runs in this plan do) now correctly falls through to
+  the built-in scan+aggregate query set.
+
 ### 13a. Run (a) — default `snapshot` mode: correctness/consistency run
 
 `cqlite.read-mode` defaults to `snapshot` — no catalog edit needed for this run.
@@ -464,6 +490,28 @@ sed -i.bak '/cqlite.read-mode=live/d' "$CLUSTER_DIR/cqlite/trino-catalog.propert
 ---
 
 ## Phase 4: OBSERVE / VERIFY
+
+**[UPDATED after the first live run]** The first run of this plan found **zero**
+`cqlite.rpc.*`/`cqlite_rpc_*` series in VictoriaMetrics and no flight traces in
+Tempo, despite a correct pod env (`CQLITE_OTEL_ENABLED=true`,
+`CQLITE_OTEL_ENDPOINT=http://localhost:4317` reachable) and no export errors in
+the flight log — **root cause: #2128**, the published `cqlite-flight` image was
+built without `--features observability`, so all the OTLP metric/trace code was
+compiled out and the env vars were silently inert. Fixed:
+`cqlite-flight/Dockerfile` now builds with `--features observability`.
+**The observability check below now expects an extra startup log line** —
+confirm it's present before checking VictoriaMetrics/Tempo (FIRST-RUN CHECK,
+not yet verified against a live cluster):
+
+```bash
+kubectl logs -l easydblab.com/kit=cqlite-flight --all-containers --prefix | grep -i observability
+```
+
+Expect one `observability enabled, exporting to OTLP endpoint` info line per
+pod, naming `endpoint=http://localhost:4317`. (If the image were ever
+published again without the feature, the fix also makes that case visible
+instead of silent: a `WARN` line stating the binary was compiled without
+`observability` and that `CQLITE_OTEL_*` vars are inert.)
 
 ### 14. Confirm `cqlite.rpc.*` metric names in VictoriaMetrics (FIRST-RUN CHECK)
 
