@@ -402,7 +402,7 @@ pub struct WriteEngine {
     /// The sync `write()` path does NOT auto-flush when a Tokio runtime is
     /// present, so once the memtable crosses the flush threshold it stays over
     /// it until an explicit (or async) flush. Without this guard the
-    /// over-threshold `log::warn!` fired on EVERY subsequent write (log spam).
+    /// over-threshold `tracing::warn!` fired on EVERY subsequent write (log spam).
     /// It is set to `true` the first time the warning is emitted and reset to
     /// `false` on the next successful flush, so the warning fires at most once
     /// per threshold crossing.
@@ -627,7 +627,7 @@ impl WriteEngine {
             // mid-stream corruption.)
             let reset_to = wal.reset_to_valid_prefix()?;
 
-            log::error!(
+            tracing::error!(
                 "WAL recovery at {:?} was LOSSY: recovered {} mutation(s), {} corrupt entry \
                  (entries), stopped_early={}, {} byte(s) not recovered. Raw segment preserved at \
                  {:?}; live WAL reset to valid prefix ({:?}). Investigate before relying on this \
@@ -652,7 +652,7 @@ impl WriteEngine {
         }
 
         if recovered > 0 {
-            log::info!(
+            tracing::info!(
                 "WAL replay complete: replayed {} mutation(s); {} rows in memtable, {} bytes",
                 recovered,
                 memtable.row_count(),
@@ -811,7 +811,7 @@ impl WriteEngine {
             // guard the warning fired on EVERY such write. Emit it at most once
             // per crossing; it is reset on the next flush.
             if !self.warned_over_threshold {
-                log::warn!(
+                tracing::warn!(
                     "Memtable size {} exceeds threshold {} - call flush() manually in async context",
                     self.memtable.size_bytes(),
                     self.config.memtable_flush_threshold
@@ -821,7 +821,7 @@ impl WriteEngine {
 
             // Try to flush synchronously only if we're not in an async context.
             if tokio::runtime::Handle::try_current().is_err() {
-                log::info!("Triggering automatic flush");
+                tracing::info!("Triggering automatic flush");
                 self.flush_internal()?;
             }
         }
@@ -985,7 +985,7 @@ impl WriteEngine {
             .memtable
             .should_flush(self.config.memtable_flush_threshold)
         {
-            log::info!(
+            tracing::info!(
                 "Memtable size {} exceeds threshold {}, triggering flush",
                 self.memtable.size_bytes(),
                 self.config.memtable_flush_threshold
@@ -1201,7 +1201,7 @@ impl WriteEngine {
         let flush_start = Instant::now();
         let rows_to_flush = self.memtable.row_count() as u64;
 
-        log::info!(
+        tracing::info!(
             "Flushing memtable: {} partitions, {} rows, {} bytes",
             self.memtable.iter().count(),
             self.memtable.row_count(),
@@ -1246,7 +1246,7 @@ impl WriteEngine {
         // Finalize SSTable
         let info = writer.finish().await?;
 
-        log::info!(
+        tracing::info!(
             "SSTable flush complete: generation {}, {} partitions, {} bytes",
             self.generation,
             info.partition_count,
@@ -1362,20 +1362,20 @@ impl WriteEngine {
             return Ok(());
         }
 
-        log::info!("Closing WriteEngine");
+        tracing::info!("Closing WriteEngine");
 
         // Flush any remaining data
         if !self.memtable.is_empty() {
-            log::info!("Flushing memtable before close");
+            tracing::info!("Flushing memtable before close");
 
             // Attempt to flush to SSTable
             match self.flush_internal_async().await {
                 Ok(_) => {
-                    log::info!("Memtable flushed successfully");
+                    tracing::info!("Memtable flushed successfully");
                 }
                 Err(e) => {
                     // If flush fails, log error and return it
-                    log::error!("Failed to flush memtable during close: {}", e);
+                    tracing::error!("Failed to flush memtable during close: {}", e);
                     // Single-boundary error recording (issue #1036): `close` is a
                     // public entry point and `flush_internal_async` is unrecorded,
                     // so record the escaping flush failure here, exactly once.
@@ -1389,7 +1389,7 @@ impl WriteEngine {
 
         // Sync WAL before closing
         if let Err(e) = self.wal.sync() {
-            log::warn!("Failed to sync WAL during close: {}", e);
+            tracing::warn!("Failed to sync WAL during close: {}", e);
             // Don't fail close if sync fails - data is already persisted to SSTable
         }
 
@@ -1398,10 +1398,10 @@ impl WriteEngine {
         // On Drop the OS would release it anyway, but explicit unlock is more
         // deterministic in async / multi-phase shutdown sequences.
         if let Err(e) = fs2::FileExt::unlock(&self.dir_lock) {
-            log::warn!("Failed to release write_dir advisory lock: {}", e);
+            tracing::warn!("Failed to release write_dir advisory lock: {}", e);
         }
 
-        log::info!("WriteEngine closed");
+        tracing::info!("WriteEngine closed");
 
         Ok(())
     }
@@ -1489,13 +1489,13 @@ impl Drop for WriteEngine {
             // but with `Durability::Disabled` the WAL was skipped entirely, so
             // an ungraceful drop loses the un-flushed rows permanently.
             match self.config.durability {
-                Durability::SyncEachWrite => log::warn!(
+                Durability::SyncEachWrite => tracing::warn!(
                     "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
                      flushed to an SSTable and remain only in the WAL (durability now relies on \
                      WAL replay at next startup). Call `close().await` for a graceful shutdown.",
                     self.memtable.row_count()
                 ),
-                Durability::Disabled => log::warn!(
+                Durability::Disabled => tracing::warn!(
                     "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
                      flushed to an SSTable and are LOST — durability is Disabled so these rows \
                      were never written to the WAL and cannot be recovered (they existed in \
@@ -1510,7 +1510,7 @@ impl Drop for WriteEngine {
         // ignore here).  The important invariant is that the lock is always
         // released before the file descriptor is closed by the OS on drop.
         if let Err(e) = fs2::FileExt::unlock(&self.dir_lock) {
-            log::debug!(
+            tracing::debug!(
                 "WriteEngine drop: advisory lock release returned: {} \
                  (may have been released by close() already)",
                 e
@@ -2734,7 +2734,7 @@ mod tests {
         );
     }
 
-    /// Issue #1620: the over-threshold `log::warn!` must fire at most once per
+    /// Issue #1620: the over-threshold `tracing::warn!` must fire at most once per
     /// threshold crossing. With a runtime present the sync `write()` path does
     /// NOT auto-flush, so the memtable stays over threshold across many writes;
     /// the `warned_over_threshold` guard prevents re-warning until the next
@@ -3297,58 +3297,76 @@ mod tests {
         );
     }
 
-    /// Minimal thread-local log capturer for the Drop-warn tests (issue #1693).
+    /// Minimal thread-local `tracing` WARN capturer for the Drop-warn tests
+    /// (issue #1693).
     ///
-    /// A `log` logger can only be installed process-wide once and is shared by
-    /// every test in this binary, so it records into a *thread-local* buffer.
-    /// cargo runs each test on its own thread, so a thread-local buffer isolates
-    /// concurrent tests from one another. No external crate is pulled in.
+    /// `start()` installs a thread-local `tracing` default subscriber (via
+    /// `set_default`) with **no** `tracing-log` bridge — the same tracing-only
+    /// path a modern embedder wires — and records WARN events into a
+    /// thread-local buffer. cargo runs each test on its own thread, so both the
+    /// subscriber and the buffer are per-thread, isolating concurrent tests.
     mod drop_warn_capture {
-        use log::{Level, LevelFilter, Log, Metadata, Record};
         use std::cell::RefCell;
-        use std::sync::Once;
+        use std::fmt;
+
+        use tracing::field::{Field, Visit};
+        use tracing::subscriber::{set_default, DefaultGuard};
+        use tracing::{Event, Level, Subscriber};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+        use tracing_subscriber::Registry;
 
         thread_local! {
             static BUFFER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+            static GUARD: RefCell<Option<DefaultGuard>> = const { RefCell::new(None) };
         }
 
-        struct ThreadLocalCapture;
+        /// Extracts the rendered `message` field of an event.
+        #[derive(Default)]
+        struct MessageVisitor {
+            message: String,
+        }
 
-        impl Log for ThreadLocalCapture {
-            fn enabled(&self, _metadata: &Metadata) -> bool {
-                true
-            }
-
-            fn log(&self, record: &Record) {
-                if record.level() == Level::Warn {
-                    BUFFER.with(|b| {
-                        if let Some(buf) = b.borrow_mut().as_mut() {
-                            buf.push(record.args().to_string());
-                        }
-                    });
+        impl Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
                 }
             }
-
-            fn flush(&self) {}
         }
 
-        static INSTALL: Once = Once::new();
+        /// A `tracing` layer that records every WARN event's message into the
+        /// current thread's buffer.
+        struct WarnCaptureLayer;
 
-        /// Install the capturing logger process-wide (idempotent) and begin
-        /// capturing warnings on the current thread. If another logger was
-        /// already installed the buffer stays available on this thread but no
-        /// records arrive, which fails the assertions loudly rather than
-        /// silently passing.
+        impl<S: Subscriber> Layer<S> for WarnCaptureLayer {
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                if *event.metadata().level() != Level::WARN {
+                    return;
+                }
+                let mut visitor = MessageVisitor::default();
+                event.record(&mut visitor);
+                BUFFER.with(|b| {
+                    if let Some(buf) = b.borrow_mut().as_mut() {
+                        buf.push(visitor.message);
+                    }
+                });
+            }
+        }
+
+        /// Begin capturing `tracing` WARN events on the current thread. The
+        /// thread-local default subscriber is kept alive by storing its guard;
+        /// `take_warnings()` drops it so later tests on this thread are
+        /// unaffected.
         pub(super) fn start() {
-            INSTALL.call_once(|| {
-                let _ = log::set_boxed_logger(Box::new(ThreadLocalCapture));
-                log::set_max_level(LevelFilter::Trace);
-            });
             BUFFER.with(|b| *b.borrow_mut() = Some(Vec::new()));
+            let subscriber = Registry::default().with(WarnCaptureLayer);
+            let guard = set_default(subscriber);
+            GUARD.with(|g| *g.borrow_mut() = Some(guard));
         }
 
         /// Take the warnings captured on the current thread since `start()`.
         pub(super) fn take_warnings() -> Vec<String> {
+            GUARD.with(|g| *g.borrow_mut() = None);
             BUFFER.with(|b| b.borrow_mut().take().unwrap_or_default())
         }
     }

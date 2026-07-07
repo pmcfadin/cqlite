@@ -77,7 +77,7 @@ impl V5CompressedLegacyParser {
         let use_row_timestamp = (flags & CELL_USE_ROW_TIMESTAMP) != 0;
         let use_row_ttl = (flags & CELL_USE_ROW_TTL) != 0;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Cell '{}' flags=0x{:02x} (deleted={}, expiring={}, empty={}, use_row_ts={}, use_row_ttl={})",
             column.name, flags, is_deleted, is_expiring, has_empty_value, use_row_timestamp, use_row_ttl
         );
@@ -102,7 +102,7 @@ impl V5CompressedLegacyParser {
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
             let absolute_ts = self.min_timestamp.wrapping_add(timestamp_delta as i64);
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Cell '{}' timestamp_delta={} (min_timestamp={}) absolute={}",
                 column.name,
                 timestamp_delta,
@@ -127,7 +127,7 @@ impl V5CompressedLegacyParser {
             let abs_ldt = self
                 .min_local_deletion_time
                 .wrapping_add(deletion_delta as i64);
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Cell '{}' deletion_delta={} (min_local_deletion_time={}) abs_ldt={}",
                 column.name,
                 deletion_delta,
@@ -152,7 +152,7 @@ impl V5CompressedLegacyParser {
             // Absolute TTL = min_ttl + delta (seconds).  Clamp to i32 range for the
             // CellExpiration.ttl_seconds field (Cassandra caps TTL at ~630M seconds).
             let abs_ttl = self.min_ttl.unwrap_or(0).wrapping_add(ttl_delta as i64);
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Cell '{}' ttl_delta={} (min_ttl={:?}) abs_ttl={}",
                 column.name,
                 ttl_delta,
@@ -197,7 +197,7 @@ impl V5CompressedLegacyParser {
         // timestamp is carried in the tombstone for timestamp-based LWW ordering.
         if is_deleted {
             let deletion_time = cell_timestamp.unwrap_or(0);
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Cell '{}' is tombstone (deleted), returning Tombstone(deletion_time={})",
                 column.name, deletion_time
             );
@@ -237,7 +237,7 @@ impl V5CompressedLegacyParser {
 
         // Handle empty cells (no value bytes to read)
         if !has_value {
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Cell '{}' has HAS_EMPTY_VALUE flag, returning empty value",
                 column.name
             );
@@ -254,7 +254,7 @@ impl V5CompressedLegacyParser {
                 CellKind::Text => Value::Text(String::new()),
                 CellKind::Blob => Value::Blob(Vec::new()),
                 _ => {
-                    log::warn!(
+                    tracing::warn!(
                         "V5CompressedLegacy: EMPTY value for cell '{}' (type {}), treating as NULL",
                         column.name,
                         column.data_type
@@ -491,7 +491,7 @@ impl V5CompressedLegacyParser {
                 let len_bytes_consumed = data[offset..].len() - remaining.len();
                 offset += len_bytes_consumed;
 
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: Counter '{}' context_len={} (len prefix: {} bytes)",
                     column.name,
                     context_len,
@@ -512,7 +512,7 @@ impl V5CompressedLegacyParser {
                     Ok((total, consumed)) if consumed == context_len => {
                         // Successfully parsed a proper CounterContext.
                         offset += consumed;
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy: Counter '{}' value={} (CounterContext), total consumed {} bytes",
                             column.name,
                             total,
@@ -541,7 +541,7 @@ impl V5CompressedLegacyParser {
                             data[offset + 7],
                         ]);
                         offset += 8;
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy: Counter '{}' value={} (raw i64 fallback), total consumed {} bytes",
                             column.name,
                             val,
@@ -937,7 +937,7 @@ impl V5CompressedLegacyParser {
                     // Frozen types: unwrap inner type and route to appropriate parser
                     let inner_type = self.extract_frozen_inner_type(type_str)?;
 
-                    log::debug!(
+                    tracing::debug!(
                         "V5CompressedLegacy: Parsing frozen type '{}' -> inner type '{}'",
                         type_str,
                         inner_type
@@ -987,7 +987,7 @@ impl V5CompressedLegacyParser {
                     } else if Self::is_udt_type(&column.data_type) {
                         // Frozen UDT - parse using UDT parser
                         // The column.data_type contains the full Cassandra type string including UserType
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy: Parsing frozen UDT column '{}' type='{}'",
                             column.name,
                             column.data_type
@@ -1038,7 +1038,7 @@ impl V5CompressedLegacyParser {
                         // registry (Issue #502).  This handles type strings like
                         // `frozen<person>` where "person" is a registered UDT rather than a
                         // collection or a full marshal-format UserType string.
-                        log::debug!(
+                        tracing::debug!(
                         "V5CompressedLegacy: Resolving frozen UDT '{}' via registry for column '{}'",
                         inner_type,
                         column.name,

@@ -130,14 +130,14 @@ impl V5CompressedLegacyParser {
         let (clustering_values, offset) = if !is_static {
             self.parse_clustering_prefix(data, offset, schema)?
         } else {
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Static row detected (extended_flags=0x{:02x}), skipping clustering prefix",
                 extended_flags.unwrap_or(0)
             );
             (vec![], offset)
         };
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsed {} clustering values after flags, now at offset {} (is_static={})",
             clustering_values.len(),
             offset,
@@ -205,7 +205,7 @@ impl V5CompressedLegacyParser {
         // individual chunk sizes as rows naturally span chunks in Cassandra's format.
         // This is NOT corruption - it's the intended file layout.
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsed row metadata at offset {}: header_size={} bytes, row_size={} bytes, timestamp={:?}, ttl={:?}, deletion={:?}",
             offset, row_header.header_size, row_size, row_header.timestamp, row_header.ttl, row_header.local_deletion_time
         );
@@ -234,7 +234,7 @@ impl V5CompressedLegacyParser {
         let has_cell_bytes = cell_data_start < after_row_offset;
 
         if row_header.local_deletion_time.is_some() && !has_cell_bytes {
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Pure row tombstone (deletion_time={:?}), skipping cell parsing",
                 row_header.local_deletion_time
             );
@@ -253,7 +253,7 @@ impl V5CompressedLegacyParser {
             }
 
             let next_offset = after_row_offset;
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy: Skipped tombstoned row, next offset = {}",
                 next_offset
             );
@@ -272,7 +272,7 @@ impl V5CompressedLegacyParser {
         // Advance offset past row metadata to start of cell data
         let mut offset = offset + row_header.header_size;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Cell data starts at offset {}, first 32 bytes: {}",
             offset,
             hex::encode(&data[offset..std::cmp::min(offset + 32, data.len())])
@@ -342,8 +342,8 @@ impl V5CompressedLegacyParser {
             }
         };
 
-        log::debug!("V5CompressedLegacy: Parsing cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes, {} on-disk columns, bitmap={:?})", offset, row_header.header_size, columns_in_order.len(), missing_bitmap);
-        log::debug!(
+        tracing::debug!("V5CompressedLegacy: Parsing cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes, {} on-disk columns, bitmap={:?})", offset, row_header.header_size, columns_in_order.len(), missing_bitmap);
+        tracing::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
         );
@@ -351,7 +351,7 @@ impl V5CompressedLegacyParser {
         // Issue #221: Check if row has complex deletion info for non-frozen collections
         let has_complex_deletion = (row_flags & ROW_HAS_COMPLEX_DELETION) != 0;
         if has_complex_deletion {
-            log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
+            tracing::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
         }
 
         // Issue #1741 read-side shadowing aggregate. Computed from scalars the cell
@@ -411,7 +411,7 @@ impl V5CompressedLegacyParser {
             let complex_type: &str = header_type.unwrap_or(&column.data_type);
 
             if offset >= data.len() {
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} on-disk cells",
                     col_idx,
                     column.name,
@@ -425,7 +425,7 @@ impl V5CompressedLegacyParser {
             // Issue #693: simple columns return 4-tuple including cell timestamp / expiration;
             //             complex columns return 2-tuple and inherit the row-level timestamp.
             if ctp.is_complex {
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: Column '{}' is complex (non-frozen collection / multicell UDT), using parse_complex_column",
                     column.name
                 );
@@ -502,7 +502,7 @@ impl V5CompressedLegacyParser {
                 };
                 match parse_result {
                     Ok((value, new_offset, col_meta)) => {
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy:   ✓ Complex column {} '{}' = {:?}, consumed {} bytes",
                             col_idx, column.name, value, new_offset - offset
                         );
@@ -582,7 +582,7 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy:   ✗ Complex column {} '{}' at offset {} FAILED: {}",
                             col_idx, column.name, offset, e
                         );
@@ -605,7 +605,7 @@ impl V5CompressedLegacyParser {
                     reader,
                 ) {
                     Ok((value, cell_own_ts, cell_exp, new_offset)) => {
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
                             col_idx,
                             column.name,
@@ -749,7 +749,7 @@ impl V5CompressedLegacyParser {
                         offset = new_offset;
                     }
                     Err(e) => {
-                        log::debug!(
+                        tracing::debug!(
                             "V5CompressedLegacy:   ✗ Column {} '{}' ({}) at offset {} FAILED: {}",
                             col_idx,
                             column.name,
@@ -771,12 +771,12 @@ impl V5CompressedLegacyParser {
         row_header.max_data_cell_expires_at = agg_max_expires_at;
         row_header.has_live_forever_data_cell = agg_has_live_forever;
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsed {}/{} on-disk columns (missing columns are NULL)",
             cells.len(),
             columns_in_order.len()
         );
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Cell column names (positional order): {:?}",
             cells.iter().map(|(name, _)| name).collect::<Vec<_>>()
         );

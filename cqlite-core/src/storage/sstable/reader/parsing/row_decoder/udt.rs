@@ -449,7 +449,7 @@ impl V5CompressedLegacyParser {
         let mut current_offset = offset;
         let mut fields = Vec::with_capacity(udt_def.fields.len());
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Parsing UDT '{}' with {} fields at offset {}",
             udt_def.name,
             udt_def.fields.len(),
@@ -460,7 +460,7 @@ impl V5CompressedLegacyParser {
             // Check bounds for field length (4 bytes)
             if current_offset + 4 > data.len() {
                 // Trailing fields can be omitted (implicit null)
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: UDT field '{}' omitted (implicit null), remaining fields omitted",
                     field_def.name
                 );
@@ -486,11 +486,11 @@ impl V5CompressedLegacyParser {
 
             let field_value = if field_len == -1 {
                 // Null field
-                log::debug!("V5CompressedLegacy: UDT field '{}' is null", field_def.name);
+                tracing::debug!("V5CompressedLegacy: UDT field '{}' is null", field_def.name);
                 None
             } else if field_len == 0 {
                 // Empty field - create empty value based on type
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: UDT field '{}' is empty",
                     field_def.name
                 );
@@ -517,7 +517,7 @@ impl V5CompressedLegacyParser {
                 let field_data = &data[current_offset..current_offset + field_len];
                 current_offset += field_len;
 
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: UDT field '{}' has {} bytes of data",
                     field_def.name,
                     field_len
@@ -664,7 +664,7 @@ impl V5CompressedLegacyParser {
             }
             _ => {
                 // For other types, return as blob
-                log::debug!(
+                tracing::debug!(
                     "V5CompressedLegacy: UDT field type {:?} parsed as blob ({} bytes)",
                     field_type,
                     data.len()
@@ -747,7 +747,7 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        log::debug!(
+        tracing::debug!(
             "V5CompressedLegacy: Counter '{}' header_size={}, shard_count={}",
             column_name,
             header_size_raw,
@@ -808,7 +808,7 @@ impl V5CompressedLegacyParser {
                 ))
             })?;
 
-            log::trace!(
+            tracing::trace!(
                 "V5CompressedLegacy: Counter '{}' shard {} count={}",
                 column_name,
                 shard_idx,
@@ -915,7 +915,7 @@ impl V5CompressedLegacyParser {
             _ => {
                 // For complex types (nested UDTs, collections, etc.), return as blob
                 // These require SSTableReader for full parsing
-                log::debug!(
+                tracing::debug!(
                     "UDT field type {:?} in frozen context parsed as blob ({} bytes)",
                     field_type,
                     data.len()

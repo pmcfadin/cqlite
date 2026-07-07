@@ -68,7 +68,7 @@ impl StatisticsReader {
             Ok(gates) => Some(gates),
             Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
             Err(e) => {
-                log::debug!(
+                tracing::debug!(
                     "StatisticsReader::open: could not derive VersionGates from {:?} ({}); \
                      defaulting to nb-compatible behaviour",
                     path,

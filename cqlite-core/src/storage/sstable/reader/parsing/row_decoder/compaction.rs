@@ -219,7 +219,7 @@ impl V5CompressedLegacyParser {
         }
 
         if skipped_partitions > 0 {
-            log::warn!(
+            tracing::warn!(
                 "V5CompressedLegacy (compaction): skipped {} malformed partitions",
                 skipped_partitions
             );
@@ -303,7 +303,7 @@ impl V5CompressedLegacyParser {
         }
 
         if skipped_partitions > 0 {
-            log::warn!(
+            tracing::warn!(
                 "V5CompressedLegacy (compaction): skipped {} malformed partitions",
                 skipped_partitions
             );

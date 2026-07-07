@@ -93,7 +93,7 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
         read_shadowing: bool,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
-        log::debug!(
+        tracing::debug!(
             "parse_block_entries: Starting parse (data size: {} bytes, version: {:?})",
             block_data.len(),
             self.header.cassandra_version
@@ -103,14 +103,14 @@ impl SSTableReader {
 
         // Decompress block data if compression is enabled
         let data = if let Some(compression_reader) = &self.compression_reader {
-            log::debug!(
+            tracing::debug!(
                 "parse_block_entries: Attempting block decompression with algorithm: {:?}",
                 compression_reader.algorithm()
             );
             let compression = Compression::new(*compression_reader.algorithm())?;
             match compression.decompress(block_data) {
                 Ok(decompressed) => {
-                    log::debug!(
+                    tracing::debug!(
                         "parse_block_entries: Block decompressed {} bytes to {} bytes",
                         block_data.len(),
                         decompressed.len()
@@ -118,14 +118,14 @@ impl SSTableReader {
                     decompressed
                 }
                 Err(e) => {
-                    log::debug!("parse_block_entries: Block decompression failed ({}), parsing raw data instead. First 32 bytes: {:02x?}",
+                    tracing::debug!("parse_block_entries: Block decompression failed ({}), parsing raw data instead. First 32 bytes: {:02x?}",
                         e, &block_data[..std::cmp::min(32, block_data.len())]);
                     // Fall back to raw data
                     block_data.to_vec()
                 }
             }
         } else {
-            log::debug!("parse_block_entries: No compression, using raw block data");
+            tracing::debug!("parse_block_entries: No compression, using raw block data");
             block_data.to_vec()
         };
 
@@ -134,7 +134,7 @@ impl SSTableReader {
         // V5_0NewBig/Bti use true 'oa' format with VInt encoding
         let data_format = self.header.cassandra_version.data_format();
 
-        log::debug!(
+        tracing::debug!(
             "parse_block_entries: Format: {:?}, DataFormat: {:?}",
             self.header.cassandra_version,
             data_format
@@ -146,23 +146,23 @@ impl SSTableReader {
             crate::parser::header::DataFormat::V5UncompressedOA
         );
 
-        log::debug!(
+        tracing::debug!(
             "parse_block_entries: use_state_machine: {}",
             use_state_machine
         );
 
         if use_state_machine {
-            log::debug!("parse_block_entries: Using state machine for true V5.0 'oa' format (VInt encoding)");
+            tracing::debug!("parse_block_entries: Using state machine for true V5.0 'oa' format (VInt encoding)");
 
             // Log schema availability - NB format files may not have embedded schema
             if let Some(schema) = &self.schema {
-                log::debug!(
+                tracing::debug!(
                     "parse_block_entries: Schema available: {}.{}",
                     schema.keyspace,
                     schema.table
                 );
             } else {
-                log::debug!(
+                tracing::debug!(
                     "[DEBUG SSTableReader::parse_block_entries] No schema in header for {:?}, will use basic state machine",
                     self.header.cassandra_version
                 );
@@ -171,13 +171,13 @@ impl SSTableReader {
             let result = self.parse_block_entries_with_state_machine(&data, schema);
             match &result {
                 Ok(entries) => {
-                    log::debug!(
+                    tracing::debug!(
                         "parse_block_entries: State machine returned {} entries",
                         entries.len()
                     );
                 }
                 Err(e) => {
-                    log::debug!(
+                    tracing::debug!(
                         "[DEBUG SSTableReader::parse_block_entries] State machine failed: {}",
                         e
                     );
@@ -199,7 +199,7 @@ impl SSTableReader {
                     (self.header.keyspace.clone(), self.header.table_name.clone())
                 });
 
-            log::debug!(
+            tracing::debug!(
                 "V5CompressedLegacy format detected, using dedicated parser for {}.{} (from path)",
                 keyspace,
                 table_name
@@ -232,7 +232,7 @@ impl SSTableReader {
                 )
             } else {
                 // No statistics reader - use zeros (may cause incorrect absolute values for delta-coded fields)
-                log::warn!("V5CompressedLegacy: No statistics_reader available, delta-coded timestamps/TTLs will use zero baseline");
+                tracing::warn!("V5CompressedLegacy: No statistics_reader available, delta-coded timestamps/TTLs will use zero baseline");
                 (0, 0, None)
             };
 
@@ -391,8 +391,8 @@ impl SSTableReader {
         data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
-        log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Starting");
-        log::debug!(
+        tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Starting");
+        tracing::debug!(
             "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Data size: {} bytes",
             data.len()
         );
@@ -402,11 +402,11 @@ impl SSTableReader {
 
         // Process multiple rows in the block
         while offset < data.len() {
-            log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Processing at offset {}/{}", offset, data.len());
+            tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Processing at offset {}/{}", offset, data.len());
 
             // Create state machine with schema information if available
             let has_schema = self.get_table_schema(schema).is_some();
-            log::debug!(
+            tracing::debug!(
                 "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Has schema: {}",
                 has_schema
             );
@@ -414,7 +414,7 @@ impl SSTableReader {
             let state_machine_result: Result<RowCellStateMachine> = if let Some(_schema) =
                 self.get_table_schema(schema)
             {
-                log::debug!(
+                tracing::debug!(
                     "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Schema found"
                 );
                 // Modern formats should use schema-aware decode (registered schema) with proper comparators
@@ -423,14 +423,14 @@ impl SSTableReader {
                 match self.header.cassandra_version {
                     crate::parser::header::CassandraVersion::V5_0NewBig
                     | crate::parser::header::CassandraVersion::V5_0Bti => {
-                        log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] True V5.0 'oa' format with VInt encoding");
+                        tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] True V5.0 'oa' format with VInt encoding");
                         // V5.0 true 'oa' formats: Use schema-aware state machine with partition key comparators
                         // These use VInt-encoded partition key component counts and lengths
 
                         // Use schema-aware state machine for V5.0 formats
                         match _schema.get_partition_key_comparators() {
                             Ok(comparators) if !comparators.is_empty() => {
-                                log::debug!("Creating schema-aware state machine with {} partition key comparators", comparators.len());
+                                tracing::debug!("Creating schema-aware state machine with {} partition key comparators", comparators.len());
                                 // Use first comparator for now (composite keys handled internally)
                                 Ok(RowCellStateMachine::with_schema(
                                     _schema.clone(),
@@ -438,11 +438,11 @@ impl SSTableReader {
                                 ))
                             }
                             Ok(_) => {
-                                log::debug!("Schema has no partition key comparators, using basic state machine");
+                                tracing::debug!("Schema has no partition key comparators, using basic state machine");
                                 Ok(RowCellStateMachine::new())
                             }
                             Err(e) => {
-                                log::debug!("Failed to get partition key comparators: {}, using basic state machine", e);
+                                tracing::debug!("Failed to get partition key comparators: {}, using basic state machine", e);
                                 Ok(RowCellStateMachine::new())
                             }
                         }
@@ -451,12 +451,12 @@ impl SSTableReader {
                         // Legacy formats can use basic state machine as last resort
                         #[cfg(feature = "legacy-heuristics")]
                         {
-                            log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format, using basic state machine");
+                            tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format, using basic state machine");
                             Ok(RowCellStateMachine::new())
                         }
                         #[cfg(not(feature = "legacy-heuristics"))]
                         {
-                            log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format but legacy-heuristics not enabled");
+                            tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format but legacy-heuristics not enabled");
                             Err(Error::Schema(
                                 "Basic state machine parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
                             ))
@@ -464,28 +464,28 @@ impl SSTableReader {
                     }
                 }
             } else {
-                log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema available from header");
+                tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema available from header");
                 // No schema available from header - check format restrictions
                 // NOTE: Only V5_0NewBig and V5_0Bti use true 'oa' format with VInt encoding
                 match self.header.cassandra_version {
                     crate::parser::header::CassandraVersion::V5_0NewBig
                     | crate::parser::header::CassandraVersion::V5_0Bti => {
-                        log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] True V5.0 'oa' format without header schema");
+                        tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] True V5.0 'oa' format without header schema");
                         // V5.0 true 'oa' format without header schema - use basic state machine
                         // Schema may be provided later by Database layer
                         // Note: These formats use VInt encoding and don't require legacy-heuristics
-                        log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 'oa' format (no schema available)");
+                        tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Using basic state machine for V5.0 'oa' format (no schema available)");
                         Ok(RowCellStateMachine::new())
                     }
                     _ => {
                         #[cfg(feature = "legacy-heuristics")]
                         {
-                            log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format without schema, using basic state machine");
+                            tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Legacy format without schema, using basic state machine");
                             Ok(RowCellStateMachine::new())
                         }
                         #[cfg(not(feature = "legacy-heuristics"))]
                         {
-                            log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema and legacy-heuristics not enabled");
+                            tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] No schema and legacy-heuristics not enabled");
                             Err(Error::Schema(
                                 "Schema-less parsing requires legacy-heuristics feature for legacy compatibility.".to_string()
                             ))
@@ -494,7 +494,7 @@ impl SSTableReader {
                 }
             };
 
-            log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] State machine creation result: {}",
+            tracing::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] State machine creation result: {}",
                       if state_machine_result.is_ok() { "OK" } else { "ERROR" });
 
             let mut _state_machine: RowCellStateMachine = state_machine_result?;
@@ -510,7 +510,7 @@ impl SSTableReader {
                 Ok(consumed) => {
                     if consumed == 0 {
                         // No progress made, avoid infinite loop
-                        log::warn!(
+                        tracing::warn!(
                             "State machine made no progress at offset {}, stopping",
                             offset
                         );
@@ -523,13 +523,13 @@ impl SSTableReader {
                             let converted_entries =
                                 self.convert_parsed_row_to_entries(&parsed_row)?;
                             entries.extend(converted_entries);
-                            log::debug!(
+                            tracing::debug!(
                                 "Successfully parsed row with {} clustering rows",
                                 parsed_row.clustering_rows.len()
                             );
                         }
                     } else if _state_machine.has_error() {
-                        log::warn!(
+                        tracing::warn!(
                             "State machine error: {}",
                             _state_machine.error_message().unwrap_or("Unknown error")
                         );
@@ -540,7 +540,7 @@ impl SSTableReader {
                     offset += consumed;
                 }
                 Err(e) => {
-                    log::warn!("State machine processing error: {}", e);
+                    tracing::warn!("State machine processing error: {}", e);
                     // Fall back to legacy parsing
                     break;
                 }
@@ -549,7 +549,7 @@ impl SSTableReader {
 
         // If state machine didn't handle all data, fall back to legacy parsing for remainder
         if offset < data.len() {
-            log::debug!(
+            tracing::debug!(
                 "Falling back to legacy parsing for remaining {} bytes",
                 data.len() - offset
             );

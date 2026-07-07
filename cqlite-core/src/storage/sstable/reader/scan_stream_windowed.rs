@@ -889,7 +889,7 @@ impl SSTableReader {
         #[cfg(feature = "scan-offload-probe")]
         probe::record_parse_thread();
 
-        log::debug!(
+        tracing::debug!(
             "drain_scan_window_blocking: drained {} chunks (final window {} bytes)",
             chunk_count,
             window.len()

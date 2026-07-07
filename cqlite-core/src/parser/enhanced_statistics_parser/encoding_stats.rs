@@ -44,12 +44,12 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
     // Use the TOC-based offset to read from the correct location.
 
     let Some(offset) = header_offset else {
-        log::debug!("No HEADER TOC offset, using fallback EncodingStats parsing");
+        tracing::debug!("No HEADER TOC offset, using fallback EncodingStats parsing");
         return parse_encoding_stats_fallback(input, gates);
     };
 
     if offset >= full_input.len() {
-        log::warn!(
+        tracing::warn!(
             "TOC offset 0x{:x} exceeds input length {}, using fallback",
             offset,
             full_input.len()
@@ -58,7 +58,7 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
     }
 
     let header_data = &full_input[offset..];
-    log::debug!(
+    tracing::debug!(
         "Parsing EncodingStats + SerializationHeader at TOC offset 0x{:x} ({} bytes available)",
         offset,
         header_data.len()
@@ -68,7 +68,7 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
     let (rest, (min_timestamp, min_deletion_time, min_ttl)) =
         parse_encoding_stats_vuints(header_data, gates)?;
 
-    log::debug!(
+    tracing::debug!(
         "EncodingStats from HEADER: min_timestamp={}, min_deletion_time={}, min_ttl={:?}",
         min_timestamp,
         min_deletion_time,
@@ -80,7 +80,7 @@ pub(super) fn parse_minimal_encoding_stats<'a>(
     {
         Ok((_, result)) => result,
         Err(e) => {
-            log::warn!(
+            tracing::warn!(
                 "Schema parsing after EncodingStats failed: {:?}, falling back to marker search",
                 e
             );

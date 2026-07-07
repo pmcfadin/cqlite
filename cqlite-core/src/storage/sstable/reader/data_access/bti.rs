@@ -13,7 +13,7 @@ use super::model::{
 };
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
-use log::debug;
+use tracing::debug;
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
 
@@ -1332,7 +1332,7 @@ impl SSTableReader {
             results.truncate(lim);
         }
 
-        log::debug!(
+        tracing::debug!(
             "SSTableReader::bti_scan_with_metadata - Returning {} results",
             results.len()
         );

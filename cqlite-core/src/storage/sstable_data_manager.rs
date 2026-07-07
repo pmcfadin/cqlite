@@ -658,7 +658,7 @@ impl SSTableDataManager {
                 }
                 // Markers (row tombstone / null row) carry no columns.
                 ScanRow::Marker(marker) => {
-                    log::debug!(
+                    tracing::debug!(
                         "Skipping non-row scan marker for key {:?}: {:?}",
                         row_key,
                         marker

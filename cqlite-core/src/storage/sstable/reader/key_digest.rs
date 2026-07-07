@@ -41,7 +41,7 @@ impl SSTableReader {
                         .await
                     {
                         Ok(parsing_context) => {
-                            log::debug!(
+                            tracing::debug!(
                                 "Using schema-driven Murmur3 digest for modern format {:?}",
                                 self.header.cassandra_version
                             );
@@ -78,12 +78,12 @@ impl SSTableReader {
                         .await
                     {
                         Ok(parsing_context) => {
-                            log::debug!("Using schema-driven Murmur3 digest for legacy format");
+                            tracing::debug!("Using schema-driven Murmur3 digest for legacy format");
                             return computer
                                 .compute_partition_key_digest(partition_key, &parsing_context);
                         }
                         Err(e) => {
-                            log::warn!(
+                            tracing::warn!(
                                 "Failed to get parsing context for legacy format, falling back to simple digest: {}",
                                 e
                             );
@@ -97,7 +97,7 @@ impl SSTableReader {
         // Legacy path: only allow simple digest when legacy-heuristics feature is enabled
         #[cfg(feature = "legacy-heuristics")]
         {
-            log::warn!("Falling back to simple digest - this may cause incorrect Index.db lookups");
+            tracing::warn!("Falling back to simple digest - this may cause incorrect Index.db lookups");
             computer.compute_simple_digest(partition_key)
         }
 

@@ -30,7 +30,7 @@ use sequential::{parse_serialization_header_at_offset, parse_serialization_heade
 pub(super) fn parse_serialization_header(
     input: &[u8],
 ) -> IResult<&[u8], SerializationHeaderResult> {
-    log::debug!(
+    tracing::debug!(
         "Searching for SerializationHeader in {} bytes (max search: 8KB)",
         input.len()
     );
@@ -42,7 +42,7 @@ pub(super) fn parse_serialization_header(
         .map(|b| format!("{:02x}", b))
         .collect::<Vec<_>>()
         .join(" ");
-    log::debug!(
+    tracing::debug!(
         "Input buffer size: {} bytes, first 64 bytes: {}",
         input.len(),
         preview_hex
@@ -61,7 +61,7 @@ pub(super) fn parse_serialization_header(
         if &input[search_offset..search_offset + marshal_pattern.len()] == marshal_pattern {
             let context_start = search_offset.saturating_sub(10);
             let context_end = (search_offset + 50).min(input.len());
-            log::debug!(
+            tracing::debug!(
                 "Found 'org.apache.cassandra.db.marshal' at offset {}, context (offset-10 to offset+50): {:02x?}",
                 search_offset,
                 &input[context_start..context_end]
@@ -107,7 +107,7 @@ pub(super) fn parse_serialization_header(
                         if !pk_types.is_empty()
                             && pk_types[0].contains("org.apache.cassandra.db.marshal")
                         {
-                            log::debug!(
+                            tracing::debug!(
                                 "Successfully parsed SerializationHeader at offset {} (lookback: {}): pk_type={}",
                                 type_len_offset,
                                 lookback,
@@ -124,7 +124,7 @@ pub(super) fn parse_serialization_header(
                     if input[prev_offset] == 0x00 && input[type_len_offset] == 0x00 {
                         let result = parse_serialization_header_at_offset(&input[prev_offset..]);
                         if result.is_ok() {
-                            log::debug!(
+                            tracing::debug!(
                                 "Successfully parsed SerializationHeader at legacy marker offset {}",
                                 prev_offset
                             );
@@ -137,18 +137,18 @@ pub(super) fn parse_serialization_header(
         search_offset += 1;
     }
 
-    log::debug!(
+    tracing::debug!(
         "Search completed: searched {} bytes, no partition key type found",
         search_offset
     );
 
     // Partition key type not found - try to find regular columns directly
     // This handles files where SerializationHeader contains only regular columns
-    log::debug!("Attempting to parse regular columns without partition key metadata");
+    tracing::debug!("Attempting to parse regular columns without partition key metadata");
     let (remaining, (partition_keys, columns)) = parse_regular_columns(input)?;
 
     if !columns.is_empty() {
-        log::debug!(
+        tracing::debug!(
             "Successfully parsed {} regular columns, {} partition keys via backtracking",
             columns.len(),
             partition_keys.len()
@@ -157,13 +157,13 @@ pub(super) fn parse_serialization_header(
     }
 
     // Nothing found - return empty results
-    log::warn!(
+    tracing::warn!(
         "Failed to locate SerializationHeader or regular columns: searched {} bytes",
         search_offset
     );
 
     if let Some((pk_types, ck_types, cols)) = fallback_parse_serialization_header_ascii(input) {
-        log::debug!(
+        tracing::debug!(
             "ASCII fallback extracted SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
             pk_types.len(),
             ck_types.len(),
@@ -185,7 +185,7 @@ fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Op
         return None;
     }
 
-    log::debug!(
+    tracing::debug!(
         "Backtracking from marker at offset {} (input len: {})",
         marker_offset,
         input.len()
@@ -196,7 +196,7 @@ fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Op
     // so we need to search back at least 209 bytes (200 + 9)
     let max_lookback = 210;
     let search_start = marker_offset.saturating_sub(max_lookback);
-    log::debug!(
+    tracing::debug!(
         "Searching for VInt from offset {} to {} ({} positions)",
         search_start,
         marker_offset,
@@ -230,7 +230,7 @@ fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Op
                 // 3. It matches Cassandra marshal type patterns
                 if type_end == marker_offset {
                     if let Ok(type_str) = std::str::from_utf8(&input[type_start..type_end]) {
-                        log::debug!(
+                        tracing::debug!(
                             "Candidate at vint_start={}: type_len={}, type_start={}, type_end={}, str={}",
                             vint_start, type_len, type_start, type_end, type_str
                         );
@@ -238,7 +238,7 @@ fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Op
                         // Note: Partition key types may or may not start with '('
                         // Both "(org.apache.cassandra..." and "org.apache.cassandra..." are valid
                         if type_str.contains("org.apache.cassandra") {
-                            log::debug!(
+                            tracing::debug!(
                                 "Found partition key type at offset {}: length={}, type={}",
                                 vint_start,
                                 type_len,
@@ -246,14 +246,14 @@ fn extract_partition_key_before_marker(input: &[u8], marker_offset: usize) -> Op
                             );
                             return Some(type_str.to_string());
                         } else {
-                            log::debug!(
+                            tracing::debug!(
                                 "Rejected candidate (starts_with='(': {}, contains 'org.apache.cassandra': {})",
                                 type_str.starts_with('('),
                                 type_str.contains("org.apache.cassandra")
                             );
                         }
                     } else {
-                        log::debug!(
+                        tracing::debug!(
                             "Rejected candidate at vint_start={}: not valid UTF-8",
                             vint_start
                         );
@@ -294,15 +294,15 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 continue;
             }
 
-            log::debug!(
+            tracing::debug!(
                 "Attempting to extract partition key by backtracking from marker at offset {}",
                 marker_offset
             );
             if let Some(pk_type) = extract_partition_key_before_marker(input, marker_offset) {
-                log::debug!("Found partition key type before marker: {}", pk_type);
+                tracing::debug!("Found partition key type before marker: {}", pk_type);
                 partition_key_types.push(pk_type);
             } else {
-                log::debug!(
+                tracing::debug!(
                     "No partition key type found via backtracking at offset {}",
                     marker_offset
                 );
@@ -316,7 +316,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 .map(|b| format!("{:02x}", b))
                 .collect::<Vec<_>>()
                 .join(" ");
-            log::debug!(
+            tracing::debug!(
                 "Pattern found at offset {}: count={}, next 128 bytes: {}",
                 marker_offset,
                 column_count,
@@ -329,7 +329,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
 
             for col_idx in 0..column_count {
                 if pos >= input.len() {
-                    log::debug!(
+                    tracing::debug!(
                         "Column {} parsing failed at offset {}: position {} exceeds buffer length {}",
                         col_idx,
                         marker_offset,
@@ -341,7 +341,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 }
 
                 if pos >= input.len() {
-                    log::debug!(
+                    tracing::debug!(
                         "Column {} parsing failed at offset {}: no data available for name length byte (pos={}, len={})",
                         col_idx,
                         marker_offset,
@@ -356,7 +356,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 pos += 1;
 
                 if name_len == 0 || name_len > 200 || pos + name_len > input.len() {
-                    log::debug!(
+                    tracing::debug!(
                         "Column {} parsing failed at offset {}: name_len sanity check failed (name_len={}, pos={}, buffer_len={})",
                         col_idx,
                         marker_offset,
@@ -378,7 +378,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                             .map(|b| format!("{:02x}", b))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        log::debug!(
+                        tracing::debug!(
                             "Column {} parsing failed at offset {}: UTF-8 decode error for column name at pos {} (len={}): {:?}, bytes: {}",
                             col_idx,
                             marker_offset,
@@ -394,7 +394,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 pos += name_len;
 
                 if pos >= input.len() {
-                    log::debug!(
+                    tracing::debug!(
                         "Column {} ('{}') parsing failed at offset {}: no data available for type length byte (pos={}, len={})",
                         col_idx,
                         column_name,
@@ -411,7 +411,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 let (type_remaining, type_len_u64) = match type_len_result {
                     Ok(r) => r,
                     Err(_) => {
-                        log::debug!(
+                        tracing::debug!(
                             "Column {} ('{}') parsing failed at offset {}: VInt parse error at pos {}",
                             col_idx,
                             column_name,
@@ -426,7 +426,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 pos = input.len() - type_remaining.len();
 
                 if type_len == 0 || type_len > 5000 || pos + type_len > input.len() {
-                    log::debug!(
+                    tracing::debug!(
                         "Column {} ('{}') parsing failed at offset {}: type_len sanity check failed (type_len={}, pos={}, buffer_len={})",
                         col_idx,
                         column_name,
@@ -449,7 +449,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                             .map(|b| format!("{:02x}", b))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        log::debug!(
+                        tracing::debug!(
                             "Column {} ('{}') parsing failed at offset {}: UTF-8 decode error for column type at pos {} (len={}): {:?}, bytes: {}",
                             col_idx,
                             column_name,
@@ -483,14 +483,14 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
                 // Successfully parsed all columns
                 let column_names: Vec<&str> =
                     parsed_columns.iter().map(|c| c.name.as_str()).collect();
-                log::debug!(
+                tracing::debug!(
                     "Successfully parsed {} columns at offset {}: {:?}",
                     parsed_columns.len(),
                     marker_offset,
                     column_names
                 );
                 if !partition_key_types.is_empty() {
-                    log::debug!(
+                    tracing::debug!(
                         "Extracted {} partition key types via backtracking: {:?}",
                         partition_key_types.len(),
                         partition_key_types
@@ -506,7 +506,7 @@ fn parse_regular_columns(input: &[u8]) -> IResult<&[u8], (Vec<String>, Vec<Colum
     }
 
     // Column section not found - return empty vecs (not an error, some files may have no regular columns)
-    log::debug!(
+    tracing::debug!(
         "Regular column section not found: searched {} bytes",
         search_offset
     );

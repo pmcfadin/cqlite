@@ -24,7 +24,7 @@
 // Allow deprecated warnings within this module since the entire module is deprecated
 #![allow(deprecated)]
 
-use log::{debug, info, warn};
+use tracing::{debug, info, warn};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};

@@ -44,7 +44,7 @@ pub fn extract_sstable_base_name(path: &Path) -> Option<String> {
     if parts.len() >= 4 {
         Some(parts[0..3].join("-"))
     } else {
-        log::warn!("Non-standard SSTable filename pattern: {}", filename);
+        tracing::warn!("Non-standard SSTable filename pattern: {}", filename);
         None
     }
 }

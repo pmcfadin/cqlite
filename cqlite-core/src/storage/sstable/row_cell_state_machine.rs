@@ -1010,7 +1010,7 @@ impl RowCellStateMachine {
 
             // Skip empty or very small chunks
             if remaining_data.len() < 8 {
-                log::debug!(
+                tracing::debug!(
                     "Skipping small data chunk of {} bytes",
                     remaining_data.len()
                 );
@@ -1026,12 +1026,12 @@ impl RowCellStateMachine {
 
                     // Prevent infinite loops
                     if consumed_bytes == 0 {
-                        log::debug!("No progress made, stopping partition parsing");
+                        tracing::debug!("No progress made, stopping partition parsing");
                         break;
                     }
                 }
                 Err(e) => {
-                    log::debug!("Failed to parse row at offset {}: {}", offset, e);
+                    tracing::debug!("Failed to parse row at offset {}: {}", offset, e);
 
                     // For Issue #35 compliance, try more aggressive parsing methods
                     // before giving up completely
@@ -1042,11 +1042,11 @@ impl RowCellStateMachine {
                             offset += std::cmp::min(remaining_data.len(), 64);
                         }
                         Ok(None) => {
-                            log::debug!("No alternative parsing method succeeded, stopping");
+                            tracing::debug!("No alternative parsing method succeeded, stopping");
                             break;
                         }
                         Err(_) => {
-                            log::debug!("All parsing methods failed, stopping");
+                            tracing::debug!("All parsing methods failed, stopping");
                             break;
                         }
                     }
@@ -1054,7 +1054,7 @@ impl RowCellStateMachine {
             }
         }
 
-        log::debug!("Parsed {} rows from partition data", results.len());
+        tracing::debug!("Parsed {} rows from partition data", results.len());
         Ok(results)
     }
 

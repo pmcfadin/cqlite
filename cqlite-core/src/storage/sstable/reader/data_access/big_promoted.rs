@@ -36,7 +36,7 @@ use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
 use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
-use log::debug;
+use tracing::debug;
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
 

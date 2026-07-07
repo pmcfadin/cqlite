@@ -24,14 +24,14 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     // Parse keyType (partition key type)
     let (input, pk_type_len) = parse_vuint(input)?;
     if pk_type_len == 0 || pk_type_len > 5000 {
-        log::debug!("Invalid pk_type_len: {}", pk_type_len);
+        tracing::debug!("Invalid pk_type_len: {}", pk_type_len);
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Verify,
         )));
     }
     if pk_type_len > 1000 {
-        log::warn!(
+        tracing::warn!(
             "Unusually long partition key type string: {} bytes (typical <1000)",
             pk_type_len
         );
@@ -41,7 +41,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     let partition_key_type = match std::str::from_utf8(pk_type_bytes) {
         Ok(s) => convert_marshal_type_to_cql(s),
         Err(_) => {
-            log::debug!("Invalid UTF-8 in partition key type");
+            tracing::debug!("Invalid UTF-8 in partition key type");
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
@@ -49,7 +49,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         }
     };
 
-    log::debug!(
+    tracing::debug!(
         "HEADER: Partition key type: {} ({} bytes)",
         partition_key_type,
         pk_type_len
@@ -59,7 +59,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     let (input, clustering_count) = parse_vuint(input)?;
     // Sanity check: Cassandra tables rarely have >100 clustering keys
     if clustering_count > 1000 {
-        log::warn!(
+        tracing::warn!(
             "Suspicious clustering_count={} in SerializationHeader (expected <100)",
             clustering_count
         );
@@ -68,7 +68,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             nom::error::ErrorKind::Verify,
         )));
     }
-    log::debug!("HEADER: {} clustering key types", clustering_count);
+    tracing::debug!("HEADER: {} clustering key types", clustering_count);
 
     let mut input = input;
     let mut clustering_key_types = Vec::with_capacity(clustering_count as usize);
@@ -76,14 +76,14 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     for i in 0..clustering_count {
         let (remaining, ck_type_len) = parse_vuint(input)?;
         if ck_type_len == 0 || ck_type_len > 5000 {
-            log::debug!("Invalid clustering key type length: {}", ck_type_len);
+            tracing::debug!("Invalid clustering key type length: {}", ck_type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
         }
         if ck_type_len > 1000 {
-            log::warn!(
+            tracing::warn!(
                 "Unusually long clustering key type string: {} bytes (typical <1000)",
                 ck_type_len
             );
@@ -99,7 +99,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let ck_type = match std::str::from_utf8(ck_type_bytes) {
             Ok(s) => s.to_string(),
             Err(_) => {
-                log::debug!("Invalid UTF-8 in clustering key type {}", i);
+                tracing::debug!("Invalid UTF-8 in clustering key type {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Verify,
@@ -107,7 +107,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             }
         };
 
-        log::debug!(
+        tracing::debug!(
             "HEADER: Clustering key {}: {} ({} bytes)",
             i,
             ck_type,
@@ -121,7 +121,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     let (input, static_count) = parse_vuint(input)?;
     // Sanity check: Cassandra tables rarely have >1000 static columns
     if static_count > 10000 {
-        log::warn!(
+        tracing::warn!(
             "Suspicious static_count={} in SerializationHeader (expected <1000)",
             static_count
         );
@@ -130,7 +130,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             nom::error::ErrorKind::Verify,
         )));
     }
-    log::debug!("HEADER: {} static columns", static_count);
+    tracing::debug!("HEADER: {} static columns", static_count);
 
     let mut input = input;
     let mut static_columns = Vec::with_capacity(static_count as usize);
@@ -139,7 +139,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         // Column name
         let (remaining, name_len) = parse_vuint(input)?;
         if name_len == 0 || name_len > 200 {
-            log::debug!("Invalid static column name length: {}", name_len);
+            tracing::debug!("Invalid static column name length: {}", name_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
@@ -150,7 +150,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let column_name = match std::str::from_utf8(name_bytes) {
             Ok(s) => s.to_string(),
             Err(_) => {
-                log::debug!("Invalid UTF-8 in static column name {}", i);
+                tracing::debug!("Invalid UTF-8 in static column name {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Verify,
@@ -161,14 +161,14 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         // Column type
         let (remaining, type_len) = parse_vuint(remaining)?;
         if type_len == 0 || type_len > 5000 {
-            log::debug!("Invalid static column type length: {}", type_len);
+            tracing::debug!("Invalid static column type length: {}", type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
         }
         if type_len > 1000 {
-            log::warn!(
+            tracing::warn!(
                 "Unusually long static column type string: {} bytes (typical <1000)",
                 type_len
             );
@@ -178,7 +178,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let cql_type = match std::str::from_utf8(type_bytes) {
             Ok(s) => convert_marshal_type_to_cql(s),
             Err(_) => {
-                log::debug!("Invalid UTF-8 in static column type {}", i);
+                tracing::debug!("Invalid UTF-8 in static column type {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Verify,
@@ -186,7 +186,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             }
         };
 
-        log::debug!(
+        tracing::debug!(
             "HEADER: Static column '{}': {} ({} bytes)",
             column_name,
             cql_type,
@@ -210,7 +210,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     let (input, regular_count) = parse_vuint(input)?;
     // Sanity check: Cassandra tables rarely have >1000 regular columns
     if regular_count > 10000 {
-        log::warn!(
+        tracing::warn!(
             "Suspicious regular_count={} in SerializationHeader (expected <1000)",
             regular_count
         );
@@ -219,7 +219,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             nom::error::ErrorKind::Verify,
         )));
     }
-    log::debug!("HEADER: {} regular columns", regular_count);
+    tracing::debug!("HEADER: {} regular columns", regular_count);
 
     let mut input = input;
     let mut regular_columns = Vec::with_capacity(regular_count as usize);
@@ -228,7 +228,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         // Column name
         let (remaining, name_len) = parse_vuint(input)?;
         if name_len == 0 || name_len > 200 {
-            log::debug!("Invalid regular column name length: {}", name_len);
+            tracing::debug!("Invalid regular column name length: {}", name_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
@@ -239,7 +239,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let column_name = match std::str::from_utf8(name_bytes) {
             Ok(s) => s.to_string(),
             Err(_) => {
-                log::debug!("Invalid UTF-8 in regular column name {}", i);
+                tracing::debug!("Invalid UTF-8 in regular column name {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Verify,
@@ -250,14 +250,14 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         // Column type
         let (remaining, type_len) = parse_vuint(remaining)?;
         if type_len == 0 || type_len > 5000 {
-            log::debug!("Invalid regular column type length: {}", type_len);
+            tracing::debug!("Invalid regular column type length: {}", type_len);
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
             )));
         }
         if type_len > 1000 {
-            log::warn!(
+            tracing::warn!(
                 "Unusually long regular column type string: {} bytes (typical <1000)",
                 type_len
             );
@@ -267,7 +267,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
         let cql_type = match std::str::from_utf8(type_bytes) {
             Ok(s) => convert_marshal_type_to_cql(s),
             Err(_) => {
-                log::debug!("Invalid UTF-8 in regular column type {}", i);
+                tracing::debug!("Invalid UTF-8 in regular column type {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Verify,
@@ -275,7 +275,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
             }
         };
 
-        log::debug!(
+        tracing::debug!(
             "HEADER: Regular column '{}': {} ({} bytes)",
             column_name,
             cql_type,
@@ -299,7 +299,7 @@ pub(in crate::parser::enhanced_statistics_parser) fn parse_serialization_header_
     let mut all_columns = static_columns;
     all_columns.extend(regular_columns);
 
-    log::debug!(
+    tracing::debug!(
         "HEADER parsing complete: partition_key='{}', {} clustering keys, {} total columns",
         partition_key_type,
         clustering_key_types.len(),

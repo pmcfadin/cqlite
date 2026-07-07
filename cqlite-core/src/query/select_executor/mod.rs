@@ -480,7 +480,7 @@ impl SelectExecutor {
 
         // Check if query requires full materialization (ORDER BY, GROUP BY, projection trim)
         if self.requires_materialization(&plan) {
-            log::info!("Query requires materialization (ORDER BY/GROUP BY/projection trim), using execute-then-stream");
+            tracing::info!("Query requires materialization (ORDER BY/GROUP BY/projection trim), using execute-then-stream");
             return self.execute_and_stream(plan, config).await;
         }
 
@@ -557,7 +557,7 @@ impl SelectExecutor {
             )
             .await
             {
-                log::error!("Streaming execution error: {}", e);
+                tracing::error!("Streaming execution error: {}", e);
                 // Issue #1581 (roborev finding): surface the error through the
                 // channel as a terminal `Err` item instead of merely logging it
                 // and letting the channel close — a silent close previously made
@@ -1255,7 +1255,7 @@ impl SelectExecutor {
                             ));
                         }
 
-                        log::debug!(
+                        tracing::debug!(
                             "SELECT * resolved {} columns from schema for {:?}.{}",
                             columns.len(),
                             keyspace_opt,

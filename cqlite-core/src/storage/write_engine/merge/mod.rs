@@ -1121,7 +1121,7 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
         let stats_bytes = match std::fs::read(&stats_path) {
             Ok(b) => b,
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "Could not read Statistics.db {:?} for baseline pre-seeding: {}",
                     stats_path,
                     e
@@ -1194,7 +1194,7 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                         Err(e) => {
                             // Unparseable extras: stay conservative and INCLUDE (do NOT skip
                             // a possibly-real LDT baseline). `true` forces the `.min()` below.
-                            log::debug!(
+                            tracing::debug!(
                                 "STATS-extras decode failed for {:?} during baseline seeding; \
                              conservatively including its LDT baseline: {:?}",
                                 stats_path,
@@ -1213,7 +1213,7 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                 }
             }
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "Could not parse Statistics.db {:?} for baseline pre-seeding: {:?}",
                     stats_path,
                     e
@@ -1257,7 +1257,7 @@ pub(crate) fn compute_expiry_ttl_ldt_floor(input_paths: &[PathBuf]) -> Option<i3
         let stats_bytes = match std::fs::read(&stats_path) {
             Ok(b) => b,
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "Could not read Statistics.db {:?} for expiry-TTL LDT floor: {}",
                     stats_path,
                     e
@@ -1340,7 +1340,7 @@ pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64>
         let stats_bytes = match std::fs::read(&stats_path) {
             Ok(b) => b,
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "Could not read Statistics.db {:?} for max-purgeable bound: {}",
                     stats_path,
                     e
@@ -1356,7 +1356,7 @@ pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64>
                 min_ts = min_ts.min(sstable_stats.timestamp_stats.min_timestamp);
             }
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "Could not parse Statistics.db {:?} for max-purgeable bound: {:?}",
                     stats_path,
                     e
@@ -1569,7 +1569,7 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
         let stats_bytes = match std::fs::read(&stats_path) {
             Ok(b) => b,
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "effective_compaction_schema: cannot read Statistics.db {:?}: {}",
                     stats_path,
                     e
@@ -1590,7 +1590,7 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
                 }
             }
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "effective_compaction_schema: cannot parse Statistics.db {:?}: {:?}",
                     stats_path,
                     e
@@ -1604,7 +1604,7 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
     }
 
     added.sort_by(|a, b| a.0.cmp(&b.0));
-    log::info!(
+    tracing::info!(
         "effective_compaction_schema: re-adding {} static column(s) dropped from schema \
          {}.{} but still present in input SSTable headers: {:?}",
         added.len(),
@@ -1938,7 +1938,7 @@ pub async fn compact_sstables_with_registry(
         if let Err(e) =
             crate::storage::write_engine::WriteEngine::delete_sstable_files_static(dropped)
         {
-            log::warn!(
+            tracing::warn!(
                 "Failed to delete dropped-whole compaction input {:?}: {} \
                  (output is valid; leftover is an invisible orphan)",
                 dropped,
@@ -2571,7 +2571,7 @@ impl KWayMerger {
             (Some(ck_a), Some(ck_b)) => {
                 // Use schema-aware comparison if available
                 ck_a.compare(ck_b, &self.schema).unwrap_or_else(|e| {
-                    log::warn!(
+                    tracing::warn!(
                         "Schema-aware clustering key comparison failed, using fallback: {}",
                         e
                     );

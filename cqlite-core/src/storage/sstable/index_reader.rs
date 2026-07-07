@@ -294,7 +294,7 @@ fn parse_index_data_with_summary<'a>(
     let registry = get_global_registry();
     let (remaining, header) = match registry.parse_index_header(input) {
         Ok(parsed_header) => {
-            log::debug!("Successfully parsed Index.db header using spec-driven approach");
+            tracing::debug!("Successfully parsed Index.db header using spec-driven approach");
 
             // Convert ParsedHeader to IndexHeader
             let header = IndexHeader {
@@ -328,7 +328,7 @@ fn parse_index_data_with_summary<'a>(
             (&input[header_size..], header)
         }
         Err(_) => {
-            log::debug!("Spec-driven header parsing failed, assuming headerless format");
+            tracing::debug!("Spec-driven header parsing failed, assuming headerless format");
 
             // Parse all partition key digests - no header in some formats
             let header = IndexHeader {
@@ -413,7 +413,7 @@ fn parse_all_partition_keys_with_summary<'a>(
                 entry_index += 1;
             }
             Err(_e) => {
-                log::debug!(
+                tracing::debug!(
                     "Stopped parsing Index.db at entry {} with {} bytes remaining",
                     entry_index,
                     remaining.len()
@@ -423,7 +423,7 @@ fn parse_all_partition_keys_with_summary<'a>(
         }
     }
 
-    log::debug!("Parsed {} partition entries from Index.db", entries.len());
+    tracing::debug!("Parsed {} partition entries from Index.db", entries.len());
     Ok((remaining, entries))
 }
 
@@ -453,7 +453,7 @@ pub(crate) fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionInd
     let promoted_len = usize::try_from(promoted_len).unwrap_or(usize::MAX);
     let (input, promoted_data) = take(promoted_len)(input)?;
 
-    log::trace!(
+    tracing::trace!(
         "Index.db BIG entry: key_len={}, data_offset={}, promoted_len={}",
         key_len,
         data_offset,

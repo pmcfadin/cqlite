@@ -183,7 +183,7 @@ pub(crate) async fn parse_header_with_version_detection(
             .unwrap_or(false);
 
     if is_nb_or_oa_format {
-        log::debug!(
+        tracing::debug!(
             "Detected BIG format (nb/oa) from filename '{}' — checking for embedded header presence",
             path.display()
         );
@@ -232,7 +232,7 @@ pub(crate) async fn parse_header_with_version_detection(
             ) && (header_buffer[0] & 0x80) != 0;
 
             if detected_version.is_some() && !is_snappy_varint_collision {
-                log::debug!(
+                tracing::debug!(
                     "NB format file '{}' has embedded header (magic: 0x{:08x}) - using standard header parsing",
                     path.display(),
                     first_4_bytes
@@ -240,7 +240,7 @@ pub(crate) async fn parse_header_with_version_detection(
                 // Fall through to standard header parsing below
             } else if is_snappy_varint_collision {
                 // Snappy varint collision detected - treat as headerless
-                log::debug!(
+                tracing::debug!(
                     "NB format file '{}' has Snappy varint collision with magic 0x{:08x} - treating as headerless",
                     path.display(),
                     first_4_bytes
@@ -248,7 +248,7 @@ pub(crate) async fn parse_header_with_version_detection(
                 return create_minimal_nb_header(path).await;
             } else {
                 // True headerless NB format - first 4 bytes are compressed data
-                log::debug!(
+                tracing::debug!(
                     "NB format file '{}' is headerless (first bytes: 0x{:08x}) - loading CompressionInfo.db",
                     path.display(),
                     first_4_bytes
@@ -257,7 +257,7 @@ pub(crate) async fn parse_header_with_version_detection(
             }
         } else {
             // Buffer too small for magic number check, assume headerless
-            log::warn!(
+            tracing::warn!(
                 "NB format file '{}' has insufficient header buffer ({} bytes) - assuming headerless format",
                 path.display(),
                 header_buffer.len()
@@ -272,7 +272,7 @@ pub(crate) async fn parse_header_with_version_detection(
     // never an embedded magic number, so we go straight to a minimal header
     // (versioned V5_0Bti so schema extraction and the V5 row parser engage).
     if matches!(gates, VersionGates::Bti(_)) {
-        log::debug!(
+        tracing::debug!(
             "Detected BTI (da) format from filename '{}' — headerless Data.db, \
              building minimal header from CompressionInfo.db",
             path.display()
@@ -311,7 +311,7 @@ pub(crate) async fn parse_header_with_version_detection(
         let compression_info_exists = check_compression_info_exists(path, parent_dir);
 
         if !compression_info_exists {
-            log::debug!(
+            tracing::debug!(
                 "Detected V5_0Uncompressed magic (0x{:08x}) but no CompressionInfo.db file exists - \
                  treating as headerless uncompressed format (partition data collision). File: '{}'",
                 first_4_bytes,
@@ -321,7 +321,7 @@ pub(crate) async fn parse_header_with_version_detection(
             // This ensures block_io.rs uses the uncompressed read path
             return create_minimal_uncompressed_header(path).await;
         } else {
-            log::debug!(
+            tracing::debug!(
                 "Detected V5_0Uncompressed magic (0x{:08x}) with CompressionInfo.db present - \
                  parsing as standard header. File: '{}'",
                 first_4_bytes,
@@ -334,7 +334,7 @@ pub(crate) async fn parse_header_with_version_detection(
     // If first 4 bytes don't match any known magic number, treat as CRC32 checksum
     let actual_header = if CassandraVersion::from_magic_number(first_4_bytes).is_none() {
         // First 4 bytes are likely a CRC32 checksum prefix
-        log::debug!(
+        tracing::debug!(
             "Detected CRC32 checksum prefix: 0x{:08x} in file '{}'",
             first_4_bytes,
             path.display()
@@ -357,7 +357,7 @@ pub(crate) async fn parse_header_with_version_detection(
 
         if computed_checksum != expected_checksum {
             // Don't fail - just warn. The checksum algorithm or scope may be different.
-            log::warn!(
+            tracing::warn!(
                 "Header CRC32 checksum mismatch for file '{}' \
                  (Expected: 0x{:08x}, Computed: 0x{:08x}). \
                  Proceeding with parsing - checksum validation may use different algorithm.",
@@ -366,7 +366,7 @@ pub(crate) async fn parse_header_with_version_detection(
                 computed_checksum
             );
         } else {
-            log::info!(
+            tracing::info!(
                 "Header CRC32 validated (0x{:08x}) for file '{}'",
                 expected_checksum,
                 path.display()
@@ -383,7 +383,7 @@ pub(crate) async fn parse_header_with_version_detection(
     let registry = get_global_registry();
     match registry.parse_data_header(actual_header) {
         Ok(parsed_header) => {
-            log::debug!(
+            tracing::debug!(
                 "Successfully parsed Data.db header using spec-driven approach for file '{}' \
                  with version: {:?}",
                 path.display(),
@@ -394,7 +394,7 @@ pub(crate) async fn parse_header_with_version_detection(
             return convert_parsed_header_to_sstable_header(parsed_header, actual_header);
         }
         Err(spec_error) => {
-            log::debug!(
+            tracing::debug!(
                 "Spec-driven parsing failed for file '{}', falling back to legacy parser: {}",
                 path.display(),
                 spec_error
@@ -439,7 +439,7 @@ pub(crate) async fn parse_header_with_version_detection(
     // Try to parse using the existing header parser (using actual_header)
     match parse_sstable_header(actual_header) {
         Ok((_, mut header)) => {
-            log::debug!(
+            tracing::debug!(
                 "Successfully parsed header for file '{}' with version: {:?}",
                 path.display(),
                 header.cassandra_version
@@ -457,7 +457,7 @@ pub(crate) async fn parse_header_with_version_detection(
             if cassandra_version == CassandraVersion::Legacy {
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    log::warn!(
+                    tracing::warn!(
                         "Failed to parse full header for legacy format file '{}', \
                          attempting minimal legacy header parsing: {:?}",
                         path.display(),
@@ -592,7 +592,7 @@ fn check_compression_info_exists(data_db_path: &Path, parent_dir: &Path) -> bool
 /// This is used when partition data coincidentally matches V5_0Uncompressed magic
 /// but no CompressionInfo.db file exists, indicating a headerless uncompressed table.
 async fn create_minimal_uncompressed_header(path: &Path) -> Result<SSTableHeader> {
-    log::info!(
+    tracing::info!(
         "Creating minimal uncompressed header for headerless file: {}",
         path.display()
     );
@@ -628,7 +628,7 @@ async fn create_minimal_nb_header(path: &Path) -> Result<SSTableHeader> {
     // Try to load CompressionInfo.db to determine compression algorithm
     let compression_algorithm = match load_nb_compression_info(path).await {
         Ok(info) => {
-            log::info!(
+            tracing::info!(
                 "Loaded CompressionInfo.db for NB format: algorithm={}, chunk_length={}, chunks={}",
                 info.algorithm,
                 info.chunk_length,
@@ -637,7 +637,7 @@ async fn create_minimal_nb_header(path: &Path) -> Result<SSTableHeader> {
             info.algorithm
         }
         Err(e) => {
-            log::warn!(
+            tracing::warn!(
                 "Could not load CompressionInfo.db for NB format file '{}': {}. Assuming no compression.",
                 path.display(),
                 e
@@ -683,7 +683,7 @@ async fn create_minimal_nb_header(path: &Path) -> Result<SSTableHeader> {
 async fn create_minimal_bti_header(path: &Path) -> Result<SSTableHeader> {
     let compression_algorithm = match load_nb_compression_info(path).await {
         Ok(info) => {
-            log::info!(
+            tracing::info!(
                 "Loaded CompressionInfo.db for BTI format: algorithm={}, chunk_length={}, chunks={}",
                 info.algorithm,
                 info.chunk_length,
@@ -692,7 +692,7 @@ async fn create_minimal_bti_header(path: &Path) -> Result<SSTableHeader> {
             info.algorithm
         }
         Err(e) => {
-            log::warn!(
+            tracing::warn!(
                 "Could not load CompressionInfo.db for BTI format file '{}': {}. Assuming no compression.",
                 path.display(),
                 e
@@ -774,7 +774,7 @@ pub(crate) fn parse_minimal_legacy_header(
     let version = if header_buffer.len() >= 6 {
         u16::from_be_bytes([header_buffer[4], header_buffer[5]])
     } else {
-        log::warn!(
+        tracing::warn!(
             "Legacy header too short for version extraction, using default version. File: {}",
             path.display()
         );
@@ -791,7 +791,7 @@ pub(crate) fn parse_minimal_legacy_header(
         )));
     }
 
-    log::info!(
+    tracing::info!(
         "Creating minimal legacy header for file '{}' with version {}",
         path.display(),
         version

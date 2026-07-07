@@ -173,7 +173,7 @@ impl StorageEngine {
                 obs::add_counter(catalog::STORAGE_OPEN_TABLES, stats.total_tables, &[]);
             }
             Err(e) => {
-                log::debug!("storage.engine.open: discovery metrics unavailable: {}", e);
+                tracing::debug!("storage.engine.open: discovery metrics unavailable: {}", e);
             }
         }
     }

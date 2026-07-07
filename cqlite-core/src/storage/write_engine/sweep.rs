@@ -65,7 +65,7 @@ impl WriteEngine {
         for outcome in [&tmp, &partial] {
             if outcome.had_failures() {
                 for failure in &outcome.failures {
-                    log::warn!(
+                    tracing::warn!(
                         "startup orphan sweep left an un-removable orphan (non-fatal, \
                          will retry next startup): {}",
                         failure
@@ -84,7 +84,7 @@ impl WriteEngine {
         let read_dir = match std::fs::read_dir(data_dir) {
             Ok(rd) => rd,
             Err(e) => {
-                log::debug!(
+                tracing::debug!(
                     "sweep_orphaned_compaction_tmp: cannot read {:?}: {}",
                     data_dir,
                     e
@@ -98,11 +98,11 @@ impl WriteEngine {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.starts_with(".compaction-tmp-") && path.is_dir() {
-                log::warn!("removing orphaned compaction tmp directory: {:?}", path);
+                tracing::warn!("removing orphaned compaction tmp directory: {:?}", path);
                 match std::fs::remove_dir_all(&path) {
                     Ok(()) => outcome.removed.push(path),
                     Err(e) => {
-                        log::warn!(
+                        tracing::warn!(
                             "failed to remove orphaned compaction tmp directory {:?}: {}",
                             path,
                             e
@@ -166,14 +166,14 @@ impl WriteEngine {
 
             let toc_path = sstable_dir.join(format!("{}-TOC.txt", base));
             if !toc_path.exists() {
-                log::warn!(
+                tracing::warn!(
                     "removing orphaned partial SSTable components for generation {}: missing TOC.txt",
                     gen_str
                 );
                 match Self::delete_sstable_files_static(&path) {
                     Ok(()) => outcome.removed.push(path.clone()),
                     Err(e) => {
-                        log::warn!(
+                        tracing::warn!(
                             "failed to remove orphaned partial SSTable for generation {}: {}",
                             gen_str,
                             e

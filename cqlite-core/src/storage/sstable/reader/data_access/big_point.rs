@@ -149,7 +149,7 @@ impl SSTableReader {
         if let Some(index) = &self.index {
             if let Some(entry) = index.find_entry(table_id, key).await? {
                 if entry.size == 0 {
-                    log::debug!(
+                    tracing::debug!(
                         "Index reports size=0 for key {:?}, using sequential scan fallback",
                         key
                     );

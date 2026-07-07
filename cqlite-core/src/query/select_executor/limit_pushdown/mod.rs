@@ -308,7 +308,7 @@ impl SelectExecutor {
                     // residual gap exhaustively (full authoritative parity) in
                     // debug/test builds.
                     if !prefix_is_token_ordered(&results) {
-                        log::error!(
+                        tracing::error!(
                             "issue #1577 invariant violated in RELEASE-active guard: the trusted \
                              full-cap `scan_stream` prefix is not in ascending (token, key) order, \
                              so it cannot be the authoritative token-ordered `scan` prefix — a \

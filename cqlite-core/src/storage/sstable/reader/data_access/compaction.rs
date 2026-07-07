@@ -31,7 +31,7 @@ impl SSTableReader {
         cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<super::super::compaction_row::CompactionRow>> {
-        log::debug!("stitch_and_parse_all_chunks_for_compaction: stitching chunks");
+        tracing::debug!("stitch_and_parse_all_chunks_for_compaction: stitching chunks");
 
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
         let mut chunk_count = 0;
@@ -55,7 +55,7 @@ impl SSTableReader {
             use crate::storage::sstable::compression::Compression;
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
-                log::debug!(
+                tracing::debug!(
                     "stitch_and_parse_all_chunks_for_compaction: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
                     chunk_count,
                     compressed_chunk.len(),
@@ -77,7 +77,7 @@ impl SSTableReader {
             chunk_count += 1;
         }
 
-        log::debug!(
+        tracing::debug!(
             "stitch_and_parse_all_chunks_for_compaction: {} chunks, {} bytes total",
             chunk_count,
             stitched_buffer.len()
@@ -122,7 +122,7 @@ impl SSTableReader {
         };
 
         let entries = parser.parse_block_for_compaction(&stitched_buffer, table_schema, self)?;
-        log::debug!(
+        tracing::debug!(
             "stitch_and_parse_all_chunks_for_compaction: parsed {} entries",
             entries.len()
         );
@@ -605,7 +605,7 @@ impl SSTableReader {
         while let Some(compressed_chunk) = self.read_next_block(&cursor).await? {
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
-                log::debug!(
+                tracing::debug!(
                     "stream_all_partitions_for_compaction: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
                     chunk_count,
                     compressed_chunk.len(),
@@ -656,7 +656,7 @@ impl SSTableReader {
             )?;
         }
 
-        log::debug!(
+        tracing::debug!(
             "stream_all_partitions_for_compaction: drained {} chunks (final window {} bytes)",
             chunk_count,
             window.len()
