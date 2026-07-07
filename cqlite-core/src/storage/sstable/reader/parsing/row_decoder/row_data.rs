@@ -566,23 +566,14 @@ impl V5CompressedLegacyParser {
                                     // `TTL(non_frozen_collection/UDT)` is not always
                                     // `null` (the complex-cell analogue of the scalar
                                     // #1743 fix at ~line 736 below). Authoritative,
-                                    // no-heuristics: `max_element_expires_at` /
-                                    // `max_element_ttl` are the explicit per-element
-                                    // localExpirationTime + TTL decoded from the cell
-                                    // (IS_EXPIRING and NOT USE_ROW_TTL — exactly what a
-                                    // `USING TTL` collection write emits). Both must be
-                                    // present to build a `CellExpiration`; a collection
-                                    // with no expiring element stays `None` (live).
-                                    let expiration = match (
-                                        col_meta.max_element_expires_at,
-                                        col_meta.max_element_ttl,
-                                    ) {
-                                        (Some(exp_s), Some(ttl_s)) => Some(CellExpiration {
-                                            ttl_seconds: ttl_s,
-                                            expires_at_seconds: exp_s,
-                                        }),
-                                        _ => None,
-                                    };
+                                    // no-heuristics: `visible_uniform_expiration` is
+                                    // `Some` ONLY when every VISIBLE element shares the
+                                    // identical explicit expiry (the `ExpiryHomogeneity`
+                                    // tracker in `complex_column.rs` — roborev Medium
+                                    // finding); a mixed/heterogeneous collection, or one
+                                    // with no expiring element, stays `None` rather than
+                                    // over-approximating with a single element's TTL.
+                                    let expiration = col_meta.visible_uniform_expiration.clone();
                                     meta_map.insert(
                                         column.name.clone(),
                                         CellWriteMetadata {

@@ -1,5 +1,101 @@
 use super::*;
 
+/// Issue #2038 (roborev Medium finding): the shape of ONE visible collection
+/// element's expiry, as input to [`ExpiryHomogeneity::fold`].
+///
+/// `LiveForever` is a live element with no TTL of any kind (`!is_expiring`).
+/// `Explicit` is an element with an EXPLICIT per-element TTL (both
+/// `element_ttl` and `element_local_deletion_time` decoded — the shape a
+/// `USING TTL` collection write emits). `Unresolvable` is `is_expiring` but
+/// missing the explicit fields — the on-disk shape of a collection element
+/// that INHERITS the row's TTL (`USE_ROW_TTL`). CQLite's own writer never
+/// emits this shape for a complex cell today, but a real Cassandra-written
+/// SSTable could; since its real expiry cannot be resolved from the element
+/// alone, it always forces the homogeneity tracker to `Mixed` rather than
+/// silently treating it as live-forever or omitting it (no-heuristics, #28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElementExpiryShape {
+    LiveForever,
+    Explicit(i32, i64),
+    Unresolvable,
+}
+
+impl ElementExpiryShape {
+    #[inline]
+    fn from_cell(cell: &ComplexCellParse) -> Self {
+        if !cell.is_expiring {
+            return Self::LiveForever;
+        }
+        match (cell.element_ttl, cell.element_local_deletion_time) {
+            (Some(ttl), Some(ldt)) => Self::Explicit(ttl as i32, ldt as u32 as i64),
+            _ => Self::Unresolvable,
+        }
+    }
+}
+
+/// Issue #2038 (roborev Medium finding): tri-state homogeneity tracker for the
+/// per-cell-metadata `TTL()` value surfaced for a non-frozen collection/UDT
+/// column.
+///
+/// Only VISIBLE (post shadow/TTL-filter, non-tombstone) elements participate
+/// — a shadow/TTL-DROPPED element must not influence what the query layer
+/// reports for the value it actually sees. This is a SEPARATE, narrower
+/// aggregate than `max_element_expires_at`/`has_live_forever_element` above,
+/// which intentionally fold dropped elements too for the orthogonal #1741
+/// row-hidden decision (whether the WHOLE ROW should still be visible) — do
+/// not conflate the two.
+///
+/// `Uniform` is the ONLY state that surfaces a `CellExpiration`: every visible
+/// element must share the IDENTICAL explicit `(ttl_seconds,
+/// expires_at_seconds)` pair. `Unseen` (no visible elements) and `LiveForever`
+/// (every visible element has no TTL) both correctly surface `None` — there is
+/// nothing to report. `Mixed` (elements disagree, or the shape can't be
+/// resolved) ALSO surfaces `None` — correctness over over-approximating with
+/// one element's expiry for a value the query does not see uniformly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpiryHomogeneity {
+    Unseen,
+    LiveForever,
+    Uniform(i32, i64),
+    Mixed,
+}
+
+impl ExpiryHomogeneity {
+    #[inline]
+    fn fold(self, shape: ElementExpiryShape) -> Self {
+        use ElementExpiryShape::{Explicit, LiveForever as ShapeLiveForever, Unresolvable};
+        match (self, shape) {
+            (Self::Mixed, _) => Self::Mixed,
+            (_, Unresolvable) => Self::Mixed,
+            (Self::Unseen, ShapeLiveForever) => Self::LiveForever,
+            (Self::Unseen, Explicit(t, e)) => Self::Uniform(t, e),
+            (Self::LiveForever, ShapeLiveForever) => Self::LiveForever,
+            (Self::LiveForever, Explicit(..)) => Self::Mixed,
+            (Self::Uniform(..), ShapeLiveForever) => Self::Mixed,
+            (Self::Uniform(t, e), Explicit(t2, e2)) => {
+                if t == t2 && e == e2 {
+                    Self::Uniform(t, e)
+                } else {
+                    Self::Mixed
+                }
+            }
+        }
+    }
+
+    /// Resolve to the `CellExpiration` surfaced in per-cell metadata: only
+    /// `Uniform` produces one.
+    #[inline]
+    fn into_cell_expiration(self) -> Option<CellExpiration> {
+        match self {
+            Self::Uniform(ttl_seconds, expires_at_seconds) => Some(CellExpiration {
+                ttl_seconds,
+                expires_at_seconds,
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl V5CompressedLegacyParser {
     /// Parse a complex column (non-frozen collection).
     /// Complex columns have multiple cells with cell paths.
@@ -249,12 +345,12 @@ impl V5CompressedLegacyParser {
         // explicit per-element expiries. Scalar-only, no per-cell allocation.
         let mut has_live_forever_element = false;
         let mut max_element_expires_at: Option<i64> = None;
-        // Issue #2038: the per-element TTL (seconds) paired with the element that
-        // owns `max_element_expires_at`. Together they let the read path surface an
-        // authoritative `CellExpiration { ttl_seconds, expires_at_seconds }` for a
-        // TTL'd non-frozen collection/UDT column (the complex-cell analogue of the
-        // scalar #1743 fix), instead of hardcoding `expiration: None`.
-        let mut max_element_ttl: Option<i32> = None;
+        // Issue #2038 (roborev Medium finding): VISIBLE-only homogeneity tracker
+        // for the per-cell-metadata `TTL()` value surfaced for a non-frozen
+        // collection/UDT column — the complex-cell analogue of the scalar #1743
+        // fix, instead of hardcoding `expiration: None`. Deliberately separate
+        // from `max_element_expires_at` above (see `ExpiryHomogeneity` doc).
+        let mut expiry_homogeneity = ExpiryHomogeneity::Unseen;
 
         // Issue #1741 (per-element filtering): count of LIVE elements dropped from
         // the emitted container by the read-side shadow/TTL filter. Stays `0` when
@@ -288,27 +384,26 @@ impl V5CompressedLegacyParser {
         fn fold_element_expiry(
             has_live_forever: &mut bool,
             max_exp: &mut Option<i64>,
-            max_exp_ttl: &mut Option<i32>,
+            homogeneity: &mut ExpiryHomogeneity,
             cell: &ComplexCellParse,
             dropped: bool,
         ) {
+            // Issue #2038 (roborev Medium finding): fold this element into the
+            // VISIBLE-only homogeneity tracker BEFORE the `dropped`-tolerant
+            // `max_exp` aggregate below — a dropped element must never
+            // contribute to the per-cell-metadata TTL (see `ExpiryHomogeneity`
+            // doc for why this is a separate, narrower aggregate).
+            if !dropped {
+                *homogeneity = homogeneity.fold(ElementExpiryShape::from_cell(cell));
+            }
+
             if !cell.is_expiring {
                 if !dropped {
                     *has_live_forever = true;
                 }
             } else if let Some(ldt) = cell.element_local_deletion_time {
                 let e = ldt as u32 as i64;
-                // Issue #2038: keep the TTL paired with the element that owns the
-                // MAX expiry (ties refresh the pairing), so the read path can build
-                // an authoritative `CellExpiration`. `element_ttl` is the explicit
-                // per-element TTL decoded alongside `element_local_deletion_time`
-                // (both present iff IS_EXPIRING and NOT USE_ROW_TTL — the exact
-                // shape the writer emits for a `USING TTL` collection).
-                let is_new_max = max_exp.map_or(true, |m: i64| e >= m);
                 *max_exp = Some(max_exp.map_or(e, |m: i64| m.max(e)));
-                if is_new_max {
-                    *max_exp_ttl = cell.element_ttl.map(|t| t as i32);
-                }
             }
         }
 
@@ -363,7 +458,7 @@ impl V5CompressedLegacyParser {
                 fold_element_expiry(
                     &mut has_live_forever_element,
                     &mut max_element_expires_at,
-                    &mut max_element_ttl,
+                    &mut expiry_homogeneity,
                     &cell,
                     dropped,
                 );
@@ -439,7 +534,7 @@ impl V5CompressedLegacyParser {
                 fold_element_expiry(
                     &mut has_live_forever_element,
                     &mut max_element_expires_at,
-                    &mut max_element_ttl,
+                    &mut expiry_homogeneity,
                     &cell,
                     dropped,
                 );
@@ -538,7 +633,7 @@ impl V5CompressedLegacyParser {
                     fold_element_expiry(
                         &mut has_live_forever_element,
                         &mut max_element_expires_at,
-                        &mut max_element_ttl,
+                        &mut expiry_homogeneity,
                         &cell,
                         dropped,
                     );
@@ -645,7 +740,7 @@ impl V5CompressedLegacyParser {
                 fold_element_expiry(
                     &mut has_live_forever_element,
                     &mut max_element_expires_at,
-                    &mut max_element_ttl,
+                    &mut expiry_homogeneity,
                     &cell,
                     dropped,
                 );
@@ -724,6 +819,11 @@ impl V5CompressedLegacyParser {
             element_tombstone_count
         );
 
+        // Issue #2038: resolve the homogeneity tracker into the `CellExpiration`
+        // surfaced in per-cell metadata — `None` unless every VISIBLE element
+        // shared the identical explicit expiry.
+        let visible_uniform_expiration = expiry_homogeneity.into_cell_expiration();
+
         Ok((
             value,
             offset,
@@ -734,7 +834,7 @@ impl V5CompressedLegacyParser {
                 complex_deletion,
                 has_live_forever_element,
                 max_element_expires_at,
-                max_element_ttl,
+                visible_uniform_expiration,
                 shadow_filtered_element_count,
             },
         ))

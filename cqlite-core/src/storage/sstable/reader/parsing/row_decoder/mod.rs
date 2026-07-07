@@ -651,14 +651,23 @@ pub(crate) struct ComplexColumnMeta {
     /// Folded into the row's `max_data_cell_expires_at` so a collection whose
     /// elements are all expired does not keep an otherwise-expired row alive.
     pub max_element_expires_at: Option<i64>,
-    /// Issue #2038: the explicit per-element TTL (seconds) paired with the element
-    /// that owns `max_element_expires_at`. Both are decoded from the authoritative
-    /// per-element cell fields (IS_EXPIRING and NOT USE_ROW_TTL — the shape a
-    /// `USING TTL` collection write emits; no heuristics). The user-facing read path
-    /// pairs them into a `CellExpiration` so `TTL(non_frozen_collection)` resolves to
-    /// the written remaining seconds instead of `null` (the complex-cell analogue of
-    /// the scalar #1743 fix). `None` when no live element carries an explicit expiry.
-    pub max_element_ttl: Option<i32>,
+    /// Issue #2038 (roborev Medium finding): the `CellExpiration` surfaced in
+    /// per-cell metadata for `TTL(non_frozen_collection/UDT)`, IFF every VISIBLE
+    /// (post shadow/TTL-filter, non-tombstone) element shares the IDENTICAL
+    /// explicit `(ttl_seconds, expires_at_seconds)` pair. Decoded from the
+    /// authoritative per-element cell fields (no heuristics, #28) via the
+    /// `ExpiryHomogeneity` tracker.
+    ///
+    /// Deliberately NARROWER than `max_element_expires_at` above: a dropped
+    /// (shadow/TTL-filtered) element never contributes here (it does for
+    /// `max_element_expires_at`, which drives the orthogonal #1741 row-hidden
+    /// decision), and a MIXED collection (elements with different TTLs, or a
+    /// live-forever element mixed with an expiring one) has no single TTL that
+    /// describes it — this is `None` in that case, correctness over
+    /// over-approximating with one element's expiry. This is the complex-cell
+    /// analogue of the scalar #1743 fix, which surfaces a single-cell expiry
+    /// unambiguously.
+    pub visible_uniform_expiration: Option<CellExpiration>,
     /// Issue #1741 (per-element filtering): number of LIVE (non-tombstone)
     /// elements DROPPED from the emitted container by the read-side per-element
     /// shadow/TTL filter — i.e. elements shadowed by the covering deletion (own
