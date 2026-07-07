@@ -44,7 +44,12 @@
 //! No wall-clock assertion race: the writer stamps each element's
 //! localExpirationTime as `wallClockNowSeconds + ttl`. We bracket the write+flush
 //! with a `[before, after]` wall-clock window and assert
-//! `expires_at ∈ [before+ttl, after+ttl]`, plus `ttl_seconds == n` exactly.
+//! `expires_at ∈ [before+ttl, after+ttl]`, plus `ttl_seconds == n` exactly. The
+//! real-SQL test (`collection_ttl_reachable_via_real_sql`) reads `remaining =
+//! expires_at - now_query` AFTER an extra `ingest()` + `db.execute()` gap of
+//! unbounded latency past `after`, so its window is widened with a THIRD
+//! `query_after` timestamp (captured post-query) instead of reusing the plain
+//! write-only `[before, after]` bracket (roborev 1518 re-review fix).
 //!
 //!   CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 //!     cargo test --package cqlite-core --features write-support,cli-helpers,state_machine \
@@ -389,6 +394,15 @@ fn collection_ttl_reachable_via_real_sql() {
     let query_result = rt
         .block_on(db.execute(&sql))
         .expect("Issue #2038: TTL() on a non-frozen collection must be reachable via real SQL");
+    // Issue #2038 roborev re-review (1518, Medium): `remaining` is evaluated at
+    // QUERY time (`expires_at - now_query`), and `ingest()` + `db.execute()`
+    // above run with UNBOUNDED latency AFTER `after` (opening SSTables +
+    // scanning, worse under load). Bracketing only by the write-only window
+    // `[before, after]` (as the metadata-API test above correctly does, since
+    // IT reads with no ingest/execute gap) is too tight here and can fail
+    // spuriously on a correct implementation. Capture `query_after` so the
+    // window covers the FULL elapsed span from write-start to query-end.
+    let query_after = now_secs();
 
     assert_eq!(
         query_result.rows.len(),
@@ -398,9 +412,12 @@ fn collection_ttl_reachable_via_real_sql() {
     let row = &query_result.rows[0];
     match row.values.get("ttl(tags)") {
         Some(Value::Integer(remaining)) => {
-            // remaining = expires_at - now; bracket by the flush window (same
-            // reasoning as the metadata-API test above).
-            let lo = (before + TTL as i64) - after;
+            // remaining = expires_at - now_query, where expires_at ∈
+            // [before+TTL, after+TTL] (from the write window) and now_query ∈
+            // [after, query_after] (write-close through query-return). The
+            // widest possible remaining range is therefore
+            // [(before+TTL) - query_after, (after+TTL) - before].
+            let lo = (before + TTL as i64) - query_after;
             let hi = (after + TTL as i64) - before;
             assert!(
                 (lo..=hi).contains(&(*remaining as i64)),
