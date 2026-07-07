@@ -116,8 +116,17 @@ pub(super) fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
 }
 
 /// Generic in-order DFS over a BTI trie, decoding each node payload with
-/// `decode_payload` and pushing `(reconstructed_key, decoded_payload)` onto the
-/// result Vec in byte-comparable order.
+/// `decode_payload` and invoking `visit(&reconstructed_key, payload)` in
+/// byte-comparable order — the key is handed to the visitor as a **borrowed
+/// slice** into the single reusable path buffer, so nothing is copied per node.
+///
+/// This is the zero-clone core (issue #1649 / L2): a SINGLE mutable `path`
+/// accumulates the transition bytes from the root to the current node, and the
+/// visitor sees that borrow directly.  Callers that need an owned key call
+/// `.to_vec()` inside their visitor (paying **per emitted result**, never per
+/// child edge — [`dfs_collect_in_order`]); offset-only callers (e.g. the
+/// next-partition seek-bound resolver) drop the key and allocate **nothing**
+/// per node ([`dfs_collect_partition_locations`]).
 ///
 /// The traversal is iterative (explicit stack), bounds-checks every offset, and
 /// enforces a **visited-offset guard** plus three independent limits so corrupt or
@@ -153,21 +162,24 @@ pub(super) fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
 ///
 /// Each guard carries a distinct error message so corruption modes stay
 /// diagnosable.
-pub(crate) fn dfs_collect_in_order<T, F>(
+pub(crate) fn dfs_visit_in_order<T, F, V>(
     trie_data: &[u8],
     root_offset: usize,
     mut decode_payload: F,
-) -> BtiResult<Vec<(Vec<u8>, T)>>
+    mut visit: V,
+) -> BtiResult<()>
 where
     F: FnMut(&[u8], usize) -> BtiResult<Option<T>>,
+    V: FnMut(&[u8], T),
 {
     // Op-based iterative DFS.  A SINGLE mutable `path` accumulates the transition
     // bytes from the root down to the current node: `Enter` pushes a node's
-    // transition byte (and schedules the matching `Pop`), `Pop` backtracks it.  We
-    // clone `path` ONLY when emitting a payload (inherent to the owned return type,
-    // O(result size)), NEVER per child edge — this avoids the O(depth^2) prefix
-    // copying that a per-edge `key_bytes.clone()` incurs on long key paths (a
-    // 70 000-byte legal chain would otherwise copy ~2.45 GB; issue #1629 roborev).
+    // transition byte (and schedules the matching `Pop`), `Pop` backtracks it.  The
+    // visitor sees `path` as a BORROWED slice — we never copy it per node.  Owned-key
+    // callers copy inside the visitor (per emitted result); offset-only callers copy
+    // nothing.  This avoids the O(depth^2) prefix copying that a per-edge
+    // `key_bytes.clone()` incurs on long key paths (a 70 000-byte legal chain would
+    // otherwise copy ~2.45 GB; issue #1629 roborev).
     enum DfsOp {
         Enter {
             node_offset: usize,
@@ -180,7 +192,6 @@ where
         Pop,
     }
 
-    let mut results: Vec<(Vec<u8>, T)> = Vec::new();
     // The single reusable root→current-node transition-byte path.
     let mut path: Vec<u8> = Vec::new();
     let mut stack: Vec<DfsOp> = vec![DfsOp::Enter {
@@ -274,10 +285,11 @@ where
         visited[word] |= bit;
 
         // 1) Emit this node's own payload (if any) BEFORE descending — the key
-        //    terminating here sorts before any continuation.  Clone `path` ONLY
-        //    here (inherent to the owned result type), never per child edge.
+        //    terminating here sorts before any continuation.  The visitor receives
+        //    `path` as a borrowed slice; any copy is the visitor's choice (per
+        //    emitted result), never per child edge.
         if let Some(payload) = decode_payload(trie_data, node_offset)? {
-            results.push((path.clone(), payload));
+            visit(&path, payload);
         }
 
         // 2) Descend children in ASCENDING transition-byte order.  Because the
@@ -296,6 +308,26 @@ where
         }
     }
 
+    Ok(())
+}
+
+/// Thin owned-key wrapper over [`dfs_visit_in_order`]: collects
+/// `(reconstructed_key, decoded_payload)` in byte-comparable order.  Each result
+/// pays ONE `to_vec()` for its key (inherent to the owned return type), never a
+/// per-child-edge copy.  Offset-only callers should use [`dfs_visit_in_order`]
+/// directly (e.g. [`dfs_collect_partition_locations`]) to allocate nothing.
+pub(crate) fn dfs_collect_in_order<T, F>(
+    trie_data: &[u8],
+    root_offset: usize,
+    decode_payload: F,
+) -> BtiResult<Vec<(Vec<u8>, T)>>
+where
+    F: FnMut(&[u8], usize) -> BtiResult<Option<T>>,
+{
+    let mut results: Vec<(Vec<u8>, T)> = Vec::new();
+    dfs_visit_in_order(trie_data, root_offset, decode_payload, |key, payload| {
+        results.push((key.to_vec(), payload));
+    })?;
     Ok(results)
 }
 
@@ -308,6 +340,28 @@ pub(crate) fn dfs_collect_partition_entries(
     dfs_collect_in_order(trie_data, root_offset, |data, off| {
         read_node_payload(data, off)
     })
+}
+
+/// Offset-only counterpart to [`dfs_collect_partition_entries`]: enumerate every
+/// partition [`BtiPartitionLocation`] in byte-comparable order WITHOUT
+/// materializing the reconstructed token keys.
+///
+/// The reconstructed key is handed to the visitor as a borrowed slice and
+/// dropped, so a caller that needs only the locations (e.g. the next-partition
+/// seek-bound resolver in `partition_successor`) pays **zero** per-entry key-`Vec`
+/// allocations — only the single `Vec<BtiPartitionLocation>` grows (issue #1649).
+pub(crate) fn dfs_collect_partition_locations(
+    trie_data: &[u8],
+    root_offset: usize,
+) -> BtiResult<Vec<BtiPartitionLocation>> {
+    let mut locations: Vec<BtiPartitionLocation> = Vec::new();
+    dfs_visit_in_order(
+        trie_data,
+        root_offset,
+        read_node_payload,
+        |_key, location| locations.push(location),
+    )?;
+    Ok(locations)
 }
 
 /// Enumerate **all** partitions in a real Cassandra 5.0 `Partitions.db` BTI file
@@ -329,6 +383,25 @@ pub fn iterate_partitions_in_bti_file<R: Read + Seek>(
     }
     let (trie_data, root_offset) = load_bti_trie_via_footer(reader)?;
     dfs_collect_partition_entries(&trie_data, root_offset)
+}
+
+/// Offset-only counterpart to [`iterate_partitions_in_bti_file`]: enumerate every
+/// partition [`BtiPartitionLocation`] in a real Cassandra 5.0 `Partitions.db` BTI
+/// file in byte-comparable order, WITHOUT reconstructing (or allocating) the
+/// token keys (issue #1649 / L2).
+///
+/// Use this when the reconstructed byte-comparable token key is not needed (the
+/// offsets are definitive) — the DFS then performs **zero** per-partition
+/// key-`Vec` allocations. Returns an empty Vec for a `< 8`-byte (e.g. empty) file.
+pub fn iterate_partition_locations_in_bti_file<R: Read + Seek>(
+    reader: &mut R,
+) -> BtiResult<Vec<BtiPartitionLocation>> {
+    let file_size = reader.seek(SeekFrom::End(0))?;
+    if file_size < 8 {
+        return Ok(Vec::new());
+    }
+    let (trie_data, root_offset) = load_bti_trie_via_footer(reader)?;
+    dfs_collect_partition_locations(&trie_data, root_offset)
 }
 
 #[cfg(test)]
