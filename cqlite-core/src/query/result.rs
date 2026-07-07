@@ -1049,7 +1049,7 @@ impl ToJson for Value {
             Value::Float(f) => float_to_json(*f),
             Value::Float32(f) => float_to_json(*f as f64),
             Value::Text(s) => json!(s),
-            Value::Json(value) => value.clone(),
+            Value::Json(value) => (**value).clone(),
             Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => json!(b64(bytes)),
             Value::Uuid(uuid) => json!(b64(uuid)),
             Value::List(items) | Value::Set(items) | Value::Tuple(items) => {

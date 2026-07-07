@@ -277,7 +277,7 @@ fn test_json_serializes_all_value_variants() {
         ),
         (
             "json_val",
-            Value::Json(serde_json::json!({"key": "value"})),
+            Value::Json(Box::new(serde_json::json!({"key": "value"}))),
             DataType::Json,
         ),
         // Collection types - DataType::List/Set/Map are unit variants
@@ -304,7 +304,7 @@ fn test_json_serializes_all_value_variants() {
         // Complex types
         (
             "udt_val",
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 type_name: "address".to_string(),
                 keyspace: "test".to_string(),
                 fields: vec![
@@ -317,7 +317,7 @@ fn test_json_serializes_all_value_variants() {
                         value: Some(Value::Text("Springfield".to_string())),
                     },
                 ],
-            }),
+            })),
             DataType::Udt,
         ),
         (
@@ -327,14 +327,14 @@ fn test_json_serializes_all_value_variants() {
         ),
         (
             "tombstone_val",
-            Value::Tombstone(TombstoneInfo {
+            Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: 1673778645000000,
                 tombstone_type: TombstoneType::RowTombstone,
                 local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
             DataType::Tombstone,
         ),
     ];
@@ -428,7 +428,7 @@ fn test_csv_serializes_all_value_variants() {
         ),
         (
             "json_val",
-            Value::Json(serde_json::json!({"key": "value"})),
+            Value::Json(Box::new(serde_json::json!({"key": "value"}))),
             DataType::Json,
         ),
         (
@@ -453,7 +453,7 @@ fn test_csv_serializes_all_value_variants() {
         ),
         (
             "udt_val",
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 type_name: "address".to_string(),
                 keyspace: "test".to_string(),
                 fields: vec![
@@ -466,7 +466,7 @@ fn test_csv_serializes_all_value_variants() {
                         value: Some(Value::Text("Springfield".to_string())),
                     },
                 ],
-            }),
+            })),
             DataType::Udt,
         ),
         (
@@ -476,14 +476,14 @@ fn test_csv_serializes_all_value_variants() {
         ),
         (
             "tombstone_val",
-            Value::Tombstone(TombstoneInfo {
+            Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: 1673778645000000,
                 tombstone_type: TombstoneType::RowTombstone,
                 local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
             DataType::Tombstone,
         ),
     ];
@@ -673,7 +673,7 @@ fn test_udt_renders_field_names_not_indices() {
         ],
     };
 
-    let result = create_single_value_result("address_col", Value::Udt(udt), DataType::Udt);
+    let result = create_single_value_result("address_col", Value::Udt(Box::new(udt)), DataType::Udt);
 
     let json = JSONWriter::write(&result, &default_config()).unwrap();
 
@@ -729,7 +729,7 @@ fn test_udt_with_null_field() {
         ],
     };
 
-    let result = create_single_value_result("person_col", Value::Udt(udt), DataType::Udt);
+    let result = create_single_value_result("person_col", Value::Udt(Box::new(udt)), DataType::Udt);
 
     let json = JSONWriter::write(&result, &default_config()).unwrap();
 

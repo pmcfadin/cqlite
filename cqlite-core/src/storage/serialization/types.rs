@@ -921,7 +921,7 @@ mod tests {
                 Some(Value::Text("Main St".to_string())),
             );
 
-        let bytes = ser.serialize_udt(&Value::Udt(udt), &schema).unwrap();
+        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
 
         // CRITICAL: Must be in schema order (street, city), NOT value order (city, street)
         let expected = vec![
@@ -951,7 +951,7 @@ mod tests {
                 Some(Value::Text("john@example.com".to_string())),
             );
 
-        let bytes = ser.serialize_udt(&Value::Udt(udt), &schema).unwrap();
+        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
 
         let expected = vec![
             0x00, 0x00, 0x00, 0x04, // name len = 4
@@ -993,11 +993,11 @@ mod tests {
 
         let _person = UdtValue::new("person".to_string(), "test_ks".to_string())
             .with_field("name".to_string(), Some(Value::Text("John".to_string())))
-            .with_field("address".to_string(), Some(Value::Udt(address.clone())));
+            .with_field("address".to_string(), Some(Value::Udt(Box::new(address.clone()))));
 
         // Serialize inner UDT first
         let address_bytes = ser
-            .serialize_udt(&Value::Udt(address), &address_schema)
+            .serialize_udt(&Value::Udt(Box::new(address)), &address_schema)
             .unwrap();
 
         // Serialize outer UDT manually
@@ -1030,7 +1030,7 @@ mod tests {
             .with_field("field_b".to_string(), Some(Value::Integer(2)))
             .with_field("field_a".to_string(), Some(Value::Integer(1)));
 
-        let bytes = ser.serialize_udt(&Value::Udt(udt), &schema).unwrap();
+        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
 
         // CRITICAL: Must serialize in schema order (a, b, c), not value order (c, b, a)
         let expected = vec![
@@ -1067,7 +1067,7 @@ mod tests {
                 ])),
             );
 
-        let bytes = ser.serialize_udt(&Value::Udt(udt), &schema).unwrap();
+        let bytes = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
 
         // Serialize list manually for expected
         let mut list_bytes = Vec::new();
@@ -1149,19 +1149,19 @@ mod tests {
             .with_field(
                 "phone_numbers".to_string(),
                 Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
-                    phone.clone(),
+                    Box::new(phone.clone()),
                 )))])),
             )
             .with_field(
                 "home_address".to_string(),
-                Some(Value::Frozen(Box::new(Value::Udt(address.clone())))),
+                Some(Value::Frozen(Box::new(Value::Udt(Box::new(address.clone()))))),
             );
         let company = UdtValue::new("company".to_string(), "test_ks".to_string())
             .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
             .with_field(
                 "employees".to_string(),
                 Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
-                    person.clone(),
+                    Box::new(person.clone()),
                 )))])),
             )
             .with_field(
@@ -1169,21 +1169,21 @@ mod tests {
                 Some(Value::Map(vec![(
                     Value::Text("platform".to_string()),
                     Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
-                        Value::Udt(person.clone()),
+                        Value::Udt(Box::new(person.clone())),
                     ))]))),
                 )])),
             );
 
         let bytes = ser
-            .serialize_udt(&Value::Udt(company.clone()), &company_schema)
+            .serialize_udt(&Value::Udt(Box::new(company.clone())), &company_schema)
             .unwrap();
 
         let person_bytes = ser
-            .serialize_udt(&Value::Udt(person.clone()), &person_schema)
+            .serialize_udt(&Value::Udt(Box::new(person.clone())), &person_schema)
             .unwrap();
         let employees_bytes = ser
             .serialize_typed_value(
-                &Value::List(vec![Value::Frozen(Box::new(Value::Udt(person.clone())))]),
+                &Value::List(vec![Value::Frozen(Box::new(Value::Udt(Box::new(person.clone()))))]),
                 &CqlType::List(Box::new(CqlType::Frozen(Box::new(CqlType::Udt(
                     "person".to_string(),
                     vec![],
@@ -1195,7 +1195,7 @@ mod tests {
                 &Value::Map(vec![(
                     Value::Text("platform".to_string()),
                     Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
-                        Value::Udt(person),
+                        Value::Udt(Box::new(person)),
                     ))]))),
                 )]),
                 &CqlType::Map(
@@ -1218,11 +1218,11 @@ mod tests {
         assert_eq!(hex(&bytes), hex(&expected));
         assert!(!person_bytes.is_empty());
         assert!(!ser
-            .serialize_udt(&Value::Udt(address), &address_schema)
+            .serialize_udt(&Value::Udt(Box::new(address)), &address_schema)
             .unwrap()
             .is_empty());
         assert!(!ser
-            .serialize_udt(&Value::Udt(phone), &phone_schema)
+            .serialize_udt(&Value::Udt(Box::new(phone)), &phone_schema)
             .unwrap()
             .is_empty());
     }
@@ -1244,13 +1244,13 @@ mod tests {
                 Some(Value::Text("Sao Paulo".to_string())),
             );
         let address_bytes = ser
-            .serialize_udt(&Value::Udt(address), &address_schema)
+            .serialize_udt(&Value::Udt(Box::new(address)), &address_schema)
             .unwrap();
 
         let value = Value::Map(vec![(
             Value::Text("cidade_日本".to_string()),
             Value::Frozen(Box::new(Value::Udt(
-                UdtValue::new("address".to_string(), "test_ks".to_string())
+                Box::new(UdtValue::new("address".to_string(), "test_ks".to_string())
                     .with_field(
                         "street".to_string(),
                         Some(Value::Text("Rua Sao Joao".to_string())),
@@ -1258,7 +1258,7 @@ mod tests {
                     .with_field(
                         "city".to_string(),
                         Some(Value::Text("Sao Paulo".to_string())),
-                    ),
+                    )),
             ))),
         )]);
 
@@ -1414,7 +1414,7 @@ mod tests {
             Some(Value::Text("Main St".to_string())),
         );
 
-        let result = ser.serialize_udt(&Value::Udt(udt), &schema);
+        let result = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

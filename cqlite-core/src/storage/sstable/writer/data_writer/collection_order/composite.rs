@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn udt_orders_field_by_field_declared_order() {
         fn udt(a: i32, b: &str) -> Value {
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 type_name: "t".into(),
                 keyspace: "ks".into(),
                 fields: vec![
@@ -389,7 +389,7 @@ mod tests {
                         value: Some(Value::Text(b.into())),
                     },
                 ],
-            })
+            }))
         }
         // Field 0 signed: -1 < 1 even though raw bytes of -1 are larger.
         assert_eq!(
@@ -408,14 +408,14 @@ mod tests {
     #[test]
     fn udt_null_field_sorts_first() {
         fn udt(a: Option<i32>) -> Value {
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 type_name: "t".into(),
                 keyspace: "ks".into(),
                 fields: vec![UdtField {
                     name: "a".into(),
                     value: a.map(Value::Integer),
                 }],
-            })
+            }))
         }
         assert_eq!(
             compare_collection_elements(&udt(None), &udt(Some(-100))),

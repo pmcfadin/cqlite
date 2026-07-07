@@ -1418,14 +1418,14 @@ fn bare_udt_with_registry_roundtrips_sparse_out_of_order() {
     let col = schema.columns[0].clone();
     let writer = DataWriter::new(create_test_stats());
     // Literal lists email THEN name (out of order) and OMITS age (sparse).
-    let udt = Value::Udt(crate::types::UdtValue {
+    let udt = Value::Udt(Box::new(crate::types::UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![
             udt_field("email", Some(Value::Text("a@b.com".to_string()))),
             udt_field("name", Some(Value::Text("Alice".to_string()))),
         ],
-    });
+    }));
 
     let row_ts = 1_005_000i64;
     let mut buf = Vec::new();
@@ -1503,11 +1503,11 @@ fn bare_udt_without_registry_is_single_simple_cell() {
     // A whole-UDT write must not panic on the simple-cell path.
     let col = schema.columns[0].clone();
     let writer = DataWriter::new(create_test_stats());
-    let udt = Value::Udt(crate::types::UdtValue {
+    let udt = Value::Udt(Box::new(crate::types::UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![udt_field("name", Some(Value::Text("Alice".to_string())))],
-    });
+    }));
     let mut buf = Vec::new();
     let res = writer.write_cell(&mut buf, &col.name, &udt, 1_005_000);
     assert!(
@@ -1662,14 +1662,14 @@ fn frozen_list_of_udt_value_is_canonicalized_after_normalization() {
     normalize_schema_udts(&mut schema, &collections_registry());
 
     // Out-of-order element fields (age, first_name), last_name omitted.
-    let element = Value::Udt(UdtValue {
+    let element = Value::Udt(Box::new(UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_compactionparityudt".to_string(),
         fields: vec![
             udt_field("age", Some(Value::Integer(41))),
             udt_field("first_name", Some(Value::Text("Alan".to_string()))),
         ],
-    });
+    }));
     let v = Value::Frozen(Box::new(Value::List(vec![element])));
 
     let canon = canonicalize_udt_value(&schema.columns[0].data_type, &v)

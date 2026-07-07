@@ -211,12 +211,12 @@ pub(super) fn phase3_person_value(name: &str) -> UdtValue {
         .with_field(
             "phone_numbers".to_string(),
             Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
-                phase3_phone_value(),
+                Box::new(phase3_phone_value()),
             )))])),
         )
         .with_field(
             "home_address".to_string(),
-            Some(Value::Frozen(Box::new(Value::Udt(phase3_address_value())))),
+            Some(Value::Frozen(Box::new(Value::Udt(Box::new(phase3_address_value()))))),
         )
 }
 
@@ -227,7 +227,7 @@ pub(super) fn phase3_company_value() -> UdtValue {
         .with_field(
             "employees".to_string(),
             Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
-                person.clone(),
+                Box::new(person.clone()),
             )))])),
         )
         .with_field(
@@ -235,7 +235,7 @@ pub(super) fn phase3_company_value() -> UdtValue {
             Some(Value::Map(vec![(
                 Value::Text("platform".to_string()),
                 Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
-                    Value::Udt(person),
+                    Value::Udt(Box::new(person)),
                 ))]))),
             )])),
         )

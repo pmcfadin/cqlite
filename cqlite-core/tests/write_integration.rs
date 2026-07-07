@@ -415,7 +415,7 @@ async fn test_udt_types() -> Result<()> {
     let pk = PartitionKey::single("id", Value::Integer(1));
     let ops = vec![CellOperation::Write {
         column: "value".to_string(),
-        value: Value::Udt(udt_value),
+        value: Value::Udt(Box::new(udt_value)),
     }];
 
     let mutation = Mutation::new(table_id, pk, None, ops, 1000000, None);

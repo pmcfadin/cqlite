@@ -372,7 +372,7 @@ mod complex_type_tests {
             field_comparators,
         };
 
-        let udt1 = Value::Udt(UdtValue {
+        let udt1 = Value::Udt(Box::new(UdtValue {
             type_name: "Person".to_string(),
             keyspace: "test".to_string(),
             fields: vec![
@@ -385,9 +385,9 @@ mod complex_type_tests {
                     value: Some(Value::Integer(30)),
                 },
             ],
-        });
+        }));
 
-        let udt2 = Value::Udt(UdtValue {
+        let udt2 = Value::Udt(Box::new(UdtValue {
             type_name: "Person".to_string(),
             keyspace: "test".to_string(),
             fields: vec![
@@ -400,7 +400,7 @@ mod complex_type_tests {
                     value: Some(Value::Integer(25)),
                 },
             ],
-        });
+        }));
 
         // Compare field by field in definition order
         assert_eq!(

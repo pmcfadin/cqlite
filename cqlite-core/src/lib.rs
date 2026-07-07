@@ -3,6 +3,13 @@
 //! A high-performance, embeddable database engine with SSTable-based storage,
 //! supporting both native and WASM deployments.
 
+// Value-representation-v2 (D1, issue #1583): keep the public `Value` enum's
+// inline layout bounded. `large_enum_variant` fails the build if a future change
+// re-inlines a fat variant (e.g. un-boxing `Tombstone`/`Udt`/`Json`) instead of
+// boxing it, so the `size_of::<Value>() <= 40` pin in `types.rs` cannot silently
+// regress.
+#![deny(clippy::large_enum_variant)]
+
 pub mod config;
 pub mod cql;
 pub mod error;

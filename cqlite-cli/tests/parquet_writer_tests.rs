@@ -183,7 +183,7 @@ fn test_parquet_json_values() {
         "nested": {"key": "value"}
     });
     let result =
-        create_single_value_result("json_col", Value::Json(json_value.clone()), DataType::Json);
+        create_single_value_result("json_col", Value::Json(Box::new(json_value.clone())), DataType::Json);
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     verify_parquet_magic(&bytes);
@@ -417,7 +417,7 @@ fn test_parquet_tuple_values() {
 #[test]
 fn test_parquet_udt_values() {
     // User-defined type with named fields
-    let udt = Value::Udt(UdtValue {
+    let udt = Value::Udt(Box::new(UdtValue {
         keyspace: "test_ks".to_string(),
         type_name: "address".to_string(),
         fields: vec![
@@ -434,7 +434,7 @@ fn test_parquet_udt_values() {
                 value: Some(Value::Integer(12345)),
             },
         ],
-    });
+    }));
     let result = create_single_value_result("udt_col", udt, DataType::Udt);
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -457,7 +457,7 @@ fn test_parquet_udt_values() {
 #[test]
 fn test_parquet_udt_with_collections() {
     // UDT containing a list field
-    let udt_with_list = Value::Udt(UdtValue {
+    let udt_with_list = Value::Udt(Box::new(UdtValue {
         keyspace: "test_ks".to_string(),
         type_name: "user_info".to_string(),
         fields: vec![
@@ -473,7 +473,7 @@ fn test_parquet_udt_with_collections() {
                 ])),
             },
         ],
-    });
+    }));
     let result = create_single_value_result("udt_list_col", udt_with_list, DataType::Udt);
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -885,14 +885,14 @@ fn test_parquet_mixed_null_and_values() {
 #[test]
 fn test_parquet_tombstone_value() {
     // Tombstone (deletion marker) should serialize as string
-    let tombstone = Value::Tombstone(TombstoneInfo {
+    let tombstone = Value::Tombstone(Box::new(TombstoneInfo {
         deletion_time: 1673778645,
         tombstone_type: TombstoneType::CellTombstone,
         local_deletion_time: 0,
         ttl: None,
         range_start: None,
         range_end: None,
-    });
+    }));
     let result = create_single_value_result("tombstone_col", tombstone, DataType::Tombstone);
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3692,7 +3692,7 @@ fn test_udt_schema_has_named_fields() {
 
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "address".to_string(),
             fields: vec![
@@ -3705,7 +3705,7 @@ fn test_udt_schema_has_named_fields() {
                     value: Some(Value::Integer(90210)),
                 },
             ],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3749,7 +3749,7 @@ fn test_udt_roundtrip_named_fields() {
 
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "address".to_string(),
             fields: vec![
@@ -3762,7 +3762,7 @@ fn test_udt_roundtrip_named_fields() {
                     value: Some(Value::Integer(12345)),
                 },
             ],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3845,7 +3845,7 @@ fn test_udt_unset_field_is_null() {
     // "age" field is unset (None value)
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "person".to_string(),
             fields: vec![
@@ -3858,7 +3858,7 @@ fn test_udt_unset_field_is_null() {
                     value: None, // unset
                 },
             ],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3911,7 +3911,7 @@ fn test_udt_missing_field_is_null() {
 
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),
             fields: vec![UdtField {
@@ -3919,7 +3919,7 @@ fn test_udt_missing_field_is_null() {
                 value: Some(Value::Integer(10)),
                 // "y" field is entirely absent from the UdtValue
             }],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3971,7 +3971,7 @@ fn test_udt_multi_row_null_and_value() {
     let result = single_col_multi_row_result(
         col,
         vec![
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 keyspace: "ks".to_string(),
                 type_name: "point".to_string(),
                 fields: vec![
@@ -3984,9 +3984,9 @@ fn test_udt_multi_row_null_and_value() {
                         value: Some(Value::Integer(2)),
                     },
                 ],
-            }),
+            })),
             Value::Null,
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 keyspace: "ks".to_string(),
                 type_name: "point".to_string(),
                 fields: vec![
@@ -3999,7 +3999,7 @@ fn test_udt_multi_row_null_and_value() {
                         value: Some(Value::Integer(20)),
                     },
                 ],
-            }),
+            })),
         ],
     );
 
@@ -4066,7 +4066,7 @@ fn test_frozen_udt_schema_and_roundtrip() {
 
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),
             fields: vec![
@@ -4079,7 +4079,7 @@ fn test_frozen_udt_schema_and_roundtrip() {
                     value: Some(Value::Integer(4)),
                 },
             ],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -4140,7 +4140,7 @@ fn test_udt_with_list_field_roundtrip() {
 
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "user_info".to_string(),
             fields: vec![
@@ -4156,7 +4156,7 @@ fn test_udt_with_list_field_roundtrip() {
                     ])),
                 },
             ],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -4205,11 +4205,11 @@ fn test_udt_zero_fields_fallback_to_utf8() {
     );
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "empty".to_string(),
             fields: vec![],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -4271,14 +4271,14 @@ fn test_udt_is_not_stringified_with_cql_type() {
     );
     let result = single_cql_typed_result(
         col,
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),
             fields: vec![UdtField {
                 name: "x".to_string(),
                 value: Some(Value::Integer(42)),
             }],
-        }),
+        })),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -4358,14 +4358,14 @@ fn test_udt_legacy_path_no_cql_type() {
     let mut values = HashMap::new();
     values.insert(
         "u".into(),
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),
             fields: vec![UdtField {
                 name: "x".to_string(),
                 value: Some(Value::Integer(7)),
             }],
-        }),
+        })),
     );
     let row = QueryRow {
         values,
@@ -4593,7 +4593,7 @@ fn make_parity_fixture() -> QueryResult {
     );
     values.insert(
         "udt_col".into(),
-        Value::Udt(UdtValue {
+        Value::Udt(Box::new(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),
             fields: vec![
@@ -4606,7 +4606,7 @@ fn make_parity_fixture() -> QueryResult {
                     value: Some(Value::Text("north".to_string())),
                 },
             ],
-        }),
+        })),
     );
 
     let row = QueryRow {

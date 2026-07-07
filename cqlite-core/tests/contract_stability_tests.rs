@@ -287,10 +287,10 @@ fn contract_value_duration() {
 
 #[test]
 fn contract_value_json() {
-    insta::assert_json_snapshot!(Value::Json(serde_json::json!({
+    insta::assert_json_snapshot!(Value::Json(Box::new(serde_json::json!({
         "key": "value",
         "number": 42
-    })));
+    }))));
 }
 
 #[test]
@@ -347,7 +347,7 @@ fn contract_value_udt() {
     let udt = UdtValue::new("Person".to_string(), "test_keyspace".to_string())
         .with_field("name".to_string(), Some(Value::Text("John".to_string())))
         .with_field("age".to_string(), Some(Value::Integer(30)));
-    insta::assert_json_snapshot!(Value::Udt(udt));
+    insta::assert_json_snapshot!(Value::Udt(Box::new(udt)));
 }
 
 #[test]

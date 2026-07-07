@@ -180,7 +180,7 @@ impl JSONWriter {
             Value::Decimal { .. } => JsonValue::String(ValueFormatter::format_value(value)),
             // Use ValueFormatter for human-readable Duration (XmoYdZns format)
             Value::Duration { .. } => JsonValue::String(ValueFormatter::format_value(value)),
-            Value::Json(j) => j.clone(),
+            Value::Json(j) => (**j).clone(),
             Value::List(list) => {
                 let json_list: Vec<JsonValue> = list.iter().map(Self::value_to_json).collect();
                 JsonValue::Array(json_list)
@@ -876,14 +876,14 @@ mod tests {
     fn test_cell_tombstone_renders_as_null() {
         use cqlite_core::types::{TombstoneInfo, TombstoneType};
 
-        let tombstone = Value::Tombstone(TombstoneInfo {
+        let tombstone = Value::Tombstone(Box::new(TombstoneInfo {
             deletion_time: 1673778645000000,
             tombstone_type: TombstoneType::CellTombstone,
             local_deletion_time: 0,
             ttl: None,
             range_start: None,
             range_end: None,
-        });
+        }));
 
         let json_val = JSONWriter::value_to_json(&tombstone);
         assert!(
@@ -896,14 +896,14 @@ mod tests {
     fn test_row_tombstone_renders_as_null() {
         use cqlite_core::types::{TombstoneInfo, TombstoneType};
 
-        let tombstone = Value::Tombstone(TombstoneInfo {
+        let tombstone = Value::Tombstone(Box::new(TombstoneInfo {
             deletion_time: 1673778645000000,
             tombstone_type: TombstoneType::RowTombstone,
             local_deletion_time: 0,
             ttl: None,
             range_start: None,
             range_end: None,
-        });
+        }));
 
         let json_val = JSONWriter::value_to_json(&tombstone);
         assert!(
@@ -927,14 +927,14 @@ mod tests {
         let mut values = HashMap::new();
         values.insert(
             "deleted_col".to_string(),
-            Value::Tombstone(TombstoneInfo {
+            Value::Tombstone(Box::new(TombstoneInfo {
                 deletion_time: 0,
                 tombstone_type: TombstoneType::CellTombstone,
                 local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
-            }),
+            })),
         );
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
         result.rows.push(row);

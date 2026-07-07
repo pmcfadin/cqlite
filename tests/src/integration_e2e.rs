@@ -103,7 +103,7 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
         row_data.insert("age".to_string(), Value::Integer(age as i32));
 
         // Store as JSON for simplicity in this test
-        let row_value = Value::Json(serde_json::to_value(row_data)?);
+        let row_value = Value::Json(Box::new(serde_json::to_value(row_data)?));
 
         storage.put(&table_id, key, row_value).await?;
     }
@@ -531,7 +531,7 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
                 }),
             );
 
-            let value = Value::Json(serde_json::to_value(row_data)?);
+            let value = Value::Json(Box::new(serde_json::to_value(row_data)?));
             batch_ops.push((key, value));
         }
 
@@ -678,7 +678,7 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
                     ]),
                 );
 
-                let value = Value::Json(serde_json::to_value(row_data).unwrap());
+                let value = Value::Json(Box::new(serde_json::to_value(row_data).unwrap()));
 
                 // Write operation
                 if let Err(e) = storage_clone.put(&table_id_clone, key.clone(), value).await {

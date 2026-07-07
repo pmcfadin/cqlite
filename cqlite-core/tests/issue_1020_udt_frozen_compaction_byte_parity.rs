@@ -379,7 +379,7 @@ fn collections_schema() -> TableSchema {
 // ── Value builders ───────────────────────────────────────────────────────────
 
 fn person(first: Option<&str>, last: Option<&str>, age: Option<i32>) -> Value {
-    Value::Frozen(Box::new(Value::Udt(UdtValue {
+    Value::Frozen(Box::new(Value::Udt(Box::new(UdtValue {
         type_name: "person".into(),
         keyspace: KEYSPACE.into(),
         fields: vec![
@@ -396,12 +396,12 @@ fn person(first: Option<&str>, last: Option<&str>, age: Option<i32>) -> Value {
                 value: age.map(Value::Integer),
             },
         ],
-    })))
+    }))))
 }
 
 /// A bare (non-Frozen-wrapped) person UDT for use as a collection ELEMENT.
 fn person_inner(first: &str, last: &str, age: i32) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "person".into(),
         keyspace: KEYSPACE.into(),
         fields: vec![
@@ -418,11 +418,11 @@ fn person_inner(first: &str, last: &str, age: i32) -> Value {
                 value: Some(Value::Integer(age)),
             },
         ],
-    })
+    }))
 }
 
 fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
-    Value::Udt(UdtValue {
+    Value::Udt(Box::new(UdtValue {
         type_name: "address".into(),
         keyspace: KEYSPACE.into(),
         fields: vec![
@@ -439,11 +439,11 @@ fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
                 value: Some(Value::Text(zip.into())),
             },
         ],
-    })
+    }))
 }
 
 fn employee(name: &str, home: Value, level: i32) -> Value {
-    Value::Frozen(Box::new(Value::Udt(UdtValue {
+    Value::Frozen(Box::new(Value::Udt(Box::new(UdtValue {
         type_name: "employee".into(),
         keyspace: KEYSPACE.into(),
         fields: vec![
@@ -460,7 +460,7 @@ fn employee(name: &str, home: Value, level: i32) -> Value {
                 value: Some(Value::Integer(level)),
             },
         ],
-    })))
+    }))))
 }
 
 fn flist(ns: &[i32]) -> Value {

@@ -130,7 +130,7 @@ fn nonfrozen_udt_is_one_nested_cell_value() {
     let row = RowData::Live {
         cells: vec![CellData {
             column: "address".to_string(),
-            value: Value::Udt(UdtValue {
+            value: Value::Udt(Box::new(UdtValue {
                 type_name: "addr".to_string(),
                 keyspace: "ks".to_string(),
                 fields: vec![
@@ -143,7 +143,7 @@ fn nonfrozen_udt_is_one_nested_cell_value() {
                         value: Some(Value::Text("94105".to_string())),
                     },
                 ],
-            }),
+            })),
             timestamp: 10,
             ttl: None,
             cell_path: None,

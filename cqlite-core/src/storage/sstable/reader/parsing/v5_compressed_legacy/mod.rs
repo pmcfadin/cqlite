@@ -452,7 +452,7 @@ impl RowHeader {
     /// merger's LWW ordering meaningful rather than defaulting to 0.
     fn row_tombstone(&self) -> Value {
         let deletion_time = self.row_tombstone_deletion_time();
-        Value::Tombstone(TombstoneInfo {
+        Value::Tombstone(Box::new(TombstoneInfo {
             deletion_time,
             tombstone_type: TombstoneType::RowTombstone,
             // Carry the on-disk `localDeletionTime` (GC clock, seconds) so the
@@ -462,7 +462,7 @@ impl RowHeader {
             ttl: None,
             range_start: None,
             range_end: None,
-        })
+        }))
     }
 
     /// Authoritative reconciliation timestamp (microseconds) for a row tombstone.

@@ -540,7 +540,7 @@ impl V5CompressedLegacyParser {
             fields,
         };
 
-        Ok((Value::Udt(udt_value), current_offset))
+        Ok((Value::Udt(Box::new(udt_value)), current_offset))
     }
 
     /// Parse a UDT field value based on its CqlType.
@@ -1059,11 +1059,11 @@ impl V5CompressedLegacyParser {
             });
         }
 
-        Ok(Value::Udt(UdtValue {
+        Ok(Value::Udt(Box::new(UdtValue {
             type_name: udt_def.name.clone(),
             keyspace: udt_def.keyspace.clone(),
             fields,
-        }))
+        })))
     }
 
     /// Parse a UDT using inline field definitions from CqlType::Udt
@@ -1171,11 +1171,11 @@ impl V5CompressedLegacyParser {
             });
         }
 
-        Ok(Value::Udt(UdtValue {
+        Ok(Value::Udt(Box::new(UdtValue {
             type_name: type_name.to_string(),
             keyspace: self.keyspace.clone(),
             fields,
-        }))
+        })))
     }
 
     /// Returns true if the column type is a complex column (non-frozen collection).

@@ -58,7 +58,7 @@ pub(super) fn decode_custom_scalar(name: &str, value_data: &[u8]) -> Result<Valu
                 .map_err(|_| Error::corruption("Invalid UTF-8 in JSON value"))?;
             let json_value: serde_json::Value = serde_json::from_str(json_text)
                 .map_err(|_| Error::corruption("Invalid JSON value"))?;
-            Ok(Value::Json(json_value))
+            Ok(Value::Json(Box::new(json_value)))
         }
         // Genuinely-unknown custom type: preserve raw bytes verbatim.
         _ => Ok(Value::Blob(value_data.to_vec())),
@@ -108,11 +108,11 @@ mod tests {
     fn json_decodes_to_typed_value() {
         assert_eq!(
             decode_custom_scalar("json", br#"{"a":1}"#).unwrap(),
-            Value::Json(serde_json::json!({"a": 1}))
+            Value::Json(Box::new(serde_json::json!({"a": 1})))
         );
         assert_eq!(
             decode_custom_scalar("json", b"[1,2,3]").unwrap(),
-            Value::Json(serde_json::json!([1, 2, 3]))
+            Value::Json(Box::new(serde_json::json!([1, 2, 3])))
         );
     }
 

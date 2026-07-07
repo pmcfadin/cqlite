@@ -680,11 +680,11 @@ impl V5CompressedLegacyParser {
                     value,
                 })
                 .collect();
-            Value::Udt(UdtValue {
+            Value::Udt(Box::new(UdtValue {
                 type_name: udt_name,
                 keyspace: udt_keyspace,
                 fields,
-            })
+            }))
         } else {
             // Unknown complex column type, skip cells
             for i in 0..cell_count_usize {
