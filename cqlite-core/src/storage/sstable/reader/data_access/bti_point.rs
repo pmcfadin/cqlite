@@ -120,6 +120,13 @@ impl SSTableReader {
     /// per-lookup `open(2)`, no cursor, no mutex — CRC-checks the chunk, and
     /// returns the compressed bytes (the caller decompresses). `Ok(None)` at EOF.
     /// Only called on the chunk-targeted path, where `CompressionInfo` is present.
+    ///
+    /// Issue #1598 (G2): `bti_decompress_and_parse_target` now reads its chunks via
+    /// `ChunkSource::chunk()` (read + CRC + decompress + B1 cache in the single decode
+    /// plane), so the sole remaining caller is the `#[cfg(not(feature = "tombstones"))]`
+    /// seek helper `bti_pull_decompressed_chunk` — this method carries the same cfg to
+    /// stay dead-code-free under `tombstones`.
+    #[cfg(not(feature = "tombstones"))]
     pub(super) fn point_read_compressed_chunk(&self, chunk_idx: usize) -> Result<Option<Vec<u8>>> {
         let Some(ci) = self.compression_info.as_deref() else {
             return Ok(None);
@@ -277,34 +284,34 @@ impl SSTableReader {
             // If chunk-targeted, append the next chunk before each parse attempt
             // (the whole-section fallback already has all bytes in `window`).
             if chunk_targeted {
-                // Cache key: the ABSOLUTE chunk index about to be read (issue #1567).
-                // Shared cache is consulted before decompress; a hit skips the
-                // decompressor (the compressed bytes were still read + CRC-checked).
-                let this_chunk = chunk_index as u64;
-                match self.point_read_compressed_chunk(chunk_index)? {
-                    Some(compressed_chunk) => {
+                // Single decode plane (issue #1598, G2): positioned read → CRC →
+                // decompress → B1 cache via `ChunkSource`. A shared-cache hit skips
+                // the decompressor; a miss reads + CRC-checks (guardrail #1411) the
+                // compressed bytes before decompressing them (issue #1567 cache key
+                // = the ABSOLUTE chunk index in the NS_BTI_CHUNK namespace).
+                let compression_opt = self
+                    .compression_reader
+                    .as_ref()
+                    .map(|cr| Compression::new(*cr.algorithm()))
+                    .transpose()?;
+                let comp_info = self.compression_info.as_deref().ok_or_else(|| {
+                    Error::corruption(
+                        "BTI chunk_targeted path requires CompressionInfo but it is absent",
+                    )
+                })?;
+                let chunk_source = super::super::chunk_source::ChunkSource::new(
+                    self.point_source.as_ref(),
+                    comp_info,
+                    compression_opt.as_ref(),
+                    &self.chunk_cache,
+                    self.stats.file_size,
+                    0, // NB/BTI: chunk offsets are absolute from Data.db byte 0
+                    super::NS_BTI_CHUNK,
+                    self.chunk_cache_id,
+                );
+                match chunk_source.chunk(chunk_index)? {
+                    Some(decompressed_chunk) => {
                         chunk_index += 1;
-                        let key = self.chunk_cache_key(super::NS_BTI_CHUNK, this_chunk);
-                        let decompressed_chunk: std::sync::Arc<[u8]> = if let Some(hit) =
-                            self.chunk_cache.get(&key)
-                        {
-                            hit
-                        } else if let Some(compression_reader) = &self.compression_reader {
-                            let compression = Compression::new(*compression_reader.algorithm())?;
-                            let d = compression.decompress(&compressed_chunk).map_err(|e| {
-                                Error::corruption(format!(
-                                    "BTI point lookup: failed to decompress chunk: {}",
-                                    e
-                                ))
-                            })?;
-                            super::model::DECOMPRESS_CALLS
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            self.chunk_cache.insert(key, d)
-                        } else {
-                            // No compression reader despite CompressionInfo:
-                            // treat raw chunk bytes as the decompressed data.
-                            self.chunk_cache.insert(key, compressed_chunk)
-                        };
                         window.extend_from_slice(&decompressed_chunk);
                     }
                     None => {
@@ -655,23 +662,24 @@ impl SSTableReader {
         // Issue #1573 (C2): positioned chunk fetch — no cursor, no mutex, no
         // per-lookup open. CRC is verified inside `point_read_compressed_chunk`
         // BEFORE we decompress here (guardrail #1411).
+        //
+        // Single decode plane (issue #1598, G2): routes through ChunkSource::decompress_only
+        // to consolidate the decompress call site, preserving the current UNCACHED behavior
+        // (no B1 cache insertion, separate work_counters counter).
         match self.point_read_compressed_chunk(*chunk_index)? {
             Some(compressed_chunk) => {
                 *chunk_index += 1;
-                let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader
-                {
-                    let compression = Compression::new(*compression_reader.algorithm())?;
-                    compression.decompress(&compressed_chunk).map_err(|e| {
-                        Error::corruption(format!(
-                            "BTI single-partition seek: failed to decompress chunk: {}",
-                            e
-                        ))
-                    })?
-                } else {
-                    // No compression reader despite CompressionInfo: treat the raw
-                    // chunk bytes as already-decompressed data.
-                    compressed_chunk
-                };
+                // Build Compression once per call (same as before)
+                let compression_opt = self
+                    .compression_reader
+                    .as_ref()
+                    .map(|cr| Compression::new(*cr.algorithm()))
+                    .transpose()?;
+                // Decompress-only: no cache, keeps work_counters separate
+                let decompressed_chunk = super::super::chunk_source::ChunkSource::decompress_only(
+                    compression_opt.as_ref(),
+                    compressed_chunk,
+                )?;
                 // Issue #953/#951: count every chunk the seek materializes so a
                 // bound test can prove the decompression window is bounded to the
                 // target partition's chunk span, not stitched to EOF.

@@ -98,7 +98,16 @@ impl SSTableReader {
             let decompressed = if compressed.len() >= max_compressed_length {
                 compressed
             } else if let Some(compression) = &compression {
-                let out = compression.decompress(&compressed)?;
+                // Single decode plane (issue #1598, G2): the actual decompress call
+                // resolves inside `ChunkSource::decompress_only`, so this module holds
+                // zero query-path decompress call sites (the architecture test proves
+                // exactly one such module). CRC is already validated above by
+                // `read_compressed_chunk_at` (guardrail #1411), so we never decode bytes
+                // that failed their inline CRC32.
+                let out = super::super::chunk_source::ChunkSource::decompress_only(
+                    Some(compression),
+                    compressed,
+                )?;
                 super::model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
                 out
             } else {

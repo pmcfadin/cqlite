@@ -582,18 +582,25 @@ impl SSTableReader {
     /// Read+decompress the next chunk into `window`, returning `false` at EOF.
     /// Bumps `chunks_decompressed` so the reverse path's decompression stays
     /// observably bounded to the target partition's chunk span.
+    ///
+    /// Single decode plane (issue #1598, G2): routes through ChunkSource::decompress_only
+    /// to consolidate the decompress call site, but preserves the current UNCACHED behavior
+    /// (no B1 cache insertion, separate work_counters counter).
     async fn pull_reverse_chunk(&self, cursor: &ScanCursor, window: &mut Vec<u8>) -> Result<bool> {
         use crate::storage::sstable::compression::Compression;
         match self.read_next_block(cursor).await? {
             Some(compressed_chunk) => {
-                let decompressed = if let Some(reader) = &self.compression_reader {
-                    let compression = Compression::new(*reader.algorithm())?;
-                    compression.decompress(&compressed_chunk).map_err(|e| {
-                        Error::corruption(format!("BIG reverse seek: chunk decompress failed: {e}"))
-                    })?
-                } else {
-                    compressed_chunk
-                };
+                // Build Compression once per call (same as before)
+                let compression_opt = self
+                    .compression_reader
+                    .as_ref()
+                    .map(|cr| Compression::new(*cr.algorithm()))
+                    .transpose()?;
+                // Decompress-only: no cache, keeps work_counters separate
+                let decompressed = super::super::chunk_source::ChunkSource::decompress_only(
+                    compression_opt.as_ref(),
+                    compressed_chunk,
+                )?;
                 crate::storage::sstable::work_counters::add_chunk_decompressed();
                 window.extend_from_slice(&decompressed);
                 Ok(true)

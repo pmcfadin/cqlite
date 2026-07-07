@@ -772,39 +772,58 @@ impl SSTableReader {
         // finding, issue #1143). Run the fallible work in a closure and flush
         // `batch` before propagating any error it returns.
         let drained: Result<()> = (|| {
+            // Single decode plane (issue #1598, G2): the windowed-scan blocking half
+            // receives compressed bytes over the channel (already read by the async I/O
+            // half), so it routes through `decode_and_cache` directly (no self-read).
+            // Build a minimal CompressionInfo for max_compressed_length (the only field
+            // the decode path needs); Compression is built once outside the loop.
+            let compression_opt = self
+                .compression_reader
+                .as_ref()
+                .map(|cr| Compression::new(*cr.algorithm()))
+                .transpose()?;
+            let comp_info_dummy = crate::storage::sstable::compression_info::CompressionInfo {
+                algorithm: String::new(),
+                option_pairs: vec![],
+                chunk_length: 0,
+                max_compressed_length: ctx.max_compressed_length as u32,
+                data_length: 0,
+                chunk_offsets: vec![],
+            };
+            let chunk_source = super::chunk_source::ChunkSource::new(
+                self.point_source.as_ref(), // unused by decode_and_cache
+                &comp_info_dummy,
+                compression_opt.as_ref(),
+                &self.chunk_cache,
+                0, // unused
+                0, // unused
+                super::data_access::NS_WINDOWED_CHUNK,
+                self.chunk_cache_id,
+            );
+
             while let Some(compressed_chunk) = raw_rx.blocking_recv() {
-                // Shared decompressed-chunk cache (issue #1567). The I/O half feeds
-                // chunks from the data-section start (chunk 0) in order, so
-                // `chunk_count` is the ABSOLUTE chunk index — a stable cache key in
-                // the windowed-scan namespace. Incompressible raw-passthrough chunks
-                // (`len >= max_compressed_length`) skip the decompressor already, so
-                // there is nothing to memoize; they are NOT cached (documented D-choice,
-                // task 4.4). On a compressible chunk the cache is consulted before
-                // decompress: a hit skips the decompressor (and the counter).
-                if compressed_chunk.len() >= ctx.max_compressed_length {
-                    window.refill(&compressed_chunk);
-                } else if let Some(compression_reader) = &self.compression_reader {
-                    let key = self
-                        .chunk_cache_key(super::data_access::NS_WINDOWED_CHUNK, chunk_count as u64);
-                    let chunk: std::sync::Arc<[u8]> = match self.chunk_cache.get(&key) {
-                        Some(hit) => hit,
-                        None => {
-                            let compression = Compression::new(*compression_reader.algorithm())?;
-                            let d = compression.decompress(&compressed_chunk).map_err(|e| {
-                                Error::corruption(format!(
-                                    "drain_scan_window_blocking: Failed to decompress chunk {}: {}",
-                                    chunk_count, e
-                                ))
-                            })?;
-                            super::data_access::DECOMPRESS_CALLS
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            self.chunk_cache.insert(key, d)
-                        }
-                    };
-                    window.refill(&chunk);
+                // Windowed scan: incompressible-raw chunks skip the cache (documented
+                // D-choice, task 4.4). The key is ABSOLUTE chunk index (I/O half feeds
+                // from data-section start in order).
+                let incompressible = compressed_chunk.len() >= ctx.max_compressed_length;
+                let chunk: std::sync::Arc<[u8]> = if incompressible {
+                    // Raw passthrough: no cache, no decompress
+                    std::sync::Arc::from(compressed_chunk.into_boxed_slice())
                 } else {
-                    window.refill(&compressed_chunk);
-                }
+                    let key = crate::storage::cache::ChunkKey::new(
+                        self.chunk_cache_id ^ super::data_access::NS_WINDOWED_CHUNK,
+                        chunk_count as u64,
+                    );
+                    // Check cache BEFORE decode_and_cache (issue #1598 roborev Medium):
+                    // warm scans must take the hit, not re-decompress and overwrite.
+                    // Mirror what chunk()/range() do: hit → Arc clone, miss → decode.
+                    if let Some(hit) = self.chunk_cache.get(&key) {
+                        hit
+                    } else {
+                        chunk_source.decode_and_cache(key, compressed_chunk, false)?
+                    }
+                };
+                window.refill(&chunk);
                 chunk_count += 1;
 
                 // Not the final chunk yet: drain confirmed partitions; NeedMore

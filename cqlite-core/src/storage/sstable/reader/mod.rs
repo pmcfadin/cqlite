@@ -11,6 +11,8 @@
 // Submodules
 mod block_io;
 mod bti_lookup_memo;
+/// Single chunk decode plane (issue #1598, Epic G / G2).
+mod chunk_source;
 /// Per-element / per-cell compaction read contract (epic #899, Phase A).
 pub mod compaction_row;
 mod component_loading;

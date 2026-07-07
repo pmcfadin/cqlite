@@ -63,7 +63,6 @@ pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
-use crate::storage::cache::ChunkKey;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
@@ -82,28 +81,6 @@ pub(super) const NS_BTI_CHUNK: u64 = 0x9E37_79B9_7F4A_7C15;
 pub(super) const NS_WINDOWED_CHUNK: u64 = 0xC2B2_AE3D_27D4_EB4F;
 
 impl SSTableReader {
-    /// Build a [`ChunkKey`] for `chunk_index` in the given per-site `namespace`,
-    /// bound to this reader's stable cache identity. See the `NS_*` salts.
-    #[inline]
-    pub(crate) fn chunk_cache_key(&self, namespace: u64, chunk_index: u64) -> ChunkKey {
-        ChunkKey::new(self.chunk_cache_id ^ namespace, chunk_index)
-    }
-
-    /// Build a [`ChunkKey`] for a size-dependent range read (the BIG point-read
-    /// path): the decompressed bytes depend on BOTH `offset` and `size`, so
-    /// `size` is carried as the key's `aux` discriminant. Keying by `offset`
-    /// alone would alias two reads at the same offset with different sizes and
-    /// return the first-cached range (roborev #1567).
-    #[inline]
-    pub(crate) fn chunk_cache_key_ranged(
-        &self,
-        namespace: u64,
-        offset: u64,
-        size: u32,
-    ) -> ChunkKey {
-        ChunkKey::with_aux(self.chunk_cache_id ^ namespace, offset, size as u64)
-    }
-
     /// The shared decompressed-chunk cache this reader consults (issue #1567).
     ///
     /// Exposed so callers/tests can observe cache residency and per-instance
@@ -362,16 +339,21 @@ impl SSTableReader {
                 );
                 compressed_chunk
             } else if let Some(compression_reader) = &self.compression_reader {
+                // Single decode plane (issue #1598, G2): route the stitch-path
+                // decompress through ChunkSource so it is the ONLY query-path module
+                // that calls Compression::decompress. Behavior-identical (no cache,
+                // no counter) to the prior inline call.
                 let compression = Compression::new(*compression_reader.algorithm())?;
-                match compression.decompress(&compressed_chunk) {
-                    Ok(decompressed) => decompressed,
-                    Err(e) => {
-                        return Err(Error::corruption(format!(
-                            "stitch_all_chunks: Failed to decompress chunk {}: {}",
-                            chunk_count, e
-                        )));
-                    }
-                }
+                super::chunk_source::ChunkSource::decompress_only(
+                    Some(&compression),
+                    compressed_chunk,
+                )
+                .map_err(|e| {
+                    Error::corruption(format!(
+                        "stitch_all_chunks: Failed to decompress chunk {}: {}",
+                        chunk_count, e
+                    ))
+                })?
             } else {
                 // No compression (should not happen for V5CompressedLegacy)
                 tracing::warn!("stitch_all_chunks: No compression reader, using raw chunk data");
@@ -461,10 +443,13 @@ impl SSTableReader {
         // (compressed tables / BTI / absent-CRC.db warn-and-proceed).
         self.verify_uncompressed_range(offset, size).await?;
 
-        // `get_cached_data` returns the final DECODED window: CRC-validated +
-        // decompressed for a compressed Data.db (issue #1773), or the CRC.db-verified
-        // raw bytes for an uncompressed one. There is no second decode here — doing so
-        // used to double-decompress the compressed path (and skip its inline CRC).
+        // Read + decompress in ONE decode plane (issue #1598, G2). `get_cached_data`
+        // returns the final DECODED window: for a compressed Data.db it routes through
+        // the CRC-validated `read_compressed_offset_window` (issue #1773 — per-chunk
+        // inline CRC32 checked BEFORE decompression, whose sole `Compression::decompress`
+        // now resolves inside `ChunkSource`), or the CRC.db-verified raw bytes for an
+        // uncompressed one. There is no second decode here — doing so used to
+        // double-decompress the compressed path (and skip its inline CRC, the #1411 bug).
         let data = self.get_cached_data(offset, size).await?;
 
         // Preserve raw data until schema is available. Pre-#1334 this offset-read
@@ -507,10 +492,14 @@ impl SSTableReader {
     ///
     /// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
     async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
-        // The shared B1 cache tracks its own hit/miss counters (issue #1567); the
-        // dead per-reader `record_cache_hit`/`record_cache_miss` atomics were
-        // removed (issue #1568).
-        let key = self.chunk_cache_key_ranged(NS_BIG_POINT, block_offset, size);
+        // The shared B1 cache tracks its own hit/miss counters (issue #1567). The
+        // ranged BIG-point key carries `size` as its aux discriminant so two reads at
+        // the same offset with different sizes can never alias (roborev #1567).
+        let key = crate::storage::cache::ChunkKey::with_aux(
+            self.chunk_cache_id ^ NS_BIG_POINT,
+            block_offset,
+            size as u64,
+        );
         if let Some(hit) = self.chunk_cache.get(&key) {
             return Ok(hit.to_vec());
         }
@@ -518,11 +507,12 @@ impl SSTableReader {
         // Produce the final DECOMPRESSED, integrity-verified window for this offset.
         let data = if let Some(comp_info) = self.compression_info.as_deref() {
             // COMPRESSED offset read (issue #1773): the authoritative inline per-chunk
-            // CRC32 MUST be validated before decompression. Reuse the shared
-            // CRC-enforcing chunk reader rather than reading `size` raw bytes and
-            // blindly LZ4-decoding them — the latter re-introduced the exact #1411
-            // CRC bypass (a bit-flipped chunk decoding to garbage instead of the
-            // typed Error::InvalidFormat that scan/scan_for_key surface).
+            // CRC32 MUST be validated before decompression. `read_compressed_offset_window`
+            // reuses the shared CRC-enforcing chunk reader (multi-chunk assembly,
+            // fail-closed past-EOF) rather than reading `size` raw bytes and blindly
+            // LZ4-decoding them — the latter re-introduced the exact #1411 CRC bypass.
+            // Its single decompress resolves inside `ChunkSource` (issue #1598, G2), so
+            // this is NOT a second decode plane.
             self.read_compressed_offset_window(comp_info, block_offset, size)
                 .await?
         } else {
