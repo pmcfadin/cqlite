@@ -76,8 +76,18 @@ tasks.withType<Test>().configureEach {
 // javadoc jars and a Central-compliant POM. `trino-spi` is compileOnly, so it is
 // absent from the POM's runtime scope; `flight-core` + `jackson-databind` are
 // `implementation`, so they appear as runtime dependencies.
+//
+// `automaticRelease = true` (issue #2156): the pinned 0.30.0 plugin's
+// `publishToMavenCentral(SonatypeHost, automaticRelease: Boolean)` overload
+// defaults `automaticRelease` to `false` when omitted — verified by decompiling
+// the cached 0.30.0 plugin jar: the Kotlin `$default` bridge loads `iconst_0`
+// (`false`) for the boolean slot when the caller doesn't pass it. That default
+// is why every prior publish (0.13.0/0.13.1/0.13.2) landed
+// VALIDATED-but-PENDING in Central Portal Deployments and needed a manual
+// Publish click. Passing `true` here makes a successful
+// `publishToMavenCentral` invocation release automatically — no portal step.
 mavenPublishing {
-    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
     coordinates("in.mcfad", "cqlite-trino", version.toString())
     configure(JavaLibrary(javadocJar = JavadocJar.Javadoc(), sourcesJar = true))
 
