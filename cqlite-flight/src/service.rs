@@ -19,16 +19,12 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::ipc::writer::IpcWriteOptions;
-use arrow::record_batch::RecordBatch;
-use arrow_flight::encode::FlightDataEncoderBuilder;
-use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaAsIpc, SchemaResult, Ticket,
 };
 use futures::Stream;
-use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
@@ -75,7 +71,10 @@ impl From<ProducerError> for Status {
             ProducerError::Discovery { .. }
             | ProducerError::Merge(_)
             | ProducerError::Convert(_)
-            | ProducerError::Predicate(_) => Status::internal(msg),
+            | ProducerError::Predicate(_)
+            // A panic on the blocking pool (issue #1476, roborev B1) is a server
+            // fault surfaced mid-stream, same class as any other internal error.
+            | ProducerError::Panicked { .. } => Status::internal(msg),
         }
     }
 }
@@ -104,6 +103,17 @@ impl From<StatsError> for Status {
             StatsError::Discovery { .. } => Status::internal(msg),
         }
     }
+}
+
+/// Resolved, ready-to-serve `do_get` inputs produced by the eager setup step
+/// (issue #1476): the built producer, its Arrow schema, the token-pruned SSTable
+/// paths, and whether the ticket aggregates. Kept together so the row and
+/// aggregate response builders share one setup path.
+struct DoGetSetup {
+    producer: MergeProducer,
+    schema_ref: Arc<ArrowSchema>,
+    paths: Vec<PathBuf>,
+    aggregating: bool,
 }
 
 /// Flight service over a node-local SSTable data directory.
@@ -197,15 +207,23 @@ impl FlightService for CqliteFlightService {
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let span = rpc_span("do_get", &request);
-        let mut metrics = RpcMetrics::start("do_get");
-        // Run the read body AND finish() within the RPC span so the core
-        // query.execute / read-path spans nest under `flight.do_get`, and so
-        // error/status recording in finish() tags this span (not a stale current
-        // span after `.instrument` completes). The merge eagerly drains SSTables
-        // into memory, so the row/byte totals are known here and attributed here.
-        async {
-            let result = self.do_get_inner(request, &mut metrics).await;
-            finish(&mut metrics, result)
+        let metrics = RpcMetrics::start("do_get");
+        // The merge now STREAMS through a bounded channel (issue #1476): batches
+        // reach the wire while it is still running, so the row/byte totals are not
+        // known here. `metrics` moves INTO the response stream, which accumulates
+        // per batch and records the terminal RPC counters when the stream ends
+        // (including the emitted prefix for a cancelled stream). On a setup error
+        // (before the stream exists) the metrics come back so we record the error
+        // and close the RPC within this span.
+        async move {
+            match self.do_get_inner(request, metrics).await {
+                Ok(response) => Ok(response),
+                Err((status, metrics)) => {
+                    crate::obs::record_status_error(&status);
+                    drop(metrics);
+                    Err(status)
+                }
+            }
         }
         .instrument(span)
         .await
@@ -366,68 +384,120 @@ impl CqliteFlightService {
         Ok(Response::new(schema_result))
     }
 
-    /// Body of [`FlightService::do_get`], run inside the RPC span. Reports the
-    /// rows + payload bytes produced by the merge into `metrics`.
+    /// Body of [`FlightService::do_get`], run inside the RPC span. Streams the
+    /// merge through a bounded channel (issue #1476). On a setup error (before the
+    /// response stream exists) `metrics` is returned so the caller can record the
+    /// error; on success `metrics` moves into the stream (recorded at stream end).
     async fn do_get_inner(
         &self,
         request: Request<Ticket>,
-        metrics: &mut RpcMetrics,
-    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
-        let producer = self.build_producer(&ticket)?;
-        let schema_ref = Arc::new(producer.arrow_schema()?);
-        let source = DirSource::resolve(
-            &self.data_dir,
-            &ticket.keyspace,
-            &ticket.table,
-            ticket.snapshot.as_deref(),
-        )?;
-
-        // The merge drains SSTables into memory and is CPU-bound — run it off the
-        // async runtime so it cannot stall the gRPC reactor. A missing table
-        // directory surfaces as `not_found`; an existing table with no SSTables
-        // yields an empty result (schema only).
-        //
-        // Cancellation (issue #1473): `spawn_blocking` is NOT cancelled when this
-        // future is dropped, so a client that disconnects mid-`do_get` would
-        // otherwise leave the merge running to completion, pinning a blocking-pool
-        // thread. We hold a `CancelGuard` across the `.await`: if the future is
-        // dropped (client gone) the guard cancels the flag, and the merge loop —
-        // which polls it between partition steps — aborts early with `Aborted`.
-        // On success we disarm the guard (the merge is done; nothing to cancel).
-        // The merge fully materializes its batches BEFORE the response stream is
-        // built, so the future-drop during this `.await` is the meaningful
-        // cancellation point; wrapping the post-materialization stream would have
-        // nothing left to cancel.
+        metrics: RpcMetrics,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, (Status, RpcMetrics)> {
+        // Cancellation (issue #1476, roborev F1): pre-change, the single merge
+        // `spawn_blocking` was covered by a `CancelGuard` held across its whole
+        // `.await`, so a client disconnect during that call stopped the work. The
+        // streaming rewrite splits eager setup (path discovery/token-prune, which
+        // reads a `Summary.db` per SSTable and can be slow over many of them) from
+        // the merge stage; ONE `CancelFlag` now spans both so a disconnect during
+        // EITHER phase stops it — `setup_guard` covers the setup await (disarmed
+        // once setup succeeds; a still-armed guard cancels on this future's drop),
+        // and the SAME flag hands off to the merge stage under a fresh guard
+        // (`spawn_streaming`/`build_aggregate_response`) covering the stream's
+        // lifetime, exactly as before this fix.
         let cancel = CancelFlag::new();
-        let mut guard = cancel.drop_guard();
-        let merge_cancel = cancel.clone();
-        let batches = tokio::task::spawn_blocking(move || {
-            producer.produce_cancellable(&source, &merge_cancel)
+        let mut setup_guard = cancel.drop_guard();
+        // Fallible eager setup: parse the ticket, build the producer + schema, and
+        // resolve/token-prune the SSTable paths off the reactor. A missing table
+        // surfaces here as a clean `not_found` BEFORE the stream opens.
+        let setup = match self.do_get_setup(request, &cancel).await {
+            Ok(setup) => setup,
+            Err(status) => return Err((status, metrics)),
+        };
+        setup_guard.disarm();
+        let DoGetSetup {
+            producer,
+            schema_ref,
+            paths,
+            aggregating,
+        } = setup;
+
+        if aggregating {
+            // Aggregate output is bounded (one row per group): keep materializing
+            // and serve it as a stream, unchanged in content (issue #1476).
+            return Ok(Response::new(
+                crate::streaming::build_aggregate_response(
+                    producer, paths, schema_ref, metrics, cancel,
+                )
+                .await?,
+            ));
+        }
+
+        // Row path: the merge runs on the blocking pool and sends each batch into a
+        // bounded channel; the response wraps the receiver. Peak resident payload
+        // is O(channel capacity · batch_size), not O(result). The merge task handle
+        // is detached (dropping it does not cancel `spawn_blocking`; a dropped
+        // response stream cancels the merge cooperatively).
+        let (stream, _merge_handle) = crate::streaming::spawn_streaming(
+            producer,
+            paths,
+            schema_ref,
+            metrics,
+            crate::streaming::DO_GET_CHANNEL_CAPACITY,
+            crate::streaming::StreamProbe::default(),
+            cancel,
+        );
+        Ok(Response::new(stream))
+    }
+
+    /// Eager, fallible `do_get` setup shared by the row and aggregate paths: parse
+    /// the ticket, build the producer + Arrow schema, resolve the table's on-disk
+    /// directory, and token-prune the SSTable paths. A missing table surfaces as
+    /// `not_found` here, before any stream opens.
+    ///
+    /// The ENTIRE fallible sequence — schema/producer construction,
+    /// `DirSource::resolve` (filesystem `is_dir`/`read_dir`, including the
+    /// Cassandra `<table>-<uuid>` layout scan), and the token-prune (reads a
+    /// sibling `Summary.db` per SSTable) — runs in ONE `spawn_blocking` closure
+    /// (issue #1476, roborev round 3). Pre-change, ALL filesystem access for
+    /// `do_get` ran inside the blocking task; letting any of it run on the async
+    /// request task instead would stall the gRPC reactor for unrelated RPCs under
+    /// slow/busy storage. `cancel` is polled inside this same closure (issue
+    /// #1476, roborev F1) so a client disconnect during setup stops it instead of
+    /// running to completion; `do_get_inner`'s `CancelGuard` still covers this
+    /// whole `.await` for the future-drop case.
+    async fn do_get_setup(
+        &self,
+        request: Request<Ticket>,
+        cancel: &CancelFlag,
+    ) -> Result<DoGetSetup, Status> {
+        let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
+        let svc = self.clone();
+        let resolve_cancel = cancel.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<DoGetSetup, Status> {
+            let producer = svc.build_producer(&ticket)?;
+            let schema_ref = Arc::new(producer.arrow_schema()?);
+            let source = DirSource::resolve(
+                &svc.data_dir,
+                &ticket.keyspace,
+                &ticket.table,
+                ticket.snapshot.as_deref(),
+            )?;
+            let aggregating = producer.is_aggregating();
+            // A cancellation here surfaces as `ProducerError::Cancelled`, mapped
+            // by `From<ProducerError> for Status` to `Status::aborted` — the same
+            // clean, expected-abort class as a merge-stage cancellation.
+            let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel)?;
+
+            Ok(DoGetSetup {
+                producer,
+                schema_ref,
+                paths,
+                aggregating,
+            })
         })
         .await
-        .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
-        guard.disarm();
-
-        // Attribute rows + in-memory payload bytes to this RPC. `get_array_memory_size`
-        // is the buffer footprint of the batch (pre-IPC framing) — a bounded, cheap
-        // count, never the payload contents.
-        let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
-        let bytes: u64 = batches
-            .iter()
-            .map(|b| b.get_array_memory_size() as u64)
-            .sum();
-        metrics.add_rows_bytes(rows, bytes);
-
-        // `with_schema` emits the Arrow schema as the first Flight message even
-        // when no record batches follow, so an empty result still carries the schema.
-        let input = futures::stream::iter(batches.into_iter().map(Ok::<RecordBatch, FlightError>));
-        let encoded = FlightDataEncoderBuilder::new()
-            .with_schema(schema_ref)
-            .build(input)
-            .map(|res| res.map_err(|e| Status::internal(e.to_string())));
-
-        Ok(Response::new(Box::pin(encoded)))
+        .map_err(|e| Status::internal(format!("do_get setup panicked: {e}")))?
     }
 
     /// Body of [`FlightService::do_action`], run inside the RPC span (issue #944).
@@ -496,7 +566,10 @@ mod tests {
         build_sstables, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL,
     };
     use arrow::array::Array;
+    use arrow::record_batch::RecordBatch;
     use arrow_flight::decode::FlightRecordBatchStream;
+    use arrow_flight::error::FlightError;
+    use futures::StreamExt;
 
     fn ticket(keyspace: &str, table: &str) -> FlightTicket {
         FlightTicket {
@@ -624,6 +697,96 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.code(), tonic::Code::NotFound, "got: {err:?}");
+    }
+
+    // ---- Issue #1476 roborev F1: setup-phase cancellation ----------------------
+
+    /// Pre-change, the single merge `spawn_blocking` was covered by a
+    /// `CancelGuard` across its whole `.await`, so a disconnect during that call
+    /// stopped the work. `do_get_setup`'s eager path discovery/token-prune phase
+    /// (its OWN, separate `spawn_blocking`) must honor the SAME cancellation
+    /// contract: a flag already cancelled when setup runs (the worst case of a
+    /// disconnect firing the setup-phase `CancelGuard` at or before the very
+    /// start of the blocking task) must stop resolution rather than run the
+    /// discovery/prune to completion, surfacing as a clean `Aborted` — never a
+    /// server fault and never a resolved path list.
+    ///
+    /// Uses a token-range ticket over multiple SSTables so an UNCANCELLED run
+    /// would genuinely read every sibling `Summary.db` during the prune (see
+    /// `prune_paths_cancellable`), proving this isn't a vacuous check against an
+    /// empty/no-op path.
+    #[test]
+    fn do_get_setup_honors_cancellation_before_resolution() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100)],
+                vec![write_row(3, "c", 3, 100), write_row(4, "d", 4, 100)],
+            ],
+        );
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut t = ticket(KS, TBL);
+        // A concrete (full-ring) token range so `ScanSpec.token` is `Some(..)` and
+        // `prune_paths_cancellable`'s per-SSTable loop actually runs.
+        t.token_start = Some(i64::MIN);
+        t.token_end = Some(i64::MAX);
+
+        let result = rt.block_on(async {
+            // Simulates the setup-phase `CancelGuard` having already fired (the
+            // client disconnected) by the time the blocking resolution task runs.
+            let cancel = CancelFlag::new();
+            cancel.cancel();
+            let bytes = t.to_bytes().unwrap();
+            svc.do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
+                .await
+        });
+        let err = match result {
+            Ok(_) => panic!("a cancelled setup must not resolve/return paths"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.code(),
+            tonic::Code::Aborted,
+            "cancellation must surface as Aborted (ProducerError::Cancelled → Status::aborted), \
+             got: {err:?}"
+        );
+    }
+
+    /// Baseline for the test above: the SAME token-range ticket, WITHOUT
+    /// cancellation, resolves normally — proving the cancelled case above is a
+    /// genuine early stop, not just "this ticket always errors."
+    #[test]
+    fn do_get_setup_resolves_normally_without_cancellation() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100)],
+                vec![write_row(3, "c", 3, 100), write_row(4, "d", 4, 100)],
+            ],
+        );
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut t = ticket(KS, TBL);
+        t.token_start = Some(i64::MIN);
+        t.token_end = Some(i64::MAX);
+
+        let setup = rt.block_on(async {
+            let cancel = CancelFlag::new();
+            let bytes = t.to_bytes().unwrap();
+            svc.do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
+                .await
+        });
+        let setup = setup.expect("uncancelled setup resolves");
+        assert_eq!(
+            setup.paths.len(),
+            2,
+            "a full-ring token filter keeps both SSTables"
+        );
     }
 
     // ---- Issue #1430: end-to-end path-traversal rejection (wiring evidence) ----

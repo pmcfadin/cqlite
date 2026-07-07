@@ -17,6 +17,7 @@ pub mod producer;
 pub mod service;
 pub mod shutdown;
 pub mod stats;
+pub mod streaming;
 pub mod ticket;
 
 #[cfg(test)]
