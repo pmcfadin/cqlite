@@ -12,7 +12,6 @@ pub mod sized_ints;
 pub use encoder::{BatchEncoder, ByteComparableEncoder, EncoderConfig, EncoderStats};
 pub use node::{
     BtiError, BtiNode, BtiNodeData, BtiNodeType, BtiResult, PayloadRef, SizedPointer, Transition,
-    TrieNavigator,
 };
 pub use parser::{
     decode_bti_partition_payload, encode_clustering_bound_oss50,
@@ -20,9 +19,8 @@ pub use parser::{
     iterate_partition_locations_in_bti_file, iterate_partitions_in_bti_file,
     iterate_rows_for_partition, iterate_rows_in_bti_file, iterate_rows_in_bti_trie,
     lookup_partition_in_bti_file, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
-    select_row_index_blocks_for_range, BtiHeader, BtiIndexStats, BtiPartitionLocation,
-    BtiRowIndexEntry, BtiRowIndexEntryWithKey, BtiRowIndexHeader, PartitionsParser, RowsParser,
-    FLAG_HAS_HASH_BYTE, FLAG_OPEN_MARKER,
+    select_row_index_blocks_for_range, BtiPartitionLocation, BtiRowIndexEntry,
+    BtiRowIndexEntryWithKey, BtiRowIndexHeader, FLAG_HAS_HASH_BYTE, FLAG_OPEN_MARKER,
 };
 // Crate-internal zero-copy slice walker (rust-reviewer #1574): consumed only by
 // the SSTable reader, so kept off cqlite-core's public semver surface. It takes a

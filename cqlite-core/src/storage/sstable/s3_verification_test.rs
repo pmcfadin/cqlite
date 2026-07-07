@@ -509,7 +509,7 @@ mod s3_verification {
         // BTI uses a TRIE, not a B-tree:
         // - In a trie, navigation is byte-by-byte along key bytes.
         // - In a B-tree, navigation is by comparing full key values at internal nodes.
-        // The BTI PartitionsParser navigates byte-by-byte (see bti/parser.rs).
+        // The BTI partition trie walk navigates byte-by-byte (see bti/parser/).
         use crate::storage::sstable::bti::node::BtiNodeType;
 
         // All BTI node types are trie nodes (PayloadOnly, Single, Sparse, Dense)

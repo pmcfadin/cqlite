@@ -409,58 +409,6 @@ impl BtiNode {
     }
 }
 
-/// Trie navigation context for tracking path through the trie
-#[derive(Debug, Clone)]
-pub struct TrieNavigator {
-    /// Current position in the file
-    pub current_offset: u64,
-    /// Path taken through the trie (for debugging/backtracking)
-    pub path: Vec<u8>,
-    /// Nodes visited (for cycle detection)
-    pub visited_offsets: std::collections::HashSet<u64>,
-}
-
-impl TrieNavigator {
-    /// Create a new navigator at the root
-    pub fn new(root_offset: u64) -> Self {
-        Self {
-            current_offset: root_offset,
-            path: Vec::new(),
-            visited_offsets: std::collections::HashSet::new(),
-        }
-    }
-
-    /// Navigate to a child node
-    pub fn navigate_to_child(&mut self, byte: u8, child_pointer: &SizedPointer) -> BtiResult<()> {
-        let target_offset = self.current_offset + child_pointer.distance;
-
-        // Check for cycles
-        if self.visited_offsets.contains(&target_offset) {
-            return Err(
-                BtiError::NavigationError("Cycle detected in trie navigation".to_string()).into(),
-            );
-        }
-
-        self.visited_offsets.insert(self.current_offset);
-        self.current_offset = target_offset;
-        self.path.push(byte);
-
-        Ok(())
-    }
-
-    /// Get the current path as a key prefix
-    pub fn current_path(&self) -> &[u8] {
-        &self.path
-    }
-
-    /// Reset to navigate from root again
-    pub fn reset(&mut self, root_offset: u64) {
-        self.current_offset = root_offset;
-        self.path.clear();
-        self.visited_offsets.clear();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,18 +520,5 @@ mod tests {
         );
         // Note: This would be invalid in practice but our implementation
         // doesn't enforce minimum children for sparse nodes in this test
-    }
-
-    #[test]
-    fn test_trie_navigator() {
-        let mut nav = TrieNavigator::new(1000);
-        assert_eq!(nav.current_offset, 1000);
-        assert_eq!(nav.current_path(), &[] as &[u8]);
-
-        let pointer = SizedPointer::new(100);
-        nav.navigate_to_child(b'a', &pointer).unwrap();
-
-        assert_eq!(nav.current_offset, 1100);
-        assert_eq!(nav.current_path(), b"a");
     }
 }

@@ -31,8 +31,8 @@ use super::partitions::{parse_bti_node_for_traversal, read_node_payload, BtiPart
 /// Real Cassandra 5.0 BTI files (`Partitions.db` / `Rows.db`) have **no
 /// header** — the root node's absolute offset is the last 8 bytes of the file.
 /// This is the footer-based loader used by the traversal iterators; it does NOT
-/// rely on the fictional [`BtiHeader`](super::reader::BtiHeader) (whose `parse`
-/// would misread byte 0 of a real BTI file).
+/// rely on any whole-file BTI header (a real BTI file has none — the root offset
+/// lives in the footer, not a byte-0 header).
 ///
 /// Returns `(trie_data, root_offset)`.
 pub(crate) fn load_bti_trie_via_footer<R: Read + Seek>(
@@ -375,7 +375,7 @@ pub(crate) fn dfs_collect_partition_locations(
 /// (issue #832), in byte-comparable order.
 ///
 /// This is the headerless public entry point: the trie is loaded via the 8-byte
-/// footer (NOT the fictional [`BtiHeader`](super::reader::BtiHeader)).  Each
+/// footer (a real BTI file has no whole-file header).  Each
 /// returned tuple is `(reconstructed_token_key, BtiPartitionLocation)`; the
 /// offset is definitive, the key is a byte-comparable token prefix (see the DFS
 /// module note).
