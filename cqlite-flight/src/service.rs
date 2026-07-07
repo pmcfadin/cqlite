@@ -30,6 +30,7 @@ use tonic::{Request, Response, Status, Streaming};
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
 use tracing::Instrument;
 
+use crate::cancel::CancelFlag;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
@@ -392,13 +393,27 @@ impl CqliteFlightService {
         request: Request<Ticket>,
         metrics: RpcMetrics,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, (Status, RpcMetrics)> {
+        // Cancellation (issue #1476, roborev F1): pre-change, the single merge
+        // `spawn_blocking` was covered by a `CancelGuard` held across its whole
+        // `.await`, so a client disconnect during that call stopped the work. The
+        // streaming rewrite splits eager setup (path discovery/token-prune, which
+        // reads a `Summary.db` per SSTable and can be slow over many of them) from
+        // the merge stage; ONE `CancelFlag` now spans both so a disconnect during
+        // EITHER phase stops it — `setup_guard` covers the setup await (disarmed
+        // once setup succeeds; a still-armed guard cancels on this future's drop),
+        // and the SAME flag hands off to the merge stage under a fresh guard
+        // (`spawn_streaming`/`build_aggregate_response`) covering the stream's
+        // lifetime, exactly as before this fix.
+        let cancel = CancelFlag::new();
+        let mut setup_guard = cancel.drop_guard();
         // Fallible eager setup: parse the ticket, build the producer + schema, and
         // resolve/token-prune the SSTable paths off the reactor. A missing table
         // surfaces here as a clean `not_found` BEFORE the stream opens.
-        let setup = match self.do_get_setup(request).await {
+        let setup = match self.do_get_setup(request, &cancel).await {
             Ok(setup) => setup,
             Err(status) => return Err((status, metrics)),
         };
+        setup_guard.disarm();
         let DoGetSetup {
             producer,
             schema_ref,
@@ -410,8 +425,10 @@ impl CqliteFlightService {
             // Aggregate output is bounded (one row per group): keep materializing
             // and serve it as a stream, unchanged in content (issue #1476).
             return Ok(Response::new(
-                crate::streaming::build_aggregate_response(producer, paths, schema_ref, metrics)
-                    .await?,
+                crate::streaming::build_aggregate_response(
+                    producer, paths, schema_ref, metrics, cancel,
+                )
+                .await?,
             ));
         }
 
@@ -427,6 +444,7 @@ impl CqliteFlightService {
             metrics,
             crate::streaming::DO_GET_CHANNEL_CAPACITY,
             crate::streaming::StreamProbe::default(),
+            cancel,
         );
         Ok(Response::new(stream))
     }
@@ -435,7 +453,15 @@ impl CqliteFlightService {
     /// the ticket, build the producer + Arrow schema, and resolve + token-prune the
     /// SSTable paths off the async reactor (the prune reads `Summary.db` files).
     /// A missing table surfaces as `not_found` here, before any stream opens.
-    async fn do_get_setup(&self, request: Request<Ticket>) -> Result<DoGetSetup, Status> {
+    ///
+    /// `cancel` is polled inside the blocking discovery/prune task (issue #1476,
+    /// roborev F1) so a client disconnect during this (potentially slow, many-
+    /// SSTable) phase stops it instead of running to completion.
+    async fn do_get_setup(
+        &self,
+        request: Request<Ticket>,
+        cancel: &CancelFlag,
+    ) -> Result<DoGetSetup, Status> {
         let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
         let producer = self.build_producer(&ticket)?;
         let schema_ref = Arc::new(producer.arrow_schema()?);
@@ -450,12 +476,16 @@ impl CqliteFlightService {
         // Return the producer back out of the blocking task (it is moved in to run
         // the blocking discovery/prune, then reused for the merge) — avoids an Arc
         // and its Sync bound.
+        let resolve_cancel = cancel.clone();
         let (producer, paths) = tokio::task::spawn_blocking(move || {
-            let paths = producer.resolve_paths(&source);
+            let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel);
             (producer, paths)
         })
         .await
         .map_err(|e| Status::internal(format!("path resolution panicked: {e}")))?;
+        // A cancellation here surfaces as `ProducerError::Cancelled`, mapped by
+        // `From<ProducerError> for Status` to `Status::aborted` — the same clean,
+        // expected-abort class as a merge-stage cancellation.
         let paths = paths?;
 
         Ok(DoGetSetup {
@@ -663,6 +693,96 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.code(), tonic::Code::NotFound, "got: {err:?}");
+    }
+
+    // ---- Issue #1476 roborev F1: setup-phase cancellation ----------------------
+
+    /// Pre-change, the single merge `spawn_blocking` was covered by a
+    /// `CancelGuard` across its whole `.await`, so a disconnect during that call
+    /// stopped the work. `do_get_setup`'s eager path discovery/token-prune phase
+    /// (its OWN, separate `spawn_blocking`) must honor the SAME cancellation
+    /// contract: a flag already cancelled when setup runs (the worst case of a
+    /// disconnect firing the setup-phase `CancelGuard` at or before the very
+    /// start of the blocking task) must stop resolution rather than run the
+    /// discovery/prune to completion, surfacing as a clean `Aborted` — never a
+    /// server fault and never a resolved path list.
+    ///
+    /// Uses a token-range ticket over multiple SSTables so an UNCANCELLED run
+    /// would genuinely read every sibling `Summary.db` during the prune (see
+    /// `prune_paths_cancellable`), proving this isn't a vacuous check against an
+    /// empty/no-op path.
+    #[test]
+    fn do_get_setup_honors_cancellation_before_resolution() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100)],
+                vec![write_row(3, "c", 3, 100), write_row(4, "d", 4, 100)],
+            ],
+        );
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut t = ticket(KS, TBL);
+        // A concrete (full-ring) token range so `ScanSpec.token` is `Some(..)` and
+        // `prune_paths_cancellable`'s per-SSTable loop actually runs.
+        t.token_start = Some(i64::MIN);
+        t.token_end = Some(i64::MAX);
+
+        let result = rt.block_on(async {
+            // Simulates the setup-phase `CancelGuard` having already fired (the
+            // client disconnected) by the time the blocking resolution task runs.
+            let cancel = CancelFlag::new();
+            cancel.cancel();
+            let bytes = t.to_bytes().unwrap();
+            svc.do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
+                .await
+        });
+        let err = match result {
+            Ok(_) => panic!("a cancelled setup must not resolve/return paths"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.code(),
+            tonic::Code::Aborted,
+            "cancellation must surface as Aborted (ProducerError::Cancelled → Status::aborted), \
+             got: {err:?}"
+        );
+    }
+
+    /// Baseline for the test above: the SAME token-range ticket, WITHOUT
+    /// cancellation, resolves normally — proving the cancelled case above is a
+    /// genuine early stop, not just "this ticket always errors."
+    #[test]
+    fn do_get_setup_resolves_normally_without_cancellation() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100)],
+                vec![write_row(3, "c", 3, 100), write_row(4, "d", 4, 100)],
+            ],
+        );
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut t = ticket(KS, TBL);
+        t.token_start = Some(i64::MIN);
+        t.token_end = Some(i64::MAX);
+
+        let setup = rt.block_on(async {
+            let cancel = CancelFlag::new();
+            let bytes = t.to_bytes().unwrap();
+            svc.do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
+                .await
+        });
+        let setup = setup.expect("uncancelled setup resolves");
+        assert_eq!(
+            setup.paths.len(),
+            2,
+            "a full-ring token filter keeps both SSTables"
+        );
     }
 
     // ---- Issue #1430: end-to-end path-traversal rejection (wiring evidence) ----

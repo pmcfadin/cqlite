@@ -51,6 +51,29 @@
       `MeteredDoGetStream`'s error arm; observed via `StreamProbe.errors_recorded`
       in the same panic test. **N1** in-flight allowance de-duplicated into
       `IN_FLIGHT_ALLOWANCE` (test-only const, doc + tests share one derivation).
+- [x] 3.6 Review-first fix round 2 (roborev re-review, 2 new Mediums — both
+      regressions vs pre-change behavior): **F1** `do_get_setup`'s eager
+      path-resolution/prune `spawn_blocking` had no `CancelGuard` (pre-change the
+      single merge `spawn_blocking` was covered end-to-end) — fixed by creating
+      ONE `CancelFlag` in `do_get_inner` BEFORE setup, holding a `CancelGuard`
+      across the setup `.await` (disarmed on success), and handing the SAME flag
+      into `spawn_streaming`/`build_aggregate_response` for the merge stage; new
+      `MergeProducer::resolve_paths_cancellable`/`prune_paths_cancellable` poll
+      the flag before listing and once per SSTable during the token-span prune.
+      Tests: `service::tests::do_get_setup_honors_cancellation_before_resolution`
+      (+ `_resolves_normally_without_cancellation` baseline),
+      `producer::tests::resolve_paths_cancellable_rejects_before_listing`,
+      `producer::tests::prune_paths_cancellable_stops_before_any_summary_read_when_pre_cancelled`.
+      **F2** mid-stream `record_status_error` ran outside the `flight.do_get`
+      span once `do_get` itself had returned (later `poll_next`s happen outside
+      the `.instrument(span)`-wrapped future) — fixed by capturing
+      `Span::current()` into `MeteredDoGetStream` at construction (while still
+      inside the instrumented future) and re-entering it around `poll_next` and
+      `Drop`'s finalize; covered by the existing
+      `metrics_attribute_emitted_prefix_on_cancel`/panic tests (same call sites,
+      now span-wrapped) — `tracing::Span` has no cheap "is this span active"
+      test hook, so this is exercised via the unchanged behavioral assertions
+      rather than a new span-presence assertion.
 
 ## 4. Verification & delivery
 
@@ -62,10 +85,12 @@
       scope here). During the B1/B2/N1 fix round `streaming.rs` itself grew past
       800 (954 lines) with the new panic/error-observability tests; split its
       `#[cfg(test)] mod tests` out into a sibling `streaming_tests.rs` (via
-      `#[path = "streaming_tests.rs"] mod tests;`) — `streaming.rs` is now 380
-      lines (source), `streaming_tests.rs` 575 (test file, well under 1500).
-      Lite re-run with `CQLITE_ALLOW_FILE_GROWTH=1` (for the still-over-threshold
-      producer.rs/service.rs only) → PASS.
+      `#[path = "streaming_tests.rs"] mod tests;`) — `streaming.rs` is now 416
+      lines (source), `streaming_tests.rs` 581 (test file, well under 1500),
+      after fix round 2's F1/F2 additions. `producer.rs`/`service.rs` continue
+      growing from their pre-existing over-threshold baseline (now 2607/1016) —
+      out of scope (#1116/#1135). Lite re-run with `CQLITE_ALLOW_FILE_GROWTH=1`
+      (for producer.rs/service.rs only) → PASS.
 - [ ] 4.2 Review-first: `rust-reviewer` + roborev on the lite-green diff.
 - [x] 4.3 Existing flight tests green (`do_get_streams_merged_rows`,
       `do_get_missing_table_is_not_found`, producer limit/token/predicate) — full

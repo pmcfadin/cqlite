@@ -471,8 +471,28 @@ impl MergeProducer {
     /// the response stream — a missing table stays a clean `not_found`, not a
     /// mid-stream error. Runs blocking filesystem I/O; call off the async reactor.
     pub fn resolve_paths(&self, source: &dyn SstableSource) -> Result<Vec<PathBuf>, ProducerError> {
+        self.resolve_paths_cancellable(source, &CancelFlag::new())
+    }
+
+    /// Like [`Self::resolve_paths`], but cooperatively cancellable (issue #1476,
+    /// roborev F1): the pre-change single merge `spawn_blocking` was covered by a
+    /// `CancelGuard` across its ENTIRE await, so a client disconnect during that
+    /// call stopped the work. The streaming rewrite's separate eager-setup phase
+    /// (discovery + token prune, which can be slow over MANY SSTables) needs the
+    /// same coverage — otherwise a disconnect before the response stream even
+    /// exists leaves this phase running to completion, pinning a blocking-pool
+    /// thread under churn. Polls `cancel` before listing and (via
+    /// [`Self::prune_paths_cancellable`]) once per SSTable during the prune.
+    pub fn resolve_paths_cancellable(
+        &self,
+        source: &dyn SstableSource,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<PathBuf>, ProducerError> {
+        if cancel.is_cancelled() {
+            return Err(ProducerError::Cancelled);
+        }
         let paths = source.data_paths()?;
-        self.prune_paths(paths)
+        self.prune_paths_cancellable(paths, cancel)
     }
 
     /// Merge already-resolved (data-listed + token-pruned) `paths` into a `Vec`
@@ -520,20 +540,40 @@ impl MergeProducer {
     /// (fail open) whenever its sibling `Summary.db` is missing or unreadable, so
     /// pruning can never drop an SSTable that might contain matching partitions.
     pub(crate) fn prune_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, ProducerError> {
+        self.prune_paths_cancellable(paths, &CancelFlag::new())
+    }
+
+    /// Like [`Self::prune_paths`], but polls `cancel` before each per-SSTable
+    /// `Summary.db` read (issue #1476, roborev F1) — the only potentially I/O-heavy
+    /// per-item work in path resolution, and so the natural cancellation boundary
+    /// for a table with many SSTables. A fresh, never-cancelled [`CancelFlag`]
+    /// (as `prune_paths` passes) makes this identical to the original
+    /// filter-based implementation.
+    pub(crate) fn prune_paths_cancellable(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<PathBuf>, ProducerError> {
         let Some(token) = &self.spec.token else {
             return Ok(paths);
         };
 
         let total = paths.len();
-        let kept: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|path| match sstable_token_span(path) {
+        let mut kept: Vec<PathBuf> = Vec::with_capacity(total);
+        for path in paths {
+            if cancel.is_cancelled() {
+                return Err(ProducerError::Cancelled);
+            }
+            let keep = match sstable_token_span(&path) {
                 // Span known: keep only if it overlaps the split's range.
                 Some((min_token, max_token)) => token.overlaps(min_token, max_token),
                 // Span unknown (missing/unreadable Summary.db): fail open.
                 None => true,
-            })
-            .collect();
+            };
+            if keep {
+                kept.push(path);
+            }
+        }
 
         tracing::debug!(
             kept = kept.len(),
@@ -1009,6 +1049,76 @@ mod tests {
         assert!(
             batches.is_empty(),
             "no output batch is produced when cancelled before the first step"
+        );
+    }
+
+    // ---- Issue #1476 roborev F1: cancellable path resolution/prune ------------
+
+    /// [`MergeProducer::resolve_paths_cancellable`] must reject an
+    /// already-cancelled flag BEFORE even listing the directory — the fast-path
+    /// check `do_get_setup`'s eager phase relies on to stop instantly on a
+    /// disconnect that fires the setup-phase `CancelGuard` before the blocking
+    /// task starts.
+    #[test]
+    fn resolve_paths_cancellable_rejects_before_listing() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+
+        let cancelled = CancelFlag::new();
+        cancelled.cancel();
+        let err = producer
+            .resolve_paths_cancellable(&DirSource::new(&dir), &cancelled)
+            .expect_err("pre-cancelled resolution aborts");
+        assert!(
+            matches!(err, ProducerError::Cancelled),
+            "expected ProducerError::Cancelled, got {err:?}"
+        );
+    }
+
+    /// [`MergeProducer::prune_paths_cancellable`] must stop BEFORE reading any
+    /// SSTable's `Summary.db` when pre-cancelled — proven against a REAL
+    /// multi-SSTable, token-filtered spec where an uncancelled run would read
+    /// every one (same token-filter setup as the plain `prune_paths` coverage),
+    /// so this isn't a vacuous check against an empty/no-op path.
+    #[test]
+    fn prune_paths_cancellable_stops_before_any_summary_read_when_pre_cancelled() {
+        use crate::ticket::FlightTicket;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        // Two SSTables so the prune loop has more than one item to (not) visit.
+        let (_temp, _data, dir) =
+            build_sstables(&schema, vec![rows[..2].to_vec(), rows[2..].to_vec()]);
+
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MIN),
+                token_end: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+        assert_eq!(paths.len(), 2, "fixture has two SSTables to prune over");
+
+        // Baseline: uncancelled, a full-ring token filter keeps both.
+        let cancelled = CancelFlag::new();
+        let kept = producer
+            .prune_paths_cancellable(paths.clone(), &cancelled)
+            .expect("uncancelled prune succeeds");
+        assert_eq!(kept.len(), 2, "full-ring token filter keeps every SSTable");
+
+        // Pre-cancelled: must abort before visiting the first path.
+        cancelled.cancel();
+        let err = producer
+            .prune_paths_cancellable(paths, &cancelled)
+            .expect_err("pre-cancelled prune aborts");
+        assert!(
+            matches!(err, ProducerError::Cancelled),
+            "expected ProducerError::Cancelled, got {err:?}"
         );
     }
 

@@ -71,6 +71,7 @@ fn first_batch_available_before_merge_completes() {
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
             pr.clone(),
+            CancelFlag::new(),
         );
         // Pull the first message (schema) then the first batch.
         let _schema_msg = read_one(&mut stream).await.expect("schema message");
@@ -118,6 +119,7 @@ fn slow_consumer_bounds_produced_batches() {
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
             pr.clone(),
+            CancelFlag::new(),
         );
         let _schema_msg = read_one(&mut stream).await.expect("schema");
         let _first = read_one(&mut stream).await.expect("first batch");
@@ -161,6 +163,7 @@ fn dropping_stream_cancels_merge() {
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
             pr.clone(),
+            CancelFlag::new(),
         );
         let _schema_msg = read_one(&mut stream).await.expect("schema");
         let _first = read_one(&mut stream).await.expect("first batch");
@@ -436,6 +439,7 @@ fn metrics_parity_on_full_consumption() {
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
             pr,
+            CancelFlag::new(),
         );
         let _ = drain_stream(stream).await;
         let _ = handle.await;
@@ -509,6 +513,7 @@ fn aggregate_path_matches_collect_content() {
             paths,
             schema_ref,
             RpcMetrics::start("do_get"),
+            CancelFlag::new(),
         )
         .await
         {
@@ -556,6 +561,7 @@ fn metrics_attribute_emitted_prefix_on_cancel() {
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
             pr,
+            CancelFlag::new(),
         );
         let _schema_msg = read_one(&mut stream).await.expect("schema");
         let _first = read_one(&mut stream).await.expect("first batch");

@@ -26,6 +26,7 @@ use arrow_flight::FlightData;
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tonic::Status;
+use tracing::Span;
 
 use crate::cancel::{CancelFlag, CancelGuard};
 use crate::obs::RpcMetrics;
@@ -160,7 +161,12 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// deterministically).
 ///
 /// `paths` MUST come from [`MergeProducer::resolve_paths`] (already token-pruned),
-/// so the fallible discovery/prune has already surfaced upstream.
+/// so the fallible discovery/prune has already surfaced upstream. `cancel` is
+/// the SAME flag threaded through the caller's eager-setup phase (issue #1476,
+/// roborev F1) — one flag, one cancellation story spanning setup + merge; the
+/// caller's setup-phase guard is expected to already be disarmed by the time
+/// this runs, so the fresh guard armed here is the only one live from this
+/// point on.
 pub(crate) fn spawn_streaming(
     producer: MergeProducer,
     paths: Vec<PathBuf>,
@@ -168,12 +174,12 @@ pub(crate) fn spawn_streaming(
     metrics: RpcMetrics,
     capacity: usize,
     probe: StreamProbe,
+    cancel: CancelFlag,
 ) -> (DoGetStream, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(capacity.max(1));
     // The shared cancel flag stops the merge when this response stream is dropped
     // (client disconnect); `blocking_send` failure is the second, independent stop
     // signal. AA3 machinery (#1473) is reused, not replaced.
-    let cancel = CancelFlag::new();
     let guard = cancel.drop_guard();
     let merge_cancel = cancel;
     let produced = probe.produced_batches.clone();
@@ -198,14 +204,18 @@ pub(crate) fn spawn_streaming(
 /// Materialize the (bounded) aggregate output and serve it as a stream, unchanged
 /// in content (issue #1476: the aggregate route keeps materializing — one row per
 /// group). The same accounting wrapper attributes rows/bytes at stream end.
+///
+/// `cancel` is the SAME flag threaded through the caller's eager-setup phase
+/// (roborev F1) — see [`spawn_streaming`]'s doc for why one flag spans both
+/// phases.
 pub(crate) async fn build_aggregate_response(
     producer: MergeProducer,
     paths: Vec<PathBuf>,
     schema_ref: Arc<ArrowSchema>,
     metrics: RpcMetrics,
+    cancel: CancelFlag,
 ) -> Result<DoGetStream, (Status, RpcMetrics)> {
     // Cancellation during materialization mirrors the pre-change guard-across-await.
-    let cancel = CancelFlag::new();
     let mut guard = cancel.drop_guard();
     let merge_cancel = cancel;
     let result =
@@ -287,6 +297,17 @@ struct MeteredDoGetStream {
     rows: u64,
     bytes: u64,
     errored: bool,
+    /// The `flight.do_get` RPC span, captured via [`Span::current`] at
+    /// construction time — while still executing inside the `do_get` wrapper's
+    /// `.instrument(span)`-wrapped future, so it correctly resolves to that RPC
+    /// span. Re-entered around every `poll_next` and around `Drop`'s finalize
+    /// (issue #1476 roborev F2): once `do_get` itself returns the `Response`,
+    /// later polls of THIS stream happen entirely outside the instrumented
+    /// future, so `record_status_error`'s `Span::current()`-based OTel error
+    /// marking would otherwise land on no span (or a stale, unrelated one) —
+    /// this makes mid-stream error/cancellation observability land on the same
+    /// span as an eager-setup error always did.
+    span: Span,
 }
 
 impl MeteredDoGetStream {
@@ -304,6 +325,7 @@ impl MeteredDoGetStream {
             rows: 0,
             bytes: 0,
             errored: false,
+            span: Span::current(),
         }
     }
 
@@ -336,6 +358,14 @@ impl Stream for MeteredDoGetStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        // Roborev F2: re-enter the captured `do_get` span so any observability
+        // recorded during this poll (error marking, span-current lookups)
+        // attributes to the RPC span, not whatever happens to be ambient on the
+        // task currently driving this stream. Cloned first (cheap — `Span` is an
+        // `Arc` handle) so `Entered`'s borrow doesn't pin `this` immutably while
+        // the match arms below need `&mut this`.
+        let span = this.span.clone();
+        let _entered = span.enter();
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 this.rows = this.rows.saturating_add(batch.num_rows() as u64);
@@ -368,6 +398,12 @@ impl Stream for MeteredDoGetStream {
 
 impl Drop for MeteredDoGetStream {
     fn drop(&mut self) {
+        // Roborev F2: enter the RPC span so a drop-triggered finalize (early
+        // client disconnect) still attributes under `flight.do_get` (cloned
+        // first for the same reason as `poll_next` — avoid pinning `self`
+        // immutably while `finalize` needs `&mut self`).
+        let span = self.span.clone();
+        let _entered = span.enter();
         // Early drop (client disconnect): attribute the emitted prefix, then the
         // still-armed guard cancels the merge. `finalize` is idempotent, so a
         // stream that already ended normally records nothing more here.
