@@ -544,48 +544,50 @@ impl SSTableReader {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
 
-        // The shared B1 cache tracks its own hit/miss counters (issue #1567); the
-        // dead per-reader `record_cache_hit`/`record_cache_miss` atomics were
-        // removed (issue #1568).
-        let key = self.chunk_cache_key_ranged(NS_BIG_POINT, block_offset, size);
-        if let Some(hit) = self.chunk_cache.get(&key) {
-            return Ok(hit.to_vec());
-        }
-
-        // Read from disk (counted so a repeat read can prove zero underlying reads).
-        // Positioned read on the shared point source (issue #1573, C2): no cursor
-        // mutex is held across this I/O, so concurrent point reads do not convoy.
+        // Single decode plane (issue #1598, G2): positioned read → decompress → B1
+        // cache via ChunkSource::range. The shared cache tracks hit/miss internally.
         model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
-        let mut buffer = vec![0u8; size as usize];
-        self.point_source.read_exact_at(block_offset, &mut buffer)?;
 
-        // Decompress if needed
-        let data = if let Some(compression_reader) = &self.compression_reader {
-            let compression = Compression::new(*compression_reader.algorithm())?;
-            match compression.decompress(&buffer) {
-                Ok(decompressed) => {
-                    model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
-                    decompressed
-                }
-                Err(e) => {
-                    // Handle decompression errors based on format
-                    if self.header.cassandra_version != CassandraVersion::Legacy {
-                        return Err(Error::corruption(format!(
-                            "Decompression failed at offset={}, size={}: {}",
-                            block_offset, size, e
-                        )));
-                    } else {
-                        buffer // Fall back to raw data for legacy formats
-                    }
+        // Build ChunkSource for the BIG point path
+        let compression_opt = self.compression_reader.as_ref()
+            .map(|cr| Compression::new(*cr.algorithm()))
+            .transpose()?;
+        let comp_info_dummy = crate::storage::sstable::compression_info::CompressionInfo {
+            algorithm: String::new(),
+            option_pairs: vec![],
+            chunk_length: 0,
+            max_compressed_length: u32::MAX, // BIG point read has no incompressible-raw branch
+            data_length: 0,
+            chunk_offsets: vec![],
+        };
+        let chunk_source = super::chunk_source::ChunkSource::new(
+            self.point_source.as_ref(),
+            &comp_info_dummy,
+            compression_opt.as_ref(),
+            &self.chunk_cache,
+            self.stats.file_size,
+            0, // header_offset unused by range()
+            NS_BIG_POINT,
+            self.chunk_cache_id,
+        );
+
+        // Range read: positioned read + decompress + B1 cache in one call
+        let arc = match chunk_source.range(block_offset, size) {
+            Ok(a) => a,
+            Err(e) => {
+                // Preserve legacy-format fallback behavior (pre-existing)
+                if self.header.cassandra_version == CassandraVersion::Legacy {
+                    warn!("Decompression failed for legacy format ({}), re-reading raw", e);
+                    let mut buffer = vec![0u8; size as usize];
+                    self.point_source.read_exact_at(block_offset, &mut buffer)?;
+                    return Ok(buffer);
+                } else {
+                    return Err(e);
                 }
             }
-        } else {
-            buffer
         };
 
-        // Insert into the shared cache (converts the Vec to Arc<[u8]> once) and
-        // return an owned copy (this site's callers consume a Vec).
-        let arc = self.chunk_cache.insert(key, data);
+        // Callers consume a Vec, so convert Arc→Vec
         Ok(arc.to_vec())
     }
 
