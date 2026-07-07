@@ -8,7 +8,7 @@
 FROM rust:1.85-bookworm AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p cqlite-flight
+RUN cargo build --release -p cqlite-flight --features observability
 
 FROM debian:bookworm-slim
 RUN useradd -r -u 10001 flight

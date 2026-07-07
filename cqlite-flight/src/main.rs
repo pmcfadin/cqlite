@@ -33,14 +33,20 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `ObservabilityConfig` is always compiled (it carries no OTel types), so
+    // reading it here works identically whether or not the `observability`
+    // feature is on. Snapshot the bits `log_observability_status` needs before
+    // moving `obs_cfg` into `init` below.
+    let obs_cfg = cqlite_core::observability::ObservabilityConfig::from_env();
+    let obs_enabled = obs_cfg.enabled;
+    let obs_endpoint = obs_cfg.endpoint.clone();
+
     // Initialise observability (issue #1041, epic #1031) BEFORE composing the
     // tracing subscriber, so `observability::tracing_layer()` returns the live
     // OTel export layer. The guard flushes/shuts down OTel on drop; hold it for
     // the whole process lifetime. With the `observability` feature off (or
     // CQLITE_OTEL_ENABLED unset) this is an inert no-op.
-    let _otel_guard = cqlite_core::observability::init(
-        cqlite_core::observability::ObservabilityConfig::from_env(),
-    )?;
+    let _otel_guard = cqlite_core::observability::init(obs_cfg)?;
     // Install the global W3C text-map propagator so incoming gRPC `traceparent`
     // metadata can be extracted into an OTel context and used to parent the
     // per-RPC spans (continuing a client's distributed trace into the service).
@@ -50,6 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     init_tracing_subscriber();
+
+    // Issue #2128: the published image was previously built without
+    // `--features observability`, so `CQLITE_OTEL_ENABLED=true` was silently
+    // inert — no metrics, no traces, no error, nothing in the startup log to
+    // say why. Make the inert-vs-active state visible instead.
+    log_observability_status(obs_enabled, &obs_endpoint);
 
     let args = Args::parse();
     let listen = args.listen;
@@ -90,4 +102,60 @@ fn init_tracing_subscriber() {
 
     // `try_init` is tolerant of a subscriber already being set (e.g. in tests).
     let _ = registry.try_init();
+}
+
+/// Log the startup observability state so `CQLITE_OTEL_ENABLED=true` is never
+/// silently inert (issue #2128).
+///
+/// `enabled` / `endpoint` come from [`cqlite_core::observability::ObservabilityConfig::from_env`],
+/// which is always compiled regardless of the `observability` feature. Two
+/// outcomes, both logged only when `enabled`:
+///
+/// * Feature compiled IN — one `info` line naming the OTLP endpoint traces and
+///   metrics are being exported to.
+/// * Feature compiled OUT — one `warn` line: the binary honours none of the
+///   `CQLITE_OTEL_*` vars, so the operator isn't left wondering why
+///   VictoriaMetrics/Tempo stay empty.
+///
+/// A no-op when `enabled` is false (the default, and the common case for a
+/// build that never sets `CQLITE_OTEL_ENABLED`).
+fn log_observability_status(enabled: bool, endpoint: &str) {
+    if !enabled {
+        return;
+    }
+    #[cfg(feature = "observability")]
+    {
+        tracing::info!(
+            endpoint,
+            "observability enabled, exporting to OTLP endpoint"
+        );
+    }
+    #[cfg(not(feature = "observability"))]
+    {
+        let _ = endpoint;
+        tracing::warn!(
+            "CQLITE_OTEL_ENABLED is set but this binary was compiled without the \
+             `observability` feature — CQLITE_OTEL_* environment variables are inert; \
+             no metrics or traces will be exported"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_observability_status_disabled_is_a_noop() {
+        // Must never panic regardless of feature state, and there's nothing to
+        // assert beyond "it returns" — disabled is the common, silent case.
+        log_observability_status(false, "http://localhost:4317");
+    }
+
+    #[test]
+    fn log_observability_status_enabled_does_not_panic() {
+        // Exercises the active branch (info-line-with-feature or
+        // warn-line-without-feature depending on how this crate was built).
+        log_observability_status(true, "http://localhost:4317");
+    }
 }

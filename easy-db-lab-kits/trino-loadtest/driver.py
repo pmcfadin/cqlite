@@ -348,21 +348,60 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _int_env_default(name: str, default: int) -> int:
+    """Read an integer env-var default defensively (issue #2130).
+
+    Kubernetes injects Docker-link-style service env vars for every Service
+    in the namespace (e.g. a Service named ``trino`` makes
+    ``TRINO_PORT=tcp://10.43.x.x:8080`` available to every pod). Building an
+    argparse *default* by eagerly calling ``int()`` on such a value crashes
+    at parser-construction time — before the caller's explicit ``--port``
+    flag (which start.sh always passes) ever gets a chance to win. Falling
+    back to ``default`` on any parse failure keeps parser construction from
+    ever raising, regardless of what happens to be sitting in the env.
+    """
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
+def _float_env_default(name: str, default: float) -> float:
+    """Float counterpart of :func:`_int_env_default` — same defensive fallback."""
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Concurrent read-load driver for a Trino coordinator's cqlite catalog")
-    parser.add_argument("--host", default=_env_default("TRINO_HOST", "localhost"))
-    parser.add_argument("--port", type=int, default=int(_env_default("TRINO_PORT", str(DEFAULT_PORT))))
-    parser.add_argument("--user", default=_env_default("TRINO_USER", DEFAULT_USER))
-    parser.add_argument("--catalog", default=_env_default("TRINO_CATALOG", DEFAULT_CATALOG))
+    # NOTE: the bare TRINO_HOST / TRINO_PORT / TRINO_USER / TRINO_CATALOG names
+    # are deliberately NOT used here (issue #2130) — Kubernetes auto-injects
+    # Docker-link-style env vars for every Service in the namespace (a Service
+    # named "trino" makes TRINO_PORT=tcp://<ip>:8080 available to every pod),
+    # which collides with exactly these generic names. Namespaced
+    # TRINO_LOADTEST_* names match the rest of this kit's env vars and avoid
+    # the collision entirely.
+    parser.add_argument("--host", default=_env_default("TRINO_LOADTEST_HOST", "localhost"))
+    parser.add_argument("--port", type=int, default=_int_env_default("TRINO_LOADTEST_PORT", DEFAULT_PORT))
+    parser.add_argument("--user", default=_env_default("TRINO_LOADTEST_USER", DEFAULT_USER))
+    parser.add_argument("--catalog", default=_env_default("TRINO_LOADTEST_CATALOG", DEFAULT_CATALOG))
     parser.add_argument("--ks", "--keyspace", dest="keyspace", default=_env_default("TRINO_LOADTEST_KEYSPACE", ""))
     parser.add_argument("--tbl", "--table", dest="table", default=_env_default("TRINO_LOADTEST_TABLE", ""))
     parser.add_argument("--queries-file", dest="queries_file", default=_env_default("TRINO_LOADTEST_QUERIES_FILE"))
-    parser.add_argument("--threads", type=int, default=int(_env_default("TRINO_LOADTEST_THREADS", "4")))
-    parser.add_argument("--duration", type=int, default=int(_env_default("TRINO_LOADTEST_DURATION", "60")))
+    parser.add_argument("--threads", type=int, default=_int_env_default("TRINO_LOADTEST_THREADS", 4))
+    parser.add_argument("--duration", type=int, default=_int_env_default("TRINO_LOADTEST_DURATION", 60))
     parser.add_argument(
         "--interval",
         type=float,
-        default=float(_env_default("TRINO_LOADTEST_INTERVAL", str(DEFAULT_INTERVAL_SECONDS))),
+        default=_float_env_default("TRINO_LOADTEST_INTERVAL", float(DEFAULT_INTERVAL_SECONDS)),
     )
     parser.add_argument(
         "--traceparent",

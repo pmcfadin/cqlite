@@ -20,7 +20,7 @@ import sys
 import tempfile
 import threading
 import traceback
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -322,6 +322,85 @@ def test_parse_args_defaults() -> None:
     assert args.traceparent is False
 
 
+class _env_var:  # noqa: N801 - small helper, lowercase-by-convention context manager
+    """Set ``name=value`` in os.environ for the duration of a ``with`` block,
+    restoring (or removing) whatever was there before on exit.
+
+    ``value=None`` means "ensure unset" for the duration of the block.
+    """
+
+    def __init__(self, name: str, value: Optional[str]) -> None:
+        self._name = name
+        self._value = value
+        self._old: Optional[str] = None
+
+    def __enter__(self) -> "_env_var":
+        self._old = os.environ.get(self._name)
+        if self._value is None:
+            os.environ.pop(self._name, None)
+        else:
+            os.environ[self._name] = self._value
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._old is None:
+            os.environ.pop(self._name, None)
+        else:
+            os.environ[self._name] = self._old
+
+
+def test_env_default_port_falls_back_on_k8s_service_injection() -> None:
+    """Issue #2130: a K8s Service named "trino" injects
+    ``TRINO_PORT=tcp://<ip>:8080`` into every pod's environment. Parser
+    construction must never crash on that, and the driver must not read the
+    bare (unnamespaced) ``TRINO_PORT`` at all — only the renamed
+    ``TRINO_LOADTEST_PORT``.
+    """
+    with _env_var("TRINO_PORT", "tcp://10.43.73.27:8080"), _env_var("TRINO_LOADTEST_PORT", None):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+        assert args.port == driver.DEFAULT_PORT
+
+
+def test_env_default_port_falls_back_on_malformed_namespaced_var() -> None:
+    """Simulates the easy-db-lab kit runner injecting a malformed value
+    directly into the namespaced var — the defensive int parse must fall
+    back to the default rather than raising at parser-construction time.
+    """
+    with _env_var("TRINO_LOADTEST_PORT", "tcp://10.0.0.1:8080"):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+        assert args.port == driver.DEFAULT_PORT
+
+
+def test_env_default_port_uses_namespaced_var_when_valid() -> None:
+    with _env_var("TRINO_LOADTEST_PORT", "9999"):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+        assert args.port == 9999
+
+
+def test_explicit_port_flag_wins_over_malformed_env() -> None:
+    """Even with a malformed TRINO_LOADTEST_PORT sitting in the env, an
+    explicit --port flag (as start.sh always passes) must win.
+    """
+    with _env_var("TRINO_LOADTEST_PORT", "tcp://10.0.0.1:8080"):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b", "--port", "8080"])
+        assert args.port == 8080
+
+
+def test_int_env_default_helper_falls_back_on_bad_value() -> None:
+    with _env_var("CQLITE_TEST_INT_VAR", "not-an-int"):
+        assert driver._int_env_default("CQLITE_TEST_INT_VAR", 42) == 42
+
+
+def test_int_env_default_helper_parses_good_value() -> None:
+    with _env_var("CQLITE_TEST_INT_VAR", "7"):
+        assert driver._int_env_default("CQLITE_TEST_INT_VAR", 42) == 7
+
+
+def test_float_env_default_helper_falls_back_on_bad_value() -> None:
+    with _env_var("CQLITE_TEST_FLOAT_VAR", "not-a-float"):
+        assert driver._float_env_default("CQLITE_TEST_FLOAT_VAR", 5.0) == 5.0
+
+
 # --------------------------------------------------------------------------
 # run_worker() — the real concurrency logic, driven with a fake connection/exec
 # --------------------------------------------------------------------------
@@ -470,6 +549,25 @@ def main() -> int:
     check("validate_args: passes with ks and tbl", test_validate_args_passes_with_ks_and_tbl)
     check("validate_args: rejects bad numeric args", test_validate_args_rejects_bad_numbers)
     check("parse_args: defaults", test_parse_args_defaults)
+    check(
+        "parse_args: --port default ignores K8s-injected bare TRINO_PORT",
+        test_env_default_port_falls_back_on_k8s_service_injection,
+    )
+    check(
+        "parse_args: --port default falls back on malformed TRINO_LOADTEST_PORT",
+        test_env_default_port_falls_back_on_malformed_namespaced_var,
+    )
+    check(
+        "parse_args: --port default honours a valid TRINO_LOADTEST_PORT",
+        test_env_default_port_uses_namespaced_var_when_valid,
+    )
+    check(
+        "parse_args: explicit --port flag wins over malformed env",
+        test_explicit_port_flag_wins_over_malformed_env,
+    )
+    check("_int_env_default: falls back on unparseable value", test_int_env_default_helper_falls_back_on_bad_value)
+    check("_int_env_default: parses a valid value", test_int_env_default_helper_parses_good_value)
+    check("_float_env_default: falls back on unparseable value", test_float_env_default_helper_falls_back_on_bad_value)
     check("run_worker: deterministic success/error accounting", test_run_worker_records_success_and_error_deterministically)
     check("run_worker: closes the connection on exit", test_run_worker_closes_connection)
     check("run_worker: traceparent header set and varies per query", test_run_worker_generates_traceparent_header_when_enabled)
