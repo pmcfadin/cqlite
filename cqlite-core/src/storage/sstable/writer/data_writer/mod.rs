@@ -53,7 +53,7 @@
 //!
 //! References:
 //! - Cassandra 5.0: `org.apache.cassandra.db.rows.UnfilteredSerializer`
-//! - Parser: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+//! - Parser: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 //! - Format docs: `docs/sstables-definitive-guide/chapters/05-data-db-format.md`
 
 // Crate imports shared with the concern submodules: re-exported `pub(crate)`

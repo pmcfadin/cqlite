@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_v5_compressed_legacy_format_research() {
+    async fn test_row_decoder_format_research() {
         use super::super::SSTableReader;
         use crate::{Config, Platform};
         use std::path::Path;
@@ -169,7 +169,7 @@ mod tests {
         }
 
         // Check if hex dump was created
-        let hex_dump_path = Path::new("/tmp/v5_compressed_legacy_block_sample.hex");
+        let hex_dump_path = Path::new("/tmp/row_decoder_block_sample.hex");
         if hex_dump_path.exists() {
             eprintln!("✅ Hex dump created at {:?}", hex_dump_path);
         } else {
@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_v5_compressed_legacy_extracts_cells() -> crate::Result<()> {
+    async fn test_row_decoder_extracts_cells() -> crate::Result<()> {
         use super::super::SSTableReader;
         use crate::schema::{
             Column, KeyColumn, SchemaRegistry, SchemaRegistryConfig, SchemaSource, TableSchema,

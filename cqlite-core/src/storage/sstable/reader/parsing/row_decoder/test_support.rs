@@ -1,4 +1,4 @@
-//! Shared test fixtures/helpers for the v5_compressed_legacy parser tests.
+//! Shared test fixtures/helpers for the row_decoder parser tests.
 #![allow(dead_code)]
 
 pub(crate) mod helpers {

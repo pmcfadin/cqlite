@@ -361,7 +361,7 @@ pub struct PartitionEntry {
 
 ### V5 Format Parser (NB Format)
 
-**File**: `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+**File**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
 
 Responsible for parsing Data.db format (where Index.db points).
 

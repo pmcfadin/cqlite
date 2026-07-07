@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ============================================================================
-// JSONL Types and Parsing (extracted from v5_compressed_legacy_parity_test.rs)
+// JSONL Types and Parsing (extracted from row_decoder_parity_test.rs)
 // ============================================================================
 
 /// Represents a partition from JSONL reference data
@@ -196,7 +196,7 @@ fn load_jsonl_reference(jsonl_path: &Path) -> Result<Vec<JsonlPartition>, String
 }
 
 // ============================================================================
-// Value Comparison (extracted from v5_compressed_legacy_parity_test.rs)
+// Value Comparison (extracted from row_decoder_parity_test.rs)
 // ============================================================================
 
 /// Compare parser Value against JSONL reference value

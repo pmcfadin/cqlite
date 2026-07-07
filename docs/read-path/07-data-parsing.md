@@ -25,7 +25,7 @@ flowchart TD
     
     DetectFormat --> V5{Cassandra\nversion?}
     
-    V5 -->|5.0 NewBig| V5NewBig[v5_compressed_legacy.rs]
+    V5 -->|5.0 NewBig| V5NewBig[row_decoder]
     V5 -->|5.0 BTI| V5BTI[BTI format parser]
     V5 -->|Legacy| LegacyParser[Legacy parser]
     
@@ -350,7 +350,7 @@ fn parse_value_heuristic(data: &[u8]) -> Result<Value> {
 
 ## Cassandra 5.0 Format
 
-**File**: `storage/sstable/reader/parsing/v5_compressed_legacy.rs`
+**File**: `storage/sstable/reader/parsing/row_decoder.rs`
 
 ### Format Changes
 

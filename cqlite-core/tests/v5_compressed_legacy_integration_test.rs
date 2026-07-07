@@ -198,7 +198,7 @@ async fn test_clustering_key_handling_integration() {
 ///
 /// This test validates Issue #162 requirement: full integration works correctly
 #[tokio::test]
-async fn test_v5_compressed_legacy_get_all_entries_integration() {
+async fn test_row_decoder_get_all_entries_integration() {
     let config = Config::default();
     let platform = Arc::new(
         Platform::new(&config)
@@ -433,7 +433,7 @@ fn test_multi_row_partition_parsing_with_standard_flags() {
 ///
 /// Validates that the reader correctly identifies and opens V5CompressedLegacy SSTables
 #[tokio::test]
-async fn test_v5_compressed_legacy_format_detection() {
+async fn test_row_decoder_format_detection() {
     let config = Config::default();
     let platform = Arc::new(
         Platform::new(&config)

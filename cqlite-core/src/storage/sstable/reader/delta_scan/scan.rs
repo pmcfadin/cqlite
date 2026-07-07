@@ -1193,7 +1193,7 @@ mod tests {
         // were changed incompatibly, callers asserting these substrings would catch it.
         //
         // The production path that calls this format is:
-        //   parse_block_emit_delta (v5_compressed_legacy.rs)
+        //   parse_block_emit_delta (row_decoder.rs)
         //     → match bound_kind { ... unknown => return Err(Error::corruption(format!(...))) }
         //
         // `parse_range_tombstone_marker_full_surfaces_unknown_bound_kind` (above) proves

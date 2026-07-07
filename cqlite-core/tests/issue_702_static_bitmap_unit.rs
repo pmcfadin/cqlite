@@ -1,10 +1,10 @@
 //! Issue #702 (review fixup): CI-guarded unit tests for the `is_static` bitmap
-//! filtering logic introduced in `v5_compressed_legacy.rs`.
+//! filtering logic introduced in `row_decoder.rs`.
 //!
 //! ## What this tests
 //!
 //! The `columns_in_order` filtering at the core of the row-cell parsing path
-//! (v5_compressed_legacy.rs ~3310-3343) filters `ColumnInfo` entries from the
+//! (row_decoder.rs ~3310-3343) filters `ColumnInfo` entries from the
 //! serialization header to include only the column group that matches the current
 //! row kind (`is_static`).  This is critical for tables that have BOTH static and
 //! regular columns: including the wrong group shifts all bitmap indices and causes
@@ -29,7 +29,7 @@ use cqlite_core::schema::{Column, TableSchema};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
-// Helpers — mirror the filtering logic from v5_compressed_legacy.rs
+// Helpers — mirror the filtering logic from row_decoder.rs
 // ---------------------------------------------------------------------------
 
 /// Simulate the `columns_in_order` build-and-filter logic from the row parser:

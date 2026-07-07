@@ -121,7 +121,7 @@ pub fn fuzz_block_emit(block: &[u8]) -> Result<()> {
         .ok_or_else(|| crate::error::Error::schema("fuzz_block_emit: no simple_table fixture"))?;
 
     let parser =
-        crate::storage::sstable::reader::parsing::v5_compressed_legacy::V5CompressedLegacyParser::new(
+        crate::storage::sstable::reader::parsing::row_decoder::V5CompressedLegacyParser::new(
             "test_basic".to_string(),
             "simple_table".to_string(),
             0,

@@ -601,8 +601,8 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
 }
 
 #[tokio::test]
-async fn test_v5_compressed_legacy_jsonl_parity() {
-    let test_name = "test_v5_compressed_legacy_jsonl_parity";
+async fn test_row_decoder_jsonl_parity() {
+    let test_name = "test_row_decoder_jsonl_parity";
 
     // Setup
     let config = Config::default();

@@ -39,7 +39,7 @@ enum PartitionItem<'a> {
 
 /// The Cassandra `ClusteringPrefix.Kind` ordinal for a range-tombstone BOUND.
 /// Used purely as a sort tiebreak (see [`sort_class`]); the canonical ordering is
-/// the one decoded on the read path (`v5_compressed_legacy/block_emit.rs`) and the
+/// the one decoded on the read path (`row_decoder/block_emit.rs`) and the
 /// constants in `data_writer/mod.rs`:
 ///   0 EXCL_END_BOUND · 1 INCL_START_BOUND · 6 INCL_END_BOUND · 7 EXCL_START_BOUND.
 fn bound_kind_ordinal(bound: &ClusteringBound, is_open: bool) -> u8 {

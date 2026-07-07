@@ -43,7 +43,7 @@ panic: "Entry 2 should have non-empty row key"
 
 ### Issue 1: Schema Not Wired to Parser
 
-**Current Code** (`parser/v5_compressed_legacy.rs`):
+**Current Code** (`parser/row_decoder.rs`):
 ```rust
 // Parser doesn't receive schema parameter
 pub fn parse_row(data: &[u8]) -> Result<Value> {
@@ -82,7 +82,7 @@ pub fn parse_row(data: &[u8], schema: Option<&TableSchema>) -> Result<Value> {
 ### Task 1: Wire Schema to V5CompressedLegacy Parser (4-6 hours)
 
 **Files to Modify**:
-1. `cqlite-core/src/parser/v5_compressed_legacy.rs`
+1. `cqlite-core/src/parser/row_decoder.rs`
    - Add `schema: Option<&TableSchema>` parameter to `parse_row()`
    - Implement schema-aware cell value parsing
    - Use column types from schema for correct type deserialization
@@ -110,7 +110,7 @@ pub fn parse_row(data: &[u8], schema: Option<&TableSchema>) -> Result<Value> {
 4. Check if parser encounters errors on certain entries
 
 **Expected Fix Location**:
-- `cqlite-core/src/parser/v5_compressed_legacy.rs` - Entry iteration logic
+- `cqlite-core/src/parser/row_decoder.rs` - Entry iteration logic
 - `cqlite-core/src/storage/sstable/reader/data_access.rs` - `get_all_entries()` method
 
 **Code Changes Estimate**: ~50 lines

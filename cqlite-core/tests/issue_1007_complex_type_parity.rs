@@ -15,7 +15,7 @@
 //! reader's complex-value decode is driven by the on-disk header's marshal-format
 //! type metadata. The reader's decode loop iterates the on-disk
 //! SerializationHeader column order and intersects it with the supplied schema
-//! (`v5_compressed_legacy.rs` ~L4079), so a column present on disk but absent
+//! (`row_decoder.rs` ~L4079), so a column present on disk but absent
 //! from the supplied schema (a DROPPED column) is excluded from the supplied
 //! schema's column set — exactly the legacy/evolved surface #1007 targets.
 //!

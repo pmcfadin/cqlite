@@ -124,7 +124,7 @@ Key Cassandra source files:
 Add temporary logging to the parser:
 
 ```rust
-// In v5_compressed_legacy.rs — for a single debugging session
+// In row_decoder — for a single debugging session
 eprintln!("[debug] offset={} flags={:#04x}", offset, flags);
 ```
 
@@ -199,5 +199,5 @@ Compression block layout (Ch.9):
 - Compressed data: each chunk independently compressed
 
 The parser decompresses each chunk to a flat buffer before parsing rows. If rows
-span chunk boundaries, the merge is done in `v5_compressed_legacy.rs` before the
+span chunk boundaries, the merge is done in `row_decoder` before the
 row parser is called.

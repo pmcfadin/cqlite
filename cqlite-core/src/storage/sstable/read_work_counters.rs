@@ -94,15 +94,15 @@
 //!   the per-cell decode-path type-normalization gauge. **J1 (issue #1635) delivered**:
 //!   dispatch is now resolved ONCE per column at `RowColumnResolution::build`
 //!   (cached on `ColumnToParse.kind`/`is_complex`), so the per-cell `to_lowercase`
-//!   sites — the value-parse normalization (`v5_compressed_legacy/cell_value.rs`) and
-//!   the per-row complex-check (`v5_compressed_legacy/udt.rs::is_complex_column`) —
+//!   sites — the value-parse normalization (`row_decoder/cell_value.rs`) and
+//!   the per-row complex-check (`row_decoder/udt.rs::is_complex_column`) —
 //!   are gone. A full fixture scan therefore records `0` (on `main`/pre-J1 it was
 //!   ≥2/cell). No production site calls [`record_type_normalize`] anymore; the counter
 //!   is retained as a regression tripwire — any reintroduced per-cell normalization
 //!   must record it, flipping the J1 `== 0` assertions red.
 //! - [`record_partition_header_try_parse`] / [`partition_header_try_parses`] —
 //!   **`PARTITION_HEADER_TRY_PARSES`**: one per speculative partition-header parse
-//!   (`v5_compressed_legacy/row_framing.rs::parse_partition_header_full`, the single
+//!   (`row_decoder/row_framing.rs::parse_partition_header_full`, the single
 //!   boundary-peek/try-parse primitive every emit path routes through). Consumer
 //!   **K2/K3** (one try-parse per partition): flips to an exact per-partition bound.
 //! - [`record_bti_node_visited`] / [`bti_nodes_visited`] — **`BTI_NODES_VISITED`**:
@@ -114,7 +114,7 @@
 //!   **L1/L3**: a targeted descent decodes ONE pointer per byte (Dense-256 node = 1, not 256).
 //! - [`record_row_sort`] / [`row_sort_invocations`] — **`ROW_SORT_INVOCATIONS`**:
 //!   the per-row cell `sort_by` gauge at the shared display-row builder
-//!   (`v5_compressed_legacy/mod.rs::build_display_row`, which #1334 consolidated the
+//!   (`row_decoder/mod.rs::build_display_row`, which #1334 consolidated the
 //!   former `block_emit`/`block_emit_windowed` sort sites into). **K3 (issue #1642)
 //!   delivered**: the decoder now emits cells positionally in serialization-header
 //!   column order (deterministic by CONSTRUCTION), so `build_display_row` performs
@@ -485,7 +485,7 @@ pub fn record_type_normalize() {
 /// consumers K2/K3, Issue #1618).
 ///
 /// Called unconditionally at the single boundary-peek/try-parse primitive
-/// (`v5_compressed_legacy/row_framing.rs::parse_partition_header_full`) every emit
+/// (`row_decoder/row_framing.rs::parse_partition_header_full`) every emit
 /// path routes through; the body compiles to a no-op in a release build.
 #[inline(always)]
 pub fn record_partition_header_try_parse() {

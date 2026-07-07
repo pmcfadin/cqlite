@@ -6,7 +6,7 @@
 //!
 //! This is the NON-DORMANT, round-trip proof: the V5 reader surfaces per-cell
 //! `ttl` / `localDeletionTime` for SIMPLE cells (see
-//! `v5_compressed_legacy.rs::parse_block_for_compaction_emit`), which the merge
+//! `row_decoder.rs::parse_block_for_compaction_emit`), which the merge
 //! threads onto `CellData`. Here we drive the REAL write→flush→read path: an
 //! expiring write in one generation and a same-timestamp cell delete in another,
 //! scanned back through `SSTableManager` after the cross-generation merge. The
