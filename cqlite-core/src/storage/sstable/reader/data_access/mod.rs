@@ -57,7 +57,6 @@ pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
-use crate::storage::cache::ChunkKey;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use log::{debug, warn};
