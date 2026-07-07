@@ -4,7 +4,6 @@
 //! Summary.db, and Statistics.db readers.
 
 use super::SSTableReader;
-use crate::schema::registry::ParsingContext;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use tracing::debug;
@@ -268,8 +267,8 @@ impl SSTableReader {
         // The BTI Partitions.db trie IS the presence oracle for a BTI SSTable
         // (BTI has no bloom filter). Emit READ_BLOOM_CHECKS exactly ONCE here — the
         // single common path every BTI presence/point lookup funnels through
-        // (get / get_with_spec_readers / get_with_schema_context / point lookup /
-        // might_contain_partition). `cqlite.result` is hit for a trie HIT
+        // (get → locate → bti_point_lookup, might_contain_partition, the candidate
+        // prune). `cqlite.result` is hit for a trie HIT
         // (maybe-present/found: a DataOffset/RowsOffset, possibly a prefix-collision
         // candidate the caller re-verifies) and miss for a trie MISS (definitive
         // absence). A trie parse error returns above without an outcome and is
@@ -486,29 +485,6 @@ impl SSTableReader {
         self.might_contain_partition(partition_key)
     }
 
-    /// Enhanced partition lookup using schema-driven key digest computation
-    pub async fn lookup_partition_with_schema_context(
-        &self,
-        partition_key: &[u8],
-        parsing_context: &ParsingContext,
-    ) -> Result<Option<(u64, u32)>> {
-        if let Some(index_reader) = &self.index_reader {
-            // Compute the schema-driven key digest for Index.db lookup
-            let key_digest =
-                self.compute_partition_key_digest_with_schema(partition_key, parsing_context)?;
-
-            // Use spec-compliant Index.db reader for partition lookup
-            if let Some(entry) = index_reader.lookup_partition(&key_digest) {
-                debug!(
-                    "Found partition via schema-driven Index.db: offset={}, size={}",
-                    entry.data_offset, entry.data_size
-                );
-                return Ok(Some((entry.data_offset, entry.data_size)));
-            }
-        }
-        Ok(None)
-    }
-
     /// Enhanced partition iteration using Summary.db reader
     ///
     /// Note: Token-based range queries are not directly supported because Summary.db
@@ -668,122 +644,5 @@ impl SSTableReader {
         // Return None - caller should compute tokens from partition keys if needed
         debug!("get_token_coverage: Summary.db does not store token values");
         Ok(None)
-    }
-
-    /// Enhanced get method using spec readers for efficient lookup
-    pub async fn get_with_spec_readers(
-        &self,
-        table_id: &TableId,
-        key: &RowKey,
-    ) -> Result<Option<ScanRow>> {
-        use crate::observability::{self as obs, catalog};
-
-        // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db
-        // trie, which is the AUTHORITATIVE presence oracle. Branch to the trie path
-        // FIRST and skip the bloom/Index.db pre-check entirely. This mirrors `get()`
-        // (which routes BTI to `bti_point_lookup` → `lookup_partition_via_bti_trie`)
-        // and is required for correctness: a BTI bloom false negative must never
-        // short-circuit the trie lookup. Routing through `get()` also guarantees the
-        // BTI presence check emits READ_BLOOM_CHECKS exactly once (from
-        // `lookup_partition_via_bti_trie`) instead of being counted here AND again on
-        // the fallback path. BIG readers keep the bloom → Index.db behavior below.
-        if self.bti_partitions_db.is_some() {
-            return self.get(table_id, key).await;
-        }
-
-        // Step 1: Use bloom filter for existence check
-        if let Some(bloom_filter) = &self.bloom_filter {
-            let present = bloom_filter.might_contain(key.as_bytes());
-            obs::add_counter(
-                catalog::READ_BLOOM_CHECKS,
-                1,
-                &[
-                    (
-                        catalog::attr::RESULT,
-                        if present { "hit" } else { "miss" }.into(),
-                    ),
-                    (
-                        catalog::attr::SSTABLE_FORMAT,
-                        self.sstable_format_label().into(),
-                    ),
-                ],
-            );
-            if !present {
-                debug!("Bloom filter indicates key does not exist");
-                return Ok(None);
-            }
-        }
-
-        // Step 2: Use Index.db reader for precise partition lookup
-        if let Some((offset, size)) = self.lookup_partition_with_index(key.as_bytes()).await? {
-            debug!("Using Index.db lookup: offset={}, size={}", offset, size);
-            return self.read_value_at_offset(offset, size).await;
-        }
-
-        // Step 3: Fallback to existing methods
-        debug!("Falling back to legacy lookup methods");
-        self.get(table_id, key).await
-    }
-
-    /// Enhanced get method using spec readers with schema-driven key digest computation
-    pub async fn get_with_schema_context(
-        &self,
-        table_id: &TableId,
-        key: &RowKey,
-        parsing_context: &ParsingContext,
-    ) -> Result<Option<ScanRow>> {
-        use crate::observability::{self as obs, catalog};
-
-        // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db
-        // trie keyed on RAW partition-key bytes, not Index.db key digests, so the
-        // schema-driven digest path below does not apply. Branch to the trie path
-        // FIRST and skip the bloom/Index.db pre-check entirely, mirroring `get()`
-        // (which routes BTI to `bti_point_lookup` → `lookup_partition_via_bti_trie`).
-        // This keeps BTI correct (a bloom false negative can never short-circuit the
-        // authoritative trie lookup) and ensures the BTI presence check emits
-        // READ_BLOOM_CHECKS exactly once instead of being double counted across this
-        // helper and its fallback. BIG readers keep the bloom → Index.db behavior.
-        if self.bti_partitions_db.is_some() {
-            return self.get(table_id, key).await;
-        }
-
-        // Step 1: Use bloom filter for existence check
-        if let Some(bloom_filter) = &self.bloom_filter {
-            let present = bloom_filter.might_contain(key.as_bytes());
-            obs::add_counter(
-                catalog::READ_BLOOM_CHECKS,
-                1,
-                &[
-                    (
-                        catalog::attr::RESULT,
-                        if present { "hit" } else { "miss" }.into(),
-                    ),
-                    (
-                        catalog::attr::SSTABLE_FORMAT,
-                        self.sstable_format_label().into(),
-                    ),
-                ],
-            );
-            if !present {
-                debug!("Bloom filter indicates key does not exist");
-                return Ok(None);
-            }
-        }
-
-        // Step 2: Use Index.db reader for precise partition lookup with schema-driven digest
-        if let Some((offset, size)) = self
-            .lookup_partition_with_schema_context(key.as_bytes(), parsing_context)
-            .await?
-        {
-            debug!(
-                "Using schema-driven Index.db lookup: offset={}, size={}",
-                offset, size
-            );
-            return self.read_value_at_offset(offset, size).await;
-        }
-
-        // Step 3: Fallback to existing methods
-        debug!("Falling back to legacy lookup methods");
-        self.get(table_id, key).await
     }
 }

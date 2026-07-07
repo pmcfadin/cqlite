@@ -106,37 +106,12 @@ async fn test_sstable_reader_index_operations(reader: &SSTableReader) {
         );
     }
 
-    // Test 2: lookup_partition_with_schema_context (should not be dead code)
-    let schema_test_key = b"schema_driven_key";
-    // Create a simple parsing context for the schema lookup
-    use cqlite_core::schema::{KeyColumn, ParsingContext, TableSchema};
-    use cqlite_core::types::ComparatorType;
-    use std::collections::HashMap;
-
-    let simple_schema = TableSchema {
-        keyspace: "test".to_string(),
-        table: "test".to_string(),
-        partition_keys: vec![KeyColumn {
-            name: "key".to_string(),
-            data_type: "text".to_string(),
-            position: 0,
-        }],
-        clustering_keys: vec![],
-        columns: vec![],
-        comments: HashMap::new(),
-        dropped_columns: HashMap::new(),
-    };
-
-    let parsing_context = ParsingContext::from_owned(
-        simple_schema,
-        vec![ComparatorType::Text],
-        vec![],
-        HashMap::new(),
-    );
-    let _schema_lookup = reader
-        .lookup_partition_with_schema_context(schema_test_key, &parsing_context)
-        .await;
-    println!("✓ Tested lookup_partition_with_schema_context");
+    // Test 2: the `locate` façade (issue #1599 / G3) — the single format-tagged
+    // partition-location entry point that replaced the deleted
+    // `lookup_partition_with_schema_context` / `get_with_*` helpers.
+    let locate_test_key = b"locate_facade_key";
+    let _located = reader.locate(locate_test_key).await;
+    println!("✓ Tested locate() façade");
 
     // Test 3: iterate_all_partitions (should not be dead code)
     // Note: iterate_token_range deprecated (Issue #218)

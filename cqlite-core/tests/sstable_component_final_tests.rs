@@ -238,9 +238,10 @@ async fn test_sstable_reader_component_integration() {
             let _index_lookup = reader.lookup_partition_with_index(test_key).await;
             println!("✓ lookup_partition_with_index() accessible and not dead code");
 
-            // Note: schema context lookup requires proper ParsingContext, so we skip this test
-            // let _schema_lookup = reader.lookup_partition_with_schema_context(test_key, &context).await;
-            println!("✓ lookup_partition_with_schema_context() accessible and not dead code");
+            // The schema-context lookup helper was replaced by the `locate` façade
+            // (issue #1599 / G3), the single format-tagged partition-location entry.
+            let _located = reader.locate(test_key).await;
+            println!("✓ locate() façade accessible and not dead code");
 
             // Test partition operations (uses Summary.db)
             // Note: iterate_token_range and get_token_coverage deprecated (Issue #218)

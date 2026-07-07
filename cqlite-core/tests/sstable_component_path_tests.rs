@@ -389,9 +389,9 @@ mod component_integration_tests {
             let test_key = b"test_partition_key";
             let _lookup_result = reader.lookup_partition_with_index(test_key).await;
 
-            // Test schema-driven lookup (uses Index.db with schema)
-            // Schema context lookup requires a ParsingContext - skip for now
-            // let _schema_lookup_result = reader.lookup_partition_with_schema_context(test_key, context).await;
+            // The schema-driven lookup helper was replaced by the `locate` façade
+            // (issue #1599 / G3), the single format-tagged partition-location entry.
+            let _located = reader.locate(test_key).await;
 
             // Test partition iteration (uses Summary.db)
             // Note: iterate_token_range is deprecated (Issue #218) - use iterate_all_partitions

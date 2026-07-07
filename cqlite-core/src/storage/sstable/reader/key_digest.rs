@@ -1,6 +1,6 @@
 //! Partition key digest computation for Index.db lookups
 
-use crate::{schema::registry::ParsingContext, Result};
+use crate::Result;
 
 use super::super::key_digest::KeyDigestComputer;
 use super::types::SSTableReader;
@@ -16,7 +16,7 @@ impl SSTableReader {
     ///
     /// NOTE (Issue #553): This function is no longer called from the main
     /// `lookup_partition_with_index` path, which now uses raw key bytes directly.
-    /// It is retained for potential future use and for `lookup_partition_with_schema_context`.
+    /// It is retained for potential future use.
     #[allow(dead_code)]
     pub(crate) async fn compute_partition_key_digest(
         &self,
@@ -111,21 +111,5 @@ impl SSTableReader {
                  Enable 'legacy-heuristics' feature only for legacy compatibility testing.",
             ))
         }
-    }
-
-    /// Compute partition key digest using table schema comparator
-    ///
-    /// This is the proper implementation that should be used when table schema
-    /// is available. It uses the partition key comparator to create the exact
-    /// digest that Cassandra would store in Index.db.
-    pub(crate) fn compute_partition_key_digest_with_schema(
-        &self,
-        partition_key: &[u8],
-        parsing_context: &ParsingContext,
-    ) -> Result<Vec<u8>> {
-        let mut computer = KeyDigestComputer::new();
-
-        // Use the proper schema-driven digest computation
-        computer.compute_partition_key_digest(partition_key, parsing_context)
     }
 }
