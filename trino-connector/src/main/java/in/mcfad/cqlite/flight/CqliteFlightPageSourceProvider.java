@@ -73,7 +73,8 @@ public class CqliteFlightPageSourceProvider implements ConnectorPageSourceProvid
                 names.isEmpty() ? Optional.empty() : Optional.of(names),
                 List.of(), // legacy flat predicates unused; tree carried in filter
                 filter,
-                null); // non-aggregated scan: no aggregation pushed
+                null, // non-aggregated scan: no aggregation pushed
+                tableHandle.limit()); // LIMIT pushdown (#2129): per-split row cap
 
         return new CqliteFlightPageSource(client, flightSplit, projected, ticket);
     }

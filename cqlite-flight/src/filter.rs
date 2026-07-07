@@ -197,6 +197,10 @@ pub struct ScanSpec {
     pub filter: Option<FilterExpr>,
     /// Column projection; `None` emits all columns.
     pub projection: Option<Vec<String>>,
+    /// Row cap (issue #2129): emit at most this many rows for the scan, counted
+    /// AFTER token pruning and predicate filtering. `None` scans the full range.
+    /// Ignored on the aggregation path (partial rows already collapse the set).
+    pub limit: Option<u64>,
 }
 
 impl ScanSpec {
@@ -240,6 +244,7 @@ impl ScanSpec {
             token,
             filter,
             projection: ticket.columns.clone(),
+            limit: ticket.limit,
         })
     }
 }
@@ -581,6 +586,31 @@ mod tests {
     fn no_bounds_means_no_token_filter() {
         let spec = ScanSpec::from_ticket(&ticket_with(vec![]), &simple_schema()).unwrap();
         assert!(spec.token.is_none());
+    }
+
+    #[test]
+    fn limit_is_carried_from_ticket() {
+        // No limit on the ticket → None on the spec.
+        let spec = ScanSpec::from_ticket(&ticket_with(vec![]), &simple_schema()).unwrap();
+        assert_eq!(spec.limit, None);
+
+        // A ticket limit flows straight through (including the 0 edge).
+        let t = FlightTicket {
+            limit: Some(5),
+            ..ticket_with(vec![])
+        };
+        assert_eq!(
+            ScanSpec::from_ticket(&t, &simple_schema()).unwrap().limit,
+            Some(5)
+        );
+        let t = FlightTicket {
+            limit: Some(0),
+            ..ticket_with(vec![])
+        };
+        assert_eq!(
+            ScanSpec::from_ticket(&t, &simple_schema()).unwrap().limit,
+            Some(0)
+        );
     }
 
     #[test]

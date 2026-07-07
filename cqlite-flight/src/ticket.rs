@@ -262,6 +262,23 @@ pub struct FlightTicket {
     /// the partial schema instead of full rows. `None` keeps the row path.
     #[serde(default)]
     pub aggregation: Option<Aggregation>,
+    /// LIMIT pushdown (issue #2129). When `Some(n)`, the producer emits at most
+    /// `n` rows for this ticket, stopping the k-way merge as soon as the cap is
+    /// reached — turning `LIMIT k` into bounded per-split work instead of a full
+    /// range scan. The cap is applied AFTER token pruning and predicate
+    /// filtering, so pruned/filtered-out rows never consume it. Because each
+    /// split caps independently, the connector reports `limitGuaranteed = false`
+    /// and Trino keeps a global `Limit` above the scan to do the final cut.
+    /// Ignored when [`Self::aggregation`] is `Some` (the aggregate already
+    /// collapses the row set to partial rows). `None` scans the full range.
+    ///
+    /// Compat: the field is additive-optional — the ticket struct is NOT
+    /// `deny_unknown_fields`, so an old server silently ignores a `limit` from a
+    /// new connector (falling back to a correct full scan) and an old connector's
+    /// ticket defaults `limit` to `None` on a new server. Both directions are
+    /// safe; the only cost of skew is losing the bounding, never wrong rows.
+    #[serde(default)]
+    pub limit: Option<u64>,
 }
 
 impl Default for FlightTicket {
@@ -279,6 +296,7 @@ impl Default for FlightTicket {
             predicates: Vec::new(),
             filter: None,
             aggregation: None,
+            limit: None,
         }
     }
 }
@@ -450,10 +468,61 @@ mod tests {
             }],
             filter: None,
             aggregation: None,
+            limit: Some(5),
         };
         let bytes = ticket.to_bytes().expect("serialize");
         let back = FlightTicket::from_bytes(&bytes).expect("parse");
         assert_eq!(ticket, back);
+    }
+
+    // ---- Issue #2129: LIMIT pushdown wire format + compat ----
+
+    /// A ticket carrying `limit` parses it, and one omitting it defaults to
+    /// `None` (no bound → full scan). The field is plain JSON so the Java
+    /// connector emits `"limit": <n>`.
+    #[test]
+    fn limit_field_parses_and_defaults_to_none() {
+        let with_limit = json!({
+            "keyspace": "k", "table": "t",
+            "ddl": "CREATE TABLE k.t (id int PRIMARY KEY)",
+            "limit": 5
+        })
+        .to_string();
+        let t = FlightTicket::from_bytes(with_limit.as_bytes()).expect("parse");
+        assert_eq!(t.limit, Some(5));
+
+        // Absent → None (an old connector's ticket on a new server).
+        let t = FlightTicket::from_bytes(&minimal_json()).expect("parse");
+        assert_eq!(t.limit, None);
+
+        // limit: 0 is a distinct, valid value (SELECT ... LIMIT 0).
+        let zero = json!({
+            "keyspace": "k", "table": "t",
+            "ddl": "CREATE TABLE k.t (id int PRIMARY KEY)",
+            "limit": 0
+        })
+        .to_string();
+        let t = FlightTicket::from_bytes(zero.as_bytes()).expect("parse");
+        assert_eq!(t.limit, Some(0));
+    }
+
+    /// Compat posture (issue #2129): the ticket is NOT `deny_unknown_fields`, so
+    /// an UNKNOWN field (e.g. a future connector's addition seen by an older
+    /// server) is silently ignored rather than rejected. This proves the
+    /// additive-optional contract that makes `limit` safe to roll out in either
+    /// order (new connector ⇄ old server, old connector ⇄ new server).
+    #[test]
+    fn unknown_field_is_ignored_not_rejected() {
+        let raw = json!({
+            "keyspace": "k", "table": "t",
+            "ddl": "CREATE TABLE k.t (id int PRIMARY KEY)",
+            "limit": 7,
+            "some_future_field": {"nested": [1, 2, 3]}
+        })
+        .to_string();
+        let t = FlightTicket::from_bytes(raw.as_bytes())
+            .expect("unknown field must not fail the parse");
+        assert_eq!(t.limit, Some(7), "known fields still bind");
     }
 
     #[test]

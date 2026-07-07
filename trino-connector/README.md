@@ -59,6 +59,7 @@ Building from this repo (`./gradlew installPlugin`) produces the same directory.
 | PageSource (Flight DoGet → Arrow → Trino Page) | done |
 | Projection pushdown (only requested columns streamed) | done |
 | Predicate pushdown (TupleDomain → ticket) | deferred (Trino post-filters; server supports it) |
+| LIMIT pushdown (per-split bounded scan) | done, tested (issue #2129) |
 
 The full stack works end-to-end: `SELECT` over `cqlite.<keyspace>.<table>`
 streams compaction-merged, token-range-deduped Arrow data back to Trino.
@@ -69,6 +70,36 @@ tuples, decimal) are rejected at planning with a clear message rather than
 failing mid-scan. Cassandra's default 16 vnodes produce 16 splits per table
 (each reads the SSTable filtered by token range) — correct, with split
 consolidation a future optimization.
+
+### LIMIT pushdown (issue #2129)
+
+`SELECT ... LIMIT k` pushes the row cap into the Flight ticket via
+`ConnectorMetadata.applyLimit`, so each split's `do_get` stops its k-way
+compaction-merge after `k` rows instead of scanning its entire token range.
+Without this, even `SELECT * ... LIMIT 5` full-scans and merges every SSTable
+(the reported ~235s over ~2M rows); with it, `LIMIT k` is bounded per-split work.
+
+Semantics:
+
+- **Per-split cap.** Each of the (token-range) splits independently caps at `k`
+  rows, so the union returned to Trino can exceed `k`. The connector therefore
+  returns `limitGuaranteed = false` and Trino keeps its `Limit`/`LimitPartial`
+  above the `TableScan` to do the final global cut — always correct.
+- **Counted after filtering.** The server applies the cap AFTER token pruning and
+  predicate filtering, so a filtered scan returns as many matching rows as exist
+  up to `k`, never fewer.
+- **Not pushed under aggregation.** An aggregated handle (`count`/`sum`/… with or
+  without `GROUP BY`) already collapses the row set; a row `LIMIT` there is
+  meaningless, so `applyLimit` declines and the server ignores `limit` if a ticket
+  ever carries both.
+
+**Version requirements.** LIMIT pushdown needs BOTH a connector and a
+cqlite-flight server that understand the ticket's `limit` field (connector +
+flight ≥ the release carrying #2129). The field is additive-optional and the
+Rust ticket is not `deny_unknown_fields`, so version skew is safe in either
+direction: an older server silently ignores `limit` (correct full scan, just
+unbounded), and an older connector never sets it (server defaults to no cap).
+Skew only forfeits the speedup — it never returns wrong rows.
 
 ## End-to-end stack (docker)
 

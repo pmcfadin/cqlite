@@ -480,15 +480,30 @@ impl MergeProducer {
     /// `merger.step()`, so a cancel (e.g. client disconnect) stops the merge
     /// before collecting/reconciling the next partition — never after performing
     /// one more potentially large partition merge.
+    ///
+    /// LIMIT pushdown (issue #2129): when the scan carries a row cap
+    /// ([`ScanSpec::limit`](crate::filter::ScanSpec)), the merge stops as soon as
+    /// `limit` rows have been EMITTED. The cap is counted AFTER the token filter
+    /// and the predicate filter, so partitions outside the range and rows the
+    /// filter rejects never consume it — a filtered scan returns as many matching
+    /// rows as exist up to `limit`, never fewer. `limit == Some(0)` emits nothing
+    /// without stepping the merge at all. The cap applies per split; the connector
+    /// sets `limitGuaranteed = false` so Trino keeps a global `Limit` above.
     fn drive_merge(
         &self,
         merger: &mut dyn PartitionStepper,
         cancel: &CancelFlag,
         batches: &mut Vec<RecordBatch>,
     ) -> Result<(), ProducerError> {
+        let limit = self.spec.limit;
+        // A zero cap produces no rows without touching the merge.
+        if limit == Some(0) {
+            return Ok(());
+        }
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
+        let mut emitted: u64 = 0;
 
-        loop {
+        'partitions: loop {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
             }
@@ -518,8 +533,15 @@ impl MergeProducer {
                     }
                 }
                 buffer.push(row);
+                emitted += 1;
                 if buffer.len() >= self.batch_size {
                     batches.push(self.flush_buffer(&mut buffer)?);
+                }
+                // LIMIT reached (counted post-filter): stop the merge early.
+                if let Some(cap) = limit {
+                    if emitted >= cap {
+                        break 'partitions;
+                    }
                 }
             }
         }
@@ -1332,6 +1354,109 @@ mod tests {
         let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
         // 10 < score < 40 → 20, 30.
         assert_eq!(total_rows(&p.produce(&DirSource::new(&dir)).unwrap()), 2);
+    }
+
+    // ---- Issue #2129: LIMIT pushdown early-stop ----
+
+    /// Collect every `score` value across the produced batches (sorted).
+    fn scores_of(batches: &[RecordBatch]) -> Vec<i32> {
+        let mut out: Vec<i32> = Vec::new();
+        for b in batches {
+            let scores = b
+                .column_by_name("score")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            out.extend((0..scores.len()).map(|i| scores.value(i)));
+        }
+        out.sort_unstable();
+        out
+    }
+
+    fn spec_with_limit(limit: Option<u64>) -> ScanSpec {
+        ScanSpec {
+            limit,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn limit_below_row_count_stops_early() {
+        let schema = simple_schema();
+        let rows = (1..=10)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let p = MergeProducer::with_spec(schema, 4, spec_with_limit(Some(3))).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 3, "LIMIT 3 caps a 10-row table at 3");
+    }
+
+    #[test]
+    fn limit_above_row_count_returns_all_rows() {
+        let schema = simple_schema();
+        let rows = (1..=10)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let p = MergeProducer::with_spec(schema, 4, spec_with_limit(Some(100))).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            total_rows(&batches),
+            10,
+            "LIMIT past the row count keeps all"
+        );
+    }
+
+    #[test]
+    fn limit_zero_emits_no_rows() {
+        let schema = simple_schema();
+        let rows = (1..=10)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let p = MergeProducer::with_spec(schema, 4, spec_with_limit(Some(0))).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 0, "LIMIT 0 emits nothing");
+    }
+
+    #[test]
+    fn limit_counts_rows_after_filtering() {
+        use crate::ticket::{FlightTicket, Predicate, PredicateOp};
+        use serde_json::json;
+        // Scores 10,20,30,40,50; `score > 25` keeps {30,40,50} (3 rows). A cap of
+        // 2 must return exactly 2 SURVIVING rows — proving filtered-out rows never
+        // consumed the cap (else we could get 0 or 1 matching row back).
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let mut spec = spec_from(
+            &schema,
+            FlightTicket {
+                predicates: vec![Predicate {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(25),
+                }],
+                ..Default::default()
+            },
+        );
+        spec.limit = Some(2);
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        let survivors = scores_of(&batches);
+        assert_eq!(survivors.len(), 2, "cap counts only surviving rows");
+        assert!(
+            survivors.iter().all(|&s| s > 25),
+            "every returned row must satisfy the filter, got {survivors:?}"
+        );
     }
 
     #[test]

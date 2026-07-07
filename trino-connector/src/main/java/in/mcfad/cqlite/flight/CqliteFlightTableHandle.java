@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.spi.connector.ConnectorTableHandle;
 
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * Identifies a table to scan. Carries the CQL DDL (fetched from Sidecar) so the
@@ -24,6 +25,14 @@ import java.util.Optional;
  * that fans out to all token ranges, pulls each range's PARTIAL aggregate, merges
  * them, and emits the fully merged result (Trino does not re-aggregate across
  * splits — see issue #841).
+ *
+ * <p>{@code limit} holds the row cap pushed down by
+ * {@link CqliteFlightMetadata#applyLimit} (issue #2129), or empty. When present,
+ * every split's Flight ticket carries it and the server stops its k-way merge
+ * after {@code limit} post-filter rows. The cap is applied PER SPLIT, so the
+ * connector returns {@code limitGuaranteed = false} and Trino keeps a global
+ * {@code Limit} above the scan. It is never set on an aggregated handle (the
+ * aggregate already collapses the row set).
  */
 public record CqliteFlightTableHandle(
         String keyspace,
@@ -31,17 +40,32 @@ public record CqliteFlightTableHandle(
         String ddl,
         Optional<String> filterJson,
         Optional<String> aggregationJson,
-        Optional<String> finalizePlanJson)
+        Optional<String> finalizePlanJson,
+        OptionalLong limit)
         implements ConnectorTableHandle {
 
     /** Convenience constructor for a handle with no pushed-down filter or aggregation. */
     public CqliteFlightTableHandle(String keyspace, String table, String ddl) {
-        this(keyspace, table, ddl, Optional.empty(), Optional.empty(), Optional.empty());
+        this(keyspace, table, ddl, Optional.empty(), Optional.empty(), Optional.empty(), OptionalLong.empty());
     }
 
     /** Convenience constructor for a handle carrying a filter but no aggregation. */
     public CqliteFlightTableHandle(String keyspace, String table, String ddl, Optional<String> filterJson) {
-        this(keyspace, table, ddl, filterJson, Optional.empty(), Optional.empty());
+        this(keyspace, table, ddl, filterJson, Optional.empty(), Optional.empty(), OptionalLong.empty());
+    }
+
+    /**
+     * Six-arg constructor (no limit) retained so existing call sites that predate
+     * LIMIT pushdown compile unchanged; defaults {@code limit} to empty.
+     */
+    public CqliteFlightTableHandle(
+            String keyspace,
+            String table,
+            String ddl,
+            Optional<String> filterJson,
+            Optional<String> aggregationJson,
+            Optional<String> finalizePlanJson) {
+        this(keyspace, table, ddl, filterJson, aggregationJson, finalizePlanJson, OptionalLong.empty());
     }
 
     /** True when this handle carries a pushed-down aggregation (the finalize-split path). */
