@@ -63,11 +63,10 @@ use tempfile::TempDir;
 const KS: &str = "budget_ks";
 const WIDE_TBL: &str = "wide_items";
 const SKINNY_TBL: &str = "skinny_items";
-/// Text-keyed wide table used to exercise the LEGACY `WHERE id = <text>`
-/// point-lookup path. A TEXT partition key named `id` routes through the legacy
-/// `QueryExecutor` (`is_simple_id_lookup` gate) AND is findable by `storage.get`
-/// (the query-side `value_to_row_key(Text)` matches `PartitionKey::to_bytes`),
-/// unlike an INTEGER `id`, which the executor maps to a synthetic `user_key_N`.
+/// Text-keyed wide table used to exercise a `WHERE id = <text>` point lookup.
+/// Since issue #1750 this routes through the modern `SelectExecutor` (which
+/// enforces the same byte + row-count budget as any other SELECT); a TEXT
+/// partition key named `id` is decoded schema-aware and matches the on-disk key.
 const WIDE_KEYED_TBL: &str = "wide_keyed_items";
 const WIDE_KEY: &str = "wide1";
 
@@ -462,13 +461,12 @@ async fn constant_query_limit_zero_returns_empty_not_result_too_large() {
     );
 }
 
-/// A simple `SELECT * ... WHERE id = <k>` point lookup routes through the LEGACY
-/// `QueryExecutor` (not the budgeted `SelectExecutor`; see `QueryEngine::execute`'s
-/// `is_simple_id_lookup` gate). A single very wide row must trip `ResultTooLarge`
-/// there too — AND on the plan-cache HIT (the second identical execution), which
-/// before the fix returned WITHOUT applying the budget (roborev #1582 D6). The
-/// plan is cached BEFORE execution, so the cold cache-miss run leaves the plan in
-/// the cache and the second run takes the plan-cache-hit return path.
+/// A simple `SELECT * ... WHERE id = <k>` point lookup. Since issue #1750 it
+/// routes through the modern `SelectExecutor`, which enforces the byte budget on
+/// its final materialized result. A single very wide row must trip
+/// `ResultTooLarge` — AND on the second identical execution (plan/plan-cache
+/// reuse), which before the #1582 D6 fix returned WITHOUT applying the budget
+/// (roborev #1582 D6). This pins that both executions enforce the ceiling.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn over_budget_point_lookup_trips_on_cold_and_cache_hit() {
     let temp = TempDir::new().unwrap();
@@ -480,8 +478,8 @@ async fn over_budget_point_lookup_trips_on_cold_and_cache_hit() {
     let tiny_budget: u64 = 512;
     let db = open_db_with_budget(data_dir, schema_path, tiny_budget).await;
 
-    // `WHERE id = '<text>'` (<= 8 whitespace tokens) routes through the legacy
-    // point-lookup path; the text key is findable by `storage.get`.
+    // `WHERE id = '<text>'` routes through the modern SELECT executor (issue
+    // #1750); the schema-aware text key targets the wide partition.
     let sql = format!("SELECT * FROM {KS}.{WIDE_KEYED_TBL} WHERE id = '{WIDE_KEY}'");
 
     fn assert_trips(err: Error, tiny_budget: u64, phase: &str) {

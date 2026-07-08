@@ -159,8 +159,10 @@ pub enum FallbackReason {
     /// so #962 can flip it to [`AccessPath::MetadataPartitionLookup`].
     MetadataScanPath,
 
-    /// The legacy `QueryExecutor` (simple-id-lookup and prepared SELECTs) issues
-    /// an unconditional `storage.scan`; it does not consult the fast path.
+    /// The legacy `QueryExecutor` issues an unconditional `storage.scan`; it does
+    /// not consult the fast path. Since issue #1750 ad-hoc SELECTs route through
+    /// the modern executor, so this reason now covers the remaining legacy SELECT
+    /// surfaces (a cached legacy SELECT plan reused via the plan-cache HIT branch).
     /// Tracked by #962 (route the legacy/prepared surfaces through the modern
     /// executor) and #961 (param binding).
     LegacyExecutorPath,

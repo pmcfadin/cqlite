@@ -166,14 +166,12 @@ impl QueryEngine {
     }
 
     /// Enforce the byte-bounded result budget (issue #1582 / D6) on a result
-    /// materialized by the LEGACY [`QueryExecutor`] — the simple `WHERE id =
-    /// <value>` point-lookup path, which is routed to `self.executor` (not the
-    /// budgeted `SelectExecutor`) for key-handling consistency with INSERT. A
-    /// wide-partition point lookup would otherwise materialize unbounded and
-    /// bypass the guard, INCLUDING on a plan-cache HIT (roborev #1582 D6). Reuses
-    /// the SAME estimator + enforcement as the optimizer path so the byte ceiling
-    /// and the row-count safety valve behave identically. Applied exactly once at
-    /// every legacy return site.
+    /// materialized by the LEGACY [`QueryExecutor`] — non-SELECT statements and
+    /// any cached legacy SELECT plan reused via the plan-cache HIT branch. Since
+    /// issue #1750 ad-hoc SELECTs route through the modern `SelectExecutor` (which
+    /// budgets itself); this guard covers the remaining legacy return sites,
+    /// INCLUDING a plan-cache HIT (roborev #1582 D6). Reuses the SAME estimator +
+    /// enforcement as the optimizer path. Applied exactly once at each site.
     fn enforce_legacy_result_budget(&self, result: &QueryResult) -> Result<()> {
         super::result_budget::enforce_materialized_rows(
             &result.rows,
@@ -223,19 +221,18 @@ impl QueryEngine {
         let start_time = Instant::now();
         self.inc_total_queries();
 
-        // Route SELECT statements through the advanced parser, except simple
-        // `WHERE id = <value>` point lookups which must share the normal
-        // executor's key-handling path so INSERT and SELECT agree on keys.
+        // Route ALL SELECT statements through the modern optimizer +
+        // `SelectExecutor` (issue #1750). It populates `metadata.columns`, applies
+        // projection, reconstructs the partition-key column, and selects the
+        // partition-targeted fast path (#949/#956) from parsed query structure +
+        // schema — never from a substring/token-count guess. The retired
+        // `is_simple_id_lookup` fork (`WHERE id =` substring + ≤ 8-token check)
+        // diverted short point reads to the legacy `QueryExecutor`, returning
+        // column-less results and skipping projection — a no-heuristics mandate
+        // violation (#28) that flipped behavior with the PK name.
         let trimmed_cql = cql.trim().to_uppercase();
-        let is_simple_id_lookup = cql.contains("WHERE id =") && cql.split_whitespace().count() <= 8;
-        if trimmed_cql.starts_with("SELECT") && !is_simple_id_lookup {
+        if trimmed_cql.starts_with("SELECT") {
             return self.execute_select_query(cql, start_time).await;
-        }
-        #[cfg(debug_assertions)]
-        if trimmed_cql.starts_with("SELECT") && is_simple_id_lookup {
-            tracing::debug!(
-                "Routing simple SELECT through normal executor for consistent key handling"
-            );
         }
 
         // Check plan cache first for non-SELECT queries. Issue #1595: serve the
@@ -447,11 +444,9 @@ impl QueryEngine {
     /// When the parsed SELECT has **zero** bind markers and `params` is empty,
     /// this delegates straight back to [`Self::execute`] so that a markerless
     /// `execute_with_params(sql, &[])` is byte-for-byte equivalent to
-    /// `execute(sql)` — including the legacy simple-`WHERE id = <literal>` point
-    /// lookup that `execute` intentionally keeps on the normal executor for
-    /// INSERT/SELECT key compatibility. Only when markers are present (`> 0`) is
-    /// the statement bound and driven through the SELECT optimizer + executor
-    /// pipeline.
+    /// `execute(sql)` — which since issue #1750 routes every literal SELECT
+    /// through the modern SELECT optimizer + executor. Only when markers are
+    /// present (`> 0`) is the statement bound and driven through that pipeline.
     ///
     /// Arity stays strict in both directions: markers `> 0` with a wrong
     /// `params.len()` is an error, and markers `== 0` with a **non-empty**
@@ -496,10 +491,9 @@ impl QueryEngine {
             let marker_count = statement.bind_marker_count();
 
             // Finding 1: a markerless SELECT with no supplied params must route
-            // exactly like a literal `execute(cql)` — including the simple-id
-            // legacy point-lookup path — so the two APIs cannot diverge. A
-            // marker-free statement with stray params is, however, a caller bug:
-            // reject it for strict arity (no placeholder to bind into).
+            // exactly like a literal `execute(cql)` (since #1750, the modern
+            // executor) so the two APIs cannot diverge. A marker-free statement
+            // with stray params is a caller bug: reject it for strict arity.
             if marker_count == 0 {
                 if params.is_empty() {
                     return self.execute(cql).await;
@@ -1122,7 +1116,8 @@ mod tests {
 
         let query_engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
 
-        // Execute 3 different queries
+        // Execute 3 different queries. Since #1750 these route through the modern
+        // SELECT executor; their plans live in `select_plan_cache`.
         let _ = query_engine
             .execute("SELECT * FROM users WHERE id = 1")
             .await;
@@ -1133,8 +1128,8 @@ mod tests {
             .execute("SELECT * FROM users WHERE id = 3")
             .await;
 
-        // Cache should only have 2 entries due to eviction
-        assert_eq!(query_engine.cache_stats().plan_cache_size, 2);
+        // Cache should only have 2 entries due to eviction (simple LRU).
+        assert_eq!(query_engine.select_plan_cache.len(), 2);
     }
 
     #[tokio::test]
@@ -1219,8 +1214,8 @@ mod tests {
         let memory = Arc::new(crate::memory::MemoryManager::new(&config).unwrap());
         let engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
 
-        // A non-`WHERE id =` SELECT routes through the modern `execute_select_query`
-        // path (see `execute`'s `is_simple_id_lookup` gate), which owns the plan cache.
+        // Every SELECT routes through `execute_select_query` (issue #1750 retired
+        // the `WHERE id =` text fork), which owns the modern `select_plan_cache`.
         let cql = "SELECT * FROM t WHERE age > 5";
 
         OPTIMIZE_INVOCATIONS.with(|c| c.set(0));
@@ -1256,7 +1251,7 @@ mod tests {
 mod engine_lock_hygiene_tests;
 
 #[cfg(test)]
-#[cfg(feature = "experimental")]
+#[cfg(all(feature = "experimental", feature = "state_machine"))]
 mod plan_cache_tests {
     use super::*;
     use crate::{
@@ -1287,13 +1282,18 @@ mod plan_cache_tests {
         (engine, temp_dir)
     }
 
-    /// Register the table schema used by the plan-cache tests.
-    ///
-    /// The write path was removed in Issue #175, so this only issues the
-    /// `CREATE TABLE` DDL — no row inserts. The plan-cache assertions below
-    /// depend solely on query *planning* (cache population/eviction on simple
-    /// `WHERE id = ?` point lookups routed through the legacy executor), not on
-    /// any stored rows, so an empty table exercises the current behavior exactly.
+    /// Number of cached modern SELECT plans. Since issue #1750 ALL SELECTs
+    /// (including `WHERE id = ?` point lookups) route through the modern
+    /// `SelectExecutor`, whose plans live in `select_plan_cache`, not the legacy
+    /// `plan_cache` surfaced by `cache_stats`; these LRU tests assert on it.
+    fn select_plan_cache_len(engine: &QueryEngine) -> usize {
+        engine.select_plan_cache.len()
+    }
+
+    /// Register the table schema used by the plan-cache tests. Write path removed
+    /// in Issue #175, so this only issues `CREATE TABLE` DDL — no row inserts. The
+    /// assertions depend solely on planning (cache population/eviction), not
+    /// stored rows, so an empty table exercises current behavior exactly.
     async fn create_sample_table(engine: &QueryEngine) {
         engine
             .execute(
@@ -1319,7 +1319,7 @@ mod plan_cache_tests {
             .await
             .unwrap();
 
-        assert_eq!(engine.cache_stats().plan_cache_size, 0);
+        assert_eq!(select_plan_cache_len(&engine), 0);
     }
 
     #[tokio::test]
@@ -1341,7 +1341,7 @@ mod plan_cache_tests {
             .await
             .unwrap();
 
-        assert_eq!(engine.cache_stats().plan_cache_size, 1);
+        assert_eq!(select_plan_cache_len(&engine), 1);
         assert!(engine.stats().cache_hit_ratio > 0.0);
     }
 
@@ -1362,6 +1362,6 @@ mod plan_cache_tests {
                 .unwrap();
         }
 
-        assert_eq!(engine.cache_stats().plan_cache_size, 2);
+        assert_eq!(select_plan_cache_len(&engine), 2);
     }
 }

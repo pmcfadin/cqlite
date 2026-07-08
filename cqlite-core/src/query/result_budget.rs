@@ -8,8 +8,12 @@
 //! pipeline), by [`crate::query::select_executor::SelectExecutor::execute`].
 //!
 //! SCOPE: the LEGACY [`QueryExecutor`](crate::query::executor::QueryExecutor)
-//! point-lookup path (simple `WHERE id = <value>` lookups) is NOT covered by
-//! this budget — deferred to the D6 redesign (tracked on #1582).
+//! path — non-SELECT statements and any cached legacy SELECT plan reused via the
+//! plan-cache HIT branch — is NOT covered by this module's estimator directly;
+//! `QueryEngine::enforce_legacy_result_budget` applies the same ceiling at those
+//! sites. Since issue #1750 ad-hoc SELECTs (including simple `WHERE id = <value>`
+//! point lookups) route through the modern `SelectExecutor` and are budgeted
+//! there. (D6 redesign tracked on #1582.)
 //!
 //! This module is compiled unconditionally (unlike `select_executor`, which is
 //! `state_machine`-gated).
