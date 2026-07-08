@@ -137,7 +137,13 @@
 #                      scripts/tests/test_udt_rowbuilder_tuple_shape.sh (#1991) —
 #                      pins the nb row-builder's UDT value to a positional tuple
 #                      (a dict → KeyError: 0 under prepared inserts) + an
-#                      actionable 0-row abort. On the python3 path also runs
+#                      actionable 0-row abort. Also runs (no python3 needed)
+#                      scripts/tests/test_agent_gate_python_bindings_determinism.sh
+#                      (#1803) — proves the python-bindings import-verify + one-shot
+#                      self-heal both self-heals a transient venv-resolution miss to
+#                      PASS and fails distinctly on a real binding defect (hermetic,
+#                      PATH-shadowed toolchain, no real maturin build). On the
+#                      python3 path also runs
 #                      scripts/tests/test_gate_concurrency_cap.sh (#1825) — proves
 #                      the machine-wide full-gate concurrency cap queues at N,
 #                      exempts --lite, and releases a slot on SIGKILL (uses the
@@ -267,6 +273,11 @@ INVOCATION_CWD="$PWD"
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
+
+# Absolute path to THIS script, for the hidden self-test hooks that re-invoke it
+# in a fresh subshell (e.g. --python-build-verify, issue #1803). It always lives
+# under <repo-root>/scripts/ (we just cd'd out of scripts/ via dirname "$0"/..).
+GATE_SELF="$REPO_ROOT/scripts/$(basename "$0")"
 
 # Agent sandboxes often run with a minimal PATH; pick up rustup's cargo.
 if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
@@ -893,6 +904,78 @@ _run_shell_selftest_files() {
   return "$rc"
 }
 
+# _python_build_verify_venv <venv> <maturin-develop-cmd> (issue #1803):
+# build the cqlite python extension into <venv> and GUARANTEE it imports, self-
+# healing a stale/half-built editable install EXACTLY ONCE. The persistent venv
+# under target/ is REUSED for the healthy path (the speed optimization); it is
+# torn down and rebuilt from scratch ONLY when a maturin-exited-0 build still
+# fails `import cqlite._cqlite` — the venv-resolution miss (a cleaned target/, an
+# interrupted prior run, or a concurrent same-checkout gate) that made the
+# python-bindings component flake with ModuleNotFoundError despite green code.
+# Contract (single source of truth for BOTH run_python_bindings and the --lite
+# python tier; exposed to the self-test via the --python-build-verify hook):
+#   exit 0 -> extension built AND `import cqlite._cqlite` verified (possibly after
+#             one clean-venv rebuild — a self-healed transient miss).
+#   exit 1 -> venv creation / pip install failed: a TOOLCHAIN gap (offline?) — the
+#             full component FAILs on it, the lite tier SKIPs (unchanged split).
+#   exit 2 -> `maturin develop` itself exited non-zero: a real BUILD failure
+#             (unchanged hard-FAIL semantics).
+#   exit 3 -> maturin exited 0 but the module did NOT import even after a clean-
+#             venv rebuild: a real binding DEFECT, not a venv miss. Emits the
+#             DISTINCT marker line so the failure reads as a code defect, not a
+#             transient flake.
+# The venv/pip/maturin/import operations are PATH-shadowable so the hermetic self-
+# test (test_agent_gate_python_bindings_determinism.sh) can simulate the miss +
+# heal without a real maturin build; production supplies the real toolchain.
+_python_build_verify_venv() {
+  local venv="$1" maturin_cmd="$2"
+
+  # venv + pip deps (rc!=0 = toolchain gap). Reuses an existing venv (speed).
+  _pbv_setup() {
+    [ -x "$venv/bin/python" ] || python3 -m venv "$venv" || return 1
+    (
+      set -euo pipefail
+      # shellcheck disable=SC1091
+      . "$venv/bin/activate"
+      pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+      pip install --quiet maturin pytest
+    )
+  }
+  # maturin develop (rc!=0 = real build failure).
+  _pbv_build() {
+    (
+      set -euo pipefail
+      # shellcheck disable=SC1091
+      . "$venv/bin/activate"
+      eval "$maturin_cmd"
+    )
+  }
+  # verify the freshly-built editable install actually imports (rc!=0 = miss).
+  _pbv_verify() {
+    (
+      set -euo pipefail
+      # shellcheck disable=SC1091
+      . "$venv/bin/activate"
+      python -c 'import cqlite; import cqlite._cqlite'
+    ) >/dev/null 2>&1
+  }
+
+  _pbv_setup    || return 1
+  _pbv_build    || return 2
+  _pbv_verify   && return 0
+
+  # maturin exited 0 but the module did not import → venv-resolution miss. Self-
+  # heal ONCE: tear the venv down and rebuild from scratch.
+  echo "[python-bindings] cqlite._cqlite did not import after 'maturin develop' (exit 0) — self-healing with a clean-venv rebuild (issue #1803)" >&2
+  rm -rf "$venv"
+  _pbv_setup    || return 1
+  _pbv_build    || return 2
+  _pbv_verify   && return 0
+
+  echo "[python-bindings] FAIL: cqlite._cqlite did not import after clean-venv rebuild — real binding defect, not a venv-resolution miss" >&2
+  return 3
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -1007,6 +1090,16 @@ case "${1:-}" in
     while IFS= read -r _drs_f; do [ -n "$_drs_f" ] && _drs_arr+=("$_drs_f"); done <<<"$_drs_targets"
     if [ "${#_drs_arr[@]}" -gt 0 ]; then _run_shell_selftest_files "${_drs_arr[@]}"; exit $?; fi
     echo "shell-selftest: (none)"; exit 0 ;;
+  # Hidden self-test hook (issue #1803): run the python build + import-verify +
+  # one-shot self-heal in isolation. Args: <venv> <maturin-develop-cmd>. Exits
+  # with the _python_build_verify_venv contract code (0 ok / 1 toolchain / 2
+  # build-fail / 3 import-defect-after-clean-rebuild). Drives the SAME function
+  # both real call sites use, so test_agent_gate_python_bindings_determinism.sh
+  # can assert the self-heal hermetically with PATH-shadowed python3/pip/maturin/
+  # python — no drift from production.
+  --python-build-verify)
+    _python_build_verify_venv "${2:?--python-build-verify needs <venv>}" "${3:?--python-build-verify needs <maturin-develop-cmd>}"
+    exit $? ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -1380,16 +1473,17 @@ run_python_bindings() {
   fi
   # Persistent venv under target/ so repeat runs skip the maturin/pytest install.
   local venv="$REPO_ROOT/target/agent-gate-venv"
-  echo ">>> [$name] maturin develop + pytest (venv: $venv, RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0})"
-  if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
+  echo ">>> [$name] maturin develop + import-verify + pytest (venv: $venv, RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0})"
+  # Build + VERIFY the extension imports (self-heals a stale/half-built editable
+  # install once — issue #1803), THEN run pytest against the verified venv. A
+  # ModuleNotFoundError from a venv-resolution miss self-heals to a clean rebuild
+  # rather than falsely FAILing green code; a genuine build/import defect FAILs
+  # with a distinct message (already in $log).
+  if bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" >"$log" 2>&1 \
+     && RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
       set -euo pipefail
-      venv="'"$venv"'"
-      [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
-      . "$venv/bin/activate"
-      pip install --quiet --upgrade pip >/dev/null
-      pip install --quiet maturin pytest
-      maturin develop -m bindings/python/Cargo.toml
-      pytest bindings/python/tests -q' >"$log" 2>&1; then
+      . "'"$venv"'/bin/activate"
+      pytest bindings/python/tests -q' >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -1689,6 +1783,23 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_delta.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (delta re-cert self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # python-bindings venv-determinism self-test (#1803): hermetic (PATH-shadowed
+  # python3/pip/maturin/python — no real maturin build, no datasets/network),
+  # always runs. Proves the import-verify + one-shot self-heal both self-heals a
+  # transient venv-resolution miss to PASS AND fails distinctly on a real binding
+  # defect. A failure FAILs the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_python_bindings_determinism.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_python_bindings_determinism.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (python-bindings venv-determinism self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -2027,15 +2138,22 @@ run_scoped_tests() {
       PYTHON_TIER_NOTE="python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run; run the full gate"
     else
       local venv="$REPO_ROOT/target/agent-gate-venv"
+      local pbv_rc
       echo ">>> [$name] python tier: $PYTHON_LITE_TIER_CMD (venv: $venv)"
-      if ! RUN_SLOW_TESTS=0 PY_MATURIN_CMD="$PYTHON_LITE_MATURIN_CMD" bash -c '
-          set -euo pipefail
-          venv="'"$venv"'"
-          [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
-          . "$venv/bin/activate"
-          pip install --quiet --upgrade pip >/dev/null
-          pip install --quiet maturin pytest
-          eval "$PY_MATURIN_CMD"' >>"$log" 2>&1; then
+      # Build + VERIFY the extension imports, self-healing a stale/half-built
+      # editable install once (issue #1803, symmetric to run_python_bindings). rc
+      # 1 (venv/pip) or 2 (maturin build) are TOOLCHAIN gaps → SKIP (offline, NOT
+      # a code failure — clippy in this same lite run already compiled cqlite-py).
+      # rc 3 (imports fail even after a clean-venv rebuild) is a real binding
+      # DEFECT → FAIL distinctly. rc 0 → run pytest against the verified venv.
+      RUN_SLOW_TESTS=0 bash "$GATE_SELF" --python-build-verify "$venv" "$PYTHON_LITE_MATURIN_CMD" >>"$log" 2>&1
+      pbv_rc=$?
+      if [ "$pbv_rc" -eq 3 ]; then
+        status=FAIL
+        OVERALL=FAIL
+        echo ">>> [$name] python tier FAIL (cqlite._cqlite did not import after clean-venv rebuild — real binding defect, not a venv-resolution miss)"
+        PYTHON_TIER_NOTE="python-tier: FAIL (cqlite._cqlite did not import after clean-venv rebuild — real binding defect)"
+      elif [ "$pbv_rc" -ne 0 ]; then
         echo ">>> [$name] python tier SKIP (venv/pip/maturin toolchain setup failed — offline or toolchain gap, NOT a code failure; see $log; run the full gate when the toolchain is available)"
         PYTHON_TIER_NOTE="python-tier: SKIPPED (toolchain: venv/pip/maturin setup failed — offline?) — python-binding diff NOT validated by this lite run; run the full gate"
       elif RUN_SLOW_TESTS=0 PY_PYTEST_CMD="$PYTHON_LITE_PYTEST_CMD" bash -c '
