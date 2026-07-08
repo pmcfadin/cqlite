@@ -16,6 +16,13 @@ The internal position document (`docs/architecture/cassandra-sidecar-parquet-pro
 is the authoritative source of truth for CQLite maintainers. This page is the
 user-facing distillation.
 
+:::tip[Querying live, not projecting]
+If you want to run distributed SQL directly over a cluster's SSTables (rather than
+materializing Parquet), see the
+[Arrow Flight server & Trino connector](/cqlite/user-docs/flight-trino/) — it also
+uses the Cassandra Sidecar, for ring/token-range discovery.
+:::
+
 ## What is already built
 
 The read-to-Parquet pipeline is largely in place:
