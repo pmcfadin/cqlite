@@ -125,9 +125,9 @@ scenarios:
           no-op when at least one Data.db is present.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-TOC.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-TOC.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -141,11 +141,11 @@ scenarios:
         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_toc_component_test digest_crc32_byte_for_byte_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Digest.crc32
-        - test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Digest.crc32
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-TOC.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Digest.crc32
+        - test-data/datasets/sstables/test_oa/simple_table-5ead3f007b2311f1ac0b1facdfdff4e7/oa-2-big-Digest.crc32
       failure_artifacts:
         - artifact.fast_pr.byte_diff
       known_limitations: >-
@@ -197,7 +197,7 @@ scenarios:
           - cqlite-core/tests/sstabledump_parity_data.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -211,7 +211,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstabledump_parity_data
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Rows and cells are normalized to the sstabledump JSONL fact model
         (partition key, clustering, cell name/value, liveness, deletion) and
@@ -256,7 +256,7 @@ scenarios:
           partition-header size against a real Cassandra nb Data.db.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/uncompressed_table-4b8735207b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -272,7 +272,7 @@ scenarios:
         row_size_vint writer_row_size_frames_body_exactly prev_size_vint
         fixture_uncompressed_row_framing
       reference_paths:
-        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/uncompressed_table-4b8735207b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -317,7 +317,7 @@ scenarios:
           byte, offset, and consumed byte range.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/uncompressed_table-4b8735207b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -332,7 +332,7 @@ scenarios:
         --features write-support --test issue_990_data_db_row_framing_parity
         row_flag_ cell_flag_ fixture_uncompressed_row_flags
       reference_paths:
-        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/uncompressed_table-4b8735207b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -376,7 +376,7 @@ scenarios:
           golden exactly.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/uncompressed_table-4b8735207b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
@@ -393,7 +393,7 @@ scenarios:
         timestamp_delta ttl_and_ldt_deltas row_tombstone_ldt_delta
         fixture_uncompressed_row_framing
       reference_paths:
-        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/uncompressed_table-4b8735207b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -439,7 +439,7 @@ scenarios:
           nb Data.db.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -454,7 +454,7 @@ scenarios:
         --features write-support --test issue_990_data_db_row_framing_parity
         multi_clustering fixture_composite_multi_clustering
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -510,7 +510,7 @@ scenarios:
           (a missing binary errors rather than skips).
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/static_columns_table-4b9f29f07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_deltas/static_with_rows-29a4cf80701f11f1b5d1d98b0640ec05/nb-1-big-Data.db
         - test-data/datasets/sstables/test_deltas/static_with_rows-29a4cf80701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
@@ -527,7 +527,7 @@ scenarios:
         --features write-support --test issue_991_static_clustering_parity
         static_only fixture_static_columns_marker
       reference_paths:
-        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/static_columns_table-4b9f29f07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -660,7 +660,7 @@ scenarios:
           the full 5-tuple (incl. the DATE 5th column) semantically.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_wide_rows/wide_partition_table-4d4364107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -675,7 +675,7 @@ scenarios:
         --features write-support --test issue_991_static_clustering_parity
         multi_column fixture_wide_multi_column
       reference_paths:
-        - test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_wide_rows/wide_partition_table-4d4364107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -728,7 +728,7 @@ scenarios:
           sstabledump golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -743,7 +743,7 @@ scenarios:
         --features write-support --test issue_991_static_clustering_parity
         composite_desc
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -789,7 +789,7 @@ scenarios:
           header/length VInt — proven by the END_OF_PARTITION framing.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/static_columns_table-4b9f29f07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -809,7 +809,7 @@ scenarios:
         --features write-support --test issue_991_static_clustering_parity
         null_vs_empty fixture_static_columns_marker
       reference_paths:
-        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/static_columns_table-4b9f29f07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       normalization: >-
@@ -1283,7 +1283,7 @@ scenarios:
           - cqlite-core/tests/sstabledump_parity_index.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -1297,7 +1297,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstabledump_parity_index
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Partition key digests and Data.db offsets resolved through Index.db are
         compared against the partition order and keys derived from sstabledump
@@ -1351,7 +1351,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstabledump_parity_summary strict::
       reference_paths:
-        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_timeseries/app_metrics-4ca6aee07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -1392,7 +1392,7 @@ scenarios:
           authoritatively from the parsed entries and the JSONL, not heuristics).
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -1406,7 +1406,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Index.db data offsets are relative to the Data.db data section while JSONL
         positions are absolute file offsets; the per-partition Data.db header is a
@@ -1500,7 +1500,7 @@ scenarios:
           key, verified not present) does not resolve.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -1514,7 +1514,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -1547,7 +1547,7 @@ scenarios:
           and last partition keys as range boundaries through the live lookup table.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -1561,7 +1561,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -1597,7 +1597,7 @@ scenarios:
           epic #970.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -1612,7 +1612,7 @@ scenarios:
         --test sstable_parity_index_db_test
         truncated_big_index_db_is_not_silently_full_or_empty
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -1648,8 +1648,8 @@ scenarios:
           JSONL partition key, and the partition count is asserted exactly equal.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -1663,8 +1663,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-Data.db.jsonl
       normalization: >-
         JSONL single-column partition keys are decoded to their raw on-disk byte
         encoding (UUID text -> 16 bytes) before comparison; composite-key byte
@@ -2047,7 +2047,7 @@ scenarios:
           apply. The test skips cleanly when no BTI binaries are present at all.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-TOC.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -2061,7 +2061,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_index_db_test bti_index_component_discovery
       reference_paths:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-TOC.txt
       failure_artifacts:
         - artifact.manual_debug.reproduction_bundle
       known_limitations: >-
@@ -2132,7 +2132,7 @@ scenarios:
         from raw bytes; the little-endian offset table is decoded independently
         and cross-checked against SummaryReader.
       reference_paths:
-        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_timeseries/app_metrics-4ca6aee07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2181,7 +2181,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstabledump_parity_summary strict::
       reference_paths:
-        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_timeseries/app_metrics-4ca6aee07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2230,7 +2230,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstabledump_parity_summary strict::
       reference_paths:
-        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_timeseries/app_metrics-4ca6aee07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2289,7 +2289,7 @@ scenarios:
         Sampled positions are decoded little-endian (the on-disk truth verified
         against Index.db) and matched to be16-length-prefixed Index.db keys.
       reference_paths:
-        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_timeseries/app_metrics-4ca6aee07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2346,7 +2346,7 @@ scenarios:
         TOC.txt component manifests are parsed strictly; format is taken from the
         descriptor filename, never inferred from contents.
       reference_paths:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-TOC.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2468,7 +2468,7 @@ scenarios:
           - cqlite-core/tests/sstabledump_parity_statistics.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
     evidence:
       type: canonical_semantic
       strict: false
@@ -2482,7 +2482,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstabledump_parity_statistics
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
       normalization: >-
         Min/max timestamps, row count, partition count and serialization-header
         column types are compared against the Statistics.db.txt dump and
@@ -2558,8 +2558,8 @@ scenarios:
     fixtures:
       references:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Statistics.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -2575,8 +2575,8 @@ scenarios:
         statistics_db_strict_core_metadata_parity
       reference_paths:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Statistics.db.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2612,7 +2612,7 @@ scenarios:
           (statistics_db_strict_corruption_fails_closed) proves it fails closed.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Statistics.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -2626,7 +2626,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_statistics_db_strict_test
       reference_paths:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Statistics.db.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2713,8 +2713,8 @@ scenarios:
           keys.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_oa/udt_table-4b9f738064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/static_columns_table-4b9f29f07b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/udt_table-5ed0a5807b2311f1ac0b1facdfdff4e7/oa-2-big-Statistics.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -2729,8 +2729,8 @@ scenarios:
         --test sstable_parity_statistics_db_strict_test
         statistics_db_strict_core_metadata_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_oa/udt_table-4b9f738064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/static_columns_table-4b9f29f07b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/udt_table-5ed0a5807b2311f1ac0b1facdfdff4e7/oa-2-big-Statistics.db.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2765,7 +2765,7 @@ scenarios:
           exercised by a reversed-clustering fixture.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -2780,7 +2780,7 @@ scenarios:
         --test sstable_parity_statistics_db_strict_test
         statistics_db_strict_core_metadata_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2923,9 +2923,9 @@ scenarios:
           establishes nothing about repair-aware tombstone purging.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Statistics.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -2940,9 +2940,9 @@ scenarios:
         --features write-support --test sstable_parity_repaired_metadata_test
         repaired_metadata_strict_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Statistics.db.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -2982,7 +2982,7 @@ scenarios:
           - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Statistics.db.txt
     evidence:
       type: partial
       storage_format_version: [nb, oa, da]
@@ -3032,7 +3032,7 @@ scenarios:
           - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Statistics.db.txt
     evidence:
       type: partial
       storage_format_version: [nb, oa, da]
@@ -3138,8 +3138,8 @@ scenarios:
           - cqlite-core/tests/v5_compressed_legacy_row_count_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-4bf70df07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -3154,8 +3154,8 @@ scenarios:
         --test v5_compressed_legacy_parity_test
         --test v5_compressed_legacy_row_count_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-4bf70df07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Decompressed chunk payloads are decoded to rows and compared (row count
         and values) against sstabledump JSONL; chunk offset tables are used for
@@ -3202,7 +3202,7 @@ scenarios:
           tracked by the carved-out scrub/verify issue #1236.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Digest.crc32
     evidence:
       type: partial
       artifacts: [checksums]
@@ -3212,7 +3212,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 emits Digest.crc32
       reference_paths:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Digest.crc32
       failure_artifacts:
         - artifact.fast_pr.checksum_diff
       known_limitations: >-
@@ -3260,7 +3260,7 @@ scenarios:
           (no trailing metadata CRC). Compares ordered offsets, not just counts.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3274,7 +3274,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -3309,7 +3309,7 @@ scenarios:
           the offset decode.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3323,7 +3323,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -3355,7 +3355,7 @@ scenarios:
           CompressedSequentialWriter.java.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3369,7 +3369,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -3402,7 +3402,7 @@ scenarios:
           byte and a CRC byte and proves both fail closed.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3416,7 +3416,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -3446,7 +3446,7 @@ scenarios:
           validated byte-for-byte across 350+ chunks of the committed corpus.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3460,7 +3460,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -3492,7 +3492,7 @@ scenarios:
           truncated input.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3506,7 +3506,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -3537,7 +3537,7 @@ scenarios:
           CRC-validated when the binaries are present.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3551,7 +3551,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -3582,7 +3582,7 @@ scenarios:
           chunks are CRC-validated when the binaries are present.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3596,7 +3596,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test sstable_parity_compression_info_test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -3649,9 +3649,9 @@ scenarios:
           and the chunk-offset table), across nb/oa/da fixtures.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
-        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-TOC.txt
+        - test-data/datasets/sstables/test_da/collection_table-67cf32a07b2311f1a7ea1783683013a6/da-2-bti-TOC.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -3666,9 +3666,9 @@ scenarios:
         --test sstable_parity_compression_info_db_strict_test
         compression_info_db_strict_byte_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
-        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
-        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-5eba5e607b2311f1ac0b1facdfdff4e7/oa-2-big-TOC.txt
+        - test-data/datasets/sstables/test_da/collection_table-67cf32a07b2311f1a7ea1783683013a6/da-2-bti-TOC.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -3710,7 +3710,7 @@ scenarios:
           boundaries between addressable chunks are exercised, not just single-chunk.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -3725,7 +3725,7 @@ scenarios:
         --test sstable_parity_compression_info_db_strict_test
         compression_info_db_strict_byte_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -3760,7 +3760,7 @@ scenarios:
           consistent end-to-end with the bytes Cassandra wrote.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3775,7 +3775,7 @@ scenarios:
         --test sstable_parity_compression_info_db_strict_test
         compression_info_db_strict_byte_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/compression_test_table-4b7904507b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -3812,7 +3812,7 @@ scenarios:
           and proves the CRC mismatch fails closed rather than returning garbage.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+        - test-data/datasets/sstables/test_da/collection_table-67cf32a07b2311f1a7ea1783683013a6/da-2-bti-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -3826,7 +3826,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test sstable_parity_compression_info_db_strict_test
       reference_paths:
-        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+        - test-data/datasets/sstables/test_da/collection_table-67cf32a07b2311f1a7ea1783683013a6/da-2-bti-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -3861,7 +3861,7 @@ scenarios:
           asserts each is rejected with an explicit error, never silently accepted.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -3876,7 +3876,7 @@ scenarios:
         --test sstable_parity_compression_info_db_strict_test
         compression_info_db_strict_corruption_fails_closed
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -3926,7 +3926,7 @@ scenarios:
         --test sstable_parity_compression_info_db_strict_test
         compression_info_db_strict_byte_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -3975,7 +3975,7 @@ scenarios:
         --test sstable_parity_compression_info_db_strict_test
         compression_info_db_strict_byte_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-TOC.txt
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -4217,8 +4217,8 @@ scenarios:
         The reference_paths point at the committed per-fixture Data.db.jsonl siblings
         (the binary Filter.db and Index.db are gitignored, fetched on demand).
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -4285,8 +4285,8 @@ scenarios:
         The reference_paths point at the committed per-fixture Data.db.jsonl siblings
         (the binary Filter.db and Index.db are gitignored, fetched on demand).
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-4b5f88e07b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
       known_limitations: >-
@@ -4338,8 +4338,8 @@ scenarios:
         --features write-support --test sstable_parity_filter_db_test
         filter_db_strict_parameters_and_no_false_negative
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -4386,7 +4386,7 @@ scenarios:
         --features write-support --test sstable_parity_filter_db_test
         filter_db_strict_corruption_fails_closed
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff
     ci:
@@ -5223,7 +5223,7 @@ scenarios:
           - cqlite-core/tests/issue_933_range_tombstone_compaction.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -5236,7 +5236,7 @@ scenarios:
       comparison_command: >-
         cargo test -p cqlite-core --features write-support --test issue_819_differential_compaction
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Tier-2 logical equivalence: merged partition/cell/timestamp/TTL/local
         deletion time/is_deleted facts compared against Cassandra compaction
@@ -5371,7 +5371,7 @@ scenarios:
           is apples-to-apples. This is the LOGICAL tier and is the hard gate.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -5384,7 +5384,7 @@ scenarios:
       comparison_command: >-
         cd compaction-parity && gradle --no-daemon test  # logical-tier sstabledump JSONL equality
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Both outputs are dumped with Cassandra's own sstabledump (-l) and the
         wall-clock-derived `expired` flag is normalized out; merged
@@ -5499,7 +5499,7 @@ scenarios:
           canonical sstabledump JSONL of cqlite's output must equal Cassandra's.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -5512,7 +5512,7 @@ scenarios:
       comparison_command: >-
         cd compaction-parity && gradle --no-daemon test  # row count + partition order via sstabledump JSONL
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Compared on the sstabledump JSONL fact model (partition key order,
         clustering order, surviving cell set); presentation and file layout
@@ -5555,7 +5555,7 @@ scenarios:
           loudly — there is no Assume-based silent skip.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -5568,7 +5568,7 @@ scenarios:
       comparison_command: >-
         cd compaction-parity && gradle --no-daemon test
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         sstabledump JSONL of both outputs with the wall-clock `expired` flag
         normalized out; logical facts compared, layout ignored.
@@ -7122,7 +7122,7 @@ scenarios:
           - cqlite-core/tests/reference_data_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_oa/simple_table-5ead3f007b2311f1ac0b1facdfdff4e7/oa-2-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -7136,7 +7136,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test reference_data_parity
       reference_paths:
-        - test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_oa/simple_table-5ead3f007b2311f1ac0b1facdfdff4e7/oa-2-big-Data.db.jsonl
       normalization: >-
         Decoded rows for nb (Cassandra 4-compatible BIG) and oa (Cassandra 5
         BIG) datasets are compared against sstabledump JSONL.
@@ -7165,7 +7165,7 @@ scenarios:
           - cqlite-core/tests/issue_909_bti_reader_roundtrip.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -7178,7 +7178,7 @@ scenarios:
       comparison_command: >-
         cargo test -p cqlite-core --features write-support --test issue_911_bti_sstabledump_parity
       reference_paths:
-        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+        - test-data/datasets/sstables/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti-Data.db.jsonl
       normalization: >-
         CQLite-written da BTI SSTables are dumped with Cassandra 5 sstabledump
         and compared for value equivalence; Partitions.db footer shape
@@ -10483,13 +10483,13 @@ scenarios:
           - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         The comparator parses a published sstabledump JSONL golden into a typed,
         ordered canonical value model and asserts an identical re-parse compares
@@ -10516,13 +10516,13 @@ scenarios:
           - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Values are normalized against the declared schema type (not guessed) so that
         ascii vs text, frozen vs multicell, and numeric widths are compared with the
@@ -10549,13 +10549,13 @@ scenarios:
           - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         Per-cell path, writetime/timestamp, TTL/local-deletion-time, and tombstone
         facts are extracted from the JSONL and compared field-by-field; presentation
@@ -10582,13 +10582,13 @@ scenarios:
           - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         The comparator refuses to treat placeholder or absent reference paths as a
         pass; a missing or empty reference JSONL fails loud, guaranteeing parity
@@ -10615,13 +10615,13 @@ scenarios:
           - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
       artifacts: [jsonl]
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-4b4ee7107b2311f1898d156e0c21aefb/nb-1-big-Data.db.jsonl
       normalization: >-
         The canonical JSONL model feeds the manifest report generator; the
         comparator asserts the rendered report rows match the typed value model so
