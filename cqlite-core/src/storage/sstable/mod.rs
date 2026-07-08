@@ -99,6 +99,25 @@ use crate::{types::TableId, Config, Result, RowKey, ScanRow};
 /// so 3 levels provides a safety margin.
 pub(crate) const MAX_SSTABLE_SCAN_DEPTH: usize = 3;
 
+/// The AUTHORITATIVE partition-key shape of a table, derived schema-less from the
+/// SSTable Statistics.db SerializationHeader (issue #1750).
+///
+/// Carries ONLY facts Cassandra actually serialises: how many partition-key
+/// components and clustering keys the table has, and the REAL names of the
+/// non-key (regular + static) columns. The partition-/clustering-key column NAMES
+/// are deliberately absent — Cassandra never serialises them, so any pk-name a
+/// schema-less parser reports is a synthesised placeholder that must not drive
+/// routing decisions (no-heuristics mandate #28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionKeyShape {
+    /// Number of partition-key components (a single-component pk is `1`).
+    pub partition_key_count: usize,
+    /// Number of clustering-key columns.
+    pub clustering_key_count: usize,
+    /// The real names of the non-key (regular + static) columns.
+    pub non_key_column_names: std::collections::HashSet<String>,
+}
+
 /// SSTable file identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SSTableId(pub String);
@@ -1698,6 +1717,59 @@ impl SSTableManager {
             .unwrap_or_default();
         // Guard dropped here, before any reader I/O.
         (readers, fully_qualified_match)
+    }
+
+    /// Resolve the AUTHORITATIVE partition-key shape for `table_id` from the
+    /// SSTable readers' Statistics.db SerializationHeader (issue #1750).
+    ///
+    /// This is the metadata a schema-less reader DOES have without a CQL schema:
+    /// the SerializationHeader (surfaced on each reader's `header().columns`)
+    /// records, per column, the authoritative `is_primary_key` / `is_clustering`
+    /// flags and the REAL names of the regular + static (non-key) columns. It does
+    /// NOT record the partition-/clustering-key column NAMES — Cassandra never
+    /// serialises those (they live in `system_schema`, absent schema-less), so the
+    /// parser synthesises a placeholder pk name (`build_partition_key_columns`) that
+    /// MUST NOT be trusted as an identity.
+    ///
+    /// Returns [`PartitionKeyShape`] carrying ONLY authoritative facts: the count of
+    /// partition-key components, the count of clustering keys, and the set of real
+    /// non-key column names. The caller confirms a predicate column is the sole
+    /// partition key BY ELIMINATION (single pk component, zero clustering keys, and
+    /// the column absent from the non-key name set) — never by the synthesised name.
+    /// Returns `None` when no reader for the table exposes a SerializationHeader
+    /// (fail-safe: the caller then keeps the honest full-scan path).
+    pub async fn partition_key_shape(&self, table_id: &TableId) -> Option<PartitionKeyShape> {
+        let (readers, _) = self.resolve_reader_snapshot(table_id).await;
+        for reader in &readers {
+            let columns = &reader.header().columns;
+            if columns.is_empty() {
+                continue;
+            }
+            let mut partition_key_count = 0usize;
+            let mut clustering_key_count = 0usize;
+            let mut non_key_column_names = std::collections::HashSet::new();
+            for col in columns {
+                match (col.is_primary_key, col.is_clustering) {
+                    (true, false) => partition_key_count += 1,
+                    (true, true) => clustering_key_count += 1,
+                    (false, _) => {
+                        non_key_column_names.insert(col.name.clone());
+                    }
+                }
+            }
+            // A SerializationHeader always names at least one partition-key
+            // component; require it so a header we could not populate schema-less
+            // (e.g. legacy formats with no Statistics.db columns) yields `None`
+            // rather than a bogus all-zero shape.
+            if partition_key_count > 0 {
+                return Some(PartitionKeyShape {
+                    partition_key_count,
+                    clustering_key_count,
+                    non_key_column_names,
+                });
+            }
+        }
+        None
     }
 
     /// Arm this manager's deterministic scan gate (issue #1591 test only).

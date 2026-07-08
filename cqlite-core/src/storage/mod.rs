@@ -366,6 +366,21 @@ impl StorageEngine {
             .await
     }
 
+    /// Resolve the AUTHORITATIVE partition-key shape for `table_id` from the
+    /// SSTable Statistics.db SerializationHeader (issue #1750).
+    ///
+    /// Used by the SCHEMA-LESS point-read classifier to confirm — from authoritative
+    /// metadata, never a synthesised pk name — that a `col = <literal>` predicate
+    /// column really is the sole partition key before taking a by-key seek. Returns
+    /// `None` when no reader exposes a SerializationHeader; delegates to
+    /// [`SSTableManager::partition_key_shape`].
+    pub async fn partition_key_shape(
+        &self,
+        table_id: &TableId,
+    ) -> Option<sstable::PartitionKeyShape> {
+        self.sstables.partition_key_shape(table_id).await
+    }
+
     /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
     ///
     /// Like [`scan_partition`](Self::scan_partition) but pushes a single-column

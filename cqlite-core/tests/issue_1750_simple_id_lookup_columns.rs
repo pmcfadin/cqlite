@@ -375,3 +375,93 @@ async fn schemaless_where_id_eq_returns_the_row() {
         "Issue #1750: the schema-less point-read row must surface at least one non-null value",
     );
 }
+
+/// Issue #1750 (CONFIRMED regression): a SCHEMA-LESS `WHERE <non_pk_col> = <literal>`
+/// must return the CORRECT matching row(s) via the honest full scan — NOT 0 rows.
+///
+/// The prior fix routed ANY schema-less single `col = <literal>` equality into a
+/// by-partition-key seek, which treated the literal as raw pk bytes, found no such
+/// partition, and returned 0 rows. On `simple_table` (`id UUID` pk, `name TEXT`
+/// regular), `SELECT * WHERE name = '<real value>'` regressed 1→0. This fix confirms
+/// the equality column is the sole partition key from AUTHORITATIVE metadata (the
+/// Statistics.db SerializationHeader shape) BY ELIMINATION before seeking; a
+/// non-pk column keeps the full-scan path and matches the regular-column cell
+/// (regular cells ARE decodable schema-less). A present-but-0-rows result is a
+/// FAILURE. The `name` value is learned from a schema-full open.
+#[tokio::test]
+async fn schemaless_where_non_pk_col_eq_returns_the_matching_row() {
+    // Learn a real (id, name) pair via a schema-full open.
+    let schema_db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+    let probe = schema_db
+        .execute(&format!("SELECT id, name FROM {QUALIFIED_TABLE} LIMIT 1"))
+        .await
+        .expect("probe select must succeed");
+    let Some(row) = probe.rows.first() else {
+        eprintln!("Skipping: simple_table returned 0 rows");
+        return;
+    };
+    let name = match row.values.get("name") {
+        Some(Value::Text(s)) if !s.is_empty() => s.clone(),
+        _ => {
+            eprintln!("Skipping: first row has no non-empty text `name`");
+            return;
+        }
+    };
+    // How many rows carry this name in the full table (the correct answer)?
+    let expected = schema_db
+        .execute(&format!(
+            "SELECT id FROM {QUALIFIED_TABLE} WHERE name = '{}' ALLOW FILTERING",
+            name.replace('\'', "''")
+        ))
+        .await
+        .map(|r| r.rows.len())
+        .unwrap_or(0);
+    drop(schema_db);
+
+    let db = match setup_schemaless().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let query = format!(
+        "SELECT * FROM {QUALIFIED_TABLE} WHERE name = '{}'",
+        name.replace('\'', "''")
+    );
+    let result = db
+        .execute(&query)
+        .await
+        .expect("schema-less non-pk equality must succeed");
+
+    // The confirmed regression: this returned 0. It must return the matching row(s),
+    // matching origin/main's full-scan behaviour. Present-but-0-rows is a FAILURE.
+    assert!(
+        !result.rows.is_empty(),
+        "Issue #1750 regression: a schema-less WHERE name = <value> must return the matching \
+         row(s) via full scan, not 0 rows (the by-pk-key seek over-fired on a non-pk column)",
+    );
+    // At least one returned row must actually carry the requested name value.
+    assert!(
+        result
+            .rows
+            .iter()
+            .any(|r| matches!(r.values.get("name"), Some(Value::Text(v)) if *v == name)),
+        "Issue #1750: a returned row must carry the requested `name` value",
+    );
+    if expected > 0 {
+        assert_eq!(
+            result.rows.len(),
+            expected,
+            "Issue #1750: the schema-less non-pk equality must return the SAME rows the \
+             schema-full full scan does",
+        );
+    }
+}
