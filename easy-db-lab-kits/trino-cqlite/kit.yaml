@@ -44,9 +44,17 @@ args:
     required: true
   - flag: --local-datacenter
     variable: LOCAL_DATACENTER
-    description: "Optional: preferred datacenter for split placement (cqlite.local-datacenter). Leave unset to disable."
+    description: "Optional: preferred datacenter for split placement (cqlite.local-datacenter). Leave unset to disable (rendered blank = no DC preference)."
     type: string
     default: ""
+  - flag: --read-mode
+    variable: READ_MODE
+    description: >-
+      How the scan resolves the SSTable file set (cqlite.read-mode):
+      `snapshot` (default) reads a consistent per-query Sidecar snapshot;
+      `live` reads the current data dir (races compaction). Valid: snapshot | live.
+    type: string
+    default: "snapshot"
   - flag: --trino-image-tag
     variable: TRINO_IMAGE_TAG
     description: >-
