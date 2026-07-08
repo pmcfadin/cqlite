@@ -44,12 +44,12 @@ use std::sync::Arc;
 #[cfg(not(feature = "tombstones"))]
 use tokio::sync::{mpsc, oneshot};
 
-#[cfg(not(feature = "tombstones"))]
-use super::stream_merge_probe;
 use super::reader::parsing::row_decoder::now_clock::now_epoch_secs;
 use super::reader::parsing::row_decoder::partition_shadow::{
     merged_row_shadowed_by_partition, PartitionShadow,
 };
+#[cfg(not(feature = "tombstones"))]
+use super::stream_merge_probe;
 use super::{reader, scan_merge};
 use crate::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, MergeStep, RowData};
 use crate::types::{CellWriteMetadata, TableId as CqlTableId};
@@ -90,9 +90,8 @@ struct ReadShadow {
 
 impl ReadShadow {
     fn new(schema: &crate::schema::TableSchema, now_secs: i64) -> Self {
-        let mut key_columns = HashSet::with_capacity(
-            schema.partition_keys.len() + schema.clustering_keys.len(),
-        );
+        let mut key_columns =
+            HashSet::with_capacity(schema.partition_keys.len() + schema.clustering_keys.len());
         for k in &schema.partition_keys {
             key_columns.insert(k.name.clone());
         }
@@ -643,7 +642,8 @@ mod tests {
     fn filter_live_partition_cover_hides_fully_shadowed_row() {
         let cover = Some(2_000i64);
         // All data older/equal to the cover → whole row hidden.
-        let hidden = shadow(0).filter_live(cover, vec![live_cell("a", 1_000), live_cell("b", 2_000)]);
+        let hidden =
+            shadow(0).filter_live(cover, vec![live_cell("a", 1_000), live_cell("b", 2_000)]);
         assert!(hidden.is_none(), "fully-shadowed row must be hidden");
         // A cell strictly newer than the cover → row survives (and keeps newer cell).
         let kept = shadow(0)

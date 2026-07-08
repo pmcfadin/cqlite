@@ -127,9 +127,11 @@ fn count_data_files(dir: &std::path::Path) -> usize {
 
 fn col<'a>(row: &'a ScanRow, name: &str) -> Option<&'a Value> {
     match row {
-        ScanRow::Row(cells) => cells
-            .iter()
-            .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None }),
+        ScanRow::Row(cells) => {
+            cells
+                .iter()
+                .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None })
+        }
         _ => None,
     }
 }
