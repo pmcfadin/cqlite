@@ -195,7 +195,9 @@ per token range, pinned to a single replica** — so each row is read exactly on
 cluster-wide, with no duplication across replicas. Each split issues a `DoGet` to
 its replica's `cqlite-flight` endpoint with that token range in the ticket.
 
-Cassandra's default 16 vnodes produce 16 splits per table.
+The split count follows the Sidecar's token-range response for the ring — roughly
+`nodes × vnodes_per_node` (e.g. a single node with Cassandra's default 16 vnodes
+yields 16 splits; an N-node vnode ring scales up accordingly).
 
 **v1 type support:** scalar columns (int, bigint, text, boolean, uuid, timestamp,
 …). Complex CQL types (collections, UDTs, tuples, decimal) are rejected at
@@ -235,10 +237,21 @@ runtime dependency — Trino supplies it from the engine classpath.
 
 ### Catalog configuration and read mode
 
-Configure a catalog in `etc/catalog/cqlite.properties`. The key properties:
+Configure a catalog in `etc/catalog/cqlite.properties`. The first line must select
+the connector factory by name; the rest are the `cqlite.*` properties:
+
+```properties
+# etc/catalog/cqlite.properties
+connector.name=cqlite_flight
+cqlite.sidecar-uri=http://cassandra-sidecar:9043
+# cqlite.read-mode=snapshot   # optional; snapshot is the default
+```
+
+The key properties:
 
 | Property | Default | Description |
 |----------|---------|-------------|
+| `connector.name` | *(required)* | Must be `cqlite_flight` — selects this connector's factory so Trino can load the catalog. |
 | `cqlite.sidecar-uri` | *(required)* | Cassandra Sidecar base URI for DDL / ring discovery. |
 | `cqlite.flight-port` | `8815` | Arrow Flight port on each Cassandra node. |
 | `cqlite.local-datacenter` | *(none)* | Preferred datacenter for split placement. |
