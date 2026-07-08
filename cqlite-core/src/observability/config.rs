@@ -82,6 +82,15 @@ pub struct ObservabilityConfig {
     pub sampling_ratio: f64,
     /// Exporter export timeout.
     pub timeout: Duration,
+    /// Opt-in, default-OFF presence-oracle false-negative verification (issue
+    /// #2163). When `true`, an SSTable read whose bloom/BTI-trie reports a key
+    /// "definitely absent" runs an AUTHORITATIVE confirmation scan and increments
+    /// `cqlite.read.bloom.false_negatives` on a contradiction. Populated from
+    /// `CQLITE_VERIFY_PRESENCE_ORACLE`; the read path itself consults the
+    /// process-global switch in
+    /// [`crate::storage::sstable::reader::presence_verification`], which reads the
+    /// SAME environment variable, so this field mirrors that runtime state.
+    pub verify_presence_oracle: bool,
 }
 
 impl Default for ObservabilityConfig {
@@ -94,6 +103,7 @@ impl Default for ObservabilityConfig {
             service_version: env!("CARGO_PKG_VERSION").to_string(),
             sampling_ratio: 1.0,
             timeout: DEFAULT_TIMEOUT,
+            verify_presence_oracle: false,
         }
     }
 }
@@ -146,6 +156,13 @@ impl ObservabilityConfig {
         if let Some(v) = env_str("CQLITE_OTEL_TIMEOUT_MS") {
             if let Ok(ms) = v.trim().parse::<u64>() {
                 cfg.timeout = Duration::from_millis(ms);
+            }
+        }
+        // Issue #2163: presence-oracle false-negative verification switch. Mirrors
+        // the process-global runtime switch the read path consults (same env var).
+        if let Some(v) = env_str("CQLITE_VERIFY_PRESENCE_ORACLE") {
+            if let Some(b) = parse_bool(&v) {
+                cfg.verify_presence_oracle = b;
             }
         }
 
@@ -207,6 +224,11 @@ impl ObservabilityConfigBuilder {
         self.config.timeout = timeout;
         self
     }
+    /// Enable/disable presence-oracle false-negative verification (issue #2163).
+    pub fn verify_presence_oracle(mut self, verify: bool) -> Self {
+        self.config.verify_presence_oracle = verify;
+        self
+    }
     /// Finish building.
     pub fn build(self) -> ObservabilityConfig {
         let mut cfg = self.config;
@@ -244,6 +266,7 @@ mod tests {
         assert_eq!(cfg.sampling_ratio, 1.0);
         assert_eq!(cfg.timeout, DEFAULT_TIMEOUT);
         assert_eq!(cfg.service_version, env!("CARGO_PKG_VERSION"));
+        assert!(!cfg.verify_presence_oracle);
     }
 
     #[test]
@@ -318,6 +341,7 @@ mod tests {
             "CQLITE_OTEL_SERVICE_VERSION",
             "CQLITE_OTEL_SAMPLING_RATIO",
             "CQLITE_OTEL_TIMEOUT_MS",
+            "CQLITE_VERIFY_PRESENCE_ORACLE",
         ];
         // Save + clear.
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
@@ -329,9 +353,11 @@ mod tests {
         let cfg = ObservabilityConfig::from_env();
         assert!(!cfg.enabled);
         assert_eq!(cfg.endpoint, DEFAULT_ENDPOINT);
+        assert!(!cfg.verify_presence_oracle);
 
         // Set every var.
         std::env::set_var("CQLITE_OTEL_ENABLED", "true");
+        std::env::set_var("CQLITE_VERIFY_PRESENCE_ORACLE", "on");
         std::env::set_var("CQLITE_OTEL_ENDPOINT", "http://c:4318");
         std::env::set_var("CQLITE_OTEL_PROTOCOL", "http");
         std::env::set_var("CQLITE_OTEL_SERVICE_NAME", "mysvc");
@@ -346,6 +372,7 @@ mod tests {
         assert_eq!(cfg.service_version, "1.2.3");
         assert_eq!(cfg.sampling_ratio, 0.25);
         assert_eq!(cfg.timeout, Duration::from_millis(2500));
+        assert!(cfg.verify_presence_oracle);
 
         // Unparseable ratio / timeout fall back to defaults; bad protocol keeps default.
         std::env::set_var("CQLITE_OTEL_SAMPLING_RATIO", "not-a-number");
