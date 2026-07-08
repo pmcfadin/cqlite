@@ -243,9 +243,32 @@ impl SSTableReader {
             // the primary path's OWN authoritative `scan_for_key` — which already
             // IS the confirming scan — never triggers a REDUNDANT second scan.
             if super::presence_verification::enabled() {
-                let _ = self
+                if let Err(e) = self
                     .verify_presence_oracle_negative(table_id, key.as_bytes())
-                    .await;
+                    .await
+                {
+                    // Issue #2163 (roborev r5): the READ stays fail-open — a
+                    // verification-scan failure (e.g. `scan_for_key` erroring on
+                    // corruption or an unreadable SSTable) must NEVER fail (or
+                    // even affect) the actual read this opt-in check is merely
+                    // double-checking; `row` above is returned unchanged either
+                    // way. But a SILENT-MISS DETECTOR that itself fails silently
+                    // defeats its own purpose, so the failure is surfaced LOUDLY
+                    // instead of discarded: an error-level log with context, AND
+                    // a record through the EXISTING error-rate signal
+                    // (`cqlite.errors.total{category,subsystem}`, issue #1038) —
+                    // never a new metric. `record_error` maps `Error::Corruption`
+                    // (the typical `scan_for_key` failure mode) to the bounded
+                    // `Corruption` category.
+                    tracing::error!(
+                        error = %e,
+                        sstable_format = self.sstable_format_label(),
+                        "opt-in presence-oracle false-negative verification scan FAILED — the \
+                         read itself is unaffected (fail-open), but this soundness check could \
+                         not run for this SSTable and needs investigation"
+                    );
+                    crate::observability::record_error(&e, "reader");
+                }
             }
         }
         Ok(row)

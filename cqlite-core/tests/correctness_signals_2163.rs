@@ -139,6 +139,18 @@ fn correctness_signals_end_to_end() {
     // A newer whole-row tombstone shadows an older live cell in the same
     // clustering slot: the live cell is SUPPRESSED and the retained tombstone
     // marker is EMITTED, both independently of tombstones_purged.
+    //
+    // This is ALSO the roborev r5 (#2163) regression pin: `run_row_tombstone_merge`
+    // uses a CLUSTERED schema (`obs2163.events`, clustering key `seq`), so the
+    // compaction read-back carries a `seq` clustering-key PSEUDO-CELL alongside
+    // the real `val` data cell (mirrors `extract_clustering_key`'s read-back
+    // contract, pinned by the existing unit test
+    // `issue_921_clustered_row_with_only_purgeable_cell_tombstone_emits_nothing`).
+    // The row tombstone shadows BOTH cells (both were written before the
+    // delete), but `seq` is not real data — only `val` may count. Asserting the
+    // EXACT count (not merely `>= 1.0`) catches the inflation: without the fix
+    // this scenario reports 2 suppressed (val + seq); confirmed empirically
+    // while developing this fix by disabling the exclusion.
     {
         let mut flows = merge::run_row_tombstone_merge();
         mc.reset();
@@ -146,9 +158,12 @@ fn correctness_signals_end_to_end() {
         let m = mc.flush_and_collect();
         let suppressed = m.counter_sum(catalog::COMPACTION_TOMBSTONES_SUPPRESSED);
         let emitted = m.counter_sum(catalog::COMPACTION_TOMBSTONES_EMITTED);
-        assert!(
-            suppressed >= 1.0,
-            "a row tombstone shadowing an older live cell must count >=1 suppressed; entry: {:?}",
+        assert_eq!(
+            suppressed,
+            1.0,
+            "cqlite.compaction.tombstones_suppressed must count DATA cells only — exactly 1 \
+             (the shadowed `val` cell), excluding the `seq` clustering-key pseudo-cell that the \
+             read-back path retains for round-tripping but is not real data; entry: {:?}",
             m.find(catalog::COMPACTION_TOMBSTONES_SUPPRESSED)
         );
         assert!(
@@ -745,6 +760,84 @@ fn correctness_signals_end_to_end() {
         drop(rt);
     }
 
+    // --- Roborev r5 (#2163): the opt-in verify scan's `Err` must not be
+    // silently discarded. The READ stays fail-open (a verifier failure must
+    // never fail the actual read), but the failure must be surfaced LOUDLY:
+    // recorded through the EXISTING error-signal path
+    // (`cqlite.errors.total{subsystem=reader}`), never a new metric. ---
+    {
+        use cqlite_core::types::RowKey;
+
+        let (reader, table_id, data_path, _tmp) =
+            fixtures::open_writer_reader_with_many_rows_and_path(30);
+
+        // Find an in-range absent key. `might_contain_partition` only consults
+        // the ALREADY-LOADED (resident) Filter.db, so this search — and the
+        // primary oracle-negative it proves — is unaffected by the Data.db
+        // corruption applied below.
+        let mut absent_key: Option<[u8; 4]> = None;
+        for candidate in 5_000_000i32..5_000_064i32 {
+            let key_bytes = candidate.to_be_bytes();
+            if !reader.might_contain_partition(&key_bytes) {
+                absent_key = Some(key_bytes);
+                break;
+            }
+        }
+        let absent_key = absent_key
+            .expect("at least one candidate must show absent via the resident bloom filter");
+
+        // Corrupt Data.db AFTER open (truncate mid-file): the resident
+        // Filter.db is untouched (lives in memory), so the primary bloom-miss
+        // path still succeeds; but the opt-in verify's authoritative
+        // `scan_for_key` — which must read Data.db fresh — now fails.
+        let original_len = std::fs::metadata(&data_path).expect("stat Data.db").len();
+        assert!(
+            original_len > 8,
+            "the fixture's Data.db must be large enough to truncate meaningfully"
+        );
+        let truncated_len = (original_len / 2).max(1);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&data_path)
+            .expect("open Data.db for truncation");
+        file.set_len(truncated_len)
+            .expect("truncate Data.db to simulate corruption/an unreadable SSTable");
+        drop(file);
+
+        presence_verification::set_enabled_for_testing(true);
+        mc.reset();
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let res = rt
+            .block_on(reader.get_with_resolution(
+                &table_id,
+                &RowKey::from(absent_key.to_vec()),
+                false,
+            ))
+            .expect("get_with_resolution must stay fail-open despite a verify-scan failure");
+        drop(rt);
+        presence_verification::set_enabled_for_testing(false);
+
+        assert!(
+            res.is_none(),
+            "the read must return the ORIGINAL oracle-negative result unaffected by the \
+             verify-scan failure (fail-open) — a debug/soundness check failing must never break \
+             a production read"
+        );
+
+        let m = mc.flush_and_collect();
+        let recorded = m.sum_where(
+            catalog::ERRORS_TOTAL,
+            &[(catalog::attr::SUBSYSTEM, "reader")],
+        );
+        assert!(
+            recorded >= 1.0,
+            "the verify-scan failure must be recorded through the existing error-signal path \
+             (cqlite.errors.total{{subsystem=reader}}) — a silent-miss DETECTOR must not itself \
+             fail silently; entry: {:?}",
+            m.find(catalog::ERRORS_TOTAL)
+        );
+    }
+
     // --- Requirement: Degraded read-path counter with bounded reason ---
     // The executor records honest fallbacks through `access_path::record`, the
     // public probe every fallback site funnels through. A fallback increments the
@@ -1178,6 +1271,61 @@ mod fixtures {
         drop(rt);
 
         (reader, TableId::from("rows"), tmp)
+    }
+
+    /// Like [`open_writer_reader_with_many_rows`], but also returns the on-disk
+    /// `Data.db` path so a test can corrupt it AFTER the reader has already
+    /// loaded Filter.db/Index.db/Summary.db into memory (roborev r5, #2163's
+    /// verify-scan-error test) — the presence-oracle bloom check never re-reads
+    /// Data.db, so corrupting the file post-open leaves the primary oracle
+    /// negative intact while making a SUBSEQUENT `scan_for_key` (the opt-in
+    /// verify path) fail.
+    pub fn open_writer_reader_with_many_rows_and_path(
+        n: i32,
+    ) -> (SSTableReader, TableId, PathBuf, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let schema = writer_schema();
+        let cfg = WriteEngineConfig::new(
+            tmp.path().join("data"),
+            tmp.path().join("wal"),
+            schema.clone(),
+        );
+        let mut engine = WriteEngine::new(cfg).expect("engine");
+        for id in 0..n {
+            engine
+                .execute(&format!(
+                    "INSERT INTO obsfn.rows (id, name) VALUES ({id}, 'row{id}')"
+                ))
+                .expect("write");
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let info = rt
+            .block_on(engine.flush())
+            .expect("flush")
+            .expect("sstable");
+        let data_file = info.data_path.clone();
+
+        let config = Config::default();
+        let platform = Arc::new(rt.block_on(Platform::new(&config)).expect("platform"));
+        let mut reader = rt
+            .block_on(SSTableReader::open(&data_file, &config, platform.clone()))
+            .expect("open reader");
+
+        let registry = rt
+            .block_on(SchemaRegistry::new(
+                SchemaRegistryConfig::default(),
+                platform.clone(),
+                config.clone(),
+            ))
+            .expect("build registry");
+        rt.block_on(registry.register_schema(schema, SchemaSource::Manual))
+            .expect("register schema");
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        rt.block_on(reader.attach_schema_registry(registry));
+        drop(rt);
+
+        (reader, TableId::from("rows"), data_file, tmp)
     }
 
     /// Two DISJOINT-key SSTable generations of the SAME table (no compaction),

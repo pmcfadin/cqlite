@@ -322,6 +322,19 @@ impl ReconcileState {
     /// data (phantom-row guard).
     pub(super) fn shadow_by_row_deletion(&mut self, purges: &mut PurgeCounts) {
         let row_del = self.row_del;
+        // Issue #2163 (roborev r5): clustering-key pseudo-cells are intentionally
+        // RETAINED in the cell list for read-back (see `extract_clustering_key`
+        // and the `had_data_before` computation in `filter_dropped_columns`
+        // below) — they are not real data, so shadowing one must not inflate
+        // `tombstones_suppressed`. Build the SAME `is_data_cell` exclusion
+        // `filter_dropped_columns`/`build` already use, computed here (before the
+        // mutable `winners` borrow) so a clustering-key cell shadowed by the row
+        // tombstone is excluded from the count.
+        let ck_names: HashSet<&str> = self
+            .clustering_key
+            .as_ref()
+            .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
+            .unwrap_or_default();
         let winners = &mut self.winners;
         self.after_row_del = std::mem::take(&mut self.order)
             .into_iter()
@@ -329,11 +342,16 @@ impl ReconcileState {
             .filter(|cell| match row_del {
                 Some(d) => {
                     let survives = cell.timestamp > d;
-                    // Issue #2163: a LIVE cell dropped here was SHADOWED by the
-                    // row tombstone (suppressed) — count it, distinct from a
-                    // gc/overlap-safe purge. A cell that is itself a tombstone is
-                    // not "live data suppressed", so it is not counted.
-                    if !survives && !KWayMerger::is_cell_tombstone(cell) {
+                    // Issue #2163: a LIVE DATA cell dropped here was SHADOWED by
+                    // the row tombstone (suppressed) — count it, distinct from a
+                    // gc/overlap-safe purge. A cell that is itself a tombstone,
+                    // or a clustering-key pseudo-cell (retained for read-back,
+                    // never real data), is not "live data suppressed" and is not
+                    // counted.
+                    if !survives
+                        && !KWayMerger::is_cell_tombstone(cell)
+                        && !ck_names.contains(cell.column.as_str())
+                    {
                         purges.suppressed += 1;
                     }
                     survives
