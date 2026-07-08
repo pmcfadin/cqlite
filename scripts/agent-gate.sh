@@ -3144,14 +3144,27 @@ dispatch_component() {
   #  are read out of cqlite-cli/Cargo.toml, UNIONed with the two self-gated
   #  ground-truth targets (write_readback_content_tests, graceful_shutdown_tests).
   #
-  # QUARANTINE (issue #2039 follow-up): these targets are PRE-EXISTING red — they
-  # are stale dataset-snapshot / SELECT-output tests that NO gate or CI lane has ever
-  # run (the ci.yml "CLI unit tests" job runs the same 3-target allowlist), so they
-  # bit-rotted against regenerated dataset binaries. They are EXCLUDED (loudly, here)
-  # rather than silently unrun, and must be triaged/fixed or re-snapshotted under
-  # #2188, then removed from this list. This is NOT a license to add new entries: a
-  # NEW failing test must be fixed, never quarantined.
-  QUARANTINE="comprehensive_select_test integration_sstable_tests parquet_writer_tests table_snapshot_tests"
+  # QUARANTINE (issue #2039 follow-up, tracked under #2188): targets excluded from
+  # both passes with a KNOWN reason, loudly here rather than silently unrun. Two
+  # distinct sub-classes surfaced by enumeration, both requiring out-of-scope triage
+  # rather than an inline fix — this is NOT a license to add new entries casually: a
+  # NEW failing (or newly-silent) test must be fixed, never quarantined, unless it
+  # matches one of these two documented shapes.
+  #  (a) PRE-EXISTING RED — stale dataset-snapshot / SELECT-output tests that NO gate
+  #      or CI lane ever ran (the ci.yml "CLI unit tests" job runs the old 3-target
+  #      allowlist), bit-rotted against regenerated dataset binaries:
+  #      comprehensive_select_test, integration_sstable_tests, parquet_writer_tests,
+  #      table_snapshot_tests.
+  #  (b) NEVER EXECUTED, UNVERIFIED — whole-file gated on the `integration-tests`
+  #      Cargo feature (cqlite-cli/Cargo.toml), which NO CI workflow or gate
+  #      component has ever enabled, so these have literally never run a single test
+  #      anywhere. Caught by the Pass-1 zero-tests guard below (they would otherwise
+  #      silently pass as "0 tests" default-feature targets — exactly the false-green
+  #      shape it exists to close): end_to_end_tests, error_handling_tests,
+  #      integration_tests. (test_runner.rs ALSO references this feature but only
+  #      gates a portion of its body, so it legitimately runs >0 tests under default
+  #      and is NOT in this list.)
+  QUARANTINE="comprehensive_select_test integration_sstable_tests parquet_writer_tests table_snapshot_tests end_to_end_tests error_handling_tests integration_tests"
   #
   # Fail closed (never silent-pass) if the glob finds zero files, or if either
   # derived target set comes back empty (a regression in the derivation).
@@ -3188,9 +3201,57 @@ dispatch_component() {
   echo "cli-tests: ${cli_test_count} tests/*.rs file(s); Pass 1 (default) targets: ${def_flags[*]}"
   echo "cli-tests: Pass 2 (write-support) targets: ${ws_flags[*]}"
   echo "cli-tests: QUARANTINED pre-existing-red targets (NOT run, #2039 follow-up): $QUARANTINE"
-  # Target names come from our own tests/ dir + Cargo.toml (safe identifiers).
-  cargo test --package cqlite-cli "${def_flags[@]}" &&
-  cargo test --package cqlite-cli --features write-support "${ws_flags[@]}"' ;;
+
+  # Zero-tests guard (roborev finding on #2039): a target whose body is entirely
+  # `#![cfg(feature = "write-support")]`-gated but which does NOT declare
+  # `required-features` in Cargo.toml lands in the Pass 1 default set (nothing
+  # excludes it) yet executes 0 tests there (its body compiles out under default
+  # features), and is invisible to the derived ws_targets set in Pass 2 unless it
+  # happens to be one of the two hardcoded self-gated ground-truth names — so a
+  # THIRD file with this shape would silently run 0 tests in BOTH passes forever.
+  # This shape is proven real: write_readback_content_tests/graceful_shutdown_tests
+  # ARE this shape (that is exactly why they are the hardcoded ground truth).
+  #
+  # Guard: after each pass, parse cargo'"'"'s own per-target "Running tests/<name>.rs"
+  # / "test result: ok. N passed" text and FAIL CLOSED if any target ran 0 tests
+  # unless it is on that pass'"'"'s explicit allowed-zero list. Only the two Pass-1
+  # ground-truth names are allowed to run 0 there; NOTHING is allowed to run 0 in
+  # Pass 2 (every real write-support target must execute at least one test).
+  check_no_unexpected_zero_tests() {
+    local pass_name="$1" logfile="$2"; shift 2
+    local allowed_zero=" $* "
+    local bad="" target=""
+    while IFS= read -r line; do
+      if [[ "$line" == *"Running tests/"* ]]; then
+        target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
+      elif [[ "$line" == "test result: ok. 0 passed; 0 failed"* ]]; then
+        if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
+          bad="$bad $target"
+        fi
+        target=""
+      elif [[ "$line" == "test result:"* ]]; then
+        target=""
+      fi
+    done < "$logfile"
+    if [ -n "$bad" ]; then
+      echo "cli-tests: FAIL-CLOSED —$bad ran 0 tests in $pass_name unexpectedly (issue #2039: a write-support-#[cfg]-gated target with no declared required-features, not on the allowed-zero list, would otherwise silently never run)" >&2
+      return 1
+    fi
+    return 0
+  }
+
+  log1=$(mktemp) && log2=$(mktemp)
+  trap "rm -f \"$log1\" \"$log2\"" EXIT
+
+  cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || exit "$rc"
+  check_no_unexpected_zero_tests "Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
+
+  cargo test --package cqlite-cli --features write-support "${ws_flags[@]}" 2>&1 | tee "$log2"
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || exit "$rc"
+  check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;

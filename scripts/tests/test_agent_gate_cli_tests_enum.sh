@@ -228,6 +228,94 @@ else
   bad "Pass-1 subtraction dropped a read-only target that should run"
 fi
 
+# 10. Behavioral check of the zero-tests guard (roborev finding on #2039): a target
+#     whose body is entirely `#[cfg(feature = "write-support")]`-gated but which does
+#     NOT declare required-features would compile+run 0 tests in Pass 1 and never
+#     appear in the derived Pass-2 set unless it happens to be one of the two
+#     hardcoded ground-truth names — silently zero coverage forever for a THIRD such
+#     file. Extract check_no_unexpected_zero_tests() VERBATIM from the gate (source
+#     of truth, no re-typed copy to drift) and drive it against synthetic cargo-style
+#     "Running tests/<name>.rs" / "test result:" log text.
+FUNC_SRC=$(awk '/^  check_no_unexpected_zero_tests\(\) \{/{f=1} f{print} f&&/^  \}$/{exit}' "$GATE")
+if [ -z "$FUNC_SRC" ]; then
+  bad "could not extract check_no_unexpected_zero_tests() from $GATE"
+else
+  ok "extracted check_no_unexpected_zero_tests() from the gate for behavioral testing"
+  eval "$FUNC_SRC"
+
+  mkdir -p "$tmp/zg"
+  cat >"$tmp/zg/pass1_ok.log" <<'LOG'
+     Running tests/unit_tests.rs (target/debug/deps/unit_tests-abc)
+
+running 5 tests
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/write_readback_content_tests.rs (target/debug/deps/write_readback_content_tests-abc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+LOG
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_ok.log" write_readback_content_tests graceful_shutdown_tests; then
+    ok "zero-tests guard: known-0 ground-truth target does NOT false-positive in Pass 1"
+  else
+    bad "zero-tests guard: false-positived on the known-0 Pass-1 ground-truth target"
+  fi
+
+  cat >"$tmp/zg/pass1_bad.log" <<'LOG'
+     Running tests/unit_tests.rs (target/debug/deps/unit_tests-abc)
+
+running 5 tests
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/sneaky_write_support_test.rs (target/debug/deps/sneaky_write_support_test-abc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+LOG
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_bad.log" write_readback_content_tests graceful_shutdown_tests; then
+    bad "zero-tests guard: did NOT catch a THIRD write-support-#[cfg]-gated target running 0 tests"
+  else
+    ok "zero-tests guard: catches a THIRD unexpected 0-test target (the exact gap roborev found)"
+  fi
+
+  cat >"$tmp/zg/pass2_bad.log" <<'LOG'
+     Running tests/cli_dml_integration_tests.rs (target/debug/deps/cli_dml_integration_tests-abc)
+
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+
+     Running tests/write_readback_content_tests.rs (target/debug/deps/write_readback_content_tests-abc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+LOG
+  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_bad.log"; then
+    bad "zero-tests guard: Pass 2 did NOT fail on a 0-test target (nothing is allowed 0 there)"
+  else
+    ok "zero-tests guard: Pass 2 fails on ANY 0-test target (no allowed-zero exceptions there)"
+  fi
+
+  cat >"$tmp/zg/pass2_ok.log" <<'LOG'
+     Running tests/cli_dml_integration_tests.rs (target/debug/deps/cli_dml_integration_tests-abc)
+
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+
+     Running tests/write_readback_content_tests.rs (target/debug/deps/write_readback_content_tests-abc)
+
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
+LOG
+  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_ok.log"; then
+    ok "zero-tests guard: an all-green Pass 2 passes cleanly (no false-positive)"
+  else
+    bad "zero-tests guard: false-positived on an all-green Pass 2"
+  fi
+fi
+
 echo
 echo "cli-tests-enum self-test: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
