@@ -9,17 +9,31 @@
 #
 # The fix routes BOTH call sites through _python_build_verify_venv, which after a
 # maturin-exited-0 build VERIFIES `import cqlite._cqlite`, and on a miss self-heals
-# EXACTLY ONCE (rm -rf the venv, recreate, reinstall, rebuild, re-verify). Only if
-# the module STILL will not import after a clean-venv rebuild does it FAIL — with a
-# DISTINCT message that names a real binding defect, not a transient venv miss.
+# EXACTLY ONCE. Only if the module STILL will not import after the rebuild does it
+# FAIL — with a DISTINCT message that names a real binding defect, not a transient
+# venv miss.
+#
+# roborev round 2 refined this: (Finding A) `maturin develop` can also fail because
+# the build TOOLCHAIN itself is absent (no cargo/rustc on PATH — an offline/
+# toolchain gap), which must classify the SAME as a venv/pip setup gap (SKIP in the
+# lite tier), not as a real compile error (FAIL) — the function now returns a
+# DISTINCT exit 4 for that case, checked BEFORE invoking maturin. (Finding B) the
+# self-heal branch no longer `rm -rf`s the SHARED persistent venv (a concurrent
+# same-checkout gate reusing it would otherwise race a mid-build/pytest teardown);
+# it builds into a PRIVATE per-process "$venv.heal.$$" venv instead and writes that
+# path back to an out-file so the caller knows what to activate + clean up.
 #
 # This test drives that function hermetically via the hidden `--python-build-verify`
-# hook with PATH-shadowed python3/pip/maturin/python (a temp dir prepended to PATH),
-# so it needs NO real maturin build and runs in well under a second. It proves BOTH
-# branches: (a) an import miss on the first attempt that succeeds after a venv
-# rebuild self-heals to PASS (exit 0), and (b) an import that fails on BOTH attempts
-# FAILs with exit 3 + the distinct marker. It also pins the healthy path (no
-# unnecessary rebuild) and the real-build-failure path (exit 2).
+# hook with PATH-shadowed python3/pip/maturin/python/cargo/rustc (temp dirs
+# prepended to PATH), so it needs NO real maturin build and runs in well under a
+# second. It proves: (a) an import miss on attempt 1 that succeeds after a rebuild
+# self-heals to PASS (exit 0) INTO A PRIVATE venv, leaving the shared venv's
+# sentinel untouched; (b) an import that fails on BOTH attempts FAILs with exit 3 +
+# the distinct marker; (c) `maturin develop` failing WITH cargo/rustc present is a
+# real compile error (exit 2, FAIL class); (d) `maturin develop` failing because
+# cargo/rustc are ABSENT is a toolchain gap (exit 4, SKIP class) — distinct from
+# (c); (e) the healthy first-try path does not rebuild; (f) an already-healthy
+# persistent venv is REUSED, never torn down.
 #
 # Run standalone:   bash scripts/tests/test_agent_gate_python_bindings_determinism.sh
 # Or via the gate:  scripts/agent-gate.sh runs it as part of `tooling-tests`.
@@ -102,15 +116,28 @@ exit 0
 EOF
 chmod +x "$stub"/python3 "$stub"/pip "$stub"/maturin "$stub"/python
 
+# Toolchain stub, in a SEPARATE directory from $stub (Finding A): `command -v
+# cargo`/`command -v rustc` just need SOMETHING executable to resolve, so a
+# no-op `exit 0` suffices. Kept apart from $stub so the toolchain-absent
+# scenario can shadow python3/pip/maturin/python WITHOUT also shadowing
+# cargo/rustc — PATH composition alone selects "present" vs "absent".
+stub_tc="$tmp/stubbin-toolchain"
+mkdir -p "$stub_tc"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$stub_tc/cargo"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$stub_tc/rustc"
+chmod +x "$stub_tc/cargo" "$stub_tc/rustc"
+
 # run_scenario <pass-on-attempt> <maturin-rc> -> sets RC / OUT / COUNTER globals.
-# Fresh venv + counter per scenario; PATH-shadowed by the stubs.
+# Fresh venv + counter per scenario; PATH-shadowed by the stubs (incl. the
+# toolchain stub, so cargo/rustc always resolve here — the toolchain-ABSENT
+# case is exercised separately by run_toolchain_scenario, which omits $stub_tc).
 run_scenario() {
   local pass_on="$1" maturin_rc="$2"
   local venv="$tmp/venv-$RANDOM$RANDOM"
   local counter="$tmp/counter-$RANDOM$RANDOM"
   rm -rf "$venv"; rm -f "$counter"
   OUT=$(
-    PATH="$stub:$PATH" \
+    PATH="$stub:$stub_tc:$PATH" \
     PBV_TEST_COUNTER="$counter" \
     PBV_TEST_PASS_ON_ATTEMPT="$pass_on" \
     MATURIN_RC="$maturin_rc" \
@@ -137,7 +164,7 @@ run_reuse_scenario() {
   : >"$venv/bin/activate"
   : >"$venv/SENTINEL"
   OUT=$(
-    PATH="$stub:$PATH" \
+    PATH="$stub:$stub_tc:$PATH" \
     PBV_TEST_COUNTER="$counter" \
     PBV_TEST_PY3_COUNTER="$py3_counter" \
     PBV_TEST_MATURIN_COUNTER="$maturin_counter" \
@@ -183,7 +210,7 @@ if [ "$SENTINEL_OK" -eq 1 ]; then
 else
   bad "reuse: the venv sentinel was removed — a healthy venv was torn down unnecessarily"
 fi
-if printf '%s\n' "$OUT" | grep -qF "self-healing with a clean-venv rebuild"; then
+if printf '%s\n' "$OUT" | grep -qF "self-healing into a private venv"; then
   bad "reuse: unexpectedly emitted the self-heal notice for an already-healthy venv"
 else
   ok "reuse: no self-heal notice emitted (nothing to heal)"
@@ -216,7 +243,7 @@ if [ "$COUNTER" -eq 2 ]; then
 else
   bad "self-heal: expected 2 import-verify attempts (heal ONCE), got $COUNTER"
 fi
-if printf '%s\n' "$OUT" | grep -qF "self-healing with a clean-venv rebuild"; then
+if printf '%s\n' "$OUT" | grep -qF "self-healing into a private venv"; then
   ok "self-heal: emits the self-heal notice"
 else
   bad "self-heal: missing the self-heal notice"
@@ -243,18 +270,98 @@ else
   bad "real-defect: expected 2 import-verify attempts, got $COUNTER"
 fi
 
-# ---- (c) real build failure: maturin exits non-zero → exit 2, no import-verify -
+# ---- (c) real COMPILE error (cargo/rustc PRESENT, roborev round-2 Finding A):
+#     maturin exits non-zero with the build toolchain available → exit 2 (FAIL
+#     class), no import-verify attempted. Distinguished from (g) below, where
+#     the SAME maturin failure happens because the toolchain is ABSENT.
 run_scenario 1 1
 if [ "$RC" -eq 2 ]; then
-  ok "build-fail: maturin develop non-zero → exit 2 (real build failure, unchanged)"
+  ok "compile-error: maturin develop non-zero WITH cargo/rustc present → exit 2 (real compile error, FAIL class)"
 else
-  bad "build-fail: expected exit 2, got $RC"
+  bad "compile-error: expected exit 2, got $RC"
   echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
 fi
 if [ "$COUNTER" -eq 0 ]; then
-  ok "build-fail: NO import-verify attempted (maturin failed before verify)"
+  ok "compile-error: NO import-verify attempted (maturin failed before verify)"
 else
-  bad "build-fail: expected 0 import-verify attempts, got $COUNTER"
+  bad "compile-error: expected 0 import-verify attempts, got $COUNTER"
+fi
+
+# ---- (g) TOOLCHAIN ABSENT (roborev round-2 Finding A): no cargo/rustc on PATH
+#     at all → exit 4 (SKIP class, same as rc 1), DISTINCT from the real
+#     compile-error exit 2 above even though `maturin develop` "fails" in both.
+#     Uses a fake HOME (so the gate's own `$HOME/.cargo/bin` auto-detect can't
+#     re-inject a real cargo) and a minimal PATH excluding $stub_tc.
+run_toolchain_absent_scenario() {
+  local venv="$tmp/venv-tcabsent-$RANDOM$RANDOM"
+  local fake_home="$tmp/fakehome-$RANDOM$RANDOM"
+  rm -rf "$venv"; mkdir -p "$fake_home"
+  OUT=$(
+    PATH="$stub:/usr/bin:/bin" \
+    HOME="$fake_home" \
+    MATURIN_RC=1 \
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
+  )
+  RC=$?
+}
+run_toolchain_absent_scenario
+if [ "$RC" -eq 4 ]; then
+  ok "toolchain-absent: no cargo/rustc on PATH → exit 4 (toolchain gap, SKIP class — distinct from exit 2)"
+else
+  bad "toolchain-absent: expected exit 4, got $RC"
+  echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
+fi
+
+# ---- (h) self-heal builds into a PRIVATE venv, never touches the SHARED venv
+#     (roborev round-2 Finding B). Pre-populate the "shared" venv dir with a
+#     sentinel file; force an import miss on attempt 1 that succeeds after a
+#     rebuild (the self-heal path); assert the written-back active-venv path
+#     is a DIFFERENT "$venv.heal.*" directory AND that the shared venv's
+#     sentinel survives (proving no `rm -rf` of shared mutable state — the
+#     race #1803 exists to eliminate, since concurrent same-checkout gates
+#     reuse the same shared venv).
+run_selfheal_privatevenv_scenario() {
+  local venv="$tmp/venv-heal-$RANDOM$RANDOM"
+  local counter="$tmp/counter-$RANDOM$RANDOM"
+  local out_file="$tmp/outfile-$RANDOM$RANDOM"
+  rm -rf "$venv"; rm -f "$counter" "$out_file"
+  mkdir -p "$venv"
+  : >"$venv/SHARED_SENTINEL"
+  OUT=$(
+    PATH="$stub:$stub_tc:$PATH" \
+    PBV_TEST_COUNTER="$counter" \
+    PBV_TEST_PASS_ON_ATTEMPT=2 \
+    MATURIN_RC=0 \
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" "$out_file" 2>&1
+  )
+  RC=$?
+  ACTIVE_VENV=""; [ -f "$out_file" ] && ACTIVE_VENV=$(cat "$out_file")
+  SHARED_SENTINEL_OK=0; [ -f "$venv/SHARED_SENTINEL" ] && SHARED_SENTINEL_OK=1
+  HEAL_VENV_EXISTS=0; [ -n "$ACTIVE_VENV" ] && [ -d "$ACTIVE_VENV" ] && HEAL_VENV_EXISTS=1
+  SHARED_VENV="$venv"
+}
+run_selfheal_privatevenv_scenario
+if [ "$RC" -eq 0 ]; then
+  ok "private-heal: self-heals to exit 0"
+else
+  bad "private-heal: expected exit 0, got $RC"
+  echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
+fi
+case "$ACTIVE_VENV" in
+  "$SHARED_VENV".heal.*)
+    ok "private-heal: the written-back active venv is a PRIVATE '\$venv.heal.*' path ($ACTIVE_VENV), not the shared venv" ;;
+  *)
+    bad "private-heal: expected an active venv matching '\$venv.heal.*', got '$ACTIVE_VENV'" ;;
+esac
+if [ "$HEAL_VENV_EXISTS" -eq 1 ]; then
+  ok "private-heal: the private heal venv directory actually exists on disk"
+else
+  bad "private-heal: the reported active venv directory does not exist"
+fi
+if [ "$SHARED_SENTINEL_OK" -eq 1 ]; then
+  ok "private-heal: the SHARED venv's sentinel survives (no rm -rf of shared mutable state — race-free)"
+else
+  bad "private-heal: the shared venv's sentinel was removed — the shared venv was destroyed (the exact race Finding B forbids)"
 fi
 
 echo "----"
