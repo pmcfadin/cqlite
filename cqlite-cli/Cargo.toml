@@ -144,6 +144,9 @@ escargot = "0.5"                # Cargo subprocess management
 cargo-llvm-cov = "0.5"          # LLVM coverage
 trybuild = "1.0"                # Compile-fail testing
 
+# NOTE: scripts/agent-gate.sh's cli-tests component parses these [[test]] blocks
+# line-wise (issue #2039) — keep `name` before a single-line `required-features`
+# per block, or a target could silently drop out of both gate passes.
 [[test]]
 name = "delta_export_tests"
 path = "tests/delta_export_tests.rs"
