@@ -2141,21 +2141,30 @@ run_scoped_tests() {
       local pbv_rc
       echo ">>> [$name] python tier: $PYTHON_LITE_TIER_CMD (venv: $venv)"
       # Build + VERIFY the extension imports, self-healing a stale/half-built
-      # editable install once (issue #1803, symmetric to run_python_bindings). rc
-      # 1 (venv/pip) or 2 (maturin build) are TOOLCHAIN gaps → SKIP (offline, NOT
-      # a code failure — clippy in this same lite run already compiled cqlite-py).
-      # rc 3 (imports fail even after a clean-venv rebuild) is a real binding
-      # DEFECT → FAIL distinctly. rc 0 → run pytest against the verified venv.
+      # editable install once (issue #1803, symmetric to run_python_bindings).
+      # rc 1 (venv create/pip install) is a genuine TOOLCHAIN *setup* gap → SKIP
+      # (offline, NOT a code failure). rc 2 (`maturin develop` itself exited
+      # non-zero) is a REAL BUILD FAILURE of our bindings, not a toolchain gap —
+      # masking it as SKIP would hide exactly the class of failure #1803 exists
+      # to surface, so it FAILs distinctly (mirrors the full gate's hard-FAIL on
+      # a maturin build error). rc 3 (imports fail even after a clean-venv
+      # rebuild) is a real binding DEFECT → FAIL distinctly. rc 0 → run pytest
+      # against the verified venv.
       RUN_SLOW_TESTS=0 bash "$GATE_SELF" --python-build-verify "$venv" "$PYTHON_LITE_MATURIN_CMD" >>"$log" 2>&1
       pbv_rc=$?
-      if [ "$pbv_rc" -eq 3 ]; then
+      if [ "$pbv_rc" -eq 2 ]; then
+        status=FAIL
+        OVERALL=FAIL
+        echo ">>> [$name] python tier FAIL (maturin develop failed — a real build/compile failure of our bindings, not a toolchain gap; see $log)"
+        PYTHON_TIER_NOTE="python-tier: FAIL (maturin develop failed — real build/compile failure)"
+      elif [ "$pbv_rc" -eq 3 ]; then
         status=FAIL
         OVERALL=FAIL
         echo ">>> [$name] python tier FAIL (cqlite._cqlite did not import after clean-venv rebuild — real binding defect, not a venv-resolution miss)"
         PYTHON_TIER_NOTE="python-tier: FAIL (cqlite._cqlite did not import after clean-venv rebuild — real binding defect)"
       elif [ "$pbv_rc" -ne 0 ]; then
-        echo ">>> [$name] python tier SKIP (venv/pip/maturin toolchain setup failed — offline or toolchain gap, NOT a code failure; see $log; run the full gate when the toolchain is available)"
-        PYTHON_TIER_NOTE="python-tier: SKIPPED (toolchain: venv/pip/maturin setup failed — offline?) — python-binding diff NOT validated by this lite run; run the full gate"
+        echo ">>> [$name] python tier SKIP (venv/pip toolchain setup failed — offline or toolchain gap, NOT a code failure; see $log; run the full gate when the toolchain is available)"
+        PYTHON_TIER_NOTE="python-tier: SKIPPED (toolchain: venv/pip setup failed — offline?) — python-binding diff NOT validated by this lite run; run the full gate"
       elif RUN_SLOW_TESTS=0 PY_PYTEST_CMD="$PYTHON_LITE_PYTEST_CMD" bash -c '
           set -euo pipefail
           . "'"$venv"'/bin/activate"
