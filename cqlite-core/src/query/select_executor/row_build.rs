@@ -72,6 +72,34 @@ pub(super) fn column_info_from_type_str(
     col_info
 }
 
+/// A decoded partition's identity + its interned `(name, value)` partition-key
+/// columns (Issue #1817). The identity is the raw key bytes PAIRED WITH a cheap
+/// schema fingerprint (`pk_schema_fingerprint`), so a hit requires BOTH to match.
+/// Names are interned once per partition.
+type DecodedPartitionKey = (Arc<[u8]>, u64, Vec<(Arc<str>, Value)>);
+
+/// Cheap fingerprint of a schema's partition-key column list — the `(name, type,
+/// position)` of every partition-key column, in order (Issue #1817, roborev).
+///
+/// The decoded partition-key columns depend ONLY on the raw key bytes and this
+/// list, so two schemas with identical partition-key columns decode identically
+/// and may safely share a cache entry, while any difference (column names, types,
+/// count, order) yields a different fingerprint → a cache MISS and re-decode.
+/// This closes the cross-schema footgun where a cache reused across two tables
+/// whose partition keys share raw bytes but differ in schema would return columns
+/// decoded for the WRONG schema.
+fn pk_schema_fingerprint(schema: &crate::schema::TableSchema) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    schema.partition_keys.len().hash(&mut hasher);
+    for col in &schema.partition_keys {
+        col.name.hash(&mut hasher);
+        col.data_type.hash(&mut hasher);
+        col.position.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Cross-row memoization of the decoded partition-key columns (Issue #1817).
 ///
 /// Partition-key column VALUES are constant within a partition, but
@@ -87,16 +115,19 @@ pub(super) fn column_info_from_type_str(
 ///
 /// If the input is NOT partition-ordered the cache simply misses and re-decodes,
 /// so correctness never depends on ordering — only the decode COUNT does.
-/// A decoded partition's key bytes paired with its interned `(name, value)`
-/// partition-key columns (Issue #1817). Names are interned once per partition.
-type DecodedPartitionKey = (Arc<[u8]>, Vec<(Arc<str>, Value)>);
-
+///
+/// A cache hit also requires the requesting schema's partition-key fingerprint to
+/// match the cached one (roborev): `PartitionKeyCache` is publicly re-exported and
+/// could be reused across tables whose partition keys share raw bytes but differ
+/// in schema — matching the fingerprint makes any such difference a MISS so the
+/// columns are never decoded for the wrong schema.
 #[derive(Default)]
 pub struct PartitionKeyCache {
-    /// Raw partition-key bytes of the last decoded partition and its decoded
-    /// `(interned name, value)` columns (unfiltered by projection — the
-    /// projection filter is applied when cloning into each row, so a cache entry
-    /// is reusable across queries with different projections).
+    /// Raw partition-key bytes + partition-key schema fingerprint of the last
+    /// decoded partition and its decoded `(interned name, value)` columns
+    /// (unfiltered by projection — the projection filter is applied when cloning
+    /// into each row, so a cache entry is reusable across queries with different
+    /// projections).
     decoded: Option<DecodedPartitionKey>,
 }
 
@@ -109,10 +140,10 @@ impl PartitionKeyCache {
         key_bytes: &Arc<[u8]>,
         schema: &crate::schema::TableSchema,
     ) -> &'a [(Arc<str>, Value)] {
-        let hit = self
-            .decoded
-            .as_ref()
-            .is_some_and(|(cached, _)| cached.as_ref() == key_bytes.as_ref());
+        let fingerprint = pk_schema_fingerprint(schema);
+        let hit = self.decoded.as_ref().is_some_and(|(cached, fp, _)| {
+            *fp == fingerprint && cached.as_ref() == key_bytes.as_ref()
+        });
         if !hit {
             // Test-only decode/name-derivation counter (Issue #1817): a cache MISS
             // is exactly one decode. A partition-grouped scan of N rows over P
@@ -145,10 +176,10 @@ impl PartitionKeyCache {
                     Vec::new()
                 }
             };
-            self.decoded = Some((Arc::clone(key_bytes), cols));
+            self.decoded = Some((Arc::clone(key_bytes), fingerprint, cols));
         }
         match &self.decoded {
-            Some((_, cols)) => cols,
+            Some((_, _, cols)) => cols,
             None => &[],
         }
     }
@@ -490,6 +521,42 @@ mod tests {
             "the single-use wrapper decodes once per call ({N}); the shared-cache \
              `build_row_from_scan_cached` is what makes a loop O(partitions)"
         );
+    }
+
+    /// Issue #1817 (roborev): `PartitionKeyCache` is publicly re-exported and could
+    /// be reused across tables whose partition keys happen to share the SAME raw key
+    /// bytes but have DIFFERENT schemas. A hit keyed only on the raw bytes would
+    /// return the columns decoded for the FIRST schema — silently wrong output for
+    /// the second. The schema-fingerprint guard makes the second call a cache MISS,
+    /// re-decoding for its own schema.
+    #[test]
+    fn pk_cache_reuse_across_schemas_does_not_leak_columns() {
+        // Both schemas have a single TEXT partition key, so the SAME raw key bytes
+        // decode to a valid TEXT value under either — but the COLUMN NAME differs
+        // (`id_a` vs `id_b`). A bytes-only cache would return `id_a` for schema B.
+        let schema_a = single_pk_schema("id_a", "text");
+        let schema_b = single_pk_schema("id_b", "text");
+        let key_bytes: Arc<[u8]> = Arc::from(b"shared-key".as_slice());
+
+        let mut cache = PartitionKeyCache::default();
+
+        // First call: schema A. Columns must be decoded for A.
+        let cols_a: Vec<(Arc<str>, Value)> = cache.columns_for(&key_bytes, &schema_a).to_vec();
+        assert_eq!(cols_a.len(), 1);
+        assert_eq!(cols_a[0].0.as_ref(), "id_a");
+        assert_eq!(cols_a[0].1, Value::Text("shared-key".to_string()));
+
+        // Second call: schema B with the SAME key bytes. Columns MUST reflect B
+        // (`id_b`), NOT the cached A columns (`id_a`).
+        let cols_b: Vec<(Arc<str>, Value)> = cache.columns_for(&key_bytes, &schema_b).to_vec();
+        assert_eq!(cols_b.len(), 1);
+        assert_eq!(
+            cols_b[0].0.as_ref(),
+            "id_b",
+            "roborev: a cache reused across schemas must NOT leak the first \
+             schema's partition-key column names — differing schema is a MISS"
+        );
+        assert_eq!(cols_b[0].1, Value::Text("shared-key".to_string()));
     }
 
     /// A suppressed marker (row tombstone / null row) yields no user-visible row.
