@@ -3166,21 +3166,29 @@ dispatch_component() {
   #      and is NOT in this list.)
   QUARANTINE="comprehensive_select_test integration_sstable_tests parquet_writer_tests table_snapshot_tests end_to_end_tests error_handling_tests integration_tests"
   #
+  # Anchor enumeration to REPO_ROOT (roborev finding, #2039): unlike the
+  # CWD-independent `cargo test --package cqlite-cli` invocations below, bare
+  # relative `cqlite-cli/tests` / `cqlite-cli/Cargo.toml` reads would silently break
+  # if this component is ever invoked from a different CWD. REPO_ROOT is baked in
+  # here as a literal absolute path (agent-gate.sh sets it before dispatch).
+  cli_tests_dir="'"$REPO_ROOT"'/cqlite-cli/tests"
+  cli_cargo_toml="'"$REPO_ROOT"'/cqlite-cli/Cargo.toml"
+
   # Fail closed (never silent-pass) if the glob finds zero files, or if either
   # derived target set comes back empty (a regression in the derivation).
-  cli_test_count=$(find cqlite-cli/tests -maxdepth 1 -name "*.rs" 2>/dev/null | wc -l | tr -d " ")
+  cli_test_count=$(find "$cli_tests_dir" -maxdepth 1 -name "*.rs" 2>/dev/null | wc -l | tr -d " ")
   if [ "${cli_test_count:-0}" -eq 0 ]; then
     echo "cli-tests: FAIL-CLOSED — no cqlite-cli/tests/*.rs files found to enumerate (#2039)" >&2
     exit 1
   fi
   # Every tests/*.rs basename (each is a cargo integration-test target).
-  all_targets=$(for f in cqlite-cli/tests/*.rs; do basename "$f" .rs; done | sort -u)
+  all_targets=$(for f in "$cli_tests_dir"/*.rs; do basename "$f" .rs; done | sort -u)
   # Targets that declare ANY required-features (name precedes required-features in
   # each [[test]] block) — excluded from the default-feature Pass 1.
-  rf_targets=$(awk -F\" "/^[[:space:]]*name[[:space:]]*=/{cur=\$2} /^[[:space:]]*required-features[[:space:]]*=/{if(cur!=\"\")print cur}" cqlite-cli/Cargo.toml | sort -u)
+  rf_targets=$(awk -F\" "/^[[:space:]]*name[[:space:]]*=/{cur=\$2} /^[[:space:]]*required-features[[:space:]]*=/{if(cur!=\"\")print cur}" "$cli_cargo_toml" | sort -u)
   # Write-support target set for Pass 2: required-features naming write-support, plus
   # the self-gated ground-truth targets. Minus quarantine (defensive; none overlap).
-  ws_targets=$( { awk -F\" "/^[[:space:]]*name[[:space:]]*=/{cur=\$2} /^[[:space:]]*required-features[[:space:]]*=/ && /write-support/{print cur}" cqlite-cli/Cargo.toml; \
+  ws_targets=$( { awk -F\" "/^[[:space:]]*name[[:space:]]*=/{cur=\$2} /^[[:space:]]*required-features[[:space:]]*=/ && /write-support/{print cur}" "$cli_cargo_toml"; \
     printf "%s\n" write_readback_content_tests graceful_shutdown_tests; } | sort -u \
     | grep -vxF -f <(printf "%s\n" $QUARANTINE) )
   # Pass 1 default set = all targets, minus required-features targets, minus quarantine.
@@ -3198,9 +3206,17 @@ dispatch_component() {
   while IFS= read -r t; do [ -n "$t" ] && def_flags+=(--test "$t"); done <<< "$default_targets"
   ws_flags=()
   while IFS= read -r t; do [ -n "$t" ] && ws_flags+=(--test "$t"); done <<< "$ws_targets"
+  # required-features targets that run in NEITHER pass (deliberately: delta-export/
+  # duckdb-tests source-built DuckDB #916; dhat-heap global allocator) — named here
+  # loudly (roborev finding, #2039) rather than only living in a source comment, the
+  # same honesty standard as the QUARANTINE notice below. Collapsed to a single
+  # space-separated line (not the newline-per-entry pipeline output) so it prints as
+  # one visible line like the other notices, rather than silently line-wrapping.
+  excluded_both=$(printf "%s\n" "$rf_targets" | grep -vxF -f <(printf "%s\n" $ws_targets) | tr "\n" " " | sed "s/ *\$//")
   echo "cli-tests: ${cli_test_count} tests/*.rs file(s); Pass 1 (default) targets: ${def_flags[*]}"
   echo "cli-tests: Pass 2 (write-support) targets: ${ws_flags[*]}"
   echo "cli-tests: QUARANTINED pre-existing-red targets (NOT run, #2039 follow-up): $QUARANTINE"
+  echo "cli-tests: EXCLUDED from BOTH passes (delta-export/duckdb-tests/dhat-heap; deliberate, #916): ${excluded_both:-(none)}"
 
   # Zero-tests guard (roborev finding on #2039): a target whose body is entirely
   # `#![cfg(feature = "write-support")]`-gated but which does NOT declare
@@ -3224,7 +3240,12 @@ dispatch_component() {
     while IFS= read -r line; do
       if [[ "$line" == *"Running tests/"* ]]; then
         target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
-      elif [[ "$line" == "test result: ok. 0 passed; 0 failed"* ]]; then
+      elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
+        # Match the FULL zero-line (roborev finding, #2039): "0 passed; 0 failed"
+        # alone also matches a target whose tests are ALL #[ignore]d (e.g.
+        # "0 passed; 0 failed; 3 ignored; ..."), which is a legitimate, unrelated
+        # shape this guard must never fault — only a truly-empty run (0 ignored
+        # too) is the write-support-#[cfg]-gated-with-no-required-features shape.
         if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
           bad="$bad $target"
         fi

@@ -90,7 +90,16 @@ else
   bad "cli-tests lacks a documented + loudly-printed QUARANTINE (#2039 honesty rule)"
 fi
 
-# 5. Fail-closed guards: zero test files AND an empty derived default/write-support
+# 5. Honesty: required-features targets excluded from BOTH passes (delta-export/
+#    duckdb-tests/dhat-heap) must also be named loudly at runtime, not left to live
+#    only in a source comment (roborev finding, #2039 "silent coverage cap" class).
+if grep -q 'excluded_both=' <<<"$CLI_BLOCK" && grep -q 'EXCLUDED from BOTH passes' <<<"$CLI_BLOCK"; then
+  ok "cli-tests loudly names required-features targets excluded from BOTH passes"
+else
+  bad "cli-tests silently drops required-features targets that run in neither pass (#2039 honesty rule)"
+fi
+
+# 6. Fail-closed guards: zero test files AND an empty derived default/write-support
 #    set must each be a visible error, never a silent pass.
 if grep -q 'FAIL-CLOSED' <<<"$CLI_BLOCK" && grep -q 'cli_test_count' <<<"$CLI_BLOCK"; then
   ok "cli-tests fails closed when no cqlite-cli/tests/*.rs files are found"
@@ -103,7 +112,7 @@ else
   bad "cli-tests lacks a fail-closed empty-target-set guard (#2039)"
 fi
 
-# 6. cli-tests now reads real Data.db (real-data CLI integration tests are in the
+# 7. cli-tests now reads real Data.db (real-data CLI integration tests are in the
 #    enumerated set), so it must join DATASET_COMPONENTS to be guarded by the
 #    dataset preflight (the #646 hazard otherwise).
 DS_LINE=$(grep -E '^DATASET_COMPONENTS=' "$GATE")
@@ -113,7 +122,18 @@ else
   bad "cli-tests missing from DATASET_COMPONENTS — dataset preflight would not guard it (#646 hazard)"
 fi
 
-# 7. Behavioral check of the fail-closed zero-file guard logic, in isolation. Uses
+# 8. CWD-independence: the enumeration must anchor to REPO_ROOT (roborev finding,
+#    #2039), not bare relative `cqlite-cli/tests` / `cqlite-cli/Cargo.toml` paths —
+#    unlike the CWD-independent `cargo test --package cqlite-cli` invocations, a
+#    relative read would silently break if this component ran from another CWD.
+if grep -q 'cli_tests_dir=' <<<"$CLI_BLOCK" && grep -q 'cli_cargo_toml=' <<<"$CLI_BLOCK" \
+   && grep -q 'REPO_ROOT' <<<"$CLI_BLOCK"; then
+  ok "cli-tests anchors its tests-dir/Cargo.toml reads to REPO_ROOT (CWD-independent)"
+else
+  bad "cli-tests reads cqlite-cli/tests or Cargo.toml via a bare relative path (#2039 CWD fragility)"
+fi
+
+# 9. Behavioral check of the fail-closed zero-file guard logic, in isolation. Uses
 #    the SAME snippet shape the gate runs; proves it fails on an empty tests/ dir
 #    and counts a populated one, quoted safely.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli-enum-test.XXXXXX")
@@ -147,7 +167,7 @@ else
   bad "guard miscounted enumerable test files (expected 2, got '${count:-<none>}')"
 fi
 
-# 8. Behavioral check of the write-support target-derivation awk against a synthetic
+# 10. Behavioral check of the write-support target-derivation awk against a synthetic
 #    Cargo.toml — proves it extracts exactly the targets whose required-features name
 #    write-support (and ignores delta-export/duckdb-tests/dhat-heap targets and the
 #    [package]/[[bin]] name lines), then UNIONs the self-gated ground-truth targets.
@@ -196,7 +216,7 @@ else
   ok "write-support derivation excludes delta-export/duckdb-tests/dhat-heap-only targets"
 fi
 
-# 9. Behavioral check of the Pass-1 default set subtraction (glob - required-features
+# 11. Behavioral check of the Pass-1 default set subtraction (glob - required-features
 #    - quarantine). Build a synthetic tests/ + reuse the synthetic Cargo.toml above,
 #    then reproduce the gate's derivation and assert the excluded targets are gone and
 #    a plain new read-only file is INCLUDED.
@@ -228,7 +248,7 @@ else
   bad "Pass-1 subtraction dropped a read-only target that should run"
 fi
 
-# 10. Behavioral check of the zero-tests guard (roborev finding on #2039): a target
+# 12. Behavioral check of the zero-tests guard (roborev finding on #2039): a target
 #     whose body is entirely `#[cfg(feature = "write-support")]`-gated but which does
 #     NOT declare required-features would compile+run 0 tests in Pass 1 and never
 #     appear in the derived Pass-2 set unless it happens to be one of the two
@@ -313,6 +333,27 @@ LOG
     ok "zero-tests guard: an all-green Pass 2 passes cleanly (no false-positive)"
   else
     bad "zero-tests guard: false-positived on an all-green Pass 2"
+  fi
+
+  # Scenario E (roborev finding, #2039): a target whose tests are ALL #[ignore]d
+  # ALSO reports "0 passed; 0 failed" — a legitimate, unrelated shape (a future
+  # manual/slow test suite) that the guard must NEVER fault, since it is not the
+  # write-support-#[cfg]-gated-with-no-required-features shape it exists to catch.
+  cat >"$tmp/zg/pass1_all_ignored.log" <<'LOG'
+     Running tests/unit_tests.rs (target/debug/deps/unit_tests-abc)
+
+running 5 tests
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/manual_slow_suite.rs (target/debug/deps/manual_slow_suite-abc)
+
+running 3 tests
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+LOG
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_all_ignored.log" write_readback_content_tests graceful_shutdown_tests; then
+    ok "zero-tests guard: an all-#[ignore]d target does NOT trip the guard (distinguished from a truly-empty run)"
+  else
+    bad "zero-tests guard: false-positived on an all-#[ignore]d target (roborev regression)"
   fi
 fi
 
