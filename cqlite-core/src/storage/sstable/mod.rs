@@ -1343,20 +1343,25 @@ impl SSTableManager {
         readers
             .iter()
             .filter(|r| {
-                // BTI candidates prune via the one `locate` façade (issue #1599 / G3),
-                // fed the hoisted C4 encoding: the `Partitions.db` trie is the
-                // authoritative presence oracle, so a `None` is a definitive absent
-                // (drop) and an `Err` (corrupt trie) is conservatively kept. This is
+                // BTI candidates prune via `might_contain_partition_encoded` (fed the
+                // hoisted C4 encoding), the SAME single emit site the raw-key BIG
+                // bloom prune below uses (issue #2163): the `Partitions.db` trie is
+                // the authoritative presence oracle, so a `false` (trie miss) is a
+                // definitive absent (drop) — recorded once as
+                // `cqlite.read.sstables_pruned{format=bti}` — and an `Err` (corrupt
+                // trie) is conservatively kept (not pruned, not recorded). This is
                 // congruent with the façade's resolution — a BTI trie result is
                 // authoritative. BIG candidates DELIBERATELY stay on the bloom-based
                 // `might_contain_partition`: a BIG `Index.db` miss is NOT a definitive
                 // absent (#1572 truncated-index invariant), so pruning a BIG reader on
                 // the façade's index probe would drop a candidate that actually holds
                 // the partition. Only the bloom filter never yields a false negative.
+                // Sharing ONE emit site (`might_contain_partition[_encoded]`) for both
+                // formats means a caller that also `locate`s the same key afterward
+                // (the actual read) never double-emits: `locate`/`locate_encoded`
+                // themselves never call `emit_sstable_pruned`.
                 match (r.is_bti(), &encoded) {
-                    (true, Some(enc)) => {
-                        matches!(r.locate_encoded(partition_key, enc), Ok(Some(_)) | Err(_))
-                    }
+                    (true, Some(enc)) => r.might_contain_partition_encoded(partition_key, enc),
                     // Non-BTI reader (or, defensively, no encoding): bloom prune.
                     _ => r.might_contain_partition(partition_key),
                 }

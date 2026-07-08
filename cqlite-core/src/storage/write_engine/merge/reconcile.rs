@@ -667,7 +667,15 @@ impl ReconcileState {
             // Step 3 already dropped the cells this deletion covers (ts <= row_del),
             // so the deletion shadows nothing within `surviving`.
             Some(match row_del {
-                Some(deletion_time) => live.with_row_deletion(deletion_time, row_del_ldt),
+                Some(deletion_time) => {
+                    // Issue #2163: this row-tombstone marker is RETAINED alongside
+                    // newer live cells (the common "retained-but-coexisting" case,
+                    // NOT the sole-output case below) — count it as emitted too, so
+                    // `tombstones_emitted` covers every marker that survives
+                    // reconciliation into the output, not only the row-absent case.
+                    purges.emitted += 1;
+                    live.with_row_deletion(deletion_time, row_del_ldt)
+                }
                 None => live,
             })
         } else if let Some(deletion_time) = row_del {

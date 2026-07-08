@@ -158,6 +158,23 @@ fn correctness_signals_end_to_end() {
         );
     }
 
+    // --- Roborev blocker #2 (#2163): retained tombstone COEXISTING with a
+    // strictly-newer live cell must ALSO count as emitted (the `build()` branch
+    // distinct from the sole-tombstone-output case above; underreported before
+    // the fix — that branch never incremented `emitted`). ---
+    {
+        let mut flows = merge::run_row_tombstone_with_newer_cell_merge();
+        mc.reset();
+        merge::compact(&mut flows);
+        let m = mc.flush_and_collect();
+        assert!(
+            m.counter_sum(catalog::COMPACTION_TOMBSTONES_EMITTED) >= 1.0,
+            "a row tombstone retained alongside a newer surviving cell must count >=1 emitted; \
+             entry: {:?}",
+            m.find(catalog::COMPACTION_TOMBSTONES_EMITTED)
+        );
+    }
+
     // --- Requirement: SSTable-pruned-by-presence-oracle counter ---
     // A BIG (nb) SSTable with a bloom filter: probing definitely-absent keys makes
     // `might_contain_partition` return false, pruning the SSTable per probe.
@@ -200,6 +217,65 @@ fn correctness_signals_end_to_end() {
             ),
             expected_pruned as f64,
             "every prune must carry cqlite.sstable.format=big for a BIG fixture"
+        );
+    }
+
+    // --- SSTable-pruned counter, BTI (`da`) branch (roborev blocker #1, #2163) ---
+    // The BTI candidate-prune (`SSTableManager::prune_candidates`) routes through
+    // the SAME public `might_contain_partition_encoded` the fix wires the counter
+    // into — exercised here directly (the "lowest public level" the BTI trie-miss
+    // prune reaches) against a real `test_da` BTI fixture, proving the
+    // `format="bti"` scenario arm the spec requires.
+    {
+        use cqlite_core::storage::sstable::bti::encode_partition_key_for_bti_trie;
+
+        let reader = fixtures::open_bti_reader();
+        mc.reset();
+        let mut expected_pruned = 0u64;
+        for i in 0..64u32 {
+            // 16-byte pseudo-UUIDs that do not exist in the fixture (whose real
+            // partition keys are UUIDs from a fixed, disjoint byte pattern).
+            let key = [
+                0xDEu8,
+                0xAD,
+                0xBE,
+                0xEF,
+                0xFE,
+                0xED,
+                0xFA,
+                0xCE,
+                (i >> 8) as u8,
+                i as u8,
+                0xAB,
+                0xCD,
+                0x00,
+                0x01,
+                0x02,
+                0x03,
+            ];
+            let encoded = encode_partition_key_for_bti_trie(&key);
+            if !reader.might_contain_partition_encoded(&key, &encoded) {
+                expected_pruned += 1;
+            }
+        }
+        let m = mc.flush_and_collect();
+        assert!(
+            expected_pruned >= 1,
+            "with 64 absent pseudo-UUID probes the BTI trie must report >=1 definitive miss"
+        );
+        assert_eq!(
+            m.counter_sum(catalog::READ_SSTABLES_PRUNED),
+            expected_pruned as f64,
+            "cqlite.read.sstables_pruned must increment once per definitively-absent BTI probe \
+             (the roborev-flagged gap: the candidate-prune path must emit for BTI too)"
+        );
+        assert_eq!(
+            m.sum_where(
+                catalog::READ_SSTABLES_PRUNED,
+                &[(catalog::attr::SSTABLE_FORMAT, "bti")],
+            ),
+            expected_pruned as f64,
+            "every BTI prune must carry cqlite.sstable.format=bti"
         );
     }
 
@@ -265,6 +341,114 @@ fn correctness_signals_end_to_end() {
             1.0,
             "the false negative must carry the offending SSTable's format"
         );
+        presence_verification::set_enabled_for_testing(false);
+        drop(rt);
+    }
+
+    // --- Roborev fold-in #3 (#2163): `get()`-level false-negative wiring ---
+    // Proves the verification switch is wired through the PUBLIC
+    // `get_with_resolution` read-path entry point end-to-end — not just callable
+    // on the `verify_presence_oracle_negative` method directly. Uses the
+    // process-global `scan_for_key_call_count()` (issue #831 pattern) as the
+    // observable proxy for "the authoritative confirmation scan ran": OFF must
+    // leave the count unchanged for an absent key; ON must increment it for the
+    // SAME key.
+    {
+        use cqlite_core::storage::sstable::reader::SSTableReader;
+        use cqlite_core::types::RowKey;
+
+        let (reader, table_id, _tmp) = fixtures::open_writer_reader_with_many_rows(50);
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+
+        // Search for an absent probe key whose token falls WITHIN this reader's
+        // authoritative Summary bound (else the C5 range short-circuit in
+        // `get_with_resolution` returns absence before ever reaching the
+        // presence-oracle / verify hook — a token-order fact independent of int
+        // order, so we search rather than assume). Verification is ON during the
+        // search. Accept ONLY a candidate whose scan-count delta is EXACTLY 1: that
+        // is the clean signature of "my verify hook ran its one confirmation scan
+        // and nothing else did" — a candidate that also trips the natural BIG
+        // resolution's OWN scan_for_key fallback (a rare bloom false-positive) would
+        // show delta 2 and is deliberately skipped, since re-probing it with
+        // verification OFF would then ALSO show a nonzero delta from that unrelated
+        // natural-fallback path, not from the switch.
+        presence_verification::set_enabled_for_testing(true);
+        let mut in_range_absent_key: Option<[u8; 4]> = None;
+        for candidate in 1_000_000i32..1_000_064 {
+            let key_bytes = candidate.to_be_bytes();
+            let before = SSTableReader::scan_for_key_call_count();
+            let res = rt
+                .block_on(reader.get_with_resolution(
+                    &table_id,
+                    &RowKey::from(key_bytes.to_vec()),
+                    false,
+                ))
+                .expect("get on candidate probe");
+            let after = SSTableReader::scan_for_key_call_count();
+            assert!(
+                res.is_none(),
+                "candidate {candidate} must be genuinely absent"
+            );
+            if after == before + 1 {
+                in_range_absent_key = Some(key_bytes);
+                break;
+            }
+        }
+        let absent_key = in_range_absent_key.expect(
+            "at least one of 64 candidates must land within the Summary bound (expected token \
+             coverage from 50 samples is ~96%) — proves the ON case reaches get_with_resolution's \
+             verify hook rather than being short-circuited by C5",
+        );
+
+        // (a) OFF: re-probing the SAME now-confirmed-in-range absent key must NOT
+        // run a confirmation scan.
+        presence_verification::set_enabled_for_testing(false);
+        let before = SSTableReader::scan_for_key_call_count();
+        let res = rt
+            .block_on(reader.get_with_resolution(
+                &table_id,
+                &RowKey::from(absent_key.to_vec()),
+                false,
+            ))
+            .expect("get with verification off");
+        let after = SSTableReader::scan_for_key_call_count();
+        assert!(res.is_none(), "the probe key must remain reported absent");
+        assert_eq!(
+            after, before,
+            "verification OFF must not run a confirmation scan through get_with_resolution"
+        );
+
+        // (b) ON: the SAME key, through the SAME public entry point, must run the
+        // confirmation scan (delta >= 1) — end-to-end wiring evidence — while the
+        // returned value is unchanged (a side-channel check only) and the
+        // false-negative counter stays 0 (a true negative).
+        presence_verification::set_enabled_for_testing(true);
+        mc.reset();
+        let before = SSTableReader::scan_for_key_call_count();
+        let res = rt
+            .block_on(reader.get_with_resolution(
+                &table_id,
+                &RowKey::from(absent_key.to_vec()),
+                false,
+            ))
+            .expect("get with verification on");
+        let after = SSTableReader::scan_for_key_call_count();
+        assert!(
+            res.is_none(),
+            "verification must not change the returned value for a true negative"
+        );
+        assert!(
+            after > before,
+            "verification ON must run a confirmation scan through get_with_resolution for the \
+             SAME key that showed no scan when OFF"
+        );
+        let m = mc.flush_and_collect();
+        assert_eq!(
+            m.counter_sum(catalog::READ_BLOOM_FALSE_NEGATIVES),
+            0.0,
+            "a true negative reached via get_with_resolution must not emit false_negatives"
+        );
+
         presence_verification::set_enabled_for_testing(false);
         drop(rt);
     }
@@ -348,6 +532,7 @@ mod merge {
                 col("id", "int", false),
                 col("seq", "int", false),
                 col("val", "text", true),
+                col("extra", "text", true),
             ],
             comments: HashMap::new(),
             dropped_columns: HashMap::new(),
@@ -421,7 +606,49 @@ mod merge {
         Flows { engine, _tmp: tmp }
     }
 
-    /// Drive maintenance compaction until a merge completes (or no work remains).
+    /// Roborev blocker #2 (#2163): a row tombstone RETAINED alongside a STRICTLY
+    /// NEWER live cell (the common "coexisting" case — `build()`'s
+    /// `!surviving.is_empty()` branch — distinct from `run_row_tombstone_merge`'s
+    /// sole-tombstone-output branch). Explicit `USING TIMESTAMP` pins the ordering
+    /// deterministically (no wall-clock race): INSERT `val` at t=1000, whole-row
+    /// DELETE at t=2000 (shadows `val`), then INSERT `extra` at t=3000 (survives the
+    /// deletion) — the row tombstone must still be carried into the merged output
+    /// via `with_row_deletion` alongside the surviving `extra` cell.
+    pub fn run_row_tombstone_with_newer_cell_merge() -> Flows {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let mut engine = open(tmp.path(), clustered_schema());
+        engine
+            .execute(
+                "INSERT INTO obs2163.events (id, seq, val) VALUES (2, 1, 'old') \
+                 USING TIMESTAMP 1000",
+            )
+            .expect("w1");
+        flush(&mut engine);
+        engine
+            .execute("DELETE FROM obs2163.events USING TIMESTAMP 2000 WHERE id = 2 AND seq = 1")
+            .expect("del");
+        flush(&mut engine);
+        engine
+            .execute(
+                "INSERT INTO obs2163.events (id, seq, extra) VALUES (2, 1, 'new') \
+                 USING TIMESTAMP 3000",
+            )
+            .expect("w2");
+        flush(&mut engine);
+        Flows { engine, _tmp: tmp }
+    }
+
+    /// Drive maintenance compaction to full convergence (every eligible merge
+    /// round completes, not just the first). A bucketed STCS policy may need MORE
+    /// THAN ONE `maintenance_step` round to combine 3+ generations down to one
+    /// SSTable (e.g. round 1 merges gens 1+2, round 2 merges that output with
+    /// gen 3) — breaking after the FIRST completed merge (the pre-#2163-fix-round
+    /// shape) would silently leave later generations unmerged. Only stop once a
+    /// round does NO work at all (nothing completed AND nothing pending): that is
+    /// the sole idle signal `maintenance_step` gives (`pending_compaction` reflects
+    /// an in-progress merge continuing past its budget, not "more candidates
+    /// exist" — see `maintenance.rs`), so an idle round with tiny test data means
+    /// every candidate has been folded in.
     pub fn compact(flows: &mut Flows) {
         // maintenance_step uses an internal block_on; call it OUTSIDE any runtime.
         let budget = std::time::Duration::from_secs(30);
@@ -430,10 +657,7 @@ mod merge {
                 .engine
                 .maintenance_step(budget)
                 .expect("maintenance_step");
-            if !report.completed_merges.is_empty() {
-                break;
-            }
-            if !report.pending_compaction {
+            if report.completed_merges.is_empty() && !report.pending_compaction {
                 break;
             }
         }
@@ -484,6 +708,36 @@ mod fixtures {
         let platform = Arc::new(rt.block_on(Platform::new(&config)).expect("platform"));
         rt.block_on(SSTableReader::open(&data_file, &config, platform))
             .expect("open reader")
+    }
+
+    /// Open a real BTI (`da`) fixture SSTable reader (has a `Partitions.db` trie —
+    /// the authoritative BTI presence oracle). Corpus: `test_da/simple_table-*`.
+    pub fn open_bti_reader() -> SSTableReader {
+        let parent = datasets_root().join("sstables").join("test_da");
+        let table_dir = std::fs::read_dir(&parent)
+            .unwrap_or_else(|e| panic!("read {}: {e} — fetch datasets first", parent.display()))
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with("simple_table-"))
+            .map(|e| e.path())
+            .expect("test_da/simple_table BTI fixture present");
+        let data_file = std::fs::read_dir(&table_dir)
+            .expect("read table dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with("-Data.db"))
+            .expect("Data.db present");
+
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let config = Config::default();
+        let platform = Arc::new(rt.block_on(Platform::new(&config)).expect("platform"));
+        let reader = rt
+            .block_on(SSTableReader::open(&data_file, &config, platform))
+            .expect("open BTI reader");
+        assert!(
+            reader.is_bti(),
+            "test_da/simple_table-* must open as a BTI reader (Partitions.db present)"
+        );
+        reader
     }
 
     fn writer_schema() -> TableSchema {
@@ -575,5 +829,62 @@ mod fixtures {
         );
         drop(rt);
         (reader, table_id, present_key, tmp)
+    }
+
+    /// Write `n` rows (ids `0..n`), flush, and open a schema-attached reader over
+    /// the produced Data.db. Used by the `get()`-level false-negative wiring test
+    /// (roborev fold-in #3, #2163), which needs an absent probe key whose token
+    /// falls WITHIN the reader's authoritative `[first_key, last_key]` Summary
+    /// bound (else the C5 range short-circuit in `get_with_resolution` returns
+    /// absence before ever reaching the presence-oracle / verify hook). `n` rows
+    /// spread the observed token span wide enough that a handful of far-outside-
+    /// range candidate ids (searched by the caller) are overwhelmingly likely to
+    /// land in-range by token, even though token order is unrelated to int order.
+    pub fn open_writer_reader_with_many_rows(
+        n: i32,
+    ) -> (SSTableReader, TableId, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let schema = writer_schema();
+        let cfg = WriteEngineConfig::new(
+            tmp.path().join("data"),
+            tmp.path().join("wal"),
+            schema.clone(),
+        );
+        let mut engine = WriteEngine::new(cfg).expect("engine");
+        for id in 0..n {
+            engine
+                .execute(&format!(
+                    "INSERT INTO obsfn.rows (id, name) VALUES ({id}, 'row{id}')"
+                ))
+                .expect("write");
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let info = rt
+            .block_on(engine.flush())
+            .expect("flush")
+            .expect("sstable");
+        let data_file = info.data_path.clone();
+
+        let config = Config::default();
+        let platform = Arc::new(rt.block_on(Platform::new(&config)).expect("platform"));
+        let mut reader = rt
+            .block_on(SSTableReader::open(&data_file, &config, platform.clone()))
+            .expect("open reader");
+
+        let registry = rt
+            .block_on(SchemaRegistry::new(
+                SchemaRegistryConfig::default(),
+                platform.clone(),
+                config.clone(),
+            ))
+            .expect("build registry");
+        rt.block_on(registry.register_schema(schema, SchemaSource::Manual))
+            .expect("register schema");
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        rt.block_on(reader.attach_schema_registry(registry));
+        drop(rt);
+
+        (reader, TableId::from("rows"), tmp)
     }
 }
