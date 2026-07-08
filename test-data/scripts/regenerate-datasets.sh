@@ -503,7 +503,7 @@ try:
             "INSERT INTO udt_table (id, name, address, large_field) VALUES (%s,%s,%s,%s)",
             (uuid.uuid4(), f"person_{random.randint(1,100)}", addr, "x" * 200))
 
-    # ttl_table (schema has default_time_to_live=86400)
+    # ttl_table (TTL removed — issue #1935; regenerated WITHOUT default_time_to_live)
     for _ in range(15):
         session.execute(
             "INSERT INTO ttl_table (id, data, expiring_value) VALUES (%s,%s,%s)",
@@ -593,7 +593,7 @@ try:
              [random.randint(1, 100) for _ in range(random.randint(1, 4))],
              {f"k{i}": f"v{i}" for i in range(random.randint(1, 3))}))
 
-    # ttl_table (schema has default_time_to_live=86400)
+    # ttl_table (TTL removed — issue #1935; regenerated WITHOUT default_time_to_live)
     for _ in range(15):
         session.execute(
             "INSERT INTO ttl_table (id, data, expiring_value) VALUES (%s,%s,%s)",

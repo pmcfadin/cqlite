@@ -205,9 +205,22 @@ validated against Cassandra 5 sstabledump — see "BTI write-path parity" below.
 A da-format TTL WRITETIME parity test remains future work.)
 
 Readable TTL fixtures tested above:
-- `test_basic.ttl_test_table` (nb, default_time_to_live=86400) — WRITETIME+TTL both validated
-- `test_timeseries.app_metrics` (nb, default_time_to_live=2592000) — not separately tested (WRITETIME parity covered via sensor_data test above)
-- `test_timeseries.log_entries` (nb, default_time_to_live=604800) — not separately tested
+- `test_basic.ttl_test_table` (nb, default_time_to_live=86400) — WRITETIME+TTL both validated.
+  **KEPT WITH TTL** (issue #1935, #1896 cluster A owner decision) as the dedicated
+  #1853 seam: its pinned-now override test proves read-time TTL shadowing, and its
+  wall-clock test proves an all-expired fixture returns 0 LIVE rows.
+- `test_timeseries.app_metrics` (was default_time_to_live=2592000) — WRITETIME parity covered via sensor_data test above
+- `test_timeseries.log_entries` (was default_time_to_live=604800) — not separately tested
+
+> Issue #1935 (#1896 cluster A): `default_time_to_live` was REMOVED from the schemas
+> of `test_timeseries.app_metrics`, `log_entries`, `tick_data`, `test_da.ttl_table`
+> and `test_oa.ttl_table` — the TTLs time-bombed those fixtures (every row read as
+> expired → 0 LIVE rows, breaking `> 0` row-count assertions once the TTL elapsed).
+> They are regenerated WITHOUT TTL by the CI corpus-regeneration pipeline (dataset
+> pin bump pending). `test_basic.ttl_test_table` intentionally keeps its TTL for the
+> #1853 seam. Until the binaries are regenerated the shipped fixtures still read as
+> expired; the CLI/parity harnesses derive the expected LIVE count from the golden,
+> so they pass at 0 now and will track the regenerated physical count automatically.
 
 No new SSTable fixtures were generated for this issue (Docker/Cassandra required for new data).
 

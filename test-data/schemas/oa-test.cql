@@ -51,13 +51,15 @@ CREATE TABLE IF NOT EXISTS udt_table (
     large_field TEXT
 ) WITH compression = {'class': 'LZ4Compressor'};
 
--- 4. TTL rows (mirrors test_basic.ttl_test_table)
+-- 4. Formerly-TTL rows (issue #1935, #1896 cluster A owner decision:
+--    default_time_to_live removed — it time-bombed the fixture so every row read
+--    as expired. Table name kept for corpus stability; regenerated WITHOUT TTL.
+--    test_basic.ttl_test_table intentionally KEEPS its TTL for the #1853 seam.)
 CREATE TABLE IF NOT EXISTS ttl_table (
     id UUID PRIMARY KEY,
     data TEXT,
     expiring_value INT
-) WITH compression = {'class': 'LZ4Compressor'}
-  AND default_time_to_live = 86400;
+) WITH compression = {'class': 'LZ4Compressor'};
 
 -- 5. Static columns (mirrors test_basic.static_columns_table)
 CREATE TABLE IF NOT EXISTS static_table (

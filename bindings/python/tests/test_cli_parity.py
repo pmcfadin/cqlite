@@ -468,6 +468,12 @@ class TestCLIParityBasic:
             ("multi_partition_table", 10),
             ("uncompressed_table", 10),
             ("compression_test_table", 10),
+            # NOTE (issue #1935): the second tuple element is the query LIMIT, not
+            # an expected row count. `ttl_test_table` KEEPS its TTL (the #1853
+            # seam) so every fixture row is wall-clock-expired and BOTH the Python
+            # binding and the CLI return 0 LIVE rows — this test asserts Python==CLI
+            # equality, which holds at 0 (and will still hold post-regen). It never
+            # hardcodes a row count.
             ("ttl_test_table", 10),
             ("static_columns_table", 10),  # Issue resolved
         ],
@@ -546,6 +552,13 @@ class TestCLIParityTimeseries:
             ("sensor_data", 10),
             ("event_store", 10),
             ("user_sessions", 10),
+            # NOTE (issue #1935): the second tuple element is the query LIMIT, not
+            # an expected row count. `app_metrics`, `log_entries` and `tick_data`
+            # had `default_time_to_live` REMOVED from the schema; until the corpus
+            # binaries are regenerated WITHOUT TTL (CI-owned), the shipped fixtures
+            # are wall-clock-expired so BOTH Python and CLI return 0 LIVE rows. This
+            # test asserts Python==CLI equality, which holds at 0 today and will
+            # still hold once the regenerated fixtures return their physical rows.
             ("app_metrics", 10),
             ("log_entries", 10),
             ("stock_prices", 10),

@@ -1130,10 +1130,15 @@ async fn writetime_parity_test_wide_rows_product_catalog() {
 //   "BTI (da) read support not yet implemented"
 //
 // Therefore no da-format TTL parity test is included.  The readable TTL
-// fixtures used above are:
-//   - test_basic.ttl_test_table  (nb, TTL=86400, expires_at checked)
-//   - test_timeseries.app_metrics (nb, TTL=2592000 — WRITETIME-only tested above)
-//   - test_timeseries.log_entries (nb, TTL=604800 — WRITETIME-only tested above)
+// fixture used above is:
+//   - test_basic.ttl_test_table  (nb, TTL=86400, expires_at checked) — this table
+//     intentionally KEEPS its default_time_to_live as the dedicated #1853 seam.
+//
+// NOTE (issue #1935 / #1896 cluster A): app_metrics/log_entries/tick_data and the
+// da/oa ttl_table fixtures had their default_time_to_live REMOVED (the TTLs
+// time-bombed those fixtures); they are regenerated WITHOUT TTL by the CI corpus
+// pipeline. Only test_basic.ttl_test_table remains a TTL fixture — its pinned-now
+// override seam above makes its coverage time-proof.
 //
 // See test-data/validation-matrix.md §"WRITETIME/TTL parity (issue #694)" for
 // the documented gap.
