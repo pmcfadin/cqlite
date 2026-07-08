@@ -210,6 +210,32 @@ fn correctness_signals_end_to_end() {
         );
     }
 
+    // --- Roborev r7 (#2163): a RETAINED CELL tombstone (a column-scoped
+    // `DELETE val` with a recent deletion time — not gc-grace-expired, so it
+    // is genuinely non-purgeable) must ALSO count as emitted, matching the
+    // row/range/partition tombstone contract. Previously `tombstones_emitted`
+    // only counted row/range/partition markers, undercounting every merge
+    // that retains a cell tombstone — exactly the marker
+    // tombstone-resurrection debugging needs to see. `tombstones_purged` must
+    // stay untouched (the cell was retained, not purged). ---
+    {
+        let mut flows = merge::run_cell_tombstone_merge();
+        mc.reset();
+        merge::compact(&mut flows);
+        let m = mc.flush_and_collect();
+        assert!(
+            m.counter_sum(catalog::COMPACTION_TOMBSTONES_EMITTED) >= 1.0,
+            "a non-purgeable (recent) cell tombstone retained through compaction must count \
+             >=1 emitted; entry: {:?}",
+            m.find(catalog::COMPACTION_TOMBSTONES_EMITTED)
+        );
+        assert_eq!(
+            m.counter_sum(catalog::COMPACTION_TOMBSTONES_PURGED),
+            0.0,
+            "a RETAINED (non-purgeable) cell tombstone must not also count as a genuine purge"
+        );
+    }
+
     // --- Requirement: SSTable-pruned-by-presence-oracle counter ---
     // A BIG (nb) SSTable with a bloom filter: probing definitely-absent keys makes
     // `might_contain_partition` return false, pruning the SSTable per probe.
@@ -765,6 +791,29 @@ mod merge {
                  USING TIMESTAMP 3000",
             )
             .expect("w2");
+        flush(&mut engine);
+        Flows { engine, _tmp: tmp }
+    }
+
+    /// Roborev r7 (#2163): a NON-PURGEABLE CELL tombstone — a column-scoped
+    /// `DELETE val` (not a whole-row delete) with a RECENT deletion time, well
+    /// within the default `gc_grace_seconds` window — must be RETAINED through
+    /// compaction and counted as `tombstones_emitted`, the same as a retained
+    /// row/range/partition marker. `extra` stays live (a surviving sibling data
+    /// cell) so the row is genuinely emitted with the `val` cell tombstone
+    /// intact, not phantom-suppressed.
+    pub fn run_cell_tombstone_merge() -> Flows {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let mut engine = open(tmp.path(), clustered_schema());
+        engine
+            .execute(
+                "INSERT INTO obs2163.events (id, seq, val, extra) VALUES (4, 1, 'keep', 'stays')",
+            )
+            .expect("w");
+        flush(&mut engine);
+        engine
+            .execute("DELETE val FROM obs2163.events WHERE id = 4 AND seq = 1")
+            .expect("del col");
         flush(&mut engine);
         Flows { engine, _tmp: tmp }
     }

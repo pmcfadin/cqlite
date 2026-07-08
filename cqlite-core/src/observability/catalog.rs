@@ -364,9 +364,12 @@ pub const COMPACTION_TOMBSTONES_SUPPRESSED: &str = "cqlite.compaction.tombstones
 /// `cqlite.compaction.tombstones_emitted` — counter `{tombstone}` (issue #2163).
 ///
 /// Tombstone markers RETAINED into the merge output (a row / range / partition
-/// tombstone carried forward because it is not purgeable), emitted once per merge.
-/// Distinct from [`COMPACTION_TOMBSTONES_PURGED`] and
-/// [`COMPACTION_TOMBSTONES_SUPPRESSED`]. No high-cardinality attributes.
+/// / cell tombstone carried forward because it is not purgeable — a cell
+/// tombstone counts here too, roborev r7: it is exactly the marker
+/// tombstone-resurrection debugging needs to see, not only the coarser
+/// row/range/partition markers), emitted once per merge. Distinct from
+/// [`COMPACTION_TOMBSTONES_PURGED`] and [`COMPACTION_TOMBSTONES_SUPPRESSED`].
+/// No high-cardinality attributes.
 pub const COMPACTION_TOMBSTONES_EMITTED: &str = "cqlite.compaction.tombstones_emitted";
 
 /// `cqlite.query.degraded_path.total` — counter `1` (issue #2163).

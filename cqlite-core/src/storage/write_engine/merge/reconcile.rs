@@ -658,6 +658,25 @@ impl ReconcileState {
         let purged_to_empty = had_data_before && !has_data_after;
         drop(ck_names);
 
+        // Issue #2163 (roborev r7): a cell tombstone (simple or complex-element,
+        // the SAME predicate `purge_gc_grace`'s retain closure uses) that
+        // SURVIVES into `surviving` — whether because gc-grace/overlap kept it,
+        // or because purging was inactive for this merge entirely (no
+        // `gc_before_secs`, e.g. an unbounded partial compaction) — is a marker
+        // RETAINED into the output, matching the row/range/partition tombstone
+        // "emitted" contract established above. Counted here from the FINAL
+        // surviving set (not inside `purge_gc_grace`'s conditional retain) so a
+        // merge with purging disabled still counts its retained cell
+        // tombstones; a cell tombstone always satisfies `is_data_cell` (it is
+        // never a clustering-key pseudo-cell), so its presence here already
+        // implies `purged_to_empty == false` and the row below is genuinely
+        // emitted with it intact.
+        let retained_cell_tombstones = surviving
+            .iter()
+            .filter(|cell| KWayMerger::is_cell_tombstone(cell) || cell.is_deleted)
+            .count() as u64;
+        purges.emitted += retained_cell_tombstones;
+
         // Attach the carried deletion metadata to whichever entry is emitted so it
         // is not dropped by reconciliation (#886 plumbing preservation).
         let has_carried_metadata = !complex_deletions.is_empty() || range_deletion.is_some();
