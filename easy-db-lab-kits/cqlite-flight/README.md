@@ -70,16 +70,37 @@ node:
 kubectl logs -l app.kubernetes.io/name=cqlite-flight -c detect-multidisk --prefix
 ```
 
-A single-disk node prints a one-line `OK` and no warning, so the default behaviour
-is unchanged.
+A single-disk node prints a one-line `OK` (exactly one populated candidate) and
+no warning, so the default behaviour is unchanged.
+
+**Zero candidates is never a silent OK.** The detection volume uses `hostPath`
+`type: DirectoryOrCreate` — deliberately, so a missing `--data-root` can never
+block the rollout (the detector is non-fatal by contract). The benign side
+effect is that a **mistyped `--data-root` is auto-created as an empty directory
+on the node** and scanned as empty. The init script therefore treats zero
+candidates as a *cannot-verify* condition and warns loudly, distinguishing two
+cases:
+
+- root has **no entries at all** → "data root ABSENT or EMPTY" — likely a wrong
+  `--data-root`, or the hostPath was auto-created; the layout check is
+  meaningless until it's fixed.
+- root is **non-empty but no `<root>/*/cassandra/data` dir is populated** → the
+  node's layout doesn't match the convention the detector scans; point
+  `--data-root` at the directory holding the per-disk mounts.
+
+Both warn to the init container's log and still exit 0. In short: a wrong
+`--data-root` shows up as a loud cannot-verify warning (plus a leftover empty
+dir on the node), never as a rollout failure and never as a false single-disk
+`OK`.
 
 **Remedies** (the server side is out of scope for this kit — #2114 covers only
 making the gap visible):
 
 - Keep the queried tables on the served disk.
 - Run one `cqlite-flight` DaemonSet per disk on distinct `--flight-port`s.
-- Set `--data-root` equal to `--data-dir` to silence the check when you have
-  deliberately accepted the single-disk scope.
+- There is deliberately **no way to silence the check entirely** — on a genuine
+  single-disk node it is already a quiet one-line `OK`, and every other state
+  is exactly the misconfiguration the detector exists to surface.
 
 Genuinely spanning multiple dirs from one server would require a `--data-dir`
 multi-value change to `cqlite-flight` itself — a server feature, out of this kit's

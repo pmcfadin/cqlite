@@ -84,8 +84,41 @@ spec:
                 found="$found ${d#$ROOT}"
                 count=$((count + 1))
               done
-              if [ "$count" -le 1 ]; then
-                echo "cqlite-flight multi-disk check (#2114): OK — ${count} candidate Cassandra data dir under ${ROOT_HOST}; serving ${SERVED}."
+              if [ "$count" -eq 0 ]; then
+                # Zero candidates is NEVER a clean OK (roborev on #2114): the
+                # root volume is DirectoryOrCreate, so a missing/mistyped
+                # --data-root is silently auto-created EMPTY on the node and
+                # must not masquerade as a verified single-disk layout.
+                # Distinguish WHY the scan came up empty:
+                if [ -z "$(ls -A "$ROOT" 2>/dev/null)" ]; then
+                  {
+                    echo "#################################################################"
+                    echo "## WARNING (issue #2114): data root ABSENT or EMPTY            ##"
+                    echo "#################################################################"
+                    echo "--data-root (${ROOT_HOST}) contains no entries at all — likely a"
+                    echo "wrong --data-root, or the hostPath was auto-created empty on this"
+                    echo "node (the mount is DirectoryOrCreate so rollout never blocks)."
+                    echo "The detector CANNOT verify this node's disk layout — a multi-disk"
+                    echo "configuration would NOT be caught. Fix --data-root so the check"
+                    echo "is meaningful. Serving ${SERVED} regardless."
+                  } >&2
+                else
+                  {
+                    echo "#################################################################"
+                    echo "## WARNING (issue #2114): no candidate data dirs under root    ##"
+                    echo "#################################################################"
+                    echo "--data-root (${ROOT_HOST}) is non-empty but holds no populated"
+                    echo "<root>/*/cassandra/data dirs. The node's layout does not match"
+                    echo "the convention this detector scans, so it CANNOT verify whether"
+                    echo "data spans multiple disks. Point --data-root at the directory"
+                    echo "holding the per-disk mounts. Serving ${SERVED} regardless."
+                  } >&2
+                fi
+                # Non-fatal: cannot-verify, never block the DaemonSet rollout.
+                exit 0
+              fi
+              if [ "$count" -eq 1 ]; then
+                echo "cqlite-flight multi-disk check (#2114): OK — exactly 1 populated Cassandra data dir under ${ROOT_HOST} (verified single-disk); serving ${SERVED}."
                 exit 0
               fi
               {
@@ -103,9 +136,9 @@ spec:
                   fi
                 done
                 echo "Reads touching data on an unserved disk return PARTIAL results with NO"
-                echo "error. Remedy: keep the queried tables on the served disk, run one"
-                echo "cqlite-flight per disk on distinct ports, or set --data-root to the served"
-                echo "dir to silence this check. See easy-db-lab-kits/cqlite-flight/README.md."
+                echo "error. Remedy: keep the queried tables on the served disk, or run one"
+                echo "cqlite-flight per disk on distinct ports."
+                echo "See easy-db-lab-kits/cqlite-flight/README.md (issue #2114)."
               } >&2
               # Non-fatal: warn only, never block the DaemonSet rollout.
               exit 0
@@ -160,7 +193,11 @@ spec:
             type: Directory
         # Read-only detection mount for the #2114 multi-disk check init container.
         # DirectoryOrCreate (not Directory) so a missing --data-root never fails
-        # pod startup — an empty dir simply yields "0 candidates" and no warning.
+        # pod startup (the detector is non-fatal BY CONTRACT). Benign side effect
+        # (roborev): a mistyped --data-root is auto-created as an empty dir on
+        # the node; the init script detects that (root with zero entries) and
+        # prints a LOUD "ABSENT or EMPTY — cannot verify" warning instead of a
+        # false single-disk OK.
         - name: cassandra-data-root
           hostPath:
             path: "__CASSANDRA_DATA_ROOT__"
