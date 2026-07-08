@@ -31,22 +31,23 @@ children, not a guess.
 `trino-cqlite`'s init container resolves the published
 `in.mcfad:cqlite-trino:<version>` artifact from Maven Central at pod-start time
 (no baked image — see `trino-cqlite/README.md` "Approach: init-container, not a
-baked image"). **As of authoring this plan, publishing is blocked** on repo
-secrets (`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, `SIGNING_KEY`,
-`SIGNING_PASSWORD` — see `.github/workflows/trino-publish.yml`), and the
-`cqlite.read-mode` feature (#2105) this plan exercises needs a **new** release
-version (e.g. `0.13.1`) published *after* epic #2103 merges — the current
-released version predates it.
+baked image").
 
-Until that version is on Maven Central, `easy-db-lab cqlite start`'s init
-container (`cqlite-plugin-fetch`) fails with a Gradle dependency-resolution error
-(`Could not resolve in.mcfad:cqlite-trino:<version>` / `Could not GET
-'https://repo1.maven.org/...'`). Confirm before you start:
+**[UPDATED for round 3]** This plan now pins **`0.13.3`** — it adds predicate
+pushdown (#2166: `applyFilter` translates the TupleDomain summary into a
+non-empty `filterJson` on the ticket) on top of `applyLimit` (0.13.2) and
+`cqlite.read-mode` (0.13.1). `0.13.3` is auto-released on Maven Central. Confirm
+it is resolvable before you start:
 
 ```bash
-curl -sf "https://repo1.maven.org/maven2/in/mcfad/cqlite-trino/<version>/cqlite-trino-<version>.pom" \
+curl -sf "https://repo1.maven.org/maven2/in/mcfad/cqlite-trino/0.13.3/cqlite-trino-0.13.3.pom" \
   -o /dev/null && echo "published" || echo "NOT PUBLISHED — stop here"
 ```
+
+If it's not resolvable, `easy-db-lab cqlite start`'s init container
+(`cqlite-plugin-fetch`) fails with a Gradle dependency-resolution error
+(`Could not resolve in.mcfad:cqlite-trino:0.13.3`) and this plan cannot proceed
+past Phase 1, step 5.
 
 If it's not published, this plan cannot proceed past Phase 1, step 5 (installing
 the `trino-cqlite` overlay).
@@ -83,7 +84,7 @@ field inside `kit.yaml` — whenever the kit declares no `kit-ref`/extension arg
 comment), so:
 
 ```bash
-easy-db-lab kit install trino-cqlite --connector-version 0.13.1 --flight-port 8815 \
+easy-db-lab kit install trino-cqlite --connector-version 0.13.3 --flight-port 8815 \
   --sidecar-uri "http://$(easy-db-lab ip db0 --private):9043" --trino-image-tag 481
 # ^ dispatch verb "trino-cqlite" (source directory name) ...
 easy-db-lab cqlite start
@@ -214,9 +215,14 @@ Coordinator and worker pods must both be Running/Ready.
 
 ### 4. Register the kit source and install cqlite-flight
 
+**[UPDATED for round 3]** Pin the moving **`dev`** image channel
+(`ghcr.io/pmcfadin/cqlite-flight:dev`) — it carries the streaming `do_get`
+producer (#1476 / PR #2176), observability (#2128), and the LIMIT early-stop.
+A tagged release image with these does not exist yet.
+
 ```bash
 $EDB kit source add cqlite /path/to/cqlite/easy-db-lab-kits
-$EDB kit install cqlite-flight --tag v0.13.1 --flight-port 8815
+$EDB kit install cqlite-flight --tag dev --flight-port 8815
 $EDB cqlite-flight start
 ```
 
@@ -230,6 +236,26 @@ Verify one pod per db node:
 
 ```bash
 kubectl get pods -l easydblab.com/kit=cqlite-flight -o wide
+```
+
+**[UPDATED for round 3 — MANDATORY POD RESTART]** `imagePullPolicy: Always`
+only pulls at pod *creation*. If the `cqlite-flight` DaemonSet pods already
+existed (e.g. from a prior install on this cluster) they keep running the old
+`:dev` layer — the round-2 24-min `LIMIT 5` was almost certainly a stale
+pre-streaming image. Force a fresh pull of the current `:dev` before testing:
+
+```bash
+kubectl rollout restart daemonset -l easydblab.com/kit=cqlite-flight
+kubectl rollout status  daemonset -l easydblab.com/kit=cqlite-flight --timeout=120s
+```
+
+Confirm each pod is running the intended image digest and logged
+`observability enabled` at startup:
+
+```bash
+kubectl get pods -l easydblab.com/kit=cqlite-flight \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+kubectl logs -l easydblab.com/kit=cqlite-flight --all-containers --prefix | grep -i observability
 ```
 
 ### 5. Install the trino-cqlite overlay (see [0.2](#02-kit-install-path-kit-source-add-not---from) for the naming subtlety)
@@ -289,7 +315,7 @@ see those two entries below, both now fixed:
 
 ```bash
 DB0_IP=$($EDB ip db0 --private)
-$EDB kit install trino-cqlite --connector-version 0.13.1 --flight-port 8815 \
+$EDB kit install trino-cqlite --connector-version 0.13.3 --flight-port 8815 \
   --sidecar-uri "http://${DB0_IP}:9043" --trino-image-tag 481
 $EDB cqlite start
 ```
@@ -419,6 +445,32 @@ $EDB trino sql "SELECT count(*) FROM cqlite.${KEYSPACE}.${TABLE}"
 Compare the Cassandra-side CQL count against the `cqlite.${KEYSPACE}.${TABLE}`
 count Trino returns. They must match exactly; a mismatch here is Phase 5's
 "wrong row counts" class before you've even started the concurrent runs.
+
+**[UPDATED for round 3 — interactive-latency regression checks].** The round-2
+run (flight pre-streaming image + connector 0.13.2) found every read shape did a
+full eager merge before emitting row 1: `LIMIT 5` = 24 min, `count(*)` = 358s+,
+point read = full scan with no predicate pushdown (#2157). Round 3 ships the
+streaming `do_get` producer (#1476/#2176, flight `:dev`) and predicate pushdown
+(#2166, connector 0.13.3). Before the two loadtest runs, capture these three
+datapoints against the round-2 baselines:
+
+```bash
+# 1) LIMIT 5 — was 24 min; expect low SECONDS (streaming + limit early-stop)
+time $EDB trino sql "SELECT * FROM cqlite.${KEYSPACE}.${TABLE} LIMIT 5"
+
+# 2) point read — EXPLAIN must show a NON-EMPTY filterJson on the table handle
+#    (round 2: filterJson=Optional.empty → full scan + Trino ScanFilter)
+$EDB trino sql "EXPLAIN SELECT * FROM cqlite.${KEYSPACE}.${TABLE} WHERE key = '<a-real-key>'"
+
+# 3) count(*) — still a full scan by nature, but do_get duration metrics must
+#    MOVE during the query (streaming) instead of going dark until completion
+time $EDB trino sql "SELECT count(*) FROM cqlite.${KEYSPACE}.${TABLE}"
+```
+
+If `LIMIT 5` still takes minutes, confirm the flight pods actually restarted
+onto the current `:dev` digest (Step 4 mandatory pod restart) before filing —
+the round-2 hang was traced to a stale image. If it's fast, that regression is
+cleared; proceed to the loadtest runs.
 
 **[UPDATED after the first live run]** The first run of this plan hit two
 `trino-loadtest` driver bugs before any query was ever issued, both now fixed
