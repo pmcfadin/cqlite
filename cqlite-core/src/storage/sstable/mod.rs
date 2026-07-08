@@ -91,6 +91,7 @@ use tokio::sync::{Mutex, RwLock};
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 use crate::types::CellWriteMetadata;
+#[cfg(not(feature = "tombstones"))] // #1917 concat fallbacks; tombstones uses k-way merge
 use crate::util::cassandra_murmur3::cmp_partition_keys_by_token;
 use crate::{types::TableId, Config, Result, RowKey, ScanRow};
 
