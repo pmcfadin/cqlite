@@ -7,6 +7,11 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -118,5 +123,54 @@ class SnapshotManagerTest {
     @Test
     void snapshotNameSanitizesUnsafeChars() {
         assertEquals("cqlite-q_1_x", SnapshotManager.snapshotName("q/1 x"));
+    }
+
+    /**
+     * Concurrent callers for the same (query, keyspace, table) must PUT exactly once, even
+     * while the (slow) create is in flight. The per-key-future memoization (issue #2113 / N5)
+     * moves the network call off the ConcurrentHashMap bin lock but keeps exactly-once — this
+     * test gates the create on a latch so many threads pile up mid-create, then asserts one
+     * PUT and one shared snapshot name.
+     */
+    @Test
+    void concurrentCallersPutExactlyOnce() throws Exception {
+        AtomicInteger creates = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        SnapshotApi blocking = new SnapshotApi() {
+            @Override
+            public void createSnapshot(String k, String t, String n, Optional<String> ttl) {
+                creates.incrementAndGet();
+                try {
+                    // Hold the create open so competing threads reach putIfAbsent while it runs.
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            @Override
+            public void clearSnapshot(String k, String t, String n) {}
+        };
+        SnapshotManager mgr = new SnapshotManager(blocking, ReadMode.SNAPSHOT, Optional.empty());
+
+        int threads = 16;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<java.util.concurrent.Future<Optional<String>>> results = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            results.add(pool.submit(() -> {
+                start.await();
+                return mgr.snapshotFor("q1", "ks", "t");
+            }));
+        }
+        start.countDown();          // fire all callers
+        Thread.sleep(50);           // let them collide on the in-flight create
+        release.countDown();        // let the winning create finish
+
+        for (java.util.concurrent.Future<Optional<String>> f : results) {
+            assertEquals(Optional.of("cqlite-q1"), f.get(5, TimeUnit.SECONDS));
+        }
+        pool.shutdownNow();
+
+        assertEquals(1, creates.get(), "exactly one PUT for concurrent same-key callers");
     }
 }
