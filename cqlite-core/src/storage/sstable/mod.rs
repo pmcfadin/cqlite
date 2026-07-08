@@ -160,11 +160,22 @@ pub struct PartitionKeyComponent {
 /// partition-key count, clustering-key count, and single-component pk type+name must
 /// agree across every header that has partition-key columns.
 ///
-/// Returns `None` when no header exposes a partition-key column (fail-safe: caller
-/// full-scans) OR when the headers' key metadata is INCONSISTENT (pk-count /
-/// clustering-count / single-pk type+name disagreement — should never happen for one
-/// table, but if it did we cannot trust the shape). All facts come from
-/// SerializationHeaders — no heuristics (#28).
+/// The classifier proves a column IS the partition key by its ABSENCE from the unioned
+/// non-key set — which is sound ONLY if the union is COMPLETE, i.e. every reader's
+/// columns were visible. So this is fail-safe on incomplete metadata (roborev 3788):
+///
+/// Returns `None` when
+/// - there are no readers (fail-safe: caller full-scans), OR
+/// - ANY resolved reader lacks a usable partition-key shape — an empty/missing
+///   SerializationHeader, or a populated header exposing no partition-key column
+///   (we cannot see that reader's regular columns, so the union is incomplete and a
+///   column could be misclassified as the pk by absence), OR
+/// - the headers' key metadata is INCONSISTENT (pk-count / clustering-count / single-pk
+///   type+name disagreement — should never happen for one table, but if it did we
+///   cannot trust the shape).
+///
+/// `Some(shape)` is returned only when EVERY reader contributed a usable, consistent
+/// pk shape. All facts come from SerializationHeaders — no heuristics (#28).
 fn partition_key_shape_from_headers<'a>(
     headers: impl IntoIterator<Item = &'a [crate::parser::header::ColumnInfo]>,
 ) -> Option<PartitionKeyShape> {
@@ -179,8 +190,15 @@ fn partition_key_shape_from_headers<'a>(
     let mut non_key_column_names = std::collections::HashSet::new();
 
     for columns in headers {
+        // COMPLETE-UNION fail-safe (roborev 3788): the classifier proves a column is
+        // the partition key by its ABSENCE from `non_key_column_names`. That proof is
+        // only sound if we can see EVERY reader's columns. A reader with no usable
+        // SerializationHeader (empty columns) would silently drop its regular columns
+        // from the union, so a regular column present ONLY in that headerless reader
+        // could be misclassified as the pk. Decline the whole shape → the caller
+        // full-scans (always correct). No heuristics (#28).
         if columns.is_empty() {
-            continue;
+            return None;
         }
         let mut partition_key_count = 0usize;
         let mut clustering_key_count = 0usize;
@@ -210,11 +228,13 @@ fn partition_key_shape_from_headers<'a>(
                 }
             }
         }
-        // A SerializationHeader always names at least one partition-key component;
-        // skip a header we could not populate schema-less (e.g. legacy formats with
-        // no Statistics.db columns) rather than record a bogus all-zero shape.
+        // A SerializationHeader always names at least one partition-key component; a
+        // header that populated columns yet exposes NO partition-key column is not a
+        // usable pk shape. Under the complete-union fail-safe (roborev 3788) we cannot
+        // trust the union when any reader's pk shape is unknown, so decline → the
+        // caller full-scans rather than record a bogus all-zero shape.
         if partition_key_count == 0 {
-            continue;
+            return None;
         }
         // The typed single-component pk type is authoritative ONLY for a single-
         // component key; drop it for a composite pk (that fast path does not apply
@@ -3130,12 +3150,67 @@ mod tests {
         );
     }
 
-    /// No header with a partition-key column → `None` (fail-safe). An empty header is
-    /// skipped, not treated as a zero-key shape.
+    /// No header with a partition-key column → `None` (fail-safe). No readers, or an
+    /// empty header, or a header exposing no pk column all decline (never a zero-key
+    /// shape).
     #[test]
     fn partition_key_shape_none_without_usable_header() {
         assert_eq!(partition_key_shape_from_headers(std::iter::empty()), None);
         let empty: Vec<crate::parser::header::ColumnInfo> = vec![];
         assert_eq!(partition_key_shape_from_headers([empty.as_slice()]), None);
+
+        // A populated header that names no partition-key column is not a usable pk
+        // shape either → decline (complete-union fail-safe, roborev 3788).
+        let no_pk = vec![col("v", "text", false, false)];
+        assert_eq!(partition_key_shape_from_headers([no_pk.as_slice()]), None);
+    }
+
+    /// COMPLETE-UNION fail-safe (roborev 3788): if ANY resolved reader lacks a usable
+    /// header, the union of non-key names is INCOMPLETE, so we cannot prove a column is
+    /// the pk by its absence. One headerless reader among several usable ones ⇒ decline
+    /// (`None`) so the classifier full-scans instead of misclassifying a regular column
+    /// (present only in the headerless reader) as a partition-key seek.
+    #[test]
+    fn partition_key_shape_declines_when_any_reader_lacks_usable_header() {
+        let usable = vec![
+            col("partition_key", "int", true, false),
+            col("v1", "text", false, false),
+        ];
+        let headerless: Vec<crate::parser::header::ColumnInfo> = vec![];
+
+        // Headerless reader FIRST among several.
+        assert_eq!(
+            partition_key_shape_from_headers([headerless.as_slice(), usable.as_slice()]),
+            None,
+            "a leading headerless reader must decline the whole shape (→ full-scan)",
+        );
+        // Headerless reader LAST — the union is still incomplete, still declines.
+        assert_eq!(
+            partition_key_shape_from_headers([usable.as_slice(), headerless.as_slice()]),
+            None,
+            "a trailing headerless reader must decline the whole shape (→ full-scan)",
+        );
+        // Headerless reader BETWEEN two usable ones.
+        let usable2 = vec![
+            col("partition_key", "int", true, false),
+            col("v1", "text", false, false),
+            col("v2", "text", false, false),
+        ];
+        assert_eq!(
+            partition_key_shape_from_headers([
+                usable.as_slice(),
+                headerless.as_slice(),
+                usable2.as_slice(),
+            ]),
+            None,
+            "any headerless reader among usable ones declines the shape",
+        );
+
+        // Control: the SAME usable readers WITHOUT the headerless one DO resolve — so
+        // it is specifically the headerless reader that forces the fail-safe decline.
+        assert!(
+            partition_key_shape_from_headers([usable.as_slice(), usable2.as_slice()]).is_some(),
+            "usable readers alone must still resolve (the fix only declines on a gap)",
+        );
     }
 }
