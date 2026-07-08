@@ -1975,11 +1975,22 @@ struct PurgeCounts {
     complex_deletions: u64,
     /// Partition-level tombstones purged (issue #1072).
     partition_tombstones: u64,
+    /// Live cells/rows SHADOWED (suppressed) by a tombstone during reconciliation
+    /// (issue #2163). NOT a purge — backs `cqlite.compaction.tombstones_suppressed`
+    /// and is deliberately EXCLUDED from [`Self::total`] (the purge total).
+    suppressed: u64,
+    /// Tombstone markers RETAINED into the merge output (issue #2163). NOT a
+    /// purge — backs `cqlite.compaction.tombstones_emitted` and is EXCLUDED from
+    /// [`Self::total`].
+    emitted: u64,
 }
 
 #[cfg(feature = "write-support")]
 impl PurgeCounts {
-    /// Total tombstones purged across every category.
+    /// Total tombstones GENUINELY PURGED across every category. The #2163
+    /// `suppressed` / `emitted` tallies are intentionally NOT included — they
+    /// count shadowing and retention, not purges, so `tombstones_purged`
+    /// semantics stay unchanged.
     fn total(self) -> u64 {
         self.cell_tombstones
             .saturating_add(self.row_tombstones)
@@ -2402,6 +2413,12 @@ impl KWayMerger {
         let mut max_partition_deletion: Option<(i64, i32)> = None;
         let mut partition_delete_key: Option<DecoratedKey> = None;
 
+        // Row-count reconciliation (issue #2163): rows entering the reconcile
+        // boundary. `rows` is moved by the loop below, so snapshot the count here.
+        // Emitted once per merge alongside `rows_out` (`merged.len()`) so the
+        // in/out delta is exactly the rows removed by reconciliation.
+        let rows_in = rows.len() as u64;
+
         for row in rows {
             if row.is_partition_delete_carrier() {
                 if let Some((mfda, ldt)) = row.partition_deletion {
@@ -2509,6 +2526,9 @@ impl KWayMerger {
                     continue;
                 }
             }
+            // Retained (non-purged) range-tombstone marker carried into the output
+            // (issue #2163): a tombstone marker emitted, not purged.
+            purges.emitted += 1;
             merged.push(
                 MergeEntry::new(
                     usize::MAX,
@@ -2547,6 +2567,9 @@ impl KWayMerger {
             if purge {
                 purges.partition_tombstones += 1;
             } else {
+                // Retained partition tombstone marker carried into the output
+                // (issue #2163): a tombstone marker emitted, not purged.
+                purges.emitted += 1;
                 merged.push(
                     MergeEntry::new(
                         usize::MAX,
@@ -2602,6 +2625,38 @@ impl KWayMerger {
             crate::observability::add_counter(
                 crate::observability::catalog::COMPACTION_TOMBSTONES_PURGED,
                 purged,
+                &[],
+            );
+        }
+
+        // Correctness / silent-miss signals (issue #2163), emitted once per merge
+        // alongside the purge total — never per row/cell. `suppressed` (live data
+        // shadowed by a tombstone) and `emitted` (tombstone markers retained) move
+        // independently of `tombstones_purged`; the row-count pair lets a dashboard
+        // see reconciliation drop ratio + volume.
+        if purges.suppressed > 0 {
+            crate::observability::add_counter(
+                crate::observability::catalog::COMPACTION_TOMBSTONES_SUPPRESSED,
+                purges.suppressed,
+                &[],
+            );
+        }
+        if purges.emitted > 0 {
+            crate::observability::add_counter(
+                crate::observability::catalog::COMPACTION_TOMBSTONES_EMITTED,
+                purges.emitted,
+                &[],
+            );
+        }
+        if rows_in > 0 {
+            crate::observability::add_counter(
+                crate::observability::catalog::MERGE_ROWS_IN,
+                rows_in,
+                &[],
+            );
+            crate::observability::add_counter(
+                crate::observability::catalog::MERGE_ROWS_OUT,
+                merged.len() as u64,
                 &[],
             );
         }
@@ -3378,8 +3433,8 @@ impl KWayMerger {
         }
         // Step 2b: complex-deletion strict-supersede + shadow-before-purge.
         state.apply_complex_deletions();
-        // Step 3: row-tombstone shadowing.
-        state.shadow_by_row_deletion();
+        // Step 3: row-tombstone shadowing (tallies #2163 suppression).
+        state.shadow_by_row_deletion(purges);
         // Step 3b: dropped-column filtering (captures the phantom-row guard).
         state.filter_dropped_columns(dropped_columns);
         // Step 3b′ (#1382): TTL expiry — convert expired live cells to cell
@@ -3389,8 +3444,9 @@ impl KWayMerger {
         state.expire_ttl_cells(now_secs);
         // Step 3c: gc_grace / overlap-aware tombstone purging (tallies #1037).
         state.purge_gc_grace(gc_before_secs, max_purgeable_timestamp, purges);
-        // Step 4: phantom-row guard + emit the merged entry.
-        state.build()
+        // Step 4: phantom-row guard + emit the merged entry (tallies #2163
+        // emitted row-tombstone markers).
+        state.build(purges)
     }
 
     /// Convert reconciled `CellData`s into writer `CellOperation`s (epic #899,

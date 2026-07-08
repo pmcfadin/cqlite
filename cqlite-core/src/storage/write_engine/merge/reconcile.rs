@@ -320,14 +320,24 @@ impl ReconcileState {
     /// `f66fa14f`). The output `after_row_del` is kept so the dropped-column
     /// stage (Step 3b) can tell whether its purge is what emptied the row of real
     /// data (phantom-row guard).
-    pub(super) fn shadow_by_row_deletion(&mut self) {
+    pub(super) fn shadow_by_row_deletion(&mut self, purges: &mut PurgeCounts) {
         let row_del = self.row_del;
         let winners = &mut self.winners;
         self.after_row_del = std::mem::take(&mut self.order)
             .into_iter()
             .filter_map(|cell_key| winners.remove(&cell_key))
             .filter(|cell| match row_del {
-                Some(d) => cell.timestamp > d,
+                Some(d) => {
+                    let survives = cell.timestamp > d;
+                    // Issue #2163: a LIVE cell dropped here was SHADOWED by the
+                    // row tombstone (suppressed) — count it, distinct from a
+                    // gc/overlap-safe purge. A cell that is itself a tombstone is
+                    // not "live data suppressed", so it is not counted.
+                    if !survives && !KWayMerger::is_cell_tombstone(cell) {
+                        purges.suppressed += 1;
+                    }
+                    survives
+                }
                 None => true,
             })
             .collect();
@@ -605,7 +615,7 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
-    pub(super) fn build(self) -> Option<MergeEntry> {
+    pub(super) fn build(self, purges: &mut PurgeCounts) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
@@ -663,6 +673,9 @@ impl ReconcileState {
         } else if let Some(deletion_time) = row_del {
             // No surviving data. If a row tombstone exists, keep the row shadowed
             // so downstream still emits the deletion (preserves #505/#498 absence).
+            // Issue #2163: this row-tombstone marker is RETAINED into the output —
+            // count it as emitted (a marker carried forward, not purged).
+            purges.emitted += 1;
             Some(MergeEntry::new(
                 run_index,
                 key,
