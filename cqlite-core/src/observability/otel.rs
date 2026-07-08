@@ -259,6 +259,11 @@ struct Instruments {
     read_partition_lookup: Counter<u64>,
     read_bloom_checks: Counter<u64>,
     read_scan_window_refill: Counter<u64>,
+    read_sstables_pruned: Counter<u64>,
+    read_bloom_false_negatives: Counter<u64>,
+    merge_rows_in: Counter<u64>,
+    merge_rows_out: Counter<u64>,
+    query_degraded_path: Counter<u64>,
     storage_open_sstables: Counter<u64>,
     storage_open_bytes: Counter<u64>,
     storage_open_tables: Counter<u64>,
@@ -276,6 +281,8 @@ struct Instruments {
     compaction_sstables_in: Counter<u64>,
     compaction_sstables_out: Counter<u64>,
     compaction_tombstones_purged: Counter<u64>,
+    compaction_tombstones_suppressed: Counter<u64>,
+    compaction_tombstones_emitted: Counter<u64>,
     rpc_requests: Counter<u64>,
     rpc_rows: Counter<u64>,
     rpc_bytes: Counter<u64>,
@@ -330,6 +337,33 @@ fn instruments() -> &'static Instruments {
                 .u64_counter(catalog::READ_SCAN_WINDOW_REFILL)
                 .with_unit(catalog::unit::DIMENSIONLESS)
                 .with_description("Windowed scan refills at compression-chunk boundaries.")
+                .build(),
+            read_sstables_pruned: m
+                .u64_counter(catalog::READ_SSTABLES_PRUNED)
+                .with_unit(catalog::unit::SSTABLES)
+                .with_description("SSTables skipped by a presence-oracle negative, keyed by {format}.")
+                .build(),
+            read_bloom_false_negatives: m
+                .u64_counter(catalog::READ_BLOOM_FALSE_NEGATIVES)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description(
+                    "Opt-in presence-oracle false negatives (soundness alarm), keyed by {format}.",
+                )
+                .build(),
+            merge_rows_in: m
+                .u64_counter(catalog::MERGE_ROWS_IN)
+                .with_unit(catalog::unit::ROWS)
+                .with_description("Rows consumed at the k-way merge reconcile boundary.")
+                .build(),
+            merge_rows_out: m
+                .u64_counter(catalog::MERGE_ROWS_OUT)
+                .with_unit(catalog::unit::ROWS)
+                .with_description("Rows emitted by the k-way merge reconcile boundary.")
+                .build(),
+            query_degraded_path: m
+                .u64_counter(catalog::QUERY_DEGRADED_PATH)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("SELECTs taking a soundness fallback, keyed by {fallback_reason}.")
                 .build(),
             storage_open_sstables: m
                 .u64_counter(catalog::STORAGE_OPEN_SSTABLES)
@@ -413,8 +447,18 @@ fn instruments() -> &'static Instruments {
                 .build(),
             compaction_tombstones_purged: m
                 .u64_counter(catalog::COMPACTION_TOMBSTONES_PURGED)
-                .with_unit("{tombstone}")
+                .with_unit(catalog::unit::TOMBSTONES)
                 .with_description("Tombstones genuinely purged during compaction.")
+                .build(),
+            compaction_tombstones_suppressed: m
+                .u64_counter(catalog::COMPACTION_TOMBSTONES_SUPPRESSED)
+                .with_unit(catalog::unit::TOMBSTONES)
+                .with_description("Live cells/rows shadowed by a tombstone during reconciliation.")
+                .build(),
+            compaction_tombstones_emitted: m
+                .u64_counter(catalog::COMPACTION_TOMBSTONES_EMITTED)
+                .with_unit(catalog::unit::TOMBSTONES)
+                .with_description("Tombstone markers retained into the merge output.")
                 .build(),
             rpc_requests: m
                 .u64_counter(catalog::RPC_REQUESTS)
@@ -524,6 +568,11 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::READ_PARTITION_LOOKUP => &i.read_partition_lookup,
         catalog::READ_BLOOM_CHECKS => &i.read_bloom_checks,
         catalog::READ_SCAN_WINDOW_REFILL => &i.read_scan_window_refill,
+        catalog::READ_SSTABLES_PRUNED => &i.read_sstables_pruned,
+        catalog::READ_BLOOM_FALSE_NEGATIVES => &i.read_bloom_false_negatives,
+        catalog::MERGE_ROWS_IN => &i.merge_rows_in,
+        catalog::MERGE_ROWS_OUT => &i.merge_rows_out,
+        catalog::QUERY_DEGRADED_PATH => &i.query_degraded_path,
         catalog::STORAGE_OPEN_SSTABLES => &i.storage_open_sstables,
         catalog::STORAGE_OPEN_BYTES => &i.storage_open_bytes,
         catalog::STORAGE_OPEN_TABLES => &i.storage_open_tables,
@@ -541,6 +590,8 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::COMPACTION_SSTABLES_IN => &i.compaction_sstables_in,
         catalog::COMPACTION_SSTABLES_OUT => &i.compaction_sstables_out,
         catalog::COMPACTION_TOMBSTONES_PURGED => &i.compaction_tombstones_purged,
+        catalog::COMPACTION_TOMBSTONES_SUPPRESSED => &i.compaction_tombstones_suppressed,
+        catalog::COMPACTION_TOMBSTONES_EMITTED => &i.compaction_tombstones_emitted,
         catalog::RPC_REQUESTS => &i.rpc_requests,
         catalog::RPC_ROWS => &i.rpc_rows,
         catalog::RPC_BYTES => &i.rpc_bytes,
