@@ -39,9 +39,79 @@ No `dashboards/` are shipped by this change — auto-discovery will pick up any
 |------|----------|---------|--------------|
 | `--tag` | `TAG` | `latest` | `cqlite-flight` image tag. |
 | `--flight-port` | `FLIGHT_PORT` | `8815` | Arrow Flight gRPC port (host + container, via `hostNetwork`). |
-| `--data-dir` | `CASSANDRA_DATA_DIR` | `/mnt/db1/cassandra/data` | Host path to the Cassandra data dir, mounted read-only. |
+| `--data-dir` | `CASSANDRA_DATA_DIR` | `/mnt/db1/cassandra/data` | Host path to the Cassandra data dir, mounted read-only. **Exactly one** — see [Multi-disk nodes](#multi-disk-nodes-single-data-dir-limitation-2114). |
+| `--data-root` | `CASSANDRA_DATA_ROOT` | `/mnt` | Host path under which per-disk data dirs live; the `detect-multidisk` init container scans it read-only and warns on more than one candidate (#2114). |
 | `--data-gid` | `CASSANDRA_DATA_GID` | `999` | Host GID that owns the Cassandra data dir; added as a pod `supplementalGroup`. |
 | `--otel-endpoint` | `OTEL_ENDPOINT` | `http://localhost:4317` | OTLP gRPC endpoint (defaults to the node-local collector). |
+
+## Multi-disk nodes: single-data-dir limitation (#2114)
+
+**cqlite-flight serves exactly ONE data directory.** Its `--data-dir` flag is a
+single path (`cqlite-flight/src/main.rs`: `data_dir: PathBuf`), so this kit mounts
+one host `hostPath` (`--data-dir`, default `/mnt/db1/cassandra/data`) and passes
+it as the only `--data-dir`.
+
+On a **multi-disk node** where Cassandra spreads `data_file_directories` across
+`/mnt/db1`, `/mnt/db2`, … the SSTables on every disk *other than the served one*
+are invisible to the Flight server. Reads that touch that data return **partial
+or empty results with no error** — a silent, latent misconfiguration. Every lab
+run to date uses single-disk nodes, so this has never bitten; the kit's job is to
+make the failure mode **visible** if it ever does.
+
+**Detection — the `detect-multidisk` init container.** Each pod runs a non-fatal
+init container (the same flight image, invoked as `/bin/sh`) that mounts
+`--data-root` (`CASSANDRA_DATA_ROOT`, default `/mnt`) read-only and counts
+**existing** `<root>/*/cassandra/data` dirs — candidacy is by existence,
+regardless of contents, because an *empty* second data dir will still receive
+SSTables later and must not report as single-disk today. If it finds more than
+the one being served it prints a **loud, unmissable warning** naming each
+unserved disk (annotated populated / currently empty), then exits 0 (it **never
+blocks** the rollout). Review it per node:
+
+```bash
+kubectl logs -l app.kubernetes.io/name=cqlite-flight -c detect-multidisk --prefix
+```
+
+A single-disk node prints a one-line `OK` — exactly one existing candidate dir
+**and it matches the served `--data-dir`** (compared in host-path form,
+trailing slashes stripped) — and no warning, so the default behaviour is
+unchanged. If the lone candidate is some *other* `*/cassandra/data` dir (wrong
+`--data-root` or wrong `--data-dir`), the detector prints a loud
+"lone candidate != served --data-dir" cannot-verify warning instead of a false
+`OK` (still exit 0).
+
+**Zero candidates is never a silent OK.** The detection volume uses `hostPath`
+`type: DirectoryOrCreate` — deliberately, so a missing `--data-root` can never
+block the rollout (the detector is non-fatal by contract). The benign side
+effect is that a **mistyped `--data-root` is auto-created as an empty directory
+on the node** and scanned as empty. The init script therefore treats zero
+candidates as a *cannot-verify* condition and warns loudly, distinguishing two
+cases:
+
+- root has **no entries at all** → "data root ABSENT or EMPTY" — likely a wrong
+  `--data-root`, or the hostPath was auto-created; the layout check is
+  meaningless until it's fixed.
+- root is **non-empty but no `<root>/*/cassandra/data` dir exists** → the
+  node's layout doesn't match the convention the detector scans; point
+  `--data-root` at the directory holding the per-disk mounts.
+
+Both warn to the init container's log and still exit 0. In short: a wrong
+`--data-root` shows up as a loud cannot-verify warning (plus a leftover empty
+dir on the node), never as a rollout failure and never as a false single-disk
+`OK`.
+
+**Remedies** (the server side is out of scope for this kit — #2114 covers only
+making the gap visible):
+
+- Keep the queried tables on the served disk.
+- Run one `cqlite-flight` DaemonSet per disk on distinct `--flight-port`s.
+- There is deliberately **no way to silence the check entirely** — on a genuine
+  single-disk node it is already a quiet one-line `OK`, and every other state
+  is exactly the misconfiguration the detector exists to surface.
+
+Genuinely spanning multiple dirs from one server would require a `--data-dir`
+multi-value change to `cqlite-flight` itself — a server feature, out of this kit's
+scope.
 
 ## Installing out-of-tree
 
@@ -52,8 +122,9 @@ in the easy-db-lab source: the real ad-hoc flag set is `--from <dir> --kit <name
 `args:`**. `Install.execute()` calls `renderAndWrite(source, kitName, storageSize)`
 with no `extraVars`, so only the fixed `TemplateVariables` set (`CLUSTER_NAME`,
 `KIT_NAME`, `DB_NODE_IPS`, `KUBECONFIG`, etc.) gets substituted — **not**
-`__TAG__`, `__FLIGHT_PORT__`, `__CASSANDRA_DATA_DIR__`, `__CASSANDRA_DATA_GID__`,
-or `__OTEL_ENDPOINT__`. `--from` also skips the `type: db` node-pool guard and any
+`__TAG__`, `__FLIGHT_PORT__`, `__CASSANDRA_DATA_DIR__`, `__CASSANDRA_DATA_ROOT__`,
+`__CASSANDRA_DATA_GID__`, or `__OTEL_ENDPOINT__`. `--from` also skips the
+`type: db` node-pool guard and any
 typed `install:` steps (irrelevant here — this kit has none).
 
 **Recommended path — register the kits directory as a source, then install by name**
@@ -73,9 +144,10 @@ written files before running `start`:
 easy-db-lab kit install --from /path/to/cqlite/easy-db-lab-kits/cqlite-flight \
   --kit cqlite-flight --size 0Gi
 # Edit the scaffolded files to replace remaining __TAG__ / __FLIGHT_PORT__ /
-# __CASSANDRA_DATA_DIR__ / __CASSANDRA_DATA_GID__ / __OTEL_ENDPOINT__ tokens:
+# __CASSANDRA_DATA_DIR__ / __CASSANDRA_DATA_ROOT__ / __CASSANDRA_DATA_GID__ /
+# __OTEL_ENDPOINT__ tokens:
 #   <workdir>/cqlite-flight/daemonset.yaml
-#   <workdir>/cqlite-flight/bin/start.sh   (only __TAG__/__FLIGHT_PORT__/__CASSANDRA_DATA_DIR__ appear here, for the echo lines)
+#   <workdir>/cqlite-flight/bin/start.sh   (only __TAG__/__FLIGHT_PORT__/__CASSANDRA_DATA_DIR__/__CASSANDRA_DATA_ROOT__ appear here, for the echo lines)
 easy-db-lab cqlite-flight start
 ```
 
