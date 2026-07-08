@@ -37,7 +37,11 @@ fn assert_registered_unit(metrics: &testing::CapturedMetrics, name: &str, unit: 
     assert!(
         metrics.contains(name),
         "{name} must be collected; saw: {:?}",
-        metrics.entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>()
+        metrics
+            .entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         metrics.unit(name),
@@ -95,7 +99,11 @@ fn correctness_signals_end_to_end() {
         catalog::READ_BLOOM_FALSE_NEGATIVES,
         catalog::unit::DIMENSIONLESS,
     );
-    assert_registered_unit(&m, catalog::QUERY_DEGRADED_PATH, catalog::unit::DIMENSIONLESS);
+    assert_registered_unit(
+        &m,
+        catalog::QUERY_DEGRADED_PATH,
+        catalog::unit::DIMENSIONLESS,
+    );
 
     // --- Requirement: Merge row-count reconciliation counters ---
     // Two overlapping generations: partition id=1 appears in BOTH SSTables and
@@ -109,12 +117,14 @@ fn correctness_signals_end_to_end() {
         let rows_in = m.counter_sum(catalog::MERGE_ROWS_IN);
         let rows_out = m.counter_sum(catalog::MERGE_ROWS_OUT);
         assert_eq!(
-            rows_in, 4.0,
+            rows_in,
+            4.0,
             "cqlite.merge.rows_in must equal the 4 rows consumed at reconcile; entry: {:?}",
             m.find(catalog::MERGE_ROWS_IN)
         );
         assert_eq!(
-            rows_out, 3.0,
+            rows_out,
+            3.0,
             "cqlite.merge.rows_out must equal the 3 reconciled rows; entry: {:?}",
             m.find(catalog::MERGE_ROWS_OUT)
         );
@@ -159,7 +169,16 @@ fn correctness_signals_end_to_end() {
         let mut expected_pruned = 0u64;
         for i in 0..64u32 {
             // 8-byte keys that do not exist in the (int-keyed) fixture table.
-            let key = [0xFEu8, 0xED, 0xFA, 0xCE, (i >> 8) as u8, i as u8, 0xAB, 0xCD];
+            let key = [
+                0xFEu8,
+                0xED,
+                0xFA,
+                0xCE,
+                (i >> 8) as u8,
+                i as u8,
+                0xAB,
+                0xCD,
+            ];
             if !reader.might_contain_partition(&key) {
                 expected_pruned += 1;
             }
@@ -187,8 +206,7 @@ fn correctness_signals_end_to_end() {
 
     // --- Requirement: Opt-in presence-oracle false-negative verification ---
     {
-        let (reader, table_id, present_key, _tmp) =
-            fixtures::open_writer_reader_with_present_key();
+        let (reader, table_id, present_key, _tmp) = fixtures::open_writer_reader_with_present_key();
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let absent_key = 0x7FFF_FFFFi32.to_be_bytes();
 
@@ -230,7 +248,10 @@ fn correctness_signals_end_to_end() {
         let got = rt
             .block_on(reader.verify_presence_oracle_negative(&table_id, &present_key))
             .expect("verify on contradiction");
-        assert!(got, "a present key must be reported as a contradicted negative");
+        assert!(
+            got,
+            "a present key must be reported as a contradicted negative"
+        );
         let m = mc.flush_and_collect();
         assert_eq!(
             m.counter_sum(catalog::READ_BLOOM_FALSE_NEGATIVES),
@@ -303,10 +324,7 @@ mod merge {
                 position: 0,
             }],
             clustering_keys: vec![],
-            columns: vec![
-                col("id", "int", false),
-                col("name", "text", true),
-            ],
+            columns: vec![col("id", "int", false), col("name", "text", true)],
             comments: HashMap::new(),
             dropped_columns: HashMap::new(),
         }
@@ -363,7 +381,9 @@ mod merge {
             .enable_all()
             .build()
             .expect("rt");
-        rt.block_on(engine.flush()).expect("flush").expect("sstable");
+        rt.block_on(engine.flush())
+            .expect("flush")
+            .expect("sstable");
     }
 
     /// Two overlapping SSTables: id=1 in both (LWW-collapses), plus id=2 and id=3.

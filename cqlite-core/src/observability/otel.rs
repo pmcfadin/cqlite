@@ -341,7 +341,9 @@ fn instruments() -> &'static Instruments {
             read_sstables_pruned: m
                 .u64_counter(catalog::READ_SSTABLES_PRUNED)
                 .with_unit(catalog::unit::SSTABLES)
-                .with_description("SSTables skipped by a presence-oracle negative, keyed by {format}.")
+                .with_description(
+                    "SSTables skipped by a presence-oracle negative, keyed by {format}.",
+                )
                 .build(),
             read_bloom_false_negatives: m
                 .u64_counter(catalog::READ_BLOOM_FALSE_NEGATIVES)
@@ -363,7 +365,9 @@ fn instruments() -> &'static Instruments {
             query_degraded_path: m
                 .u64_counter(catalog::QUERY_DEGRADED_PATH)
                 .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("SELECTs taking a soundness fallback, keyed by {fallback_reason}.")
+                .with_description(
+                    "SELECTs taking a soundness fallback, keyed by {fallback_reason}.",
+                )
                 .build(),
             storage_open_sstables: m
                 .u64_counter(catalog::STORAGE_OPEN_SSTABLES)
