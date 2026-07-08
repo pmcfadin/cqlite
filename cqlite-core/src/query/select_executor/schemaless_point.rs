@@ -5,7 +5,7 @@
 //! point-read recogniser + its single-component key encoder; the schema-aware
 //! `classify_partition_lookup` stays in `lookup.rs`.
 //!
-//! # Known schemaless-seek limitations (tracked in #TBD)
+//! # Known schemaless-seek limitations (tracked in #2200)
 //!
 //! These are ACCEPTED limitations of the schema-less single-component seek path.
 //! Each is fail-SAFE (it yields the correct 0 rows or declines to a full scan, never
