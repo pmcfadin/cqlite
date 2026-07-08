@@ -1,6 +1,9 @@
 -- Time Series Schema for CQL Test Data Generation
--- Optimized for time-based data with TTLs and time window compaction
+-- Optimized for time-based data with time window compaction
 -- Issue #18: Docker-based test data generation
+-- Issue #1935 (#1896 cluster A): default_time_to_live removed from app_metrics,
+--   log_entries and tick_data — the TTLs time-bombed the fixtures (every row read
+--   as expired). Regenerated WITHOUT TTL for stable row-count parity.
 
 -- Create keyspace for time series testing
 CREATE KEYSPACE IF NOT EXISTS test_timeseries WITH replication = {
@@ -29,7 +32,9 @@ CREATE TABLE IF NOT EXISTS sensor_data (
   }
   AND clustering ORDER BY (timestamp DESC);
 
--- Application metrics with TTL
+-- Application metrics (TTL removed — issue #1935, #1896 cluster A owner decision:
+-- default_time_to_live time-bombed the fixture so every row read as expired.
+-- Regenerated WITHOUT TTL for stable, time-proof row-count parity.)
 CREATE TABLE IF NOT EXISTS app_metrics (
     application_id TEXT,
     metric_name TEXT,
@@ -44,8 +49,7 @@ CREATE TABLE IF NOT EXISTS app_metrics (
     'compaction_window_unit': 'MINUTES',
     'compaction_window_size': 30
   }
-  AND clustering ORDER BY (timestamp DESC)
-  AND default_time_to_live = 2592000; -- 30 days
+  AND clustering ORDER BY (timestamp DESC);
 
 -- User activity tracking
 CREATE TABLE IF NOT EXISTS user_activity (
@@ -105,8 +109,7 @@ CREATE TABLE IF NOT EXISTS log_entries (
     'compaction_window_unit': 'HOURS',
     'compaction_window_size': 6
   }
-  AND clustering ORDER BY (log_id DESC)
-  AND default_time_to_live = 604800; -- 7 days
+  AND clustering ORDER BY (log_id DESC); -- TTL removed (issue #1935, #1896 cluster A)
 
 -- Event sourcing table
 CREATE TABLE IF NOT EXISTS event_store (
@@ -169,5 +172,4 @@ CREATE TABLE IF NOT EXISTS tick_data (
     'compaction_window_unit': 'MINUTES',
     'compaction_window_size': 1
   }
-  AND clustering ORDER BY (tick_id ASC)
-  AND default_time_to_live = 86400; -- 1 day
+  AND clustering ORDER BY (tick_id ASC); -- TTL removed (issue #1935, #1896 cluster A)

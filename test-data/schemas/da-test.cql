@@ -33,10 +33,11 @@ CREATE TABLE IF NOT EXISTS collection_table (
     properties MAP<TEXT, TEXT>
 ) WITH compression = {'class': 'LZ4Compressor'};
 
--- 3. TTL rows
+-- 3. Formerly-TTL rows (issue #1935, #1896 cluster A owner decision:
+--    default_time_to_live removed — it time-bombed the fixture so every row read
+--    as expired. Table name kept for corpus stability; regenerated WITHOUT TTL.)
 CREATE TABLE IF NOT EXISTS ttl_table (
     id UUID PRIMARY KEY,
     data TEXT,
     expiring_value INT
-) WITH compression = {'class': 'LZ4Compressor'}
-  AND default_time_to_live = 86400;
+) WITH compression = {'class': 'LZ4Compressor'};
