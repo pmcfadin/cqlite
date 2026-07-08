@@ -85,8 +85,10 @@
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
 #                      issue #865 folded it into the workspace so fmt/clippy reach it)
 #   write-tests        cargo test -p cqlite-core --features write-support (lib + roundtrip + compaction)
-#   cli-tests          cargo test -p cqlite-cli --test unit_tests + (write-support)
-#                      write_readback_content_tests (CQL write→read content parity, #1231)
+#   cli-tests          cargo test -p cqlite-cli --features write-support --tests —
+#                      ENUMERATES every cqlite-cli/tests/*.rs target (#2039), not a
+#                      hardcoded allowlist; cargo auto-skips delta-export/duckdb-tests/
+#                      dhat-heap targets. Fails closed if zero test files are found.
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
@@ -1871,6 +1873,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # cli-tests enumeration self-test (#2039): no python3 needed, always runs
+  # (hermetic — asserts the cli-tests component enumerates every cqlite-cli/tests/*.rs
+  # target instead of a hardcoded allowlist, and exercises the fail-closed guard; no
+  # cargo). A failure FAILs the component, mirroring the delta/parity-report guards.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_cli_tests_enum.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_cli_tests_enum.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (cli-tests enumeration self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -2895,7 +2913,11 @@ run_file_size
 #   needs datasets: core-tests, tombstones-scan, scan-offload-guard,
 #     work-counters-guard (the wiring-evidence tests scan real Data.db fixtures),
 #     memory-budget (dhat lane reads real Data.db and fails closed on empty),
-#     integration-tests, write-tests, smoke (read Data.db / golden fixtures), and
+#     integration-tests, write-tests, smoke (read Data.db / golden fixtures),
+#     cli-tests (issue #2039: now ENUMERATES every cqlite-cli/tests/*.rs target,
+#     several of which — one_shot_real_data_integration_tests, repl_real_data_tests,
+#     integration_sstable_tests, read_sstable_stdout_tests, … — read real Data.db;
+#     was formerly dataset-free when it ran only the 3-target allowlist), and
 #     python-bindings — the pytest suite resolves CQLITE_DATASETS_ROOT and calls
 #     skip_if_no_datasets() (bindings/python/tests/conftest.py), so with data
 #     absent its dataset-backed coverage *silently skips* and the suite can still
@@ -2903,8 +2925,7 @@ run_file_size
 #     preflight must FAIL loudly rather than let a skipped suite pass green — the
 #     same #646 failure mode that motivated guarding the Rust dataset suites.
 #   dataset-free (deliberately NOT guarded): fmt, clippy, file-size (operate on
-#     source text), cli-tests (only the unit_tests.rs target: tempfile-based
-#     config/parsing/output tests, no CQLITE_DATASETS_ROOT, no Data.db),
+#     source text),
 #     parity-report (renders the manifest + diffs the committed report; reads no
 #     CQLITE_DATASETS_ROOT, no Data.db — issue #1338),
 #     delivery-telemetry + tooling-tests (pure shell/stdlib tool tests; the lone
@@ -2917,7 +2938,7 @@ run_file_size
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests python-bindings smoke"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings smoke"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -3090,9 +3111,33 @@ dispatch_component() {
   cargo test --package cqlite-core --features write-support --test write_read_roundtrip &&
   cargo test --package cqlite-core --features write-support --test compaction_integration' ;;
     cli-tests) run_component cli-tests bash -c '
-  cargo test --package cqlite-cli --test unit_tests &&
-  cargo test --package cqlite-cli --features write-support --test write_readback_content_tests &&
-  cargo test --package cqlite-cli --features write-support --test graceful_shutdown_tests' ;;
+  # issue #2039: ENUMERATE every cqlite-cli/tests/*.rs integration-test target
+  # instead of a hardcoded 3-target allowlist. The old allowlist
+  # (unit_tests + write_readback_content_tests + graceful_shutdown_tests) made any
+  # NEW test file invisible to the full gate — a false-green (a red integration
+  # test the gate never ran; observed on #1483 with read_sstable_stdout_tests).
+  #
+  # `cargo test --tests` runs ALL test targets whose required-features are
+  # satisfied by the enabled feature set, and cargo AUTO-SKIPS the ones we
+  # deliberately do NOT enable here — so feature flags stay correct per target
+  # without hand-maintaining a list:
+  #   * delta-export / duckdb-tests targets (delta_export_tests, delta_roundtrip_tests,
+  #     duckdb_parquet_validation): source-built DuckDB, kept OUT of the main gate
+  #     per cqlite-cli/Cargo.toml (expensive; runner disk limits, #916).
+  #   * dhat-heap target (issue_1581_query_stream_memory): installs a global
+  #     allocator, opt-in only.
+  # The default feature set (interactive/tui/cli-helpers) plus write-support covers
+  # the former allowlist AND every other non-special-feature target, including the
+  # previously-invisible read_sstable_stdout_tests / issue_1506_progress_hygiene.
+  #
+  # Fail closed (never silent-pass) if enumeration finds zero test files (#2039).
+  cli_test_count=$(find cqlite-cli/tests -maxdepth 1 -name "*.rs" 2>/dev/null | wc -l | tr -d " ")
+  if [ "${cli_test_count:-0}" -eq 0 ]; then
+    echo "cli-tests: FAIL-CLOSED — no cqlite-cli/tests/*.rs files found to enumerate (#2039)" >&2
+    exit 1
+  fi
+  echo "cli-tests: enumerating ${cli_test_count} cqlite-cli/tests/*.rs target(s) via --tests (#2039)"
+  cargo test --package cqlite-cli --features write-support --tests' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
