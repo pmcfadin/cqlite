@@ -116,6 +116,26 @@ pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
     normalize(h1)
 }
 
+/// Compare two raw partition keys by Cassandra's canonical global (token-ring)
+/// order: Murmur3 token first, raw key bytes as a deterministic tiebreak.
+///
+/// This is THE cross-partition order Cassandra presents rows in, and the single
+/// authoritative definition shared by every access path that concatenates rows
+/// from more than one source:
+/// - the streaming k-way merge (`sstable/mod.rs`, #1580),
+/// - the `WHERE pk IN (...)` fan-out (`select_executor::lookup::sort_rows_by_token`,
+///   #955), and
+/// - the multi-candidate `scan_partition` / metadata concat fallbacks (#1917).
+///
+/// Raw-byte order alone is the WRONG global order (it differs from token order for
+/// almost all key sets), so all of the above route through this comparator to keep
+/// row order identical regardless of which path served the query.
+pub fn cmp_partition_keys_by_token(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    cassandra_murmur3_token(a)
+        .cmp(&cassandra_murmur3_token(b))
+        .then_with(|| a.cmp(b))
+}
+
 /// Compute `DecoratedKey.filterHashLowerBits()` for a raw partition key, matching
 /// Cassandra 5.0's `org.apache.cassandra.db.DecoratedKey`.
 ///
@@ -164,6 +184,96 @@ fn fmix64(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering;
+
+    // ---------------------------------------------------------------
+    // Issue #1917 — the canonical global-order comparator shared by every
+    // multi-source concat path (streaming k-way merge #1580, IN fan-out #955,
+    // scan_partition/metadata concat fallbacks). These prove the comparator IS
+    // Cassandra token-ring order and that it genuinely DIFFERS from raw-byte
+    // order (the order the concat sites used before #1917 — the "wrong global
+    // order" flagged by #1580).
+    // ---------------------------------------------------------------
+
+    /// A deterministic key set whose raw-byte order inverts token order, so the
+    /// two comparators cannot be conflated. Keys are simple ASCII partition keys.
+    fn inverting_key_set() -> Vec<Vec<u8>> {
+        (0u32..24)
+            .map(|i| format!("pk{i:03}").into_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn cmp_by_token_matches_token_then_raw_bytes() {
+        // The comparator is exactly: token first, raw bytes as tiebreak.
+        for a in inverting_key_set() {
+            for b in inverting_key_set() {
+                let expected = cassandra_murmur3_token(&a)
+                    .cmp(&cassandra_murmur3_token(&b))
+                    .then_with(|| a.cmp(&b));
+                assert_eq!(
+                    cmp_partition_keys_by_token(&a, &b),
+                    expected,
+                    "comparator diverged from token-then-bytes for {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cmp_by_token_is_a_total_order_consistent_with_sorting() {
+        // Sorting a shuffled key set with the comparator yields non-decreasing
+        // tokens (byte-order within equal-token ties) — the order all concat
+        // paths now agree on.
+        let mut keys = inverting_key_set();
+        keys.reverse();
+        keys.sort_by(|a, b| cmp_partition_keys_by_token(a, b));
+        for w in keys.windows(2) {
+            let ta = cassandra_murmur3_token(&w[0]);
+            let tb = cassandra_murmur3_token(&w[1]);
+            assert!(
+                ta < tb || (ta == tb && w[0] <= w[1]),
+                "sorted order not monotonic in token: {:?}(t={ta}) then {:?}(t={tb})",
+                w[0],
+                w[1],
+            );
+        }
+    }
+
+    #[test]
+    fn token_order_differs_from_raw_byte_order() {
+        // Regression guard for #1917: token order is NOT raw-byte order. The old
+        // concat sites re-sorted by `a.0.cmp(&b.0)` (raw bytes); this asserts that
+        // order genuinely differs from the token order Cassandra presents, so the
+        // swap is observable, not cosmetic.
+        let keys = inverting_key_set();
+
+        let mut by_bytes = keys.clone();
+        by_bytes.sort();
+
+        let mut by_token = keys.clone();
+        by_token.sort_by(|a, b| cmp_partition_keys_by_token(a, b));
+
+        assert_ne!(
+            by_bytes,
+            by_token,
+            "expected raw-byte order to differ from token order for {} keys",
+            keys.len()
+        );
+
+        // And prove at least one adjacent pair actually inverts.
+        let inverts = keys.iter().enumerate().any(|(i, a)| {
+            keys.iter().skip(i + 1).any(|b| {
+                let token_ord = cmp_partition_keys_by_token(a, b);
+                let byte_ord = a.as_slice().cmp(b.as_slice());
+                token_ord != Ordering::Equal && byte_ord != Ordering::Equal && token_ord != byte_ord
+            })
+        });
+        assert!(
+            inverts,
+            "no inverting pair found — key set is a poor regression guard"
+        );
+    }
 
     // ---------------------------------------------------------------
     // Test vectors verified against a running Cassandra 5.0 instance.

@@ -91,6 +91,8 @@ use tokio::sync::{Mutex, RwLock};
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 use crate::types::CellWriteMetadata;
+#[cfg(not(feature = "tombstones"))] // #1917 concat fallbacks; tombstones uses k-way merge
+use crate::util::cassandra_murmur3::cmp_partition_keys_by_token;
 use crate::{types::TableId, Config, Result, RowKey, ScanRow};
 
 /// Maximum directory depth when scanning for SSTable files.
@@ -1461,10 +1463,9 @@ impl SSTableManager {
             results.retain(matches_key);
             all_results.append(&mut results);
         }
-        // A single candidate's rows already come back in on-disk key order; only
-        // concatenating more than one candidate needs a re-sort to merge them.
+        // #1917: rows here already share `partition_key` (prior retain) so this is a no-op today; kept for future multi-partition safety + parity with the IN fan-out / streaming scan's token order (raw-byte = #1580 wrong-order).
         if candidates.len() > 1 {
-            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+            all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
         Ok((all_results, true))
@@ -1664,10 +1665,9 @@ impl SSTableManager {
             };
             all_results.append(&mut results);
         }
-        // A single candidate's rows already come back in on-disk key order; only
-        // concatenating more than one candidate needs a re-sort to merge them.
+        // #1917: rows here already share `partition_key` (prior retain) so this is a no-op today; kept for future multi-partition safety + parity with the IN fan-out / streaming scan's token order (raw-byte = #1580 wrong-order).
         if candidates.len() > 1 {
-            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+            all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
         Ok((all_results, clustering_engaged))

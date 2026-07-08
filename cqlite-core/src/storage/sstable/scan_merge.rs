@@ -105,6 +105,10 @@ struct Candidate {
 }
 
 impl Candidate {
+    // Same token-then-raw-bytes rule as `cmp_partition_keys_by_token`
+    // (`util/cassandra_murmur3.rs`) plus a `reader_idx` tiebreak for k-way merge
+    // stability; expressed independently here since the k-way merge state isn't a
+    // pairwise `(key_a, key_b)` comparison the shared comparator can drop into.
     fn cmp(&self, other: &Self) -> Ordering {
         #[cfg(any(test, feature = "metrics"))]
         SCAN_KEY_COMPARISONS.with(|c| c.set(c.get().wrapping_add(1)));
@@ -216,6 +220,11 @@ pub(crate) fn kway_merge_token_order<T>(
 /// cross-generation merge paths, which are themselves `#[cfg(feature =
 /// "write-support")]`. Without the gate this is dead code in the minimal build
 /// and fails `-D warnings`.
+///
+/// Expresses the same token-then-raw-bytes rule as
+/// [`cmp_partition_keys_by_token`](crate::util::cassandra_murmur3::cmp_partition_keys_by_token)
+/// independently (pre-computed tokens over a batch, not a pairwise comparator) —
+/// keep both in sync if the tiebreak rule ever changes.
 #[cfg(feature = "write-support")]
 pub(crate) fn sort_by_token_order<E>(
     results: &mut Vec<E>,
