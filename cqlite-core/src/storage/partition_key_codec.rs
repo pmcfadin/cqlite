@@ -150,6 +150,26 @@ pub fn encode_partition_key_columns(values: &[Value], schema: &TableSchema) -> R
     Ok(result)
 }
 
+/// Encode a single scalar `Value` to the raw single-component on-disk
+/// partition-key bytes for a KNOWN CQL type (issue #1750, roborev 3784).
+///
+/// This is the schema-less counterpart of [`encode_partition_key_columns`] for a
+/// one-component key: it drives the SAME typed coercion + serializer, so a parsed
+/// SELECT literal (which the parser widens to `Value::BigInt` for every integer)
+/// encodes to the WIDTH Cassandra actually wrote — an `int` partition key is 4
+/// bytes, `bigint` 8, `uuid` 16, `text` raw UTF-8, etc. It exists because a
+/// schema-less point read has no `TableSchema`, only the authoritative pk TYPE
+/// from the Statistics.db SerializationHeader.
+///
+/// Returns an error (so the caller declines the targeted seek and full-scans)
+/// when `cql_type` is unparseable or the literal cannot be serialized for it —
+/// never a possibly-wrong-width key (correctness first, no-heuristics #28).
+pub fn encode_single_component_key_typed(value: &Value, cql_type: &str) -> Result<Vec<u8>> {
+    let comparator = ComparatorType::from_data_type(cql_type)?;
+    let coerced = coerce_value_for_comparator(value, &comparator);
+    serialize_value_bytes(&coerced, &comparator)
+}
+
 /// Best-effort coercion of a parsed CQL literal `Value` to the variant the
 /// partition-key serializer expects for `comparator`.
 ///

@@ -1,30 +1,24 @@
-//! Execution Path Parity Tests for Issue #253
+//! Execution Path Tests (Issue #253, updated for Issue #1750)
 //!
-//! This test suite validates that both LEGACY and ADVANCED execution paths
-//! produce consistent query results, while documenting known divergence in
-//! key generation strategies.
+//! Historically CQLite had two SELECT execution paths and a text heuristic
+//! (`WHERE id =` substring + ≤ 8 whitespace tokens) that routed short `WHERE id
+//! =` point reads to the LEGACY `QueryExecutor`. That legacy path returned
+//! column-less results and skipped projection — the #1750 correctness bug — and
+//! the routing itself violated the no-heuristics mandate (#28).
 //!
-//! **Background**: CQLite has two execution paths:
-//! - **LEGACY path** (`executor.rs`): Uses `format!("user_key_{}", id)` for simple point lookups
-//! - **ADVANCED path** (`select_executor.rs`): Uses schema-aware key decoding based on CQL types
-//!
-//! **Routing Logic** (`engine.rs:132-142`):
-//! - Simple "WHERE id = <value>" queries with ≤8 tokens → LEGACY path
-//! - All other SELECT queries → ADVANCED path
-//!
-//! **Key Generation Divergence** (documented, not a bug):
-//! - LEGACY: Generates keys as `format!("user_key_{}", id)` (text-based)
-//! - ADVANCED: Decodes partition keys from RowKey bytes using CQL type system
+//! **Issue #1750** RETIRED that heuristic: ALL SELECTs now route through the
+//! modern `SelectExecutor`, which populates `metadata.columns` from the schema,
+//! applies projection, reconstructs the partition-key column, and selects a
+//! partition-targeted fast path (#949/#956) from parsed query structure + schema
+//! alone. The behavioral regression tests live in
+//! `issue_1750_simple_id_lookup_columns.rs`; this file now only asserts that no
+//! text pattern drives SELECT routing (`test_no_text_heuristic_routes_selects`)
+//! plus general SELECT execution sanity.
 //!
 //! **Requirements**:
 //! - CQLITE_DATASETS_ROOT environment variable pointing to test-data/datasets
 //! - test_basic dataset with simple_table SSTable files
 //! - basic-types.cql schema file
-//!
-//! **Coverage**:
-//! - Key generation strategy documentation
-//! - Routing logic validation
-//! - Execution path consistency checks
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
@@ -208,47 +202,18 @@ async fn test_complex_query_routing_to_advanced() {
 }
 
 #[tokio::test]
-async fn test_key_generation_divergence_documented() {
-    //! Validates and documents the key generation divergence between paths.
+async fn test_no_text_heuristic_routes_selects() {
+    //! Issue #1750 (supersedes the Issue #253 "documented divergence"): the
+    //! `is_simple_id_lookup` text heuristic — a `WHERE id =` substring + ≤ 8
+    //! whitespace-token guess on the raw CQL — has been RETIRED. All SELECTs now
+    //! route through the modern `SelectExecutor` on parsed query structure +
+    //! schema alone. This satisfies the no-heuristics mandate (#28): no query
+    //! text pattern routes to a different executor.
     //!
-    //! ## Root Cause Analysis (Issue #253)
-    //!
-    //! The two execution paths serve fundamentally different purposes:
-    //!
-    //! ### LEGACY Path (`executor.rs:794-805`)
-    //! - **Purpose**: Synthetic INSERT/SELECT testing with in-memory storage
-    //! - **Key format**: `format!("user_key_{}", id)` - text-based synthetic keys
-    //! - **Limitation**: Only works for columns named "id" with Integer type
-    //! - **Problem**: Violates No-Heuristics Mandate (Issue #28)
-    //!
-    //! ### ADVANCED Path (`select_executor.rs` → `storage::partition_key_codec`)
-    //! - **Purpose**: Reading real Cassandra SSTable partition keys
-    //! - **Key format**: Schema-aware binary decoding via the canonical
-    //!   `storage::partition_key_codec::decode_partition_key_columns()`, which
-    //!   `select_executor::build_row_from_scan` delegates to (and the write engine's
-    //!   `PartitionKey::from_bytes` shares). Prior to Issue #586 this lived inline in
-    //!   `select_executor.rs` as `decode_partition_key_value()` and mishandled
-    //!   single-component TEXT keys.
-    //! - **Supports**: uuid, timeuuid, text, int, bigint, counter, blob, date, …
-    //! - **Correct for**: Real SSTable data
-    //!
-    //! ## Why the 8-Token Heuristic Exists
-    //!
-    //! `SELECT * FROM ks.table WHERE id = 1` has exactly 8 whitespace-separated tokens.
-    //! The routing hack sends ≤8 token queries with "WHERE id =" to LEGACY path to
-    //! maintain compatibility with synthetic INSERT testing. This is a workaround,
-    //! not a feature.
-    //!
-    //! ## Correct Behavior
-    //!
-    //! For SSTable reading, ADVANCED path is correct. The LEGACY INSERT feature
-    //! generates keys that will never match real Cassandra partition keys.
+    //! This is the source-level half of the fix's acceptance criterion #3; the
+    //! behavioral half (short `WHERE id =` point reads return populated
+    //! `metadata.columns`) lives in `issue_1750_simple_id_lookup_columns.rs`.
 
-    // Validate the key generation patterns exist in the codebase. These are
-    // intentionally light source-text probes that document the Issue #253
-    // divergence; they assert *architecture*, not a function's exact file, so a
-    // legitimate refactor (e.g. Issue #586 relocating partition-key decoding into
-    // the shared `partition_key_codec` module) doesn't falsely flag a regression.
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let read = |rel: &str| {
         std::fs::read_to_string(manifest.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
@@ -279,43 +244,43 @@ async fn test_key_generation_divergence_documented() {
         out
     };
 
-    // LEGACY path: synthetic `user_key_{id}` generation still lives in executor.rs.
-    let legacy_pattern = "user_key_";
-    let executor_content = read("src/query/executor.rs");
-    assert!(
-        executor_content.contains(legacy_pattern),
-        "LEGACY path should contain '{legacy_pattern}' pattern in executor.rs",
-    );
-
-    // ADVANCED path: schema-aware partition-key decoding is now the canonical
+    // ADVANCED path: schema-aware partition-key decoding is the canonical
     // `decode_partition_key_columns` in `partition_key_codec`, which
-    // `select_executor` delegates to (Issue #586). Assert both halves of that
-    // contract rather than grepping for the old inline `decode_partition_key_value`.
+    // `select_executor` delegates to (Issue #586).
     let codec_content = read("src/storage/partition_key_codec.rs");
     assert!(
         codec_content.contains("fn decode_partition_key_columns"),
-        "ADVANCED path: canonical decoder 'decode_partition_key_columns' should live in partition_key_codec.rs",
+        "canonical decoder 'decode_partition_key_columns' should live in partition_key_codec.rs",
     );
     let select_executor_content = read_module("src/query/select_executor");
     assert!(
         select_executor_content.contains("partition_key_codec::decode_partition_key_columns"),
-        "ADVANCED path: select_executor should delegate partition-key decoding to partition_key_codec",
+        "select_executor should delegate partition-key decoding to partition_key_codec",
     );
 
-    // Verify the routing hack exists
+    // No-heuristics enforcement: the retired routing hack must NOT reappear.
+    // Assert against the SELECT-routing region of `execute` specifically (the
+    // executable `if trimmed_cql.starts_with("SELECT")` gate + a small window
+    // after it) so an unrelated doc-comment mention of the historical heuristic
+    // elsewhere in the file cannot resurrect a false positive.
     let engine_content = read("src/query/engine.rs");
+    let gate_idx = engine_content
+        .find("if trimmed_cql.starts_with(\"SELECT\")")
+        .expect("engine.rs must still gate on a SELECT prefix");
+    let window_end = (gate_idx + 400).min(engine_content.len());
+    let routing_window = &engine_content[gate_idx..window_end];
     assert!(
-        engine_content.contains("WHERE id =") && engine_content.contains("count() <= 8"),
-        "Routing hack should exist in engine.rs (WHERE id = with 8-token check)"
+        !routing_window.contains("count() <= 8"),
+        "Issue #1750: the ≤8-token routing heuristic must NOT drive SELECT routing",
+    );
+    assert!(
+        routing_window.contains("return self.execute_select_query"),
+        "Issue #1750: every SELECT must route through the modern execute_select_query path",
     );
 
-    println!("Issue #253 ROOT CAUSE VERIFIED:");
-    println!("  LEGACY:   executor.rs contains 'user_key_' synthetic key pattern");
-    println!("  ADVANCED: select_executor.rs delegates to partition_key_codec::decode_partition_key_columns (Issue #586)");
-    println!("  HACK:     engine.rs contains 8-token routing workaround");
-    println!();
-    println!("  This IS a bug - LEGACY key generation violates No-Heuristics Mandate.");
-    println!("  The routing hack exists to maintain compatibility with broken INSERT feature.");
+    println!("Issue #1750 VERIFIED: no text heuristic routes SELECTs.");
+    println!("  ADVANCED: select_executor delegates to partition_key_codec::decode_partition_key_columns");
+    println!("  ROUTING:  engine.rs routes ALL SELECTs through execute_select_query (structure + schema)");
 }
 
 #[tokio::test]

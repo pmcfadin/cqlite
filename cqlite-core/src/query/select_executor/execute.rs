@@ -14,6 +14,7 @@
 //! this file can reach `mod.rs`'s private items directly — the logic, ordering,
 //! and error handling are unchanged.
 
+use super::schemaless_point::classify_schemaless_point_lookup;
 use super::{
     build_row_from_scan, classify_partition_lookup, collect_capped_materialized,
     column_info_from_type_str, honest_targeted_path, parse_table_id, project_expr_reshapes_row,
@@ -450,6 +451,24 @@ impl SelectExecutor {
             ),
         }
 
+        // Issue #1750: a SCHEMA-LESS `WHERE pk = <literal>` point read can be served
+        // by a key-byte-targeted seek ONLY when the equality column is a
+        // metadata-CONFIRMED sole partition key (single-component pk, no clustering
+        // keys, column absent from the authoritative non-key column names). Resolve
+        // that authoritative shape from the Statistics.db SerializationHeader (the
+        // metadata a schema-less reader HAS) and classify BY ELIMINATION — never a
+        // pk-name/text guess (#28). `None` (metadata unavailable, or the column is a
+        // non-pk column) keeps the honest full-scan path, which correctly matches
+        // regular-column equalities. Resolved only when there is no CQL schema and no
+        // WRITETIME/TTL metadata projection (the two branches below own those).
+        let schemaless_seek: Option<super::schemaless_point::SchemalessPointSeek> =
+            if schema_opt.is_none() && !context.projection_flags.include_cell_metadata {
+                let shape = self.storage.partition_key_shape(table).await;
+                classify_schemaless_point_lookup(predicates, shape.as_ref())
+            } else {
+                None
+            };
+
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
         let results = if context.projection_flags.include_cell_metadata {
@@ -522,6 +541,55 @@ impl SelectExecutor {
                     Some(row)
                 },
             )?
+        } else if let Some(seek) = schemaless_seek {
+            // Issue #1750 (regression fix, re-scoped): a SCHEMA-LESS `WHERE pk =
+            // <literal>` point read whose equality column is a metadata-CONFIRMED
+            // sole partition key. With no schema the full-scan path CANNOT
+            // reconstruct the partition-key column, so the shared per-row
+            // `evaluate_predicates` backstop below would reject EVERY row on the pk
+            // equality and return 0 rows — the regression from rerouting this read
+            // off the legacy `QueryExecutor` (which looked up by key bytes, never
+            // re-evaluating the predicate). Serve it here by the SAME
+            // key-byte-targeted seek the schema-aware Targeted arm uses
+            // (`scan_partition`), which is self-verifying: it returns ONLY rows whose
+            // raw partition key equals `seek.bytes`, so a wrong/absent key yields
+            // nothing (never another partition's rows). The key is encoded through
+            // the TYPED single-component codec for the pk's AUTHORITATIVE type (from
+            // the Statistics.db SerializationHeader `keyType`), so a parsed integer
+            // literal (`Value::BigInt`) builds the width Cassandra wrote — an `int`
+            // pk's 4-byte key, not an 8-byte one (roborev 3784 FINDING 2). The
+            // decision is made from AUTHORITATIVE metadata by ELIMINATION — never a
+            // pk-name/substring/token-count text guess (#28). A `WHERE <regular_col>
+            // = <literal>` does NOT reach here (the classifier returns `None` because
+            // the column is one of the authoritative non-key names), so it keeps the
+            // honest full-scan path and correctly matches the regular-column cell.
+            //
+            // Post-seek guard (roborev 3784 FINDING 1): the classifier admits the
+            // predicate column by ELIMINATION, which also admits a
+            // nonexistent/misspelled column whose literal happens to encode to a real
+            // partition's key. `finalize_schemaless_seek_row` reconstructs the sole
+            // pk column under its authoritative type/name and RE-EVALUATES the
+            // predicate, so such a column yields `Unknown` and rejects the row
+            // (correct 0 rows) — the pk-name predicate still matches. The schema-less
+            // `SELECT *` column metadata still comes from the first row in `execute`.
+            let (rows, engaged) = self
+                .storage
+                .scan_partition(table, &seek.bytes, None)
+                .await?;
+            let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
+            context.access_path = Some(path.clone());
+            crate::query::access_path::record(path);
+            context.scan_rows += rows.len() as u64;
+            context.rows_processed += rows.len() as u64;
+            let mut out = Vec::with_capacity(rows.len());
+            for (key, value) in rows {
+                if let Some(row) = super::schemaless_point::finalize_schemaless_seek_row(
+                    key, value, projection, predicates, &seek,
+                ) {
+                    out.push(row);
+                }
+            }
+            out
         } else {
             // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
             // partition-targeted lookup that prunes SSTables via bloom/BTI and only

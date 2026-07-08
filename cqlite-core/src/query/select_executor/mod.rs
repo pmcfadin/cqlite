@@ -45,6 +45,7 @@ mod limit_pushdown;
 mod lookup;
 mod predicate;
 mod row_build;
+mod schemaless_point;
 mod stream_agg;
 mod streaming;
 mod value_ops;

@@ -133,8 +133,9 @@ async fn get_partition_point_read_reports_partition_lookup_access_path() {
     };
     let literal = uuid_to_literal(&id);
 
-    // The exact shape the bench issues: a fully-constrained UUID-PK point read,
-    // projected (>8 tokens) so it routes through the modern SelectExecutor.
+    // The exact shape the bench issues: a fully-constrained UUID-PK point read.
+    // Since issue #1750 every SELECT routes through the modern SelectExecutor
+    // regardless of token count; the projected shape mirrors the bench.
     let res = db
         .execute(&format!(
             "SELECT id, name FROM {QUALIFIED_TABLE} WHERE id = {literal}"
@@ -150,8 +151,8 @@ async fn get_partition_point_read_reports_partition_lookup_access_path() {
 
     assert!(
         res.metadata.access_path.is_some(),
-        "Issue #1562: point read reported no access_path (None) — it fell into the legacy \
-         simple-id-lookup full-scan route. Keep the projected (>8-token) query shape.",
+        "Issue #1562: point read reported no access_path (None) — a modern-executor SELECT \
+         must always attach an access-path signal.",
     );
 
     assert_eq!(

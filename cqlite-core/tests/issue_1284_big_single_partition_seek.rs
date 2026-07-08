@@ -187,8 +187,9 @@ async fn assert_seek_engages_and_matches_full_scan(keyspace: &str, table: &str) 
     // signal reflects exactly this query. Routed through `execute_with_params`
     // (a bound `WHERE id = ?`) so it takes the SELECT-executor partition-targeted
     // pipeline — `targeted_partition_rows` → `scan_partition_clustering` →
-    // `scan_single_partition_clustering` — rather than the legacy ≤8-token
-    // simple-id point-lookup path, which is what this issue's seek lives on.
+    // `scan_single_partition_clustering` — which is what this issue's seek lives
+    // on. (Since issue #1750 a literal `WHERE id = <uuid>` takes the same modern
+    // pipeline; the bound form is used here for the parameter-binding coverage.)
     work_counters::reset();
     let seek = db
         .execute_with_params(

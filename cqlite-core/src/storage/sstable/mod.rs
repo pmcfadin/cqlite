@@ -99,6 +99,179 @@ use crate::{types::TableId, Config, Result, RowKey, ScanRow};
 /// so 3 levels provides a safety margin.
 pub(crate) const MAX_SSTABLE_SCAN_DEPTH: usize = 3;
 
+/// The AUTHORITATIVE partition-key shape of a table, derived schema-less from the
+/// SSTable Statistics.db SerializationHeader (issue #1750).
+///
+/// Carries ONLY facts Cassandra actually serialises: how many partition-key
+/// components and clustering keys the table has, and the REAL names of the
+/// non-key (regular + static) columns. The partition-/clustering-key column NAMES
+/// are deliberately absent — Cassandra never serialises them, so any pk-name a
+/// schema-less parser reports is a synthesised placeholder that must not drive
+/// routing decisions (no-heuristics mandate #28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionKeyShape {
+    /// Number of partition-key components (a single-component pk is `1`).
+    pub partition_key_count: usize,
+    /// Number of clustering-key columns.
+    pub clustering_key_count: usize,
+    /// The real names of the non-key (regular + static) columns.
+    pub non_key_column_names: std::collections::HashSet<String>,
+    /// For a single-component pk ONLY: the sole partition-key column's authoritative
+    /// CQL type (from the SerializationHeader `keyType`) and its header-carried name.
+    ///
+    /// The CQL type is authoritative — Cassandra serialises partition-key TYPES even
+    /// though it never serialises their NAMES (issue #1750, roborev 3784). It drives
+    /// the TYPED single-component key encoding so a schema-less `WHERE int_pk = 42`
+    /// builds the 4-byte `int` key Cassandra wrote, not an 8-byte `BigInt` key. The
+    /// `name` is the header's synthesised placeholder (`id` for uuid/timeuuid, else
+    /// `partition_key`) — NOT a trusted identity, only the label under which
+    /// `build_row_from_scan` reconstructs the pk column so the seeked row can be
+    /// re-validated against the predicate. `None` for a composite pk (the typed
+    /// single-component fast path does not apply) or when no reader exposed a
+    /// single-component pk type.
+    pub single_pk_component: Option<PartitionKeyComponent>,
+}
+
+/// The authoritative type + header-synthesised name of a single-component
+/// partition key (issue #1750, roborev 3784). See [`PartitionKeyShape`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionKeyComponent {
+    /// The header's synthesised pk column name (`id` / `partition_key`). NOT a
+    /// trusted identity — only a label for pk-column reconstruction.
+    pub name: String,
+    /// The authoritative CQL type of the pk component (from `keyType`).
+    pub cql_type: String,
+}
+
+/// Resolve the AUTHORITATIVE [`PartitionKeyShape`] by UNIONing the non-key column
+/// names across EVERY reader's SerializationHeader while requiring CONSISTENT key
+/// metadata (issue #1750, roborev 3786).
+///
+/// This is the pure core of [`SSTableManager::partition_key_shape`], factored out so
+/// the multi-reader union + consistency logic is unit-testable without SSTable
+/// binaries. `headers` is one `&[ColumnInfo]` per resolved reader for the table (an
+/// empty or non-header reader contributes nothing).
+///
+/// A multi-generation / schema-evolved table can add a REGULAR column in a LATER
+/// generation absent from an earlier generation's header. Using only the first
+/// header would omit that column from the non-key name set, so a
+/// `WHERE <later-gen-regular-col> = <val>` could be MISCLASSIFIED as a partition-key
+/// seek. To prevent that, the non-key names are UNIONed across all headers, and the
+/// partition-key count, clustering-key count, and single-component pk type+name must
+/// agree across every header that has partition-key columns.
+///
+/// The classifier proves a column IS the partition key by its ABSENCE from the unioned
+/// non-key set — which is sound ONLY if the union is COMPLETE, i.e. every reader's
+/// columns were visible. So this is fail-safe on incomplete metadata (roborev 3788):
+///
+/// Returns `None` when
+/// - there are no readers (fail-safe: caller full-scans), OR
+/// - ANY resolved reader lacks a usable partition-key shape — an empty/missing
+///   SerializationHeader, or a populated header exposing no partition-key column
+///   (we cannot see that reader's regular columns, so the union is incomplete and a
+///   column could be misclassified as the pk by absence), OR
+/// - the headers' key metadata is INCONSISTENT (pk-count / clustering-count / single-pk
+///   type+name disagreement — should never happen for one table, but if it did we
+///   cannot trust the shape).
+///
+/// `Some(shape)` is returned only when EVERY reader contributed a usable, consistent
+/// pk shape. All facts come from SerializationHeaders — no heuristics (#28).
+fn partition_key_shape_from_headers<'a>(
+    headers: impl IntoIterator<Item = &'a [crate::parser::header::ColumnInfo]>,
+) -> Option<PartitionKeyShape> {
+    // Key metadata the first header-bearing reader established; every subsequent
+    // header MUST match it or the whole shape is declined (inconsistent → None).
+    struct AgreedKeyShape {
+        partition_key_count: usize,
+        clustering_key_count: usize,
+        single_pk_component: Option<PartitionKeyComponent>,
+    }
+    let mut agreed: Option<AgreedKeyShape> = None;
+    let mut non_key_column_names = std::collections::HashSet::new();
+
+    for columns in headers {
+        // COMPLETE-UNION fail-safe (roborev 3788): the classifier proves a column is
+        // the partition key by its ABSENCE from `non_key_column_names`. That proof is
+        // only sound if we can see EVERY reader's columns. A reader with no usable
+        // SerializationHeader (empty columns) would silently drop its regular columns
+        // from the union, so a regular column present ONLY in that headerless reader
+        // could be misclassified as the pk. Decline the whole shape → the caller
+        // full-scans (always correct). No heuristics (#28).
+        if columns.is_empty() {
+            return None;
+        }
+        let mut partition_key_count = 0usize;
+        let mut clustering_key_count = 0usize;
+        // The sole partition-key component's authoritative CQL type + header-
+        // synthesised name (issue #1750, roborev 3784). Recorded for the FIRST pk
+        // column seen in THIS header; only surfaced when the pk is single-component.
+        // Cassandra serialises pk TYPES (authoritative) but not NAMES (`name` is a
+        // placeholder used only for pk reconstruction).
+        let mut first_pk_component: Option<PartitionKeyComponent> = None;
+        for col in columns {
+            match (col.is_primary_key, col.is_clustering) {
+                (true, false) => {
+                    if first_pk_component.is_none() {
+                        first_pk_component = Some(PartitionKeyComponent {
+                            name: col.name.clone(),
+                            cql_type: col.column_type.clone(),
+                        });
+                    }
+                    partition_key_count += 1;
+                }
+                (true, true) => clustering_key_count += 1,
+                (false, _) => {
+                    // Union non-key names across ALL readers (roborev 3786): a
+                    // regular column present only in a later generation must be
+                    // recognised, else it could be misread as the partition key.
+                    non_key_column_names.insert(col.name.clone());
+                }
+            }
+        }
+        // A SerializationHeader always names at least one partition-key component; a
+        // header that populated columns yet exposes NO partition-key column is not a
+        // usable pk shape. Under the complete-union fail-safe (roborev 3788) we cannot
+        // trust the union when any reader's pk shape is unknown, so decline → the
+        // caller full-scans rather than record a bogus all-zero shape.
+        if partition_key_count == 0 {
+            return None;
+        }
+        // The typed single-component pk type is authoritative ONLY for a single-
+        // component key; drop it for a composite pk (that fast path does not apply
+        // and a composite key isn't one raw value).
+        let single_pk_component = (partition_key_count == 1)
+            .then_some(first_pk_component)
+            .flatten();
+
+        match &agreed {
+            None => {
+                agreed = Some(AgreedKeyShape {
+                    partition_key_count,
+                    clustering_key_count,
+                    single_pk_component,
+                });
+            }
+            Some(prev) => {
+                // Require CONSISTENT key metadata across readers; any disagreement
+                // means we cannot trust the shape → decline (#28).
+                if prev.partition_key_count != partition_key_count
+                    || prev.clustering_key_count != clustering_key_count
+                    || prev.single_pk_component != single_pk_component
+                {
+                    return None;
+                }
+            }
+        }
+    }
+
+    agreed.map(|shape| PartitionKeyShape {
+        partition_key_count: shape.partition_key_count,
+        clustering_key_count: shape.clustering_key_count,
+        non_key_column_names,
+        single_pk_component: shape.single_pk_component,
+    })
+}
+
 /// SSTable file identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SSTableId(pub String);
@@ -1700,6 +1873,45 @@ impl SSTableManager {
         (readers, fully_qualified_match)
     }
 
+    /// Resolve the AUTHORITATIVE partition-key shape for `table_id` from the
+    /// SSTable readers' Statistics.db SerializationHeader (issue #1750).
+    ///
+    /// This is the metadata a schema-less reader DOES have without a CQL schema:
+    /// the SerializationHeader (surfaced on each reader's `header().columns`)
+    /// records, per column, the authoritative `is_primary_key` / `is_clustering`
+    /// flags and the REAL names of the regular + static (non-key) columns. It does
+    /// NOT record the partition-/clustering-key column NAMES — Cassandra never
+    /// serialises those (they live in `system_schema`, absent schema-less), so the
+    /// parser synthesises a placeholder pk name (`build_partition_key_columns`) that
+    /// MUST NOT be trusted as an identity.
+    ///
+    /// Returns [`PartitionKeyShape`] carrying ONLY authoritative facts: the count of
+    /// partition-key components, the count of clustering keys, and the set of real
+    /// non-key column names. The caller confirms a predicate column is the sole
+    /// partition key BY ELIMINATION (single pk component, zero clustering keys, and
+    /// the column absent from the non-key name set) — never by the synthesised name.
+    ///
+    /// The shape is resolved across ALL readers serving the table, not just the
+    /// first (issue #1750, roborev 3786). A multi-generation / schema-evolved table
+    /// can add a REGULAR column in a LATER generation that is absent from an earlier
+    /// generation's header. Consulting only the first reader would MISS that column
+    /// from the non-key name set, so a `WHERE <later-gen-regular-col> = <val>` could
+    /// be MISCLASSIFIED as a partition-key seek. To prevent that:
+    ///   * the non-key column names are UNIONed across every reader's header, and
+    ///   * the partition-key count, clustering-key count, and the single-component
+    ///     pk type+name must be CONSISTENT across all readers with a header.
+    ///
+    /// Returns `None` when no reader for the table exposes a SerializationHeader OR
+    /// when the readers' key metadata is INCONSISTENT (a pk-count / clustering-count
+    /// / single-pk type+name disagreement — which should never happen for one table
+    /// but, if it did, means we cannot trust the shape). Both are fail-safe: the
+    /// caller then keeps the honest full-scan path (all from SerializationHeaders,
+    /// no heuristics — #28).
+    pub async fn partition_key_shape(&self, table_id: &TableId) -> Option<PartitionKeyShape> {
+        let (readers, _) = self.resolve_reader_snapshot(table_id).await;
+        partition_key_shape_from_headers(readers.iter().map(|r| r.header().columns.as_slice()))
+    }
+
     /// Arm this manager's deterministic scan gate (issue #1591 test only).
     /// The next `scan` on this manager pauses at its per-reader I/O, signalling
     /// [`Gate::reached`](scan_gate::Gate) and blocking on
@@ -2827,6 +3039,178 @@ mod tests {
         assert!(
             out.recv().await.is_none(),
             "no items after the terminal error"
+        );
+    }
+
+    // ---- partition_key_shape_from_headers: multi-generation union (roborev 3786) ----
+
+    /// Build a minimal `ColumnInfo` for the shape-resolution unit tests.
+    fn col(
+        name: &str,
+        cql_type: &str,
+        is_primary_key: bool,
+        is_clustering: bool,
+    ) -> crate::parser::header::ColumnInfo {
+        crate::parser::header::ColumnInfo {
+            name: name.to_string(),
+            column_type: cql_type.to_string(),
+            is_primary_key,
+            key_position: None,
+            is_static: false,
+            is_clustering,
+            clustering_reversed: false,
+        }
+    }
+
+    /// roborev 3786: a REGULAR column present ONLY in a LATER generation must land in
+    /// the UNIONed non-key name set, so a `WHERE <later-gen-regular-col> = <val>` is
+    /// NOT misclassified as a partition-key seek. Two headers, single-component `int`
+    /// pk, zero clustering: gen-1 has `v1`, gen-2 adds `v2`.
+    #[test]
+    fn partition_key_shape_unions_later_generation_regular_column() {
+        let gen1 = vec![
+            col("partition_key", "int", true, false),
+            col("v1", "text", false, false),
+        ];
+        let gen2 = vec![
+            col("partition_key", "int", true, false),
+            col("v1", "text", false, false),
+            col("v2", "text", false, false),
+        ];
+        let shape = partition_key_shape_from_headers([gen1.as_slice(), gen2.as_slice()])
+            .expect("consistent headers must resolve a shape");
+        assert_eq!(shape.partition_key_count, 1);
+        assert_eq!(shape.clustering_key_count, 0);
+        // The later-generation regular column IS in the unioned non-key set — so the
+        // classifier's by-elimination check will NOT treat it as the partition key.
+        assert!(
+            shape.non_key_column_names.contains("v2"),
+            "later-gen regular column must be in the unioned non-key set (roborev 3786)",
+        );
+        assert!(shape.non_key_column_names.contains("v1"));
+        assert_eq!(
+            shape
+                .single_pk_component
+                .as_ref()
+                .map(|c| c.cql_type.as_str()),
+            Some("int"),
+        );
+
+        // The misclassification the fix prevents: had we used only gen-1, `v2` would
+        // be absent from the non-key set and thus admitted by elimination as the pk.
+        let gen1_only =
+            partition_key_shape_from_headers([gen1.as_slice()]).expect("single header resolves");
+        assert!(
+            !gen1_only.non_key_column_names.contains("v2"),
+            "gen-1 alone MISSES v2 — this is exactly the multi-gen bug the union fixes",
+        );
+    }
+
+    /// Inconsistent key metadata across readers (a pk-count disagreement) declines
+    /// the shape → `None` → the caller full-scans (fail-safe, no heuristics).
+    #[test]
+    fn partition_key_shape_declines_inconsistent_readers() {
+        // gen-1: single-component pk; gen-2: composite (2-component) pk.
+        let single = vec![
+            col("pk", "int", true, false),
+            col("v", "text", false, false),
+        ];
+        let composite = vec![
+            col("pk_a", "int", true, false),
+            col("pk_b", "int", true, false),
+            col("v", "text", false, false),
+        ];
+        assert_eq!(
+            partition_key_shape_from_headers([single.as_slice(), composite.as_slice()]),
+            None,
+            "a pk-count disagreement across readers must decline (→ full-scan)",
+        );
+
+        // A clustering-count disagreement likewise declines.
+        let clustered = vec![
+            col("pk", "int", true, false),
+            col("ck", "int", true, true),
+            col("v", "text", false, false),
+        ];
+        assert_eq!(
+            partition_key_shape_from_headers([single.as_slice(), clustered.as_slice()]),
+            None,
+            "a clustering-count disagreement across readers must decline",
+        );
+
+        // A single-pk TYPE disagreement declines too.
+        let single_bigint = vec![
+            col("pk", "bigint", true, false),
+            col("v", "text", false, false),
+        ];
+        assert_eq!(
+            partition_key_shape_from_headers([single.as_slice(), single_bigint.as_slice()]),
+            None,
+            "a single-pk type disagreement across readers must decline",
+        );
+    }
+
+    /// No header with a partition-key column → `None` (fail-safe). No readers, or an
+    /// empty header, or a header exposing no pk column all decline (never a zero-key
+    /// shape).
+    #[test]
+    fn partition_key_shape_none_without_usable_header() {
+        assert_eq!(partition_key_shape_from_headers(std::iter::empty()), None);
+        let empty: Vec<crate::parser::header::ColumnInfo> = vec![];
+        assert_eq!(partition_key_shape_from_headers([empty.as_slice()]), None);
+
+        // A populated header that names no partition-key column is not a usable pk
+        // shape either → decline (complete-union fail-safe, roborev 3788).
+        let no_pk = vec![col("v", "text", false, false)];
+        assert_eq!(partition_key_shape_from_headers([no_pk.as_slice()]), None);
+    }
+
+    /// COMPLETE-UNION fail-safe (roborev 3788): if ANY resolved reader lacks a usable
+    /// header, the union of non-key names is INCOMPLETE, so we cannot prove a column is
+    /// the pk by its absence. One headerless reader among several usable ones ⇒ decline
+    /// (`None`) so the classifier full-scans instead of misclassifying a regular column
+    /// (present only in the headerless reader) as a partition-key seek.
+    #[test]
+    fn partition_key_shape_declines_when_any_reader_lacks_usable_header() {
+        let usable = vec![
+            col("partition_key", "int", true, false),
+            col("v1", "text", false, false),
+        ];
+        let headerless: Vec<crate::parser::header::ColumnInfo> = vec![];
+
+        // Headerless reader FIRST among several.
+        assert_eq!(
+            partition_key_shape_from_headers([headerless.as_slice(), usable.as_slice()]),
+            None,
+            "a leading headerless reader must decline the whole shape (→ full-scan)",
+        );
+        // Headerless reader LAST — the union is still incomplete, still declines.
+        assert_eq!(
+            partition_key_shape_from_headers([usable.as_slice(), headerless.as_slice()]),
+            None,
+            "a trailing headerless reader must decline the whole shape (→ full-scan)",
+        );
+        // Headerless reader BETWEEN two usable ones.
+        let usable2 = vec![
+            col("partition_key", "int", true, false),
+            col("v1", "text", false, false),
+            col("v2", "text", false, false),
+        ];
+        assert_eq!(
+            partition_key_shape_from_headers([
+                usable.as_slice(),
+                headerless.as_slice(),
+                usable2.as_slice(),
+            ]),
+            None,
+            "any headerless reader among usable ones declines the shape",
+        );
+
+        // Control: the SAME usable readers WITHOUT the headerless one DO resolve — so
+        // it is specifically the headerless reader that forces the fail-safe decline.
+        assert!(
+            partition_key_shape_from_headers([usable.as_slice(), usable2.as_slice()]).is_some(),
+            "usable readers alone must still resolve (the fix only declines on a gap)",
         );
     }
 }
