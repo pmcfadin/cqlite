@@ -421,10 +421,16 @@ impl SSTableReader {
             // `lookup_partition_via_bti_trie` is the single common path that emits
             // READ_BLOOM_CHECKS for the BTI presence check — do NOT emit again here
             // or the metric would be double counted.
-            return matches!(
+            let present = matches!(
                 self.lookup_partition_via_bti_trie(partition_key),
                 Ok(Some(_)) | Err(_)
             );
+            if !present {
+                // Definitive trie miss → this SSTable is pruned from the read
+                // (issue #2163).
+                self.emit_sstable_pruned();
+            }
+            return present;
         }
         // BIG: only record READ_BLOOM_CHECKS when a bloom filter actually exists.
         // With no filter loaded we cannot prune, so we conservatively return `true`
@@ -447,10 +453,30 @@ impl SSTableReader {
                         ),
                     ],
                 );
+                if !present {
+                    // Bloom `might_contain == false` is a definitive negative →
+                    // this SSTable is pruned from the read (issue #2163).
+                    self.emit_sstable_pruned();
+                }
                 present
             }
             None => true,
         }
+    }
+
+    /// Emit `cqlite.read.sstables_pruned` for one SSTable excluded from a read by
+    /// a presence-oracle definitive negative (issue #2163). Carries the bounded
+    /// `cqlite.sstable.format` (`"big"`/`"bti"`); no-op when observability is off.
+    fn emit_sstable_pruned(&self) {
+        use crate::observability::{self as obs, catalog};
+        obs::add_counter(
+            catalog::READ_SSTABLES_PRUNED,
+            1,
+            &[(
+                catalog::attr::SSTABLE_FORMAT,
+                self.sstable_format_label().into(),
+            )],
+        );
     }
 
     /// `true` when this reader was opened on a BTI ("da") SSTable (its
@@ -476,10 +502,18 @@ impl SSTableReader {
     /// any trie parse error is treated conservatively as "maybe present".
     pub fn might_contain_partition_encoded(&self, partition_key: &[u8], encoded: &[u8; 9]) -> bool {
         if self.bti_partitions_db.is_some() {
-            return matches!(
+            let present = matches!(
                 self.lookup_partition_via_bti_trie_encoded(partition_key, encoded),
                 Ok(Some(_)) | Err(_)
             );
+            if !present {
+                // Definitive trie miss on the candidate-prune path → SSTable pruned
+                // (issue #2163). The BIG branch below delegates to
+                // `might_contain_partition`, which emits its own prune, so there is
+                // no double count.
+                self.emit_sstable_pruned();
+            }
+            return present;
         }
         // BIG: no BTI encoding to hoist — the bloom filter hashes the raw key.
         self.might_contain_partition(partition_key)

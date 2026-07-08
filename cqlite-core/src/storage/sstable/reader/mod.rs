@@ -30,6 +30,9 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+// Opt-in, default-off presence-oracle false-negative verification switch
+// (issue #2163). Consulted by the presence-oracle read path.
+pub mod presence_verification;
 // One format-tagged partition-location façade (issue #1599 / G3): `locate` /
 // `locate_encoded` compose the C5 range short-circuit + per-format offset resolve.
 mod partition_locator;

@@ -205,20 +205,74 @@ impl SSTableReader {
         // the reader's would otherwise cause false negatives and drop live
         // partitions (the writer→reader roundtrip #909 must read back). It also
         // guarantees a BTI get() can never fall through to scan_for_key.
-        if self.bti_partitions_db.is_some() {
-            return self
-                .bti_point_lookup(table_id, key, fully_qualified_match)
-                .await;
-        }
+        let result = if self.bti_partitions_db.is_some() {
+            self.bti_point_lookup(table_id, key, fully_qualified_match)
+                .await
+        } else {
+            // BIG ("nb"/uncompressed) readers: raw-key Index.db resolve +
+            // covering-chunk seek (issue #1572). The bloom pre-check, the fast
+            // Index.db-resolved chunk-targeted decode, and the index-less
+            // `scan_for_key` fallback all live in `big_point`.
+            self.big_get_with_resolution(table_id, key, fully_qualified_match)
+                .await
+        };
 
-        // BIG ("nb"/uncompressed) readers: raw-key Index.db resolve + covering-chunk
-        // seek (issue #1572). The bloom pre-check, the fast Index.db-resolved
-        // chunk-targeted decode, and the index-less `scan_for_key` fallback all live
-        // in `big_point`. Before #1572 this path called `self.index.find_entry()`
-        // with raw key bytes against a *digest*-keyed map (always a miss, issue
-        // #517), so every lookup fell through to a whole-file `scan_for_key`.
-        self.big_get_with_resolution(table_id, key, fully_qualified_match)
-            .await
+        // Issue #2163: opt-in presence-oracle false-negative verification. On an
+        // absent point read (the oracle's negative), when the default-off switch is
+        // enabled, an AUTHORITATIVE confirmation scan proves the negative truthful;
+        // a contradiction increments `cqlite.read.bloom.false_negatives`. Off by
+        // default → this whole block is skipped and the read costs nothing extra
+        // (in particular a BTI point read still never reaches `scan_for_key`).
+        if let Ok(None) = &result {
+            if super::presence_verification::enabled() {
+                let _ = self
+                    .verify_presence_oracle_negative(table_id, key.as_bytes())
+                    .await;
+            }
+        }
+        result
+    }
+
+    /// Authoritatively verify a presence-oracle "definitely absent" verdict for
+    /// `partition_key` in THIS SSTable (issue #2163, opt-in / default-off).
+    ///
+    /// When the [`presence_verification`](super::presence_verification) switch is
+    /// OFF (the default) this returns `Ok(false)` WITHOUT scanning — zero cost.
+    /// When ON, it runs an AUTHORITATIVE sequential scan of this SSTable's own
+    /// Data.db for the key (never a heuristic inference from byte patterns — the
+    /// no-heuristics mandate). If the scan FINDS the key, the oracle produced a
+    /// false negative: `cqlite.read.bloom.false_negatives` increments once with
+    /// this SSTable's bounded `cqlite.sstable.format`, a warning is logged, and
+    /// `Ok(true)` is returned. A genuine absence returns `Ok(false)` and never
+    /// emits. Under a correct bloom/BTI-trie the counter stays 0.
+    pub async fn verify_presence_oracle_negative(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+    ) -> Result<bool> {
+        use crate::observability::{self as obs, catalog};
+
+        if !super::presence_verification::enabled() {
+            return Ok(false);
+        }
+        // Authoritative confirmation: walk this SSTable's Data.db for the key.
+        let key = RowKey::from(partition_key.to_vec());
+        let found = self.scan_for_key(table_id, &key).await?.is_some();
+        if found {
+            let format = self.sstable_format_label();
+            obs::add_counter(
+                catalog::READ_BLOOM_FALSE_NEGATIVES,
+                1,
+                &[(catalog::attr::SSTABLE_FORMAT, format.into())],
+            );
+            warn!(
+                sstable_format = format,
+                partition_key_len = partition_key.len(),
+                "presence-oracle false negative: a key reported definitely absent was found by an \
+                 authoritative scan — the bloom/BTI-trie is unsound for this SSTable"
+            );
+        }
+        Ok(found)
     }
 
     /// Stitch all compressed chunks and parse as a single buffer (V5CompressedLegacy)
