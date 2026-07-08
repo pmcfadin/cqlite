@@ -48,10 +48,15 @@ mkdir -p "$stub"
 # python3: satisfies `python3 -m venv <dir>` by creating <dir>/bin + an EMPTY
 # activate (no PATH mutation → the verify `python -c` stays PATH-shadowed by our
 # stub). It deliberately does NOT create <dir>/bin/python, so the reuse guard is
-# false and behavior is driven solely by the counter (deterministic).
+# false and behavior is driven solely by the counter (deterministic) UNLESS a
+# scenario pre-populates <venv>/bin/python itself (the reuse scenario below).
+# Also increments PBV_TEST_PY3_COUNTER so the reuse scenario can assert `python3
+# -m venv` (i.e. a rebuild) was NEVER invoked.
 cat >"$stub/python3" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "-m" ] && [ "${2:-}" = "venv" ]; then
+  n=0; [ -f "${PBV_TEST_PY3_COUNTER:-/dev/null}" ] && n=$(cat "$PBV_TEST_PY3_COUNTER" 2>/dev/null || echo 0)
+  n=$((n + 1)); [ -n "${PBV_TEST_PY3_COUNTER:-}" ] && printf '%s' "$n" >"$PBV_TEST_PY3_COUNTER"
   d="${3:?venv dir}"
   mkdir -p "$d/bin"
   : >"$d/bin/activate"
@@ -67,10 +72,16 @@ exit 0
 EOF
 
 # maturin: `develop ...` exits ${MATURIN_RC:-0}. A non-zero here is a real BUILD
-# failure (contract exit 2), NOT the import miss we self-heal.
+# failure (contract exit 2), NOT the import miss we self-heal. Also increments
+# PBV_TEST_MATURIN_COUNTER so the reuse scenario can assert it ran AT MOST ONCE
+# (no needless rebuild-and-rebuild on an already-healthy venv).
 cat >"$stub/maturin" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = "develop" ]; then exit "${MATURIN_RC:-0}"; fi
+if [ "${1:-}" = "develop" ]; then
+  n=0; [ -f "${PBV_TEST_MATURIN_COUNTER:-/dev/null}" ] && n=$(cat "$PBV_TEST_MATURIN_COUNTER" 2>/dev/null || echo 0)
+  n=$((n + 1)); [ -n "${PBV_TEST_MATURIN_COUNTER:-}" ] && printf '%s' "$n" >"$PBV_TEST_MATURIN_COUNTER"
+  exit "${MATURIN_RC:-0}"
+fi
 exit 0
 EOF
 
@@ -108,6 +119,75 @@ run_scenario() {
   RC=$?
   COUNTER=0; [ -f "$counter" ] && COUNTER=$(cat "$counter")
 }
+
+# run_reuse_scenario: pre-populate a venv that ALREADY has a usable
+# <venv>/bin/python marker (so `_pbv_setup`'s `[ -x "$venv/bin/python" ]` reuse
+# guard is TRUE) and where the import verifies on the FIRST attempt. Also drops
+# a sentinel file directly in the venv dir so a `rm -rf "$venv"` (the self-heal
+# teardown) would be detectable by its absence. Sets RC / OUT / COUNTER (import
+# attempts) / PY3_COUNTER (venv-creation calls) / MATURIN_COUNTER / SENTINEL_OK.
+run_reuse_scenario() {
+  local venv="$tmp/venv-reuse-$RANDOM$RANDOM"
+  local counter="$tmp/counter-$RANDOM$RANDOM"
+  local py3_counter="$tmp/py3counter-$RANDOM$RANDOM"
+  local maturin_counter="$tmp/maturincounter-$RANDOM$RANDOM"
+  rm -rf "$venv"; rm -f "$counter" "$py3_counter" "$maturin_counter"
+  mkdir -p "$venv/bin"
+  : >"$venv/bin/python"; chmod +x "$venv/bin/python"
+  : >"$venv/bin/activate"
+  : >"$venv/SENTINEL"
+  OUT=$(
+    PATH="$stub:$PATH" \
+    PBV_TEST_COUNTER="$counter" \
+    PBV_TEST_PY3_COUNTER="$py3_counter" \
+    PBV_TEST_MATURIN_COUNTER="$maturin_counter" \
+    PBV_TEST_PASS_ON_ATTEMPT=1 \
+    MATURIN_RC=0 \
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
+  )
+  RC=$?
+  COUNTER=0; [ -f "$counter" ] && COUNTER=$(cat "$counter")
+  PY3_COUNTER=0; [ -f "$py3_counter" ] && PY3_COUNTER=$(cat "$py3_counter")
+  MATURIN_COUNTER=0; [ -f "$maturin_counter" ] && MATURIN_COUNTER=$(cat "$maturin_counter")
+  SENTINEL_OK=0; [ -f "$venv/SENTINEL" ] && SENTINEL_OK=1
+}
+
+# ---- (e) venv REUSE: an already-healthy venv verifies on attempt 1 → NO rebuild,
+#     NO `python3 -m venv` (re)creation, `maturin develop` invoked at most once,
+#     no self-heal message, and the pre-existing venv (sentinel) survives —
+#     preserving the persistent-venv speed optimization (a stated AC).
+run_reuse_scenario
+if [ "$RC" -eq 0 ]; then
+  ok "reuse: already-healthy venv verifies on first attempt → exit 0"
+else
+  bad "reuse: expected exit 0, got $RC"
+  echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
+fi
+if [ "$COUNTER" -eq 1 ]; then
+  ok "reuse: exactly ONE import-verify attempt (no rebuild)"
+else
+  bad "reuse: expected 1 import-verify attempt, got $COUNTER"
+fi
+if [ "$PY3_COUNTER" -eq 0 ]; then
+  ok "reuse: python3 -m venv NEVER invoked (existing venv/bin/python reused, not recreated)"
+else
+  bad "reuse: expected 0 'python3 -m venv' calls (venv should be reused), got $PY3_COUNTER"
+fi
+if [ "$MATURIN_COUNTER" -eq 1 ]; then
+  ok "reuse: maturin develop invoked exactly ONCE (no needless rebuild-and-rebuild)"
+else
+  bad "reuse: expected exactly 1 'maturin develop' call, got $MATURIN_COUNTER"
+fi
+if [ "$SENTINEL_OK" -eq 1 ]; then
+  ok "reuse: the pre-existing venv survives (no rm -rf teardown of a healthy venv)"
+else
+  bad "reuse: the venv sentinel was removed — a healthy venv was torn down unnecessarily"
+fi
+if printf '%s\n' "$OUT" | grep -qF "self-healing with a clean-venv rebuild"; then
+  bad "reuse: unexpectedly emitted the self-heal notice for an already-healthy venv"
+else
+  ok "reuse: no self-heal notice emitted (nothing to heal)"
+fi
 
 # ---- (d) healthy first-try: import verifies immediately → PASS, no rebuild -----
 run_scenario 1 0
