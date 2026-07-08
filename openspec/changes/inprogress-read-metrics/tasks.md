@@ -30,7 +30,7 @@ merge-on-green → finalize).
   slot table (mirror the `RPC_METHODS` pattern in `obs.rs`); record `RPC_PHASE_DURATION` + a span event
   at each transition, driven from `do_get_inner`/`do_get_setup` (`cqlite-flight/src/service.rs:391/468`)
   and the `merge_setup`→`stream` boundary in `spawn_streaming` / `producer.rs`. (read-progress-observability)
-- [ ] 2.2 Red-then-green: `capture_spans`/`MetricsCapture` test asserting a `merge_setup`-tagged
+- [x] 2.2 Red-then-green: `capture_spans`/`MetricsCapture` test asserting a `merge_setup`-tagged
   `cqlite.rpc.phase.duration` sample (and span event under `flight.do_get`) is recorded before the
   terminal batch; a bounded-attribute test asserting every phase value ∈ the closed set and no
   ticket/key/query attribute is present; an ordering test (`resolve`→`merge_setup`→`stream`, no
@@ -43,16 +43,16 @@ merge-on-green → finalize).
   flush replacing the single `execute.rs:343` emission. Add a feature-independent progress-observation
   seam (a `Relaxed`-atomic delta-flush counter, analogous to `StreamProbe`) so the increment count is
   testable without depending on OTel exporter aggregation. (read-progress-observability)
-- [ ] 3.2 Red-then-green: through the public Flight full-scan merge surface, assert the progress seam
+- [x] 3.2 Red-then-green: through the public Flight full-scan merge surface, assert the progress seam
   records ≥2 delta flushes over a threshold-crossing scan (main records exactly 1) and the summed deltas
   equal the total; a `MetricsCapture` test asserting the incremental total equals the single-shot total
   and the `access_path` attribute set is unchanged. (read-progress-observability)
 
 ## Stage 4 — cross-cutting invariants
-- [ ] 4.1 Test: no new unbounded attribute — collect all metrics from a streaming `do_get` + core scan
+- [x] 4.1 Test: no new unbounded attribute — collect all metrics from a streaming `do_get` + core scan
   and assert every attribute key/value is bounded (existing `catalog::attr` or the new `cqlite.rpc.phase`).
   (read-progress-observability)
-- [ ] 4.2 Test/verify: feature-off build (`--no-default-features` path that excludes `observability`)
+- [x] 4.2 Test/verify: feature-off build (`--no-default-features` path that excludes `observability`)
   compiles the new emission as no-ops and links no OpenTelemetry; confirm no new env var / CLI flag /
   ticket field / public method was added. (read-progress-observability)
 - [ ] 4.3 If any behaviour is user-facing, update CLAUDE.md + the `agents-developing/` observability
