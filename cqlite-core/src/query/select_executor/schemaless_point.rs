@@ -4,6 +4,30 @@
 //! classifier file does not grow. This holds ONLY the structural schema-less
 //! point-read recogniser + its single-component key encoder; the schema-aware
 //! `classify_partition_lookup` stays in `lookup.rs`.
+//!
+//! # Known schemaless-seek limitations (tracked in #TBD)
+//!
+//! These are ACCEPTED limitations of the schema-less single-component seek path.
+//! Each is fail-SAFE (it yields the correct 0 rows or declines to a full scan, never
+//! a wrong non-empty answer) and none is fixed here — they are documented so the
+//! follow-up issue and the next reader are grounded:
+//!
+//! 1. **WRITETIME()/TTL() projection + schemaless pk read → 0 rows.** When a
+//!    `WHERE pk = <lit>` also projects cell metadata (WRITETIME/TTL), the seek path
+//!    is NOT taken (`execute.rs` gates it on `!include_cell_metadata`) and the
+//!    metadata full-scan cannot reconstruct the partition-key column schema-less, so
+//!    the post-scan predicate backstop rejects every row → 0 rows
+//!    (`execute.rs:465`).
+//! 2. **Post-seek guard false-negative for a TIMESTAMP pk (and any seek-firing type
+//!    outside the numeric `values_equal`/`as_f64` set) with a numeric literal.** The
+//!    seek finds the partition, but the post-seek guard's
+//!    `values_equal(Timestamp, BigInt)` is `false`, so the valid row is rejected →
+//!    0 rows. The seek still self-verifies on the raw key bytes, so this is a
+//!    false-negative (0 rows), never a wrong row.
+//! 3. **`coerce_value_for_comparator` has no Date/Varint/Decimal arm for numeric
+//!    literals — by design.** Those types decline via a serialize error rather than
+//!    risk a wrong-width key, so a `WHERE date_pk = <numeric_lit>` full-scans (safe)
+//!    instead of taking the typed seek.
 
 use super::super::select_optimizer::SSTablePredicate;
 use crate::storage::sstable::PartitionKeyShape;
