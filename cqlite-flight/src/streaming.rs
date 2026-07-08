@@ -470,7 +470,9 @@ impl Stream for MeteredDoGetStream {
                 // Feature-independent progress seam (no-op OTel notwithstanding):
                 // publish the running rows and bump the per-batch emission count so
                 // a slow-consumer test can observe forward progress mid-stream.
-                this.probe.progressed_rows.store(this.rows, Ordering::Relaxed);
+                this.probe
+                    .progressed_rows
+                    .store(this.rows, Ordering::Relaxed);
                 this.probe.emitted_batches.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Some(Ok(batch)))
             }

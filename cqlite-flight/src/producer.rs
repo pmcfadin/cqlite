@@ -1059,7 +1059,12 @@ mod tests {
         let err = {
             let mut sink = CollectSink(&mut batches);
             producer
-                .drive_merge(&mut counting, &cancelled, &mut sink, &ScanProgress::default())
+                .drive_merge(
+                    &mut counting,
+                    &cancelled,
+                    &mut sink,
+                    &ScanProgress::default(),
+                )
                 .expect_err("pre-cancelled merge aborts")
         };
 
