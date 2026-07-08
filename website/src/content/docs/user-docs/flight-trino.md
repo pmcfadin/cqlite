@@ -114,9 +114,11 @@ Arrow Flight RPC surface:
 | `GetFlightInfo` | Returns the Arrow schema (derived from the ticket DDL) plus an endpoint/ticket. |
 | `GetSchema` | Returns just the Arrow schema for a ticket. |
 | `DoGet` | Streams the merged, filtered table as Arrow record batches. |
+| `DoAction("table_stats")` / `ListActions` | Returns per-table aggregate statistics (Σ live rows, Σ partition count, SSTable count) that the Trino connector uses to drive aggregation-pushdown planning. |
 
-All write/exchange RPCs (`DoPut`, `DoExchange`, `DoAction`, …) are unimplemented —
-it is a read-only server.
+The only supported action is `table_stats`; every other action type is
+`unimplemented`. All write/exchange RPCs (`DoPut`, `DoExchange`, `Handshake`, …)
+are likewise unimplemented — it is a read-only server.
 
 The ticket is a small JSON document. Required fields name the table and carry the
 DDL used to build the schema for the merge; the rest are optional pushdowns:
@@ -129,6 +131,7 @@ DDL used to build the schema for the merge; the rest are optional pushdowns:
   "snapshot": "cqlite-abc",            // optional; null = live data dir
   "token_start": -3074457345618258602, // optional, exclusive  (range is (start, end])
   "token_end":   3074457345618258602,  // optional, inclusive
+  "wraparound": false,                 // optional; true when token_start > token_end (range wraps the ring)
   "columns": ["pk", "v"],              // optional projection; null = all columns
   "predicates": [                      // optional; AND-combined, evaluated per row
     { "column": "v", "op": "Gt", "value": 10 }
@@ -143,7 +146,9 @@ DDL used to build the schema for the merge; the rest are optional pushdowns:
   Operands are typed by the column's CQL type.
 - **`token_start` / `token_end`** filter on the token already stored on each
   partition key — no Murmur3 computation. This is how the Trino connector assigns
-  a token range to each split.
+  a token range to each split. Set **`wraparound`** to `true` for a range that
+  crosses the ring's minimum token (`token_start > token_end`); it defaults to
+  `false`.
 
 ### PyArrow Flight example
 
@@ -203,10 +208,10 @@ classloader directory, so the connector jar must sit alongside all of its runtim
 dependencies. You assemble that *directory of jars* and drop it into Trino's
 plugin path (`/usr/lib/trino/plugin/cqlite_flight`).
 
-**From this repo:**
+**From this repo** (the Gradle wrapper lives in `trino-connector/`):
 
 ```bash
-./gradlew installPlugin   # produces build/plugin/cqlite_flight/
+cd trino-connector && ./gradlew installPlugin   # produces build/plugin/cqlite_flight/
 ```
 
 **From the published Maven Central artifact** (`in.mcfad:cqlite-trino:<version>`),
