@@ -26,7 +26,9 @@ use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
 use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
-use cqlite_core::query::{build_row_from_scan, AccessPath, ColumnInfo, QueryRow};
+use cqlite_core::query::{
+    build_row_from_scan_cached, AccessPath, ColumnInfo, PartitionKeyCache, QueryRow,
+};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
@@ -658,6 +660,9 @@ impl MergeProducer {
         let mut meter = ScanProgressMeter::new(progress, AccessPath::FullScan.label());
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
+        // Issue #1817: one partition-key decode cache for the whole merge; each
+        // partition's rows arrive consecutively, so its key decodes once.
+        let mut pk_cache = PartitionKeyCache::default();
 
         'partitions: loop {
             if cancel.is_cancelled() {
@@ -679,7 +684,7 @@ impl MergeProducer {
                 // Build the FULL row so predicates can reference any column, even
                 // one projected out of the output. Output projection is applied
                 // separately via `self.columns` during Arrow conversion.
-                let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
+                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache) else {
                     continue;
                 };
                 // Count a row materialised/examined by the scan (BEFORE the
@@ -757,6 +762,9 @@ impl MergeProducer {
         cancel: &CancelFlag,
         state: &mut crate::agg::AggState,
     ) -> Result<(), ProducerError> {
+        // Issue #1817: one partition-key decode cache for the whole aggregate
+        // merge; each partition's rows arrive consecutively, so its key decodes once.
+        let mut pk_cache = PartitionKeyCache::default();
         loop {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
@@ -771,7 +779,7 @@ impl MergeProducer {
                 }
             }
             for entry in rows {
-                let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
+                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache) else {
                     continue;
                 };
                 if let Some(filter) = &self.spec.filter {
@@ -790,7 +798,12 @@ impl MergeProducer {
     ///
     /// The row carries ALL columns (no projection) so predicate evaluation can
     /// reference any column; output projection is applied later via `self.columns`.
-    fn entry_to_row(&self, partition_key: &[u8], row_data: RowData) -> Option<QueryRow> {
+    fn entry_to_row(
+        &self,
+        partition_key: &[u8],
+        row_data: RowData,
+        pk_cache: &mut PartitionKeyCache,
+    ) -> Option<QueryRow> {
         let cells = match row_data {
             RowData::Live { cells } => cells,
             // Whole-row deletion: suppress from output.
@@ -810,7 +823,16 @@ impl MergeProducer {
             .collect();
 
         let key = RowKey::new(partition_key.to_vec());
-        build_row_from_scan(key, ScanRow::Row(row_cells), &[], Some(&self.schema))
+        // Issue #1817: reuse the caller's per-merge partition-key decode cache so a
+        // partition's rows (emitted consecutively by the k-way merger) decode the
+        // key once, not once per row. Output is byte-identical.
+        build_row_from_scan_cached(
+            key,
+            ScanRow::Row(row_cells),
+            &[],
+            Some(&self.schema),
+            pk_cache,
+        )
     }
 
     /// Merge `paths` WITHOUT the input prune, relying only on the per-partition

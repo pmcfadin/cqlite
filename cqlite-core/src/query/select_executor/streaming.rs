@@ -6,8 +6,9 @@
 //! directly; logic, ordering, and error handling are unchanged.
 
 use super::{
-    build_row_from_scan, classify_partition_lookup, evaluate_predicates, honest_targeted_path,
-    partition_key_digest, sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome,
+    build_row_from_scan_cached, classify_partition_lookup, evaluate_predicates,
+    honest_targeted_path, partition_key_digest, sort_rows_by_token, validate_token_predicates,
+    PartitionKeyCache, PartitionLookupOutcome,
 };
 use super::{
     AccessPath, ExecutionStep, QueryRow, Result, SelectExecutor, StorageEngine, TableId,
@@ -106,11 +107,19 @@ impl SelectExecutor {
                             AccessPath::StreamingPartitionLookup,
                             engaged,
                         ));
+                        // Issue #1817: hoist the partition-key decode across a
+                        // partition's rows (a lookup returns one partition's rows).
+                        let mut pk_cache = PartitionKeyCache::default();
                         for (key, value) in rows {
                             let part_sig =
                                 per_partition_limit.map(|_| partition_key_digest(&key.0));
-                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
-                            else {
+                            let Some(row) = build_row_from_scan_cached(
+                                key,
+                                value,
+                                projection,
+                                schema_opt,
+                                &mut pk_cache,
+                            ) else {
                                 continue;
                             };
                             if !evaluate_predicates(&row, predicates)? {
@@ -175,11 +184,20 @@ impl SelectExecutor {
                             all_engaged,
                         ));
                         sort_rows_by_token(&mut combined);
+                        // Issue #1817: hoist the partition-key decode across a
+                        // partition's rows (combined is token-sorted, so a
+                        // partition's rows are contiguous).
+                        let mut pk_cache = PartitionKeyCache::default();
                         for (key, value) in combined {
                             let part_sig =
                                 per_partition_limit.map(|_| partition_key_digest(&key.0));
-                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
-                            else {
+                            let Some(row) = build_row_from_scan_cached(
+                                key,
+                                value,
+                                projection,
+                                schema_opt,
+                                &mut pk_cache,
+                            ) else {
                                 continue;
                             };
                             if !evaluate_predicates(&row, predicates)? {
@@ -241,14 +259,24 @@ impl SelectExecutor {
                         .scan_stream_batched(table, None, None, schema_opt, buffer_size)
                         .await?;
 
+                    // Issue #1817: hoist the partition-key decode across a
+                    // partition's rows. The cache persists ACROSS batches (a
+                    // partition may straddle a batch boundary), so a partition's
+                    // key is decoded once regardless of batching.
+                    let mut pk_cache = PartitionKeyCache::default();
                     while let Some(batch) = scan_stream.recv().await {
                         for (key, value) in batch? {
                             // Capture the partition-key digest before `key` is moved
                             // into row construction (only when needed).
                             let part_sig =
                                 per_partition_limit.map(|_| partition_key_digest(&key.0));
-                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
-                            else {
+                            let Some(row) = build_row_from_scan_cached(
+                                key,
+                                value,
+                                projection,
+                                schema_opt,
+                                &mut pk_cache,
+                            ) else {
                                 continue;
                             };
 

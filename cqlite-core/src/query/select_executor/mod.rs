@@ -91,7 +91,7 @@ use writetime_ttl::{
 // Public surface re-exports (kept identical to the pre-split module so
 // `query::mod`'s `pub use select_executor::{...}` resolves unchanged).
 pub use predicate::{evaluate_leaf, evaluate_predicates, LeafOutcome};
-pub use row_build::build_row_from_scan;
+pub use row_build::{build_row_from_scan, build_row_from_scan_cached, PartitionKeyCache};
 pub use writetime_ttl::{FixedClock, NowSeconds};
 
 // `validate_token_predicates` is used by the executor's scan paths.
@@ -115,6 +115,19 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     pub(crate) static SORT_KEY_EVALUATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+// Test-only counter for the number of times the partition-key columns are
+// DECODED from the raw key bytes (issue #1817). With the per-partition
+// `PartitionKeyCache`, a partition-grouped scan of `rows` rows over `partitions`
+// distinct partitions increments this once per PARTITION (`O(partitions)`), not
+// once per row (`O(rows)`) as the pre-hoist per-row decode did. Same
+// thread-local rationale as `PROJECTION_NAME_DERIVATIONS`: `build_row_from_scan`
+// is synchronous, so the counter is read on the same thread that ran the builds.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PARTITION_KEY_DECODES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -146,7 +159,13 @@ pub(super) fn partition_key_digest(key_bytes: &[u8]) -> u128 {
 /// digest collision between two DISTINCT partition keys — so the fast path is an
 /// `O(1)` digest hash plus a single byte compare, yet correctness never depends
 /// on collision absence.
-type PartitionCounts = HashMap<u128, Vec<(Vec<u8>, u64)>>;
+// Issue #1817 (E2/E8): FxHashMap on the hot PER PARTITION LIMIT counter map. The
+// key is the already-well-mixed 128-bit `partition_key_digest`, so re-SipHashing
+// it (the default `HashMap`) is wasted work; Fx is a fast integer mix. This map is
+// PURELY INTERNAL to the executor — it never crosses the public API surface (it
+// bookkeeps counts, not result rows), so switching its hasher is a hot-path win
+// with no public-type change (`QueryRow.values` stays `HashMap<Arc<str>, Value>`).
+type PartitionCounts = rustc_hash::FxHashMap<u128, Vec<(Vec<u8>, u64)>>;
 
 /// Admit one row under PER PARTITION LIMIT `count`, returning `true` when the
 /// row is within its partition's cap (and incrementing that partition's count).
@@ -986,7 +1005,7 @@ impl SelectExecutor {
     /// independent of digest collisions.
     fn execute_per_partition_limit(rows: Vec<QueryRow>, count: u64) -> Vec<QueryRow> {
         let mut out = Vec::with_capacity(rows.len());
-        let mut counts: PartitionCounts = HashMap::new();
+        let mut counts: PartitionCounts = PartitionCounts::default();
         for row in rows {
             let digest = partition_key_digest(&row.key.0);
             if admit_partition_row(&mut counts, digest, &row.key.0, count) {
@@ -1869,7 +1888,7 @@ mod tests {
     /// valid row is dropped when digests collide.
     #[test]
     fn per_partition_limit_exact_confirm_survives_digest_collision() {
-        let mut counts: PartitionCounts = HashMap::new();
+        let mut counts: PartitionCounts = PartitionCounts::default();
         // A single digest value shared by two genuinely distinct partitions.
         const COLLIDING: u128 = 0xDEAD_BEEF;
         let a = b"partition-a".as_slice();

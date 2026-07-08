@@ -21,8 +21,8 @@
 //! tombstone / null-row marker or a predicate miss can never under-deliver.
 
 use super::{
-    build_row_from_scan, evaluate_predicates, ExecutionContext, ExecutionStep, QueryRow, Result,
-    SSTablePredicate, SelectExecutor, TableId, TableSchema,
+    build_row_from_scan_cached, evaluate_predicates, ExecutionContext, ExecutionStep, QueryRow,
+    Result, SSTablePredicate, SelectExecutor, TableId, TableSchema,
 };
 use crate::query::select_ast::SelectClause;
 
@@ -211,12 +211,16 @@ impl SelectExecutor {
                 .storage
                 .scan(table, None, None, None, schema_opt)
                 .await?;
+            // Issue #1817: hoist the partition-key decode across a partition's rows.
+            let mut pk_cache = super::PartitionKeyCache::default();
             return collect_capped_materialized(
                 materialized,
                 Some(cap),
                 predicates,
                 context,
-                |(key, value)| build_row_from_scan(key, value, projection, schema_opt),
+                |(key, value)| {
+                    build_row_from_scan_cached(key, value, projection, schema_opt, &mut pk_cache)
+                },
             );
         }
 
@@ -236,12 +240,16 @@ impl SelectExecutor {
             .await?;
 
         let mut results = Vec::new();
+        // Issue #1817: hoist the partition-key decode across a partition's rows.
+        let mut pk_cache = super::PartitionKeyCache::default();
         while let Some(item) = scan_stream.recv().await {
             let (key, value) = item?;
             context.rows_processed += 1;
             context.scan_rows += 1;
 
-            let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
+            let Some(row) =
+                build_row_from_scan_cached(key, value, projection, schema_opt, &mut pk_cache)
+            else {
                 continue;
             };
 
@@ -407,12 +415,16 @@ impl SelectExecutor {
             .storage
             .scan(table, None, None, None, schema_opt)
             .await?;
+        // Issue #1817: hoist the partition-key decode across a partition's rows.
+        let mut pk_cache = super::PartitionKeyCache::default();
         collect_capped_materialized(
             authoritative,
             Some(cap),
             predicates,
             context,
-            |(key, value)| build_row_from_scan(key, value, projection, schema_opt),
+            |(key, value)| {
+                build_row_from_scan_cached(key, value, projection, schema_opt, &mut pk_cache)
+            },
         )
     }
 
@@ -451,7 +463,7 @@ impl SelectExecutor {
             if expected.len() >= cap {
                 break;
             }
-            if let Some(row) = build_row_from_scan(key, value, projection, schema_opt) {
+            if let Some(row) = super::build_row_from_scan(key, value, projection, schema_opt) {
                 if evaluate_predicates(&row, predicates)? {
                     expected.push(row.key);
                 }

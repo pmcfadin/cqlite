@@ -1,6 +1,7 @@
+use super::super::build_row_from_scan;
 use super::{
-    build_row_from_scan, collect_capped_materialized, prefix_is_token_ordered, scan_pushdown_cap,
-    ExecutionContext, QueryRow,
+    collect_capped_materialized, prefix_is_token_ordered, scan_pushdown_cap, ExecutionContext,
+    QueryRow,
 };
 use crate::query::select_ast::{
     ColumnRef, ComparisonExpression, ComparisonOperator, ComparisonRightSide, OrderByClause,

@@ -75,7 +75,8 @@ pub use writetime_ttl_validator::{
 pub use select_ast::SelectStatement;
 #[cfg(feature = "state_machine")]
 pub use select_executor::{
-    build_row_from_scan, evaluate_leaf, evaluate_predicates, LeafOutcome, SelectExecutor,
+    build_row_from_scan, build_row_from_scan_cached, evaluate_leaf, evaluate_predicates,
+    LeafOutcome, PartitionKeyCache, SelectExecutor,
 };
 #[cfg(feature = "state_machine")]
 pub use select_optimizer::{

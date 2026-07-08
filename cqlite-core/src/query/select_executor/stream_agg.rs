@@ -13,8 +13,9 @@ use super::aggregation::{
     init_aggregate_accumulators, update_aggregate, AggregationState,
 };
 use super::{
-    build_row_from_scan, classify_partition_lookup, evaluate_predicates, validate_token_predicates,
-    AccessPath, ExecutionContext, ExecutionStep, PartitionLookupOutcome, SelectExecutor,
+    build_row_from_scan_cached, classify_partition_lookup, evaluate_predicates,
+    validate_token_predicates, AccessPath, ExecutionContext, ExecutionStep, PartitionKeyCache,
+    PartitionLookupOutcome, SelectExecutor,
 };
 use crate::query::result::QueryRow;
 use crate::query::select_ast::WhereExpression;
@@ -164,12 +165,17 @@ impl SelectExecutor {
             .storage
             .scan_stream_batched(table, None, None, schema_opt, AGG_FOLD_SCAN_BUFFER)
             .await?;
+        // Issue #1817: hoist the partition-key decode across a partition's rows;
+        // the cache persists across batches (a partition may straddle a batch).
+        let mut pk_cache = PartitionKeyCache::default();
         while let Some(batch) = scan_stream.recv().await {
             for (key, value) in batch? {
                 context.rows_processed += 1;
                 context.scan_rows += 1;
 
-                let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
+                let Some(row) =
+                    build_row_from_scan_cached(key, value, projection, schema_opt, &mut pk_cache)
+                else {
                     continue;
                 };
                 if !evaluate_predicates(&row, predicates)? {
