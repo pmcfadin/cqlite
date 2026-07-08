@@ -45,12 +45,21 @@ impl SSTableReader {
     /// fallback. It gates the per-row table-consistency guard in
     /// `bti_decompress_and_parse_target`: an exact FQ match may relax across a
     /// header-keyspace divergence, while a fallback keeps strict keyspace matching.
+    ///
+    /// Returns `(row, oracle_pruned)` (issue #2163): `oracle_pruned` is `true`
+    /// ONLY for the Step 1 trie-miss branch — this SSTable was excluded from the
+    /// read by the presence oracle BEFORE any decode was attempted. Every other
+    /// `None` outcome (a decoded-but-non-matching prefix-collision candidate, a
+    /// tombstone) is NOT an oracle exclusion and reports `oracle_pruned = false`,
+    /// so the caller (`get_with_resolution`) emits `cqlite.read.sstables_pruned`
+    /// and runs the opt-in false-negative verification ONLY for a genuine
+    /// definitive negative — never for a row this reader actually examined.
     pub(super) async fn bti_point_lookup(
         &self,
         table_id: &TableId,
         key: &RowKey,
         fully_qualified_match: bool,
-    ) -> Result<Option<ScanRow>> {
+    ) -> Result<(Option<ScanRow>, bool)> {
         // 1. Resolve the uncompressed Data.db offset via the one `locate` façade
         //    (issue #1599 / G3). For a BTI reader `locate` runs the C5 step (a no-op
         //    — BTI has no Summary bound, so nothing is short-circuited or recorded)
@@ -60,7 +69,8 @@ impl SSTableReader {
         //    `locate` returns `(offset, 0)` and we use only the offset.
         let offset = match self.locate(key.as_bytes()).await? {
             Some((off, _size)) => off as usize,
-            None => return Ok(None), // not in this SSTable (authoritative trie miss)
+            // Not in this SSTable (authoritative trie miss) — an oracle exclusion.
+            None => return Ok((None, true)),
         };
 
         // 2. Obtain a DECOMPRESSED window that contains the target partition.
@@ -89,14 +99,17 @@ impl SSTableReader {
             )
             .await?;
 
+        // Steps 2+ decoded (or attempted to decode) actual partition data — the
+        // trie admitted this SSTable, so any `None` here (prefix-collision
+        // candidate that didn't match, or a tombstone) is NOT an oracle exclusion.
         match found {
             Some(value) => {
                 if !self.filter_tombstone(&value) {
-                    return Ok(None);
+                    return Ok((None, false));
                 }
-                Ok(Some(value))
+                Ok((Some(value), false))
             }
-            None => Ok(None),
+            None => Ok((None, false)),
         }
     }
 

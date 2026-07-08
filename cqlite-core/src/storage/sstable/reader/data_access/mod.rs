@@ -208,32 +208,47 @@ impl SSTableReader {
         // the reader's would otherwise cause false negatives and drop live
         // partitions (the writer→reader roundtrip #909 must read back). It also
         // guarantees a BTI get() can never fall through to scan_for_key.
-        let result = if self.bti_partitions_db.is_some() {
+        let (row, oracle_pruned) = if self.bti_partitions_db.is_some() {
             self.bti_point_lookup(table_id, key, fully_qualified_match)
-                .await
+                .await?
         } else {
             // BIG ("nb"/uncompressed) readers: raw-key Index.db resolve +
             // covering-chunk seek (issue #1572). The bloom pre-check, the fast
             // Index.db-resolved chunk-targeted decode, and the index-less
             // `scan_for_key` fallback all live in `big_point`.
             self.big_get_with_resolution(table_id, key, fully_qualified_match)
-                .await
+                .await?
         };
 
-        // Issue #2163: opt-in presence-oracle false-negative verification. On an
-        // absent point read (the oracle's negative), when the default-off switch is
-        // enabled, an AUTHORITATIVE confirmation scan proves the negative truthful;
-        // a contradiction increments `cqlite.read.bloom.false_negatives`. Off by
-        // default → this whole block is skipped and the read costs nothing extra
-        // (in particular a BTI point read still never reaches `scan_for_key`).
-        if let Ok(None) = &result {
+        // Issue #2163 (roborev r4): `oracle_pruned` is `true` ONLY when the
+        // presence oracle itself (bloom-miss for BIG / trie-miss for BTI) excluded
+        // this SSTable from the read BEFORE any decode or scan — the PRIMARY
+        // single-reader point-read path, which the spec scenario "a partition
+        // point lookup ... through the public read surface" names directly. This
+        // is the SAME emit site `might_contain_partition[_encoded]` use (via
+        // `emit_sstable_pruned`), so a candidate pre-pruned by
+        // `SSTableManager::prune_candidates` (excluded from the candidate list, so
+        // `get()` is never called on it for this read) is never double-counted:
+        // exactly one of {prune-time check, this get-time check} runs per SSTable
+        // per logical read.
+        if oracle_pruned {
+            self.emit_sstable_pruned();
+
+            // Opt-in presence-oracle false-negative verification: when the
+            // default-off switch is enabled, an AUTHORITATIVE confirmation scan
+            // proves this exclusion truthful; a contradiction increments
+            // `cqlite.read.bloom.false_negatives`. Off by default → this whole
+            // block is skipped and the read costs nothing extra. Gated on
+            // `oracle_pruned` (not merely `row.is_none()`) so a `None` reached via
+            // the primary path's OWN authoritative `scan_for_key` — which already
+            // IS the confirming scan — never triggers a REDUNDANT second scan.
             if super::presence_verification::enabled() {
                 let _ = self
                     .verify_presence_oracle_negative(table_id, key.as_bytes())
                     .await;
             }
         }
-        result
+        Ok(row)
     }
 
     /// Stitch all compressed chunks and parse as a single buffer (V5CompressedLegacy)

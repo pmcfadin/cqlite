@@ -163,6 +163,16 @@ impl Drop for ObservabilityGuard {
 /// subscriber and add [`tracing_layer`] to it — see the module docs on
 /// [`crate::observability`].
 pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
+    // Issue #2163 (roborev r4): plumb the presence-oracle verification config
+    // field into the runtime switch the read path actually consults — applied
+    // UNCONDITIONALLY (even when `cfg.enabled == false`, i.e. OTel export itself
+    // is off), since the switch also drives the confirmation-scan + warning-log
+    // side effect independent of metric export. `apply_config` itself honors
+    // env-overrides-config precedence.
+    crate::storage::sstable::reader::presence_verification::apply_config(
+        cfg.verify_presence_oracle,
+    );
+
     if !cfg.enabled {
         return Ok(ObservabilityGuard::inert());
     }

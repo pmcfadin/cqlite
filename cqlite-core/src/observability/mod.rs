@@ -294,12 +294,22 @@ impl ObservabilityGuard {
 }
 
 /// Initialise observability from `cfg`. When the `observability` feature is
-/// disabled this is a no-op that returns an inert [`ObservabilityGuard`], so
-/// callers (CLI, Flight, bindings) can call it unconditionally.
+/// disabled this is a no-op (no OTel wiring) that returns an inert
+/// [`ObservabilityGuard`], so callers (CLI, Flight, bindings) can call it
+/// unconditionally.
+///
+/// It STILL plumbs `cfg.verify_presence_oracle` into the presence-oracle
+/// false-negative verification switch (issue #2163, roborev r4): that switch is
+/// an always-compiled storage-layer knob, independent of whether the OTel export
+/// stack is linked, so a config-only build without the `observability` feature
+/// can still enable the confirmation-scan correctness check (its counter emit is
+/// simply a no-op in that build, per the module's zero-cost-when-off contract).
 #[cfg(not(feature = "observability"))]
 #[inline]
 pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
-    let _ = cfg;
+    crate::storage::sstable::reader::presence_verification::apply_config(
+        cfg.verify_presence_oracle,
+    );
     Ok(ObservabilityGuard { _private: () })
 }
 

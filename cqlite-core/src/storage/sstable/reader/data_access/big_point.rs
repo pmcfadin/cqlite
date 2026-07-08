@@ -54,12 +54,22 @@ impl SSTableReader {
     ///
     /// `fully_qualified_match` is threaded through to the shared decode's per-row
     /// table-consistency guard exactly as the BTI path does (issue #1321 / #1284).
+    ///
+    /// Returns `(row, oracle_pruned)` (issue #2163): `oracle_pruned` is `true`
+    /// ONLY for the Step 1 bloom-definite-miss branch — this SSTable was excluded
+    /// from the read by the presence oracle BEFORE any Index.db probe, decode, or
+    /// scan. Every other `None` outcome (including one reached via the authoritative
+    /// `scan_for_key` fallback, which already performed its OWN confirming scan) is
+    /// NOT an oracle exclusion and reports `oracle_pruned = false`, so the caller
+    /// (`get_with_resolution`) neither double-counts `cqlite.read.sstables_pruned`
+    /// nor runs a REDUNDANT second confirmation scan when the opt-in false-negative
+    /// verification is enabled (roborev r4, #2163).
     pub(super) async fn big_get_with_resolution(
         &self,
         table_id: &TableId,
         key: &RowKey,
         fully_qualified_match: bool,
-    ) -> Result<Option<ScanRow>> {
+    ) -> Result<(Option<ScanRow>, bool)> {
         use crate::observability::{self as obs, catalog};
 
         // 1. Bloom pre-check (unchanged behaviour): a definite miss short-circuits.
@@ -80,7 +90,8 @@ impl SSTableReader {
                 ],
             );
             if !present {
-                return Ok(None);
+                // Definitive presence-oracle negative — an oracle exclusion.
+                return Ok((None, true));
             }
         }
 
@@ -118,9 +129,9 @@ impl SSTableReader {
                         .await?;
                     if let Some(value) = found {
                         if !self.filter_tombstone(&value) {
-                            return Ok(None);
+                            return Ok((None, false));
                         }
-                        return Ok(Some(value));
+                        return Ok((Some(value), false));
                     }
                     // Exact index hit but no matching row decoded (schema-unavailable
                     // soft-miss / benign table-guard rejection). Fall through to the
@@ -142,7 +153,11 @@ impl SSTableReader {
                     // counter observable. The fast definitive-absent path for the
                     // common (non-degraded) case is the bloom pre-check above; this
                     // fallback fires only on a bloom false-positive (rare, acceptable).
-                    return self.scan_for_key(table_id, key).await;
+                    // NOT an oracle exclusion: the scan itself is the authority here.
+                    return self
+                        .scan_for_key(table_id, key)
+                        .await
+                        .map(|row| (row, false));
                 }
             }
         }
@@ -151,6 +166,8 @@ impl SSTableReader {
         //    NOTE: `self.index` (SSTableIndex) is keyed on key digests, so
         //    `find_entry()` with raw key bytes misses; retained for the size==0
         //    uncompressed handling and the writer-produced-index cases (issue #517).
+        //    Neither branch below is an oracle exclusion: each either scans
+        //    authoritatively or decodes a resolved offset.
         if let Some(index) = &self.index {
             if let Some(entry) = index.find_entry(table_id, key).await? {
                 if entry.size == 0 {
@@ -158,13 +175,21 @@ impl SSTableReader {
                         "Index reports size=0 for key {:?}, using sequential scan fallback",
                         key
                     );
-                    return self.scan_for_key(table_id, key).await;
+                    return self
+                        .scan_for_key(table_id, key)
+                        .await
+                        .map(|row| (row, false));
                 }
                 // Index offsets are relative to data section start - adjust for header.
                 let file_offset = entry.offset + self.actual_header_size as u64;
-                return self.read_value_at_offset(file_offset, entry.size).await;
+                return self
+                    .read_value_at_offset(file_offset, entry.size)
+                    .await
+                    .map(|row| (row, false));
             }
         }
-        self.scan_for_key(table_id, key).await
+        self.scan_for_key(table_id, key)
+            .await
+            .map(|row| (row, false))
     }
 }

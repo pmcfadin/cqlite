@@ -467,7 +467,12 @@ impl SSTableReader {
     /// Emit `cqlite.read.sstables_pruned` for one SSTable excluded from a read by
     /// a presence-oracle definitive negative (issue #2163). Carries the bounded
     /// `cqlite.sstable.format` (`"big"`/`"bti"`); no-op when observability is off.
-    fn emit_sstable_pruned(&self) {
+    ///
+    /// `pub(crate)` (not just this module) so the PRIMARY single-reader point-read
+    /// path (`get_with_resolution` in `data_access/mod.rs`) can call the SAME emit
+    /// site the candidate-prune helpers (`might_contain_partition[_encoded]`) use —
+    /// one implementation, no duplicated emission logic (roborev r4).
+    pub(crate) fn emit_sstable_pruned(&self) {
         use crate::observability::{self as obs, catalog};
         obs::add_counter(
             catalog::READ_SSTABLES_PRUNED,

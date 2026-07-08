@@ -279,6 +279,81 @@ fn correctness_signals_end_to_end() {
         );
     }
 
+    // --- Roborev r4 blocker #1 (#2163): the PRIMARY point-read path must emit
+    // `sstables_pruned` too — not only the `might_contain_partition[_encoded]`
+    // candidate-prune helpers. This IS the spec's own scenario: "a partition
+    // point lookup ... through the public read surface" over a table with
+    // multiple SSTables, present in one generation and absent from another. ---
+    {
+        use cqlite_core::types::RowKey;
+
+        let (reader_present, reader_absent, table_id, _tmp) =
+            fixtures::open_two_generation_readers();
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+
+        // Search among gen 1's own ids for one gen 2's bloom filter ALSO reports
+        // absent (bloom filters can rarely false-positive on an unrelated key;
+        // searching — not assuming — keeps this deterministic, same technique as
+        // the BTI in-range search above).
+        let mut probe_id: Option<i32> = None;
+        for candidate in 0..20i32 {
+            let key_bytes = candidate.to_be_bytes();
+            if !reader_absent.might_contain_partition(&key_bytes) {
+                probe_id = Some(candidate);
+                break;
+            }
+        }
+        let probe_id = probe_id.expect(
+            "at least one of gen 1's 20 ids must show as absent in gen 2's bloom filter \
+             (expected false-positive rate ~1%)",
+        );
+        let probe_key = probe_id.to_be_bytes();
+
+        mc.reset();
+        let found_in_gen1 = rt
+            .block_on(reader_present.get_with_resolution(
+                &table_id,
+                &RowKey::from(probe_key.to_vec()),
+                false,
+            ))
+            .expect("get on the generation holding the key");
+        let found_in_gen2 = rt
+            .block_on(reader_absent.get_with_resolution(
+                &table_id,
+                &RowKey::from(probe_key.to_vec()),
+                false,
+            ))
+            .expect("get on the generation NOT holding the key");
+        drop(rt);
+
+        assert!(
+            found_in_gen1.is_some(),
+            "the generation that actually holds id={probe_id} must return it"
+        );
+        assert!(
+            found_in_gen2.is_none(),
+            "the OTHER generation must report id={probe_id} absent"
+        );
+
+        let m = mc.flush_and_collect();
+        assert_eq!(
+            m.counter_sum(catalog::READ_SSTABLES_PRUNED),
+            1.0,
+            "the PRIMARY public get_with_resolution() point-read path must emit \
+             cqlite.read.sstables_pruned exactly once for the excluded generation \
+             (the gen-1 hit must emit nothing); entry: {:?}",
+            m.find(catalog::READ_SSTABLES_PRUNED)
+        );
+        assert_eq!(
+            m.sum_where(
+                catalog::READ_SSTABLES_PRUNED,
+                &[(catalog::attr::SSTABLE_FORMAT, "big")],
+            ),
+            1.0,
+            "the prune must carry cqlite.sstable.format=big"
+        );
+    }
+
     // --- Requirement: Opt-in presence-oracle false-negative verification ---
     {
         let (reader, table_id, present_key, _tmp) = fixtures::open_writer_reader_with_present_key();
@@ -450,6 +525,223 @@ fn correctness_signals_end_to_end() {
         );
 
         presence_verification::set_enabled_for_testing(false);
+        drop(rt);
+    }
+
+    // --- Roborev r4 blocker #2 (#2163): `ObservabilityConfig::verify_presence_oracle`
+    // must not be decorative. Config-only enablement (NO env var set) must flip
+    // the runtime switch through the PUBLIC `observability::init` entry point, and
+    // that flip must drive an ACTUAL confirmation scan through the public
+    // `get_with_resolution` read path — not merely make `enabled()` report `true`
+    // in isolation. Also pins the documented env-overrides-config precedence. ---
+    {
+        use cqlite_core::observability::ObservabilityConfig;
+        use cqlite_core::storage::sstable::reader::SSTableReader;
+        use cqlite_core::types::RowKey;
+
+        // Isolate from any real process env for this assertion.
+        let saved_env = std::env::var(presence_verification::ENV_VAR).ok();
+        std::env::remove_var(presence_verification::ENV_VAR);
+
+        let (reader, table_id, _tmp) = fixtures::open_writer_reader_with_many_rows(30);
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+
+        // Locate an in-range absent key (else C5 would short-circuit before the
+        // verify hook regardless of the switch) using the TEST setter purely to
+        // search — the switch is driven exclusively through `observability::init`
+        // for every assertion below.
+        presence_verification::set_enabled_for_testing(true);
+        let mut in_range_absent_key: Option<[u8; 4]> = None;
+        for candidate in 3_000_000i32..3_000_064 {
+            let key_bytes = candidate.to_be_bytes();
+            let before = SSTableReader::scan_for_key_call_count();
+            let res = rt
+                .block_on(reader.get_with_resolution(
+                    &table_id,
+                    &RowKey::from(key_bytes.to_vec()),
+                    false,
+                ))
+                .expect("get on candidate probe");
+            let after = SSTableReader::scan_for_key_call_count();
+            assert!(
+                res.is_none(),
+                "candidate {candidate} must be genuinely absent"
+            );
+            if after == before + 1 {
+                in_range_absent_key = Some(key_bytes);
+                break;
+            }
+        }
+        let absent_key = in_range_absent_key
+            .expect("at least one of 64 candidates must land within the Summary bound");
+
+        // Config-only DISABLE (no env): the switch must be OFF and the same key
+        // must show no confirmation scan through the public read path.
+        let cfg_off = ObservabilityConfig::builder()
+            .enabled(false)
+            .verify_presence_oracle(false)
+            .build();
+        let _guard = cqlite_core::observability::init(cfg_off).expect("init config-off");
+        assert!(
+            !presence_verification::enabled(),
+            "config-only disable must flip the switch off through observability::init"
+        );
+        let before = SSTableReader::scan_for_key_call_count();
+        let res = rt
+            .block_on(reader.get_with_resolution(
+                &table_id,
+                &RowKey::from(absent_key.to_vec()),
+                false,
+            ))
+            .expect("get config-off");
+        let after = SSTableReader::scan_for_key_call_count();
+        assert!(res.is_none());
+        assert_eq!(
+            after, before,
+            "config-only disable must not run a confirmation scan through get_with_resolution"
+        );
+
+        // Config-only ENABLE (no env): the switch must flip ON AND drive an ACTUAL
+        // confirmation scan through the public get_with_resolution() path for the
+        // SAME key — the end-to-end proof the field is wired, not decorative.
+        let cfg_on = ObservabilityConfig::builder()
+            .enabled(false)
+            .verify_presence_oracle(true)
+            .build();
+        let _guard = cqlite_core::observability::init(cfg_on).expect("init config-on");
+        assert!(
+            presence_verification::enabled(),
+            "config-only enable must flip the switch on through observability::init"
+        );
+        let before = SSTableReader::scan_for_key_call_count();
+        let res = rt
+            .block_on(reader.get_with_resolution(
+                &table_id,
+                &RowKey::from(absent_key.to_vec()),
+                false,
+            ))
+            .expect("get config-on");
+        let after = SSTableReader::scan_for_key_call_count();
+        assert!(res.is_none());
+        assert!(
+            after > before,
+            "config-only enable must drive a confirmation scan through get_with_resolution — \
+             proving ObservabilityConfig::verify_presence_oracle is wired end-to-end, not \
+             decorative"
+        );
+
+        // An explicitly-set env var must override a conflicting config value
+        // (documented env-overrides-config precedence).
+        std::env::set_var(presence_verification::ENV_VAR, "false");
+        let cfg_conflict = ObservabilityConfig::builder()
+            .enabled(false)
+            .verify_presence_oracle(true) // config says ON; env says off
+            .build();
+        let _guard = cqlite_core::observability::init(cfg_conflict).expect("init env-override");
+        assert!(
+            !presence_verification::enabled(),
+            "an explicitly-set env var must override a conflicting config value"
+        );
+
+        // Restore env + leave the switch OFF for any later blocks.
+        match saved_env {
+            Some(v) => std::env::set_var(presence_verification::ENV_VAR, v),
+            None => std::env::remove_var(presence_verification::ENV_VAR),
+        }
+        presence_verification::set_enabled_for_testing(false);
+        drop(rt);
+    }
+
+    // --- Roborev r4 item 3 (LOW, folded in, #2163): no REDUNDANT double scan.
+    // When the PRIMARY path itself already ran the authoritative `scan_for_key`
+    // (a bloom false positive falling through to an Index.db miss), the key was
+    // NOT excluded by the presence oracle (`oracle_pruned = false`), so turning
+    // verification ON must NOT trigger a second confirmation scan — the delta
+    // must stay exactly 1 (the primary scan only) whether verification is OFF or
+    // ON, distinguishing "oracle negative" (needs verifying) from "already an
+    // authoritative scan result" (nothing left to verify). ---
+    {
+        use cqlite_core::storage::sstable::reader::SSTableReader;
+        use cqlite_core::types::RowKey;
+
+        let (reader, table_id, _tmp) = fixtures::open_writer_reader_with_many_rows(30);
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+
+        // Search for a bloom FALSE POSITIVE: `might_contain_partition == true` for
+        // a key genuinely absent (well outside the inserted 0..30 range). Default
+        // `fp_chance` is 0.01, so finding >=1 among 10,000 candidates is
+        // overwhelmingly likely (searched, not assumed).
+        let mut fp_key: Option<[u8; 4]> = None;
+        for candidate in 4_000_000i32..4_010_000i32 {
+            let key_bytes = candidate.to_be_bytes();
+            if reader.might_contain_partition(&key_bytes) {
+                fp_key = Some(key_bytes);
+                break;
+            }
+        }
+
+        if let Some(fp_key) = fp_key {
+            // Verification OFF: the primary path's OWN Index.db-miss fallback
+            // scans once (the natural #1572 behaviour, unrelated to the switch).
+            presence_verification::set_enabled_for_testing(false);
+            let before = SSTableReader::scan_for_key_call_count();
+            let res = rt
+                .block_on(reader.get_with_resolution(
+                    &table_id,
+                    &RowKey::from(fp_key.to_vec()),
+                    false,
+                ))
+                .expect("get on bloom-false-positive key, verification off");
+            let after = SSTableReader::scan_for_key_call_count();
+            assert!(res.is_none(), "the bloom-FP key must still resolve absent");
+            assert_eq!(
+                after,
+                before + 1,
+                "the primary path's own scan_for_key fallback must run exactly once"
+            );
+
+            // Verification ON, the SAME key: `oracle_pruned` is false (the bloom
+            // hit admitted this SSTable; the index miss forced the primary path's
+            // OWN scan), so the opt-in verify hook must NOT run a second scan.
+            presence_verification::set_enabled_for_testing(true);
+            mc.reset();
+            let before = SSTableReader::scan_for_key_call_count();
+            let res = rt
+                .block_on(reader.get_with_resolution(
+                    &table_id,
+                    &RowKey::from(fp_key.to_vec()),
+                    false,
+                ))
+                .expect("get on bloom-false-positive key, verification on");
+            let after = SSTableReader::scan_for_key_call_count();
+            assert!(res.is_none(), "the bloom-FP key must still resolve absent");
+            assert_eq!(
+                after,
+                before + 1,
+                "verification ON must NOT add a second scan when the primary path already ran \
+                 the authoritative scan_for_key (oracle_pruned=false) — exactly one scan total"
+            );
+            let m = mc.flush_and_collect();
+            assert_eq!(
+                m.counter_sum(catalog::READ_SSTABLES_PRUNED),
+                0.0,
+                "a bloom hit (even a false positive) is not a presence-oracle exclusion — must \
+                 not emit sstables_pruned"
+            );
+            assert_eq!(
+                m.counter_sum(catalog::READ_BLOOM_FALSE_NEGATIVES),
+                0.0,
+                "the skipped (non-oracle) case must never emit false_negatives"
+            );
+            presence_verification::set_enabled_for_testing(false);
+        } else {
+            eprintln!(
+                "correctness_signals_2163: no bloom false positive found among 10,000 candidates \
+                 (fp_chance=0.01 makes this astronomically unlikely) — skipping the no-double-scan \
+                 sub-assertion for this run; the structural invariant (verify only runs when \
+                 oracle_pruned) is still enforced by the code path itself"
+            );
+        }
         drop(rt);
     }
 
@@ -886,5 +1178,78 @@ mod fixtures {
         drop(rt);
 
         (reader, TableId::from("rows"), tmp)
+    }
+
+    /// Two DISJOINT-key SSTable generations of the SAME table (no compaction),
+    /// opened as independent `SSTableReader`s — the multi-SSTable point-lookup
+    /// scenario the spec names directly (roborev r4, #2163). Generation 1 holds
+    /// ids `0..20`; generation 2 holds ids `1000..1020` (a disjoint range so a
+    /// probe key from gen 1 is genuinely absent from gen 2's Data.db, not merely
+    /// absent from the writer's `INSERT` set).
+    pub fn open_two_generation_readers(
+    ) -> (SSTableReader, SSTableReader, TableId, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let schema = writer_schema();
+        let cfg = WriteEngineConfig::new(
+            tmp.path().join("data"),
+            tmp.path().join("wal"),
+            schema.clone(),
+        );
+        let mut engine = WriteEngine::new(cfg).expect("engine");
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+
+        for id in 0..20i32 {
+            engine
+                .execute(&format!(
+                    "INSERT INTO obsfn.rows (id, name) VALUES ({id}, 'g1-{id}')"
+                ))
+                .expect("write gen1");
+        }
+        let info1 = rt
+            .block_on(engine.flush())
+            .expect("flush gen1")
+            .expect("sstable gen1");
+
+        for id in 1000..1020i32 {
+            engine
+                .execute(&format!(
+                    "INSERT INTO obsfn.rows (id, name) VALUES ({id}, 'g2-{id}')"
+                ))
+                .expect("write gen2");
+        }
+        let info2 = rt
+            .block_on(engine.flush())
+            .expect("flush gen2")
+            .expect("sstable gen2");
+
+        let config = Config::default();
+        let platform = Arc::new(rt.block_on(Platform::new(&config)).expect("platform"));
+        let registry = rt
+            .block_on(SchemaRegistry::new(
+                SchemaRegistryConfig::default(),
+                platform.clone(),
+                config.clone(),
+            ))
+            .expect("build registry");
+        rt.block_on(registry.register_schema(schema, SchemaSource::Manual))
+            .expect("register schema");
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+
+        let mut reader1 = rt
+            .block_on(SSTableReader::open(
+                &info1.data_path,
+                &config,
+                platform.clone(),
+            ))
+            .expect("open gen1 reader");
+        rt.block_on(reader1.attach_schema_registry(registry.clone()));
+
+        let mut reader2 = rt
+            .block_on(SSTableReader::open(&info2.data_path, &config, platform))
+            .expect("open gen2 reader");
+        rt.block_on(reader2.attach_schema_registry(registry));
+
+        drop(rt);
+        (reader1, reader2, TableId::from("rows"), tmp)
     }
 }
