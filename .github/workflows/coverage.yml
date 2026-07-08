@@ -105,6 +105,19 @@ jobs:
           rm -rf test-data/datasets
           tar -xzf /tmp/cassandra5-small-full-v3.4.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
+          # Restore git-tracked reference fixtures the asset clobbered (#2022).
+          # The published dataset asset carries stale/non-corrupt copies of some
+          # COMMITTED fixtures — e.g. corruption/test_comp_corrupt/
+          # uncompressed_data_bit_flip/nb-1-big-Data.db, which verify_sstable must
+          # flag as corrupt to match the captured Cassandra oracle. The `rm -rf`
+          # + asset extraction above overwrites the committed (authoritative)
+          # copy with the asset's clean version, so issue_1396_uncompressed_crc_verify
+          # panics under the enforced coverage run and the whole gate exits 101
+          # before any coverage % is computed. Committed versions are the source
+          # of truth and must win. Mirrors
+          # fetch-datasets.sh::restore_ci_tracked_dataset_files.
+          git restore --source=HEAD -- test-data/datasets
+
           # Verify extraction
           NEW_DB_COUNT=$(find test-data/datasets/sstables -name '*-Data.db' 2>/dev/null | wc -l)
           echo "✅ Extraction complete - now have $NEW_DB_COUNT Data.db fixtures"
