@@ -226,11 +226,15 @@ jobs:
         # keep excluding test/bench/examples as before. `spec` and `bin` are
         # anchored with `\b` word boundaries (the `regex` crate supports plain
         # word-boundary assertions, just not lookahead) so they only match
-        # actual test/spec files (e.g. `header_spec.rs` as a whole-word "spec")
-        # and not substrings inside genuine read-path source files —
-        # `parser/binary.rs` ("bin") and `storage/sstable/header_spec.rs`
-        # ("spec") were being incidentally dropped from the measurement before
-        # this anchor. Patterns anchor on `src/...` so a keep-dir like
+        # "spec"/"bin" as a WHOLE WORD (e.g. an actual `*_spec_test.rs` file,
+        # or a path segment like `/bin/`) and NOT as a substring inside a
+        # genuine read-path source file's name — `parser/binary.rs` ("bin" is
+        # a substring of "binary", not a whole word) and
+        # `storage/sstable/header_spec.rs` ("spec" is preceded by "_", a word
+        # char, so no boundary) are correctly KEPT/INCLUDED by this anchor;
+        # before the anchor, the plain (unanchored) substring match was
+        # incidentally EXCLUDING both from the measurement. Patterns anchor
+        # on `src/...` so a keep-dir like
         # `src/parser/types/` is never matched by a top-level exclusion like
         # `src/types/`. `--ignore-filename-regex` runs a substring (find) match
         # against the file path llvm-cov reports.
@@ -292,6 +296,7 @@ jobs:
         import re
         import json
         import os
+        from datetime import datetime, timezone
 
         COVERAGE_THRESHOLD = float(os.environ.get('COVERAGE_THRESHOLD', '90'))
         # Mid-tier "WARNING" badge stays a fixed 10-point band below the pass
@@ -363,7 +368,7 @@ jobs:
                 "total_lines": coverage_data['total_lines'],
                 "covered_lines": coverage_data['covered_lines'],
                 "files": len(coverage_data['files']),
-                "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
             with open("validation_artifacts/coverage/reports/coverage-report.json", "w") as f:
