@@ -306,6 +306,7 @@ struct Instruments {
     compaction_budget_requested: Histogram<f64>,
     compaction_budget_consumed: Histogram<f64>,
     rpc_duration: Histogram<f64>,
+    rpc_phase_duration: Histogram<f64>,
     sstables_open: Gauge<i64>,
     memtable_size_bytes: Gauge<i64>,
     memtable_rows: Gauge<i64>,
@@ -539,6 +540,11 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::SECONDS)
                 .with_description("Arrow Flight RPC handler duration in seconds.")
                 .build(),
+            rpc_phase_duration: m
+                .f64_histogram(catalog::RPC_PHASE_DURATION)
+                .with_unit(catalog::unit::SECONDS)
+                .with_description("do_get per-phase duration in seconds (#2162).")
+                .build(),
             sstables_open: m
                 .i64_gauge(catalog::SSTABLES_OPEN)
                 .with_unit(catalog::unit::SSTABLES)
@@ -631,6 +637,7 @@ pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[Key
         catalog::COMPACTION_BUDGET_REQUESTED => &i.compaction_budget_requested,
         catalog::COMPACTION_BUDGET_CONSUMED => &i.compaction_budget_consumed,
         catalog::RPC_DURATION => &i.rpc_duration,
+        catalog::RPC_PHASE_DURATION => &i.rpc_phase_duration,
         _ => {
             meter()
                 .f64_histogram(name)

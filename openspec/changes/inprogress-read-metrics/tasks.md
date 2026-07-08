@@ -8,10 +8,10 @@ and WILL drift — the implementer re-greps before editing. Follow the implement
 merge-on-green → finalize).
 
 ## Stage 0 — catalog surface + guards (write tests FIRST, must fail on main)
-- [ ] 0.1 Add `attr::RPC_PHASE = "cqlite.rpc.phase"` and `RPC_PHASE_DURATION = "cqlite.rpc.phase.duration"`
+- [x] 0.1 Add `attr::RPC_PHASE = "cqlite.rpc.phase"` and `RPC_PHASE_DURATION = "cqlite.rpc.phase.duration"`
   to `cqlite-core/src/observability/catalog.rs`; add to `ALL_METRICS`; extend the namespaced-key +
   unique-name catalog unit tests to cover them. (read-progress-observability)
-- [ ] 0.2 Update the catalog doc comments for `RPC_ROWS`, `RPC_BYTES`, `QUERY_ROWS_SCANNED`, `READ_ROWS`,
+- [x] 0.2 Update the catalog doc comments for `RPC_ROWS`, `RPC_BYTES`, `QUERY_ROWS_SCANNED`, `READ_ROWS`,
   `READ_PARTITIONS` to state "emitted incrementally during a long-running scan (issue #2162)".
   (read-progress-observability)
 
