@@ -96,7 +96,12 @@ fn sstables_root(keyspace: &str) -> Option<PathBuf> {
         std::env::var("CQLITE_DATASETS_ROOT")
             .ok()
             .map(|r| PathBuf::from(r).join("sstables")),
-        Some(repo_root().join("test-data").join("datasets").join("sstables")),
+        Some(
+            repo_root()
+                .join("test-data")
+                .join("datasets")
+                .join("sstables"),
+        ),
     ];
     candidates
         .into_iter()
@@ -106,15 +111,14 @@ fn sstables_root(keyspace: &str) -> Option<PathBuf> {
 
 fn schema_path(file: &str) -> Option<PathBuf> {
     let candidates = [
-        std::env::var("CQLITE_DATASETS_ROOT")
-            .ok()
-            .and_then(|r| PathBuf::from(r).parent().map(|p| p.join("schemas").join(file))),
+        std::env::var("CQLITE_DATASETS_ROOT").ok().and_then(|r| {
+            PathBuf::from(r)
+                .parent()
+                .map(|p| p.join("schemas").join(file))
+        }),
         Some(repo_root().join("test-data").join("schemas").join(file)),
     ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|p| p.exists())
+    candidates.into_iter().flatten().find(|p| p.exists())
 }
 
 fn fixture_dir(sstables_root: &Path, keyspace: &str, prefix: &str) -> Option<PathBuf> {
@@ -216,7 +220,10 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         return Ok(false);
     };
     let Some(dir) = fixture_dir(&root, &case.keyspace, &case.fixture_dir_prefix) else {
-        let msg = format!("case {}: fixture dir {}* absent", case.id, case.fixture_dir_prefix);
+        let msg = format!(
+            "case {}: fixture dir {}* absent",
+            case.id, case.fixture_dir_prefix
+        );
         if require_fixtures() {
             return Err(format!("REQUIRE_FIXTURES: {msg}"));
         }
@@ -291,7 +298,10 @@ async fn run_case(case: &Case) -> Result<bool, String> {
                 .values
                 .get(col.as_str())
                 .ok_or_else(|| format!("case {}: result row missing column {col}", case.id))?;
-            m.insert(col.clone(), value_to_json(v).map_err(|e| format!("case {}: {e}", case.id))?);
+            m.insert(
+                col.clone(),
+                value_to_json(v).map_err(|e| format!("case {}: {e}", case.id))?,
+            );
         }
         actual.push(m);
     }
@@ -321,12 +331,17 @@ async fn run_case(case: &Case) -> Result<bool, String> {
 
 #[tokio::test]
 async fn query_semantics_oracle_matches_cassandra_select() {
-    let oracle_path = repo_root().join("test-data").join("query-semantics-oracle.json");
+    let oracle_path = repo_root()
+        .join("test-data")
+        .join("query-semantics-oracle.json");
     let text = std::fs::read_to_string(&oracle_path)
         .unwrap_or_else(|e| panic!("read oracle {}: {e}", oracle_path.display()));
     let oracle: Oracle = serde_json::from_str(&text)
         .unwrap_or_else(|e| panic!("parse oracle {}: {e}", oracle_path.display()));
-    assert!(!oracle.cases.is_empty(), "oracle must define at least one case");
+    assert!(
+        !oracle.cases.is_empty(),
+        "oracle must define at least one case"
+    );
 
     let mut ran = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -338,7 +353,11 @@ async fn query_semantics_oracle_matches_cassandra_select() {
         }
     }
 
-    assert!(failures.is_empty(), "query-semantics oracle failures:\n{}", failures.join("\n\n"));
+    assert!(
+        failures.is_empty(),
+        "query-semantics oracle failures:\n{}",
+        failures.join("\n\n")
+    );
 
     if require_fixtures() {
         assert!(
