@@ -83,6 +83,19 @@ pub(crate) struct StreamProbe {
     rows: Arc<AtomicU64>,
     /// Payload bytes attributed to metrics at stream end.
     bytes: Arc<AtomicU64>,
+    /// Running rows counted as each record batch passes through
+    /// [`MeteredDoGetStream`] toward the client (issue #2162). Updated per batch
+    /// BEFORE the stream ends, so a feature-independent slow-consumer test can
+    /// observe `cqlite.rpc.rows` progress mid-stream (the OTel counter itself is a
+    /// no-op when the `observability` feature is off). Distinct from [`Self::rows`],
+    /// which is only stored at finalization.
+    progressed_rows: Arc<AtomicU64>,
+    /// Count of record batches that have passed through [`MeteredDoGetStream`]
+    /// toward the client — i.e. the number of per-batch `cqlite.rpc.rows` /
+    /// `cqlite.rpc.bytes` counter emissions (issue #2162). One emission per batch,
+    /// never per row. Distinct from [`Self::produced_batches`], which counts
+    /// batches the merge pushed toward the channel.
+    emitted_batches: Arc<AtomicUsize>,
     /// Incremented once per surfaced egress error, alongside the
     /// `crate::obs::record_status_error` call — both by [`MeteredDoGetStream`]'s
     /// error arm for a merge-stage error (roborev B2) AND by
@@ -373,7 +386,11 @@ impl MeteredDoGetStream {
     /// normal end followed by drop (or vice versa) records only once.
     fn finalize(&mut self, ok: bool) {
         if let Some(mut metrics) = self.metrics.take() {
-            metrics.add_rows_bytes(self.rows, self.bytes);
+            // Issue #2162: rows/bytes were already attributed INCREMENTALLY per
+            // batch (`record_batch_progress`), so `finalize` no longer re-adds the
+            // accumulated totals — it only sets the terminal OK/error status and
+            // drops `metrics`, which emits the terminal RPC request/duration
+            // counters. The probe records the emitted-prefix totals for tests.
             if ok {
                 metrics.ok();
             }
@@ -407,10 +424,26 @@ impl Stream for MeteredDoGetStream {
         let _entered = span.enter();
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                this.rows = this.rows.saturating_add(batch.num_rows() as u64);
-                this.bytes = this
-                    .bytes
-                    .saturating_add(batch.get_array_memory_size() as u64);
+                // Issue #2162: attribute this batch's rows/bytes as an INCREMENTAL
+                // counter delta right now, as it passes toward the client, instead
+                // of a single aggregate emission at stream end. One emission per
+                // batch, never per row. The running total (`this.rows`/`this.bytes`)
+                // is still accumulated for the terminal probe/parity bookkeeping;
+                // `finish` no longer re-emits the counters, so the monotonic total
+                // over a fully-drained stream is byte-identical to the pre-#2162
+                // single emission.
+                let batch_rows = batch.num_rows() as u64;
+                let batch_bytes = batch.get_array_memory_size() as u64;
+                this.rows = this.rows.saturating_add(batch_rows);
+                this.bytes = this.bytes.saturating_add(batch_bytes);
+                if let Some(metrics) = this.metrics.as_mut() {
+                    metrics.record_batch_progress(batch_rows, batch_bytes);
+                }
+                // Feature-independent progress seam (no-op OTel notwithstanding):
+                // publish the running rows and bump the per-batch emission count so
+                // a slow-consumer test can observe forward progress mid-stream.
+                this.probe.progressed_rows.store(this.rows, Ordering::Relaxed);
+                this.probe.emitted_batches.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(Some(Err(err))) => {

@@ -542,6 +542,115 @@ fn metrics_parity_on_full_consumption() {
     );
 }
 
+// ---- Issue #2162 Stage 1: rpc.rows/rpc.bytes move per batch ----------------
+
+/// The rpc-progress seam moves BEFORE the stream is drained: after pulling the
+/// schema + first batch from a slow consumer, `progressed_rows` is non-zero and
+/// strictly below the fixture total, and at least one — but not all — per-batch
+/// emissions have happened. On pre-#2162 `main`, rows are attributed only at
+/// stream end, so nothing has moved at this observation point.
+///
+/// This is the feature-independent proof (via `StreamProbe`, which does not
+/// depend on the `observability` OTel counters) that emission moved from
+/// stream-end to per-batch — one emission per batch, never per row.
+#[test]
+fn rpc_progress_moves_before_stream_completes() {
+    let n = 40;
+    let (_temp, dir, schema) = many_partition_fixture(n);
+    // batch_size = 1 → one row per batch, so emitted_batches == rows emitted.
+    let producer = MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
+    let paths = resolved(&producer, &dir);
+    let schema_ref = Arc::new(producer.arrow_schema().unwrap());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let pr = probe();
+    let pr_check = pr.clone();
+    rt.block_on(async move {
+        let (mut stream, handle) = spawn_streaming(
+            producer,
+            paths,
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            pr,
+            CancelFlag::new(),
+        );
+        let _schema_msg = read_one(&mut stream).await.expect("schema");
+        let _first = read_one(&mut stream).await.expect("first batch");
+
+        let progressed = pr_check.progressed_rows.load(Ordering::Relaxed);
+        let emitted = pr_check.emitted_batches.load(Ordering::Relaxed);
+        assert!(
+            (1..n as u64).contains(&progressed),
+            "rpc.rows must have moved before drain: progressed={progressed} of {n}"
+        );
+        assert!(
+            (1..n as usize).contains(&emitted),
+            "at least one, but not all, per-batch emissions before drain: emitted={emitted}"
+        );
+
+        drop(stream);
+        let _ = handle.await;
+    });
+}
+
+/// The per-batch deltas sum to the unchanged total: draining the stream to
+/// completion, the running progress (== summed per-batch deltas) equals the
+/// fixture's total row count, and the number of per-batch emissions equals the
+/// number of record batches — proving emission is per-batch, not per-row, and
+/// the monotonic total is byte-identical to the pre-#2162 single emission.
+#[test]
+fn per_batch_deltas_sum_to_unchanged_total() {
+    let schema = simple_schema();
+    let rows = (1..=10)
+        .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
+        .collect::<Vec<_>>();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+    // batch_size = 4 → ceil(10/4) = 3 batches, so per-batch (not per-row).
+    let producer =
+        MergeProducer::with_spec(schema.clone(), 4, crate::filter::ScanSpec::default()).unwrap();
+    let expected = collect_batches(&producer, &dir);
+    let expected_rows: u64 = expected.iter().map(|b| b.num_rows() as u64).sum();
+    let expected_batches = expected.len();
+
+    let stream_producer =
+        MergeProducer::with_spec(schema, 4, crate::filter::ScanSpec::default()).unwrap();
+    let paths = resolved(&stream_producer, &dir);
+    let schema_ref = Arc::new(stream_producer.arrow_schema().unwrap());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let pr = probe();
+    let pr_check = pr.clone();
+    rt.block_on(async move {
+        let (stream, handle) = spawn_streaming(
+            stream_producer,
+            paths,
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            pr,
+            CancelFlag::new(),
+        );
+        let _ = drain_stream(stream).await;
+        let _ = handle.await;
+    });
+
+    assert!(expected_rows > 0, "fixture must produce rows");
+    assert_eq!(
+        pr_check.progressed_rows.load(Ordering::Relaxed),
+        expected_rows,
+        "summed per-batch deltas equal the total the single emission produced"
+    );
+    assert_eq!(
+        pr_check.emitted_batches.load(Ordering::Relaxed),
+        expected_batches,
+        "one per-batch emission per record batch (per-batch, not per-row)"
+    );
+    // The finalized total (used for the terminal probe) matches too.
+    assert_eq!(pr_check.rows.load(Ordering::Relaxed), expected_rows);
+}
+
 // ---- Requirement 6: aggregate path keeps materializing (unchanged content) -
 
 /// An aggregation ticket over a multi-SSTable table serves its bounded

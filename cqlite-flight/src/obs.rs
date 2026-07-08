@@ -121,10 +121,25 @@ impl RpcMetrics {
         self.status = STATUS_OK;
     }
 
-    /// Add rows + payload bytes streamed (used by `do_get`).
-    pub fn add_rows_bytes(&mut self, rows: u64, bytes: u64) {
+    /// Record one record batch's rows + payload bytes as an INCREMENTAL progress
+    /// delta (issue #2162): emit `cqlite.rpc.rows` / `cqlite.rpc.bytes` as a
+    /// monotonic counter delta right now, as the batch passes toward the client,
+    /// instead of a single aggregate emission at stream end. Called once per
+    /// record batch by [`crate::streaming::MeteredDoGetStream`], so a long-running
+    /// `do_get` shows the counters climbing while `cqlite.rpc.in_flight` is still
+    /// non-zero. The running totals are also accumulated for the terminal
+    /// bookkeeping; because the deltas are emitted here, `finish` does NOT re-emit
+    /// them (no double counting). Emission is per-batch, never per-row.
+    pub fn record_batch_progress(&mut self, rows: u64, bytes: u64) {
         self.rows = self.rows.saturating_add(rows);
         self.bytes = self.bytes.saturating_add(bytes);
+        let method = method_attr(self.method);
+        if rows > 0 {
+            obs::add_counter(catalog::RPC_ROWS, rows, &[method.clone()]);
+        }
+        if bytes > 0 {
+            obs::add_counter(catalog::RPC_BYTES, bytes, &[method]);
+        }
     }
 
     /// Emit the terminal metrics. Idempotent; called from `Drop`.
@@ -142,12 +157,11 @@ impl RpcMetrics {
             self.started.elapsed().as_secs_f64(),
             &[method.clone(), status],
         );
-        if self.rows > 0 {
-            obs::add_counter(catalog::RPC_ROWS, self.rows, &[method.clone()]);
-        }
-        if self.bytes > 0 {
-            obs::add_counter(catalog::RPC_BYTES, self.bytes, &[method.clone()]);
-        }
+        // `cqlite.rpc.rows` / `cqlite.rpc.bytes` are emitted INCREMENTALLY per
+        // record batch by `record_batch_progress` (issue #2162), so `finish` no
+        // longer re-adds the accumulated totals here — doing so would double-count
+        // the monotonic counters. The accumulated `self.rows`/`self.bytes` remain
+        // available for terminal bookkeeping / tests only.
         // Decrement the SAME shared per-method counter incremented in `start`.
         // `fetch_sub` returns the previous value, so the new level is `prev - 1`;
         // a `max(0)` floor guards against an unexpected underflow without ever
@@ -343,7 +357,8 @@ mod tests {
         // The recorder must drive its counters/gauges without panicking in any
         // build (no-op when the core observability feature is off).
         let mut m = RpcMetrics::start("do_get");
-        m.add_rows_bytes(5, 1024);
+        m.record_batch_progress(5, 1024);
+        m.record_batch_progress(3, 512);
         m.ok();
         drop(m);
     }

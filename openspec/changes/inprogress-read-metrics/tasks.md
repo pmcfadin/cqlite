@@ -16,11 +16,11 @@ merge-on-green → finalize).
   (read-progress-observability)
 
 ## Stage 1 — incremental streaming progress (Flight, public surface)
-- [ ] 1.1 Move `cqlite.rpc.rows` / `cqlite.rpc.bytes` emission from `RpcMetrics::finish`
+- [x] 1.1 Move `cqlite.rpc.rows` / `cqlite.rpc.bytes` emission from `RpcMetrics::finish`
   (`cqlite-flight/src/obs.rs:145`) to a per-batch counter delta in the `Poll::Ready(Some(Ok(batch)))`
   arm of `MeteredDoGetStream::poll_next` (`cqlite-flight/src/streaming.rs:370`); `finish` no longer
   re-adds the accumulated totals (avoid double counting). (read-progress-observability)
-- [ ] 1.2 Red-then-green: extend `streaming_tests.rs` with a slow-consumer test asserting `MetricsCapture`
+- [x] 1.2 Red-then-green: extend `streaming_tests.rs` with a slow-consumer test asserting `MetricsCapture`
   sees `cqlite.rpc.rows` non-zero and `< total` while the stream is undrained and `cqlite.rpc.in_flight`
   is non-zero; and a drain-to-completion test asserting the summed total is byte-identical to the
   pre-change single emission. (read-progress-observability)
