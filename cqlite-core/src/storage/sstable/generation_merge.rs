@@ -120,13 +120,24 @@ impl ReadShadow {
             if matches!(cell.value, Value::Tombstone(_)) {
                 continue;
             }
+            // Primary-key (partition + clustering) pseudo-cells are STRUCTURAL: the
+            // compaction reader surfaces clustering columns as simple cells and both
+            // the single-gen read loop and the merger's `apply_partition_shadowing`
+            // leave them untouched (never subjected to the read-time shadow/expiry
+            // drop). Keep them verbatim and out of the `max_data_ts` fold, so a row
+            // kept alive by a newer DATA cell under a partition tombstone never loses
+            // its clustering-key value (a pseudo-cell whose own `ts <= cover` must NOT
+            // be stripped) — otherwise the multi-gen path would emit a malformed row
+            // diverging from the single-gen path (issue #1849; roborev multi-gen finding).
+            if self.key_columns.contains(&cell.column) {
+                kept.push(cell);
+                continue;
+            }
             let eff_ts = Some(cell.timestamp);
             let eff_exp = cell_expiry_secs(&cell);
             let dropped = PartitionShadow::cell_shadowed_or_expired(cover, now, eff_ts, eff_exp);
-            if !self.key_columns.contains(&cell.column) {
-                if let Some(t) = eff_ts {
-                    max_data_ts = Some(max_data_ts.map_or(t, |m| m.max(t)));
-                }
+            if let Some(t) = eff_ts {
+                max_data_ts = Some(max_data_ts.map_or(t, |m| m.max(t)));
             }
             if !dropped {
                 kept.push(cell);
@@ -591,6 +602,13 @@ mod tests {
         }
     }
 
+    fn shadow_with_keys(now_secs: i64, keys: &[&str]) -> ReadShadow {
+        ReadShadow {
+            now_secs,
+            key_columns: keys.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
     fn live_cell(column: &str, ts: i64) -> CellData {
         CellData::new(column.to_string(), Value::Integer(1), ts)
     }
@@ -651,6 +669,55 @@ mod tests {
             .expect("row visible");
         let names: Vec<&str> = kept.iter().map(|c| c.column.as_str()).collect();
         assert_eq!(names, vec!["b"], "older `a` shadowed, newer `b` survives");
+    }
+
+    /// A row kept alive by a DATA cell newer than the partition tombstone (a
+    /// post-delete resurrecting UPDATE) must retain its clustering-key pseudo-cell
+    /// even when that pseudo-cell's own write timestamp is `<= cover`. The shadow/
+    /// expiry drop is STRUCTURALLY skipped for key columns (matching the single-gen
+    /// path + the merger), so the surviving row is never emitted missing its
+    /// clustering-key value (issue #1849; roborev multi-gen finding).
+    #[test]
+    fn filter_live_keeps_clustering_key_under_partition_cover() {
+        let cover = Some(2_000i64);
+        // `ck` is a clustering pseudo-cell with ts <= cover (would be dropped if the
+        // shadow test were applied to it); `data` is a newer resurrecting cell; `old`
+        // is a stale data cell that MUST be shadowed away.
+        let cells = vec![
+            live_cell("ck", 1_000),
+            live_cell("old", 1_000),
+            live_cell("data", 3_000),
+        ];
+        let kept = shadow_with_keys(0, &["ck"])
+            .filter_live(cover, cells)
+            .expect("row survives via newer `data` cell");
+        let names: Vec<&str> = kept.iter().map(|c| c.column.as_str()).collect();
+        assert!(
+            names.contains(&"ck"),
+            "clustering-key pseudo-cell must be retained, got {names:?}"
+        );
+        assert!(
+            names.contains(&"data"),
+            "newer resurrecting data cell must survive, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"old"),
+            "stale data cell shadowed by the partition tombstone must be dropped, got {names:?}"
+        );
+    }
+
+    /// A clustering-key pseudo-cell does NOT by itself keep a row alive: a row whose
+    /// only non-key data is fully shadowed is still hidden even though the key cell is
+    /// retained-eligible (the key cell is excluded from the `max_data_ts` fold).
+    #[test]
+    fn filter_live_key_cell_does_not_resurrect_shadowed_row() {
+        let cover = Some(2_000i64);
+        let cells = vec![live_cell("ck", 1_000), live_cell("old", 1_000)];
+        let hidden = shadow_with_keys(0, &["ck"]).filter_live(cover, cells);
+        assert!(
+            hidden.is_none(),
+            "a key pseudo-cell alone must not keep a fully-shadowed row visible"
+        );
     }
 
     /// AC4 post-2038: an expiring cell whose `localDeletionTime` is a post-2038
