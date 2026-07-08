@@ -89,7 +89,9 @@ pre-change single-shot total, and the access-path / bounded attributes carried S
   feature-independent progress-observation seam analogous to the existing `StreamProbe`
 - **WHEN** the scan runs to completion
 - **THEN** the progress seam records at least two `cqlite.query.rows_scanned` delta flushes (on `main`
-  it records exactly one — the single end-of-scan emission)
+  the Flight merge/scan loop records ZERO incremental flushes — the seam itself is net-new for this
+  path; Flight `do_get` drives the k-way merge directly and never ran through `select_executor`'s
+  pre-existing single-shot `execute.rs` emission, so there was no baseline "one" emission to move)
 - **AND** the summed deltas equal the scan's total examined-row count.
 
 #### Scenario: The incremental total matches the single-shot total and cardinality is unchanged

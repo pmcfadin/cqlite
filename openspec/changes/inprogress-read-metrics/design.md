@@ -48,12 +48,11 @@ The issue lists an optional in-flight progress *gauge*. Deferred, not adopted:
   this change's telemetry-only surface. Recorded here so the owner can green-light it later.
 
 ## Emit-site map (surveyed, `main`-relative — implementer re-greps)
-| Signal | Emit-at-tail site today | New incremental site |
+| Signal | Emit-at-tail site today | New incremental site (as implemented) |
 |---|---|---|
-| `cqlite.rpc.rows` / `cqlite.rpc.bytes` | `obs.rs:145` (`RpcMetrics::finish`, via `finalize`) | per-batch arm of `MeteredDoGetStream::poll_next` (`streaming.rs:370`) |
-| `cqlite.query.rows_scanned` | `execute.rs:343` (single `add_counter`) | threshold flush in the scan loop (`select_executor/mod.rs:702`, `stream_agg.rs:170`) |
-| `cqlite.read.rows` / `cqlite.read.partitions` | end-of-read | same scan/merge loop, threshold delta |
-| phase timing | *(does not exist)* | `do_get` / `do_get_setup` (`service.rs:391/468`) + `producer.rs` `drive_merge` boundary |
+| `cqlite.rpc.rows` / `cqlite.rpc.bytes` | `obs.rs:145` (`RpcMetrics::finish`, via `finalize`) | per-batch arm of `MeteredDoGetStream::poll_next` (`streaming.rs`), via `RpcMetrics::record_batch_progress` |
+| `cqlite.query.rows_scanned` (+ `cqlite.read.rows`/`cqlite.read.partitions`) | `execute.rs:343` (single `add_counter`, `select_executor` path only) | **Implemented on the Flight k-way-merge scan loop**, not `select_executor`: `ScanProgressMeter` in `cqlite-flight/src/scan_progress.rs`, driven from `producer.rs::drive_merge`. Flight `do_get` never runs through `select_executor` (it drives `cqlite_core::storage::write_engine::KWayMerger` directly), and Scenario 3.2 anchors the public Flight-merge surface, so the Flight merge loop is the reachable site for this scenario. `select_executor`'s existing single-shot `execute.rs:343` emission is left as-is (LIMIT-pushdown's `scan_rows` rebaseline logic in `limit_pushdown/mod.rs` makes an incremental version there materially riskier for no scenario-required benefit) — it records ZERO incremental flushes (net-new emission is Flight-only), not "exactly one" as originally surveyed for a shared site. |
+| phase timing | *(does not exist)* | `do_get_inner` (`service.rs`, via `obs::PhaseTimer`) + the `produce_streaming`/`build_aggregate_response` `merge_setup`→`stream` boundary (`streaming.rs`, `producer.rs::produce_streaming`'s `on_merger_built` hook) |
 
 ## Bounded phase enum
 `resolve` (path discovery + token prune, `do_get_setup` → `resolve_paths_cancellable`),

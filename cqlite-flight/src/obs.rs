@@ -10,9 +10,10 @@
 //!   `query.execute` and read-path spans nest under the RPC span, so a client's
 //!   distributed trace continues seamlessly into CQLite.
 //! * **Metrics** — [`RpcMetrics`] is an RAII recorder: it bumps the in-flight
-//!   gauge and, on drop, records the request counter (by method + ok/error),
-//!   the latency histogram, and decrements the gauge. `do_get` additionally
-//!   reports rows and bytes streamed via [`RpcMetrics::add_rows_bytes`].
+//!   gauge and, on drop, records the request counter (by method + ok/error) and
+//!   the latency histogram, then decrements the gauge. `do_get` additionally
+//!   reports rows and bytes streamed per record batch, incrementally, via
+//!   [`RpcMetrics::record_batch_progress`] (issue #2162).
 //!
 //! All metric calls go through `cqlite_core::observability`, which is a no-op
 //! when its own feature is off, so the handlers compile and run identically in

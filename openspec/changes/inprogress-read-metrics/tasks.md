@@ -37,16 +37,23 @@ merge-on-green → finalize).
   fabricated zero for a skipped phase). (read-progress-observability)
 
 ## Stage 3 — incremental core scan counters
-- [x] 3.1 Add a named `SCAN_PROGRESS_ROWS` threshold const (aligned to batch size) and flush
-  `cqlite.query.rows_scanned` (and read.rows/read.partitions on the merge scan) as deltas at the
-  threshold in the scan loop (`select_executor/mod.rs:702`, `stream_agg.rs:169`), with a final remainder
-  flush replacing the single `execute.rs:343` emission. Add a feature-independent progress-observation
-  seam (a `Relaxed`-atomic delta-flush counter, analogous to `StreamProbe`) so the increment count is
-  testable without depending on OTel exporter aggregation. (read-progress-observability)
+- [x] 3.1 **As implemented**: added a named `SCAN_PROGRESS_ROWS` threshold const (aligned to batch size)
+  in the new `cqlite-flight/src/scan_progress.rs` and flush `cqlite.query.rows_scanned` (and
+  read.rows/read.partitions on the merge scan) as deltas at the threshold in the Flight k-way-merge scan
+  loop (`producer.rs::drive_merge`, via `ScanProgressMeter`), with a `Drop`-guaranteed final remainder
+  flush covering every exit (completion, LIMIT break, cancel, error, panic). Flight `do_get` drives
+  `KWayMerger` directly and never runs through `select_executor`/`execute.rs:343` — that site's
+  pre-existing single-shot emission is left as-is (Scenario 3.2 anchors the public Flight-merge surface,
+  and an incremental version there is materially riskier given LIMIT-pushdown's `scan_rows` rebaseline
+  logic in `limit_pushdown/mod.rs`, for no scenario-required benefit). Added the feature-independent
+  `ScanProgress` progress-observation seam (`Relaxed`-atomic delta-flush counter, analogous to
+  `StreamProbe`) so the increment count is testable without depending on OTel exporter aggregation.
+  (read-progress-observability)
 - [x] 3.2 Red-then-green: through the public Flight full-scan merge surface, assert the progress seam
-  records ≥2 delta flushes over a threshold-crossing scan (main records exactly 1) and the summed deltas
-  equal the total; a `MetricsCapture` test asserting the incremental total equals the single-shot total
-  and the `access_path` attribute set is unchanged. (read-progress-observability)
+  records ≥2 delta flushes over a threshold-crossing scan (main records ZERO — the seam is net-new for
+  this path) and the summed deltas equal the total; a `MetricsCapture` test (own integration-test binary,
+  `cqlite-flight/tests/metrics_capture_test.rs`) asserting the incremental total equals the single-shot
+  total and the `access_path` attribute set is unchanged. (read-progress-observability)
 
 ## Stage 4 — cross-cutting invariants
 - [x] 4.1 Test: no new unbounded attribute — collect all metrics from a streaming `do_get` + core scan

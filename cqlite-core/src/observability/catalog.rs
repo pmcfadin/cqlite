@@ -111,10 +111,19 @@ pub mod attr {
 
 /// `cqlite.read.rows` — counter `{row}`.
 ///
-/// Total rows materialised by the read path. On the read/merge scan the delta is
-/// emitted incrementally during a long-running scan (issue #2162), at a bounded
-/// row threshold, so the counter climbs before the scan returns; the total is
-/// unchanged. Bounded attributes: [`attr::SSTABLE_FORMAT`].
+/// Total rows materialised by the read path. On the Flight k-way merge scan
+/// (issue #2162) the delta is emitted incrementally during a long-running scan,
+/// at a bounded row threshold, so the counter climbs before the scan returns;
+/// the total is unchanged. That merge-scan emission is FORMAT-AGNOSTIC (carries
+/// no attributes): the k-way merge reconciles rows across potentially several
+/// input SSTables — of possibly mixed BIG/BTI format — into one row set before
+/// this counter's grain, so no single format label is honest at the point of
+/// emission without per-input-file tallies threaded through reconciliation (no
+/// consumer needs that split today; a future extension could add it). A direct
+/// single-SSTable read-path caller may still attach [`attr::SSTABLE_FORMAT`]
+/// where the format is known at its own emission site — this metric's attribute
+/// set is therefore [`attr::SSTABLE_FORMAT`] OR no attributes, never a fabricated
+/// format label.
 pub const READ_ROWS: &str = "cqlite.read.rows";
 
 /// `cqlite.read.bytes` — counter `By`.
@@ -125,10 +134,14 @@ pub const READ_BYTES: &str = "cqlite.read.bytes";
 
 /// `cqlite.read.partitions` — counter `{partition}`.
 ///
-/// Total partitions scanned. On the read/merge scan the delta is emitted
-/// incrementally during a long-running scan (issue #2162), at a bounded row
+/// Total partitions scanned. On the Flight k-way merge scan (issue #2162) the
+/// delta is emitted incrementally during a long-running scan, at a bounded row
 /// threshold, so the counter climbs before the scan returns; the total is
-/// unchanged. Bounded attributes: [`attr::SSTABLE_FORMAT`].
+/// unchanged. Like [`READ_ROWS`], that merge-scan emission is FORMAT-AGNOSTIC
+/// (no attributes) — the merged partition already reconciles across possibly
+/// mixed-format input SSTables — while a direct single-SSTable read-path caller
+/// may still attach [`attr::SSTABLE_FORMAT`]. Bounded attributes:
+/// [`attr::SSTABLE_FORMAT`] OR none.
 pub const READ_PARTITIONS: &str = "cqlite.read.partitions";
 
 /// `cqlite.read.duration` — histogram `s`.

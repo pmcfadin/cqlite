@@ -119,6 +119,13 @@ impl<'a> ScanProgressMeter<'a> {
     }
 
     /// Emit the accumulated (unflushed) deltas, if any, and advance the markers.
+    ///
+    /// The [`ScanProgress`] observation seam (`flushes`/`flushed_rows`) tracks
+    /// `cqlite.query.rows_scanned` flushes specifically (the spec's Scenario 3.2
+    /// contract), so it is only bumped when `rows_delta > 0` — a partitions-only
+    /// bump (a partition whose every row was a tombstone / skipped, so zero rows
+    /// were examined but one partition was) still emits `cqlite.read.partitions`
+    /// but does NOT count as a `rows_scanned` flush.
     fn flush(&mut self) {
         let rows_delta = self.examined - self.flushed_rows;
         let partitions_delta = self.partitions - self.flushed_partitions;
@@ -134,17 +141,24 @@ impl<'a> ScanProgressMeter<'a> {
                     AttrValue::StaticStr(self.access_path),
                 )],
             );
+            // Format-agnostic (issue #2162, roborev): the k-way merge reconciles
+            // rows across potentially several input SSTables of possibly mixed
+            // BIG/BTI format before this counter's grain, so no single format
+            // label is honest here without per-input-file tallies threaded
+            // through reconciliation (see catalog::READ_ROWS doc). A future
+            // extension could add per-format splitting if a consumer needs it.
             obs::add_counter(catalog::READ_ROWS, rows_delta, &[]);
+            self.progress.flushes.fetch_add(1, Ordering::Relaxed);
+            self.progress
+                .flushed_rows
+                .fetch_add(rows_delta, Ordering::Relaxed);
         }
         if partitions_delta > 0 {
+            // Format-agnostic for the same reason as READ_ROWS above.
             obs::add_counter(catalog::READ_PARTITIONS, partitions_delta, &[]);
         }
         self.flushed_rows = self.examined;
         self.flushed_partitions = self.partitions;
-        self.progress.flushes.fetch_add(1, Ordering::Relaxed);
-        self.progress
-            .flushed_rows
-            .fetch_add(rows_delta, Ordering::Relaxed);
     }
 }
 
