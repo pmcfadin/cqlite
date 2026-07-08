@@ -182,6 +182,13 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   reference files —
   [validation playbook](https://pmcfadin.github.io/cqlite/agents-developing/validation-playbook/)
 - Never let a dataset-dependent test pass on an empty dataset (0-rows-when-present = failure)
+- **Two parity oracles (issue #1742)**: *physical-dump parity* (the `*-Data.db.jsonl` sstabledump
+  goldens) enumerates every on-disk cell INCLUDING tombstones/deleted/expired-TTL rows, so it CANNOT
+  catch a read-time-reconciliation bug (both sides keep the shadowed rows → green while a real
+  `SELECT` diverges). *Query-semantics parity* (`test-data/query-semantics-oracle.json`, gate
+  component `query-semantics-oracle`, test `query_semantics_oracle_parity.rs`) records the
+  post-reconciliation result set of a canonical `SELECT` at a PINNED `now` (never wall-clock). Add
+  the correct oracle for the property under test; correctness of `SELECT` output needs the semantic one.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate
