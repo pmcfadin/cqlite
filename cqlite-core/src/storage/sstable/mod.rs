@@ -91,6 +91,7 @@ use tokio::sync::{Mutex, RwLock};
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 use crate::types::CellWriteMetadata;
+use crate::util::cassandra_murmur3::cmp_partition_keys_by_token;
 use crate::{types::TableId, Config, Result, RowKey, ScanRow};
 
 /// Maximum directory depth when scanning for SSTable files.
@@ -1461,20 +1462,9 @@ impl SSTableManager {
             results.retain(matches_key);
             all_results.append(&mut results);
         }
-        // A single candidate's rows already come back in on-disk order, which IS
-        // Cassandra token-ring order, so leave it sort-free. Concatenating more than
-        // one candidate must re-merge into that same canonical global order: Murmur3
-        // token first, raw key bytes as tiebreak (mod.rs:880-884 / #1580 flag raw-byte
-        // re-sorting as the WRONG global order). Route through the one shared
-        // comparator so this metadata path, the streaming k-way merge, and the IN
-        // fan-out (`sort_rows_by_token`) all return identical row order (#1917).
+        // #1917: concat sorts token-ring order via shared cmp (raw-byte = wrong order, #1580).
         if candidates.len() > 1 {
-            all_results.sort_by(|a, b| {
-                crate::util::cassandra_murmur3::cmp_partition_keys_by_token(
-                    a.0.as_bytes(),
-                    b.0.as_bytes(),
-                )
-            });
+            all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
         Ok((all_results, true))
@@ -1674,20 +1664,9 @@ impl SSTableManager {
             };
             all_results.append(&mut results);
         }
-        // A single candidate's rows already come back in on-disk order, which IS
-        // Cassandra token-ring order, so leave it sort-free. Concatenating more than
-        // one candidate must re-merge into that same canonical global order: Murmur3
-        // token first, raw key bytes as tiebreak (mod.rs:880-884 / #1580 flag raw-byte
-        // re-sorting as the WRONG global order). Route through the one shared
-        // comparator so this path, the streaming k-way merge, and the IN fan-out
-        // (`sort_rows_by_token`) all return identical row order (#1917).
+        // #1917: concat sorts token-ring order via shared cmp (raw-byte = wrong order, #1580).
         if candidates.len() > 1 {
-            all_results.sort_by(|a, b| {
-                crate::util::cassandra_murmur3::cmp_partition_keys_by_token(
-                    a.0.as_bytes(),
-                    b.0.as_bytes(),
-                )
-            });
+            all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
         Ok((all_results, clustering_engaged))
