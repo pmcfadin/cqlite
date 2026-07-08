@@ -105,10 +105,16 @@ enum, never a key/query string.
    catalog) lets one series carry every arm for a stacked dashboard, and the reason enum is
    already closed.
 
-## Open question for the owner (product-level)
+## Open question for the owner (product-level) — RESOLVED
 
 - **Requirement 3 granularity (fork):** ship a *new* `cqlite.read.sstables_pruned{format}`
   counter (recommended — `{sstable}`-unit, unambiguous), **or** declare the existing
   `cqlite.read.bloom.checks{result=miss}` arm the official skipped-SSTable signal and add
-  *only* the opt-in false-negative counter (Requirement 4)? The recommendation is the new
-  counter; the owner may prefer to avoid a near-duplicate of the checks-miss arm.
+  *only* the opt-in false-negative counter (Requirement 4)?
+
+  **OWNER DECISION (2026-07-08, #2163):** ship the NEW dedicated
+  `cqlite.read.sstables_pruned` counter carrying the bounded `cqlite.sstable.format`
+  attribute. Do NOT reuse the `cqlite.read.bloom.checks{result=miss}` arm as the
+  skipped-SSTable signal — the per-check miss counts *checks*, not *SSTables skipped*, so a
+  dedicated `{sstable}`-unit counter is unambiguous and dashboard-honest. The existing
+  `cqlite.read.bloom.checks` metric stays as-is.
