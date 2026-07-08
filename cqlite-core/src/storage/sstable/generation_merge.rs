@@ -37,17 +37,21 @@
 //! The whole module is gated on `write-support` at its `mod` declaration in the
 //! parent (`sstable/mod.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(not(feature = "tombstones"))]
 use tokio::sync::{mpsc, oneshot};
 
+use super::reader::parsing::row_decoder::now_clock::now_epoch_secs;
+use super::reader::parsing::row_decoder::partition_shadow::{
+    merged_row_shadowed_by_partition, PartitionShadow,
+};
 #[cfg(not(feature = "tombstones"))]
 use super::stream_merge_probe;
 use super::{reader, scan_merge};
-use crate::storage::write_engine::merge::{KWayMerger, MergeEntry, MergeStep, RowData};
+use crate::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, MergeStep, RowData};
 use crate::types::{CellWriteMetadata, TableId as CqlTableId};
 use crate::{Result, RowCells, RowKey, ScanRow, Value};
 
@@ -56,20 +60,141 @@ use crate::{Result, RowCells, RowKey, ScanRow, Value};
 /// write_timestamp_micros)])`.
 type MergedMetaRow = (Vec<u8>, ScanRow, Vec<(String, i64)>);
 
+/// Post-merge read-time visibility for the multi-generation read path (issue #1849).
+///
+/// A `SELECT` over a table directory with more than one SSTable generation routes
+/// through the [`KWayMerger`], which performs cross-generation last-write-wins +
+/// tombstone RECONCILIATION but NOT read-time TTL expiry / partition-deletion
+/// visibility. Historically that let a multi-gen read return TTL-expired (or
+/// partition-shadowed) cells as live, even after #1741 fixed the single-gen path.
+///
+/// This runs the merger's already-reconciled output through the SAME single-gen
+/// [`PartitionShadow`] per-cell decision (`cell_shadowed_or_expired`) and row-level
+/// partition-shadow decision (`merged_row_shadowed_by_partition`), so there is ONE
+/// read-visibility implementation across single- and multi-generation reads. It adds
+/// READ visibility only — reconciliation and the compaction/write path are untouched
+/// (AC6). Range-tombstone shadowing of covered older cells is already applied by the
+/// merger (#933); read-time cell/row TTL expiry is the gap this closes.
+struct ReadShadow {
+    /// Read-time TTL clock (epoch seconds), captured ONCE per scan so a scan crossing
+    /// an expiration-second boundary decides every row with the same `now` — matching
+    /// the single-gen parser's per-scan clock capture (issue #1849 AC4). Honours the
+    /// `CQLITE_TTL_NOW_OVERRIDE_SECS` debug test seam via [`now_epoch_secs`].
+    now_secs: i64,
+    /// Names of the primary-key (partition + clustering) columns, surfaced by the
+    /// compaction reader as pseudo-cells. Excluded from the row-level DATA-cell
+    /// timestamp aggregate so only real data cells drive the partition-shadow row
+    /// decision — matching the single-gen fold, which ignores pk/ck pseudo-cells.
+    key_columns: HashSet<String>,
+}
+
+impl ReadShadow {
+    fn new(schema: &crate::schema::TableSchema, now_secs: i64) -> Self {
+        let mut key_columns =
+            HashSet::with_capacity(schema.partition_keys.len() + schema.clustering_keys.len());
+        for k in &schema.partition_keys {
+            key_columns.insert(k.name.clone());
+        }
+        for k in &schema.clustering_keys {
+            key_columns.insert(k.name.clone());
+        }
+        Self {
+            now_secs,
+            key_columns,
+        }
+    }
+
+    /// Filter one merged `RowData::Live` row's cells for read visibility given the
+    /// partition-tombstone `cover` (`markedForDeleteAt` µs, or `None`). Returns `None`
+    /// when the WHOLE row is hidden (partition-shadowed), else the surviving cells
+    /// with cell tombstones plus TTL-expired / partition-shadowed data cells dropped.
+    fn filter_live(&self, cover: Option<i64>, cells: Vec<CellData>) -> Option<Vec<CellData>> {
+        let now = self.now_secs;
+        let mut kept = Vec::with_capacity(cells.len());
+        // Fold over REAL data cells (kept AND dropped) so a partition tombstone that
+        // shadows every data cell is recognised at the row level — mirrors the
+        // single-gen `agg_max_cell_ts` fold in `row_data.rs`.
+        let mut max_data_ts: Option<i64> = None;
+        for cell in cells {
+            // A cell tombstone is never live data (a deleted column is absent).
+            if matches!(cell.value, Value::Tombstone(_)) {
+                continue;
+            }
+            // Primary-key (partition + clustering) pseudo-cells are STRUCTURAL: the
+            // compaction reader surfaces clustering columns as simple cells and both
+            // the single-gen read loop and the merger's `apply_partition_shadowing`
+            // leave them untouched (never subjected to the read-time shadow/expiry
+            // drop). Keep them verbatim and out of the `max_data_ts` fold, so a row
+            // kept alive by a newer DATA cell under a partition tombstone never loses
+            // its clustering-key value (a pseudo-cell whose own `ts <= cover` must NOT
+            // be stripped) — otherwise the multi-gen path would emit a malformed row
+            // diverging from the single-gen path (issue #1849; roborev multi-gen finding).
+            if self.key_columns.contains(&cell.column) {
+                kept.push(cell);
+                continue;
+            }
+            let eff_ts = Some(cell.timestamp);
+            let eff_exp = cell_expiry_secs(&cell);
+            let dropped = PartitionShadow::cell_shadowed_or_expired(cover, now, eff_ts, eff_exp);
+            if let Some(t) = eff_ts {
+                max_data_ts = Some(max_data_ts.map_or(t, |m| m.max(t)));
+            }
+            if !dropped {
+                kept.push(cell);
+            }
+        }
+        if merged_row_shadowed_by_partition(cover, max_data_ts) {
+            return None;
+        }
+        Some(kept)
+    }
+}
+
+/// The read-time expiry instant (epoch seconds) of a merged cell, or `None` when it
+/// is not an expiring cell. An expiring cell's `localDeletionTime` is its
+/// `localExpirationTime`; it is reinterpreted UNSIGNED so a post-2038 expiry stored
+/// as a negative `i32` bit pattern (oa/da `hasUIntDeletionTime`) is not wrapped
+/// negative and wrongly treated as long-expired — matching the single-gen unsigned
+/// LDT handling in `row_data.rs` (issue #1849 AC4).
+fn cell_expiry_secs(cell: &CellData) -> Option<i64> {
+    cell.ttl?;
+    cell.local_deletion_time.map(|s| (s as u32) as i64)
+}
+
+/// The partition-level `markedForDeleteAt` (µs) carried by the synthetic
+/// partition-tombstone carrier entry of a merged partition (issue #1072), or `None`
+/// when the partition has no tombstone. Used as the read-side partition-shadow cover
+/// across the partition's rows (issue #1849).
+fn partition_cover(rows: &[MergeEntry]) -> Option<i64> {
+    rows.iter()
+        .find_map(|e| e.partition_deletion.map(|(mfda, _ldt)| mfda))
+}
+
 /// Convert one reconciled partition's merge rows into the live scan rows the read
 /// path emits: drop cell tombstones, drop row tombstones, drop rows left empty.
 ///
 /// The single emission kernel shared by the materializing plain merge and the
 /// streaming driver so tombstone filtering can never drift between them (issue
 /// #1334: emit the interned-name `ScanRow` carrier the read path consumes).
-fn partition_live_rows(row_key: &RowKey, rows: Vec<MergeEntry>) -> Vec<(RowKey, ScanRow)> {
+fn partition_live_rows(
+    row_key: &RowKey,
+    rows: Vec<MergeEntry>,
+    shadow: &ReadShadow,
+) -> Vec<(RowKey, ScanRow)> {
+    // Issue #1849: partition-tombstone cover for this partition's rows, applied as a
+    // read-side shadow floor alongside per-cell read-time TTL expiry (post-merge).
+    let cover = partition_cover(&rows);
     let mut out = Vec::new();
     for entry in rows {
         match entry.row_data {
             RowData::Live { cells } => {
-                let row_cells: RowCells = cells
+                // Read-time visibility: drop cell tombstones + TTL-expired /
+                // partition-shadowed data cells; `None` hides the whole row.
+                let Some(surviving) = shadow.filter_live(cover, cells) else {
+                    continue;
+                };
+                let row_cells: RowCells = surviving
                     .into_iter()
-                    .filter(|c| !matches!(c.value, Value::Tombstone(_)))
                     .map(|c| (Arc::from(c.column.as_str()), c.value))
                     .collect();
                 if !row_cells.is_empty() {
@@ -128,6 +253,8 @@ pub(super) async fn merge_generations_for_read(
     let schema = schema.clone();
 
     let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
+        // Issue #1849: capture the read-time TTL clock ONCE per scan.
+        let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let mut merger = KWayMerger::new(paths, &schema)?;
         let mut out = Vec::new();
         while let MergeStep::Partition { key, rows } = merger.step()? {
@@ -138,7 +265,7 @@ pub(super) async fn merge_generations_for_read(
                 if row_key.as_bytes() != target.as_slice() {
                     continue;
                 }
-                out.extend(partition_live_rows(&row_key, rows));
+                out.extend(partition_live_rows(&row_key, rows, &shadow));
                 break;
             }
 
@@ -153,7 +280,7 @@ pub(super) async fn merge_generations_for_read(
                     continue;
                 }
             }
-            out.extend(partition_live_rows(&row_key, rows));
+            out.extend(partition_live_rows(&row_key, rows, &shadow));
         }
         Ok(out)
     })
@@ -239,6 +366,8 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     let target_for_merge = target_bytes;
 
     let merged_rows = tokio::task::spawn_blocking(move || -> Result<Vec<MergedMetaRow>> {
+        // Issue #1849: capture the read-time TTL clock ONCE per scan.
+        let shadow = ReadShadow::new(&merge_schema, now_epoch_secs());
         let mut merger = KWayMerger::new(paths, &merge_schema)?;
         let mut out = Vec::new();
         while let MergeStep::Partition { key, rows } = merger.step()? {
@@ -249,7 +378,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
                 if row_key.as_bytes() != target.as_slice() {
                     continue;
                 }
-                push_metadata_rows(&key.key, rows, &mut out);
+                push_metadata_rows(&key.key, rows, &mut out, &shadow);
                 break;
             }
 
@@ -264,7 +393,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
                     continue;
                 }
             }
-            push_metadata_rows(&key.key, rows, &mut out);
+            push_metadata_rows(&key.key, rows, &mut out, &shadow);
         }
         Ok(out)
     })
@@ -304,16 +433,25 @@ pub(super) async fn merge_generations_for_read_with_metadata(
 /// live cells plus each surviving cell's `(column, write_timestamp)`. Shared by the
 /// range and point-targeted branches of the metadata merge so the tombstone
 /// filtering + timestamp capture live once.
-fn push_metadata_rows(key_bytes: &[u8], rows: Vec<MergeEntry>, out: &mut Vec<MergedMetaRow>) {
+fn push_metadata_rows(
+    key_bytes: &[u8],
+    rows: Vec<MergeEntry>,
+    out: &mut Vec<MergedMetaRow>,
+    shadow: &ReadShadow,
+) {
+    // Issue #1849: same read-side partition cover + per-cell TTL/shadow filter as the
+    // plain path, so the WRITETIME/TTL projection agrees with `SELECT *`.
+    let cover = partition_cover(&rows);
     for entry in rows {
         if let RowData::Live { cells } = entry.row_data {
-            let mut row_cells: RowCells = Vec::with_capacity(cells.len());
-            let mut timestamps: Vec<(String, i64)> = Vec::with_capacity(cells.len());
-            for c in cells {
-                // Drop cell tombstones: a deleted column is absent.
-                if matches!(c.value, Value::Tombstone(_)) {
-                    continue;
-                }
+            // `filter_live` drops cell tombstones + TTL-expired / partition-shadowed
+            // data cells; `None` hides the whole row (partition-shadowed).
+            let Some(surviving) = shadow.filter_live(cover, cells) else {
+                continue;
+            };
+            let mut row_cells: RowCells = Vec::with_capacity(surviving.len());
+            let mut timestamps: Vec<(String, i64)> = Vec::with_capacity(surviving.len());
+            for c in surviving {
                 timestamps.push((c.column.clone(), c.timestamp));
                 row_cells.push((Arc::from(c.column.as_str()), c.value));
             }
@@ -377,6 +515,8 @@ pub(super) async fn stream_generations_for_read(
     let (out_tx, out_rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(buffer_size.max(1));
 
     tokio::task::spawn_blocking(move || {
+        // Issue #1849: capture the read-time TTL clock ONCE per scan.
+        let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let mut merger = match KWayMerger::new(paths, &schema) {
             Ok(m) => {
                 // Signal readiness; if the caller already dropped, stop.
@@ -417,7 +557,7 @@ pub(super) async fn stream_generations_for_read(
                 }
             }
 
-            let live = partition_live_rows(&row_key, rows);
+            let live = partition_live_rows(&row_key, rows, &shadow);
             // Issue #1579: the streaming producer holds ONE partition's rows
             // resident at a time — record the window (not the whole table) so the
             // memory guard observes O(window).
@@ -446,4 +586,155 @@ fn ordered_generation_paths(reader_list: &[Arc<reader::SSTableReader>]) -> Vec<P
     let mut ordered: Vec<&Arc<reader::SSTableReader>> = reader_list.iter().collect();
     ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
     ordered.iter().map(|r| r.file_path.clone()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Issue #1849: deterministic pins for the post-merge read-visibility filter,
+    //! independent of on-disk fixtures. The end-to-end multi-generation proof lives
+    //! in `tests/issue_1849_multigen_tombstone_ttl_shadow.rs`.
+    use super::*;
+
+    fn shadow(now_secs: i64) -> ReadShadow {
+        ReadShadow {
+            now_secs,
+            key_columns: HashSet::new(),
+        }
+    }
+
+    fn shadow_with_keys(now_secs: i64, keys: &[&str]) -> ReadShadow {
+        ReadShadow {
+            now_secs,
+            key_columns: keys.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    fn live_cell(column: &str, ts: i64) -> CellData {
+        CellData::new(column.to_string(), Value::Integer(1), ts)
+    }
+
+    fn expiring_cell(column: &str, ts: i64, ldt: i32) -> CellData {
+        let mut c = CellData::new(column.to_string(), Value::Integer(1), ts);
+        c.ttl = Some(60);
+        c.local_deletion_time = Some(ldt);
+        c
+    }
+
+    /// A TTL-expired data cell (past `localDeletionTime`) is dropped while a
+    /// live-forever sibling survives; the row itself stays (not partition-shadowed).
+    #[test]
+    fn filter_live_drops_ttl_expired_cell_keeps_live() {
+        let now = 2_000_000i64;
+        let cells = vec![
+            live_cell("name", 100),
+            expiring_cell("token", 100, 1_000), // expired: 1000 <= now
+        ];
+        let kept = shadow(now).filter_live(None, cells).expect("row visible");
+        let names: Vec<&str> = kept.iter().map(|c| c.column.as_str()).collect();
+        assert_eq!(names, vec!["name"], "expired `token` must be dropped");
+    }
+
+    /// A cell tombstone is never live data (dropped like the single-gen path).
+    #[test]
+    fn filter_live_drops_cell_tombstone() {
+        let mut tomb = CellData::new("gone".to_string(), Value::Integer(0), 100);
+        tomb.value = Value::Tombstone(Box::new(crate::types::TombstoneInfo {
+            deletion_time: 100,
+            tombstone_type: crate::types::TombstoneType::CellTombstone,
+            local_deletion_time: 0,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        }));
+        let kept = shadow(0)
+            .filter_live(None, vec![live_cell("keep", 100), tomb])
+            .expect("row visible");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].column, "keep");
+    }
+
+    /// A row whose every data cell is shadowed by the partition tombstone (all data
+    /// older than `markedForDeleteAt`) is hidden entirely (`None`); a row with a cell
+    /// strictly newer than the deletion survives.
+    #[test]
+    fn filter_live_partition_cover_hides_fully_shadowed_row() {
+        let cover = Some(2_000i64);
+        // All data older/equal to the cover → whole row hidden.
+        let hidden =
+            shadow(0).filter_live(cover, vec![live_cell("a", 1_000), live_cell("b", 2_000)]);
+        assert!(hidden.is_none(), "fully-shadowed row must be hidden");
+        // A cell strictly newer than the cover → row survives (and keeps newer cell).
+        let kept = shadow(0)
+            .filter_live(cover, vec![live_cell("a", 1_000), live_cell("b", 3_000)])
+            .expect("row visible");
+        let names: Vec<&str> = kept.iter().map(|c| c.column.as_str()).collect();
+        assert_eq!(names, vec!["b"], "older `a` shadowed, newer `b` survives");
+    }
+
+    /// A row kept alive by a DATA cell newer than the partition tombstone (a
+    /// post-delete resurrecting UPDATE) must retain its clustering-key pseudo-cell
+    /// even when that pseudo-cell's own write timestamp is `<= cover`. The shadow/
+    /// expiry drop is STRUCTURALLY skipped for key columns (matching the single-gen
+    /// path + the merger), so the surviving row is never emitted missing its
+    /// clustering-key value (issue #1849; roborev multi-gen finding).
+    #[test]
+    fn filter_live_keeps_clustering_key_under_partition_cover() {
+        let cover = Some(2_000i64);
+        // `ck` is a clustering pseudo-cell with ts <= cover (would be dropped if the
+        // shadow test were applied to it); `data` is a newer resurrecting cell; `old`
+        // is a stale data cell that MUST be shadowed away.
+        let cells = vec![
+            live_cell("ck", 1_000),
+            live_cell("old", 1_000),
+            live_cell("data", 3_000),
+        ];
+        let kept = shadow_with_keys(0, &["ck"])
+            .filter_live(cover, cells)
+            .expect("row survives via newer `data` cell");
+        let names: Vec<&str> = kept.iter().map(|c| c.column.as_str()).collect();
+        assert!(
+            names.contains(&"ck"),
+            "clustering-key pseudo-cell must be retained, got {names:?}"
+        );
+        assert!(
+            names.contains(&"data"),
+            "newer resurrecting data cell must survive, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"old"),
+            "stale data cell shadowed by the partition tombstone must be dropped, got {names:?}"
+        );
+    }
+
+    /// A clustering-key pseudo-cell does NOT by itself keep a row alive: a row whose
+    /// only non-key data is fully shadowed is still hidden even though the key cell is
+    /// retained-eligible (the key cell is excluded from the `max_data_ts` fold).
+    #[test]
+    fn filter_live_key_cell_does_not_resurrect_shadowed_row() {
+        let cover = Some(2_000i64);
+        let cells = vec![live_cell("ck", 1_000), live_cell("old", 1_000)];
+        let hidden = shadow_with_keys(0, &["ck"]).filter_live(cover, cells);
+        assert!(
+            hidden.is_none(),
+            "a key pseudo-cell alone must not keep a fully-shadowed row visible"
+        );
+    }
+
+    /// AC4 post-2038: an expiring cell whose `localDeletionTime` is a post-2038
+    /// instant stored as a NEGATIVE `i32` bit pattern is reinterpreted UNSIGNED, so
+    /// it reads as a large FUTURE expiry (not wrongly wrapped negative / long-expired).
+    #[test]
+    fn cell_expiry_secs_reinterprets_post_2038_unsigned() {
+        // 2039-ish epoch seconds > i32::MAX, stored as the wrapping `as i32`.
+        let future: i64 = 2_200_000_000;
+        let stored = future as u32 as i32; // negative bit pattern
+        let c = expiring_cell("token", 100, stored);
+        assert_eq!(
+            cell_expiry_secs(&c),
+            Some(future),
+            "post-2038 LDT must reinterpret unsigned to a future expiry"
+        );
+        // A non-expiring (no-TTL) cell has no expiry.
+        assert_eq!(cell_expiry_secs(&live_cell("x", 100)), None);
+    }
 }

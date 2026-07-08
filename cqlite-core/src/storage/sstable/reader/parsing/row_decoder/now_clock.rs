@@ -67,7 +67,7 @@ const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
 /// seam first; an invalid/absent override leaves the wall-clock behavior
 /// unchanged. In release builds this is a straight `SystemTime::now()` call —
 /// the override seam (including the env read itself) is compiled out entirely.
-pub(super) fn now_epoch_secs() -> i64 {
+pub(crate) fn now_epoch_secs() -> i64 {
     #[cfg(debug_assertions)]
     let raw_override = std::env::var(TTL_NOW_OVERRIDE_ENV).ok();
     #[cfg(not(debug_assertions))]

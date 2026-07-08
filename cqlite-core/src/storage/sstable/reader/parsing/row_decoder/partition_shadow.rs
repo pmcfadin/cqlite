@@ -34,7 +34,14 @@ pub(super) fn clustering_reversed_flags(schema: &crate::schema::TableSchema) -> 
 }
 
 /// Per-partition read-side shadowing state (issue #1741).
-pub(super) struct PartitionShadow {
+///
+/// The type is `pub(crate)` so the multi-generation read path
+/// (`storage::sstable::generation_merge`) can reuse its per-cell decision
+/// [`PartitionShadow::cell_shadowed_or_expired`] POST-merge (issue #1849), keeping
+/// ONE read-visibility implementation. Its stateful methods (`open`,
+/// `feed_range_marker`, `row_hidden`, …) stay `pub(super)` — only the stateless
+/// per-cell decision is shared outward.
+pub(crate) struct PartitionShadow {
     /// Partition-level `markedForDeleteAt` (µs), or `None` when the partition is live.
     partition_deletion: Option<i64>,
     /// The currently-open range tombstone: `(start_bound_values, start_inclusive,
@@ -220,7 +227,7 @@ impl PartitionShadow {
     /// shadowed (no-heuristics: we hide only what authoritative metadata proves
     /// stale). Associated function so both the row-data cell loop and its unit pins
     /// share one decision.
-    pub(super) fn cell_shadowed_or_expired(
+    pub(crate) fn cell_shadowed_or_expired(
         cover: Option<i64>,
         now: i64,
         eff_ts: Option<i64>,
@@ -230,6 +237,53 @@ impl PartitionShadow {
         let expired = eff_exp.is_some_and(|e| e <= now);
         shadowed || expired
     }
+}
+
+/// Whether a partition-level deletion at `cover` (µs, `markedForDeleteAt`) shadows
+/// the WHOLE of a merged (post-`KWayMerger`) row whose maximum DATA-cell write
+/// timestamp is `max_data_cell_timestamp` (issue #1849).
+///
+/// This is the multi-generation read path's reuse of the single-gen row-level
+/// decision [`RowHeader::shadowed_by_deletion_at`]: it builds the same `RowHeader`
+/// the single-gen emit path folds (a row with NO surfaced primary-key liveness
+/// marker — the `KWayMerger` output does not carry one — and the given max data-cell
+/// timestamp) and applies the identical `ts <= markedForDeleteAt` rule. A row with
+/// no data-cell timestamp (`None`) is NEVER shadowed (fail-safe / no-heuristics: we
+/// hide only what authoritative metadata proves predates the deletion).
+///
+/// Read-time TTL expiry is applied PER CELL on the merged path (via
+/// [`PartitionShadow::cell_shadowed_or_expired`]); whole-row TTL hiding needs the
+/// primary-key liveness marker, which the merger output lacks, so it is deliberately
+/// NOT decided here (issue #1849 scope note).
+///
+/// Gated on `write-support`: the sole caller is the cross-generation read path
+/// (`generation_merge`), whose `mod` declaration in `sstable/mod.rs` is itself
+/// `#[cfg(feature = "write-support")]`. Without this matching gate the function is
+/// orphaned (zero callers) under the `minimal-build` feature set and `-D dead_code`
+/// fails the build. `cell_shadowed_or_expired` needs no such gate — the single-gen
+/// read path (`row_data`/`complex_column`) calls it unconditionally.
+#[cfg(feature = "write-support")]
+pub(crate) fn merged_row_shadowed_by_partition(
+    cover: Option<i64>,
+    max_data_cell_timestamp: Option<i64>,
+) -> bool {
+    let Some(deleted_at) = cover else {
+        return false;
+    };
+    let header = RowHeader {
+        timestamp: None,
+        ttl: None,
+        liveness_expires_at_seconds: None,
+        local_deletion_time: None,
+        marked_for_delete_at: None,
+        header_size: 0,
+        row_size_vint_len: 0,
+        missing_columns_bitmap: None,
+        max_data_cell_timestamp,
+        max_data_cell_expires_at: None,
+        has_live_forever_data_cell: false,
+    };
+    header.shadowed_by_deletion_at(deleted_at)
 }
 
 #[cfg(test)]
@@ -481,6 +535,28 @@ mod tests {
         h4.timestamp = None;
         h4.max_data_cell_timestamp = Some(3000); // > 2000
         assert!(!shadow.row_hidden(&h4, &[]));
+    }
+
+    /// Issue #1849: the multi-generation read path's row-level partition-shadow
+    /// reuse. A merged row is hidden by a partition tombstone iff its max DATA-cell
+    /// write ts is `<= markedForDeleteAt`; a row with no data-cell ts (`None`) or no
+    /// cover is NEVER hidden. Revert-verify: dropping the `<=` (using `<`) makes the
+    /// exact-boundary assertion FALSE; returning `true` on `None` cover would hide
+    /// live rows.
+    #[cfg(feature = "write-support")]
+    #[test]
+    fn merged_row_partition_shadow_reuse() {
+        use super::merged_row_shadowed_by_partition as f;
+        // No cover → never hidden.
+        assert!(!f(None, Some(1_000)));
+        // Cover but no data-cell ts (pk-only / undecodable) → never hidden.
+        assert!(!f(Some(2_000), None));
+        // Data older than the deletion → hidden.
+        assert!(f(Some(2_000), Some(1_000)));
+        // Data exactly at the deletion → hidden (deletes: ts <= markedForDeleteAt).
+        assert!(f(Some(2_000), Some(2_000)));
+        // Data strictly newer than the deletion → survives.
+        assert!(!f(Some(2_000), Some(3_000)));
     }
 
     /// Issue #1741 (Finding 2, header-level consequence): a row whose aggregated
