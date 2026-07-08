@@ -3149,8 +3149,8 @@ dispatch_component() {
   # run (the ci.yml "CLI unit tests" job runs the same 3-target allowlist), so they
   # bit-rotted against regenerated dataset binaries. They are EXCLUDED (loudly, here)
   # rather than silently unrun, and must be triaged/fixed or re-snapshotted under
-  # dedicated follow-up issues, then removed from this list. This is NOT a license to
-  # add new entries: a NEW failing test must be fixed, never quarantined.
+  # #2188, then removed from this list. This is NOT a license to add new entries: a
+  # NEW failing test must be fixed, never quarantined.
   QUARANTINE="comprehensive_select_test integration_sstable_tests parquet_writer_tests table_snapshot_tests"
   #
   # Fail closed (never silent-pass) if the glob finds zero files, or if either
