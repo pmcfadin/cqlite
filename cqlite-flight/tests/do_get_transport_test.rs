@@ -194,12 +194,17 @@ fn do_get_over_transport_real_compressed_fixture() {
     // The service resolves `<data_dir>/<keyspace>/<table>[-<uuid>]`, so point
     // `data_dir` at `sstables/` and let the ticket carry keyspace `test_basic`.
     let data_dir = std::path::PathBuf::from(&root).join("sstables");
-    if !data_dir
+    // Skip when the gitignored `Data.db` BINARY is absent (the repo ships only
+    // the JSONL references, so the fixture DIRECTORY exists even in a worktree
+    // that never ran `fetch-datasets.sh`). Checking the actual `Data.db` file —
+    // not just the dir — is what stops this from silently 0-row-passing on an
+    // unfetched checkout while still asserting `> 0` whenever the binary is real.
+    let data_db = data_dir
         .join("test_basic")
         .join("simple_table-6aa08200a25111f0a3fef1a551383fb9")
-        .is_dir()
-    {
-        eprintln!("real fixture dir absent — skipping");
+        .join("nb-1-big-Data.db");
+    if !data_db.is_file() {
+        eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
         return;
     }
     let ddl = "CREATE TABLE test_basic.simple_table (\
