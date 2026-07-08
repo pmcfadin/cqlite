@@ -14,6 +14,7 @@ pub mod filter;
 pub mod obs;
 pub mod pathsafe;
 pub mod producer;
+pub mod scan_progress;
 pub mod service;
 pub mod shutdown;
 pub mod stats;
@@ -22,3 +23,13 @@ pub mod ticket;
 
 #[cfg(test)]
 mod testutil;
+
+// Issue #2162 OTel-level assertions (phase histograms, bounded attributes,
+// rpc.rows presence via the shared `observability-testing` capture harness) live
+// in `tests/metrics_capture_test.rs` — a SEPARATE integration-test binary/process
+// (roborev, matching the #2163 precedent), not a unit-test module here. The
+// capture harness installs a PROCESS-GLOBAL in-memory meter provider on first
+// use; sharing it with this crate's parallel `cargo test --lib` unit-test binary
+// would risk cross-test metric contamination. The feature-independent
+// `StreamProbe`/`ScanProgress` seam tests in `streaming_tests.rs` carry the
+// always-compiled (feature-off-safe) wiring evidence.

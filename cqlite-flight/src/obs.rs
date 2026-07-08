@@ -10,9 +10,10 @@
 //!   `query.execute` and read-path spans nest under the RPC span, so a client's
 //!   distributed trace continues seamlessly into CQLite.
 //! * **Metrics** — [`RpcMetrics`] is an RAII recorder: it bumps the in-flight
-//!   gauge and, on drop, records the request counter (by method + ok/error),
-//!   the latency histogram, and decrements the gauge. `do_get` additionally
-//!   reports rows and bytes streamed via [`RpcMetrics::add_rows_bytes`].
+//!   gauge and, on drop, records the request counter (by method + ok/error) and
+//!   the latency histogram, then decrements the gauge. `do_get` additionally
+//!   reports rows and bytes streamed per record batch, incrementally, via
+//!   [`RpcMetrics::record_batch_progress`] (issue #2162).
 //!
 //! All metric calls go through `cqlite_core::observability`, which is a no-op
 //! when its own feature is off, so the handlers compile and run identically in
@@ -121,10 +122,25 @@ impl RpcMetrics {
         self.status = STATUS_OK;
     }
 
-    /// Add rows + payload bytes streamed (used by `do_get`).
-    pub fn add_rows_bytes(&mut self, rows: u64, bytes: u64) {
+    /// Record one record batch's rows + payload bytes as an INCREMENTAL progress
+    /// delta (issue #2162): emit `cqlite.rpc.rows` / `cqlite.rpc.bytes` as a
+    /// monotonic counter delta right now, as the batch passes toward the client,
+    /// instead of a single aggregate emission at stream end. Called once per
+    /// record batch by [`crate::streaming::MeteredDoGetStream`], so a long-running
+    /// `do_get` shows the counters climbing while `cqlite.rpc.in_flight` is still
+    /// non-zero. The running totals are also accumulated for the terminal
+    /// bookkeeping; because the deltas are emitted here, `finish` does NOT re-emit
+    /// them (no double counting). Emission is per-batch, never per-row.
+    pub fn record_batch_progress(&mut self, rows: u64, bytes: u64) {
         self.rows = self.rows.saturating_add(rows);
         self.bytes = self.bytes.saturating_add(bytes);
+        let method = method_attr(self.method);
+        if rows > 0 {
+            obs::add_counter(catalog::RPC_ROWS, rows, &[method.clone()]);
+        }
+        if bytes > 0 {
+            obs::add_counter(catalog::RPC_BYTES, bytes, &[method]);
+        }
     }
 
     /// Emit the terminal metrics. Idempotent; called from `Drop`.
@@ -142,12 +158,11 @@ impl RpcMetrics {
             self.started.elapsed().as_secs_f64(),
             &[method.clone(), status],
         );
-        if self.rows > 0 {
-            obs::add_counter(catalog::RPC_ROWS, self.rows, &[method.clone()]);
-        }
-        if self.bytes > 0 {
-            obs::add_counter(catalog::RPC_BYTES, self.bytes, &[method.clone()]);
-        }
+        // `cqlite.rpc.rows` / `cqlite.rpc.bytes` are emitted INCREMENTALLY per
+        // record batch by `record_batch_progress` (issue #2162), so `finish` no
+        // longer re-adds the accumulated totals here — doing so would double-count
+        // the monotonic counters. The accumulated `self.rows`/`self.bytes` remain
+        // available for terminal bookkeeping / tests only.
         // Decrement the SAME shared per-method counter incremented in `start`.
         // `fetch_sub` returns the previous value, so the new level is `prev - 1`;
         // a `max(0)` floor guards against an unexpected underflow without ever
@@ -161,6 +176,108 @@ impl RpcMetrics {
 impl Drop for RpcMetrics {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+/// `do_get` execution phases (issue #2162), a fixed, bounded, ordered set. Used
+/// as the `cqlite.rpc.phase` attribute value on `cqlite.rpc.phase.duration`; the
+/// values are `&'static str` from this closed table so metric cardinality is
+/// capped exactly like [`RPC_METHODS`] — never a per-query/ticket/key value.
+///
+/// - `resolve`: path discovery + token prune (`do_get_setup`).
+/// - `merge_setup`: opening every input SSTable + building the k-way merger
+///   (`KWayMerger::new`, the #2157 stall suspect) before the first batch.
+/// - `stream`: partitions stepping + batches flowing to the client.
+pub const PHASE_RESOLVE: &str = "resolve";
+/// See [`PHASE_RESOLVE`].
+pub const PHASE_MERGE_SETUP: &str = "merge_setup";
+/// See [`PHASE_RESOLVE`].
+pub const PHASE_STREAM: &str = "stream";
+
+/// The closed set of `do_get` phase labels, in transition order.
+const RPC_PHASES: [&str; 3] = [PHASE_RESOLVE, PHASE_MERGE_SETUP, PHASE_STREAM];
+
+/// Normalise a phase label to its bounded slot, so an unexpected value can never
+/// leak as a metric attribute (it maps to `resolve`, never an arbitrary string).
+fn phase_slot(phase: &str) -> &'static str {
+    RPC_PHASES
+        .iter()
+        .find(|p| **p == phase)
+        .copied()
+        .unwrap_or(PHASE_RESOLVE)
+}
+
+/// Records the wall time a `do_get` spends in each bounded execution phase
+/// (issue #2162): `resolve` → `merge_setup` → `stream`.
+///
+/// Constructed at `do_get` entry (phase `resolve`). [`Self::transition`] closes
+/// the current phase — emitting a `cqlite.rpc.phase.duration` histogram sample
+/// tagged with the bounded `cqlite.rpc.phase` attribute plus a `tracing` span
+/// event — and opens the next. [`Drop`] closes whichever phase is still open, so
+/// EVERY entered phase records exactly one sample even on an error/cancel/panic
+/// exit, and a phase never entered records none (never a fabricated zero).
+///
+/// The recorder captures the `do_get` span at construction and re-enters it
+/// around each emission, so the span events attach to the `flight.do_get` span
+/// even when the later phases run on the blocking merge pool (mirrors
+/// [`crate::streaming`]'s span-capture pattern).
+pub struct PhaseTimer {
+    method: &'static str,
+    phase: &'static str,
+    started: Instant,
+    span: tracing::Span,
+}
+
+impl PhaseTimer {
+    /// Begin timing at the `resolve` phase for `method` (a `&'static str` from the
+    /// bounded `FlightService` method set).
+    pub fn start(method: &'static str) -> Self {
+        let method = RPC_METHODS[method_index(method)];
+        Self {
+            method,
+            phase: PHASE_RESOLVE,
+            started: Instant::now(),
+            span: tracing::Span::current(),
+        }
+    }
+
+    /// Close the current phase (record its duration) and open `next`.
+    pub fn transition(&mut self, next: &'static str) {
+        self.record_current();
+        self.phase = phase_slot(next);
+        self.started = Instant::now();
+    }
+
+    /// Emit the histogram sample + span event for the phase currently open.
+    fn record_current(&self) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let _entered = self.span.enter();
+        obs::record_histogram(
+            catalog::RPC_PHASE_DURATION,
+            elapsed,
+            &[
+                method_attr(self.method),
+                (
+                    catalog::attr::RPC_PHASE,
+                    AttrValue::StaticStr(phase_slot(self.phase)),
+                ),
+            ],
+        );
+        tracing::debug!(
+            rpc.method = self.method,
+            cqlite.rpc.phase = self.phase,
+            elapsed_s = elapsed,
+            "do_get phase completed"
+        );
+    }
+}
+
+impl Drop for PhaseTimer {
+    fn drop(&mut self) {
+        // Close whichever phase is still open — covers the normal terminal phase
+        // AND an error/cancel/panic exit that never transitioned further, so a
+        // stall that emits zero rows still records the phase it died in.
+        self.record_current();
     }
 }
 
@@ -343,7 +460,8 @@ mod tests {
         // The recorder must drive its counters/gauges without panicking in any
         // build (no-op when the core observability feature is off).
         let mut m = RpcMetrics::start("do_get");
-        m.add_rows_bytes(5, 1024);
+        m.record_batch_progress(5, 1024);
+        m.record_batch_progress(3, 512);
         m.ok();
         drop(m);
     }

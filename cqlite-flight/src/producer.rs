@@ -26,7 +26,7 @@ use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
 use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
-use cqlite_core::query::{build_row_from_scan, ColumnInfo, QueryRow};
+use cqlite_core::query::{build_row_from_scan, AccessPath, ColumnInfo, QueryRow};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
@@ -36,6 +36,7 @@ use cqlite_core::RowKey;
 use crate::agg::{AggError, AggPlan};
 use crate::cancel::CancelFlag;
 use crate::filter::ScanSpec;
+use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 use crate::ticket::Aggregation;
 
 /// Errors produced while merging SSTables into Arrow batches.
@@ -521,17 +522,27 @@ impl MergeProducer {
     /// Aggregation is NOT streamed here (its output is bounded); the service routes
     /// aggregating tickets to [`Self::produce_from_resolved`]. Called defensively,
     /// this returns without emitting for an aggregating producer.
+    ///
+    /// `on_merger_built` fires exactly once, at the `merge_setup` → `stream`
+    /// phase boundary (issue #2162) — right AFTER [`KWayMerger::new`] has opened
+    /// every input SSTable and BEFORE the first partition is stepped/emitted — so
+    /// a caller can attribute the SSTable-opening cost (the #2157 stall suspect)
+    /// to the `merge_setup` phase. It is NOT called when there is nothing to merge
+    /// (aggregating producer or no paths), because no merger is built in that case.
     pub(crate) fn produce_streaming(
         &self,
         paths: Vec<PathBuf>,
         cancel: &CancelFlag,
         sink: &mut dyn BatchSink,
+        progress: &ScanProgress,
+        on_merger_built: impl FnOnce(),
     ) -> Result<(), ProducerError> {
         if self.agg.is_some() || paths.is_empty() {
             return Ok(());
         }
         let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
-        self.drive_merge(&mut merger, cancel, sink)
+        on_merger_built();
+        self.drive_merge(&mut merger, cancel, sink, progress)
     }
 
     /// Prune `paths` to those whose token span overlaps the spec's token range.
@@ -606,7 +617,9 @@ impl MergeProducer {
 
         let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
         let mut sink = CollectSink(&mut batches);
-        self.drive_merge(&mut merger, cancel, &mut sink)?;
+        // Collect path (parity oracle): a private seam — no external observer, but
+        // the same incremental counter emission runs (issue #2162).
+        self.drive_merge(&mut merger, cancel, &mut sink, &ScanProgress::default())?;
         Ok(batches)
     }
 
@@ -630,12 +643,19 @@ impl MergeProducer {
         merger: &mut dyn PartitionStepper,
         cancel: &CancelFlag,
         sink: &mut dyn BatchSink,
+        progress: &ScanProgress,
     ) -> Result<(), ProducerError> {
         let limit = self.spec.limit;
         // A zero cap produces no rows without touching the merge.
         if limit == Some(0) {
             return Ok(());
         }
+        // Incremental scan-progress meter (issue #2162): flushes rows_scanned /
+        // read.rows / read.partitions deltas at the batch-scale threshold and, via
+        // its `Drop`, the remainder on EVERY exit (completion, LIMIT break, cancel,
+        // error, panic). The Flight merge always full-scans its (pruned) inputs, so
+        // the bounded access-path label is `full_scan`.
+        let mut meter = ScanProgressMeter::new(progress, AccessPath::FullScan.label());
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
 
@@ -653,6 +673,8 @@ impl MergeProducer {
                     continue;
                 }
             }
+            // Count a partition actually scanned (post token-range filter).
+            meter.record_partition();
             for entry in rows {
                 // Build the FULL row so predicates can reference any column, even
                 // one projected out of the output. Output projection is applied
@@ -660,6 +682,9 @@ impl MergeProducer {
                 let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
                     continue;
                 };
+                // Count a row materialised/examined by the scan (BEFORE the
+                // predicate filter — the `rows_scanned` semantic).
+                meter.record_row();
                 // Predicate pushdown: evaluate the nested filter tree with SQL
                 // Kleene logic and keep the row only when it is definitely True
                 // (Unknown and False both reject — WHERE semantics, issue #834).
@@ -1034,7 +1059,12 @@ mod tests {
         let err = {
             let mut sink = CollectSink(&mut batches);
             producer
-                .drive_merge(&mut counting, &cancelled, &mut sink)
+                .drive_merge(
+                    &mut counting,
+                    &cancelled,
+                    &mut sink,
+                    &ScanProgress::default(),
+                )
                 .expect_err("pre-cancelled merge aborts")
         };
 

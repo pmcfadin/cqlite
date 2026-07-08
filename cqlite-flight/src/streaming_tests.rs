@@ -32,6 +32,15 @@ fn probe() -> StreamProbe {
     StreamProbe::default()
 }
 
+/// A throwaway phase timer (issue #2162) for the streaming-path tests: they
+/// assert bounded-channel / metrics behaviour, not phase timing, so any timer is
+/// fine — it records its (tiny) phase durations as no-ops when `observability` is
+/// off. The dedicated phase assertions live in the `observability-testing` gated
+/// integration test.
+fn timer() -> crate::obs::PhaseTimer {
+    crate::obs::PhaseTimer::start("do_get")
+}
+
 /// Read exactly one item from the response stream (the first Flight message is
 /// the schema; the second carries the first record batch), proving a batch is
 /// available before the merge has run to completion.
@@ -72,6 +81,7 @@ fn first_batch_available_before_merge_completes() {
             DO_GET_CHANNEL_CAPACITY,
             pr.clone(),
             CancelFlag::new(),
+            timer(),
         );
         // Pull the first message (schema) then the first batch.
         let _schema_msg = read_one(&mut stream).await.expect("schema message");
@@ -120,6 +130,7 @@ fn slow_consumer_bounds_produced_batches() {
             DO_GET_CHANNEL_CAPACITY,
             pr.clone(),
             CancelFlag::new(),
+            timer(),
         );
         let _schema_msg = read_one(&mut stream).await.expect("schema");
         let _first = read_one(&mut stream).await.expect("first batch");
@@ -164,6 +175,7 @@ fn dropping_stream_cancels_merge() {
             DO_GET_CHANNEL_CAPACITY,
             pr.clone(),
             CancelFlag::new(),
+            timer(),
         );
         let _schema_msg = read_one(&mut stream).await.expect("schema");
         let _first = read_one(&mut stream).await.expect("first batch");
@@ -381,7 +393,13 @@ fn stream_batches_raw(producer: MergeProducer, paths: Vec<PathBuf>) -> Vec<Recor
                 tx,
                 produced: Arc::new(AtomicUsize::new(0)),
             };
-            if let Err(e) = producer.produce_streaming(paths, &cancel, &mut sink) {
+            if let Err(e) = producer.produce_streaming(
+                paths,
+                &cancel,
+                &mut sink,
+                &crate::scan_progress::ScanProgress::default(),
+                || {},
+            ) {
                 let _ = sink.tx.blocking_send(Err(e));
             }
         });
@@ -517,6 +535,7 @@ fn metrics_parity_on_full_consumption() {
             DO_GET_CHANNEL_CAPACITY,
             pr,
             CancelFlag::new(),
+            timer(),
         );
         let _ = drain_stream(stream).await;
         let _ = handle.await;
@@ -539,6 +558,282 @@ fn metrics_parity_on_full_consumption() {
         pr_check.errors_recorded.load(Ordering::Relaxed),
         0,
         "normal completion must not record an error"
+    );
+}
+
+// ---- Issue #2162 Stage 1: rpc.rows/rpc.bytes move per batch ----------------
+
+/// The rpc-progress seam moves BEFORE the stream is drained: after pulling the
+/// schema + first batch from a slow consumer, `progressed_rows` is non-zero and
+/// strictly below the fixture total, and at least one — but not all — per-batch
+/// emissions have happened. On pre-#2162 `main`, rows are attributed only at
+/// stream end, so nothing has moved at this observation point.
+///
+/// This is the feature-independent proof (via `StreamProbe`, which does not
+/// depend on the `observability` OTel counters) that emission moved from
+/// stream-end to per-batch — one emission per batch, never per row.
+#[test]
+fn rpc_progress_moves_before_stream_completes() {
+    let n = 40;
+    let (_temp, dir, schema) = many_partition_fixture(n);
+    // batch_size = 1 → one row per batch, so emitted_batches == rows emitted.
+    let producer = MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
+    let paths = resolved(&producer, &dir);
+    let schema_ref = Arc::new(producer.arrow_schema().unwrap());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let pr = probe();
+    let pr_check = pr.clone();
+    rt.block_on(async move {
+        let (mut stream, handle) = spawn_streaming(
+            producer,
+            paths,
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            pr,
+            CancelFlag::new(),
+            timer(),
+        );
+        let _schema_msg = read_one(&mut stream).await.expect("schema");
+        let _first = read_one(&mut stream).await.expect("first batch");
+
+        let progressed = pr_check.progressed_rows.load(Ordering::Relaxed);
+        let emitted = pr_check.emitted_batches.load(Ordering::Relaxed);
+        assert!(
+            (1..n as u64).contains(&progressed),
+            "rpc.rows must have moved before drain: progressed={progressed} of {n}"
+        );
+        assert!(
+            (1..n as usize).contains(&emitted),
+            "at least one, but not all, per-batch emissions before drain: emitted={emitted}"
+        );
+
+        drop(stream);
+        let _ = handle.await;
+    });
+}
+
+/// The per-batch deltas sum to the unchanged total: draining the stream to
+/// completion, the running progress (== summed per-batch deltas) equals the
+/// fixture's total row count, and the number of per-batch emissions equals the
+/// number of record batches — proving emission is per-batch, not per-row, and
+/// the monotonic total is byte-identical to the pre-#2162 single emission.
+#[test]
+fn per_batch_deltas_sum_to_unchanged_total() {
+    let schema = simple_schema();
+    let rows = (1..=10)
+        .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
+        .collect::<Vec<_>>();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+    // batch_size = 4 → ceil(10/4) = 3 batches, so per-batch (not per-row).
+    let producer =
+        MergeProducer::with_spec(schema.clone(), 4, crate::filter::ScanSpec::default()).unwrap();
+    let expected = collect_batches(&producer, &dir);
+    let expected_rows: u64 = expected.iter().map(|b| b.num_rows() as u64).sum();
+    let expected_batches = expected.len();
+
+    let stream_producer =
+        MergeProducer::with_spec(schema, 4, crate::filter::ScanSpec::default()).unwrap();
+    let paths = resolved(&stream_producer, &dir);
+    let schema_ref = Arc::new(stream_producer.arrow_schema().unwrap());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let pr = probe();
+    let pr_check = pr.clone();
+    rt.block_on(async move {
+        let (stream, handle) = spawn_streaming(
+            stream_producer,
+            paths,
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            pr,
+            CancelFlag::new(),
+            timer(),
+        );
+        let _ = drain_stream(stream).await;
+        let _ = handle.await;
+    });
+
+    assert!(expected_rows > 0, "fixture must produce rows");
+    assert_eq!(
+        pr_check.progressed_rows.load(Ordering::Relaxed),
+        expected_rows,
+        "summed per-batch deltas equal the total the single emission produced"
+    );
+    assert_eq!(
+        pr_check.emitted_batches.load(Ordering::Relaxed),
+        expected_batches,
+        "one per-batch emission per record batch (per-batch, not per-row)"
+    );
+    // The finalized total (used for the terminal probe) matches too.
+    assert_eq!(pr_check.rows.load(Ordering::Relaxed), expected_rows);
+}
+
+// ---- Issue #2162 Stage 3: core scan counters flush incrementally -----------
+
+/// Build a probe whose scan-progress seam flushes every `threshold` examined
+/// rows, so a modest fixture exercises multiple incremental flushes without
+/// building 16k rows.
+fn probe_with_threshold(threshold: u64) -> StreamProbe {
+    StreamProbe {
+        scan_progress: crate::scan_progress::ScanProgress::with_threshold(threshold),
+        ..Default::default()
+    }
+}
+
+/// Over a threshold-crossing full scan through the public Flight merge surface,
+/// the scan-progress seam records at least TWO `cqlite.query.rows_scanned` delta
+/// flushes (threshold crossings + the final remainder), and the summed deltas
+/// equal the scan's total examined-row count. On pre-#2162 `main` the count is
+/// exactly one — the single end-of-scan emission.
+#[test]
+fn rows_scanned_flushes_incrementally_over_threshold() {
+    let schema = simple_schema();
+    let rows = (1..=10)
+        .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
+        .collect::<Vec<_>>();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+    let producer =
+        MergeProducer::with_spec(schema.clone(), 4, crate::filter::ScanSpec::default()).unwrap();
+    let expected = collect_batches(&producer, &dir);
+    let total_rows: u64 = expected.iter().map(|b| b.num_rows() as u64).sum();
+    assert!(total_rows >= 8, "fixture must cross the test threshold");
+
+    let stream_producer =
+        MergeProducer::with_spec(schema, 4, crate::filter::ScanSpec::default()).unwrap();
+    let paths = resolved(&stream_producer, &dir);
+    let schema_ref = Arc::new(stream_producer.arrow_schema().unwrap());
+
+    // threshold = 4 → 10 rows yields 2 threshold crossings + a remainder flush.
+    let pr = probe_with_threshold(4);
+    let pr_check = pr.clone();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let (stream, handle) = spawn_streaming(
+            stream_producer,
+            paths,
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            pr,
+            CancelFlag::new(),
+            timer(),
+        );
+        let _ = drain_stream(stream).await;
+        let _ = handle.await;
+    });
+
+    assert!(
+        pr_check.scan_progress.flush_count() >= 2,
+        "threshold-crossing scan must flush ≥2 rows_scanned deltas, got {}",
+        pr_check.scan_progress.flush_count()
+    );
+    assert_eq!(
+        pr_check.scan_progress.flushed_rows(),
+        total_rows,
+        "summed incremental deltas must equal the total examined-row count"
+    );
+}
+
+/// A sub-threshold scan flushes exactly once — the final remainder — matching the
+/// pre-#2162 single end-of-scan emission (the counter total is unchanged; only a
+/// long scan gains incremental cadence).
+#[test]
+fn rows_scanned_sub_threshold_flushes_once() {
+    let schema = simple_schema();
+    let rows = (1..=5)
+        .map(|i| write_row(i, &format!("n{i}"), i, 100))
+        .collect::<Vec<_>>();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+    let stream_producer =
+        MergeProducer::with_spec(schema, 4, crate::filter::ScanSpec::default()).unwrap();
+    let paths = resolved(&stream_producer, &dir);
+    let schema_ref = Arc::new(stream_producer.arrow_schema().unwrap());
+
+    // Default (production) threshold: 5 rows never crosses it → one remainder flush.
+    let pr = probe();
+    let pr_check = pr.clone();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let (stream, handle) = spawn_streaming(
+            stream_producer,
+            paths,
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            pr,
+            CancelFlag::new(),
+            timer(),
+        );
+        let _ = drain_stream(stream).await;
+        let _ = handle.await;
+    });
+
+    assert_eq!(
+        pr_check.scan_progress.flush_count(),
+        1,
+        "a sub-threshold scan flushes exactly once (the remainder)"
+    );
+    assert_eq!(pr_check.scan_progress.flushed_rows(), 5);
+}
+
+/// Early termination still flushes the remainder (issue #2162): a LIMIT that
+/// stops the merge mid-scan must NOT lose the in-flight progress — the seam's
+/// summed deltas equal the rows actually examined up to the cap, via the
+/// `ScanProgressMeter`'s `Drop`.
+#[test]
+fn rows_scanned_flushes_remainder_on_limit_break() {
+    use crate::filter::ScanSpec;
+    let schema = simple_schema();
+    let rows = (1..=20)
+        .map(|i| write_row(i, &format!("n{i}"), i, 100))
+        .collect::<Vec<_>>();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+    // LIMIT 6 stops the merge after emitting 6 rows; the meter's Drop must still
+    // flush the examined remainder for the entered (unflushed) rows.
+    let spec = ScanSpec {
+        limit: Some(6),
+        ..Default::default()
+    };
+    let stream_producer = MergeProducer::with_spec(schema, 4, spec).unwrap();
+    let paths = resolved(&stream_producer, &dir);
+    let schema_ref = Arc::new(stream_producer.arrow_schema().unwrap());
+
+    let pr = probe_with_threshold(4);
+    let pr_check = pr.clone();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let (stream, handle) = spawn_streaming(
+            stream_producer,
+            paths,
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            pr,
+            CancelFlag::new(),
+            timer(),
+        );
+        let _ = drain_stream(stream).await;
+        let _ = handle.await;
+    });
+
+    // At least one flush happened and the summed deltas equal the examined rows
+    // (≥ the 6 emitted; the meter counts examined-before-predicate, and with no
+    // predicate that equals the rows built up to the LIMIT break).
+    assert!(
+        pr_check.scan_progress.flush_count() >= 1,
+        "a LIMIT-terminated scan must still flush its progress"
+    );
+    assert_eq!(
+        pr_check.scan_progress.flushed_rows(),
+        6,
+        "summed deltas equal the rows examined up to the LIMIT break — none lost"
     );
 }
 
@@ -598,6 +893,7 @@ fn aggregate_path_matches_collect_content() {
             schema_ref,
             RpcMetrics::start("do_get"),
             CancelFlag::new(),
+            timer(),
         )
         .await
         {
@@ -649,6 +945,7 @@ fn metrics_attribute_emitted_prefix_on_cancel() {
             DO_GET_CHANNEL_CAPACITY,
             pr,
             CancelFlag::new(),
+            timer(),
         );
         let _schema_msg = read_one(&mut stream).await.expect("schema");
         let _first = read_one(&mut stream).await.expect("first batch");

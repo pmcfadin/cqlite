@@ -51,6 +51,13 @@ observability = [
     "dep:opentelemetry_sdk",
     "dep:tracing-opentelemetry",
 ]
+# Test-only: pull in cqlite-core's shared in-memory OTLP capture harness
+# (`observability::testing`) so the #2162 phase/attribute assertions can read
+# back the emitted `cqlite.rpc.phase.duration` / `cqlite.rpc.rows` /
+# `cqlite.query.rows_scanned` series. NOT in defaults; enables the gated
+# `metrics_capture_tests` module. Run:
+#   cargo test -p cqlite-flight --features observability-testing
+observability-testing = ["cqlite-core/observability-testing"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

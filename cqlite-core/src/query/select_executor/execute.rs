@@ -332,6 +332,16 @@ impl SelectExecutor {
         // honest per-query signal (`context.access_path`, set by the SSTable-scan
         // step) and the rows the scan examined (`context.rows_processed`). Bounded
         // attributes only — never the query text or key values.
+        //
+        // Issue #2162: this stays a SINGLE-SHOT emission deliberately. The Flight
+        // `do_get` merge/scan path gained incremental `QUERY_ROWS_SCANNED` deltas
+        // (`cqlite-flight/src/scan_progress.rs`), but that path never runs through
+        // `SelectExecutor` — Flight drives `KWayMerger` directly. Making THIS site
+        // incremental too would additionally have to interact with
+        // `limit_pushdown`'s `scan_rows` rebaseline/decode-stop accounting
+        // (`limit_pushdown/mod.rs`), which re-runs a capped scan and resets
+        // `context.scan_rows` — a materially riskier change with no scenario in
+        // #2162's spec requiring it.
         {
             use crate::observability::{self as obs, catalog, AttrValue};
 

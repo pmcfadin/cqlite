@@ -83,6 +83,19 @@ pub(crate) struct StreamProbe {
     rows: Arc<AtomicU64>,
     /// Payload bytes attributed to metrics at stream end.
     bytes: Arc<AtomicU64>,
+    /// Running rows counted as each record batch passes through
+    /// [`MeteredDoGetStream`] toward the client (issue #2162). Updated per batch
+    /// BEFORE the stream ends, so a feature-independent slow-consumer test can
+    /// observe `cqlite.rpc.rows` progress mid-stream (the OTel counter itself is a
+    /// no-op when the `observability` feature is off). Distinct from [`Self::rows`],
+    /// which is only stored at finalization.
+    progressed_rows: Arc<AtomicU64>,
+    /// Count of record batches that have passed through [`MeteredDoGetStream`]
+    /// toward the client — i.e. the number of per-batch `cqlite.rpc.rows` /
+    /// `cqlite.rpc.bytes` counter emissions (issue #2162). One emission per batch,
+    /// never per row. Distinct from [`Self::produced_batches`], which counts
+    /// batches the merge pushed toward the channel.
+    emitted_batches: Arc<AtomicUsize>,
     /// Incremented once per surfaced egress error, alongside the
     /// `crate::obs::record_status_error` call — both by [`MeteredDoGetStream`]'s
     /// error arm for a merge-stage error (roborev B2) AND by
@@ -91,6 +104,12 @@ pub(crate) struct StreamProbe {
     /// eager-setup errors always did, independent of whether OTel counters are
     /// compiled in.
     errors_recorded: Arc<AtomicUsize>,
+    /// Incremental core-scan progress seam (issue #2162): counts the
+    /// `cqlite.query.rows_scanned` delta flushes the merge/scan loop emits and
+    /// their summed total, feature-independently (like the rest of this probe).
+    /// Threaded into `drive_merge` so a full-scan `do_get` records ≥ 2 flushes
+    /// over a threshold-crossing scan, versus exactly 1 for a sub-threshold scan.
+    pub(crate) scan_progress: crate::scan_progress::ScanProgress,
 }
 
 /// Sink that sends each merged batch into the bounded `do_get` channel.
@@ -178,6 +197,7 @@ pub(crate) fn spawn_streaming(
     capacity: usize,
     probe: StreamProbe,
     cancel: CancelFlag,
+    timer: crate::obs::PhaseTimer,
 ) -> (DoGetStream, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(capacity.max(1));
     // The shared cancel flag stops the merge when this response stream is dropped
@@ -186,6 +206,9 @@ pub(crate) fn spawn_streaming(
     let guard = cancel.drop_guard();
     let merge_cancel = cancel;
     let produced = probe.produced_batches.clone();
+    // The incremental scan-progress seam (issue #2162) is threaded into the merge
+    // loop so `cqlite.query.rows_scanned` climbs while the scan is in progress.
+    let scan_progress = probe.scan_progress.clone();
 
     // Run the CPU-bound merge off the async runtime; it sends batches as it goes.
     // `error_tx` is a clone kept OUTSIDE the (potentially unwound) merge closure so
@@ -195,7 +218,17 @@ pub(crate) fn spawn_streaming(
         let error_tx = tx.clone();
         let mut sink = ChannelSink { tx, produced };
         run_merge_catching_panics(&error_tx, move || {
-            producer.produce_streaming(paths, &merge_cancel, &mut sink)
+            // `timer` enters `do_get` already in the `merge_setup` phase (the
+            // caller transitioned `resolve` → `merge_setup` before spawning). The
+            // `on_merger_built` hook fires the `merge_setup` → `stream` transition
+            // right after `KWayMerger::new` opens the input SSTables; the timer
+            // then drops at the end of this closure, recording the final `stream`
+            // phase (or `merge_setup` if the merger build itself failed / there was
+            // nothing to merge). Issue #2162.
+            let mut timer = timer;
+            producer.produce_streaming(paths, &merge_cancel, &mut sink, &scan_progress, || {
+                timer.transition(crate::obs::PHASE_STREAM);
+            })
         });
     });
 
@@ -217,7 +250,15 @@ pub(crate) async fn build_aggregate_response(
     schema_ref: Arc<ArrowSchema>,
     metrics: RpcMetrics,
     cancel: CancelFlag,
+    timer: crate::obs::PhaseTimer,
 ) -> Result<DoGetStream, (Status, RpcMetrics)> {
+    // The aggregate route materializes its bounded per-group output — it never
+    // enters a client `stream` phase (issue #2162). The caller transitioned
+    // `resolve` → `merge_setup` before this call, so `timer` measures the merger
+    // build + drain-to-accumulator under `merge_setup`; it is a local here, so it
+    // drops (recording that `merge_setup` sample) on EVERY exit — success, a
+    // materialization error, or a cancel — and records no `stream` sample.
+    let _timer = timer;
     // Cancellation during materialization mirrors the pre-change guard-across-await.
     let mut guard = cancel.drop_guard();
     let merge_cancel = cancel;
@@ -373,7 +414,11 @@ impl MeteredDoGetStream {
     /// normal end followed by drop (or vice versa) records only once.
     fn finalize(&mut self, ok: bool) {
         if let Some(mut metrics) = self.metrics.take() {
-            metrics.add_rows_bytes(self.rows, self.bytes);
+            // Issue #2162: rows/bytes were already attributed INCREMENTALLY per
+            // batch (`record_batch_progress`), so `finalize` no longer re-adds the
+            // accumulated totals — it only sets the terminal OK/error status and
+            // drops `metrics`, which emits the terminal RPC request/duration
+            // counters. The probe records the emitted-prefix totals for tests.
             if ok {
                 metrics.ok();
             }
@@ -407,10 +452,28 @@ impl Stream for MeteredDoGetStream {
         let _entered = span.enter();
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                this.rows = this.rows.saturating_add(batch.num_rows() as u64);
-                this.bytes = this
-                    .bytes
-                    .saturating_add(batch.get_array_memory_size() as u64);
+                // Issue #2162: attribute this batch's rows/bytes as an INCREMENTAL
+                // counter delta right now, as it passes toward the client, instead
+                // of a single aggregate emission at stream end. One emission per
+                // batch, never per row. The running total (`this.rows`/`this.bytes`)
+                // is still accumulated for the terminal probe/parity bookkeeping;
+                // `finish` no longer re-emits the counters, so the monotonic total
+                // over a fully-drained stream is byte-identical to the pre-#2162
+                // single emission.
+                let batch_rows = batch.num_rows() as u64;
+                let batch_bytes = batch.get_array_memory_size() as u64;
+                this.rows = this.rows.saturating_add(batch_rows);
+                this.bytes = this.bytes.saturating_add(batch_bytes);
+                if let Some(metrics) = this.metrics.as_mut() {
+                    metrics.record_batch_progress(batch_rows, batch_bytes);
+                }
+                // Feature-independent progress seam (no-op OTel notwithstanding):
+                // publish the running rows and bump the per-batch emission count so
+                // a slow-consumer test can observe forward progress mid-stream.
+                this.probe
+                    .progressed_rows
+                    .store(this.rows, Ordering::Relaxed);
+                this.probe.emitted_batches.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(Some(Err(err))) => {

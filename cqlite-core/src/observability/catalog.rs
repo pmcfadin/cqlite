@@ -92,6 +92,13 @@ pub mod attr {
     /// Bounded to two values so a single metric series carries both arms for
     /// success/error-rate dashboards.
     pub const RPC_STATUS: &str = "cqlite.rpc.status";
+    /// `do_get` execution phase (issue #2162). Bounded to the closed set
+    /// `"resolve"`, `"merge_setup"`, `"stream"` — a `&'static str` from a fixed
+    /// slot table, never a per-query, per-ticket, key, or query-text value. Used
+    /// as the bounded dimension on [`super::RPC_PHASE_DURATION`] so a stalled
+    /// `do_get` localizes to a phase (time piling up in `merge_setup`) from
+    /// metrics alone.
+    pub const RPC_PHASE: &str = "cqlite.rpc.phase";
     /// Reason a `SELECT` fell back to a degraded (full-scan) read path
     /// (issue #2163). Values come from
     /// [`crate::query::access_path::FallbackReason::label`] — a documented closed
@@ -104,8 +111,19 @@ pub mod attr {
 
 /// `cqlite.read.rows` — counter `{row}`.
 ///
-/// Total rows materialised by the read path. Bounded attributes:
-/// [`attr::SSTABLE_FORMAT`].
+/// Total rows materialised by the read path. On the Flight k-way merge scan
+/// (issue #2162) the delta is emitted incrementally during a long-running scan,
+/// at a bounded row threshold, so the counter climbs before the scan returns;
+/// the total is unchanged. That merge-scan emission is FORMAT-AGNOSTIC (carries
+/// no attributes): the k-way merge reconciles rows across potentially several
+/// input SSTables — of possibly mixed BIG/BTI format — into one row set before
+/// this counter's grain, so no single format label is honest at the point of
+/// emission without per-input-file tallies threaded through reconciliation (no
+/// consumer needs that split today; a future extension could add it). A direct
+/// single-SSTable read-path caller may still attach [`attr::SSTABLE_FORMAT`]
+/// where the format is known at its own emission site — this metric's attribute
+/// set is therefore [`attr::SSTABLE_FORMAT`] OR no attributes, never a fabricated
+/// format label.
 pub const READ_ROWS: &str = "cqlite.read.rows";
 
 /// `cqlite.read.bytes` — counter `By`.
@@ -116,7 +134,14 @@ pub const READ_BYTES: &str = "cqlite.read.bytes";
 
 /// `cqlite.read.partitions` — counter `{partition}`.
 ///
-/// Total partitions scanned. Bounded attributes: [`attr::SSTABLE_FORMAT`].
+/// Total partitions scanned. On the Flight k-way merge scan (issue #2162) the
+/// delta is emitted incrementally during a long-running scan, at a bounded row
+/// threshold, so the counter climbs before the scan returns; the total is
+/// unchanged. Like [`READ_ROWS`], that merge-scan emission is FORMAT-AGNOSTIC
+/// (no attributes) — the merged partition already reconciles across possibly
+/// mixed-format input SSTables — while a direct single-SSTable read-path caller
+/// may still attach [`attr::SSTABLE_FORMAT`]. Bounded attributes:
+/// [`attr::SSTABLE_FORMAT`] OR none.
 pub const READ_PARTITIONS: &str = "cqlite.read.partitions";
 
 /// `cqlite.read.duration` — histogram `s`.
@@ -225,8 +250,14 @@ pub const QUERY_ROWS: &str = "cqlite.query.rows";
 /// Total rows materialised/examined by the SELECT scan step before predicate
 /// filtering, projection, and `LIMIT` (issue #1035). The gap between this and
 /// [`QUERY_ROWS`] is the read-amplification of a query — large for a
-/// `full_scan`, ~1 for a `partition_lookup`. Bounded attributes:
-/// [`attr::ACCESS_PATH`]. Emitted by the modern `SelectExecutor` only.
+/// `full_scan`, ~1 for a `partition_lookup`. Emitted incrementally during a
+/// long-running scan (issue #2162): monotonic counter deltas at a bounded row
+/// threshold on the merge/scan loop, plus a final remainder flush, so the counter
+/// climbs before the scan returns. The total over a completed scan is identical
+/// to the pre-#2162 single end-of-scan emission and it still carries only the
+/// bounded [`attr::ACCESS_PATH`] attribute. Bounded attributes:
+/// [`attr::ACCESS_PATH`]. Emitted by the modern `SelectExecutor` and the Flight
+/// merge/scan loop.
 pub const QUERY_ROWS_SCANNED: &str = "cqlite.query.rows_scanned";
 
 /// `cqlite.sstables.open` — gauge `{sstable}`.
@@ -441,14 +472,35 @@ pub const RPC_IN_FLIGHT: &str = "cqlite.rpc.in_flight";
 /// `cqlite.rpc.rows` — counter `{row}`.
 ///
 /// Total rows returned to clients by `do_get` (summed across emitted record
-/// batches). Bounded attributes: [`attr::RPC_METHOD`].
+/// batches). Emitted incrementally during a long-running scan (issue #2162): a
+/// monotonic counter delta per record batch as it passes toward the client, so a
+/// climbing value reads as a healthy long scan and a flat one (while
+/// [`RPC_IN_FLIGHT`] > 0) as a stall. The counter total over a fully-drained
+/// stream is unchanged — only the emission cadence moved from stream-end to
+/// per-batch. Bounded attributes: [`attr::RPC_METHOD`].
 pub const RPC_ROWS: &str = "cqlite.rpc.rows";
 
 /// `cqlite.rpc.bytes` — counter `By`.
 ///
 /// Total record-batch payload bytes streamed to clients by `do_get` (in-memory
-/// Arrow batch size, pre-IPC-framing). Bounded attributes: [`attr::RPC_METHOD`].
+/// Arrow batch size, pre-IPC-framing). Emitted incrementally during a
+/// long-running scan (issue #2162): a monotonic counter delta per record batch;
+/// the total over a fully-drained stream is byte-identical to the pre-#2162
+/// single end-of-stream emission. Bounded attributes: [`attr::RPC_METHOD`].
 pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
+
+/// `cqlite.rpc.phase.duration` — histogram `s` (issue #2162).
+///
+/// Wall time a `do_get` spends in each of a bounded, closed set of execution
+/// phases — `resolve` (path discovery + token prune), `merge_setup` (opening
+/// input SSTables + building the k-way merger, the #2157 stall suspect), and
+/// `stream` (partitions stepping + batches flowing to the client). Recorded once
+/// per phase transition, so a `do_get` dominated by opening SSTables shows its
+/// wall time accumulating in `merge_setup` BEFORE the first batch — a stall that
+/// emits zero rows still localizes to a phase. Bounded attributes:
+/// [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed three-value set). NEVER
+/// carries a ticket, key, token range, or query-text attribute.
+pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
 
 /// All catalog metric names, for tests and registration sanity checks.
 pub const ALL_METRICS: &[&str] = &[
@@ -502,6 +554,8 @@ pub const ALL_METRICS: &[&str] = &[
     RPC_IN_FLIGHT,
     RPC_ROWS,
     RPC_BYTES,
+    // In-progress read/query metrics (#2162)
+    RPC_PHASE_DURATION,
 ];
 
 #[cfg(test)]
@@ -534,9 +588,20 @@ mod tests {
             attr::PLAN_TYPE,
             attr::RPC_METHOD,
             attr::RPC_STATUS,
+            attr::RPC_PHASE,
             attr::FALLBACK_REASON,
         ] {
             assert!(key.starts_with("cqlite."), "attr {key} must be namespaced");
         }
+    }
+
+    #[test]
+    fn rpc_phase_duration_is_registered_and_namespaced() {
+        // Issue #2162: the new phase-duration histogram must be part of the
+        // canonical catalog so registration/uniqueness sanity checks cover it, and
+        // its name must be rooted under `cqlite.` like every other metric.
+        assert!(ALL_METRICS.contains(&RPC_PHASE_DURATION));
+        assert!(RPC_PHASE_DURATION.starts_with("cqlite."));
+        assert!(attr::RPC_PHASE.starts_with("cqlite."));
     }
 }
