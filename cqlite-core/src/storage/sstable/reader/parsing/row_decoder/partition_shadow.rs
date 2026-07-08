@@ -255,6 +255,14 @@ impl PartitionShadow {
 /// [`PartitionShadow::cell_shadowed_or_expired`]); whole-row TTL hiding needs the
 /// primary-key liveness marker, which the merger output lacks, so it is deliberately
 /// NOT decided here (issue #1849 scope note).
+///
+/// Gated on `write-support`: the sole caller is the cross-generation read path
+/// (`generation_merge`), whose `mod` declaration in `sstable/mod.rs` is itself
+/// `#[cfg(feature = "write-support")]`. Without this matching gate the function is
+/// orphaned (zero callers) under the `minimal-build` feature set and `-D dead_code`
+/// fails the build. `cell_shadowed_or_expired` needs no such gate — the single-gen
+/// read path (`row_data`/`complex_column`) calls it unconditionally.
+#[cfg(feature = "write-support")]
 pub(crate) fn merged_row_shadowed_by_partition(
     cover: Option<i64>,
     max_data_cell_timestamp: Option<i64>,
@@ -535,6 +543,7 @@ mod tests {
     /// cover is NEVER hidden. Revert-verify: dropping the `<=` (using `<`) makes the
     /// exact-boundary assertion FALSE; returning `true` on `None` cover would hide
     /// live rows.
+    #[cfg(feature = "write-support")]
     #[test]
     fn merged_row_partition_shadow_reuse() {
         use super::merged_row_shadowed_by_partition as f;
