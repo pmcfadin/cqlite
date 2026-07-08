@@ -121,7 +121,30 @@ spec:
                 exit 0
               fi
               if [ "$count" -eq 1 ]; then
-                echo "cqlite-flight multi-disk check (#2114): OK — exactly 1 Cassandra data dir exists under ${ROOT_HOST} (verified single-disk); serving ${SERVED}."
+                # roborev r3: a lone candidate is only an OK if it IS the served
+                # --data-dir. A misconfigured --data-root holding exactly one
+                # UNRELATED */cassandra/data dir must not report single-disk OK.
+                # Compare in HOST-path form (candidates were enumerated under the
+                # container mount and stored root-relative; SERVED is a host
+                # path), with trailing slashes stripped on both sides.
+                cand="${found# }"
+                cand_host="${ROOT_HOST%/}${cand}"
+                cand_norm="${cand_host%/}"
+                served_norm="${SERVED%/}"
+                if [ "$cand_norm" = "$served_norm" ]; then
+                  echo "cqlite-flight multi-disk check (#2114): OK — exactly 1 Cassandra data dir exists under ${ROOT_HOST} and it matches served --data-dir ${SERVED} (verified single-disk)."
+                  exit 0
+                fi
+                {
+                  echo "#################################################################"
+                  echo "## WARNING (issue #2114): lone candidate != served --data-dir  ##"
+                  echo "#################################################################"
+                  echo "The scanned root's only candidate ${cand_host} is NOT the served"
+                  echo "--data-dir ${SERVED} — wrong --data-root or wrong --data-dir; the"
+                  echo "served dir was not found under the root. The detector CANNOT"
+                  echo "verify this node's disk layout. Serving ${SERVED} regardless."
+                } >&2
+                # Non-fatal: cannot-verify, never block the DaemonSet rollout.
                 exit 0
               fi
               {

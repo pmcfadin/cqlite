@@ -72,8 +72,13 @@ blocks** the rollout). Review it per node:
 kubectl logs -l app.kubernetes.io/name=cqlite-flight -c detect-multidisk --prefix
 ```
 
-A single-disk node prints a one-line `OK` (exactly one existing candidate dir)
-and no warning, so the default behaviour is unchanged.
+A single-disk node prints a one-line `OK` — exactly one existing candidate dir
+**and it matches the served `--data-dir`** (compared in host-path form,
+trailing slashes stripped) — and no warning, so the default behaviour is
+unchanged. If the lone candidate is some *other* `*/cassandra/data` dir (wrong
+`--data-root` or wrong `--data-dir`), the detector prints a loud
+"lone candidate != served --data-dir" cannot-verify warning instead of a false
+`OK` (still exit 0).
 
 **Zero candidates is never a silent OK.** The detection volume uses `hostPath`
 `type: DirectoryOrCreate` — deliberately, so a missing `--data-root` can never
