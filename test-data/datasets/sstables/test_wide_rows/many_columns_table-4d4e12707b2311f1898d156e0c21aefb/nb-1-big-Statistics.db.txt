@@ -1,0 +1,66 @@
+SSTable: /var/lib/cassandra/data/test_wide_rows/many_columns_table-4d4e12707b2311f1898d156e0c21aefb/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 07/08/2026 23:18:22 (1783552702905087)
+Maximum timestamp: 07/08/2026 23:18:23 (1783552703063682)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 07/08/2026 23:18:22 (1783552702)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.SnappyCompressor
+Compression ratio: 0.7515612616896498
+TTL min: 0
+TTL max: 0
+First token: -8775808073942940395 (957539f8-dcc5-4f90-8850-0e7e3c094e03)
+Last token: 8341267119403523141 (6cb04460-4b2f-47ad-9085-780b53f3dde3)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.04032258064516129
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 248cf681-4b60-4ad6-bab3-5796d079e06f
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1783552602312, position=156799)=CommitLogPosition(segmentId=1783552602312, position=867071)}
+totalColumnsSet: 5000
+totalRows: 50
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1783552740 (07/08/2026 23:19:00) |   250 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes)  | Count  (%)  Histogram 
+   1331 (1.3 kB) |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1331 (1.3 kB)
+   75th      1331 (1.3 kB)
+   95th      1331 (1.3 kB)
+   98th      1331 (1.3 kB)
+   99th      1331 (1.3 kB)
+   Min       1110 (1.1 kB)
+   Max       1331 (1.3 kB)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   124     |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      124
+   75th      124
+   95th      124
+   98th      124
+   99th      124
+   Min       104
+   Max       124
+Local token space coverage: NaN
+Estimated cardinality: 50
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 07/08/2026 23:18:22 (1783552702)
+EncodingStats minTimestamp: 07/08/2026 23:18:22 (1783552702905087)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: col_054:org.apache.cassandra.db.marshal.BytesType, col_055:org.apache.cassandra.db.marshal.BytesType, col_056:org.apache.cassandra.db.marshal.DecimalType, col_057:org.apache.cassandra.db.marshal.DecimalType, col_058:org.apache.cassandra.db.marshal.DecimalType, col_059:org.apache.cassandra.db.marshal.DecimalType, col_050:org.apache.cassandra.db.marshal.UUIDType, col_051:org.apache.cassandra.db.marshal.BytesType, col_052:org.apache.cassandra.db.marshal.BytesType, col_053:org.apache.cassandra.db.marshal.BytesType, col_065:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type), col_066:org.apache.cassandra.db.marshal.InetAddressType, col_067:org.apache.cassandra.db.marshal.InetAddressType, col_100:org.apache.cassandra.db.marshal.UTF8Type, col_068:org.apache.cassandra.db.marshal.SimpleDateType, col_069:org.apache.cassandra.db.marshal.SimpleDateType, col_060:org.apache.cassandra.db.marshal.DecimalType, col_061:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type), col_062:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type), col_063:org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type), col_064:org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type), col_076:org.apache.cassandra.db.marshal.ShortType, col_077:org.apache.cassandra.db.marshal.UTF8Type, col_078:org.apache.cassandra.db.marshal.UTF8Type, col_079:org.apache.cassandra.db.marshal.UTF8Type, col_070:org.apache.cassandra.db.marshal.TimeType, col_071:org.apache.cassandra.db.marshal.DurationType, col_072:org.apache.cassandra.db.marshal.TimeUUIDType, col_073:org.apache.cassandra.db.marshal.UTF8Type, col_074:org.apache.cassandra.db.marshal.AsciiType, col_075:org.apache.cassandra.db.marshal.ByteType, col_087:org.apache.cassandra.db.marshal.UTF8Type, col_088:org.apache.cassandra.db.marshal.UTF8Type, col_001:org.apache.cassandra.db.marshal.UTF8Type, col_089:org.apache.cassandra.db.marshal.UTF8Type, col_002:org.apache.cassandra.db.marshal.UTF8Type, col_003:org.apache.cassandra.db.marshal.UTF8Type, col_004:org.apache.cassandra.db.marshal.UTF8Type, col_005:org.apache.cassandra.db.marshal.UTF8Type, col_006:org.apache.cassandra.db.marshal.UTF8Type, col_007:org.apache.cassandra.db.marshal.UTF8Type, col_008:org.apache.cassandra.db.marshal.UTF8Type, col_009:org.apache.cassandra.db.marshal.UTF8Type, col_080:org.apache.cassandra.db.marshal.UTF8Type, col_081:org.apache.cassandra.db.marshal.UTF8Type, col_082:org.apache.cassandra.db.marshal.UTF8Type, col_083:org.apache.cassandra.db.marshal.UTF8Type, col_084:org.apache.cassandra.db.marshal.UTF8Type, col_085:org.apache.cassandra.db.marshal.UTF8Type, col_086:org.apache.cassandra.db.marshal.UTF8Type, col_010:org.apache.cassandra.db.marshal.UTF8Type, col_098:org.apache.cassandra.db.marshal.UTF8Type, col_011:org.apache.cassandra.db.marshal.Int32Type, col_099:org.apache.cassandra.db.marshal.UTF8Type, col_012:org.apache.cassandra.db.marshal.Int32Type, col_013:org.apache.cassandra.db.marshal.Int32Type, col_014:org.apache.cassandra.db.marshal.Int32Type, col_015:org.apache.cassandra.db.marshal.Int32Type, col_016:org.apache.cassandra.db.marshal.Int32Type, col_017:org.apache.cassandra.db.marshal.Int32Type, col_018:org.apache.cassandra.db.marshal.Int32Type, col_019:org.apache.cassandra.db.marshal.Int32Type, col_090:org.apache.cassandra.db.marshal.UTF8Type, col_091:org.apache.cassandra.db.marshal.UTF8Type, col_092:org.apache.cassandra.db.marshal.UTF8Type, col_093:org.apache.cassandra.db.marshal.UTF8Type, col_094:org.apache.cassandra.db.marshal.UTF8Type, col_095:org.apache.cassandra.db.marshal.UTF8Type, col_096:org.apache.cassandra.db.marshal.UTF8Type, col_097:org.apache.cassandra.db.marshal.UTF8Type, col_021:org.apache.cassandra.db.marshal.LongType, col_022:org.apache.cassandra.db.marshal.LongType, col_023:org.apache.cassandra.db.marshal.LongType, col_024:org.apache.cassandra.db.marshal.LongType, col_025:org.apache.cassandra.db.marshal.LongType, col_026:org.apache.cassandra.db.marshal.FloatType, col_027:org.apache.cassandra.db.marshal.FloatType, col_028:org.apache.cassandra.db.marshal.FloatType, col_029:org.apache.cassandra.db.marshal.FloatType, col_020:org.apache.cassandra.db.marshal.Int32Type, col_032:org.apache.cassandra.db.marshal.DoubleType, col_033:org.apache.cassandra.db.marshal.DoubleType, col_034:org.apache.cassandra.db.marshal.DoubleType, col_035:org.apache.cassandra.db.marshal.DoubleType, col_036:org.apache.cassandra.db.marshal.BooleanType, col_037:org.apache.cassandra.db.marshal.BooleanType, col_038:org.apache.cassandra.db.marshal.BooleanType, col_039:org.apache.cassandra.db.marshal.BooleanType, col_030:org.apache.cassandra.db.marshal.FloatType, col_031:org.apache.cassandra.db.marshal.DoubleType, col_043:org.apache.cassandra.db.marshal.TimestampType, col_044:org.apache.cassandra.db.marshal.TimestampType, col_045:org.apache.cassandra.db.marshal.TimestampType, col_046:org.apache.cassandra.db.marshal.UUIDType, col_047:org.apache.cassandra.db.marshal.UUIDType, col_048:org.apache.cassandra.db.marshal.UUIDType, col_049:org.apache.cassandra.db.marshal.UUIDType, col_040:org.apache.cassandra.db.marshal.BooleanType, col_041:org.apache.cassandra.db.marshal.TimestampType, col_042:org.apache.cassandra.db.marshal.TimestampType
+IsTransient: false

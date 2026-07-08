@@ -1,0 +1,66 @@
+SSTable: /var/lib/cassandra/data/test_collections/nested_collections_table-4c042d507b2311f1898d156e0c21aefb/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.1
+Minimum timestamp: 07/08/2026 23:18:20 (1783552700546434)
+Maximum timestamp: 07/08/2026 23:18:20 (1783552700682731)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 07/08/2026 23:18:20 (1783552700)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.5246327184358776
+TTL min: 0
+TTL max: 0
+First token: -8576402244102576586 (51ddb5ed-5f2b-4942-b9e1-cf018549dac9)
+Last token: 9204506580087261599 (0b8cfcb5-d006-406a-830e-b35337ef4721)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.3333333333333333
+SSTable Level: 1
+Repaired at: 0
+Originating host id: 248cf681-4b60-4ad6-bab3-5796d079e06f
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1783552602312, position=90240)=CommitLogPosition(segmentId=1783552602312, position=858840)}
+totalColumnsSet: 200
+totalRows: 50
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1783552740 (07/08/2026 23:19:00) |   200 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   770 (770 B)  |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      770 (770 B)
+   75th      770 (770 B)
+   95th      770 (770 B)
+   98th      770 (770 B)
+   99th      770 (770 B)
+   Min       643 (643 B)
+   Max       770 (770 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   12      |    50 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      12
+   75th      12
+   95th      12
+   98th      12
+   99th      12
+   Min       11
+   Max       12
+Local token space coverage: NaN
+Estimated cardinality: 50
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 07/08/2026 23:18:20 (1783552700)
+EncodingStats minTimestamp: 07/08/2026 23:18:20 (1783552700546434)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: scores_by_game:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))), tags_by_category:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UTF8Type))), time_series_data:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.SimpleDateType,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.TimestampType))), user_preferences:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.UTF8Type)))
+IsTransient: false

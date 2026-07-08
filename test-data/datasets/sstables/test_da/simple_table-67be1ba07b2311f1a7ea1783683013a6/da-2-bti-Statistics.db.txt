@@ -1,0 +1,66 @@
+SSTable: /var/lib/cassandra/data/test_da/simple_table-67be1ba07b2311f1a7ea1783683013a6/da-2-bti
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 07/08/2026 23:19:02 (1783552742428298)
+Maximum timestamp: 07/08/2026 23:19:02 (1783552742466328)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.7973568281938326
+TTL min: 0
+TTL max: 0
+First token: -7647048816195910195 (58fdf371-d448-4ad2-99f7-460a6e0f1f08)
+Last token: 8666006335512811137 (501035bf-e79e-4d3a-a4fa-76dc8b3323e0)
+Covered clusterings: [, ]
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 248cf681-4b60-4ad6-bab3-5796d079e06f
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1783552731180, position=69950)=CommitLogPosition(segmentId=1783552731180, position=81714)}
+totalColumnsSet: 75
+totalRows: 15
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   60 (60 B)    |     6 ( 40) OOOOOOOOOOOOOOOOOOOO
+   72 (72 B)    |     9 ( 60) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      72 (72 B)
+   75th      72 (72 B)
+   95th      72 (72 B)
+   98th      72 (72 B)
+   99th      72 (72 B)
+   Min       51 (51 B)
+   Max       72 (72 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   5       |    15 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      5
+   75th      5
+   95th      5
+   98th      5
+   99th      5
+   Min       5
+   Max       5
+Local token space coverage: NaN
+Estimated cardinality: 15
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTimestamp: 07/08/2026 23:19:02 (1783552742428298)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: created:org.apache.cassandra.db.marshal.TimestampType, name:org.apache.cassandra.db.marshal.UTF8Type, active:org.apache.cassandra.db.marshal.BooleanType, salary:org.apache.cassandra.db.marshal.LongType, age:org.apache.cassandra.db.marshal.Int32Type
+IsTransient: false
