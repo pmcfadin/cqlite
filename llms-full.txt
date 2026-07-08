@@ -1457,6 +1457,34 @@ See `.claude/skills/test-data-management/dataset-generation.md` in the repo for 
 
 CQLite validates parsing correctness by comparing output against `sstabledump` — the Cassandra tool that produces authoritative JSON from SSTable files. Golden JSONL files are committed alongside the binary SSTables so CI can run parity checks without a live Cassandra cluster.
 
+## Two oracles: physical-dump parity vs query-semantics parity
+
+[Section titled “Two oracles: physical-dump parity vs query-semantics parity”](#two-oracles-physical-dump-parity-vs-query-semantics-parity)
+
+There are **two independent parity oracles**, and they answer different questions. Confusing them hides read-time-reconciliation bugs (issue #1741/#1742):
+
+|                      | **Physical-dump parity**                                                                                        | **Query-semantics parity**                                                                     |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Oracle               | `*-Data.db.jsonl` (sstabledump `-l`)                                                                            | `test-data/query-semantics-oracle.json`                                                        |
+| What it captures     | Every cell **physically on disk** — *including* tombstones, deleted rows, and expired-but-uncompacted TTL cells | The **post-reconciliation result set** a real Cassandra `SELECT` returns                       |
+| Question answered    | ”Did CQLite parse the bytes the same as Cassandra wrote them?"                                                  | "Does a CQLite `SELECT` return what a Cassandra `SELECT` returns?”                             |
+| TTL / tombstone rows | Present (enumerated)                                                                                            | Absent (shadowed / expired away)                                                               |
+| Test lane            | the seven `golden_path_*` integration tests, Python/Node parity                                                 | `cqlite-core/tests/query_semantics_oracle_parity.rs` (gate component `query-semantics-oracle`) |
+
+**Why both are needed.** A physical dump enumerates shadowed/expired rows, so a row-count/value comparison against it **structurally cannot catch a read-time reconciliation bug**: when CQLite fails to apply partition deletions, range tombstones, or TTL expiry, *both* sides still contain those rows and physical parity passes green — while a real `SELECT` diverges. `test_basic.ttl_test_table`’s golden holds all 100 expired rows; CQLite returned all 100; physical parity was green; a real Cassandra `SELECT` returns 0. That gap is exactly what the query-semantics oracle closes.
+
+The query-semantics oracle records, per fixture, the canonical `SELECT` and its expected result set evaluated at a **pinned `now`** (`pinned_now_secs`, epoch seconds) so TTL expiry is deterministic — never wall-clock-flaky. The reader honors the pin via the debug-only `CQLITE_TTL_NOW_OVERRIDE_SECS` seam (`now_clock.rs`). Each case carries a non-empty `expected_rows` and re-asserts the committed golden’s physical row count, so a 0-row or unreconciled result fails loudly (anti-empty-pass) and the divergence (physical count > semantic count) is visible in the test output.
+
+Run it directly:
+
+```bash
+env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test -p cqlite-core --features "state_machine cli-helpers" \
+  --test query_semantics_oracle_parity -- --nocapture
+```
+
+`CQLITE_REQUIRE_FIXTURES=1` (which the gate component sets) makes an absent/empty fixture a **hard failure**; without it, a minimal checkout that lacks the committed `test_compaction_tombstone_ttl` fixtures SKIPs loudly.
+
 ## Golden JSONL files
 
 [Section titled “Golden JSONL files”](#golden-jsonl-files)
