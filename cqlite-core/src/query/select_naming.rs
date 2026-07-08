@@ -10,6 +10,7 @@
 //! synthetic `col_N`.
 
 use super::select_ast::*;
+use crate::schema::CqlType;
 
 /// The scan-projection column name for a SELECT expression, or `None` when the
 /// expression does not name a stored column (aggregates, literals, arithmetic).
@@ -124,6 +125,37 @@ pub(crate) fn result_column_name(expr: &SelectExpression, index: usize) -> Strin
     }
 }
 
+/// Derive the CQL result type of an aggregate from the aggregate FUNCTION and
+/// its argument's schema type — never from a schema lookup of the aggregate's
+/// output name/alias (issue #1941). The name-lookup approach mis-typed
+/// `COUNT(*) AS value` as the `value` column's type and fell back to `Text` for
+/// any aggregate whose derived name matched no column.
+///
+/// Oracle — Cassandra's aggregate type rules, reconciled with the value type
+/// CQLite's executor actually emits in `finalize_group`
+/// (`select_executor::aggregation`):
+///   * `COUNT(*)` / `COUNT(col)` → `bigint` (emitted `Value::BigInt`)
+///   * `SUM(_)` / `AVG(_)`       → `double` (CQLite accumulates every numeric
+///     input into an `f64` and emits `Value::Float`, so the metadata type MUST
+///     be `double` to describe the produced value rather than lie about it)
+///   * `MIN(col)` / `MAX(col)`   → the argument column's type (the value is
+///     cloned through unchanged)
+///
+/// `arg_type` is the pre-resolved CQL type of the aggregate's argument column
+/// (from the schema); it is consulted ONLY for MIN/MAX. Returns `None` solely
+/// for a MIN/MAX whose argument type is unknown (no schema, or the argument is
+/// not a resolvable column), leaving the caller's existing untyped fallback.
+pub(crate) fn aggregate_result_cql_type(
+    function: &AggregateType,
+    arg_type: Option<CqlType>,
+) -> Option<CqlType> {
+    match function {
+        AggregateType::Count => Some(CqlType::BigInt),
+        AggregateType::Sum | AggregateType::Avg => Some(CqlType::Double),
+        AggregateType::Min | AggregateType::Max => arg_type,
+    }
+}
+
 /// Resolve `(column, alias)` for an aggregate. `COUNT(*)` and any aggregate
 /// referencing `*` yields `("*", "Func(*)")`; a single named column yields
 /// `(name, "Func_name")`; anything else falls back to `("*", "Func")`.
@@ -232,6 +264,42 @@ mod tests {
         assert_eq!(aggregate_arg_source_columns(&aliased), vec!["value"]);
         // Plain columns / non-aggregates contribute no aggregate-argument columns.
         assert!(aggregate_arg_source_columns(&col("value")).is_empty());
+    }
+
+    /// Issue #1941: aggregate result type comes from the function (+ argument
+    /// type for MIN/MAX), never a name lookup. COUNT → bigint; SUM/AVG → double
+    /// (CQLite emits `Value::Float`); MIN/MAX preserve the argument type and are
+    /// the ONLY variants that return `None` when the argument type is unknown.
+    #[test]
+    fn aggregate_result_cql_type_derives_from_function_and_argument() {
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Count, Some(CqlType::Int)),
+            Some(CqlType::BigInt),
+            "COUNT is bigint regardless of any argument type"
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Sum, Some(CqlType::Int)),
+            Some(CqlType::Double)
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Avg, Some(CqlType::Int)),
+            Some(CqlType::Double)
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Min, Some(CqlType::Int)),
+            Some(CqlType::Int),
+            "MIN preserves the argument column's type"
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Max, Some(CqlType::Double)),
+            Some(CqlType::Double)
+        );
+        // Only MIN/MAX with an unknown argument type stay untyped.
+        assert_eq!(aggregate_result_cql_type(&AggregateType::Min, None), None);
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Count, None),
+            Some(CqlType::BigInt)
+        );
     }
 
     /// A non-aggregate expression is not an aggregate name and falls back to the
