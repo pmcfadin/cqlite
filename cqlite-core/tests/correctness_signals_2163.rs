@@ -163,7 +163,7 @@ fn correctness_signals_end_to_end() {
     // `might_contain_partition` return false, pruning the SSTable per probe.
     {
         let reader = fixtures::open_big_reader();
-        let rt = tokio::runtime::Runtime::new().expect("rt");
+        // `might_contain_partition` is synchronous — no runtime needed here.
         // Count how many absent-key probes the oracle reports definitely-absent.
         mc.reset();
         let mut expected_pruned = 0u64;
@@ -183,7 +183,6 @@ fn correctness_signals_end_to_end() {
                 expected_pruned += 1;
             }
         }
-        drop(rt);
         let m = mc.flush_and_collect();
         assert!(
             expected_pruned >= 1,
