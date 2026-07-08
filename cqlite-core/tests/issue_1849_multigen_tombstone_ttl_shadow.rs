@@ -1,9 +1,9 @@
 //! Issue #1849 (P0, split from #1741): a MULTI-generation `SELECT` (a table dir
 //! with >1 SSTable generation, `candidates > 1`) routes through the write-support
-//! `KWayMerger` for cross-generation reconciliation. That merger does last-write-wins
-//! + tombstone reconciliation but does NOT apply read-time TTL expiry — so before
-//! this fix a multi-gen read returned TTL-EXPIRED cells as live, even though the
-//! single-gen path (#1741) already hides them.
+//! `KWayMerger` for cross-generation reconciliation. That merger reconciles
+//! (last-write-wins plus tombstone shadowing) but does NOT apply read-time TTL
+//! expiry, so before this fix a multi-gen read returned TTL-EXPIRED cells as live,
+//! even though the single-gen path (#1741) already hides them.
 //!
 //! The fix runs the merger's reconciled output through the SAME single-gen
 //! `PartitionShadow` per-cell decision (`cell_shadowed_or_expired`) POST-merge, so
