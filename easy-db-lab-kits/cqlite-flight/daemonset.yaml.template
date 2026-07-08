@@ -78,9 +78,12 @@ spec:
               found=""
               count=0
               # Lab convention: each disk mounts at $ROOT_HOST/<disk>/cassandra/data.
+              # Candidacy = EXISTENCE of the dir, regardless of contents (roborev
+              # r2 on #2114): an empty second data dir still counts — Cassandra
+              # will spread SSTables onto it later, and calling it single-disk OK
+              # today would land right back in silent-partial-read territory.
               for d in "$ROOT"/*/cassandra/data; do
                 [ -d "$d" ] || continue
-                [ -n "$(ls -A "$d" 2>/dev/null)" ] || continue
                 found="$found ${d#$ROOT}"
                 count=$((count + 1))
               done
@@ -107,7 +110,7 @@ spec:
                     echo "#################################################################"
                     echo "## WARNING (issue #2114): no candidate data dirs under root    ##"
                     echo "#################################################################"
-                    echo "--data-root (${ROOT_HOST}) is non-empty but holds no populated"
+                    echo "--data-root (${ROOT_HOST}) is non-empty but holds no"
                     echo "<root>/*/cassandra/data dirs. The node's layout does not match"
                     echo "the convention this detector scans, so it CANNOT verify whether"
                     echo "data spans multiple disks. Point --data-root at the directory"
@@ -118,7 +121,7 @@ spec:
                 exit 0
               fi
               if [ "$count" -eq 1 ]; then
-                echo "cqlite-flight multi-disk check (#2114): OK — exactly 1 populated Cassandra data dir under ${ROOT_HOST} (verified single-disk); serving ${SERVED}."
+                echo "cqlite-flight multi-disk check (#2114): OK — exactly 1 Cassandra data dir exists under ${ROOT_HOST} (verified single-disk); serving ${SERVED}."
                 exit 0
               fi
               {
@@ -129,10 +132,15 @@ spec:
                 echo "This node has ${count} candidate data dirs under ${ROOT_HOST}:"
                 for f in $found; do
                   host="${ROOT_HOST}${f}"
-                  if [ "$ROOT$f" = "$SERVED_IN" ]; then
-                    echo "  - ${host}   <-- SERVED by this pod"
+                  if [ -n "$(ls -A "$ROOT$f" 2>/dev/null)" ]; then
+                    fill="populated"
                   else
-                    echo "  - ${host}   (NOT served — its SSTables are SILENTLY MISSING from query results)"
+                    fill="currently empty — WILL receive SSTables later"
+                  fi
+                  if [ "$ROOT$f" = "$SERVED_IN" ]; then
+                    echo "  - ${host}   <-- SERVED by this pod (${fill})"
+                  else
+                    echo "  - ${host}   (NOT served, ${fill} — its SSTables are/will be SILENTLY MISSING from query results)"
                   fi
                 done
                 echo "Reads touching data on an unserved disk return PARTIAL results with NO"

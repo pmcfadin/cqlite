@@ -61,17 +61,19 @@ make the failure mode **visible** if it ever does.
 **Detection — the `detect-multidisk` init container.** Each pod runs a non-fatal
 init container (the same flight image, invoked as `/bin/sh`) that mounts
 `--data-root` (`CASSANDRA_DATA_ROOT`, default `/mnt`) read-only and counts
-candidate `<root>/*/cassandra/data` dirs that actually contain data. If it finds
-more than the one being served it prints a **loud, unmissable warning** naming
-each unserved disk, then exits 0 (it **never blocks** the rollout). Review it per
-node:
+**existing** `<root>/*/cassandra/data` dirs — candidacy is by existence,
+regardless of contents, because an *empty* second data dir will still receive
+SSTables later and must not report as single-disk today. If it finds more than
+the one being served it prints a **loud, unmissable warning** naming each
+unserved disk (annotated populated / currently empty), then exits 0 (it **never
+blocks** the rollout). Review it per node:
 
 ```bash
 kubectl logs -l app.kubernetes.io/name=cqlite-flight -c detect-multidisk --prefix
 ```
 
-A single-disk node prints a one-line `OK` (exactly one populated candidate) and
-no warning, so the default behaviour is unchanged.
+A single-disk node prints a one-line `OK` (exactly one existing candidate dir)
+and no warning, so the default behaviour is unchanged.
 
 **Zero candidates is never a silent OK.** The detection volume uses `hostPath`
 `type: DirectoryOrCreate` — deliberately, so a missing `--data-root` can never
@@ -84,7 +86,7 @@ cases:
 - root has **no entries at all** → "data root ABSENT or EMPTY" — likely a wrong
   `--data-root`, or the hostPath was auto-created; the layout check is
   meaningless until it's fixed.
-- root is **non-empty but no `<root>/*/cassandra/data` dir is populated** → the
+- root is **non-empty but no `<root>/*/cassandra/data` dir exists** → the
   node's layout doesn't match the convention the detector scans; point
   `--data-root` at the directory holding the per-disk mounts.
 
@@ -115,8 +117,9 @@ in the easy-db-lab source: the real ad-hoc flag set is `--from <dir> --kit <name
 `args:`**. `Install.execute()` calls `renderAndWrite(source, kitName, storageSize)`
 with no `extraVars`, so only the fixed `TemplateVariables` set (`CLUSTER_NAME`,
 `KIT_NAME`, `DB_NODE_IPS`, `KUBECONFIG`, etc.) gets substituted — **not**
-`__TAG__`, `__FLIGHT_PORT__`, `__CASSANDRA_DATA_DIR__`, `__CASSANDRA_DATA_GID__`,
-or `__OTEL_ENDPOINT__`. `--from` also skips the `type: db` node-pool guard and any
+`__TAG__`, `__FLIGHT_PORT__`, `__CASSANDRA_DATA_DIR__`, `__CASSANDRA_DATA_ROOT__`,
+`__CASSANDRA_DATA_GID__`, or `__OTEL_ENDPOINT__`. `--from` also skips the
+`type: db` node-pool guard and any
 typed `install:` steps (irrelevant here — this kit has none).
 
 **Recommended path — register the kits directory as a source, then install by name**
@@ -136,9 +139,10 @@ written files before running `start`:
 easy-db-lab kit install --from /path/to/cqlite/easy-db-lab-kits/cqlite-flight \
   --kit cqlite-flight --size 0Gi
 # Edit the scaffolded files to replace remaining __TAG__ / __FLIGHT_PORT__ /
-# __CASSANDRA_DATA_DIR__ / __CASSANDRA_DATA_GID__ / __OTEL_ENDPOINT__ tokens:
+# __CASSANDRA_DATA_DIR__ / __CASSANDRA_DATA_ROOT__ / __CASSANDRA_DATA_GID__ /
+# __OTEL_ENDPOINT__ tokens:
 #   <workdir>/cqlite-flight/daemonset.yaml
-#   <workdir>/cqlite-flight/bin/start.sh   (only __TAG__/__FLIGHT_PORT__/__CASSANDRA_DATA_DIR__ appear here, for the echo lines)
+#   <workdir>/cqlite-flight/bin/start.sh   (only __TAG__/__FLIGHT_PORT__/__CASSANDRA_DATA_DIR__/__CASSANDRA_DATA_ROOT__ appear here, for the echo lines)
 easy-db-lab cqlite-flight start
 ```
 
