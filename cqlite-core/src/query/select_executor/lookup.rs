@@ -363,9 +363,7 @@ pub(super) fn classify_clustering_slice(
 /// rows arrive contiguously from a single `scan_partition` call.
 pub(super) fn sort_rows_by_token(rows: &mut [(RowKey, ScanRow)]) {
     rows.sort_by(|a, b| {
-        let ta = crate::util::cassandra_murmur3::cassandra_murmur3_token(&a.0 .0);
-        let tb = crate::util::cassandra_murmur3::cassandra_murmur3_token(&b.0 .0);
-        ta.cmp(&tb).then_with(|| a.0 .0.cmp(&b.0 .0))
+        crate::util::cassandra_murmur3::cmp_partition_keys_by_token(&a.0 .0, &b.0 .0)
     });
 }
 
