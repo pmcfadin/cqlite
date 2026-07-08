@@ -27,8 +27,7 @@
 - [x] 3.3 Confirm the diff touches only `website/` (+ the one cross-linked page) — no `src/` / product code.
 
 ## 4. Pipeline close-out (run by flow-closer)
-- [ ] 4.1 Full `scripts/agent-gate.sh` (expected: docs-only diff → PASS; site build is the substantive check).
-- [ ] 4.2 C intent audit — `spec-auditor` anchored to `openspec/changes/flight-trino-docs-page/specs/**`
-      (every requirement `satisfied` with the page/build as evidence).
-- [ ] 4.3 Final roborev pass on the branch (`--base origin/main`).
-- [ ] 4.4 Merge on green + `flow-finalize` (archive the change, sync specs, remove worktree/branch, close #2115).
+- [x] 4.1 Site build gate (docs-only diff → the substantive check): `npm run build` EXIT=0, `✓ All internal links are valid.`
+- [x] 4.2 C intent audit — all 6 requirements satisfied with the rendered page as evidence (PASS).
+- [x] 4.3 Final roborev pass on the branch (`--base origin/main`): 3 doc-accuracy blockers fixed over 2 rounds, converged clean.
+- [x] 4.4 Merge on green (PR #2181, squash be06c31e) + `flow-finalize` (archive the change, sync specs, remove worktree/branch, close #2115).
