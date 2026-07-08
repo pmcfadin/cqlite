@@ -224,19 +224,35 @@ fn method_attr(method: &'static str) -> (&'static str, AttrValue) {
 }
 
 /// Record an RPC failure into the error-rate signal (`cqlite.errors.total`,
-/// subsystem `flight`) and mark the active span errored.
+/// subsystem `flight`), emit a `tracing` log line, and mark the active span
+/// errored.
 ///
 /// The handlers return `tonic::Status`, but [`obs::record_error`] keys the
 /// counter on a bounded `{category, subsystem}` label set derived from a
 /// `cqlite_core::Error` — never the message. We therefore map the gRPC status
 /// *code* (a closed set) to a representative `cqlite_core::Error` so the error
-/// category is meaningful. No part of the status message is ever recorded.
+/// category is meaningful. No part of the status message is ever recorded in the
+/// metric.
+///
+/// Logging (issue #2193): the OTel error counter is a no-op when the
+/// `observability` feature is off (the common case, and how the field flight
+/// image was built — see #2128), so before this change a failure that arrived
+/// through this hook was invisible in the logs even at `RUST_LOG=debug`. That
+/// let a `do_get` streaming-egress failure (issue #2193) close the client stream
+/// with `Failed to read message` while the server logged nothing. We now emit a
+/// `tracing` event so every recorded failure is visible in the log at a level
+/// matching its severity — `error` for a server fault, `warn` for a client
+/// fault, and `debug` for the expected `Aborted` of a client disconnect /
+/// cooperative cancellation (so normal disconnects stay quiet). The status
+/// message is fine to log (unlike the metric, the log is not a bounded-label
+/// cardinality surface).
 pub fn record_status_error(status: &tonic::Status) {
     use cqlite_core::Error;
     use tonic::Code;
+    let code = status.code();
     // A fixed, bounded code→error mapping. The message text is irrelevant to the
     // counter (only the category is used) so a constant placeholder is passed.
-    let err = match status.code() {
+    let err = match code {
         Code::NotFound => Error::not_found("flight"),
         Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
             Error::invalid_input("flight")
@@ -245,6 +261,47 @@ pub fn record_status_error(status: &tonic::Status) {
         _ => Error::internal("flight"),
     };
     obs::record_error(&err, SUBSYSTEM);
+
+    let message = status.message();
+    match log_level_for(code) {
+        // Expected, benign terminal states: a client disconnect / cooperative
+        // cancellation surfaces as `Aborted`, and a healthy end is `Ok` (never
+        // routed here, but guarded). Keep these off the error/warn logs.
+        tracing::Level::DEBUG => {
+            tracing::debug!(subsystem = SUBSYSTEM, %code, message, "flight rpc ended");
+        }
+        // Client-fault codes: the request was bad, not the server.
+        tracing::Level::WARN => {
+            tracing::warn!(subsystem = SUBSYSTEM, %code, message, "flight rpc failed");
+        }
+        // Server-fault codes (Internal, Unknown, DataLoss, Unavailable, …): the
+        // class that includes a swallowed streaming-egress encode/send failure.
+        _ => {
+            tracing::error!(subsystem = SUBSYSTEM, %code, message, "flight rpc failed");
+        }
+    }
+}
+
+/// The `tracing` level at which a failing gRPC `code` is logged by
+/// [`record_status_error`]: `debug` for the benign terminal states (client
+/// disconnect / cancellation), `warn` for a client-fault request, and `error`
+/// for a server fault — the class that includes a swallowed streaming-egress
+/// encode/send failure (issue #2193). Split out as a pure function so the
+/// severity mapping is unit-testable without a `tracing` subscriber.
+fn log_level_for(code: tonic::Code) -> tracing::Level {
+    use tonic::Code;
+    match code {
+        Code::Aborted | Code::Cancelled | Code::Ok => tracing::Level::DEBUG,
+        Code::NotFound
+        | Code::InvalidArgument
+        | Code::FailedPrecondition
+        | Code::OutOfRange
+        | Code::Unauthenticated
+        | Code::PermissionDenied
+        | Code::AlreadyExists
+        | Code::Unimplemented => tracing::Level::WARN,
+        _ => tracing::Level::ERROR,
+    }
 }
 
 /// `opentelemetry::propagation::Extractor` over gRPC request metadata, so the
@@ -363,6 +420,45 @@ mod tests {
             tonic::Status::internal("x"),
         ] {
             record_status_error(&status);
+        }
+    }
+
+    #[test]
+    fn log_level_matches_fault_severity() {
+        use tonic::Code;
+        use tracing::Level;
+        // Server faults — the swallowed streaming-egress class (issue #2193) —
+        // must log at error so a `do_get` encode/send failure is never invisible.
+        for code in [
+            Code::Internal,
+            Code::Unknown,
+            Code::DataLoss,
+            Code::Unavailable,
+        ] {
+            assert_eq!(
+                log_level_for(code),
+                Level::ERROR,
+                "{code:?} is a server fault"
+            );
+        }
+        // Client faults log at warn (the request was bad, not the server).
+        for code in [
+            Code::NotFound,
+            Code::InvalidArgument,
+            Code::FailedPrecondition,
+            Code::OutOfRange,
+            Code::Unimplemented,
+        ] {
+            assert_eq!(
+                log_level_for(code),
+                Level::WARN,
+                "{code:?} is a client fault"
+            );
+        }
+        // Expected benign terminal states (client disconnect / cancellation)
+        // stay at debug so normal disconnects don't spam the error log.
+        for code in [Code::Aborted, Code::Cancelled, Code::Ok] {
+            assert_eq!(log_level_for(code), Level::DEBUG, "{code:?} is benign");
         }
     }
 
