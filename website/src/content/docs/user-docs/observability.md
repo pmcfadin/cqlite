@@ -81,6 +81,7 @@ Read by every surface. Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`.
 | `CQLITE_OTEL_SERVICE_VERSION` | string | crate version | `service.version` resource attribute. |
 | `CQLITE_OTEL_SAMPLING_RATIO` | f64 | `1.0` | Trace-ID-ratio sampling probability, clamped to `[0.0, 1.0]`. |
 | `CQLITE_OTEL_TIMEOUT_MS` | u64 | `10000` | Exporter export timeout in milliseconds. |
+| `CQLITE_VERIFY_PRESENCE_ORACLE` | bool | `false` | Opt-in soundness check: when true, a read whose bloom/BTI-trie reports a key "definitely absent" runs an authoritative confirmation scan and increments `cqlite.read.bloom.false_negatives` on a contradiction (expected value: 0). Off by default — it is the one presence-oracle counter that costs real work. |
 
 ## Per-surface configuration
 
@@ -182,6 +183,8 @@ Collector's Prometheus exporter sanitises dotted names to underscores, appends
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` |
 | `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`, `cqlite.query.access_path`, `cqlite.sstable.format` |
 | `cqlite.read.bloom.checks` | counter | `1` | `cqlite.result`, `cqlite.sstable.format` |
+| `cqlite.read.sstables_pruned` | counter | `{sstable}` | `cqlite.sstable.format` |
+| `cqlite.read.bloom.false_negatives` | counter | `1` | `cqlite.sstable.format` |
 | `cqlite.storage.open.sstables` | counter | `{sstable}` | (none) |
 | `cqlite.storage.open.bytes` | counter | `By` | (none) |
 | `cqlite.storage.open.tables` | counter | `1` | (none) |
@@ -189,6 +192,7 @@ Collector's Prometheus exporter sanitises dotted names to underscores, appends
 | `cqlite.query.duration` | histogram | `s` | `cqlite.subsystem` |
 | `cqlite.query.rows` | counter | `{row}` | `cqlite.query.access_path`, `cqlite.query.plan_type` |
 | `cqlite.query.rows_scanned` | counter | `{row}` | `cqlite.query.access_path` |
+| `cqlite.query.degraded_path.total` | counter | `1` | `cqlite.query.fallback_reason` |
 | `cqlite.write.mutations` | counter | `{row}` | (none) |
 | `cqlite.write.partitions` | counter | `{partition}` | (none) |
 | `cqlite.write.bytes` | counter | `By` | (none) |
@@ -206,6 +210,10 @@ Collector's Prometheus exporter sanitises dotted names to underscores, appends
 | `cqlite.compaction.sstables_in` | counter | `{sstable}` | (none) |
 | `cqlite.compaction.sstables_out` | counter | `{sstable}` | (none) |
 | `cqlite.compaction.tombstones_purged` | counter | `{tombstone}` | (none) |
+| `cqlite.compaction.tombstones_suppressed` | counter | `{tombstone}` | (none) |
+| `cqlite.compaction.tombstones_emitted` | counter | `{tombstone}` | (none) |
+| `cqlite.merge.rows_in` | counter | `{row}` | (none) |
+| `cqlite.merge.rows_out` | counter | `{row}` | (none) |
 | `cqlite.compaction.lag` | gauge | `{sstable}` | (none) |
 | `cqlite.compaction.finalize.duration` | histogram | `s` | (none) |
 | `cqlite.compaction.budget.requested` | histogram | `s` | (none) |

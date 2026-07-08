@@ -31,6 +31,7 @@ These are read by every surface through
 | `CQLITE_OTEL_SERVICE_VERSION` | string | crate version | `service.version` resource attribute. |
 | `CQLITE_OTEL_SAMPLING_RATIO` | f64 | `1.0` | Trace-ID-ratio sampling probability, clamped to `[0.0, 1.0]`. |
 | `CQLITE_OTEL_TIMEOUT_MS` | u64 | `10000` | Exporter export timeout in milliseconds. |
+| `CQLITE_VERIFY_PRESENCE_ORACLE` | bool | `false` | Opt-in soundness check (issue #2163). When true, an SSTable read whose bloom/BTI-trie reports a key "definitely absent" runs an AUTHORITATIVE confirmation scan and increments `cqlite.read.bloom.false_negatives` on a contradiction. Off by default — it is the one presence-oracle counter that costs real work; turn it on transiently to prove the oracle-soundness invariant (expected value: 0), then off. |
 
 Unparseable values fall back to the documented default rather than erroring, so
 a typo never crashes the host process.
@@ -213,6 +214,8 @@ dot-separated under the `cqlite.` root; units use UCUM annotations
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` |
 | `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`, `cqlite.query.access_path`, `cqlite.sstable.format` |
 | `cqlite.read.bloom.checks` | counter | `1` | `cqlite.result`, `cqlite.sstable.format` |
+| `cqlite.read.sstables_pruned` | counter | `{sstable}` | `cqlite.sstable.format` |
+| `cqlite.read.bloom.false_negatives` | counter | `1` | `cqlite.sstable.format` |
 | `cqlite.storage.open.sstables` | counter | `{sstable}` | (none) |
 | `cqlite.storage.open.bytes` | counter | `By` | (none) |
 | `cqlite.storage.open.tables` | counter | `1` | (none) |
@@ -225,6 +228,7 @@ dot-separated under the `cqlite.` root; units use UCUM annotations
 | `cqlite.query.duration` | histogram | `s` | `cqlite.subsystem` |
 | `cqlite.query.rows` | counter | `{row}` | `cqlite.query.access_path`, `cqlite.query.plan_type` |
 | `cqlite.query.rows_scanned` | counter | `{row}` | `cqlite.query.access_path` |
+| `cqlite.query.degraded_path.total` | counter | `1` | `cqlite.query.fallback_reason` |
 
 ### Write path
 
@@ -252,6 +256,10 @@ dot-separated under the `cqlite.` root; units use UCUM annotations
 | `cqlite.compaction.sstables_in` | counter | `{sstable}` | (none) |
 | `cqlite.compaction.sstables_out` | counter | `{sstable}` | (none) |
 | `cqlite.compaction.tombstones_purged` | counter | `{tombstone}` | (none) |
+| `cqlite.compaction.tombstones_suppressed` | counter | `{tombstone}` | (none) |
+| `cqlite.compaction.tombstones_emitted` | counter | `{tombstone}` | (none) |
+| `cqlite.merge.rows_in` | counter | `{row}` | (none) |
+| `cqlite.merge.rows_out` | counter | `{row}` | (none) |
 | `cqlite.compaction.lag` | gauge | `{sstable}` | (none) |
 | `cqlite.compaction.finalize.duration` | histogram | `s` | (none) |
 | `cqlite.compaction.budget.requested` | histogram | `s` | (none) |
@@ -288,6 +296,7 @@ closed value space so cardinality stays bounded. Source:
 | `cqlite.result` | `hit`, `miss` |
 | `cqlite.read.lookup_route` | `index`, `bti_trie` |
 | `cqlite.query.access_path` | `full_scan`, `partition_lookup`, `multi_partition_lookup`, `clustering_slice`, `fallback_full_scan` |
+| `cqlite.query.fallback_reason` | `no_schema`, `partition_key_not_fully_constrained`, `partition_key_encoding_failed`, `metadata_scan_path`, `legacy_executor_path`, `tombstones_build_no_prune` |
 | `cqlite.query.plan_type` | `table_scan`, `point_lookup`, `index_scan`, `range_scan`, `aggregation` |
 | `cqlite.rpc.method` | fixed `FlightService` method set (`do_get`, `get_flight_info`, `get_schema`, `handshake`, …) |
 | `cqlite.rpc.status` | `ok`, `error` |
