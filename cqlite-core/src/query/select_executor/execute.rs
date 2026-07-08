@@ -461,7 +461,7 @@ impl SelectExecutor {
         // non-pk column) keeps the honest full-scan path, which correctly matches
         // regular-column equalities. Resolved only when there is no CQL schema and no
         // WRITETIME/TTL metadata projection (the two branches below own those).
-        let schemaless_pk_bytes: Option<Vec<u8>> =
+        let schemaless_seek: Option<super::schemaless_point::SchemalessPointSeek> =
             if schema_opt.is_none() && !context.projection_flags.include_cell_metadata {
                 let shape = self.storage.partition_key_shape(table).await;
                 classify_schemaless_point_lookup(predicates, shape.as_ref())
@@ -541,7 +541,7 @@ impl SelectExecutor {
                     Some(row)
                 },
             )?
-        } else if let Some(pk_bytes) = schemaless_pk_bytes {
+        } else if let Some(seek) = schemaless_seek {
             // Issue #1750 (regression fix, re-scoped): a SCHEMA-LESS `WHERE pk =
             // <literal>` point read whose equality column is a metadata-CONFIRMED
             // sole partition key. With no schema the full-scan path CANNOT
@@ -552,18 +552,30 @@ impl SelectExecutor {
             // re-evaluating the predicate). Serve it here by the SAME
             // key-byte-targeted seek the schema-aware Targeted arm uses
             // (`scan_partition`), which is self-verifying: it returns ONLY rows whose
-            // raw partition key equals `pk_bytes`, so a wrong/absent key yields
-            // nothing (never another partition's rows). The decision is made from
-            // AUTHORITATIVE metadata (the Statistics.db SerializationHeader shape,
-            // resolved above) by ELIMINATION — never a pk-name/substring/token-count
-            // text guess (#28). A `WHERE <regular_col> = <literal>` does NOT reach
-            // here (the classifier returns `None` because the column is one of the
-            // authoritative non-key names), so it keeps the honest full-scan path and
-            // correctly matches the regular-column cell. Skip the per-row predicate
-            // backstop for this branch (the seek already pinned the partition by
-            // key); the schema-less `SELECT *` column metadata still comes from the
-            // first row's keys in `execute`.
-            let (rows, engaged) = self.storage.scan_partition(table, &pk_bytes, None).await?;
+            // raw partition key equals `seek.bytes`, so a wrong/absent key yields
+            // nothing (never another partition's rows). The key is encoded through
+            // the TYPED single-component codec for the pk's AUTHORITATIVE type (from
+            // the Statistics.db SerializationHeader `keyType`), so a parsed integer
+            // literal (`Value::BigInt`) builds the width Cassandra wrote — an `int`
+            // pk's 4-byte key, not an 8-byte one (roborev 3784 FINDING 2). The
+            // decision is made from AUTHORITATIVE metadata by ELIMINATION — never a
+            // pk-name/substring/token-count text guess (#28). A `WHERE <regular_col>
+            // = <literal>` does NOT reach here (the classifier returns `None` because
+            // the column is one of the authoritative non-key names), so it keeps the
+            // honest full-scan path and correctly matches the regular-column cell.
+            //
+            // Post-seek guard (roborev 3784 FINDING 1): the classifier admits the
+            // predicate column by ELIMINATION, which also admits a
+            // nonexistent/misspelled column whose literal happens to encode to a real
+            // partition's key. `finalize_schemaless_seek_row` reconstructs the sole
+            // pk column under its authoritative type/name and RE-EVALUATES the
+            // predicate, so such a column yields `Unknown` and rejects the row
+            // (correct 0 rows) — the pk-name predicate still matches. The schema-less
+            // `SELECT *` column metadata still comes from the first row in `execute`.
+            let (rows, engaged) = self
+                .storage
+                .scan_partition(table, &seek.bytes, None)
+                .await?;
             let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
             context.access_path = Some(path.clone());
             crate::query::access_path::record(path);
@@ -571,7 +583,9 @@ impl SelectExecutor {
             context.rows_processed += rows.len() as u64;
             let mut out = Vec::with_capacity(rows.len());
             for (key, value) in rows {
-                if let Some(row) = build_row_from_scan(key, value, projection, None) {
+                if let Some(row) = super::schemaless_point::finalize_schemaless_seek_row(
+                    key, value, projection, predicates, &seek,
+                ) {
                     out.push(row);
                 }
             }

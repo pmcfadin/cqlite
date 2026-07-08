@@ -119,6 +119,32 @@ async fn setup_schemaless() -> Result<Database, String> {
     Ok(result.database)
 }
 
+/// Table with an `int` single-component partition key (roborev 3784 FINDING 2).
+/// `test_compactionparity.live_no_clustering` is `id INT PRIMARY KEY, v TEXT` —
+/// the closest real scalar-column `int`-pk fixture (a true `int` pk; the pk NAME
+/// is not serialised so the header synthesises `partition_key`). Opened SCHEMA-LESS
+/// so the point read must derive the pk width from the SerializationHeader `keyType`.
+const INT_PK_TABLE: &str = "test_compactionparity.live_no_clustering";
+
+async fn setup_schemaless_int_pk() -> Result<Database, String> {
+    let root = datasets_root().ok_or("CQLITE_DATASETS_ROOT not set or missing")?;
+    let data_dir = root.join("sstables");
+    if !data_dir.exists() {
+        return Err(format!("sstables dir not found at {data_dir:?}"));
+    }
+    let config = IngestionConfig {
+        schema_paths: vec![],
+        data_dir,
+        version_hint: None,
+        core_config: cqlite_core::Config::default(),
+        table_directory_filter: Some("/test_compactionparity/live_no_clustering".to_string()),
+    };
+    let result = ingest(config)
+        .await
+        .map_err(|e| format!("ingestion failed: {e}"))?;
+    Ok(result.database)
+}
+
 fn uuid_to_literal(bytes: &[u8; 16]) -> String {
     let h = |range: std::ops::Range<usize>| -> String {
         bytes[range].iter().map(|b| format!("{b:02x}")).collect()
@@ -464,4 +490,122 @@ async fn schemaless_where_non_pk_col_eq_returns_the_matching_row() {
              schema-full full scan does",
         );
     }
+}
+
+/// roborev 3784 FINDING 2 (real correctness bug): a SCHEMA-LESS `WHERE <int_pk> = <n>`
+/// point read through the REAL parser must return the matching row. A SELECT integer
+/// literal parses as `Value::BigInt`; before the fix it encoded to an 8-byte key while
+/// the `int` partition key on disk is 4 bytes, so the seek missed and returned 0 rows
+/// (silent wrong result). The fix carries the pk TYPE from the Statistics.db
+/// SerializationHeader and encodes through the typed single-component codec (4 bytes
+/// for `int`). This test runs an actual query STRING through `Database::execute` — NOT
+/// a hand-built `Value` — so it exercises the parsed-query path the unit tests miss.
+/// It FAILS on a2d72f96 (8-byte encoding → 0 rows) and passes after. Present-but-0-rows
+/// is a FAILURE.
+#[tokio::test]
+async fn schemaless_where_int_pk_eq_returns_the_row() {
+    let db = match setup_schemaless_int_pk().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    // Discover a real int partition-key value via a schema-less full scan of the
+    // pk column. The header synthesises the pk name `partition_key`; the pk column
+    // is reconstructed by the seek path but a bare scan omits it — so learn a valid
+    // key by counting rows and probing candidate small ints present in the fixture.
+    // The fixture (`live_no_clustering`) has partition keys 1..=4; assert `= 1`
+    // returns exactly its one row, and `= 999` (absent) returns 0.
+    let all = db
+        .execute(&format!("SELECT * FROM {INT_PK_TABLE}"))
+        .await
+        .expect("schema-less full scan must succeed");
+    if all.rows.is_empty() {
+        eprintln!("Skipping: {INT_PK_TABLE} present but returned 0 rows");
+        return;
+    }
+
+    let hit = db
+        .execute(&format!(
+            "SELECT * FROM {INT_PK_TABLE} WHERE partition_key = 1"
+        ))
+        .await
+        .expect("schema-less int-pk point lookup must succeed");
+    assert_eq!(
+        hit.rows.len(),
+        1,
+        "roborev 3784 FINDING 2: a schema-less `WHERE int_pk = 1` must return exactly the one \
+         matching row (before the fix the 8-byte BigInt encoding missed the 4-byte int key → 0 rows)",
+    );
+    // The matching row must carry its regular cell value AND the reconstructed pk.
+    let row = &hit.rows[0];
+    assert_eq!(
+        row.values.get("partition_key"),
+        Some(&Value::Integer(1)),
+        "the reconstructed int pk column must equal the looked-up value",
+    );
+    assert!(
+        row.values.contains_key("v"),
+        "the matching row must surface its regular `v` cell",
+    );
+
+    // A partition key that is NOT present returns 0 rows (the seek is self-verifying).
+    let miss = db
+        .execute(&format!(
+            "SELECT * FROM {INT_PK_TABLE} WHERE partition_key = 999"
+        ))
+        .await
+        .expect("absent-key point lookup must succeed");
+    assert_eq!(
+        miss.rows.len(),
+        0,
+        "an absent int partition key must return 0 rows",
+    );
+}
+
+/// roborev 3784 FINDING 1 (hardening): a SCHEMA-LESS `WHERE <nonexistent_col> = <n>`
+/// whose literal COLLIDES with a real partition key's bytes must return 0 rows — NOT
+/// the collided partition's row. The classifier admits the predicate column by
+/// ELIMINATION (absent from non-key names), which also admits a misspelled/nonexistent
+/// column; the post-seek guard reconstructs the pk under its authoritative name and
+/// re-evaluates the predicate, so a predicate on a nonexistent column is Unknown and
+/// rejects the row (correct 0 rows). On `live_no_clustering` (`partition_key` int pk),
+/// `WHERE not_a_column = 1` collides with the real key `1` but must yield 0 rows.
+#[tokio::test]
+async fn schemaless_where_nonexistent_col_eq_returns_zero_rows() {
+    let db = match setup_schemaless_int_pk().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+    // Confirm the fixture is present and that `partition_key = 1` really is a hit,
+    // so a 0 result for the bogus column is meaningfully the guard rejecting it.
+    let baseline = db
+        .execute(&format!(
+            "SELECT * FROM {INT_PK_TABLE} WHERE partition_key = 1"
+        ))
+        .await
+        .expect("baseline pk lookup must succeed");
+    if baseline.rows.is_empty() {
+        eprintln!("Skipping: {INT_PK_TABLE} present but `partition_key = 1` returned 0 rows");
+        return;
+    }
+
+    let result = db
+        .execute(&format!(
+            "SELECT * FROM {INT_PK_TABLE} WHERE not_a_column = 1"
+        ))
+        .await
+        .expect("schema-less nonexistent-column equality must succeed");
+    assert_eq!(
+        result.rows.len(),
+        0,
+        "roborev 3784 FINDING 1: a schema-less `WHERE not_a_column = 1` must return 0 rows — the \
+         post-seek predicate guard rejects a nonexistent column even when its literal collides \
+         with a real partition key's bytes",
+    );
 }

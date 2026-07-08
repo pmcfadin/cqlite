@@ -7,7 +7,22 @@
 
 use super::super::select_optimizer::SSTablePredicate;
 use crate::storage::sstable::PartitionKeyShape;
-use crate::types::Value;
+
+/// The classified schema-less single-component point-key seek (issue #1750).
+///
+/// Carries the raw on-disk partition-key `bytes` to seek by AND the authoritative
+/// pk component (`name` + `cql_type`) needed to (a) reconstruct the seeked row's
+/// partition-key column schema-less and (b) re-evaluate the predicate against it
+/// (the post-seek guard for roborev 3784 FINDING 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SchemalessPointSeek {
+    /// Raw single-component partition-key bytes to seek by.
+    pub bytes: Vec<u8>,
+    /// The header-synthesised pk column name (`id` / `partition_key`).
+    pub pk_name: String,
+    /// The authoritative CQL type of the pk component.
+    pub pk_cql_type: String,
+}
 
 /// Classify a SCHEMA-LESS point read against AUTHORITATIVE partition-key metadata
 /// (issue #1750 regression fix, then re-scoped to stop over-firing).
@@ -43,7 +58,7 @@ use crate::types::Value;
 pub(super) fn classify_schemaless_point_lookup(
     predicates: &[SSTablePredicate],
     shape: Option<&PartitionKeyShape>,
-) -> Option<Vec<u8>> {
+) -> Option<SchemalessPointSeek> {
     use super::super::select_optimizer::SSTableFilterOp;
 
     // Exactly one predicate, a non-token single-value equality.
@@ -69,26 +84,96 @@ pub(super) fn classify_schemaless_point_lookup(
         return None;
     }
 
-    encode_single_component_key(value)
+    // The pk component's authoritative CQL TYPE (from the SerializationHeader
+    // `keyType`, never a guess — #28). Without a provable single-component type we
+    // DECLINE the seek (full-scan stays correct) rather than encode a
+    // possibly-wrong-width key (issue #1750, roborev 3784 FINDING 2).
+    let component = shape.single_pk_component.as_ref()?;
+
+    // Encode the literal through the TYPED single-component partition-key codec
+    // for that pk type — the SAME path the schema-aware Targeted seek uses — so a
+    // parsed integer literal (`Value::BigInt`) encodes to the width Cassandra
+    // wrote (`int` → 4 bytes, `bigint` → 8, `uuid` → 16, `text` → utf8). An
+    // unencodable literal/type yields `None` → decline the seek.
+    let bytes = crate::storage::partition_key_codec::encode_single_component_key_typed(
+        value,
+        &component.cql_type,
+    )
+    .ok()?;
+
+    Some(SchemalessPointSeek {
+        bytes,
+        pk_name: component.name.clone(),
+        pk_cql_type: component.cql_type.clone(),
+    })
 }
 
-/// Encode a single `Value` to the raw single-component on-disk partition-key
-/// bytes — the schema-less counterpart of the write engine's
-/// `PartitionKey::to_bytes` single-component form (raw value bytes, NO framing),
-/// used by [`classify_schemaless_point_lookup`].
+/// Build the user-visible `QueryRow` for ONE row returned by a schema-less
+/// single-component point seek, reconstructing the partition-key column and
+/// applying the post-seek predicate guard (issue #1750, roborev 3784 FINDING 1).
 ///
-/// Only the value kinds with an UNAMBIGUOUS single-component key encoding are
-/// accepted; anything else (collections, blobs, etc.) returns `None` so the
-/// caller falls back to a full scan rather than guessing a byte layout.
-fn encode_single_component_key(value: &Value) -> Option<Vec<u8>> {
-    match value {
-        Value::Uuid(bytes) => Some(bytes.to_vec()),
-        Value::Integer(i) => Some(i.to_be_bytes().to_vec()),
-        Value::BigInt(i) => Some(i.to_be_bytes().to_vec()),
-        Value::Text(s) => Some(s.as_bytes().to_vec()),
-        Value::Boolean(b) => Some(vec![u8::from(*b)]),
-        _ => None,
+/// The seek self-verifies on raw KEY bytes but never re-checks the predicate
+/// COLUMN, and the classifier admits the predicate column BY ELIMINATION (absent
+/// from the authoritative non-key names) — which also admits a misspelled or
+/// nonexistent column. If such a literal happens to encode to a real partition
+/// key's bytes, the seek would return that partition's row for a column the user
+/// never has. So we:
+///   1. reconstruct the sole pk column from the raw key under its authoritative
+///      TYPE and header-synthesised NAME (schema-less `build_row_from_scan` omits
+///      the pk), and
+///   2. re-evaluate the predicate against the materialised row — a predicate on
+///      the pk name matches; one on a nonexistent/misspelled column is `Unknown`
+///      and rejects the row (yielding the correct 0 rows).
+///
+/// Returns `None` for a tombstoned/absent row, a pk that cannot be decoded, or a
+/// row the predicate rejects. The projection is honoured for output (the pk is
+/// materialised for the guard regardless, then dropped from output if the
+/// projection excludes it) so this matches the schema-aware path's row shape.
+pub(super) fn finalize_schemaless_seek_row(
+    key: crate::types::RowKey,
+    value: crate::types::ScanRow,
+    projection: &[String],
+    predicates: &[SSTablePredicate],
+    seek: &SchemalessPointSeek,
+) -> Option<crate::query::result::QueryRow> {
+    use super::predicate::evaluate_predicates;
+    use super::row_build::build_row_from_scan;
+
+    // Decode the sole pk value from the raw key under its authoritative type
+    // (BEFORE `key` is moved into the row builder). A decode failure means we
+    // cannot validate the row, so drop it (honest 0 rather than an unvalidated 1).
+    let comparator = crate::types::ComparatorType::from_data_type(&seek.pk_cql_type).ok()?;
+    let pk_value =
+        crate::storage::partition_key_codec::deserialize_value_bytes(&key.0, &comparator).ok()?;
+
+    // Schema-less row build (schema = None) surfaces the decoded non-key cells but
+    // NOT the pk column.
+    let mut row = build_row_from_scan(key, value, projection, None)?;
+
+    // Materialise the pk column under its authoritative name for the guard.
+    let pk_name: std::sync::Arc<str> = seek.pk_name.as_str().into();
+    let already_present = row.values.contains_key(&pk_name);
+    if !already_present {
+        row.values.insert(pk_name.clone(), pk_value);
     }
+
+    // Post-seek guard: re-evaluate the predicate. A predicate on the pk name
+    // matches the reconstructed value; one on a nonexistent/misspelled column is
+    // Unknown → row rejected (the FINDING 1 over-firing this removes).
+    if !evaluate_predicates(&row, predicates).ok()? {
+        return None;
+    }
+
+    // Honour projection for OUTPUT: drop the pk again if we injected it only for
+    // the guard and the projection does not include it (empty projection = all).
+    if !already_present
+        && !projection.is_empty()
+        && !projection.iter().any(|p| p.as_str() == seek.pk_name)
+    {
+        row.values.remove(&pk_name);
+    }
+
+    Some(row)
 }
 
 #[cfg(test)]
@@ -96,8 +181,14 @@ mod tests {
     use super::super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
     use super::*;
 
+    use super::super::super::select_optimizer::SSTablePredicate as Pred;
+    use crate::query::result::QueryRow;
+    use crate::storage::sstable::PartitionKeyComponent;
+    use crate::types::{RowKey, ScanRow, Value};
+    use std::sync::Arc;
+
     /// A single-component-pk, no-clustering table whose only non-key column is
-    /// `name` — mirrors `test_basic.simple_table` (`id UUID` pk, `name TEXT`).
+    /// `name`/`age` — mirrors `test_basic.simple_table` (`id UUID` pk).
     fn simple_table_shape() -> PartitionKeyShape {
         PartitionKeyShape {
             partition_key_count: 1,
@@ -105,56 +196,84 @@ mod tests {
             non_key_column_names: ["name".to_string(), "age".to_string()]
                 .into_iter()
                 .collect(),
+            single_pk_component: Some(PartitionKeyComponent {
+                name: "id".to_string(),
+                cql_type: "uuid".to_string(),
+            }),
+        }
+    }
+
+    /// A single-component `int` pk table (`partition_key` pk, `v` regular) —
+    /// mirrors `test_compactionparity.live_no_clustering`.
+    fn int_pk_shape() -> PartitionKeyShape {
+        PartitionKeyShape {
+            partition_key_count: 1,
+            clustering_key_count: 0,
+            non_key_column_names: ["v".to_string()].into_iter().collect(),
+            single_pk_component: Some(PartitionKeyComponent {
+                name: "partition_key".to_string(),
+                cql_type: "int".to_string(),
+            }),
         }
     }
 
     /// Issue #1750 (regression fix): a schema-less `col = <literal>` whose column is
-    /// a metadata-CONFIRMED sole partition key (single pk component, no clustering
-    /// keys, column absent from the authoritative non-key names) yields its raw
-    /// single-component key bytes for a targeted seek. The confirmation is by
-    /// elimination from authoritative metadata — never a pk-name/text guess.
+    /// a metadata-CONFIRMED sole partition key yields the TYPED single-component key
+    /// bytes for a targeted seek. Confirmation is by elimination from authoritative
+    /// metadata — never a pk-name/text guess.
     #[test]
     fn classify_schemaless_point_lookup_targets_confirmed_pk_equality() {
         let shape = simple_table_shape();
         let uuid = [7u8; 16];
         let predicate =
             SSTablePredicate::column("id", SSTableFilterOp::Equal, vec![Value::Uuid(uuid)]);
-        assert_eq!(
-            classify_schemaless_point_lookup(std::slice::from_ref(&predicate), Some(&shape)),
-            Some(uuid.to_vec()),
-            "a single UUID `=` on the confirmed pk must yield the raw 16-byte key",
-        );
+        let seek = classify_schemaless_point_lookup(std::slice::from_ref(&predicate), Some(&shape))
+            .expect("a single UUID `=` on the confirmed pk must classify");
+        assert_eq!(seek.bytes, uuid.to_vec(), "raw 16-byte uuid key");
+        assert_eq!(seek.pk_name, "id");
+        assert_eq!(seek.pk_cql_type, "uuid");
 
-        // int / text single-component encodings (pk column named `pk`, absent from
-        // the non-key names, so confirmed by elimination).
-        let pk_shape = PartitionKeyShape {
-            partition_key_count: 1,
-            clustering_key_count: 0,
-            non_key_column_names: ["v".to_string()].into_iter().collect(),
-        };
-        let int_pred =
-            SSTablePredicate::column("pk", SSTableFilterOp::Equal, vec![Value::Integer(42)]);
-        assert_eq!(
-            classify_schemaless_point_lookup(std::slice::from_ref(&int_pred), Some(&pk_shape)),
-            Some(42i32.to_be_bytes().to_vec()),
-        );
-        let text_pred = SSTablePredicate::column(
-            "pk",
+        // roborev 3784 FINDING 2: a parsed integer literal arrives as `Value::BigInt`
+        // (the SELECT parser widens every integer); on an `int` pk it must encode to
+        // Cassandra's 4-byte `int` key, NOT an 8-byte one.
+        let int_shape = int_pk_shape();
+        let int_pred = SSTablePredicate::column(
+            "partition_key",
             SSTableFilterOp::Equal,
-            vec![Value::Text("k0".to_string())],
+            vec![Value::BigInt(42)],
+        );
+        let int_seek =
+            classify_schemaless_point_lookup(std::slice::from_ref(&int_pred), Some(&int_shape))
+                .expect("int pk `=` must classify");
+        assert_eq!(
+            int_seek.bytes,
+            42i32.to_be_bytes().to_vec(),
+            "a BigInt literal on an int pk must encode to the 4-byte int key (roborev 3784)",
+        );
+        assert_eq!(int_seek.bytes.len(), 4);
+    }
+
+    /// A literal that cannot be encoded for the pk's authoritative type (e.g. a text
+    /// literal against a `uuid` pk) DECLINES the seek → full-scan, never a
+    /// wrong-width key (roborev 3784 FINDING 2, correctness-first).
+    #[test]
+    fn classify_schemaless_point_lookup_declines_type_mismatch() {
+        let shape = simple_table_shape(); // uuid pk
+        let text_on_uuid = SSTablePredicate::column(
+            "id",
+            SSTableFilterOp::Equal,
+            vec![Value::Text("not-a-uuid".to_string())],
         );
         assert_eq!(
-            classify_schemaless_point_lookup(std::slice::from_ref(&text_pred), Some(&pk_shape)),
-            Some(b"k0".to_vec()),
+            classify_schemaless_point_lookup(std::slice::from_ref(&text_on_uuid), Some(&shape)),
+            None,
+            "a text literal on a uuid pk must decline (no provable key encoding)",
         );
     }
 
     /// Issue #1750 (the confirmed regression): a schema-less `WHERE <non_pk_col> =
     /// <literal>` must NOT take the by-key seek — the column is one of the
-    /// authoritative non-key names, so it can never be the partition key. Returning
-    /// `None` keeps the honest full-scan path, which correctly matches the
-    /// regular-column cell (the by-key seek would seek a nonexistent partition and
-    /// return 0 rows — the 1→0 over-firing this fix removes).
+    /// authoritative non-key names, so it can never be the partition key.
     #[test]
     fn classify_schemaless_point_lookup_rejects_non_pk_column_equality() {
         let shape = simple_table_shape();
@@ -166,24 +285,23 @@ mod tests {
         assert_eq!(
             classify_schemaless_point_lookup(std::slice::from_ref(&name_eq), Some(&shape)),
             None,
-            "a regular-column equality must NOT take the pk-key seek (would return 0 rows); \
-             it must full-scan and match the cell",
+            "a regular-column equality must NOT take the pk-key seek; it must full-scan",
         );
     }
 
     /// The seek must NOT fire when the shape shows a composite pk or any clustering
-    /// key — a single raw value can't be the whole point key there — nor when the
-    /// authoritative shape is unavailable (`None`): both keep the full-scan path.
+    /// key, when the pk type is absent, nor when the shape is unavailable (`None`).
     #[test]
     fn classify_schemaless_point_lookup_requires_single_component_point_shape() {
         let value = vec![Value::Uuid([1u8; 16])];
         let pred = SSTablePredicate::column("id", SSTableFilterOp::Equal, value);
 
-        // Composite partition key.
+        // Composite partition key (no single-component type).
         let composite = PartitionKeyShape {
             partition_key_count: 2,
             clustering_key_count: 0,
             non_key_column_names: Default::default(),
+            single_pk_component: None,
         };
         assert_eq!(
             classify_schemaless_point_lookup(std::slice::from_ref(&pred), Some(&composite)),
@@ -195,9 +313,25 @@ mod tests {
             partition_key_count: 1,
             clustering_key_count: 1,
             non_key_column_names: Default::default(),
+            single_pk_component: Some(PartitionKeyComponent {
+                name: "id".to_string(),
+                cql_type: "uuid".to_string(),
+            }),
         };
         assert_eq!(
             classify_schemaless_point_lookup(std::slice::from_ref(&pred), Some(&clustered)),
+            None,
+        );
+
+        // Single-component shape but no provable pk type → decline (correctness).
+        let no_type = PartitionKeyShape {
+            partition_key_count: 1,
+            clustering_key_count: 0,
+            non_key_column_names: Default::default(),
+            single_pk_component: None,
+        };
+        assert_eq!(
+            classify_schemaless_point_lookup(std::slice::from_ref(&pred), Some(&no_type)),
             None,
         );
 
@@ -210,8 +344,7 @@ mod tests {
 
     /// Issue #1750: the schema-less classifier must NOT fire on any non-point
     /// shape — no predicate, a range, an `IN`, multiple predicates, a token
-    /// predicate, or an unencodable value — so those keep the honest full-scan
-    /// path (never a wrong targeted read), even on a confirmed single-pk table.
+    /// predicate, or an unencodable value.
     #[test]
     fn classify_schemaless_point_lookup_rejects_non_point_shapes() {
         let shape = simple_table_shape();
@@ -264,5 +397,80 @@ mod tests {
             classify_schemaless_point_lookup(std::slice::from_ref(&blob), s),
             None
         );
+    }
+
+    fn scan_row(cells: &[(&str, Value)]) -> ScanRow {
+        ScanRow::Row(
+            cells
+                .iter()
+                .map(|(n, v)| (Arc::<str>::from(*n), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// roborev 3784 FINDING 1: the post-seek guard re-evaluates the predicate. A
+    /// `WHERE <pk_name> = <value>` matches the reconstructed pk column and returns
+    /// the row; a `WHERE <nonexistent_col> = <value>` (admitted by elimination) is
+    /// Unknown against the materialised row and yields 0 rows.
+    #[test]
+    fn finalize_seek_row_guards_on_reconstructed_pk() {
+        // int pk = 42, one regular col `v`.
+        let seek = SchemalessPointSeek {
+            bytes: 42i32.to_be_bytes().to_vec(),
+            pk_name: "partition_key".to_string(),
+            pk_cql_type: "int".to_string(),
+        };
+        let key = RowKey::new(42i32.to_be_bytes().to_vec());
+        let value = scan_row(&[("v", Value::Text("hi".to_string()))]);
+
+        // Predicate on the pk name → matches → row returned, pk reconstructed.
+        let pk_pred = vec![Pred::column(
+            "partition_key",
+            SSTableFilterOp::Equal,
+            vec![Value::BigInt(42)],
+        )];
+        let row: QueryRow =
+            finalize_schemaless_seek_row(key.clone(), value.clone(), &[], &pk_pred, &seek)
+                .expect("pk-name predicate must match the reconstructed row");
+        assert_eq!(row.values.get("partition_key"), Some(&Value::Integer(42)));
+        assert_eq!(row.values.get("v"), Some(&Value::Text("hi".to_string())));
+
+        // Predicate on a nonexistent column → Unknown against the materialised row
+        // → row REJECTED (the FINDING 1 over-firing this removes).
+        let bogus_pred = vec![Pred::column(
+            "not_a_column",
+            SSTableFilterOp::Equal,
+            vec![Value::BigInt(42)],
+        )];
+        assert!(
+            finalize_schemaless_seek_row(key, value, &[], &bogus_pred, &seek).is_none(),
+            "a nonexistent predicate column must yield 0 rows post-seek (roborev 3784 FINDING 1)",
+        );
+    }
+
+    /// The projection is honoured for output: the pk is reconstructed for the guard
+    /// but dropped from the row when the projection excludes it.
+    #[test]
+    fn finalize_seek_row_honours_projection_for_output() {
+        let seek = SchemalessPointSeek {
+            bytes: 7i32.to_be_bytes().to_vec(),
+            pk_name: "partition_key".to_string(),
+            pk_cql_type: "int".to_string(),
+        };
+        let key = RowKey::new(7i32.to_be_bytes().to_vec());
+        let value = scan_row(&[("v", Value::Text("x".to_string()))]);
+        let pk_pred = vec![Pred::column(
+            "partition_key",
+            SSTableFilterOp::Equal,
+            vec![Value::BigInt(7)],
+        )];
+        // Projection = [v] only → pk used for the guard, then dropped from output.
+        let row = finalize_schemaless_seek_row(key, value, &["v".to_string()], &pk_pred, &seek)
+            .expect("row passes the guard");
+        assert!(
+            !row.values.contains_key("partition_key"),
+            "pk excluded from projection must not appear in output",
+        );
+        assert_eq!(row.values.get("v"), Some(&Value::Text("x".to_string())));
     }
 }

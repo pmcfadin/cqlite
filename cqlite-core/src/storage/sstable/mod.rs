@@ -116,6 +116,31 @@ pub struct PartitionKeyShape {
     pub clustering_key_count: usize,
     /// The real names of the non-key (regular + static) columns.
     pub non_key_column_names: std::collections::HashSet<String>,
+    /// For a single-component pk ONLY: the sole partition-key column's authoritative
+    /// CQL type (from the SerializationHeader `keyType`) and its header-carried name.
+    ///
+    /// The CQL type is authoritative — Cassandra serialises partition-key TYPES even
+    /// though it never serialises their NAMES (issue #1750, roborev 3784). It drives
+    /// the TYPED single-component key encoding so a schema-less `WHERE int_pk = 42`
+    /// builds the 4-byte `int` key Cassandra wrote, not an 8-byte `BigInt` key. The
+    /// `name` is the header's synthesised placeholder (`id` for uuid/timeuuid, else
+    /// `partition_key`) — NOT a trusted identity, only the label under which
+    /// `build_row_from_scan` reconstructs the pk column so the seeked row can be
+    /// re-validated against the predicate. `None` for a composite pk (the typed
+    /// single-component fast path does not apply) or when no reader exposed a
+    /// single-component pk type.
+    pub single_pk_component: Option<PartitionKeyComponent>,
+}
+
+/// The authoritative type + header-synthesised name of a single-component
+/// partition key (issue #1750, roborev 3784). See [`PartitionKeyShape`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionKeyComponent {
+    /// The header's synthesised pk column name (`id` / `partition_key`). NOT a
+    /// trusted identity — only a label for pk-column reconstruction.
+    pub name: String,
+    /// The authoritative CQL type of the pk component (from `keyType`).
+    pub cql_type: String,
 }
 
 /// SSTable file identifier
@@ -1748,9 +1773,23 @@ impl SSTableManager {
             let mut partition_key_count = 0usize;
             let mut clustering_key_count = 0usize;
             let mut non_key_column_names = std::collections::HashSet::new();
+            // Capture the sole partition-key component's authoritative CQL type +
+            // header-synthesised name (issue #1750, roborev 3784). Recorded for the
+            // FIRST pk column seen; only surfaced below when the pk really is
+            // single-component. Cassandra serialises pk TYPES (authoritative) but not
+            // NAMES (`name` is a placeholder used only for pk-column reconstruction).
+            let mut first_pk_component: Option<PartitionKeyComponent> = None;
             for col in columns {
                 match (col.is_primary_key, col.is_clustering) {
-                    (true, false) => partition_key_count += 1,
+                    (true, false) => {
+                        if first_pk_component.is_none() {
+                            first_pk_component = Some(PartitionKeyComponent {
+                                name: col.name.clone(),
+                                cql_type: col.column_type.clone(),
+                            });
+                        }
+                        partition_key_count += 1;
+                    }
                     (true, true) => clustering_key_count += 1,
                     (false, _) => {
                         non_key_column_names.insert(col.name.clone());
@@ -1762,10 +1801,17 @@ impl SSTableManager {
             // (e.g. legacy formats with no Statistics.db columns) yields `None`
             // rather than a bogus all-zero shape.
             if partition_key_count > 0 {
+                // The typed single-component pk type is authoritative ONLY for a
+                // single-component key; drop it for a composite pk (that fast path
+                // does not apply and a composite key isn't one raw value).
+                let single_pk_component = (partition_key_count == 1)
+                    .then_some(first_pk_component)
+                    .flatten();
                 return Some(PartitionKeyShape {
                     partition_key_count,
                     clustering_key_count,
                     non_key_column_names,
+                    single_pk_component,
                 });
             }
         }
