@@ -16,8 +16,14 @@
 //! so it is deterministic and never wall-clock-flaky.
 //!
 //! Anti-empty-pass / SKIP contract:
-//!   * Each case carries a non-empty `expected_rows`, so a 0-row (unreconciled-or-
-//!     broken) result FAILS loudly — it can never green-pass empty.
+//!   * Each case carries a non-empty `expected_rows`, OR explicitly opts into a
+//!     legitimate zero-row outcome via `expect_empty: true` (e.g. "every row was
+//!     shadowed"). A case with empty `expected_rows` and no `expect_empty` opt-in
+//!     is a hard FAIL — it is never allowed to silently collapse the compared
+//!     column set to `[]` and pass vacuously regardless of what the reader
+//!     returns. `expect_empty: true` additionally requires `physical_row_count >
+//!     0`, proving rows really existed on disk and were reconciled away rather
+//!     than an empty/misconfigured fixture masquerading as "reconciled to zero".
 //!   * `physical_row_count` is re-derived from the committed golden JSONL and
 //!     asserted, proving the fixture's rows are physically present on disk.
 //!   * When the committed fixture (or its `*.db` binaries) is absent, the case
@@ -74,6 +80,13 @@ struct Case {
     physical_row_count: usize,
     /// Ordered map per row so JSON author-order is preserved for readable diffs.
     expected_rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    /// Explicit opt-in for a case whose correct semantic result is ZERO rows
+    /// (e.g. every physical row was shadowed/expired). Required whenever
+    /// `expected_rows` is empty — see the module doc's anti-empty-pass contract.
+    /// Defaults to `false` so an author who forgets to fill in `expected_rows`
+    /// gets a loud failure, never a silent vacuous pass.
+    #[serde(default)]
+    expect_empty: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +224,30 @@ fn normalize(rows: Vec<serde_json::Map<String, serde_json::Value>>) -> Vec<Strin
 
 /// One case: returns Ok(true) if it ran a comparison, Ok(false) if it SKIPped.
 async fn run_case(case: &Case) -> Result<bool, String> {
+    // Anti-empty-pass config validation (independent of fixture presence): an
+    // empty `expected_rows` must be an explicit, provable opt-in — never an
+    // accident that silently collapses the compared column set to `[]` and
+    // passes vacuously regardless of what the reader returns.
+    if case.expected_rows.is_empty() {
+        if !case.expect_empty {
+            return Err(format!(
+                "case {}: expected_rows is empty but expect_empty is not set — a \
+                 case expecting zero semantic rows must opt in explicitly via \
+                 expect_empty: true (an unopted-in empty expected_rows would \
+                 silently pass vacuously regardless of what the reader returns)",
+                case.id
+            ));
+        }
+        if case.physical_row_count == 0 {
+            return Err(format!(
+                "case {}: expect_empty is set but physical_row_count is 0 — \
+                 expect_empty must prove rows existed on disk and were \
+                 reconciled away, not just an empty/misconfigured fixture",
+                case.id
+            ));
+        }
+    }
+
     let Some(root) = sstables_root(&case.keyspace) else {
         let msg = format!("case {}: keyspace {} absent", case.id, case.keyspace);
         if require_fixtures() {
@@ -327,6 +364,64 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         got.len()
     );
     Ok(true)
+}
+
+/// A synthetic `Case` for the guard-enforcement tests below. Uses placeholder
+/// paths/queries that are never reached — `run_case` must reject these cases
+/// during the config-validation check at the top, before any fixture I/O.
+fn synthetic_case(
+    id: &str,
+    expected_rows_len_zero: bool,
+    expect_empty: bool,
+    physical_row_count: usize,
+) -> Case {
+    Case {
+        id: id.to_string(),
+        keyspace: "does_not_matter".to_string(),
+        table: "does_not_matter".to_string(),
+        fixture_dir_prefix: "does_not_matter".to_string(),
+        sstable_prefix: "does_not_matter".to_string(),
+        schema: "does_not_matter.cql".to_string(),
+        query: "SELECT 1".to_string(),
+        pinned_now_secs: 0,
+        physical_row_count,
+        expected_rows: if expected_rows_len_zero {
+            Vec::new()
+        } else {
+            vec![serde_json::Map::new()]
+        },
+        expect_empty,
+    }
+}
+
+/// Issue #1742 review finding: an empty `expected_rows` without the explicit
+/// `expect_empty` opt-in must FAIL LOUDLY, never silently collapse the compared
+/// column set to `[]` and pass vacuously.
+#[tokio::test]
+async fn empty_expected_rows_without_opt_in_fails_loudly() {
+    let case = synthetic_case("synthetic_empty_no_optin", true, false, 5);
+    let err = run_case(&case).await.expect_err(
+        "an empty expected_rows without expect_empty must fail loudly, not vacuously pass",
+    );
+    assert!(
+        err.contains("expect_empty"),
+        "error must name the missing opt-in, got: {err}"
+    );
+}
+
+/// `expect_empty: true` still requires proof that physical rows existed and
+/// were reconciled away — `physical_row_count == 0` is an empty/misconfigured
+/// fixture, not a legitimate "reconciled to zero" case.
+#[tokio::test]
+async fn expect_empty_requires_nonzero_physical_row_count() {
+    let case = synthetic_case("synthetic_empty_zero_physical", true, true, 0);
+    let err = run_case(&case)
+        .await
+        .expect_err("expect_empty with physical_row_count == 0 must fail loudly");
+    assert!(
+        err.contains("physical_row_count"),
+        "error must name the missing proof, got: {err}"
+    );
 }
 
 #[tokio::test]
