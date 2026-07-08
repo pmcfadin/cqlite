@@ -23,9 +23,14 @@ args:
     default: "8815"
   - flag: --data-dir
     variable: CASSANDRA_DATA_DIR
-    description: "Host path to the Cassandra data directory, mounted read-only into the pod"
+    description: "Host path to the Cassandra data directory, mounted read-only into the pod. cqlite-flight serves EXACTLY ONE dir — on a multi-disk node (data spread across /mnt/db1, /mnt/db2, ...) the other disks are silently missed; see --data-root and issue #2114"
     type: string
     default: "/mnt/db1/cassandra/data"
+  - flag: --data-root
+    variable: CASSANDRA_DATA_ROOT
+    description: "Host path under which per-disk Cassandra data dirs live (e.g. /mnt, with /mnt/db1, /mnt/db2). An init container scans this read-only and prints a LOUD, non-fatal warning if it finds more candidate data dirs than the single one --data-dir serves (issue #2114 — silent partial results). Set equal to --data-dir to silence the check"
+    type: string
+    default: "/mnt"
   - flag: --data-gid
     variable: CASSANDRA_DATA_GID
     description: "Host GID that owns the Cassandra data dir; added as a pod supplementalGroup so the image's uid-10001 process can read it"

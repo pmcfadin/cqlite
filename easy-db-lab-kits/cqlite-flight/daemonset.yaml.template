@@ -47,6 +47,72 @@ spec:
         runAsGroup: 10001
         supplementalGroups:
           - __CASSANDRA_DATA_GID__
+      initContainers:
+        # Issue #2114: cqlite-flight's --data-dir accepts EXACTLY ONE directory.
+        # On a multi-disk node whose Cassandra spreads data_file_directories
+        # across /mnt/db1, /mnt/db2, ..., only the single served dir is mounted;
+        # SSTables on the other disks are read as if absent — reads return
+        # PARTIAL results with NO error (a silent, latent misconfiguration).
+        # This init container scans --data-root (__CASSANDRA_DATA_ROOT__, default
+        # /mnt) read-only and prints a LOUD, NON-FATAL warning when it finds more
+        # candidate Cassandra data dirs than the one being served, so the failure
+        # mode is visible in `kubectl logs -c detect-multidisk <pod>`. It reuses
+        # the flight image (debian-slim → has /bin/sh) so there is no extra image
+        # pull, and always exits 0 — it NEVER blocks the DaemonSet rollout.
+        - name: detect-multidisk
+          image: "ghcr.io/pmcfadin/cqlite-flight:__TAG__"
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              SERVED="__CASSANDRA_DATA_DIR__"
+              ROOT_HOST="__CASSANDRA_DATA_ROOT__"
+              ROOT="/data-root"
+              # Map the served host path into this container's view of the root
+              # so it can be marked in the listing below.
+              case "$SERVED" in
+                "$ROOT_HOST"/*) SERVED_IN="$ROOT${SERVED#$ROOT_HOST}" ;;
+                *) SERVED_IN="" ;;
+              esac
+              found=""
+              count=0
+              # Lab convention: each disk mounts at $ROOT_HOST/<disk>/cassandra/data.
+              for d in "$ROOT"/*/cassandra/data; do
+                [ -d "$d" ] || continue
+                [ -n "$(ls -A "$d" 2>/dev/null)" ] || continue
+                found="$found ${d#$ROOT}"
+                count=$((count + 1))
+              done
+              if [ "$count" -le 1 ]; then
+                echo "cqlite-flight multi-disk check (#2114): OK — ${count} candidate Cassandra data dir under ${ROOT_HOST}; serving ${SERVED}."
+                exit 0
+              fi
+              {
+                echo "##############################################################"
+                echo "## WARNING (issue #2114): MULTIPLE Cassandra data dirs found ##"
+                echo "##############################################################"
+                echo "cqlite-flight serves EXACTLY ONE --data-dir and CANNOT span disks."
+                echo "This node has ${count} candidate data dirs under ${ROOT_HOST}:"
+                for f in $found; do
+                  host="${ROOT_HOST}${f}"
+                  if [ "$ROOT$f" = "$SERVED_IN" ]; then
+                    echo "  - ${host}   <-- SERVED by this pod"
+                  else
+                    echo "  - ${host}   (NOT served — its SSTables are SILENTLY MISSING from query results)"
+                  fi
+                done
+                echo "Reads touching data on an unserved disk return PARTIAL results with NO"
+                echo "error. Remedy: keep the queried tables on the served disk, run one"
+                echo "cqlite-flight per disk on distinct ports, or set --data-root to the served"
+                echo "dir to silence this check. See easy-db-lab-kits/cqlite-flight/README.md."
+              } >&2
+              # Non-fatal: warn only, never block the DaemonSet rollout.
+              exit 0
+          volumeMounts:
+            - name: cassandra-data-root
+              mountPath: /data-root
+              readOnly: true
       containers:
         - name: cqlite-flight
           image: "ghcr.io/pmcfadin/cqlite-flight:__TAG__"
@@ -92,3 +158,10 @@ spec:
           hostPath:
             path: "__CASSANDRA_DATA_DIR__"
             type: Directory
+        # Read-only detection mount for the #2114 multi-disk check init container.
+        # DirectoryOrCreate (not Directory) so a missing --data-root never fails
+        # pod startup — an empty dir simply yields "0 candidates" and no warning.
+        - name: cassandra-data-root
+          hostPath:
+            path: "__CASSANDRA_DATA_ROOT__"
+            type: DirectoryOrCreate

@@ -39,9 +39,51 @@ No `dashboards/` are shipped by this change — auto-discovery will pick up any
 |------|----------|---------|--------------|
 | `--tag` | `TAG` | `latest` | `cqlite-flight` image tag. |
 | `--flight-port` | `FLIGHT_PORT` | `8815` | Arrow Flight gRPC port (host + container, via `hostNetwork`). |
-| `--data-dir` | `CASSANDRA_DATA_DIR` | `/mnt/db1/cassandra/data` | Host path to the Cassandra data dir, mounted read-only. |
+| `--data-dir` | `CASSANDRA_DATA_DIR` | `/mnt/db1/cassandra/data` | Host path to the Cassandra data dir, mounted read-only. **Exactly one** — see [Multi-disk nodes](#multi-disk-nodes-single-data-dir-limitation-2114). |
+| `--data-root` | `CASSANDRA_DATA_ROOT` | `/mnt` | Host path under which per-disk data dirs live; the `detect-multidisk` init container scans it read-only and warns on more than one candidate (#2114). |
 | `--data-gid` | `CASSANDRA_DATA_GID` | `999` | Host GID that owns the Cassandra data dir; added as a pod `supplementalGroup`. |
 | `--otel-endpoint` | `OTEL_ENDPOINT` | `http://localhost:4317` | OTLP gRPC endpoint (defaults to the node-local collector). |
+
+## Multi-disk nodes: single-data-dir limitation (#2114)
+
+**cqlite-flight serves exactly ONE data directory.** Its `--data-dir` flag is a
+single path (`cqlite-flight/src/main.rs`: `data_dir: PathBuf`), so this kit mounts
+one host `hostPath` (`--data-dir`, default `/mnt/db1/cassandra/data`) and passes
+it as the only `--data-dir`.
+
+On a **multi-disk node** where Cassandra spreads `data_file_directories` across
+`/mnt/db1`, `/mnt/db2`, … the SSTables on every disk *other than the served one*
+are invisible to the Flight server. Reads that touch that data return **partial
+or empty results with no error** — a silent, latent misconfiguration. Every lab
+run to date uses single-disk nodes, so this has never bitten; the kit's job is to
+make the failure mode **visible** if it ever does.
+
+**Detection — the `detect-multidisk` init container.** Each pod runs a non-fatal
+init container (the same flight image, invoked as `/bin/sh`) that mounts
+`--data-root` (`CASSANDRA_DATA_ROOT`, default `/mnt`) read-only and counts
+candidate `<root>/*/cassandra/data` dirs that actually contain data. If it finds
+more than the one being served it prints a **loud, unmissable warning** naming
+each unserved disk, then exits 0 (it **never blocks** the rollout). Review it per
+node:
+
+```bash
+kubectl logs -l app.kubernetes.io/name=cqlite-flight -c detect-multidisk --prefix
+```
+
+A single-disk node prints a one-line `OK` and no warning, so the default behaviour
+is unchanged.
+
+**Remedies** (the server side is out of scope for this kit — #2114 covers only
+making the gap visible):
+
+- Keep the queried tables on the served disk.
+- Run one `cqlite-flight` DaemonSet per disk on distinct `--flight-port`s.
+- Set `--data-root` equal to `--data-dir` to silence the check when you have
+  deliberately accepted the single-disk scope.
+
+Genuinely spanning multiple dirs from one server would require a `--data-dir`
+multi-value change to `cqlite-flight` itself — a server feature, out of this kit's
+scope.
 
 ## Installing out-of-tree
 
