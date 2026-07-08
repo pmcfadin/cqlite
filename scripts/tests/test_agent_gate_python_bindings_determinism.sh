@@ -41,6 +41,11 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+# Resolve bash by its REAL absolute path from the CURRENT (unshadowed)
+# environment, before any scenario overrides PATH — used for the
+# toolchain-absent scenario so command resolution never depends on which
+# PATH is in effect at invocation time (roborev round 3, Finding 1).
+BASH_BIN=$(command -v bash)
 
 DISTINCT_MARKER="did not import after clean-venv rebuild — real binding defect"
 
@@ -65,10 +70,14 @@ mkdir -p "$stub"
 # false and behavior is driven solely by the counter (deterministic) UNLESS a
 # scenario pre-populates <venv>/bin/python itself (the reuse scenario below).
 # Also increments PBV_TEST_PY3_COUNTER so the reuse scenario can assert `python3
-# -m venv` (i.e. a rebuild) was NEVER invoked.
+# -m venv` (i.e. a rebuild) was NEVER invoked. PBV_TEST_VENV_FAIL=1 makes venv
+# creation itself fail (rc-1 setup-gap scenario, roborev round 3 Finding 2).
 cat >"$stub/python3" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "-m" ] && [ "${2:-}" = "venv" ]; then
+  if [ "${PBV_TEST_VENV_FAIL:-0}" = 1 ]; then
+    exit 1
+  fi
   n=0; [ -f "${PBV_TEST_PY3_COUNTER:-/dev/null}" ] && n=$(cat "$PBV_TEST_PY3_COUNTER" 2>/dev/null || echo 0)
   n=$((n + 1)); [ -n "${PBV_TEST_PY3_COUNTER:-}" ] && printf '%s' "$n" >"$PBV_TEST_PY3_COUNTER"
   d="${3:?venv dir}"
@@ -79,9 +88,12 @@ fi
 exit 0
 EOF
 
-# pip: always succeeds (dependency install is not what we are testing).
+# pip: succeeds unless PBV_TEST_PIP_FAIL=1 (rc-1 setup-gap scenario, roborev
+# round 3 Finding 2 — an alternate trigger for the same "venv/pip toolchain
+# setup failed" class, exercised via the `pip install maturin pytest` call).
 cat >"$stub/pip" <<'EOF'
 #!/usr/bin/env bash
+[ "${PBV_TEST_PIP_FAIL:-0}" = 1 ] && exit 1
 exit 0
 EOF
 
@@ -126,6 +138,34 @@ mkdir -p "$stub_tc"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$stub_tc/cargo"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$stub_tc/rustc"
 chmod +x "$stub_tc/cargo" "$stub_tc/rustc"
+
+# Curated minimal-coreutils shim (roborev round 3, Finding 1): the ORIGINAL
+# toolchain-absent scenario appended the real system `/usr/bin:/bin` to the
+# PATH so agent-gate.sh's own startup path (dirname/basename/mkdir, all used
+# before + inside the hook) still resolved — but that made "absent" HOST-
+# DEPENDENT: a CI image with a distro-packaged cargo/rustc under /usr/bin
+# would leak a REAL cargo/rustc into the scenario, silently exercising rc 2
+# instead of rc 4 and passing vacuously. Fix: resolve the handful of coreutils
+# actually needed (dirname, basename, mkdir, cat) to their REAL absolute paths
+# from the CURRENT (real, unshadowed) PATH ONCE, symlink ONLY those into a
+# dedicated directory, and build the scenario's PATH from ONLY $stub + this
+# directory — no system directory is ever on it, so cargo/rustc can NEVER
+# resolve regardless of the host. `bash` is included too: every stub script
+# has a `#!/usr/bin/env bash` shebang, and `env` resolves that interpreter
+# via the CHILD process's (i.e. our shadowed) PATH, not the caller's real one
+# — without a `bash` on this minimal PATH the stubs themselves fail to
+# execute ("env: bash: No such file or directory"), which was caught by this
+# very scenario misreporting rc 1 instead of rc 4 during development.
+stub_coreutils_min="$tmp/stubbin-coreutils-min"
+mkdir -p "$stub_coreutils_min"
+for _tool in dirname basename mkdir cat bash; do
+  _tool_real=$(command -v "$_tool" 2>/dev/null) || {
+    echo "FATAL: '$_tool' not found on the real PATH — cannot build the hermetic toolchain-absent scenario" >&2
+    exit 1
+  }
+  ln -s "$_tool_real" "$stub_coreutils_min/$_tool"
+done
+unset _tool _tool_real
 
 # run_scenario <pass-on-attempt> <maturin-rc> -> sets RC / OUT / COUNTER globals.
 # Fresh venv + counter per scenario; PATH-shadowed by the stubs (incl. the
@@ -287,29 +327,129 @@ else
   bad "compile-error: expected 0 import-verify attempts, got $COUNTER"
 fi
 
-# ---- (g) TOOLCHAIN ABSENT (roborev round-2 Finding A): no cargo/rustc on PATH
-#     at all → exit 4 (SKIP class, same as rc 1), DISTINCT from the real
-#     compile-error exit 2 above even though `maturin develop` "fails" in both.
-#     Uses a fake HOME (so the gate's own `$HOME/.cargo/bin` auto-detect can't
-#     re-inject a real cargo) and a minimal PATH excluding $stub_tc.
+# ---- (g) TOOLCHAIN ABSENT (roborev round-2 Finding A, made HERMETIC by round-3
+#     Finding 1): no cargo/rustc on PATH at all → exit 4 (SKIP class, same as
+#     rc 1), DISTINCT from the real compile-error exit 2 above even though
+#     `maturin develop` "fails" in both. The scenario PATH is built ENTIRELY
+#     from $stub (python3/pip/maturin/python) + $stub_coreutils_min (the
+#     curated dirname/basename/mkdir/cat symlinks) — NEVER a system directory
+#     — so cargo/rustc cannot resolve regardless of what the host happens to
+#     have installed. A fake HOME additionally blocks the gate's own
+#     `$HOME/.cargo/bin` auto-detect from re-injecting a real cargo, and
+#     $BASH_BIN (resolved once from the real PATH, before any override) makes
+#     the bash invocation itself independent of the scenario's PATH too.
 run_toolchain_absent_scenario() {
   local venv="$tmp/venv-tcabsent-$RANDOM$RANDOM"
   local fake_home="$tmp/fakehome-$RANDOM$RANDOM"
   rm -rf "$venv"; mkdir -p "$fake_home"
   OUT=$(
-    PATH="$stub:/usr/bin:/bin" \
+    PATH="$stub:$stub_coreutils_min" \
     HOME="$fake_home" \
     MATURIN_RC=1 \
-    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
+    "$BASH_BIN" "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
   )
   RC=$?
 }
 run_toolchain_absent_scenario
 if [ "$RC" -eq 4 ]; then
-  ok "toolchain-absent: no cargo/rustc on PATH → exit 4 (toolchain gap, SKIP class — distinct from exit 2)"
+  ok "toolchain-absent: no cargo/rustc resolvable on a PATH built ENTIRELY from our stub dirs → exit 4 (toolchain gap, SKIP class — distinct from exit 2, hermetic regardless of host)"
 else
-  bad "toolchain-absent: expected exit 4, got $RC"
+  bad "toolchain-absent: expected exit 4, got $RC (if this is 2, the scenario PATH leaked a REAL cargo/rustc from the host — hermeticity broken)"
   echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
+fi
+
+# ---- (i) VENV/PIP SETUP FAILURE (roborev round 3, Finding 2 — completes the
+#     exit-code matrix: 0 healthy / 1 setup-gap / 2 compile-error / 3 import-
+#     after-rebuild / 4 toolchain-absent). `python3 -m venv` itself failing
+#     (PBV_TEST_VENV_FAIL=1) is a genuine venv-creation toolchain gap →
+#     _pbv_setup fails BEFORE the build stage is ever reached → exit 1. No
+#     import-verify or maturin invocation should happen.
+run_setup_fail_scenario() {
+  local venv="$tmp/venv-setupfail-$RANDOM$RANDOM"
+  local counter="$tmp/counter-$RANDOM$RANDOM"
+  local maturin_counter="$tmp/maturincounter-$RANDOM$RANDOM"
+  rm -rf "$venv"; rm -f "$counter" "$maturin_counter"
+  OUT=$(
+    PATH="$stub:$stub_tc:$PATH" \
+    PBV_TEST_COUNTER="$counter" \
+    PBV_TEST_MATURIN_COUNTER="$maturin_counter" \
+    PBV_TEST_VENV_FAIL=1 \
+    MATURIN_RC=0 \
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
+  )
+  RC=$?
+  COUNTER=0; [ -f "$counter" ] && COUNTER=$(cat "$counter")
+  MATURIN_COUNTER=0; [ -f "$maturin_counter" ] && MATURIN_COUNTER=$(cat "$maturin_counter")
+}
+run_setup_fail_scenario
+if [ "$RC" -eq 1 ]; then
+  ok "setup-fail: python3 -m venv failing → exit 1 (venv/pip toolchain setup gap)"
+else
+  bad "setup-fail: expected exit 1, got $RC"
+  echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
+fi
+if [ "$MATURIN_COUNTER" -eq 0 ]; then
+  ok "setup-fail: maturin develop NEVER invoked (setup failed before the build stage)"
+else
+  bad "setup-fail: expected 0 'maturin develop' calls, got $MATURIN_COUNTER"
+fi
+if [ "$COUNTER" -eq 0 ]; then
+  ok "setup-fail: NO import-verify attempted (setup failed before verify)"
+else
+  bad "setup-fail: expected 0 import-verify attempts, got $COUNTER"
+fi
+# Same class via the OTHER setup call: `pip install maturin pytest` failing
+# (venv creation itself succeeds, the dependency install does not).
+run_pip_fail_scenario() {
+  local venv="$tmp/venv-pipfail-$RANDOM$RANDOM"
+  rm -rf "$venv"
+  OUT=$(
+    PATH="$stub:$stub_tc:$PATH" \
+    PBV_TEST_PIP_FAIL=1 \
+    MATURIN_RC=0 \
+    bash "$GATE" --python-build-verify "$venv" "maturin develop --profile dev -m bindings/python/Cargo.toml" 2>&1
+  )
+  RC=$?
+}
+run_pip_fail_scenario
+if [ "$RC" -eq 1 ]; then
+  ok "setup-fail (pip): pip install failing → exit 1 (same venv/pip toolchain setup gap)"
+else
+  bad "setup-fail (pip): expected exit 1, got $RC"
+  echo "------- out -------"; printf '%s\n' "$OUT"; echo "-------------------"
+fi
+
+# ---- (j) CALLER classification (roborev round 3, Finding 2): the --lite
+#     python tier explicitly branches rc 2 (FAIL), rc 3 (FAIL), and rc 4
+#     (SKIP) — rc 1 has NO explicit branch, so it MUST fall through to the
+#     generic `elif [ "$pbv_rc" -ne 0 ]` catch-all, which is the SKIP branch.
+#     This reads the ACTUAL source (not a re-implementation) so it breaks the
+#     moment someone adds an explicit — and possibly wrong — rc==1 branch
+#     that reclassifies a toolchain setup gap as a code FAIL.
+# NOTE: "$python_diff" -eq 1 appears TWICE in agent-gate.sh (a plan-string
+# helper AND the real python-tier execution block) — anchor on a comment
+# string unique to the REAL block (the "SKIP vs FAIL split" note directly
+# above it) so this reliably extracts the right one even if a future edit
+# reorders the two.
+lite_tier_src=$(awk '/SKIP vs FAIL split \(roborev job 1449, Low\)/{flag=1} flag{print; if (/^  fi$/) exit}' "$GATE")
+if [ -z "$lite_tier_src" ]; then
+  bad "lite-tier-classification: could not locate the python-tier block in $GATE (source shape changed — update this test)"
+elif printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-eq 2' \
+   && printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-eq 3' \
+   && printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-eq 4' \
+   && printf '%s\n' "$lite_tier_src" | grep -qE 'pbv_rc.*-ne 0'; then
+  ok "lite-tier-classification: rc 1 has NO explicit branch (only 2/3/4 do), so it falls through the catch-all 'pbv_rc -ne 0' branch → SKIP (source-verified, not re-implemented)"
+else
+  bad "lite-tier-classification: expected explicit rc==2/rc==3/rc==4 branches plus a catch-all 'pbv_rc -ne 0' branch in the python tier; the source shape has changed"
+  echo "------- lite tier source -------"; printf '%s\n' "$lite_tier_src"; echo "---------------------------------"
+fi
+# The catch-all branch's OWN note text must say SKIPPED, not FAIL — pinning
+# that the fallthrough destination is really the SKIP branch, not some other
+# unnamed non-zero-handling code path.
+if printf '%s\n' "$lite_tier_src" | grep -A2 'pbv_rc.*-ne 0' | grep -q 'SKIP'; then
+  ok "lite-tier-classification: the catch-all 'pbv_rc -ne 0' branch is the SKIP branch (not FAIL)"
+else
+  bad "lite-tier-classification: the catch-all 'pbv_rc -ne 0' branch does not read as SKIP"
 fi
 
 # ---- (h) self-heal builds into a PRIVATE venv, never touches the SHARED venv
