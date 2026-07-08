@@ -509,6 +509,108 @@ fn correctness_signals_end_to_end() {
         presence_verification::set_enabled_for_testing(false);
         drop(rt);
     }
+
+    // --- Roborev r7 (#2163): the REVERSE-SCAN FAST PATH (`candidates.len() ==
+    // 1` branch of `scan_partition_clustering_reverse`) serves the read
+    // DIRECTLY from the single admitted candidate and never falls through to
+    // the reconciling fallback — so a false negative wrongly excluding a
+    // co-holding generation on THIS branch was never verified (unlike the r6
+    // multi-generation-manager case, which the `!= 1` fallback DOES cover via
+    // `scan_partition_clustering`'s own `verify_pruned_candidates` call). Drives
+    // the PUBLIC `ORDER BY ... DESC` reverse read path end-to-end through
+    // `Database::execute`, not the manager directly. ---
+    {
+        use cqlite_core::ingestion::{ingest, IngestionConfig};
+
+        let (data_dir, filter_path, _tmp) = fixtures::write_wide_partition_two_generations();
+
+        // Fault-inject: zero gen B's Filter.db bit array (same technique as the
+        // r6 manager test) — structurally valid, but reports every key absent,
+        // so `prune_candidates` wrongly excludes gen B and
+        // `scan_partition_clustering_reverse` takes the `len() == 1` fast path
+        // serving ONLY gen A's 100 rows.
+        let mut filter_bytes = std::fs::read(&filter_path).expect("read gen B Filter.db");
+        assert!(
+            filter_bytes.len() > 8,
+            "gen B Filter.db must have a non-empty bit array to corrupt"
+        );
+        for b in &mut filter_bytes[8..] {
+            *b = 0;
+        }
+        std::fs::write(&filter_path, &filter_bytes).expect("write corrupted Filter.db");
+
+        // A temp CQL schema file so `ingest()` can register query-time decode
+        // metadata for the table (independent of the WriteEngine's own schema).
+        let schema_dir = tempfile::TempDir::new().expect("schema tmp");
+        let schema_path = schema_dir.path().join("wide.cql");
+        std::fs::write(
+            &schema_path,
+            "CREATE TABLE obsfn.wide (id int, seq int, val text, PRIMARY KEY (id, seq));",
+        )
+        .expect("write schema file");
+
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let db = rt
+            .block_on(ingest(IngestionConfig {
+                schema_paths: vec![schema_path],
+                data_dir,
+                version_hint: Some("5.0".to_string()),
+                core_config: cqlite_core::Config::default(),
+                table_directory_filter: None,
+            }))
+            .expect("ingest over both generations (gen B has a corrupted Filter.db)")
+            .database;
+
+        // (a) Verification OFF (default): the reverse fast path silently serves
+        // ONLY gen A's 100 rows (the silent-miss bug this switch detects; the
+        // read wrongly took the single-generation direct-serve path instead of
+        // reconciling with gen B's 5 extra rows) — and no confirmation scan runs.
+        presence_verification::set_enabled_for_testing(false);
+        mc.reset();
+        let res_off = rt
+            .block_on(db.execute("SELECT seq FROM obsfn.wide WHERE id = 1 ORDER BY seq DESC"))
+            .expect("reverse query, verification off");
+        let m = mc.flush_and_collect();
+        assert_eq!(
+            res_off.rows.len(),
+            100,
+            "the reverse fast path must silently miss gen B's 5 extra rows when verification is \
+             off — sees only gen A's 100 rows"
+        );
+        assert_eq!(
+            m.counter_sum(catalog::READ_BLOOM_FALSE_NEGATIVES),
+            0.0,
+            "verification OFF must never emit false_negatives (zero extra scan cost)"
+        );
+
+        // (b) Verification ON, the SAME (still-corrupted) data: the reverse
+        // fast path's own pruned-candidate verification (roborev r7 fix) must
+        // catch the contradiction exactly once.
+        presence_verification::set_enabled_for_testing(true);
+        mc.reset();
+        let _res_on = rt
+            .block_on(db.execute("SELECT seq FROM obsfn.wide WHERE id = 1 ORDER BY seq DESC"))
+            .expect("reverse query, verification on");
+        let m = mc.flush_and_collect();
+        assert_eq!(
+            m.counter_sum(catalog::READ_BLOOM_FALSE_NEGATIVES),
+            1.0,
+            "the reverse-scan fast path's wrongly-pruned gen B must be caught EXACTLY once when \
+             verification is on; entry: {:?}",
+            m.find(catalog::READ_BLOOM_FALSE_NEGATIVES)
+        );
+        assert_eq!(
+            m.sum_where(
+                catalog::READ_BLOOM_FALSE_NEGATIVES,
+                &[(catalog::attr::SSTABLE_FORMAT, "big")],
+            ),
+            1.0,
+            "the contradicted negative must carry cqlite.sstable.format=big"
+        );
+
+        presence_verification::set_enabled_for_testing(false);
+        drop(rt);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -701,7 +803,7 @@ mod merge {
 mod fixtures {
     use cqlite_core::platform::Platform;
     use cqlite_core::schema::registry::{SchemaRegistry, SchemaRegistryConfig, SchemaSource};
-    use cqlite_core::schema::{Column, KeyColumn, TableSchema};
+    use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
     use cqlite_core::storage::sstable::reader::SSTableReader;
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
     use cqlite_core::types::TableId;
@@ -920,5 +1022,101 @@ mod fixtures {
             .expect("gen2 must have a Filter.db (default bloom_filter_fp_chance)");
 
         (data_dir, filter_path, TableId::from("obsfn.rows"), tmp)
+    }
+
+    fn wide_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "obsfn".to_string(),
+            table: "wide".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "seq".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "seq".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "val".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    /// A WIDE partition (`id = 1`) split across TWO generations, for the
+    /// reverse-scan fast-path candidate-prune test (roborev r7, #2163). Gen A
+    /// holds 100 clustering rows carrying a 1 KiB `val` each (~100 KiB total —
+    /// comfortably crossing the 64 KiB promoted-index threshold, so
+    /// `big_reverse_partition_rows` actually engages: a promoted index is only
+    /// emitted once a partition crosses that boundary). Gen B holds 5 MORE
+    /// clustering rows for the SAME partition (small; it doesn't itself need to
+    /// be wide) — UNCORRUPTED, both generations legitimately hold `id = 1`, so
+    /// `candidates.len() == 2` and the reverse fast path correctly declines in
+    /// favor of the reconciling in-memory-sort fallback. Returns the `data` root
+    /// (pass to `ingest()`), gen B's `Filter.db` path (for corruption), and the
+    /// `TempDir` (kept alive).
+    pub fn write_wide_partition_two_generations() -> (PathBuf, PathBuf, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let schema = wide_schema();
+        let data_dir = tmp.path().join("data");
+        let cfg = WriteEngineConfig::new(data_dir.clone(), tmp.path().join("wal"), schema);
+        let mut engine = WriteEngine::new(cfg).expect("engine");
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+
+        let blob = "x".repeat(1024);
+        for seq in 0..100i32 {
+            engine
+                .execute(&format!(
+                    "INSERT INTO obsfn.wide (id, seq, val) VALUES (1, {seq}, '{blob}')"
+                ))
+                .expect("write gen A row");
+        }
+        rt.block_on(engine.flush())
+            .expect("flush gen A")
+            .expect("sstable gen A");
+
+        for seq in 100..105i32 {
+            engine
+                .execute(&format!(
+                    "INSERT INTO obsfn.wide (id, seq, val) VALUES (1, {seq}, 'genB-{seq}')"
+                ))
+                .expect("write gen B row");
+        }
+        let info_b = rt
+            .block_on(engine.flush())
+            .expect("flush gen B")
+            .expect("sstable gen B");
+        drop(rt);
+
+        let filter_path = info_b
+            .filter_path
+            .clone()
+            .expect("gen B must have a Filter.db (default bloom_filter_fp_chance)");
+
+        (data_dir, filter_path, tmp)
     }
 }
