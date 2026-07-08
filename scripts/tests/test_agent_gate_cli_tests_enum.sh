@@ -103,7 +103,7 @@ else
   bad "cli-tests lacks a fail-closed empty-target-set guard (#2039)"
 fi
 
-# 5. cli-tests now reads real Data.db (real-data CLI integration tests are in the
+# 6. cli-tests now reads real Data.db (real-data CLI integration tests are in the
 #    enumerated set), so it must join DATASET_COMPONENTS to be guarded by the
 #    dataset preflight (the #646 hazard otherwise).
 DS_LINE=$(grep -E '^DATASET_COMPONENTS=' "$GATE")
@@ -113,7 +113,7 @@ else
   bad "cli-tests missing from DATASET_COMPONENTS — dataset preflight would not guard it (#646 hazard)"
 fi
 
-# 6. Behavioral check of the fail-closed zero-file guard logic, in isolation. Uses
+# 7. Behavioral check of the fail-closed zero-file guard logic, in isolation. Uses
 #    the SAME snippet shape the gate runs; proves it fails on an empty tests/ dir
 #    and counts a populated one, quoted safely.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli-enum-test.XXXXXX")
@@ -147,7 +147,7 @@ else
   bad "guard miscounted enumerable test files (expected 2, got '${count:-<none>}')"
 fi
 
-# 7. Behavioral check of the write-support target-derivation awk against a synthetic
+# 8. Behavioral check of the write-support target-derivation awk against a synthetic
 #    Cargo.toml — proves it extracts exactly the targets whose required-features name
 #    write-support (and ignores delta-export/duckdb-tests/dhat-heap targets and the
 #    [package]/[[bin]] name lines), then UNIONs the self-gated ground-truth targets.
@@ -196,7 +196,7 @@ else
   ok "write-support derivation excludes delta-export/duckdb-tests/dhat-heap-only targets"
 fi
 
-# 8. Behavioral check of the Pass-1 default set subtraction (glob - required-features
+# 9. Behavioral check of the Pass-1 default set subtraction (glob - required-features
 #    - quarantine). Build a synthetic tests/ + reuse the synthetic Cargo.toml above,
 #    then reproduce the gate's derivation and assert the excluded targets are gone and
 #    a plain new read-only file is INCLUDED.
