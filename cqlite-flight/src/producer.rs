@@ -21,12 +21,15 @@
 //! [`produce_streaming`]: MergeProducer::produce_streaming
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
 use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
-use cqlite_core::query::{build_row_from_scan, ColumnInfo, QueryRow};
+use cqlite_core::observability::{self as obs, catalog, AttrValue};
+use cqlite_core::query::{build_row_from_scan, AccessPath, ColumnInfo, QueryRow};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
@@ -339,6 +342,148 @@ impl BatchSink for CollectSink<'_> {
     }
 }
 
+/// Row threshold at which the merge/scan loop flushes an incremental
+/// `cqlite.query.rows_scanned` (and `cqlite.read.rows` / `cqlite.read.partitions`)
+/// counter delta while a long scan is in progress (issue #2162). Batch-scale, so
+/// emission is per-batch-scale, NEVER per row — the counter climbs before the
+/// scan returns without a per-row `add_counter` on the hot path.
+pub(crate) const SCAN_PROGRESS_ROWS: u64 = 8192;
+
+/// Feature-independent progress-observation seam for the merge/scan loop (issue
+/// #2162), analogous to [`crate::streaming::StreamProbe`]: cheap `Relaxed` atomics
+/// always maintained, so a test can assert the number of incremental delta
+/// flushes and their summed total WITHOUT depending on the `observability` OTel
+/// exporter (which is a genuine no-op when the feature is off). It also carries
+/// the flush `threshold` so a test can lower it to exercise multiple flushes over
+/// a small fixture; production uses [`SCAN_PROGRESS_ROWS`].
+#[derive(Clone)]
+pub(crate) struct ScanProgress {
+    /// Count of `cqlite.query.rows_scanned` delta flushes emitted (threshold
+    /// crossings + the final remainder). A completed scan that exceeds the
+    /// threshold records ≥ 2; one that does not records exactly 1.
+    flushes: Arc<AtomicU64>,
+    /// Sum of the emitted deltas — equals the scan's total examined-row count on
+    /// completion (byte-identical to the pre-#2162 single emission).
+    flushed_rows: Arc<AtomicU64>,
+    /// Rows examined between flushes before a delta is emitted.
+    threshold: u64,
+}
+
+impl Default for ScanProgress {
+    fn default() -> Self {
+        Self::with_threshold(SCAN_PROGRESS_ROWS)
+    }
+}
+
+impl ScanProgress {
+    /// Build a seam with an explicit flush threshold (tests lower it; production
+    /// uses [`ScanProgress::default`] == [`SCAN_PROGRESS_ROWS`]).
+    pub(crate) fn with_threshold(threshold: u64) -> Self {
+        Self {
+            flushes: Arc::new(AtomicU64::new(0)),
+            flushed_rows: Arc::new(AtomicU64::new(0)),
+            threshold: threshold.max(1),
+        }
+    }
+
+    /// Number of incremental delta flushes emitted so far.
+    #[cfg(test)]
+    pub(crate) fn flush_count(&self) -> u64 {
+        self.flushes.load(Ordering::Relaxed)
+    }
+
+    /// Summed emitted deltas so far (== total examined rows on completion).
+    #[cfg(test)]
+    pub(crate) fn flushed_rows(&self) -> u64 {
+        self.flushed_rows.load(Ordering::Relaxed)
+    }
+}
+
+/// Accumulates examined rows + scanned partitions during one merge/scan run and
+/// flushes `cqlite.query.rows_scanned` / `cqlite.read.rows` / `cqlite.read.partitions`
+/// counter deltas at the [`ScanProgress`] threshold, plus a final remainder flush
+/// on [`Drop`] (issue #2162).
+///
+/// `Drop` guarantees the remainder is emitted on EVERY exit — a completed scan, a
+/// `LIMIT` early break, a cooperative cancel, a merge error, or a panic — so the
+/// monotonic total always equals the scan's total examined-row count and no
+/// in-flight progress is ever lost. Emission is at most once per threshold of
+/// examined rows, never per row.
+struct ScanProgressMeter<'a> {
+    progress: &'a ScanProgress,
+    access_path: &'static str,
+    examined: u64,
+    partitions: u64,
+    flushed_rows: u64,
+    flushed_partitions: u64,
+}
+
+impl<'a> ScanProgressMeter<'a> {
+    fn new(progress: &'a ScanProgress, access_path: &'static str) -> Self {
+        Self {
+            progress,
+            access_path,
+            examined: 0,
+            partitions: 0,
+            flushed_rows: 0,
+            flushed_partitions: 0,
+        }
+    }
+
+    /// Count one partition actually scanned (post token-range filter).
+    fn record_partition(&mut self) {
+        self.partitions += 1;
+    }
+
+    /// Count one row materialised/examined by the scan (BEFORE predicate
+    /// filtering — the `rows_scanned` semantic) and flush a delta if the threshold
+    /// is crossed.
+    fn record_row(&mut self) {
+        self.examined += 1;
+        if self.examined - self.flushed_rows >= self.progress.threshold {
+            self.flush();
+        }
+    }
+
+    /// Emit the accumulated (unflushed) deltas, if any, and advance the markers.
+    fn flush(&mut self) {
+        let rows_delta = self.examined - self.flushed_rows;
+        let partitions_delta = self.partitions - self.flushed_partitions;
+        if rows_delta == 0 && partitions_delta == 0 {
+            return;
+        }
+        if rows_delta > 0 {
+            obs::add_counter(
+                catalog::QUERY_ROWS_SCANNED,
+                rows_delta,
+                &[(
+                    catalog::attr::ACCESS_PATH,
+                    AttrValue::StaticStr(self.access_path),
+                )],
+            );
+            obs::add_counter(catalog::READ_ROWS, rows_delta, &[]);
+        }
+        if partitions_delta > 0 {
+            obs::add_counter(catalog::READ_PARTITIONS, partitions_delta, &[]);
+        }
+        self.flushed_rows = self.examined;
+        self.flushed_partitions = self.partitions;
+        self.progress.flushes.fetch_add(1, Ordering::Relaxed);
+        self.progress
+            .flushed_rows
+            .fetch_add(rows_delta, Ordering::Relaxed);
+    }
+}
+
+impl Drop for ScanProgressMeter<'_> {
+    fn drop(&mut self) {
+        // Final remainder flush — covers a completed scan AND every early exit
+        // (LIMIT break, cancel, error, panic), so the incremental total is always
+        // the scan's total examined-row count.
+        self.flush();
+    }
+}
+
 impl MergeProducer {
     /// Build an unfiltered producer for `schema` (emits all rows and columns).
     pub fn new(schema: TableSchema, batch_size: usize) -> Result<Self, ProducerError> {
@@ -521,17 +666,27 @@ impl MergeProducer {
     /// Aggregation is NOT streamed here (its output is bounded); the service routes
     /// aggregating tickets to [`Self::produce_from_resolved`]. Called defensively,
     /// this returns without emitting for an aggregating producer.
+    ///
+    /// `on_merger_built` fires exactly once, at the `merge_setup` → `stream`
+    /// phase boundary (issue #2162) — right AFTER [`KWayMerger::new`] has opened
+    /// every input SSTable and BEFORE the first partition is stepped/emitted — so
+    /// a caller can attribute the SSTable-opening cost (the #2157 stall suspect)
+    /// to the `merge_setup` phase. It is NOT called when there is nothing to merge
+    /// (aggregating producer or no paths), because no merger is built in that case.
     pub(crate) fn produce_streaming(
         &self,
         paths: Vec<PathBuf>,
         cancel: &CancelFlag,
         sink: &mut dyn BatchSink,
+        progress: &ScanProgress,
+        on_merger_built: impl FnOnce(),
     ) -> Result<(), ProducerError> {
         if self.agg.is_some() || paths.is_empty() {
             return Ok(());
         }
         let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
-        self.drive_merge(&mut merger, cancel, sink)
+        on_merger_built();
+        self.drive_merge(&mut merger, cancel, sink, progress)
     }
 
     /// Prune `paths` to those whose token span overlaps the spec's token range.
@@ -606,7 +761,9 @@ impl MergeProducer {
 
         let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
         let mut sink = CollectSink(&mut batches);
-        self.drive_merge(&mut merger, cancel, &mut sink)?;
+        // Collect path (parity oracle): a private seam — no external observer, but
+        // the same incremental counter emission runs (issue #2162).
+        self.drive_merge(&mut merger, cancel, &mut sink, &ScanProgress::default())?;
         Ok(batches)
     }
 
@@ -630,12 +787,19 @@ impl MergeProducer {
         merger: &mut dyn PartitionStepper,
         cancel: &CancelFlag,
         sink: &mut dyn BatchSink,
+        progress: &ScanProgress,
     ) -> Result<(), ProducerError> {
         let limit = self.spec.limit;
         // A zero cap produces no rows without touching the merge.
         if limit == Some(0) {
             return Ok(());
         }
+        // Incremental scan-progress meter (issue #2162): flushes rows_scanned /
+        // read.rows / read.partitions deltas at the batch-scale threshold and, via
+        // its `Drop`, the remainder on EVERY exit (completion, LIMIT break, cancel,
+        // error, panic). The Flight merge always full-scans its (pruned) inputs, so
+        // the bounded access-path label is `full_scan`.
+        let mut meter = ScanProgressMeter::new(progress, AccessPath::FullScan.label());
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
 
@@ -653,6 +817,8 @@ impl MergeProducer {
                     continue;
                 }
             }
+            // Count a partition actually scanned (post token-range filter).
+            meter.record_partition();
             for entry in rows {
                 // Build the FULL row so predicates can reference any column, even
                 // one projected out of the output. Output projection is applied
@@ -660,6 +826,9 @@ impl MergeProducer {
                 let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
                     continue;
                 };
+                // Count a row materialised/examined by the scan (BEFORE the
+                // predicate filter — the `rows_scanned` semantic).
+                meter.record_row();
                 // Predicate pushdown: evaluate the nested filter tree with SQL
                 // Kleene logic and keep the row only when it is definitely True
                 // (Unknown and False both reject — WHERE semantics, issue #834).
@@ -1034,7 +1203,7 @@ mod tests {
         let err = {
             let mut sink = CollectSink(&mut batches);
             producer
-                .drive_merge(&mut counting, &cancelled, &mut sink)
+                .drive_merge(&mut counting, &cancelled, &mut sink, &ScanProgress::default())
                 .expect_err("pre-cancelled merge aborts")
         };
 

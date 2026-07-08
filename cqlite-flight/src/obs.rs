@@ -178,6 +178,108 @@ impl Drop for RpcMetrics {
     }
 }
 
+/// `do_get` execution phases (issue #2162), a fixed, bounded, ordered set. Used
+/// as the `cqlite.rpc.phase` attribute value on `cqlite.rpc.phase.duration`; the
+/// values are `&'static str` from this closed table so metric cardinality is
+/// capped exactly like [`RPC_METHODS`] — never a per-query/ticket/key value.
+///
+/// - `resolve`: path discovery + token prune (`do_get_setup`).
+/// - `merge_setup`: opening every input SSTable + building the k-way merger
+///   (`KWayMerger::new`, the #2157 stall suspect) before the first batch.
+/// - `stream`: partitions stepping + batches flowing to the client.
+pub const PHASE_RESOLVE: &str = "resolve";
+/// See [`PHASE_RESOLVE`].
+pub const PHASE_MERGE_SETUP: &str = "merge_setup";
+/// See [`PHASE_RESOLVE`].
+pub const PHASE_STREAM: &str = "stream";
+
+/// The closed set of `do_get` phase labels, in transition order.
+const RPC_PHASES: [&str; 3] = [PHASE_RESOLVE, PHASE_MERGE_SETUP, PHASE_STREAM];
+
+/// Normalise a phase label to its bounded slot, so an unexpected value can never
+/// leak as a metric attribute (it maps to `resolve`, never an arbitrary string).
+fn phase_slot(phase: &str) -> &'static str {
+    RPC_PHASES
+        .iter()
+        .find(|p| **p == phase)
+        .copied()
+        .unwrap_or(PHASE_RESOLVE)
+}
+
+/// Records the wall time a `do_get` spends in each bounded execution phase
+/// (issue #2162): `resolve` → `merge_setup` → `stream`.
+///
+/// Constructed at `do_get` entry (phase `resolve`). [`Self::transition`] closes
+/// the current phase — emitting a `cqlite.rpc.phase.duration` histogram sample
+/// tagged with the bounded `cqlite.rpc.phase` attribute plus a `tracing` span
+/// event — and opens the next. [`Drop`] closes whichever phase is still open, so
+/// EVERY entered phase records exactly one sample even on an error/cancel/panic
+/// exit, and a phase never entered records none (never a fabricated zero).
+///
+/// The recorder captures the `do_get` span at construction and re-enters it
+/// around each emission, so the span events attach to the `flight.do_get` span
+/// even when the later phases run on the blocking merge pool (mirrors
+/// [`crate::streaming`]'s span-capture pattern).
+pub struct PhaseTimer {
+    method: &'static str,
+    phase: &'static str,
+    started: Instant,
+    span: tracing::Span,
+}
+
+impl PhaseTimer {
+    /// Begin timing at the `resolve` phase for `method` (a `&'static str` from the
+    /// bounded `FlightService` method set).
+    pub fn start(method: &'static str) -> Self {
+        let method = RPC_METHODS[method_index(method)];
+        Self {
+            method,
+            phase: PHASE_RESOLVE,
+            started: Instant::now(),
+            span: tracing::Span::current(),
+        }
+    }
+
+    /// Close the current phase (record its duration) and open `next`.
+    pub fn transition(&mut self, next: &'static str) {
+        self.record_current();
+        self.phase = phase_slot(next);
+        self.started = Instant::now();
+    }
+
+    /// Emit the histogram sample + span event for the phase currently open.
+    fn record_current(&self) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let _entered = self.span.enter();
+        obs::record_histogram(
+            catalog::RPC_PHASE_DURATION,
+            elapsed,
+            &[
+                method_attr(self.method),
+                (
+                    catalog::attr::RPC_PHASE,
+                    AttrValue::StaticStr(phase_slot(self.phase)),
+                ),
+            ],
+        );
+        tracing::debug!(
+            rpc.method = self.method,
+            cqlite.rpc.phase = self.phase,
+            elapsed_s = elapsed,
+            "do_get phase completed"
+        );
+    }
+}
+
+impl Drop for PhaseTimer {
+    fn drop(&mut self) {
+        // Close whichever phase is still open — covers the normal terminal phase
+        // AND an error/cancel/panic exit that never transitioned further, so a
+        // stall that emits zero rows still records the phase it died in.
+        self.record_current();
+    }
+}
+
 /// Fixed, bounded set of `FlightService` RPC method names, in the order used to
 /// index [`IN_FLIGHT`]. Cardinality is exactly the gRPC method set — no ticket,
 /// key, query, or payload ever appears here.

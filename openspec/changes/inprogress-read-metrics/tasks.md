@@ -26,7 +26,7 @@ merge-on-green → finalize).
   pre-change single emission. (read-progress-observability)
 
 ## Stage 2 — bounded per-do_get phase breakdown (Flight, public surface)
-- [ ] 2.1 Introduce a bounded phase enum (`resolve | merge_setup | stream`) with a fixed `&'static str`
+- [x] 2.1 Introduce a bounded phase enum (`resolve | merge_setup | stream`) with a fixed `&'static str`
   slot table (mirror the `RPC_METHODS` pattern in `obs.rs`); record `RPC_PHASE_DURATION` + a span event
   at each transition, driven from `do_get_inner`/`do_get_setup` (`cqlite-flight/src/service.rs:391/468`)
   and the `merge_setup`→`stream` boundary in `spawn_streaming` / `producer.rs`. (read-progress-observability)
@@ -37,7 +37,7 @@ merge-on-green → finalize).
   fabricated zero for a skipped phase). (read-progress-observability)
 
 ## Stage 3 — incremental core scan counters
-- [ ] 3.1 Add a named `SCAN_PROGRESS_ROWS` threshold const (aligned to batch size) and flush
+- [x] 3.1 Add a named `SCAN_PROGRESS_ROWS` threshold const (aligned to batch size) and flush
   `cqlite.query.rows_scanned` (and read.rows/read.partitions on the merge scan) as deltas at the
   threshold in the scan loop (`select_executor/mod.rs:702`, `stream_agg.rs:169`), with a final remainder
   flush replacing the single `execute.rs:343` emission. Add a feature-independent progress-observation

@@ -104,6 +104,12 @@ pub(crate) struct StreamProbe {
     /// eager-setup errors always did, independent of whether OTel counters are
     /// compiled in.
     errors_recorded: Arc<AtomicUsize>,
+    /// Incremental core-scan progress seam (issue #2162): counts the
+    /// `cqlite.query.rows_scanned` delta flushes the merge/scan loop emits and
+    /// their summed total, feature-independently (like the rest of this probe).
+    /// Threaded into `drive_merge` so a full-scan `do_get` records ≥ 2 flushes
+    /// over a threshold-crossing scan, versus exactly 1 for a sub-threshold scan.
+    pub(crate) scan_progress: crate::producer::ScanProgress,
 }
 
 /// Sink that sends each merged batch into the bounded `do_get` channel.
@@ -191,6 +197,7 @@ pub(crate) fn spawn_streaming(
     capacity: usize,
     probe: StreamProbe,
     cancel: CancelFlag,
+    timer: crate::obs::PhaseTimer,
 ) -> (DoGetStream, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(capacity.max(1));
     // The shared cancel flag stops the merge when this response stream is dropped
@@ -199,6 +206,9 @@ pub(crate) fn spawn_streaming(
     let guard = cancel.drop_guard();
     let merge_cancel = cancel;
     let produced = probe.produced_batches.clone();
+    // The incremental scan-progress seam (issue #2162) is threaded into the merge
+    // loop so `cqlite.query.rows_scanned` climbs while the scan is in progress.
+    let scan_progress = probe.scan_progress.clone();
 
     // Run the CPU-bound merge off the async runtime; it sends batches as it goes.
     // `error_tx` is a clone kept OUTSIDE the (potentially unwound) merge closure so
@@ -208,7 +218,17 @@ pub(crate) fn spawn_streaming(
         let error_tx = tx.clone();
         let mut sink = ChannelSink { tx, produced };
         run_merge_catching_panics(&error_tx, move || {
-            producer.produce_streaming(paths, &merge_cancel, &mut sink)
+            // `timer` enters `do_get` already in the `merge_setup` phase (the
+            // caller transitioned `resolve` → `merge_setup` before spawning). The
+            // `on_merger_built` hook fires the `merge_setup` → `stream` transition
+            // right after `KWayMerger::new` opens the input SSTables; the timer
+            // then drops at the end of this closure, recording the final `stream`
+            // phase (or `merge_setup` if the merger build itself failed / there was
+            // nothing to merge). Issue #2162.
+            let mut timer = timer;
+            producer.produce_streaming(paths, &merge_cancel, &mut sink, &scan_progress, || {
+                timer.transition(crate::obs::PHASE_STREAM);
+            })
         });
     });
 
@@ -230,7 +250,15 @@ pub(crate) async fn build_aggregate_response(
     schema_ref: Arc<ArrowSchema>,
     metrics: RpcMetrics,
     cancel: CancelFlag,
+    timer: crate::obs::PhaseTimer,
 ) -> Result<DoGetStream, (Status, RpcMetrics)> {
+    // The aggregate route materializes its bounded per-group output — it never
+    // enters a client `stream` phase (issue #2162). The caller transitioned
+    // `resolve` → `merge_setup` before this call, so `timer` measures the merger
+    // build + drain-to-accumulator under `merge_setup`; it is a local here, so it
+    // drops (recording that `merge_setup` sample) on EVERY exit — success, a
+    // materialization error, or a cancel — and records no `stream` sample.
+    let _timer = timer;
     // Cancellation during materialization mirrors the pre-change guard-across-await.
     let mut guard = cancel.drop_guard();
     let merge_cancel = cancel;

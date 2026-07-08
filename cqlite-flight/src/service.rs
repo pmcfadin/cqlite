@@ -406,6 +406,13 @@ impl CqliteFlightService {
         // lifetime, exactly as before this fix.
         let cancel = CancelFlag::new();
         let mut setup_guard = cancel.drop_guard();
+        // Phase timing (issue #2162): begin in the `resolve` phase. The timer
+        // captures the `flight.do_get` span (this future runs under it via
+        // `.instrument`), so its per-phase histogram samples + span events attach
+        // to that span even for the phases that run on the blocking merge pool. On
+        // the setup-error path below the timer drops here, recording the `resolve`
+        // phase it died in — so a stall that never produces a row still localizes.
+        let mut timer = crate::obs::PhaseTimer::start("do_get");
         // Fallible eager setup: parse the ticket, build the producer + schema, and
         // resolve/token-prune the SSTable paths off the reactor. A missing table
         // surfaces here as a clean `not_found` BEFORE the stream opens.
@@ -414,6 +421,9 @@ impl CqliteFlightService {
             Err(status) => return Err((status, metrics)),
         };
         setup_guard.disarm();
+        // `resolve` done; enter `merge_setup` (opening SSTables + building the
+        // merger — the #2157 stall suspect — happens next, before the first batch).
+        timer.transition(crate::obs::PHASE_MERGE_SETUP);
         let DoGetSetup {
             producer,
             schema_ref,
@@ -426,7 +436,7 @@ impl CqliteFlightService {
             // and serve it as a stream, unchanged in content (issue #1476).
             return Ok(Response::new(
                 crate::streaming::build_aggregate_response(
-                    producer, paths, schema_ref, metrics, cancel,
+                    producer, paths, schema_ref, metrics, cancel, timer,
                 )
                 .await?,
             ));
@@ -445,6 +455,7 @@ impl CqliteFlightService {
             crate::streaming::DO_GET_CHANNEL_CAPACITY,
             crate::streaming::StreamProbe::default(),
             cancel,
+            timer,
         );
         Ok(Response::new(stream))
     }
