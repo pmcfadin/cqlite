@@ -223,7 +223,24 @@ static LAST_ACCESS_PATH: ArcSwapOption<AccessPath> = ArcSwapOption::const_empty(
 /// reads [`last`] reflects the path the query actually took. The store is lock-free
 /// and infallible (no poisoning surface); recording is a diagnostic side channel and
 /// never aborts a query.
+///
+/// Additionally emits the degraded read-path counter
+/// (`cqlite.query.degraded_path.total`, issue #2163) exactly when `path` is an
+/// honest [`AccessPath::FallbackFullScan`], carrying the bounded
+/// [`FallbackReason::label`] as `cqlite.query.fallback_reason`. A targeted path
+/// never increments it. The emission is a no-op with zero OTel linkage when the
+/// `observability` feature is off.
 pub fn record(path: AccessPath) {
+    if let AccessPath::FallbackFullScan { reason } = &path {
+        crate::observability::add_counter(
+            crate::observability::catalog::QUERY_DEGRADED_PATH,
+            1,
+            &[(
+                crate::observability::catalog::attr::FALLBACK_REASON,
+                reason.label().into(),
+            )],
+        );
+    }
     LAST_ACCESS_PATH.store(Some(Arc::new(path)));
 }
 

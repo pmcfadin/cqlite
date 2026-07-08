@@ -38,6 +38,8 @@ pub mod unit {
     pub const SSTABLES: &str = "{sstable}";
     /// A count of errors.
     pub const ERRORS: &str = "{error}";
+    /// A count of tombstones.
+    pub const TOMBSTONES: &str = "{tombstone}";
     /// Bytes.
     pub const BYTES: &str = "By";
     /// Seconds (OTel prefers base-unit seconds for durations).
@@ -90,6 +92,14 @@ pub mod attr {
     /// Bounded to two values so a single metric series carries both arms for
     /// success/error-rate dashboards.
     pub const RPC_STATUS: &str = "cqlite.rpc.status";
+    /// Reason a `SELECT` fell back to a degraded (full-scan) read path
+    /// (issue #2163). Values come from
+    /// [`crate::query::access_path::FallbackReason::label`] — a documented closed
+    /// set (`no_schema`, `partition_key_not_fully_constrained`,
+    /// `partition_key_encoding_failed`, `metadata_scan_path`, `legacy_executor_path`,
+    /// `tombstones_build_no_prune`). Bounded by the enum itself; NEVER carries a
+    /// partition key, predicate value, or query string.
+    pub const FALLBACK_REASON: &str = "cqlite.query.fallback_reason";
 }
 
 /// `cqlite.read.rows` — counter `{row}`.
@@ -161,6 +171,42 @@ pub const READ_BLOOM_CHECKS: &str = "cqlite.read.bloom.checks";
 /// exercised (a multi-chunk SSTable with a straddling partition); it stays
 /// zero for single-chunk SSTables. No high-cardinality attributes.
 pub const READ_SCAN_WINDOW_REFILL: &str = "cqlite.read.scan.window_refill";
+
+/// `cqlite.read.sstables_pruned` — counter `{sstable}` (issue #2163).
+///
+/// Incremented once for each SSTable EXCLUDED from a read because its presence
+/// oracle returned a definitive negative — the bloom filter for BIG
+/// (`might_contain_partition == false`) or the Partitions.db trie for BTI (a trie
+/// miss). Bounded attributes: [`attr::SSTABLE_FORMAT`]. Distinct from
+/// [`READ_BLOOM_CHECKS`], which counts *checks* (hit/miss); this counts SSTables
+/// actually skipped, in `{sstable}` units — the dashboard-honest prune signal.
+pub const READ_SSTABLES_PRUNED: &str = "cqlite.read.sstables_pruned";
+
+/// `cqlite.read.bloom.false_negatives` — counter `1` (issue #2163).
+///
+/// OPT-IN, default-OFF soundness alarm: incremented ONLY when the presence-oracle
+/// false-negative verification (`CQLITE_VERIFY_PRESENCE_ORACLE`) is enabled and an
+/// AUTHORITATIVE scan of an SSTable finds a key its bloom/BTI-trie said was
+/// definitely absent. Under a correct oracle this stays 0; a non-zero value is a
+/// corruption/soundness alarm. Bounded attributes: [`attr::SSTABLE_FORMAT`].
+pub const READ_BLOOM_FALSE_NEGATIVES: &str = "cqlite.read.bloom.false_negatives";
+
+/// `cqlite.merge.rows_in` — counter `{row}` (issue #2163).
+///
+/// Sum of input rows consumed at the k-way merge RECONCILE boundary, emitted once
+/// per merge (aggregated from stack-local counters, never per row/cell). Paired
+/// with [`MERGE_ROWS_OUT`]; their delta is the number of rows removed by
+/// reconciliation (LWW collapse + tombstone suppression). Scoped to reconcile so
+/// producer-level filtering (token prune, predicate, `LIMIT`) is EXCLUDED. No
+/// high-cardinality attributes.
+pub const MERGE_ROWS_IN: &str = "cqlite.merge.rows_in";
+
+/// `cqlite.merge.rows_out` — counter `{row}` (issue #2163).
+///
+/// Sum of rows emitted by the k-way merge reconcile boundary post-reconciliation,
+/// emitted once per merge. See [`MERGE_ROWS_IN`] for the pairing/scope contract.
+/// No high-cardinality attributes.
+pub const MERGE_ROWS_OUT: &str = "cqlite.merge.rows_out";
 
 /// `cqlite.query.duration` — histogram `s`.
 ///
@@ -305,6 +351,35 @@ pub const COMPACTION_SSTABLES_OUT: &str = "cqlite.compaction.sstables_out";
 /// reconciliation collapse is NOT counted. No high-cardinality attributes.
 pub const COMPACTION_TOMBSTONES_PURGED: &str = "cqlite.compaction.tombstones_purged";
 
+/// `cqlite.compaction.tombstones_suppressed` — counter `{tombstone}` (issue #2163).
+///
+/// Live cells/rows SHADOWED (suppressed) by a tombstone during merge
+/// reconciliation, emitted once per merge. Distinct from
+/// [`COMPACTION_TOMBSTONES_PURGED`] (a genuine gc/overlap-safe purge) and
+/// [`COMPACTION_TOMBSTONES_EMITTED`] (a marker retained). Suppression without a
+/// safe purge or a retained marker is the resurrection-risk smell. No
+/// high-cardinality attributes.
+pub const COMPACTION_TOMBSTONES_SUPPRESSED: &str = "cqlite.compaction.tombstones_suppressed";
+
+/// `cqlite.compaction.tombstones_emitted` — counter `{tombstone}` (issue #2163).
+///
+/// Tombstone markers RETAINED into the merge output (a row / range / partition
+/// / cell tombstone carried forward because it is not purgeable — a cell
+/// tombstone counts here too, roborev r7: it is exactly the marker
+/// tombstone-resurrection debugging needs to see, not only the coarser
+/// row/range/partition markers), emitted once per merge. Distinct from
+/// [`COMPACTION_TOMBSTONES_PURGED`] and [`COMPACTION_TOMBSTONES_SUPPRESSED`].
+/// No high-cardinality attributes.
+pub const COMPACTION_TOMBSTONES_EMITTED: &str = "cqlite.compaction.tombstones_emitted";
+
+/// `cqlite.query.degraded_path.total` — counter `1` (issue #2163).
+///
+/// Incremented once each time a `SELECT` takes a soundness fallback recorded as
+/// [`crate::query::access_path::AccessPath::FallbackFullScan`]. Bounded attribute:
+/// [`attr::FALLBACK_REASON`] (the closed `FallbackReason::label()` set). A green
+/// targeted query does NOT increment it. NEVER carries a key/predicate/query text.
+pub const QUERY_DEGRADED_PATH: &str = "cqlite.query.degraded_path.total";
+
 /// `cqlite.compaction.lag` — gauge `{sstable}`.
 ///
 /// Current L0 SSTables pending compaction (compaction lag). No high-cardinality
@@ -383,6 +458,11 @@ pub const ALL_METRICS: &[&str] = &[
     READ_DURATION,
     READ_PARTITION_LOOKUP,
     READ_BLOOM_CHECKS,
+    READ_SSTABLES_PRUNED,
+    READ_BLOOM_FALSE_NEGATIVES,
+    MERGE_ROWS_IN,
+    MERGE_ROWS_OUT,
+    QUERY_DEGRADED_PATH,
     STORAGE_OPEN_SSTABLES,
     STORAGE_OPEN_BYTES,
     STORAGE_OPEN_TABLES,
@@ -410,6 +490,8 @@ pub const ALL_METRICS: &[&str] = &[
     COMPACTION_SSTABLES_IN,
     COMPACTION_SSTABLES_OUT,
     COMPACTION_TOMBSTONES_PURGED,
+    COMPACTION_TOMBSTONES_SUPPRESSED,
+    COMPACTION_TOMBSTONES_EMITTED,
     COMPACTION_LAG,
     COMPACTION_FINALIZE_DURATION,
     COMPACTION_BUDGET_REQUESTED,
@@ -452,6 +534,7 @@ mod tests {
             attr::PLAN_TYPE,
             attr::RPC_METHOD,
             attr::RPC_STATUS,
+            attr::FALLBACK_REASON,
         ] {
             assert!(key.starts_with("cqlite."), "attr {key} must be namespaced");
         }

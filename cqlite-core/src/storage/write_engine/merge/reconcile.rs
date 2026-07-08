@@ -320,14 +320,42 @@ impl ReconcileState {
     /// `f66fa14f`). The output `after_row_del` is kept so the dropped-column
     /// stage (Step 3b) can tell whether its purge is what emptied the row of real
     /// data (phantom-row guard).
-    pub(super) fn shadow_by_row_deletion(&mut self) {
+    pub(super) fn shadow_by_row_deletion(&mut self, purges: &mut PurgeCounts) {
         let row_del = self.row_del;
+        // Issue #2163 (roborev r5): clustering-key pseudo-cells are intentionally
+        // RETAINED in the cell list for read-back (see `extract_clustering_key`
+        // and the `had_data_before` computation in `filter_dropped_columns`
+        // below) — they are not real data, so shadowing one must not inflate
+        // `tombstones_suppressed`. Build the SAME `is_data_cell` exclusion
+        // `filter_dropped_columns`/`build` already use, computed here (before the
+        // mutable `winners` borrow) so a clustering-key cell shadowed by the row
+        // tombstone is excluded from the count.
+        let ck_names: HashSet<&str> = self
+            .clustering_key
+            .as_ref()
+            .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
+            .unwrap_or_default();
         let winners = &mut self.winners;
         self.after_row_del = std::mem::take(&mut self.order)
             .into_iter()
             .filter_map(|cell_key| winners.remove(&cell_key))
             .filter(|cell| match row_del {
-                Some(d) => cell.timestamp > d,
+                Some(d) => {
+                    let survives = cell.timestamp > d;
+                    // Issue #2163: a LIVE DATA cell dropped here was SHADOWED by
+                    // the row tombstone (suppressed) — count it, distinct from a
+                    // gc/overlap-safe purge. A cell that is itself a tombstone,
+                    // or a clustering-key pseudo-cell (retained for read-back,
+                    // never real data), is not "live data suppressed" and is not
+                    // counted.
+                    if !survives
+                        && !KWayMerger::is_cell_tombstone(cell)
+                        && !ck_names.contains(cell.column.as_str())
+                    {
+                        purges.suppressed += 1;
+                    }
+                    survives
+                }
                 None => true,
             })
             .collect();
@@ -605,7 +633,7 @@ impl ReconcileState {
     ///
     /// Returns `None` for an empty group (the original `let key = key?`
     /// early-out) or a truly absent row.
-    pub(super) fn build(self) -> Option<MergeEntry> {
+    pub(super) fn build(self, purges: &mut PurgeCounts) -> Option<MergeEntry> {
         let ReconcileState {
             clustering_key,
             key,
@@ -629,6 +657,25 @@ impl ReconcileState {
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;
         drop(ck_names);
+
+        // Issue #2163 (roborev r7): a cell tombstone (simple or complex-element,
+        // the SAME predicate `purge_gc_grace`'s retain closure uses) that
+        // SURVIVES into `surviving` — whether because gc-grace/overlap kept it,
+        // or because purging was inactive for this merge entirely (no
+        // `gc_before_secs`, e.g. an unbounded partial compaction) — is a marker
+        // RETAINED into the output, matching the row/range/partition tombstone
+        // "emitted" contract established above. Counted here from the FINAL
+        // surviving set (not inside `purge_gc_grace`'s conditional retain) so a
+        // merge with purging disabled still counts its retained cell
+        // tombstones; a cell tombstone always satisfies `is_data_cell` (it is
+        // never a clustering-key pseudo-cell), so its presence here already
+        // implies `purged_to_empty == false` and the row below is genuinely
+        // emitted with it intact.
+        let retained_cell_tombstones = surviving
+            .iter()
+            .filter(|cell| KWayMerger::is_cell_tombstone(cell) || cell.is_deleted)
+            .count() as u64;
+        purges.emitted += retained_cell_tombstones;
 
         // Attach the carried deletion metadata to whichever entry is emitted so it
         // is not dropped by reconciliation (#886 plumbing preservation).
@@ -657,12 +704,23 @@ impl ReconcileState {
             // Step 3 already dropped the cells this deletion covers (ts <= row_del),
             // so the deletion shadows nothing within `surviving`.
             Some(match row_del {
-                Some(deletion_time) => live.with_row_deletion(deletion_time, row_del_ldt),
+                Some(deletion_time) => {
+                    // Issue #2163: this row-tombstone marker is RETAINED alongside
+                    // newer live cells (the common "retained-but-coexisting" case,
+                    // NOT the sole-output case below) — count it as emitted too, so
+                    // `tombstones_emitted` covers every marker that survives
+                    // reconciliation into the output, not only the row-absent case.
+                    purges.emitted += 1;
+                    live.with_row_deletion(deletion_time, row_del_ldt)
+                }
                 None => live,
             })
         } else if let Some(deletion_time) = row_del {
             // No surviving data. If a row tombstone exists, keep the row shadowed
             // so downstream still emits the deletion (preserves #505/#498 absence).
+            // Issue #2163: this row-tombstone marker is RETAINED into the output —
+            // count it as emitted (a marker carried forward, not purged).
+            purges.emitted += 1;
             Some(MergeEntry::new(
                 run_index,
                 key,

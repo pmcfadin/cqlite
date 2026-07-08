@@ -417,14 +417,35 @@ impl SSTableReader {
         use crate::observability::{self as obs, catalog};
 
         if self.bti_partitions_db.is_some() {
+            // Issue #2163 (roborev r7): restore the C5 range short-circuit
+            // (`locate`'s Step 1) ahead of the trie probe. The r2 refactor
+            // removed `locate_encoded` (replaced by routing the candidate-prune
+            // path through these `might_contain_partition[_encoded]` helpers)
+            // and dropped this step for BTI, so an out-of-range key paid a
+            // pointless trie descent and never recorded
+            // `read_work_counters::record_range_short_circuit`. A no-op for a
+            // genuine BTI reader today (no Summary.db, so
+            // `partition_key_out_of_range` always returns `false`), but this
+            // restores exact step-ordering parity with `locate` for any
+            // degraded case and keeps the work-counter accounting consistent.
+            if self.partition_key_out_of_range(partition_key) {
+                crate::storage::sstable::read_work_counters::record_range_short_circuit();
+                return false;
+            }
             // BTI: trie miss is authoritative absence; any error is conservative.
             // `lookup_partition_via_bti_trie` is the single common path that emits
             // READ_BLOOM_CHECKS for the BTI presence check — do NOT emit again here
             // or the metric would be double counted.
-            return matches!(
+            let present = matches!(
                 self.lookup_partition_via_bti_trie(partition_key),
                 Ok(Some(_)) | Err(_)
             );
+            if !present {
+                // Definitive trie miss → this SSTable is pruned from the read
+                // (issue #2163).
+                self.emit_sstable_pruned();
+            }
+            return present;
         }
         // BIG: only record READ_BLOOM_CHECKS when a bloom filter actually exists.
         // With no filter loaded we cannot prune, so we conservatively return `true`
@@ -447,10 +468,35 @@ impl SSTableReader {
                         ),
                     ],
                 );
+                if !present {
+                    // Bloom `might_contain == false` is a definitive negative →
+                    // this SSTable is pruned from the read (issue #2163).
+                    self.emit_sstable_pruned();
+                }
                 present
             }
             None => true,
         }
+    }
+
+    /// Emit `cqlite.read.sstables_pruned` for one SSTable excluded from a read by
+    /// a presence-oracle definitive negative (issue #2163). Carries the bounded
+    /// `cqlite.sstable.format` (`"big"`/`"bti"`); no-op when observability is off.
+    ///
+    /// `pub(crate)` (not just this module) so the PRIMARY single-reader point-read
+    /// path (`get_with_resolution` in `data_access/mod.rs`) can call the SAME emit
+    /// site the candidate-prune helpers (`might_contain_partition[_encoded]`) use —
+    /// one implementation, no duplicated emission logic (roborev r4).
+    pub(crate) fn emit_sstable_pruned(&self) {
+        use crate::observability::{self as obs, catalog};
+        obs::add_counter(
+            catalog::READ_SSTABLES_PRUNED,
+            1,
+            &[(
+                catalog::attr::SSTABLE_FORMAT,
+                self.sstable_format_label().into(),
+            )],
+        );
     }
 
     /// `true` when this reader was opened on a BTI ("da") SSTable (its
@@ -476,10 +522,29 @@ impl SSTableReader {
     /// any trie parse error is treated conservatively as "maybe present".
     pub fn might_contain_partition_encoded(&self, partition_key: &[u8], encoded: &[u8; 9]) -> bool {
         if self.bti_partitions_db.is_some() {
-            return matches!(
+            // Issue #2163 (roborev r7): restore the C5 range short-circuit
+            // (`locate`'s Step 1) ahead of the trie probe — see the identical
+            // restoration + rationale in `might_contain_partition`'s BTI branch.
+            // This is the candidate-prune path's OWN entry point (called from
+            // `SSTableManager::prune_candidates` for every BTI candidate), so
+            // restoring it here is what actually re-covers the multi-generation
+            // prune loop the old `locate_encoded` used to gate.
+            if self.partition_key_out_of_range(partition_key) {
+                crate::storage::sstable::read_work_counters::record_range_short_circuit();
+                return false;
+            }
+            let present = matches!(
                 self.lookup_partition_via_bti_trie_encoded(partition_key, encoded),
                 Ok(Some(_)) | Err(_)
             );
+            if !present {
+                // Definitive trie miss on the candidate-prune path → SSTable pruned
+                // (issue #2163). The BIG branch below delegates to
+                // `might_contain_partition`, which emits its own prune, so there is
+                // no double count.
+                self.emit_sstable_pruned();
+            }
+            return present;
         }
         // BIG: no BTI encoding to hoist — the bloom filter hashes the raw key.
         self.might_contain_partition(partition_key)

@@ -43,7 +43,35 @@ impl SSTableManager {
         // (partition, clustering) row may appear in more than one, and reconciling
         // them is the in-memory-sort path's job (cross-generation last-write-wins).
         // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
-        let candidates = Self::prune_candidates(&reader_list, partition_key);
+        let (candidates, pruned) = Self::prune_candidates(&reader_list, partition_key);
+
+        // Issue #2163 (roborev r7): verify pruned candidates ONLY on the
+        // `candidates.len() == 1` FAST PATH below — that branch serves the read
+        // DIRECTLY from `candidates[0]` via `big_reverse_partition_rows` and
+        // returns without ever reaching the caller's fallback. A false negative
+        // that wrongly excluded a co-holding generation on THIS branch is the
+        // silent-miss case the switch exists to catch: unverified, the read
+        // would (a) never confirm the wrongly-pruned reader's contradiction, AND
+        // (b) wrongly take the single-generation direct-serve path instead of
+        // the reconciling in-memory-sort fallback that would have merged both
+        // generations' rows. Strictly inside the opt-in switch (a no-op when
+        // disabled) and fail-open on `Err` (the same loud-error contract the
+        // other `verify_pruned_candidates` call sites use).
+        //
+        // The `candidates.len() != 1` branch deliberately does NOT verify here:
+        // every such outcome (zero OR multiple admitted) returns `Ok(None)`, and
+        // the caller's fallback (`query::select_executor::lookup`) ALWAYS
+        // re-runs the SAME deterministic prune via `scan_partition_clustering`,
+        // which DOES call `verify_pruned_candidates` on the identical
+        // `reader_list`/`partition_key` (same bloom/trie state ⇒ byte-identical
+        // exclusion set). Verifying on BOTH branches would double-COUNT a
+        // contradicted negative (once here, once in the fallback) for the SAME
+        // logical read — so this call is gated to fire only where the fallback
+        // will never run.
+        if candidates.len() == 1 {
+            Self::verify_pruned_candidates(&pruned, table_id, partition_key).await;
+        }
+
         if candidates.len() != 1 {
             return Ok(None);
         }
