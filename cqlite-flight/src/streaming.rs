@@ -83,10 +83,13 @@ pub(crate) struct StreamProbe {
     rows: Arc<AtomicU64>,
     /// Payload bytes attributed to metrics at stream end.
     bytes: Arc<AtomicU64>,
-    /// Incremented once per mid-stream error, alongside the
-    /// `crate::obs::record_status_error` call (roborev B2) — proves the error
-    /// arm reaches the same error-observability hook `do_get`'s eager-setup
-    /// errors always did, independent of whether OTel counters are compiled in.
+    /// Incremented once per surfaced egress error, alongside the
+    /// `crate::obs::record_status_error` call — both by [`MeteredDoGetStream`]'s
+    /// error arm for a merge-stage error (roborev B2) AND by
+    /// [`record_encoder_error`] for an encoder-stage error (issue #2193). Proves
+    /// every egress failure reaches the same error-observability hook `do_get`'s
+    /// eager-setup errors always did, independent of whether OTel counters are
+    /// compiled in.
     errors_recorded: Arc<AtomicUsize>,
 }
 
@@ -197,8 +200,8 @@ pub(crate) fn spawn_streaming(
     });
 
     let inner = Box::pin(ReceiverStream { rx });
-    let metered = MeteredDoGetStream::new(inner, metrics, Some(guard), probe);
-    (encode_do_get(metered, schema_ref), handle)
+    let metered = MeteredDoGetStream::new(inner, metrics, Some(guard), probe.clone());
+    (encode_do_get(metered, schema_ref, probe), handle)
 }
 
 /// Materialize the (bounded) aggregate output and serve it as a stream, unchanged
@@ -235,35 +238,71 @@ pub(crate) async fn build_aggregate_response(
     };
 
     let iter = futures::stream::iter(batches.into_iter().map(Ok::<_, ProducerError>));
-    let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, StreamProbe::default());
-    Ok(encode_do_get(metered, schema_ref))
+    let probe = StreamProbe::default();
+    let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, probe.clone());
+    Ok(encode_do_get(metered, schema_ref, probe))
 }
 
 /// Wrap a `RecordBatch` stream in the Flight encoder. `with_schema` emits the
 /// Arrow schema as the first message even for an empty result, so a schema-only
 /// response still carries the schema.
+///
+/// `probe` observes encoder-stage egress failures (issue #2193): an error raised
+/// INSIDE the encoder is downstream of [`MeteredDoGetStream`], so it never hit
+/// that stream's error arm — before this change it was neither logged nor
+/// counted. `record_encoder_error` now routes it through the shared
+/// error-observability hook and bumps `probe.errors_recorded`, so the failure is
+/// visible and deterministically observable in tests.
 fn encode_do_get(
     batch_stream: impl Stream<Item = Result<RecordBatch, FlightError>> + Send + 'static,
     schema_ref: Arc<ArrowSchema>,
+    probe: StreamProbe,
 ) -> DoGetStream {
     let encoded = FlightDataEncoderBuilder::new()
         .with_schema(schema_ref)
         .build(batch_stream)
-        .map(|res| res.map_err(flight_error_to_status));
+        .map(move |res| res.map_err(|e| flight_error_to_status(e, &probe)));
     Box::pin(encoded)
 }
 
 /// Recover a [`Status`] from an encoder [`FlightError`], preserving the gRPC code
 /// of a producer error surfaced mid-stream (e.g. `aborted` for a cancelled merge,
 /// `not_found`, `invalid_argument`) instead of flattening everything to internal.
-fn flight_error_to_status(e: FlightError) -> Status {
+///
+/// Issue #2193 — surface the swallowed egress-encode/send failure: an error
+/// raised INSIDE the Flight encoder (Arrow IPC framing, batch encoding, or the
+/// send itself) reached this mapping and went straight to the client as a gRPC
+/// status with NO server-side log and NO entry in the flight error signal — the
+/// exact silent path that let a `do_get` stream close with the client's
+/// `Failed to read message` while the server logged nothing even at
+/// `RUST_LOG=debug`. Route those encoder-stage errors through
+/// [`crate::obs::record_status_error`] (which logs at error level and bumps the
+/// error-rate signal). A producer/merge error is NOT re-recorded here: it
+/// arrives as `ExternalError(Box<Status>)`, already logged + recorded by
+/// [`MeteredDoGetStream`]'s error arm, so we only unwrap it — double-recording
+/// would double-count the error signal.
+fn flight_error_to_status(e: FlightError, probe: &StreamProbe) -> Status {
     match e {
         FlightError::ExternalError(boxed) => match boxed.downcast::<Status>() {
+            // Already observed upstream (MeteredDoGetStream) — just recover it.
             Ok(status) => *status,
-            Err(other) => Status::internal(other.to_string()),
+            // A non-`Status` external error out of the encoder — not yet observed.
+            Err(other) => record_encoder_error(Status::internal(other.to_string()), probe),
         },
-        other => Status::internal(other.to_string()),
+        // Every other `FlightError` variant is raised by the encoder itself
+        // (Arrow/IPC/decode/… ) — the swallowed egress class. Observe it.
+        other => record_encoder_error(Status::internal(other.to_string()), probe),
     }
+}
+
+/// Log + record an encoder-stage egress failure (issue #2193) and return the
+/// same [`Status`] for propagation to the client, so the failure is both visible
+/// server-side (via [`crate::obs::record_status_error`]'s error log + error
+/// signal) AND delivered as a proper gRPC error status.
+fn record_encoder_error(status: Status, probe: &StreamProbe) -> Status {
+    crate::obs::record_status_error(&status);
+    probe.errors_recorded.fetch_add(1, Ordering::Relaxed);
+    status
 }
 
 /// Minimal [`Stream`] adapter over a bounded [`mpsc::Receiver`] (the crate has no

@@ -244,7 +244,7 @@ fn do_get_stream_surfaces_panic_as_internal_status_not_eof() {
         let inner = Box::pin(ReceiverStream { rx });
         let pr = probe();
         let metered = MeteredDoGetStream::new(inner, RpcMetrics::start("do_get"), None, pr.clone());
-        let mut stream = encode_do_get(metered, schema_ref);
+        let mut stream = encode_do_get(metered, schema_ref, pr.clone());
 
         // First message is the schema; the panic must arrive as an `Err` Status
         // (not the stream simply ending after the schema).
@@ -269,6 +269,83 @@ fn do_get_stream_surfaces_panic_as_internal_status_not_eof() {
             "the mid-stream error must reach record_status_error exactly once (B2)"
         );
     });
+}
+
+// ---- Issue #2193: a swallowed encoder-stage egress failure is now surfaced ---
+
+/// An error raised INSIDE the Flight encoder (here: a batch whose column count
+/// disagrees with the advertised schema, so `FlightDataEncoderBuilder` fails
+/// while building the record-batch message — AFTER it has already emitted the
+/// schema message, the exact "schema then abrupt failure" shape the field
+/// client saw as `Failed to read message`) must (a) surface to the client as a
+/// gRPC `Status`, and (b) be routed through the shared error-observability hook
+/// (`record_status_error`, which logs at error level and bumps the flight
+/// error-rate signal), observed here via `StreamProbe::errors_recorded`.
+///
+/// An encoder-stage error is downstream of [`MeteredDoGetStream`], so it never
+/// reached that stream's error arm. FAILS on pre-change `encode_do_get`: the
+/// error mapping produced the `Status` but never called `record_status_error`
+/// (nor bumped the probe), so the failure was swallowed — invisible in the logs
+/// even at `RUST_LOG=debug` and absent from the error signal.
+#[test]
+fn encoder_stage_error_is_surfaced_not_swallowed() {
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field};
+
+    // Advertised (schema message) schema: two columns.
+    let schema_ref = Arc::new(ArrowSchema::new(vec![
+        Field::new("a", DataType::Int32, false),
+        Field::new("b", DataType::Int32, false),
+    ]));
+    // Produced batch: only ONE column — a schema/batch divergence the Flight
+    // encoder rejects when building the record-batch message (after the schema
+    // message is already on the wire).
+    let batch_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "a",
+        DataType::Int32,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        batch_schema,
+        vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+    )
+    .unwrap();
+
+    let pr = probe();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let status = rt.block_on({
+        let pr = pr.clone();
+        async move {
+            let stream = futures::stream::iter(vec![Ok::<_, FlightError>(batch)]);
+            let mut encoded = encode_do_get(stream, schema_ref, pr);
+            // Message 1: the schema (Ok). Then the encoder error.
+            let _schema = encoded.next().await.expect("schema message");
+            let mut err_status = None;
+            while let Some(item) = encoded.next().await {
+                if let Err(s) = item {
+                    err_status = Some(s);
+                    break;
+                }
+            }
+            err_status
+        }
+    });
+
+    let status = status.expect("encoder-stage failure must surface as a Status, not a clean EOF");
+    assert_eq!(
+        status.code(),
+        tonic::Code::Internal,
+        "an egress encode failure maps to Status::internal, got: {status:?}"
+    );
+    assert_eq!(
+        pr.errors_recorded.load(Ordering::Relaxed),
+        1,
+        "the encoder-stage egress failure must reach record_status_error exactly \
+         once (issue #2193: it was previously swallowed with no log/signal at all)"
+    );
 }
 
 // ---- Task 2.3 / Requirement 4: stream/collect byte-identity ----------------
