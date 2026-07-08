@@ -15,6 +15,7 @@ pub mod obs;
 pub mod pathsafe;
 pub mod producer;
 pub mod service;
+pub mod scan_progress;
 pub mod shutdown;
 pub mod stats;
 pub mod streaming;

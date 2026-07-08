@@ -397,7 +397,7 @@ fn stream_batches_raw(producer: MergeProducer, paths: Vec<PathBuf>) -> Vec<Recor
                 paths,
                 &cancel,
                 &mut sink,
-                &crate::producer::ScanProgress::default(),
+                &crate::scan_progress::ScanProgress::default(),
                 || {},
             ) {
                 let _ = sink.tx.blocking_send(Err(e));
@@ -679,7 +679,7 @@ fn per_batch_deltas_sum_to_unchanged_total() {
 /// building 16k rows.
 fn probe_with_threshold(threshold: u64) -> StreamProbe {
     StreamProbe {
-        scan_progress: crate::producer::ScanProgress::with_threshold(threshold),
+        scan_progress: crate::scan_progress::ScanProgress::with_threshold(threshold),
         ..Default::default()
     }
 }

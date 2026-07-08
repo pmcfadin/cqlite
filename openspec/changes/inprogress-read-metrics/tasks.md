@@ -55,7 +55,7 @@ merge-on-green → finalize).
 - [x] 4.2 Test/verify: feature-off build (`--no-default-features` path that excludes `observability`)
   compiles the new emission as no-ops and links no OpenTelemetry; confirm no new env var / CLI flag /
   ticket field / public method was added. (read-progress-observability)
-- [ ] 4.3 If any behaviour is user-facing, update CLAUDE.md + the `agents-developing/` observability
+- [x] 4.3 If any behaviour is user-facing, update CLAUDE.md + the `agents-developing/` observability
   note in the same change (keep doctrine current).
 
 ## Stage 5 — endgame (flow-closer)

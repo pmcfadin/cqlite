@@ -109,7 +109,7 @@ pub(crate) struct StreamProbe {
     /// their summed total, feature-independently (like the rest of this probe).
     /// Threaded into `drive_merge` so a full-scan `do_get` records ≥ 2 flushes
     /// over a threshold-crossing scan, versus exactly 1 for a sub-threshold scan.
-    pub(crate) scan_progress: crate::producer::ScanProgress,
+    pub(crate) scan_progress: crate::scan_progress::ScanProgress,
 }
 
 /// Sink that sends each merged batch into the bounded `do_get` channel.
