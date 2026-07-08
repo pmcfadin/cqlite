@@ -1306,6 +1306,53 @@ impl SelectExecutor {
                     // metadata and row keys can never diverge (never `col_N`).
                     let column_name = crate::query::select_naming::result_column_name(expr, i);
 
+                    // Issue #1941: an aggregate's result TYPE is derived from the
+                    // aggregate function + argument type, NOT from a schema lookup
+                    // of its output name/alias. Detect the aggregate via the parsed
+                    // AST (no string-matching — no-heuristics mandate) BEFORE the
+                    // name-based lookup below, which otherwise mis-typed
+                    // `COUNT(*) AS value` as the `value` column's type and fell back
+                    // to `Text` for any name matching no column.
+                    if let Some(agg) = crate::query::select_naming::unwrap_aggregate(expr) {
+                        // Resolve the argument column's schema type for MIN/MAX
+                        // (COUNT/SUM/AVG ignore it). `aggregate_column_and_alias`
+                        // yields "*" for `COUNT(*)` / any star argument.
+                        let (arg_col, _) =
+                            crate::query::select_naming::aggregate_column_and_alias(agg);
+                        let arg_cql_type = if arg_col == "*" {
+                            None
+                        } else {
+                            schema_opt.and_then(|schema| {
+                                schema
+                                    .columns
+                                    .iter()
+                                    .find(|c| c.name == arg_col)
+                                    .and_then(|c| parse_cql_type_str(&c.data_type))
+                            })
+                        };
+                        let cql_type_opt = crate::query::select_naming::aggregate_result_cql_type(
+                            &agg.function,
+                            arg_cql_type,
+                        );
+                        let data_type = cql_type_opt
+                            .as_ref()
+                            .map(cql_type_to_data_type)
+                            .unwrap_or(crate::types::DataType::Text);
+                        let mut col_info = ColumnInfo {
+                            name: column_name,
+                            data_type,
+                            nullable: true,
+                            position: i,
+                            table_name: None,
+                            cql_type: None,
+                        };
+                        if let Some(cql_type) = cql_type_opt {
+                            col_info = col_info.with_cql_type(cql_type);
+                        }
+                        columns.push(col_info);
+                        continue;
+                    }
+
                     // Look up CQL type for this column in the schema (Issue #674).
                     let cql_type_opt = schema_opt.and_then(|schema| {
                         schema
@@ -2338,5 +2385,109 @@ mod tests {
             "a reordered select with no helper columns (same column set) must \
              stream directly"
         );
+    }
+
+    /// Issue #1941: execute `sql` end-to-end against a registry table that has a
+    /// `value` INT column (to exercise the alias-collision case) plus numeric
+    /// columns, and return the result metadata columns. The aggregate path runs
+    /// through the REAL `execute()` metadata build (`get_result_columns` with the
+    /// resolved schema), so assertions here prove `metadata.columns[i]` typing on
+    /// the actual query path, not a helper in isolation.
+    async fn agg_result_columns(sql: &str) -> Vec<ColumnInfo> {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        schema
+            .parse_and_register_cql_schema(
+                "CREATE TABLE ks.t (id int PRIMARY KEY, value int, amount int, price double)",
+            )
+            .await
+            .expect("schema registers");
+        let executor = SelectExecutor::new(schema.clone(), storage.clone());
+        let optimizer =
+            crate::query::select_optimizer::SelectOptimizer::new(schema.clone(), storage.clone());
+        let statement = crate::query::select_parser::parse_select(sql).unwrap();
+        let plan = optimizer.optimize(statement).await.unwrap();
+        executor
+            .execute(plan)
+            .await
+            .expect("query executes")
+            .metadata
+            .columns
+    }
+
+    /// Issue #1941: `COUNT(*) AS value` MUST report a `bigint` count result type
+    /// even though the table has a real `value INT` column. Pre-fix the metadata
+    /// type was resolved by looking the aggregate's output NAME up in the schema,
+    /// so the alias collided with column `value` and reported `int`.
+    #[tokio::test]
+    async fn aggregate_count_alias_collision_reports_bigint_not_column_type() {
+        let cols = agg_result_columns("SELECT COUNT(*) AS value FROM ks.t").await;
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].name, "value",
+            "alias names the column (issue #1763)"
+        );
+        assert_eq!(
+            cols[0].cql_type,
+            Some(CqlType::BigInt),
+            "COUNT is bigint regardless of a same-named `value INT` column (#1941)"
+        );
+        assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
+    }
+
+    /// Issue #1941: a bare `COUNT(*)` whose derived name matches no schema column
+    /// must be `bigint`, not the old `Text` fallback.
+    #[tokio::test]
+    async fn aggregate_count_star_reports_bigint_not_text_fallback() {
+        let cols = agg_result_columns("SELECT COUNT(*) FROM ks.t").await;
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].cql_type, Some(CqlType::BigInt));
+        assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
+    }
+
+    /// Issue #1941: SUM/AVG report `double` — CQLite's aggregation accumulates all
+    /// numeric input into an f64 and `finalize_group` emits `Value::Float`, so the
+    /// metadata type MUST be `double` to match the produced value (never the
+    /// argument column's `int` type, and never `Text`).
+    #[tokio::test]
+    async fn aggregate_sum_and_avg_report_double() {
+        let sum = agg_result_columns("SELECT SUM(amount) FROM ks.t").await;
+        assert_eq!(sum.len(), 1);
+        assert_eq!(sum[0].cql_type, Some(CqlType::Double));
+        assert_eq!(sum[0].data_type, crate::types::DataType::Float);
+
+        let avg = agg_result_columns("SELECT AVG(amount) FROM ks.t").await;
+        assert_eq!(avg.len(), 1);
+        assert_eq!(avg[0].cql_type, Some(CqlType::Double));
+        assert_eq!(avg[0].data_type, crate::types::DataType::Float);
+    }
+
+    /// Issue #1941: MIN/MAX preserve the ARGUMENT column's type (the value is
+    /// cloned through unchanged) — `MIN(amount)` over an `int` column is `int`,
+    /// `MAX(price)` over a `double` column is `double`.
+    #[tokio::test]
+    async fn aggregate_min_max_report_argument_type() {
+        let min_int = agg_result_columns("SELECT MIN(amount) FROM ks.t").await;
+        assert_eq!(min_int.len(), 1);
+        assert_eq!(min_int[0].cql_type, Some(CqlType::Int));
+        assert_eq!(min_int[0].data_type, crate::types::DataType::Integer);
+
+        let max_double = agg_result_columns("SELECT MAX(price) FROM ks.t").await;
+        assert_eq!(max_double.len(), 1);
+        assert_eq!(max_double[0].cql_type, Some(CqlType::Double));
+        assert_eq!(max_double[0].data_type, crate::types::DataType::Float);
     }
 }
