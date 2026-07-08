@@ -44,8 +44,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v3
-  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
-  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
+  DATASET_ASSET: cassandra5-small-full-v3.5.tar.gz
+  DATASET_SHA256: 13d8da00743d9780c7ee89478649c280f9d91519a4561f6909cc4ce3bb7a3631
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   OUTPUT_DIR: ${{ github.workspace }}/smoke-test-results
 

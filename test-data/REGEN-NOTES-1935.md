@@ -36,32 +36,43 @@ five TTL-carrying corpus tables that time-bombed the fixtures, **keep**
    `ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock` (wall-clock)
    still cover `test_basic.ttl_test_table` with TTL.
 
-## What is CI-GATED / owner-owned (NOT done here)
+## What is CI-GATED / owner-owned (regen + asset cut — how v3.5 was produced)
 
-The whole-corpus binary regeneration (rm -rf + fresh UUIDs + new release asset +
-dataset-pin bump) is owned by CI + owner. Exact recipe:
+The whole-corpus binary regeneration + new release asset + dataset-pin bump is
+owner-owned. The `exhaustive-regeneration.yml` CI workflow **audits** the corpus
+(runs `regenerate-datasets.sh` against real Cassandra 5 + `cassandra-parity --
+corpus-audit`) but **by design exports no tarball** — the published asset is cut
+from a **local regeneration**. Exact flow that produced v3.5:
 
-1. **Regenerate binaries** — run the `exhaustive-regeneration.yml` workflow
-   (`workflow_dispatch`), which runs `test-data/scripts/regenerate-datasets.sh`
-   against real Cassandra 5, then `cassandra-parity -- corpus-audit` (must be
-   clean) and refreshes JSONL goldens. It packages the corpus to compute the asset
-   name + SHA256 but by design does NOT publish.
-2. **Publish the asset** — `test-data/scripts/publish_datasets.sh --type full
-   --tag datasets-v3` (uploads `cassandra5-small-full.tar.gz` with `--clobber`;
-   version lives in the TAG, not the filename — but the fetch pin keys on the
-   versioned asset name `cassandra5-small-full-v3.5.tar.gz`, so cut/upload the v3.5
-   asset). Mind the macOS tar AppleDouble gotcha when packing.
-3. **Bump the dataset pin** — `test-data/scripts/bump-dataset-pin.sh
-   --new-sha <sha256-of-new-asset> --new-asset cassandra5-small-full-v3.5.tar.gz`
-   (never tag-only: `DATASET_TAG` / `DATASET_ASSET` / `DATASET_SHA256` must ALL be
-   set consistently across `.github/workflows/*.yml` and
-   `test-data/scripts/fetch-datasets.sh`). Current pin: `datasets-v3` /
-   `cassandra5-small-full-v3.4.tar.gz` /
-   `3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33`.
+1. **Regenerate binaries locally** — `test-data/scripts/regenerate-datasets.sh`
+   against real Cassandra 5, then refresh the JSONL goldens + manifest
+   (`cassandra-parity -- corpus-audit` must be clean).
+2. **Package** — `test-data/scripts/package_datasets.sh --full --suffix v3.5`
+   produces `cassandra5-small-full-v3.5.tar.gz` (version in the suffix; the fetch
+   pin keys on this versioned asset name). Mind the macOS tar AppleDouble gotcha.
+3. **Upload** — `gh release upload datasets-v3 cassandra5-small-full-v3.5.tar.gz
+   --clobber` and capture its SHA256.
+4. **Bump the dataset pin** — `test-data/scripts/bump-dataset-pin.sh
+   --new-sha <sha256-of-new-asset>` (defaults: asset
+   `cassandra5-small-full-v3.5.tar.gz`, tag `datasets-v3`, old v3.4). Never
+   tag-only: `DATASET_TAG` / `DATASET_ASSET` / `DATASET_SHA256` must ALL be set
+   consistently across `.github/workflows/*.yml` and
+   `test-data/scripts/fetch-datasets.sh`; the script's self-check fails on any
+   stale v3.4 pin. Pin after this PR: `datasets-v3` /
+   `cassandra5-small-full-v3.5.tar.gz` /
+   `13d8da00743d9780c7ee89478649c280f9d91519a4561f6909cc4ce3bb7a3631`.
    Do NOT invent a SHA — it does not exist until the asset is built.
-4. **Round-trip verify** — `bash test-data/scripts/fetch-datasets.sh` pulls the
+5. **Round-trip verify** — `bash test-data/scripts/fetch-datasets.sh` pulls the
    new asset, verifies the SHA, and the parity/CLI tests then see the regenerated
    (no-TTL) fixtures returning their physical row counts.
+
+> **WARNING — do NOT wholesale fresh-regen the aged TTL fixtures.** TTL expiry
+> derives from the *real insertion wall-clock*, so a fresh regen of
+> `test_basic.ttl_test_table` re-seeds live rows and breaks the #1853
+> fully-expired seam (`ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock`)
+> for ~24h until the new TTLs lapse. The executed v3.5 flow deliberately
+> **preserved the aged v3.4 fixtures** for `test_basic.ttl_test_table` (and for
+> `test_da/wide_table` from `gen-wide-bti.sh`) rather than regenerating them.
 
 ## Expected outcome after regen
 
