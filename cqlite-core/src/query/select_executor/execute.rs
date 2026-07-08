@@ -14,6 +14,7 @@
 //! this file can reach `mod.rs`'s private items directly — the logic, ordering,
 //! and error handling are unchanged.
 
+use super::schemaless_point::classify_schemaless_point_lookup;
 use super::{
     build_row_from_scan, classify_partition_lookup, collect_capped_materialized,
     column_info_from_type_str, honest_targeted_path, parse_table_id, project_expr_reshapes_row,
@@ -522,6 +523,42 @@ impl SelectExecutor {
                     Some(row)
                 },
             )?
+        } else if let Some(pk_bytes) = schema_opt
+            .is_none()
+            .then(|| classify_schemaless_point_lookup(predicates))
+            .flatten()
+        {
+            // Issue #1750 (regression fix): a SCHEMA-LESS `WHERE pk = <literal>`
+            // point read. With no schema the full-scan path CANNOT reconstruct the
+            // partition-key column, so the shared per-row `evaluate_predicates`
+            // backstop below would reject EVERY row on the pk equality and return 0
+            // rows — the regression from rerouting this read off the legacy
+            // `QueryExecutor` (which looked up by key bytes, never re-evaluating the
+            // predicate). Serve it here by the SAME key-byte-targeted seek the
+            // schema-aware Targeted arm uses (`scan_partition`), which is
+            // self-verifying: it returns ONLY rows whose raw partition key equals
+            // `pk_bytes`, so a wrong/absent key yields nothing (never another
+            // partition's rows). The decision is purely STRUCTURAL
+            // (`classify_schemaless_point_lookup`: exactly one non-token `col =
+            // <single-component literal>` predicate) — never a substring/token-count
+            // text guess (#28). Skip the per-row predicate backstop for this branch
+            // (the seek already pinned the partition by key); the schema-less
+            // `SELECT *` column metadata still comes from the first row's keys in
+            // `execute` (the #1750 column fix is unaffected — it targets the
+            // schema-PRESENT path).
+            let (rows, engaged) = self.storage.scan_partition(table, &pk_bytes, None).await?;
+            let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
+            context.access_path = Some(path.clone());
+            crate::query::access_path::record(path);
+            context.scan_rows += rows.len() as u64;
+            context.rows_processed += rows.len() as u64;
+            let mut out = Vec::with_capacity(rows.len());
+            for (key, value) in rows {
+                if let Some(row) = build_row_from_scan(key, value, projection, None) {
+                    out.push(row);
+                }
+            }
+            out
         } else {
             // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
             // partition-targeted lookup that prunes SSTables via bloom/BTI and only

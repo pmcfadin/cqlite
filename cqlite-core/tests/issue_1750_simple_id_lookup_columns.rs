@@ -97,6 +97,28 @@ async fn setup() -> Result<Database, String> {
     Ok(result.database)
 }
 
+/// Open the SAME fixture with NO schema loaded (issue #1750 regression). A
+/// schema-less open exercises the point-read path that CANNOT reconstruct the
+/// partition-key column from the row bytes.
+async fn setup_schemaless() -> Result<Database, String> {
+    let root = datasets_root().ok_or("CQLITE_DATASETS_ROOT not set or missing")?;
+    let data_dir = root.join("sstables");
+    if !data_dir.exists() {
+        return Err(format!("sstables dir not found at {data_dir:?}"));
+    }
+    let config = IngestionConfig {
+        schema_paths: vec![],
+        data_dir,
+        version_hint: None,
+        core_config: cqlite_core::Config::default(),
+        table_directory_filter: Some("/test_basic/simple_table".to_string()),
+    };
+    let result = ingest(config)
+        .await
+        .map_err(|e| format!("ingestion failed: {e}"))?;
+    Ok(result.database)
+}
+
 fn uuid_to_literal(bytes: &[u8; 16]) -> String {
     let h = |range: std::ops::Range<usize>| -> String {
         bytes[range].iter().map(|b| format!("{b:02x}")).collect()
@@ -288,5 +310,68 @@ async fn where_id_eq_still_takes_partition_lookup_fast_path() {
         access_path::last(),
         Some(AccessPath::PartitionLookup),
         "Issue #1750: the access-path probe must record PartitionLookup for WHERE id = <uuid>",
+    );
+}
+
+/// Issue #1750 (round-C regression): a SCHEMA-LESS `WHERE id = <uuid>` point
+/// read must still return the row. With no schema the full-scan path cannot
+/// reconstruct the partition-key column, so the shared per-row predicate backstop
+/// would reject every row on the `id` equality and return 0 rows — the regression
+/// introduced by rerouting this read off the legacy `QueryExecutor` (which looked
+/// up by key bytes and never re-evaluated the predicate). The structural
+/// schema-less point-lookup path restores the row WITHOUT reintroducing any text
+/// heuristic. A present-but-empty result is a FAILURE.
+///
+/// The valid UUID literal is learned from a SCHEMA-FULL open (the schema-less scan
+/// omits the pk column), then the point read is issued against a SCHEMA-LESS open.
+#[tokio::test]
+async fn schemaless_where_id_eq_returns_the_row() {
+    // Learn a real id via a schema-full open.
+    let schema_db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+    let Some(id) = a_real_id(&schema_db).await else {
+        eprintln!("Skipping: simple_table returned 0 rows or id not uuid");
+        return;
+    };
+    drop(schema_db);
+
+    let db = match setup_schemaless().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let query = format!(
+        "SELECT * FROM {QUALIFIED_TABLE} WHERE id = {}",
+        uuid_to_literal(&id)
+    );
+    let result = db
+        .execute(&query)
+        .await
+        .expect("schema-less point lookup must succeed");
+
+    assert_eq!(
+        result.rows.len(),
+        1,
+        "Issue #1750: a schema-less WHERE id = <uuid> point read must return exactly the one \
+         matching row (regression returned 0 rows because the schema-less scan can't \
+         reconstruct the pk column and the predicate backstop then rejected every row)",
+    );
+    // The row carries real values (never an all-empty/column-less row).
+    let row = &result.rows[0];
+    assert!(
+        !row.values.is_empty(),
+        "Issue #1750: the schema-less point-read row must surface its cell values",
+    );
+    assert!(
+        row.values.values().any(|v| !matches!(v, Value::Null)),
+        "Issue #1750: the schema-less point-read row must surface at least one non-null value",
     );
 }
