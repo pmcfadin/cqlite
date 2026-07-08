@@ -14639,15 +14639,16 @@ flight.rpc (do_get)
 
 Read by every surface. Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
-| Variable                      | Type   | Default                 | Meaning                                                       |
-| ----------------------------- | ------ | ----------------------- | ------------------------------------------------------------- |
-| `CQLITE_OTEL_ENABLED`         | bool   | `false`                 | Master switch; when false, init is a no-op.                   |
-| `CQLITE_OTEL_ENDPOINT`        | string | `http://localhost:4317` | OTLP collector endpoint (gRPC) or base URL (HTTP).            |
-| `CQLITE_OTEL_PROTOCOL`        | enum   | `grpc`                  | `grpc` or `http` (HTTP/protobuf).                             |
-| `CQLITE_OTEL_SERVICE_NAME`    | string | `cqlite`                | `service.name` resource attribute.                            |
-| `CQLITE_OTEL_SERVICE_VERSION` | string | crate version           | `service.version` resource attribute.                         |
-| `CQLITE_OTEL_SAMPLING_RATIO`  | f64    | `1.0`                   | Trace-ID-ratio sampling probability, clamped to `[0.0, 1.0]`. |
-| `CQLITE_OTEL_TIMEOUT_MS`      | u64    | `10000`                 | Exporter export timeout in milliseconds.                      |
+| Variable                        | Type   | Default                 | Meaning                                                                                                                                                                                                                                                                                                          |
+| ------------------------------- | ------ | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CQLITE_OTEL_ENABLED`           | bool   | `false`                 | Master switch; when false, init is a no-op.                                                                                                                                                                                                                                                                      |
+| `CQLITE_OTEL_ENDPOINT`          | string | `http://localhost:4317` | OTLP collector endpoint (gRPC) or base URL (HTTP).                                                                                                                                                                                                                                                               |
+| `CQLITE_OTEL_PROTOCOL`          | enum   | `grpc`                  | `grpc` or `http` (HTTP/protobuf).                                                                                                                                                                                                                                                                                |
+| `CQLITE_OTEL_SERVICE_NAME`      | string | `cqlite`                | `service.name` resource attribute.                                                                                                                                                                                                                                                                               |
+| `CQLITE_OTEL_SERVICE_VERSION`   | string | crate version           | `service.version` resource attribute.                                                                                                                                                                                                                                                                            |
+| `CQLITE_OTEL_SAMPLING_RATIO`    | f64    | `1.0`                   | Trace-ID-ratio sampling probability, clamped to `[0.0, 1.0]`.                                                                                                                                                                                                                                                    |
+| `CQLITE_OTEL_TIMEOUT_MS`        | u64    | `10000`                 | Exporter export timeout in milliseconds.                                                                                                                                                                                                                                                                         |
+| `CQLITE_VERIFY_PRESENCE_ORACLE` | bool   | `false`                 | Opt-in soundness check: when true, a read whose bloom/BTI-trie reports a key “definitely absent” runs an authoritative confirmation scan and increments `cqlite.read.bloom.false_negatives` on a contradiction (expected value: 0). Off by default — it is the one presence-oracle counter that costs real work. |
 
 ## Per-surface configuration
 
@@ -14739,48 +14740,55 @@ CQLITE_OTEL_ENABLED=true CQLITE_OTEL_ENDPOINT=http://localhost:4317 \
 
 Names are dot-separated under `cqlite.`; units use UCUM annotations. The OTel Collector’s Prometheus exporter sanitises dotted names to underscores, appends `_total` to counters, and adds unit suffixes (`_seconds` for `s`, `_bytes` for `By`) — e.g. `cqlite.read.rows` → `cqlite_read_rows_total`.
 
-| Metric                                | Instrument | Unit          | Bounded attributes                                                   |
-| ------------------------------------- | ---------- | ------------- | -------------------------------------------------------------------- |
-| `cqlite.read.rows`                    | counter    | `{row}`       | `cqlite.sstable.format`                                              |
-| `cqlite.read.bytes`                   | counter    | `By`          | `cqlite.sstable.format`, `cqlite.compression`                        |
-| `cqlite.read.partitions`              | counter    | `{partition}` | `cqlite.sstable.format`                                              |
-| `cqlite.read.duration`                | histogram  | `s`           | `cqlite.sstable.format`                                              |
-| `cqlite.read.partition_lookup.total`  | counter    | `1`           | `cqlite.result`, `cqlite.query.access_path`, `cqlite.sstable.format` |
-| `cqlite.read.bloom.checks`            | counter    | `1`           | `cqlite.result`, `cqlite.sstable.format`                             |
-| `cqlite.storage.open.sstables`        | counter    | `{sstable}`   | (none)                                                               |
-| `cqlite.storage.open.bytes`           | counter    | `By`          | (none)                                                               |
-| `cqlite.storage.open.tables`          | counter    | `1`           | (none)                                                               |
-| `cqlite.sstables.open`                | gauge      | `{sstable}`   | `cqlite.sstable.format`                                              |
-| `cqlite.query.duration`               | histogram  | `s`           | `cqlite.subsystem`                                                   |
-| `cqlite.query.rows`                   | counter    | `{row}`       | `cqlite.query.access_path`, `cqlite.query.plan_type`                 |
-| `cqlite.query.rows_scanned`           | counter    | `{row}`       | `cqlite.query.access_path`                                           |
-| `cqlite.write.mutations`              | counter    | `{row}`       | (none)                                                               |
-| `cqlite.write.partitions`             | counter    | `{partition}` | (none)                                                               |
-| `cqlite.write.bytes`                  | counter    | `By`          | (none)                                                               |
-| `cqlite.memtable.size_bytes`          | gauge      | `By`          | (none)                                                               |
-| `cqlite.memtable.rows`                | gauge      | `{row}`       | (none)                                                               |
-| `cqlite.wal.sync.duration`            | histogram  | `s`           | (none)                                                               |
-| `cqlite.flush.duration`               | histogram  | `s`           | (none)                                                               |
-| `cqlite.flush.rows`                   | counter    | `{row}`       | (none)                                                               |
-| `cqlite.flush.bytes`                  | counter    | `By`          | (none)                                                               |
-| `cqlite.flush.sstables`               | counter    | `{sstable}`   | (none)                                                               |
-| `cqlite.compression.ratio`            | histogram  | `1`           | `cqlite.compression`                                                 |
-| `cqlite.compaction.duration`          | histogram  | `s`           | (none)                                                               |
-| `cqlite.compaction.rows_merged`       | counter    | `{row}`       | (none)                                                               |
-| `cqlite.compaction.bytes_written`     | counter    | `By`          | (none)                                                               |
-| `cqlite.compaction.sstables_in`       | counter    | `{sstable}`   | (none)                                                               |
-| `cqlite.compaction.sstables_out`      | counter    | `{sstable}`   | (none)                                                               |
-| `cqlite.compaction.tombstones_purged` | counter    | `{tombstone}` | (none)                                                               |
-| `cqlite.compaction.lag`               | gauge      | `{sstable}`   | (none)                                                               |
-| `cqlite.compaction.finalize.duration` | histogram  | `s`           | (none)                                                               |
-| `cqlite.compaction.budget.requested`  | histogram  | `s`           | (none)                                                               |
-| `cqlite.compaction.budget.consumed`   | histogram  | `s`           | (none)                                                               |
-| `cqlite.errors.total`                 | counter    | `{error}`     | `cqlite.error.category`, `cqlite.subsystem`                          |
-| `cqlite.rpc.requests`                 | counter    | `1`           | `cqlite.rpc.method`, `cqlite.rpc.status`                             |
-| `cqlite.rpc.duration`                 | histogram  | `s`           | `cqlite.rpc.method`, `cqlite.rpc.status`                             |
-| `cqlite.rpc.in_flight`                | gauge      | `1`           | `cqlite.rpc.method`                                                  |
-| `cqlite.rpc.rows`                     | counter    | `{row}`       | `cqlite.rpc.method`                                                  |
-| `cqlite.rpc.bytes`                    | counter    | `By`          | `cqlite.rpc.method`                                                  |
+| Metric                                    | Instrument | Unit          | Bounded attributes                                                   |
+| ----------------------------------------- | ---------- | ------------- | -------------------------------------------------------------------- |
+| `cqlite.read.rows`                        | counter    | `{row}`       | `cqlite.sstable.format`                                              |
+| `cqlite.read.bytes`                       | counter    | `By`          | `cqlite.sstable.format`, `cqlite.compression`                        |
+| `cqlite.read.partitions`                  | counter    | `{partition}` | `cqlite.sstable.format`                                              |
+| `cqlite.read.duration`                    | histogram  | `s`           | `cqlite.sstable.format`                                              |
+| `cqlite.read.partition_lookup.total`      | counter    | `1`           | `cqlite.result`, `cqlite.query.access_path`, `cqlite.sstable.format` |
+| `cqlite.read.bloom.checks`                | counter    | `1`           | `cqlite.result`, `cqlite.sstable.format`                             |
+| `cqlite.read.sstables_pruned`             | counter    | `{sstable}`   | `cqlite.sstable.format`                                              |
+| `cqlite.read.bloom.false_negatives`       | counter    | `1`           | `cqlite.sstable.format`                                              |
+| `cqlite.storage.open.sstables`            | counter    | `{sstable}`   | (none)                                                               |
+| `cqlite.storage.open.bytes`               | counter    | `By`          | (none)                                                               |
+| `cqlite.storage.open.tables`              | counter    | `1`           | (none)                                                               |
+| `cqlite.sstables.open`                    | gauge      | `{sstable}`   | `cqlite.sstable.format`                                              |
+| `cqlite.query.duration`                   | histogram  | `s`           | `cqlite.subsystem`                                                   |
+| `cqlite.query.rows`                       | counter    | `{row}`       | `cqlite.query.access_path`, `cqlite.query.plan_type`                 |
+| `cqlite.query.rows_scanned`               | counter    | `{row}`       | `cqlite.query.access_path`                                           |
+| `cqlite.query.degraded_path.total`        | counter    | `1`           | `cqlite.query.fallback_reason`                                       |
+| `cqlite.write.mutations`                  | counter    | `{row}`       | (none)                                                               |
+| `cqlite.write.partitions`                 | counter    | `{partition}` | (none)                                                               |
+| `cqlite.write.bytes`                      | counter    | `By`          | (none)                                                               |
+| `cqlite.memtable.size_bytes`              | gauge      | `By`          | (none)                                                               |
+| `cqlite.memtable.rows`                    | gauge      | `{row}`       | (none)                                                               |
+| `cqlite.wal.sync.duration`                | histogram  | `s`           | (none)                                                               |
+| `cqlite.flush.duration`                   | histogram  | `s`           | (none)                                                               |
+| `cqlite.flush.rows`                       | counter    | `{row}`       | (none)                                                               |
+| `cqlite.flush.bytes`                      | counter    | `By`          | (none)                                                               |
+| `cqlite.flush.sstables`                   | counter    | `{sstable}`   | (none)                                                               |
+| `cqlite.compression.ratio`                | histogram  | `1`           | `cqlite.compression`                                                 |
+| `cqlite.compaction.duration`              | histogram  | `s`           | (none)                                                               |
+| `cqlite.compaction.rows_merged`           | counter    | `{row}`       | (none)                                                               |
+| `cqlite.compaction.bytes_written`         | counter    | `By`          | (none)                                                               |
+| `cqlite.compaction.sstables_in`           | counter    | `{sstable}`   | (none)                                                               |
+| `cqlite.compaction.sstables_out`          | counter    | `{sstable}`   | (none)                                                               |
+| `cqlite.compaction.tombstones_purged`     | counter    | `{tombstone}` | (none)                                                               |
+| `cqlite.compaction.tombstones_suppressed` | counter    | `{tombstone}` | (none)                                                               |
+| `cqlite.compaction.tombstones_emitted`    | counter    | `{tombstone}` | (none)                                                               |
+| `cqlite.merge.rows_in`                    | counter    | `{row}`       | (none)                                                               |
+| `cqlite.merge.rows_out`                   | counter    | `{row}`       | (none)                                                               |
+| `cqlite.compaction.lag`                   | gauge      | `{sstable}`   | (none)                                                               |
+| `cqlite.compaction.finalize.duration`     | histogram  | `s`           | (none)                                                               |
+| `cqlite.compaction.budget.requested`      | histogram  | `s`           | (none)                                                               |
+| `cqlite.compaction.budget.consumed`       | histogram  | `s`           | (none)                                                               |
+| `cqlite.errors.total`                     | counter    | `{error}`     | `cqlite.error.category`, `cqlite.subsystem`                          |
+| `cqlite.rpc.requests`                     | counter    | `1`           | `cqlite.rpc.method`, `cqlite.rpc.status`                             |
+| `cqlite.rpc.duration`                     | histogram  | `s`           | `cqlite.rpc.method`, `cqlite.rpc.status`                             |
+| `cqlite.rpc.in_flight`                    | gauge      | `1`           | `cqlite.rpc.method`                                                  |
+| `cqlite.rpc.rows`                         | counter    | `{row}`       | `cqlite.rpc.method`                                                  |
+| `cqlite.rpc.bytes`                        | counter    | `By`          | `cqlite.rpc.method`                                                  |
 
 Unbounded values (raw error messages, partition keys, full query text) are NEVER attached as attributes or span fields.
 
