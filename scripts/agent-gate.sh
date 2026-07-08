@@ -1024,7 +1024,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -1700,6 +1700,54 @@ run_compaction_byte_parity() {
       env CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
         cargo test -p cqlite-core --features write-support \
           --test issue_1019_static_dropped_collection_compaction_parity' >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# query-semantics-oracle: the QUERY-SEMANTICS parity lane (issue #1742), DISTINCT
+# from the physical sstabledump JSONL goldens. The physical goldens enumerate every
+# on-disk cell (tombstones, deleted rows, expired-but-uncompacted TTL cells), so a
+# row-count/value comparison against them structurally CANNOT catch a read-time-
+# reconciliation regression: when the reader fails to reconcile, both sides still
+# contain the shadowed/expired rows and parity passes while a real Cassandra SELECT
+# diverges (the #1741 read-path P0). This lane instead compares CQLite SELECT output
+# to the POST-RECONCILIATION result set recorded in test-data/query-semantics-oracle.json,
+# evaluating TTL at a PINNED `now` per case (deterministic, never wall-clock-flaky).
+#
+# Fixture policy: the three real Cassandra 5.0.2 fixtures it reads
+# (test_compaction_tombstone_ttl/{ttl_expired_live,shadow_row_delete,rt_cross_gen})
+# are COMMITTED to git, so the lane runs fail-closed (CQLITE_REQUIRE_FIXTURES=1): an
+# absent/present-but-0-row fixture is a hard FAIL, never a silent skip. The whole
+# component SKIPs (loud, never silent PASS) only when CQLITE_DATASETS_ROOT is unset or
+# the committed keyspace is absent (a minimal checkout). NOT in DATASET_COMPONENTS: it
+# is self-guarding, so it must not trip the hard dataset preflight.
+run_query_semantics_oracle() {
+  local name=query-semantics-oracle
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  local committed_ks="${CQLITE_DATASETS_ROOT:-}/sstables/test_compaction_tombstone_ttl"
+  if [ -z "${CQLITE_DATASETS_ROOT:-}" ] || [ ! -d "$committed_ks" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (CQLITE_DATASETS_ROOT unset or committed test_compaction_tombstone_ttl fixtures absent)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] query-semantics parity oracle vs Cassandra SELECT (#1742)"
+  if env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test -p cqlite-core --features "state_machine cli-helpers" \
+        --test query_semantics_oracle_parity >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -3282,6 +3330,7 @@ dispatch_component() {
   [ "$rc" -eq 0 ] || exit "$rc"
   check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
+    query-semantics-oracle) run_query_semantics_oracle ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     delivery-telemetry) run_delivery_telemetry ;;
