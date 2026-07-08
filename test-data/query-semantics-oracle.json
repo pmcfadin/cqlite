@@ -1,0 +1,103 @@
+{
+  "doc": [
+    "Query-semantics parity oracle (issue #1742).",
+    "",
+    "This file is a DIFFERENT oracle from the physical sstabledump JSONL goldens",
+    "(`*-Data.db.jsonl`). The physical goldens enumerate every on-disk cell —",
+    "INCLUDING tombstones, deleted rows, and expired-but-uncompacted TTL cells.",
+    "Row-count/value parity against a physical dump therefore CANNOT catch a",
+    "read-time-reconciliation bug: when CQLite fails to reconcile, both sides still",
+    "contain the shadowed/expired rows and parity passes while a real Cassandra",
+    "SELECT diverges (issue #1741, the read-path P0 this oracle guards against",
+    "regressing).",
+    "",
+    "Each case below records the POST-RECONCILIATION result set a real Cassandra",
+    "`SELECT` returns for a canonical query, evaluated at a PINNED `now`",
+    "(`pinned_now_secs`, epoch seconds) so TTL expiry is deterministic and never",
+    "wall-clock-flaky. The reader honors the pin via the debug-only",
+    "`CQLITE_TTL_NOW_OVERRIDE_SECS` seam (see `now_clock.rs`).",
+    "",
+    "`physical_row_count` is the count of `type == \"row\"` entries in the committed",
+    "sstabledump golden — an anti-empty-pass sanity check AND (where it exceeds",
+    "`expected_rows.len()`) a direct demonstration of the physical-vs-semantic gap",
+    "this oracle exists to close.",
+    "",
+    "Consumed by cqlite-core/tests/query_semantics_oracle_parity.rs."
+  ],
+  "oracle_version": 1,
+  "provenance": {
+    "cassandra_version": "5.0.2",
+    "cassandra_git_sha": "f278f6774fc76465c182041e081982105c3e7dbb",
+    "fixture_generation_command": "bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh",
+    "note": [
+      "All three fixtures below are REAL Apache Cassandra 5.0.2 SSTables committed",
+      "to the repo (test-data/datasets/sstables/test_compaction_tombstone_ttl/**),",
+      "with provenance already tracked in test-data/cassandra-parity-manifest.yml",
+      "(scenarios cass.compaction.*shadow_row_delete / *ttl_expired_live /",
+      "*rt_cross_gen). They are post-major-compaction (nb-3-big) fixtures and still",
+      "present the physical-vs-semantic divergence (a physical dump enumerates the",
+      "surviving row/RT/expired markers that a SELECT hides).",
+      "",
+      "GAP (issue #1742 AC2): a dedicated SINGLE-generation (pre-compaction) fixture",
+      "carrying coexisting partition-deletion + older LIVE rows, a range tombstone",
+      "with a LIVE row INSIDE its bounds, and an expired TTL cell whose VALUE is",
+      "still on disk requires generating uncompacted SSTables from a live Cassandra",
+      "container (autocompaction disabled, single flush). Docker/Cassandra was not",
+      "available in the implementing sandbox, so no such fixture is added here.",
+      "Tracked for real-Cassandra regeneration in the issue #1742 follow-up."
+    ]
+  },
+  "cases": [
+    {
+      "id": "ttl_expired_live__select_star",
+      "keyspace": "test_compaction_tombstone_ttl",
+      "table": "ttl_expired_live",
+      "fixture_dir_prefix": "ttl_expired_live-",
+      "sstable_prefix": "nb-3-big",
+      "schema": "compaction-tombstone-ttl-parity.cql",
+      "query": "SELECT id, ck, v FROM test_compaction_tombstone_ttl.ttl_expired_live",
+      "reconciliation": ["ttl_expiry"],
+      "pinned_now_secs": 1782950400,
+      "pinned_now_note": "2026-07-01T23:56:40Z — AFTER row ck=1's TTL expiry (expires_at 2026-07-01T23:54:23Z, epoch 1782950063); row ck=2 has no TTL so it stays live at any now.",
+      "physical_row_count": 2,
+      "expected_rows": [
+        { "id": 1, "ck": 2, "v": "b-1-2" }
+      ]
+    },
+    {
+      "id": "shadow_row_delete__select_star",
+      "keyspace": "test_compaction_tombstone_ttl",
+      "table": "shadow_row_delete",
+      "fixture_dir_prefix": "shadow_row_delete-",
+      "sstable_prefix": "nb-3-big",
+      "schema": "compaction-tombstone-ttl-parity.cql",
+      "query": "SELECT id, ck, v FROM test_compaction_tombstone_ttl.shadow_row_delete",
+      "reconciliation": ["row_deletion"],
+      "pinned_now_secs": 1782950400,
+      "pinned_now_note": "No TTL in this fixture; pin is fixed for determinism only. Row (id=1, ck=1) is a ROW tombstone (no live cells) and must be hidden.",
+      "physical_row_count": 4,
+      "expected_rows": [
+        { "id": 1, "ck": 2, "v": "a-1-2" },
+        { "id": 1, "ck": 3, "v": "b-1-3" },
+        { "id": 2, "ck": 0, "v": "a-2-0" }
+      ]
+    },
+    {
+      "id": "rt_cross_gen__select_star",
+      "keyspace": "test_compaction_tombstone_ttl",
+      "table": "rt_cross_gen",
+      "fixture_dir_prefix": "rt_cross_gen-",
+      "sstable_prefix": "nb-3-big",
+      "schema": "compaction-tombstone-ttl-parity.cql",
+      "query": "SELECT id, ck, v FROM test_compaction_tombstone_ttl.rt_cross_gen",
+      "reconciliation": ["range_tombstone"],
+      "pinned_now_secs": 1782950400,
+      "pinned_now_note": "No TTL; pin fixed for determinism. A range tombstone covers clustering [10,25]; the live rows sit at ck=5 and ck=30 (OUTSIDE the RT), so both survive — this pins that the RT open/close markers are skipped and do not wrongly shadow rows outside their bounds. A LIVE-row-INSIDE-RT case needs the single-gen fixture noted in provenance.gap.",
+      "physical_row_count": 2,
+      "expected_rows": [
+        { "id": 1, "ck": 5, "v": "a-1-5" },
+        { "id": 1, "ck": 30, "v": "b-1-30" }
+      ]
+    }
+  ]
+}
