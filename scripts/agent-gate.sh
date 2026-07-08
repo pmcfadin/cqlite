@@ -137,7 +137,13 @@
 #                      scripts/tests/test_udt_rowbuilder_tuple_shape.sh (#1991) —
 #                      pins the nb row-builder's UDT value to a positional tuple
 #                      (a dict → KeyError: 0 under prepared inserts) + an
-#                      actionable 0-row abort. On the python3 path also runs
+#                      actionable 0-row abort. Also runs (no python3 needed)
+#                      scripts/tests/test_agent_gate_python_bindings_determinism.sh
+#                      (#1803) — proves the python-bindings import-verify + one-shot
+#                      self-heal both self-heals a transient venv-resolution miss to
+#                      PASS and fails distinctly on a real binding defect (hermetic,
+#                      PATH-shadowed toolchain, no real maturin build). On the
+#                      python3 path also runs
 #                      scripts/tests/test_gate_concurrency_cap.sh (#1825) — proves
 #                      the machine-wide full-gate concurrency cap queues at N,
 #                      exempts --lite, and releases a slot on SIGKILL (uses the
@@ -267,6 +273,11 @@ INVOCATION_CWD="$PWD"
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
+
+# Absolute path to THIS script, for the hidden self-test hooks that re-invoke it
+# in a fresh subshell (e.g. --python-build-verify, issue #1803). It always lives
+# under <repo-root>/scripts/ (we just cd'd out of scripts/ via dirname "$0"/..).
+GATE_SELF="$REPO_ROOT/scripts/$(basename "$0")"
 
 # Agent sandboxes often run with a minimal PATH; pick up rustup's cargo.
 if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
@@ -893,6 +904,121 @@ _run_shell_selftest_files() {
   return "$rc"
 }
 
+# _python_build_verify_venv <venv> <maturin-develop-cmd> [<active-venv-out-file>]
+# (issue #1803): build the cqlite python extension into <venv> and GUARANTEE it
+# imports, self-healing a stale/half-built editable install EXACTLY ONCE. The
+# persistent venv under target/ is REUSED for the healthy path (the speed
+# optimization). On a miss (maturin exits 0 but the module does not import — a
+# venv-resolution miss from a cleaned target/, an interrupted prior run, or a
+# concurrent same-checkout gate) it self-heals into a PRIVATE per-process venv
+# rather than tearing down the shared one (roborev round-2 Finding B): a
+# concurrent gate in the same checkout (a `--only python-bindings` alongside a
+# full gate, or two lite runs) reuses the SAME $venv, so an `rm -rf "$venv"`
+# here would race that other process's mid-build/pytest use of it. macOS has no
+# flock, so we sidestep the race entirely instead of locking: never destroy
+# shared mutable state. Contract (single source of truth for BOTH
+# run_python_bindings and the --lite python tier; exposed to the self-test via
+# the --python-build-verify hook):
+#   exit 0 -> extension built AND `import cqlite._cqlite` verified (possibly via
+#             a private self-heal venv — see $3 below).
+#   exit 1 -> venv creation / pip install failed: a TOOLCHAIN gap (offline?) — the
+#             full component FAILs on it, the lite tier SKIPs (unchanged split).
+#   exit 2 -> `maturin develop` exited non-zero WITH cargo+rustc present: a real
+#             COMPILE ERROR of our bindings (hard-FAIL in both the full gate and
+#             the lite tier).
+#   exit 3 -> maturin exited 0 but the module did NOT import even after a clean-
+#             venv rebuild: a real binding DEFECT, not a venv miss. Emits the
+#             DISTINCT marker line so the failure reads as a code defect, not a
+#             transient flake.
+#   exit 4 -> `maturin develop` exited non-zero because the build TOOLCHAIN
+#             itself is absent (no cargo/rustc on PATH — offline/toolchain gap,
+#             roborev round-2 Finding A): same class as exit 1, NOT a compile
+#             error — the full gate still hard-FAILs on it (cargo/rustc are
+#             always present in a full gate run), but the lite tier SKIPs.
+# $3, if given, is a file path this function writes the ACTUALLY-USED venv
+# directory into (the shared $venv on the healthy path, or the private heal venv
+# after a self-heal) — callers activate THAT path for the subsequent pytest run
+# and are responsible for `rm -rf`-ing it afterward when it is not the shared
+# venv (a private heal venv must not accumulate under target/).
+# The venv/pip/maturin/import operations are PATH-shadowable so the hermetic self-
+# test (test_agent_gate_python_bindings_determinism.sh) can simulate the miss +
+# heal without a real maturin build; production supplies the real toolchain.
+_python_build_verify_venv() {
+  local venv="$1" maturin_cmd="$2" out_file="${3:-}"
+  local active_venv="$venv"
+
+  _pbv_write_active() {
+    [ -n "$out_file" ] && printf '%s' "$active_venv" >"$out_file"
+  }
+  # venv + pip deps (rc!=0 = toolchain gap). Reuses an existing venv (speed).
+  _pbv_setup() {
+    [ -x "$active_venv/bin/python" ] || python3 -m venv "$active_venv" || return 1
+    (
+      set -euo pipefail
+      # shellcheck disable=SC1091
+      . "$active_venv/bin/activate"
+      pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+      pip install --quiet maturin pytest
+    )
+  }
+  # maturin develop. rc 4 = the build TOOLCHAIN itself is absent (no cargo/rustc
+  # on PATH — an offline/toolchain gap, same class as rc 1). Any other non-zero
+  # (cargo+rustc present, maturin still failed) propagates as-is: a REAL compile
+  # error of our bindings.
+  _pbv_build() {
+    if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+      return 4
+    fi
+    (
+      set -euo pipefail
+      # shellcheck disable=SC1091
+      . "$active_venv/bin/activate"
+      eval "$maturin_cmd"
+    )
+  }
+  # verify the freshly-built editable install actually imports (rc!=0 = miss).
+  _pbv_verify() {
+    (
+      set -euo pipefail
+      # shellcheck disable=SC1091
+      . "$active_venv/bin/activate"
+      python -c 'import cqlite; import cqlite._cqlite'
+    ) >/dev/null 2>&1
+  }
+
+  local build_rc
+  _pbv_setup || { _pbv_write_active; return 1; }
+  build_rc=0; _pbv_build || build_rc=$?
+  if [ "$build_rc" -eq 4 ]; then _pbv_write_active; return 4; fi
+  if [ "$build_rc" -ne 0 ]; then _pbv_write_active; return 2; fi
+  if _pbv_verify; then _pbv_write_active; return 0; fi
+
+  # maturin exited 0 but the module did not import → venv-resolution miss. Self-
+  # heal ONCE into a PRIVATE per-process venv (PID-suffixed; a $RANDOM fallback
+  # guards the vanishingly rare PID collision) — the shared $venv is NEVER
+  # rm -rf'd, so a concurrent same-checkout gate reusing it is never raced.
+  local heal_venv="${venv}.heal.$$"
+  while [ -e "$heal_venv" ]; do heal_venv="${venv}.heal.$$.$RANDOM"; done
+  echo "[python-bindings] cqlite._cqlite did not import after 'maturin develop' (exit 0) — self-healing into a private venv ($heal_venv, issue #1803); the shared venv is left untouched to avoid a cross-run teardown race" >&2
+  active_venv="$heal_venv"
+  _pbv_setup || { _pbv_write_active; return 1; }
+  build_rc=0; _pbv_build || build_rc=$?
+  if [ "$build_rc" -eq 4 ]; then _pbv_write_active; return 4; fi
+  if [ "$build_rc" -ne 0 ]; then _pbv_write_active; return 2; fi
+  if _pbv_verify; then _pbv_write_active; return 0; fi
+
+  # Every return path above writes $active_venv to $out_file (a no-op when the
+  # caller passed none — e.g. the hermetic self-test), so the caller is SOLELY
+  # responsible for `rm -rf`-ing it when it differs from the shared $venv (a
+  # private heal venv must never accumulate under target/, but the shared venv
+  # must never be torn down by this function). Uniform for every exit code:
+  # nothing here special-cases cleanup, so there is exactly one place a caller
+  # needs to check.
+  _pbv_write_active
+  echo "[python-bindings] FAIL: cqlite._cqlite did not import after clean-venv rebuild — real binding defect, not a venv-resolution miss" >&2
+  return 3
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -1007,6 +1133,18 @@ case "${1:-}" in
     while IFS= read -r _drs_f; do [ -n "$_drs_f" ] && _drs_arr+=("$_drs_f"); done <<<"$_drs_targets"
     if [ "${#_drs_arr[@]}" -gt 0 ]; then _run_shell_selftest_files "${_drs_arr[@]}"; exit $?; fi
     echo "shell-selftest: (none)"; exit 0 ;;
+  # Hidden self-test hook (issue #1803): run the python build + import-verify +
+  # one-shot self-heal in isolation. Args: <venv> <maturin-develop-cmd>
+  # [<active-venv-out-file>]. Exits with the _python_build_verify_venv contract
+  # code (0 ok / 1 venv-pip toolchain / 2 real-compile-error / 3 import-defect-
+  # after-clean-rebuild / 4 build-toolchain-absent). Drives the SAME function
+  # both real call sites use, so test_agent_gate_python_bindings_determinism.sh
+  # can assert the self-heal + private-venv behavior hermetically with
+  # PATH-shadowed python3/pip/maturin/python/cargo/rustc — no drift from
+  # production.
+  --python-build-verify)
+    _python_build_verify_venv "${2:?--python-build-verify needs <venv>}" "${3:?--python-build-verify needs <maturin-develop-cmd>}" "${4:-}"
+    exit $? ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -1380,19 +1518,38 @@ run_python_bindings() {
   fi
   # Persistent venv under target/ so repeat runs skip the maturin/pytest install.
   local venv="$REPO_ROOT/target/agent-gate-venv"
-  echo ">>> [$name] maturin develop + pytest (venv: $venv, RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0})"
-  if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
-      set -euo pipefail
-      venv="'"$venv"'"
-      [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
-      . "$venv/bin/activate"
-      pip install --quiet --upgrade pip >/dev/null
-      pip install --quiet maturin pytest
-      maturin develop -m bindings/python/Cargo.toml
-      pytest bindings/python/tests -q' >"$log" 2>&1; then
-    status=PASS
+  echo ">>> [$name] maturin develop + import-verify + pytest (venv: $venv, RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0})"
+  # Build + VERIFY the extension imports (self-heals a stale/half-built editable
+  # install once — issue #1803), THEN run pytest against the WRITTEN-BACK active
+  # venv. A ModuleNotFoundError from a venv-resolution miss self-heals to a clean
+  # rebuild rather than falsely FAILing green code; a genuine build/import defect
+  # FAILs with a distinct message (already in $log). The self-heal branch never
+  # touches the SHARED $venv (roborev round-2 Finding B: a concurrent same-
+  # checkout gate reusing it would otherwise race a mid-build `rm -rf`) — it
+  # builds into a private per-process venv instead, whose path the hook writes
+  # to $active_venv_file so this shell knows what to activate for pytest and
+  # clean up afterward.
+  local active_venv_file active_venv
+  active_venv_file=$(mktemp "${TMPDIR:-/tmp}/agent-gate-active-venv.XXXXXX")
+  if bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" "$active_venv_file" >"$log" 2>&1; then
+    active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
+    if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
+        set -euo pipefail
+        . "'"$active_venv"'/bin/activate"
+        pytest bindings/python/tests -q' >>"$log" 2>&1; then
+      status=PASS
+    else
+      status=FAIL
+    fi
   else
     status=FAIL
+    active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
+  fi
+  # Clean up a private self-heal venv (never the shared $venv) so heal venvs
+  # don't accumulate under target/.
+  [ "$active_venv" != "$venv" ] && rm -rf "$active_venv"
+  rm -f "$active_venv_file"
+  if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
@@ -1689,6 +1846,23 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_delta.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (delta re-cert self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # python-bindings venv-determinism self-test (#1803): hermetic (PATH-shadowed
+  # python3/pip/maturin/python — no real maturin build, no datasets/network),
+  # always runs. Proves the import-verify + one-shot self-heal both self-heals a
+  # transient venv-resolution miss to PASS AND fails distinctly on a real binding
+  # defect. A failure FAILs the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_python_bindings_determinism.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_python_bindings_determinism.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (python-bindings venv-determinism self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -2027,20 +2201,44 @@ run_scoped_tests() {
       PYTHON_TIER_NOTE="python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run; run the full gate"
     else
       local venv="$REPO_ROOT/target/agent-gate-venv"
+      local pbv_rc active_venv_file active_venv
       echo ">>> [$name] python tier: $PYTHON_LITE_TIER_CMD (venv: $venv)"
-      if ! RUN_SLOW_TESTS=0 PY_MATURIN_CMD="$PYTHON_LITE_MATURIN_CMD" bash -c '
-          set -euo pipefail
-          venv="'"$venv"'"
-          [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
-          . "$venv/bin/activate"
-          pip install --quiet --upgrade pip >/dev/null
-          pip install --quiet maturin pytest
-          eval "$PY_MATURIN_CMD"' >>"$log" 2>&1; then
-        echo ">>> [$name] python tier SKIP (venv/pip/maturin toolchain setup failed — offline or toolchain gap, NOT a code failure; see $log; run the full gate when the toolchain is available)"
-        PYTHON_TIER_NOTE="python-tier: SKIPPED (toolchain: venv/pip/maturin setup failed — offline?) — python-binding diff NOT validated by this lite run; run the full gate"
+      # Build + VERIFY the extension imports, self-healing a stale/half-built
+      # editable install once (issue #1803, symmetric to run_python_bindings).
+      # rc 1 (venv create/pip install) and rc 4 (build TOOLCHAIN absent — no
+      # cargo/rustc on PATH, roborev round-2 Finding A) are genuine TOOLCHAIN
+      # gaps → SKIP (offline, NOT a code failure). rc 2 (`maturin develop`
+      # exited non-zero WITH cargo+rustc present) is a REAL COMPILE ERROR of our
+      # bindings, not a toolchain gap — masking it as SKIP would hide exactly the
+      # class of failure #1803 exists to surface, so it FAILs distinctly
+      # (mirrors the full gate's hard-FAIL on a maturin build error). rc 3
+      # (imports fail even after a clean-venv rebuild) is a real binding DEFECT
+      # → FAIL distinctly. rc 0 → run pytest against the WRITTEN-BACK active
+      # venv (possibly a private self-heal venv — Finding B; the shared $venv is
+      # never torn down).
+      active_venv_file=$(mktemp "${TMPDIR:-/tmp}/agent-gate-active-venv.XXXXXX")
+      RUN_SLOW_TESTS=0 bash "$GATE_SELF" --python-build-verify "$venv" "$PYTHON_LITE_MATURIN_CMD" "$active_venv_file" >>"$log" 2>&1
+      pbv_rc=$?
+      active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
+      if [ "$pbv_rc" -eq 2 ]; then
+        status=FAIL
+        OVERALL=FAIL
+        echo ">>> [$name] python tier FAIL (maturin develop failed — a real build/compile failure of our bindings, not a toolchain gap; see $log)"
+        PYTHON_TIER_NOTE="python-tier: FAIL (maturin develop failed — real build/compile failure)"
+      elif [ "$pbv_rc" -eq 3 ]; then
+        status=FAIL
+        OVERALL=FAIL
+        echo ">>> [$name] python tier FAIL (cqlite._cqlite did not import after clean-venv rebuild — real binding defect, not a venv-resolution miss)"
+        PYTHON_TIER_NOTE="python-tier: FAIL (cqlite._cqlite did not import after clean-venv rebuild — real binding defect)"
+      elif [ "$pbv_rc" -eq 4 ]; then
+        echo ">>> [$name] python tier SKIP (build toolchain absent — no cargo/rustc on PATH, NOT a code failure; see $log; run the full gate when the toolchain is available)"
+        PYTHON_TIER_NOTE="python-tier: SKIPPED (toolchain: cargo/rustc absent) — python-binding diff NOT validated by this lite run; run the full gate"
+      elif [ "$pbv_rc" -ne 0 ]; then
+        echo ">>> [$name] python tier SKIP (venv/pip toolchain setup failed — offline or toolchain gap, NOT a code failure; see $log; run the full gate when the toolchain is available)"
+        PYTHON_TIER_NOTE="python-tier: SKIPPED (toolchain: venv/pip setup failed — offline?) — python-binding diff NOT validated by this lite run; run the full gate"
       elif RUN_SLOW_TESTS=0 PY_PYTEST_CMD="$PYTHON_LITE_PYTEST_CMD" bash -c '
           set -euo pipefail
-          . "'"$venv"'/bin/activate"
+          . "'"$active_venv"'/bin/activate"
           eval "$PY_PYTEST_CMD"' >>"$log" 2>&1; then
         echo ">>> [$name] python tier PASS"
         PYTHON_TIER_NOTE="python-tier: PASS ($PYTHON_LITE_TIER_CMD)"
@@ -2050,6 +2248,10 @@ run_scoped_tests() {
         echo ">>> [$name] python tier FAIL (pytest failure — a real code failure)"
         PYTHON_TIER_NOTE="python-tier: FAIL (pytest failure — a real code failure)"
       fi
+      # Clean up a private self-heal venv (never the shared $venv) so heal
+      # venvs don't accumulate under target/.
+      [ "$active_venv" != "$venv" ] && rm -rf "$active_venv"
+      rm -f "$active_venv_file"
     fi
   fi
 
