@@ -192,22 +192,48 @@ jobs:
         # Use cargo-llvm-cov for more accurate coverage. The tool supports one
         # output format per report invocation, so run tests once, then emit the
         # HTML and LCOV reports from the captured profile data.
+        #
+        # Issue #2022: the enforced ≥90% gate is scoped to the READ-PATH module
+        # set ONLY, matching the include list documented in root `tarpaulin.toml`
+        # ([core_reading_focus].include) — that file is the SOURCE OF TRUTH for
+        # this module set; keep the two in sync so they never silently drift.
+        # Read-path modules that exist today: `src/storage/sstable/*` and
+        # `src/parser/*` (the tarpaulin list also names reader/format/validation,
+        # which are not present as top-level dirs — `storage/sstable/reader` is
+        # already covered by `storage/sstable/*`).
+        #
+        # cargo-llvm-cov (0.8.7) has no include-only filter and the `regex` crate
+        # has no lookahead, so we cannot write one negative-lookahead pattern.
+        # Instead we EXCLUDE every top-level module dir / file that is NOT in the
+        # read-path set, plus the non-sstable subdirs/files under `storage/`, and
+        # keep excluding test/bench/examples as before. `spec` and `bin` are
+        # anchored with `\b` word boundaries (the `regex` crate supports plain
+        # word-boundary assertions, just not lookahead) so they only match
+        # actual test/spec files (e.g. `header_spec.rs` as a whole-word "spec")
+        # and not substrings inside genuine read-path source files —
+        # `parser/binary.rs` ("bin") and `storage/sstable/header_spec.rs`
+        # ("spec") were being incidentally dropped from the measurement before
+        # this anchor. Patterns anchor on `src/...` so a keep-dir like
+        # `src/parser/types/` is never matched by a top-level exclusion like
+        # `src/types/`. `--ignore-filename-regex` runs a substring (find) match
+        # against the file path llvm-cov reports.
+        READPATH_IGNORE='(test|\bspec\b|bench|examples|\bbin\b|src/benchmarks/|src/config\.rs|src/cql/|src/discovery/|src/error\.rs|src/export/|src/float_cmp\.rs|src/fuzz_support\.rs|src/ingestion\.rs|src/lib\.rs|src/memory/|src/observability/|src/platform/|src/query/|src/schema/|src/testing/|src/types/|src/types\.rs|src/util/|src/version_hints\.rs|src/storage/cache/|src/storage/serialization/|src/storage/write_engine/|src/storage/mod\.rs|src/storage/partition_key_codec\.rs|src/storage/repl_data_api\.rs|src/storage/schema_discovery\.rs|src/storage/sstable_data_manager\.rs)'
         cargo llvm-cov clean --workspace
         cargo llvm-cov \
           --package cqlite-core \
           --no-report \
-          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
+          --ignore-filename-regex="$READPATH_IGNORE" \
           --verbose
         cargo llvm-cov report \
           --html \
           --output-dir ../validation_artifacts/coverage/html \
-          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
+          --ignore-filename-regex="$READPATH_IGNORE" \
           --fail-under-lines 90 \
           --verbose
         cargo llvm-cov report \
           --lcov \
           --output-path ../validation_artifacts/coverage/lcov.info \
-          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
+          --ignore-filename-regex="$READPATH_IGNORE" \
           --verbose
           
     - name: Run Comprehensive Coverage (Informational)
