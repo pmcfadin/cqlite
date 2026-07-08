@@ -43,7 +43,19 @@ impl SSTableManager {
         // (partition, clustering) row may appear in more than one, and reconciling
         // them is the in-memory-sort path's job (cross-generation last-write-wins).
         // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
-        let candidates = Self::prune_candidates(&reader_list, partition_key);
+        //
+        // Issue #2163 (roborev r6): this seam does NOT call
+        // `verify_pruned_candidates` on its own `pruned` set — every
+        // `candidates.len() != 1` outcome (zero OR multiple admitted, which
+        // includes a false negative wrongly excluding the sole holder) falls
+        // through to `Ok(None)`, and the caller's fallback
+        // (`query::select_executor::lookup`) ALWAYS re-runs the SAME
+        // deterministic prune via `scan_partition_clustering`, which DOES call
+        // `verify_pruned_candidates` on the identical `reader_list`/`partition_key`
+        // (same bloom/trie state ⇒ byte-identical exclusion set). Verifying here
+        // too would re-scan the SAME excluded reader a second time in the same
+        // logical read — pure redundant work with no additional coverage.
+        let (candidates, _pruned) = Self::prune_candidates(&reader_list, partition_key);
         if candidates.len() != 1 {
             return Ok(None);
         }

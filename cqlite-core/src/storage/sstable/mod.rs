@@ -1329,45 +1329,106 @@ impl SSTableManager {
     /// encoding to hoist — its raw-key bloom check runs unchanged — so a non-BTI or
     /// mixed candidate set stays correct. The pruning decision (and therefore the
     /// resulting rows) is byte-identical to the per-candidate path.
+    /// Returns `(admitted, pruned)`: `admitted` are the SAME byte-for-byte
+    /// filtered candidates the original single-`Vec` `prune_candidates` returned;
+    /// `pruned` are every reader EXCLUDED by the presence-oracle check — each is,
+    /// by construction, a definitive-negative exclusion (the filter's ONLY
+    /// criterion), so `pruned` is exactly the set
+    /// [`verify_pruned_candidates`](Self::verify_pruned_candidates) needs to
+    /// authoritatively re-check (issue #2163's core silent-miss case: a false
+    /// negative HERE, at the multi-generation candidate prune, would otherwise
+    /// drop that SSTable from the read with no verification ever reached — the
+    /// per-reader `get_with_resolution` verify hook only covers a single reader's
+    /// OWN point read, never a candidate eliminated at this layer).
     #[cfg(not(feature = "tombstones"))]
     fn prune_candidates(
         readers: &[Arc<reader::SSTableReader>],
         partition_key: &[u8],
-    ) -> Vec<Arc<reader::SSTableReader>> {
+    ) -> (
+        Vec<Arc<reader::SSTableReader>>,
+        Vec<Arc<reader::SSTableReader>>,
+    ) {
         use crate::storage::sstable::bti::encode_partition_key_for_bti_trie;
         // Encode once iff a BTI reader is present (BIG readers ignore `encoded`).
         let encoded = readers
             .iter()
             .any(|r| r.is_bti())
             .then(|| encode_partition_key_for_bti_trie(partition_key));
-        readers
-            .iter()
-            .filter(|r| {
-                // BTI candidates prune via `might_contain_partition_encoded` (fed the
-                // hoisted C4 encoding), the SAME single emit site the raw-key BIG
-                // bloom prune below uses (issue #2163): the `Partitions.db` trie is
-                // the authoritative presence oracle, so a `false` (trie miss) is a
-                // definitive absent (drop) — recorded once as
-                // `cqlite.read.sstables_pruned{format=bti}` — and an `Err` (corrupt
-                // trie) is conservatively kept (not pruned, not recorded). This is
-                // congruent with the façade's resolution — a BTI trie result is
-                // authoritative. BIG candidates DELIBERATELY stay on the bloom-based
-                // `might_contain_partition`: a BIG `Index.db` miss is NOT a definitive
-                // absent (#1572 truncated-index invariant), so pruning a BIG reader on
-                // the façade's index probe would drop a candidate that actually holds
-                // the partition. Only the bloom filter never yields a false negative.
-                // Sharing ONE emit site (`might_contain_partition[_encoded]`) for both
-                // formats means a caller that also `locate`s the same key afterward
-                // (the actual read) never double-emits: `locate`/`locate_encoded`
-                // themselves never call `emit_sstable_pruned`.
-                match (r.is_bti(), &encoded) {
-                    (true, Some(enc)) => r.might_contain_partition_encoded(partition_key, enc),
-                    // Non-BTI reader (or, defensively, no encoding): bloom prune.
-                    _ => r.might_contain_partition(partition_key),
-                }
-            })
-            .cloned()
-            .collect()
+        readers.iter().cloned().partition(|r| {
+            // BTI candidates prune via `might_contain_partition_encoded` (fed the
+            // hoisted C4 encoding), the SAME single emit site the raw-key BIG
+            // bloom prune below uses (issue #2163): the `Partitions.db` trie is
+            // the authoritative presence oracle, so a `false` (trie miss) is a
+            // definitive absent (drop) — recorded once as
+            // `cqlite.read.sstables_pruned{format=bti}` — and an `Err` (corrupt
+            // trie) is conservatively kept (not pruned, not recorded). This is
+            // congruent with the façade's resolution — a BTI trie result is
+            // authoritative. BIG candidates DELIBERATELY stay on the bloom-based
+            // `might_contain_partition`: a BIG `Index.db` miss is NOT a definitive
+            // absent (#1572 truncated-index invariant), so pruning a BIG reader on
+            // the façade's index probe would drop a candidate that actually holds
+            // the partition. Only the bloom filter never yields a false negative.
+            // Sharing ONE emit site (`might_contain_partition[_encoded]`) for both
+            // formats means a caller that also `locate`s the same key afterward
+            // (the actual read) never double-emits: `locate`/`locate_encoded`
+            // themselves never call `emit_sstable_pruned`.
+            match (r.is_bti(), &encoded) {
+                (true, Some(enc)) => r.might_contain_partition_encoded(partition_key, enc),
+                // Non-BTI reader (or, defensively, no encoding): bloom prune.
+                _ => r.might_contain_partition(partition_key),
+            }
+        })
+    }
+
+    /// Verify presence-oracle negatives for SSTables EXCLUDED by
+    /// [`prune_candidates`](Self::prune_candidates) — issue #2163's core
+    /// silent-miss case, roborev r6. A bloom/BTI-trie false negative during a
+    /// MULTI-generation candidate prune would otherwise drop that SSTable from
+    /// the read entirely, unverified: the per-reader `get_with_resolution` opt-in
+    /// verify hook (`data_access/mod.rs`) never runs for a candidate eliminated
+    /// one layer up, at THIS prune site — a candidate excluded here never reaches
+    /// `get_with_resolution` at all for this read.
+    ///
+    /// STRICTLY inside the opt-in switch (default-off = zero extra work,
+    /// unchanged behaviour): when
+    /// [`presence_verification::enabled`](reader::presence_verification::enabled)
+    /// is `false` (the default), this returns immediately without touching
+    /// `pruned` at all. When enabled, each pruned reader is verified via
+    /// [`SSTableReader::verify_presence_oracle_negative`] (an authoritative
+    /// confirmation scan): a genuine contradiction increments
+    /// `cqlite.read.bloom.false_negatives` EXACTLY ONCE per contradicted
+    /// negative (the verify method's own single per-call emit — this loop calls
+    /// it once per pruned reader, never more). Any `Err` fails OPEN (the
+    /// caller's admitted `candidates` list is never touched) but is surfaced
+    /// LOUDLY via the SAME loud-failure contract `get_with_resolution` uses
+    /// (roborev r4): an error-level log with context, and a record through the
+    /// EXISTING error-rate signal (`cqlite.errors.total{subsystem=reader}`,
+    /// issue #1038) — never a new metric.
+    #[cfg(not(feature = "tombstones"))]
+    async fn verify_pruned_candidates(
+        pruned: &[Arc<reader::SSTableReader>],
+        table_id: &TableId,
+        partition_key: &[u8],
+    ) {
+        if !reader::presence_verification::enabled() {
+            return;
+        }
+        for r in pruned {
+            if let Err(e) = r
+                .verify_presence_oracle_negative(table_id, partition_key)
+                .await
+            {
+                tracing::error!(
+                    error = %e,
+                    sstable_format = r.sstable_format_label(),
+                    "opt-in presence-oracle false-negative verification scan FAILED for a \
+                     prune_candidates-excluded SSTable — the read itself is unaffected \
+                     (fail-open), but this soundness check could not run for this SSTable and \
+                     needs investigation"
+                );
+                crate::observability::record_error(&e, "reader");
+            }
+        }
     }
 
     #[cfg(not(feature = "tombstones"))]
@@ -1390,7 +1451,14 @@ impl SSTableManager {
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
         // This is the property #962 requires — only candidates are opened, never N.
         // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
-        let candidates = Self::prune_candidates(&reader_list, partition_key);
+        let (candidates, pruned) = Self::prune_candidates(&reader_list, partition_key);
+
+        // Issue #2163 (roborev r6): opt-in verification of every EXCLUDED
+        // candidate — a strict no-op unless the switch is on. Runs BEFORE the
+        // `candidates.is_empty()` early-return below, since the core silent-miss
+        // case is exactly "every admitted candidate came up empty because a
+        // false negative wrongly pruned the ONE generation holding the key".
+        Self::verify_pruned_candidates(&pruned, table_id, partition_key).await;
 
         tracing::debug!(
             "SSTableManager::scan_partition_with_cell_metadata - {}/{} SSTables admit partition \
@@ -1554,7 +1622,12 @@ impl SSTableManager {
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
         // C4 (#1575): the BTI key hash+encoding is hoisted to once per read here.
-        let candidates = Self::prune_candidates(&reader_list, partition_key);
+        let (candidates, pruned) = Self::prune_candidates(&reader_list, partition_key);
+
+        // Issue #2163 (roborev r6): opt-in verification of every EXCLUDED
+        // candidate — a strict no-op unless the switch is on. See
+        // `verify_pruned_candidates` for the fail-open / loud-failure contract.
+        Self::verify_pruned_candidates(&pruned, table_id, partition_key).await;
 
         tracing::debug!(
             "SSTableManager::scan_partition - {}/{} SSTables admit partition key (len={}) for '{}'",
