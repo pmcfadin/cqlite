@@ -3161,10 +3161,18 @@ dispatch_component() {
   #      anywhere. Caught by the Pass-1 zero-tests guard below (they would otherwise
   #      silently pass as "0 tests" default-feature targets — exactly the false-green
   #      shape it exists to close): end_to_end_tests, error_handling_tests,
-  #      integration_tests. (test_runner.rs ALSO references this feature but only
-  #      gates a portion of its body, so it legitimately runs >0 tests under default
-  #      and is NOT in this list.)
-  QUARANTINE="comprehensive_select_test integration_sstable_tests parquet_writer_tests table_snapshot_tests end_to_end_tests error_handling_tests integration_tests"
+  #      integration_tests, test_runner. test_runner OWN #[test] fns (lines
+  #      684/694 as of this writing) live inside the SAME
+  #      `#[cfg(all(test, feature = "integration-tests"))] mod tests` as the other
+  #      three — its real, non-incidental test count is 0. It only APPEARS to run
+  #      >0 tests today because it does `mod test_helpers;` (line 8), and
+  #      test_helpers.rs carries its own UNRELATED always-on `#[cfg(test)] mod
+  #      tests { #[test] fn test_helper_functions }` that gets transitively
+  #      compiled in — a routine future refactor (dropping the unused `mod
+  #      test_helpers;`, or moving that helper elsewhere) would silently drop
+  #      test_runner to a real 0 and trip the zero-tests guard below for a reason
+  #      unrelated to test_runner itself, hence quarantining it here instead.
+  QUARANTINE="comprehensive_select_test integration_sstable_tests parquet_writer_tests table_snapshot_tests end_to_end_tests error_handling_tests integration_tests test_runner"
   #
   # Anchor enumeration to REPO_ROOT (roborev finding, #2039): unlike the
   # CWD-independent `cargo test --package cqlite-cli` invocations below, bare
