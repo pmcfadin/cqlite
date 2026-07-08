@@ -1463,7 +1463,7 @@ impl SSTableManager {
             results.retain(matches_key);
             all_results.append(&mut results);
         }
-        // #1917: concat sorts token-ring order via shared cmp (raw-byte = wrong order, #1580).
+        // #1917: rows here already share `partition_key` (prior retain) so this is a no-op today; kept for future multi-partition safety + parity with the IN fan-out / streaming scan's token order (raw-byte = #1580 wrong-order).
         if candidates.len() > 1 {
             all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
@@ -1665,7 +1665,7 @@ impl SSTableManager {
             };
             all_results.append(&mut results);
         }
-        // #1917: concat sorts token-ring order via shared cmp (raw-byte = wrong order, #1580).
+        // #1917: rows here already share `partition_key` (prior retain) so this is a no-op today; kept for future multi-partition safety + parity with the IN fan-out / streaming scan's token order (raw-byte = #1580 wrong-order).
         if candidates.len() > 1 {
             all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
