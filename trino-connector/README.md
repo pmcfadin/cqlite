@@ -187,6 +187,15 @@ The Sidecar endpoint paths and HTTP verbs above match apache/cassandra-sidecar
 `ApiEndpointsV1.SNAPSHOTS_ROUTE` (`CreateSnapshotRequest` → `PUT`, `ClearSnapshotRequest`
 → `DELETE`).
 
+**Statistics use the live dir, even in `snapshot` mode.** The optimizer's `table_stats`
+fetch runs during query *planning*, which is earlier than split planning — so the per-query
+snapshot does not exist yet when the row-count estimate is gathered. The connector therefore
+estimates off the current data directory (`snapshot=null` on the `table_stats` request). The
+scan itself still reads the immutable snapshot; only the row-count *estimate* comes from the
+live dir. This is a plan-quality concern (the optimizer may pick a slightly different
+join/aggregation strategy), never a correctness one — returned rows always come from the
+snapshot. We deliberately do not create the snapshot earlier just to tighten this estimate.
+
 ## Load testing (optional `loadtest` profile)
 
 `cassandra-easy-stress` is wired in behind a separate `loadtest` profile, so a

@@ -18,6 +18,11 @@
 connector.name=cqlite_flight
 cqlite.sidecar-uri=__SIDECAR_URI__
 cqlite.flight-port=__FLIGHT_PORT__
-# Optional preferred datacenter for split placement. Left blank (commented)
-# when --local-datacenter was not passed at install time.
-# cqlite.local-datacenter=__LOCAL_DATACENTER__
+# Preferred datacenter for split placement. Set by the kit's --local-datacenter
+# arg; renders BLANK when the flag is not passed, which the connector treats as
+# "no DC preference" — functionally identical to leaving it unset (an empty DC
+# name matches no replica set, so split placement falls back to any replica).
+cqlite.local-datacenter=__LOCAL_DATACENTER__
+# How each scan resolves the SSTable file set. Set by the kit's --read-mode arg
+# (snapshot | live); defaults to snapshot (consistent per-query Sidecar snapshot).
+cqlite.read-mode=__READ_MODE__

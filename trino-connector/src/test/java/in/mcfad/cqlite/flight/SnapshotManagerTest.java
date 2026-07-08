@@ -7,6 +7,11 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -118,5 +123,120 @@ class SnapshotManagerTest {
     @Test
     void snapshotNameSanitizesUnsafeChars() {
         assertEquals("cqlite-q_1_x", SnapshotManager.snapshotName("q/1 x"));
+    }
+
+    /**
+     * Concurrent callers for the same (query, keyspace, table) must PUT exactly once, even
+     * while the (slow) create is in flight. The per-key-future memoization (issue #2113 / N5)
+     * moves the network call off the ConcurrentHashMap bin lock but keeps exactly-once — this
+     * test gates the create on a latch so many threads pile up mid-create, then asserts one
+     * PUT and one shared snapshot name.
+     */
+    @Test
+    void concurrentCallersPutExactlyOnce() throws Exception {
+        AtomicInteger creates = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        SnapshotApi blocking = new SnapshotApi() {
+            @Override
+            public void createSnapshot(String k, String t, String n, Optional<String> ttl) {
+                creates.incrementAndGet();
+                try {
+                    // Hold the create open so competing threads reach putIfAbsent while it runs.
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            @Override
+            public void clearSnapshot(String k, String t, String n) {}
+        };
+        SnapshotManager mgr = new SnapshotManager(blocking, ReadMode.SNAPSHOT, Optional.empty());
+
+        int threads = 16;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<java.util.concurrent.Future<Optional<String>>> results = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            results.add(pool.submit(() -> {
+                start.await();
+                return mgr.snapshotFor("q1", "ks", "t");
+            }));
+        }
+        start.countDown();          // fire all callers
+        Thread.sleep(50);           // let them collide on the in-flight create
+        release.countDown();        // let the winning create finish
+
+        for (java.util.concurrent.Future<Optional<String>> f : results) {
+            assertEquals(Optional.of("cqlite-q1"), f.get(5, TimeUnit.SECONDS));
+        }
+        pool.shutdownNow();
+
+        assertEquals(1, creates.get(), "exactly one PUT for concurrent same-key callers");
+    }
+
+    /**
+     * A winner that dies with a NON-RuntimeException throwable (an {@link Error}) must never
+     * leave an incomplete future in the map (roborev on issue #2113): a concurrent waiter
+     * must unblock with a failure — not hang on {@code join()} forever — and a subsequent
+     * caller must retry with exactly one new PUT. Uses short get() timeouts so a liveness
+     * regression fails this test fast instead of hanging the suite.
+     */
+    @Test
+    void errorFromCreateNeverLeavesIncompleteFuture() throws Exception {
+        AtomicInteger creates = new AtomicInteger();
+        CountDownLatch winnerInCreate = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SnapshotApi api = new SnapshotApi() {
+            @Override
+            public void createSnapshot(String k, String t, String n, Optional<String> ttl) {
+                if (creates.incrementAndGet() == 1) {
+                    winnerInCreate.countDown();
+                    try {
+                        // Hold the create open so the waiter joins the in-flight future.
+                        release.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    throw new AssertionError("sidecar died mid-create"); // an Error, not a RuntimeException
+                }
+                // Second call (the retry) succeeds.
+            }
+            @Override
+            public void clearSnapshot(String k, String t, String n) {}
+        };
+        SnapshotManager mgr = new SnapshotManager(api, ReadMode.SNAPSHOT, Optional.empty());
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Future<Optional<String>> winner =
+                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t"));
+            assertTrue(winnerInCreate.await(5, TimeUnit.SECONDS), "winner reached the create");
+            java.util.concurrent.Future<Optional<String>> waiter =
+                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t"));
+            Thread.sleep(50); // let the waiter pile up on the in-flight future
+            release.countDown();
+
+            // (a) Both callers FAIL (fail-closed); the waiter does NOT hang on join().
+            java.util.concurrent.ExecutionException winnerEx = assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> winner.get(5, TimeUnit.SECONDS));
+            assertTrue(winnerEx.getCause() instanceof AssertionError,
+                    "winner rethrows the original Error, got: " + winnerEx.getCause());
+            java.util.concurrent.ExecutionException waiterEx = assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> waiter.get(5, TimeUnit.SECONDS));
+            assertTrue(waiterEx.getCause() instanceof AssertionError,
+                    "waiter surfaces the winner's Error, got: " + waiterEx.getCause());
+
+            // (b) The failed future was removed, so a retry recomputes and succeeds —
+            // with exactly one NEW PUT.
+            assertEquals(Optional.of("cqlite-q1"), mgr.snapshotFor("q1", "ks", "t"));
+            assertEquals(2, creates.get(), "one failed PUT + one successful retry PUT");
+
+            // cleanup deletes only the successfully created snapshot and must not throw.
+            mgr.cleanup("q1");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

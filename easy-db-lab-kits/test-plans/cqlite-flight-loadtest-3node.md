@@ -473,12 +473,14 @@ $EDB trino-loadtest-trino stop
 
 ### 13b. Run (b) — `cqlite.read-mode=live`: the compaction-stress weak-spot hunt
 
-`cqlite.read-mode` is **not** exposed as a `trino-cqlite` install-time flag (its
-`kit.yaml`/`trino-catalog.properties.template` only wire `sidecar-uri`,
-`flight-port`, and `local-datacenter` — verified by reading both files; this is
-a real gap against the connector's own documented property). Set it by hand,
-the same way the overlay's README already documents for
-`cqlite.local-datacenter`:
+`cqlite.read-mode` **is** a `trino-cqlite` install-time flag (`--read-mode`,
+default `snapshot`; issue #2113), threaded straight into the rendered
+`trino-catalog.properties`. The cleanest way to run Phase 3b is to install the
+overlay with `--read-mode live` (see the overlay README's "Install order"), so
+no catalog hand-edit is needed at all.
+
+If the overlay is already installed in `snapshot` mode and you don't want to
+reinstall, you can still flip the rendered catalog by hand for this one run:
 
 ```bash
 echo "cqlite.read-mode=live" >> "$CLUSTER_DIR/cqlite/trino-catalog.properties"

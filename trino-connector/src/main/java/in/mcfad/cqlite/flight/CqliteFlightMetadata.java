@@ -982,6 +982,15 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         var root = MAPPER.createObjectNode();
         root.put("keyspace", keyspace);
         root.put("table", table);
+        // snapshot=null on purpose: this stats fetch runs during query PLANNING, but the
+        // per-query Sidecar snapshot (SnapshotManager) is not created until split planning,
+        // which happens AFTER the optimizer has asked for these statistics. There is no
+        // snapshot to name yet, so we estimate off the live data directory. In SNAPSHOT
+        // read mode the scan itself still reads the immutable snapshot; only this row-count
+        // ESTIMATE comes from the live dir. That is a plan-quality concern (the optimizer may
+        // pick a slightly different join/agg strategy), never a correctness one — the returned
+        // rows always come from the snapshot. We deliberately do NOT create the snapshot
+        // earlier just to tighten this estimate (issue #2113 / N4).
         root.putNull("snapshot");
         try {
             return MAPPER.writeValueAsBytes(root);
