@@ -63,13 +63,24 @@ Building from this repo (`./gradlew installPlugin`) produces the same directory.
 
 The full stack works end-to-end: `SELECT` over `cqlite.<keyspace>.<table>`
 streams compaction-merged, token-range-deduped Arrow data back to Trino.
-Validated types include int/bigint/text/boolean/uuid/timestamp.
+Validated types include int/bigint/text/boolean/uuid/timestamp/date/time.
 
-**v1 type support:** scalar columns. Complex CQL types (collections, UDTs,
-tuples, decimal) are rejected at planning with a clear message rather than
-failing mid-scan. Cassandra's default 16 vnodes produce 16 splits per table
-(each reads the SSTable filtered by token range) — correct, with split
-consolidation a future optimization.
+**v1 type support:** scalar columns, including CQL `time` (mapped to Trino
+`TIME(9)`, nanosecond precision). Complex CQL types (collections, UDTs, tuples,
+decimal, varint) are not yet materializable.
+
+**Per-column degradation (issue #2229):** a column of an unsupported type no
+longer makes the whole table unqueryable. Such columns are *hidden* from the
+Trino schema — omitted from both the column handles and `DESCRIBE` — and a single
+warning per table names the hidden columns and their Arrow type. `SELECT *` and
+`SELECT`ing any supported column work normally; hidden columns cannot be
+referenced. If *every* column of a table is unsupported the table is genuinely
+unqueryable, so it fails fast with a clear `NOT_SUPPORTED` error rather than
+presenting a confusing zero-column table.
+
+Cassandra's default 16 vnodes produce 16 splits per table (each reads the SSTable
+filtered by token range) — correct, with split consolidation a future
+optimization.
 
 ### LIMIT pushdown (issue #2129)
 

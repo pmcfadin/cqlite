@@ -140,6 +140,34 @@ class ArrowToTrinoTest {
     }
 
     @Test
+    void convertsTime64NanosToTrinoPicosOfDay() {
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var time = new org.apache.arrow.vector.TimeNanoVector("t", allocator);
+            time.allocateNew(2);
+            // 13:14:15.123456789 → nanos-of-day.
+            long nanosOfDay = ((13L * 3600 + 14 * 60 + 15) * 1_000_000_000L) + 123_456_789L;
+            time.set(0, nanosOfDay);
+            time.setNull(1);
+
+            var root = new VectorSchemaRoot(List.of(time));
+            root.setRowCount(2);
+
+            var columns = List.of(
+                    new CqliteFlightColumnHandle("t", io.trino.spi.type.TimeType.TIME_NANOS));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            assertEquals(2, page.getPositionCount());
+
+            long picos = io.trino.spi.type.TimeType.TIME_NANOS.getLong(page.getBlock(0), 0);
+            // Trino TIME is picoseconds of day: nanos * 1000, exact.
+            assertEquals(nanosOfDay * 1_000L, picos);
+            assertTrue(page.getBlock(0).isNull(1));
+
+            root.close();
+        }
+    }
+
+    @Test
     void formatsUuidBytes() {
         byte[] bytes = new byte[16];
         bytes[15] = 1;

@@ -7,6 +7,7 @@ import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
@@ -14,6 +15,8 @@ import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
+
+import java.util.Optional;
 
 /**
  * Maps Arrow schema fields (as produced by the cqlite-flight server's
@@ -56,16 +59,33 @@ public final class ArrowTypeMapper {
         };
     }
 
-    /** Map one Arrow field to a Trino {@link Type}. */
+    /**
+     * Map one Arrow field to a Trino {@link Type}, throwing when the column's
+     * type is not supported. Callers that want to degrade per-column (hide the
+     * column rather than fail the whole table) should use {@link #toTrinoOrEmpty}.
+     */
     public static Type toTrino(Field field) {
+        return toTrinoOrEmpty(field).orElseThrow(() -> new UnsupportedOperationException(
+                "Unsupported Arrow type for column '" + field.getName() + "': " + field.getType()
+                        + " (the connector currently supports scalar columns)"));
+    }
+
+    /**
+     * Resolve a column's Trino {@link Type}, or {@link Optional#empty()} when the
+     * Arrow type is not one the connector can materialize (decimal, varint,
+     * list/set/map, tuple, UDT). {@link CqliteFlightMetadata} uses this to omit
+     * unsupported columns from the Trino schema (hide + warn) rather than making
+     * the entire table unqueryable.
+     */
+    public static Optional<Type> toTrinoOrEmpty(Field field) {
         // UUID is carried as FixedSizeBinary(16) tagged with the Arrow UUID
         // extension; surface it as VARCHAR (canonical hyphenated form).
         if (UUID_EXTENSION.equals(field.getMetadata().get(EXTENSION_KEY))) {
-            return VarcharType.VARCHAR;
+            return Optional.of(VarcharType.VARCHAR);
         }
 
         ArrowType type = field.getType();
-        return switch (type) {
+        Type mapped = switch (type) {
             case ArrowType.Bool ignored -> BooleanType.BOOLEAN;
             case ArrowType.Int i -> switch (i.getBitWidth()) {
                 case 8 -> TinyintType.TINYINT;
@@ -82,10 +102,22 @@ public final class ArrowTypeMapper {
             case ArrowType.Binary ignored -> VarbinaryType.VARBINARY;
             case ArrowType.FixedSizeBinary ignored -> VarbinaryType.VARBINARY;
             case ArrowType.Date ignored -> DateType.DATE;
+            // CQL time → Arrow Time (Rust emits Time64(Nanosecond)); Trino has a
+            // native TIME whose precision mirrors the Arrow unit.
+            case ArrowType.Time t -> timeType(t);
             case ArrowType.Timestamp ignored -> TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
-            default -> throw new UnsupportedOperationException(
-                    "Unsupported Arrow type for column '" + field.getName() + "': " + type
-                            + " (the connector currently supports scalar columns)");
+            default -> null;
+        };
+        return Optional.ofNullable(mapped);
+    }
+
+    /** Map an Arrow {@code Time} unit to the Trino {@link TimeType} of equal precision. */
+    private static TimeType timeType(ArrowType.Time time) {
+        return switch (time.getUnit()) {
+            case SECOND -> TimeType.TIME_SECONDS;
+            case MILLISECOND -> TimeType.TIME_MILLIS;
+            case MICROSECOND -> TimeType.TIME_MICROS;
+            case NANOSECOND -> TimeType.TIME_NANOS;
         };
     }
 }

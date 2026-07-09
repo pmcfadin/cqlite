@@ -12,6 +12,7 @@ import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
@@ -28,6 +29,10 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.SmallIntVector;
+import org.apache.arrow.vector.TimeMicroVector;
+import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeNanoVector;
+import org.apache.arrow.vector.TimeSecVector;
 import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarBinaryVector;
@@ -80,6 +85,7 @@ public final class ArrowToTrino {
             case TimestampWithTimeZoneType t -> t.writeLong(builder,
                     DateTimeEncoding.packDateTimeWithZone(
                             ((TimeStampVector) vector).get(i), TimeZoneKey.UTC_KEY));
+            case TimeType t -> t.writeLong(builder, timePicos(vector, i));
             case VarcharType t -> t.writeSlice(builder, varcharSlice(vector, i));
             case VarbinaryType t -> t.writeSlice(builder, binarySlice(vector, i));
             default -> throw new UnsupportedOperationException(
@@ -143,6 +149,23 @@ public final class ArrowToTrino {
             default -> throw new UnsupportedOperationException(
                     "Unsupported Trino type for merged-aggregate write: " + type);
         }
+    }
+
+    /**
+     * Convert an Arrow time-of-day value to Trino's picoseconds-of-day encoding.
+     * Rust emits CQL {@code time} as {@code Time64(Nanosecond)}; the other units
+     * are handled for completeness so the conversion mirrors whatever precision
+     * {@link ArrowTypeMapper} mapped the column to.
+     */
+    private static long timePicos(FieldVector vector, int i) {
+        return switch (vector) {
+            case TimeNanoVector v -> v.get(i) * 1_000L;
+            case TimeMicroVector v -> v.get(i) * 1_000_000L;
+            case TimeMilliVector v -> v.get(i) * 1_000_000_000L;
+            case TimeSecVector v -> v.get(i) * 1_000_000_000_000L;
+            default -> throw new UnsupportedOperationException(
+                    "Cannot map Arrow vector " + vector.getClass().getSimpleName() + " to TIME");
+        };
     }
 
     /** VARBINARY may be backed by variable or fixed-size binary vectors. */
