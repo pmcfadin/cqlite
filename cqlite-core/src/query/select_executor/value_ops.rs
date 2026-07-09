@@ -58,7 +58,7 @@ pub(super) fn as_integral_i128(v: &Value) -> Option<i128> {
 /// NaN operand is UNKNOWN, so the row is dropped (issue #2231). Only the `float`
 /// variants can be NaN — integral types never are, so this is principled, not a
 /// bit-pattern heuristic.
-pub(super) fn is_nan_value(v: &Value) -> bool {
+pub(in crate::query) fn is_nan_value(v: &Value) -> bool {
     match v {
         Value::Float(x) => x.is_nan(),
         Value::Float32(x) => x.is_nan(),
@@ -133,7 +133,7 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
 /// ORDER BY / MIN / MAX / clustering-key ordering, which must keep the
 /// NaN-greatest total order and existing f64-based numeric ordering
 /// (`try_compare_values`/`compare_values_ordering`, unchanged).
-pub(in crate::query) fn try_compare_values_predicate(
+pub(super) fn try_compare_values_predicate(
     a: &Value,
     b: &Value,
 ) -> Result<Option<std::cmp::Ordering>> {

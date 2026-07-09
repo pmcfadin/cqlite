@@ -634,24 +634,32 @@ impl QueryExecutor {
     /// sibling of the Trino-pushdown fix #2231).
     ///
     /// Returns `Ok(None)` — SQL UNKNOWN, so the caller DROPS the row — when
-    /// either operand is a NaN float. It delegates to the SHARED, principled
-    /// predicate comparator `value_ops::try_compare_values_predicate` (the same
-    /// one #2231 introduced), which drops NaN and compares large integers
-    /// exactly (`i128`, no `f64` collapse). On `Err` (genuinely incomparable
-    /// operands, e.g. `Null` vs a value, or two disjoint non-numeric types) it
-    /// falls back to this path's own [`Self::compare_values`], preserving the
-    /// legacy executor's established `Null`-vs-value ordering and its
-    /// same-type/incomparable-type error semantics — the fix is scoped to the
-    /// NaN-predicate leak only, exactly like #2231.
+    /// either operand is a NaN float (issue #2257, the legacy-executor sibling
+    /// of the Trino-pushdown fix #2231). Otherwise delegates to
+    /// [`Self::compare_values`] UNCHANGED.
+    ///
+    /// Deliberately does NOT route through `value_ops::try_compare_values_predicate`
+    /// for the non-NaN case: that shared helper also does cross-numeric
+    /// coercion (`Integer` vs `BigInt`/`Float` via `as_f64`, exact `i128` for
+    /// integrals) that this legacy path has never had — `compare_values` only
+    /// matches identical variants and `Err`s on any cross-numeric pair. Since
+    /// WHERE-clause literals commonly parse as `Value::Integer` regardless of
+    /// the column's actual CQL type, falling through to that coercion would
+    /// silently turn a previously-hard-`Err` query into a successful (and
+    /// unvalidated against real Cassandra semantics) comparison — a functional
+    /// widening this issue does not ask for. The fix is scoped to EXACTLY the
+    /// NaN-predicate leak: same-type/incomparable-type error semantics and
+    /// `Null`-vs-value ordering are untouched.
     ///
     /// This is for filter/`WHERE` evaluation ONLY. ORDER BY / sort
     /// ([`Self::apply_sort_step`]) still uses [`Self::compare_values`] directly,
     /// keeping the Cassandra NaN-greatest total order unchanged.
     fn predicate_ordering(&self, a: &Value, b: &Value) -> Result<Option<Ordering>> {
-        match crate::query::select_executor::value_ops::try_compare_values_predicate(a, b) {
-            Ok(ordering) => Ok(ordering),
-            Err(_) => self.compare_values(a, b).map(Some),
+        use crate::query::select_executor::value_ops::is_nan_value;
+        if is_nan_value(a) || is_nan_value(b) {
+            return Ok(None);
         }
+        self.compare_values(a, b).map(Some)
     }
 
     /// Compare two values
@@ -1113,6 +1121,44 @@ mod tests {
             Some(Ordering::Less),
             "Null < value ordering preserved (legacy semantics)"
         );
+    }
+
+    /// Issue #2257 review-first finding (roborev/rust-reviewer, converging):
+    /// `predicate_ordering` must NOT widen this legacy path's comparison
+    /// semantics beyond the NaN-predicate fix. `compare_values` never coerced
+    /// cross-numeric variants (`Integer` vs `BigInt`/`Float`) — it `Err`s for
+    /// any pair that isn't identical-variant, `Null`, or a same-type numeric —
+    /// and WHERE-clause literals commonly parse as `Value::Integer` regardless
+    /// of the column's real CQL type, so this is a live case, not a corner.
+    /// `predicate_ordering` must reproduce that exact `Err`, never silently
+    /// coerce via the broader `value_ops` predicate comparator.
+    #[tokio::test]
+    async fn predicate_ordering_still_errs_on_cross_numeric_pairs() {
+        let (_tmp, executor, _) = make_executor().await;
+
+        // Integer vs BigInt: pinned pre-#2257 behavior is a hard error, not a
+        // silently-coerced numeric comparison.
+        assert!(executor
+            .predicate_ordering(&Value::Integer(5), &Value::BigInt(5))
+            .is_err());
+        // Integer vs Float: same — no coercion, must error exactly like
+        // `compare_values` always did.
+        assert!(executor
+            .predicate_ordering(&Value::Integer(5), &Value::Float(5.0))
+            .is_err());
+
+        // The identical pairs behave the same via evaluate_condition's `>`
+        // arm: a query-execution error surfaces, it is not silently satisfied
+        // or silently dropped.
+        let mut m = HashMap::new();
+        m.insert("bigcol".to_string(), Value::Integer(5));
+        let row = QueryRow::with_values(RowKey::new(vec![1]), m);
+        let cond = Condition {
+            column: "bigcol".to_string(),
+            operator: ComparisonOperator::GreaterThan,
+            value: Value::BigInt(3),
+        };
+        assert!(executor.evaluate_condition(&row, &cond).is_err());
     }
 
     // -- indexes_used access-path reporting (issue #760, Epic #756) --------
