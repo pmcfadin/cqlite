@@ -32,7 +32,10 @@ run_with_timeout() {
   while kill -0 "$pid" 2>/dev/null; do
     if (( waited >= secs )); then
       kill -9 "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null
+      # Reap the killed child without letting its non-zero wait status trip
+      # errexit before `return 124` runs — self-contained regardless of the
+      # caller's current `set -e`/`set +e` state.
+      wait "$pid" 2>/dev/null || true
       return 124
     fi
     sleep 1
@@ -45,6 +48,9 @@ log()  { echo "── $* ──"; }
 # Both query helpers route through run_with_timeout so a hang surfaces as a
 # clear FATAL message + fast exit rather than either an indefinite stall or an
 # opaque `set -e` abort from an unhandled non-zero command-substitution status.
+# Returns the underlying query's real exit status (not just 0) so callers that
+# poll readiness via `if trino ...; then break; fi` keep working — only a
+# timeout (124) is special-cased to a hard, immediate script failure.
 trino() {
   local out rc=0
   set +e
@@ -56,6 +62,7 @@ trino() {
     exit 1
   fi
   echo "$out"
+  return "$rc"
 }
 
 assert_eq() {
@@ -98,7 +105,7 @@ log "bring up stack (builds cqlite-flight image; waits for healthy deps)"
 
 log "wait for Trino to accept queries"
 for i in $(seq 1 60); do
-  if "${COMPOSE[@]}" exec -T trino trino --execute "SELECT 1" >/dev/null 2>&1; then break; fi
+  if trino "SELECT 1" >/dev/null 2>&1; then break; fi
   sleep 5
   [[ $i -eq 60 ]] && { echo "Trino did not become ready"; exit 1; }
 done
@@ -109,8 +116,7 @@ log "load data + flush to SSTables"
 
 log "wait for the connector to resolve the table via Sidecar (CQL session warmup)"
 for i in $(seq 1 36); do
-  if "${COMPOSE[@]}" exec -T trino trino --execute \
-       "SELECT count(*) FROM cqlite.analytics.events" >/dev/null 2>&1; then break; fi
+  if trino "SELECT count(*) FROM cqlite.analytics.events" >/dev/null 2>&1; then break; fi
   sleep 5
   [[ $i -eq 36 ]] && { echo "connector never resolved analytics.events (Sidecar not ready)"; exit 1; }
 done
@@ -159,8 +165,7 @@ assert_eq "agg + predicate"         '"120"'                                  "$(
 # Globals always push regardless of the gate.
 log "wait for the connector to resolve analytics.readings"
 for i in $(seq 1 36); do
-  if "${COMPOSE[@]}" exec -T trino trino --execute \
-       "SELECT count(*) FROM cqlite.analytics.readings" >/dev/null 2>&1; then break; fi
+  if trino "SELECT count(*) FROM cqlite.analytics.readings" >/dev/null 2>&1; then break; fi
   sleep 5
   [[ $i -eq 36 ]] && { echo "connector never resolved analytics.readings"; exit 1; }
 done
@@ -193,6 +198,7 @@ explain() {
     exit 1
   fi
   echo "$out"
+  return "$rc"
 }
 pushed()    { grep -q 'aggregationJson=Optional\[' <<<"$1"; }
 assert_pushed() {
