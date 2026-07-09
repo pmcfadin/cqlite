@@ -437,9 +437,13 @@ impl MergeProducer {
                     .as_ref()
                     .map(pushdown_capability)
                     .unwrap_or("none");
-                // Assemble metadata in a BTreeMap so key order is canonical and
-                // independent of the per-process HashMap hasher seed as fixtures
-                // gain >1 entry (issue #2283); `with_metadata` takes a HashMap.
+                // Assemble in a BTreeMap for deterministic ASSEMBLY order — NOTE:
+                // this does NOT guarantee final wire order for fields with >= 2
+                // metadata keys, since arrow_schema::Field::with_metadata
+                // re-collects into its own HashMap before IPC serialization
+                // (arrow-ipc's metadata_to_fb iterates that HashMap unsorted).
+                // Safe today only because every field here carries exactly one
+                // metadata entry (order-trivial). See #2285 for the real fix.
                 let mut metadata: std::collections::BTreeMap<String, String> =
                     field.metadata().clone().into_iter().collect();
                 metadata.insert("cqlite:pushdown".to_string(), capability.to_string());
