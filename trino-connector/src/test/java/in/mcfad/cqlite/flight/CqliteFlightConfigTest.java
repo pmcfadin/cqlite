@@ -109,6 +109,118 @@ class CqliteFlightConfigTest {
     }
 
     @Test
+    void rejectsSidecarUriWithNonRootPath() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "https://proxy.example/sidecar");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithQuery() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://cassandra:9043?token=abc");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithFragment() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://cassandra:9043#frag");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void acceptsRootPathSidecarUri() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://cassandra:9043/");
+        assertEquals("/", CqliteFlightConfig.fromMap(m).sidecarUri().getPath());
+    }
+
+    @Test
+    void acceptsEmptyPathSidecarUri() {
+        // base() uses http://cassandra:9043 (no trailing slash) — the existing default must stay valid.
+        assertEquals(java.net.URI.create("http://cassandra:9043"),
+                CqliteFlightConfig.fromMap(base()).sidecarUri());
+    }
+
+    @Test
+    void rejectsSidecarUriWithoutExplicitPort() {
+        // Per-host snapshot addressing derives each replica URI from scheme + port; a portless
+        // base (URI.getPort() < 0) would only fail later at first snapshot use (issue #2227 roborev).
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://cassandra");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithoutScheme() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "//cassandra:9043");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithNonHttpScheme() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "ftp://cassandra:9043");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithoutHost() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://:9043");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithUserInfo() {
+        // Per-host derivation keeps only scheme + port, silently dropping userinfo — a base with
+        // credentials would authenticate db0 discovery but not the per-host snapshot PUTs.
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://user:secret@cassandra:9043");
+        IllegalArgumentException ex =
+                assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+        // The offending URI in the message must not leak the credential.
+        org.junit.jupiter.api.Assertions.assertFalse(ex.getMessage().contains("secret"));
+    }
+
+    @Test
+    void rejectsSidecarUriWithPercentEncodedUserInfoWithoutLeaking() {
+        // getUserInfo() decodes percent-escapes but URI#toString() renders the raw (encoded)
+        // form; redaction must match the RAW userinfo or the encoded credential leaks verbatim
+        // into the exception message (roborev job 1567).
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://us%40er:p%23ss@10.0.0.5:9043");
+        IllegalArgumentException ex =
+                assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+        String message = ex.getMessage();
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("p%23ss"),
+                "raw-encoded credential must not leak: " + message);
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("p#ss"),
+                "decoded credential must not leak: " + message);
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("us%40er"),
+                "raw-encoded userinfo must not leak: " + message);
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("us@er"),
+                "decoded userinfo must not leak: " + message);
+    }
+
+    @Test
+    void acceptsIpv4RootSidecarUri() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://10.0.0.5:9043");
+        assertEquals(java.net.URI.create("http://10.0.0.5:9043"),
+                CqliteFlightConfig.fromMap(m).sidecarUri());
+    }
+
+    @Test
+    void acceptsHttpsRootSidecarUri() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "https://cassandra:9043/");
+        assertEquals("/", CqliteFlightConfig.fromMap(m).sidecarUri().getPath());
+    }
+
+    @Test
     void rejectsOutOfRangeRatio() {
         Map<String, String> m = base();
         m.put("cqlite.aggregation-pushdown-max-group-ratio", "1.5");

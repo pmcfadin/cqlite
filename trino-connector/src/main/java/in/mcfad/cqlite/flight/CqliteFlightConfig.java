@@ -73,6 +73,80 @@ public record CqliteFlightConfig(
             throw new IllegalArgumentException(
                     "cqlite.table-stats-timeout-ms must be > 0, got " + tableStatsTimeoutMillis);
         }
+        requireRootPerNodeBase(sidecarUri);
+    }
+
+    /**
+     * Validate the whole per-host-addressing contract on {@code cqlite.sidecar-uri} up front
+     * (issue #2227). Per-host snapshot addressing derives each replica host's Sidecar URI from
+     * this base's <b>scheme + port only</b> ({@code HostSnapshotApis.PerHostSidecarClients}),
+     * swapping the host and keeping nothing else. Every assumption that derivation (and the db0
+     * discovery {@code SidecarClient}) makes about the base must hold at config load, so a
+     * misconfiguration fails at catalog load rather than surfacing later at first snapshot use:
+     * <ul>
+     *   <li>an <b>explicit port</b> ({@code getPort() >= 0}) — the per-host URI is built from it;
+     *   <li>a <b>scheme</b> that is present and {@code http}/{@code https} — the derived URI and
+     *       the HTTP client both require it;
+     *   <li>a non-empty <b>host</b> — the db0 discovery client resolves requests against it;
+     *   <li><b>no userinfo</b> — per-host derivation drops it, so credentials would reach db0
+     *       discovery but never the per-host snapshot PUTs (silent partial auth);
+     *   <li><b>root path, no query, no fragment</b> — all dropped from the derived per-host URI.
+     * </ul>
+     * {@code HostSnapshotApis.fromBaseUri}/{@code forHost} keep their own port check as
+     * defence-in-depth; this is the first failure point. The hostNetwork DaemonSet contract
+     * (README) requires a root-path per-node Sidecar base.
+     */
+    private static void requireRootPerNodeBase(URI base) {
+        String scheme = base.getScheme();
+        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+            throw rejectBase(base, "must have an http or https scheme");
+        }
+        String host = base.getHost();
+        if (host == null || host.isEmpty()) {
+            throw rejectBase(base, "must include a host");
+        }
+        if (base.getPort() < 0) {
+            throw rejectBase(base, "must include an explicit port (e.g. http://cassandra:9043) so "
+                    + "per-host snapshot addressing can reach each replica's Sidecar");
+        }
+        if (base.getUserInfo() != null) {
+            throw rejectBase(base, "must not carry userinfo/credentials — per-host snapshot "
+                    + "addressing keeps only scheme + port, so any credentials would be silently "
+                    + "dropped from the per-host snapshot PUTs");
+        }
+        String path = base.getPath();
+        boolean nonRootPath = path != null && !path.isEmpty() && !path.equals("/");
+        if (nonRootPath || base.getQuery() != null || base.getFragment() != null) {
+            throw rejectBase(base, "must be a root-path per-node Sidecar base URI (e.g. "
+                    + "http://cassandra:9043); a base with a path/query/fragment (proxied or "
+                    + "non-root) is unsupported");
+        }
+    }
+
+    /**
+     * Build a rejection for an invalid {@code cqlite.sidecar-uri}, naming the property, the
+     * constraint, and the offending URI with any userinfo/credentials redacted so a secret in
+     * the catalog properties never leaks into logs.
+     */
+    private static IllegalArgumentException rejectBase(URI base, String constraint) {
+        return new IllegalArgumentException(
+                "cqlite.sidecar-uri " + constraint + " (hostNetwork DaemonSet contract, see README); got: "
+                        + redactUserInfo(base));
+    }
+
+    /**
+     * Render {@code base} for an error message, replacing any userinfo with {@code ***}.
+     * {@code base.toString()} renders the <b>raw</b> (percent-encoded) form, so the match must
+     * use {@link URI#getRawUserInfo()} rather than the decoded {@link URI#getUserInfo()} —
+     * otherwise encoded credentials (e.g. {@code us%40er:p%23ss}) would fail to match and leak
+     * into the exception message verbatim.
+     */
+    private static String redactUserInfo(URI base) {
+        String rawUserInfo = base.getRawUserInfo();
+        if (rawUserInfo == null) {
+            return base.toString();
+        }
+        return base.toString().replace(rawUserInfo + "@", "***@");
     }
 
     public static CqliteFlightConfig fromMap(Map<String, String> config) {

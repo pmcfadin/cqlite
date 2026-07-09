@@ -138,7 +138,7 @@ Catalog properties (`etc/catalog/cqlite.properties`):
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `cqlite.sidecar-uri` | *(required)* | Cassandra Sidecar base URI for DDL/ring discovery. |
+| `cqlite.sidecar-uri` | *(required)* | Cassandra Sidecar base URI for DDL/ring discovery. In `snapshot` mode this URI's scheme + port are reused to reach every replica host's co-located Sidecar for per-host snapshot creation (issue #2227), so it **must include an explicit port** (e.g. `http://cassandra:9043`). |
 | `cqlite.flight-port` | `8815` | Arrow Flight port on each Cassandra node. |
 | `cqlite.local-datacenter` | *(none)* | Preferred datacenter for split placement. |
 | `cqlite.read-mode` | `snapshot` | `snapshot` (default) reads a consistent, per-query Sidecar snapshot; `live` reads the current data dir (races compaction). See [Read mode](#read-mode-snapshot-vs-live). |
@@ -175,24 +175,44 @@ Both modes only ever see **flushed** SSTables — memtable rows are invisible un
 
 In `snapshot` mode the connector, at **split-planning time** (once per query, per table):
 
-1. Creates a Sidecar snapshot named `cqlite-<queryId>` of the scanned table
+1. Creates a Sidecar snapshot named `cqlite-<queryId>` of the scanned table **on every
+   distinct replica host the query's splits will read**
    (`PUT /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`, with the
-   configured `?ttl=` backstop).
+   configured `?ttl=` backstop). A Sidecar snapshot `PUT` is *instance-local* — it creates
+   the snapshot only on the node fronting that one Sidecar (issue #2227). Since a multi-node
+   scan fans splits across every replica host, the connector must create the snapshot on
+   each host's own Sidecar, or a split routed elsewhere would read a directory that does not
+   exist and fail NotFound.
 2. Names that snapshot in **every** Flight ticket, so all splits read the one immutable
-   file set.
-3. Best-effort **deletes** the snapshot when the query finishes — success or failure —
-   via Trino's `cleanupQuery` hook
+   file set on their host.
+3. Best-effort **deletes** the snapshot on each of those hosts when the query finishes —
+   success or failure — via Trino's `cleanupQuery` hook
    (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`).
+
+**Per-host Sidecar addressing.** The connector only ever queries the configured
+`cqlite.sidecar-uri` (db0) for discovery, but the Cassandra Sidecar runs as a `hostNetwork`
+DaemonSet on **every** db node at the same fixed port. Each replica host's Sidecar URI is
+therefore derived from the configured URI's scheme + port and the split's host address —
+so `cqlite.sidecar-uri` **must include an explicit port** in `snapshot` mode (creation
+fails closed with a clear error otherwise). Because only the scheme + port carry over, the
+base **must be a root-path per-node Sidecar URI** with an `http`/`https` scheme, a host, an
+explicit port, and no userinfo/credentials, path, query, or fragment (e.g.
+`http://cassandra:9043`): any such extra — a proxied or non-root base like
+`https://proxy.example/sidecar`, or embedded credentials — would be silently dropped from the
+per-host snapshot PUTs, so it is rejected at config load rather than surfacing later at first
+snapshot use.
 
 Why per-query rather than a long-lived reusable snapshot: it needs no background reaper,
 each query gets an isolated consistent view, and the queryId makes the name collision-free
 and traceable. The `cqlite.snapshot-ttl` backstop means even a coordinator crash between
 create and cleanup can't leak the snapshot — Cassandra auto-drops it.
 
-**Fail-closed:** if snapshot creation fails in `snapshot` mode, the query **fails** — the
-connector does **not** silently fall back to a live read. Falling back would hand back a
-compaction-racing result the operator explicitly asked to avoid. Switch to
-`cqlite.read-mode=live` to opt into that behavior deliberately.
+**Fail-closed:** if snapshot creation fails on **any** replica host in `snapshot` mode, the
+query **fails** with an actionable error naming the host + snapshot — the connector does
+**not** silently fall back to a live read, nor let a later split hit a bare NotFound on a
+host where the snapshot was never made. Falling back would hand back a compaction-racing
+result the operator explicitly asked to avoid. Switch to `cqlite.read-mode=live` to opt into
+that behavior deliberately.
 
 The Sidecar endpoint paths and HTTP verbs above match apache/cassandra-sidecar
 `ApiEndpointsV1.SNAPSHOTS_ROUTE` (`CreateSnapshotRequest` → `PUT`, `ClearSnapshotRequest`

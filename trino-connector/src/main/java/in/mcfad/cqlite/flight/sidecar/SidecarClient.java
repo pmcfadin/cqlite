@@ -49,6 +49,11 @@ public final class SidecarClient implements SnapshotApi {
                 .build();
     }
 
+    /** The base URI this client resolves requests against (package-visible for tests). */
+    URI base() {
+        return base;
+    }
+
     /** Cluster ring across all keyspaces. */
     public SidecarModels.RingResponse ring() {
         return parseRing(get("/api/v1/cassandra/ring"));
@@ -182,6 +187,12 @@ public final class SidecarClient implements SnapshotApi {
 
         public SidecarException(String message, int statusCode) {
             super(message);
+            this.statusCode = statusCode;
+        }
+
+        /** Preserve the underlying cause (e.g. when re-wrapping a per-host create failure). */
+        public SidecarException(String message, int statusCode, Throwable cause) {
+            super(message, cause);
             this.statusCode = statusCode;
         }
 

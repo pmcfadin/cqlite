@@ -2,6 +2,7 @@ package in.mcfad.cqlite.flight;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import in.mcfad.cqlite.flight.sidecar.HostSnapshotApis;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
 import in.mcfad.cqlite.flight.sidecar.SnapshotApi;
@@ -31,9 +32,9 @@ class ReadModeWiringTest {
             List.of(),
             List.of(new ReplicaInfo("-100", "100", Map.of("dc1", List.of("10.0.0.2:7000")))));
 
-    /** A SnapshotApi that records but succeeds. */
-    private static SnapshotApi noopSidecar() {
-        return new SnapshotApi() {
+    /** A per-host SnapshotApi factory whose creates/clears succeed (no-op). */
+    private static HostSnapshotApis noopSidecar() {
+        return host -> new SnapshotApi() {
             @Override
             public void createSnapshot(String k, String t, String n, Optional<String> ttl) {}
             @Override
@@ -54,7 +55,7 @@ class ReadModeWiringTest {
     @Test
     void snapshotModeNamesSnapshotInTicket() throws Exception {
         SnapshotManager mgr = new SnapshotManager(noopSidecar(), ReadMode.SNAPSHOT, Optional.of("6h"));
-        Optional<String> snapshot = mgr.snapshotFor("q1", "ks", "t");
+        Optional<String> snapshot = mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.2"));
 
         List<CqliteFlightSplit> splits =
                 CqliteFlightSplitManager.buildSplits(TABLE, REPLICAS, "dc1", 8815, snapshot);
@@ -66,7 +67,7 @@ class ReadModeWiringTest {
     @Test
     void liveModeLeavesSnapshotNullInTicket() throws Exception {
         SnapshotManager mgr = new SnapshotManager(noopSidecar(), ReadMode.LIVE, Optional.of("6h"));
-        Optional<String> snapshot = mgr.snapshotFor("q1", "ks", "t");
+        Optional<String> snapshot = mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.2"));
 
         List<CqliteFlightSplit> splits =
                 CqliteFlightSplitManager.buildSplits(TABLE, REPLICAS, "dc1", 8815, snapshot);

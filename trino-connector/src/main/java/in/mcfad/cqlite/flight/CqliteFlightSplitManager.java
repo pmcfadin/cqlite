@@ -10,10 +10,13 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
+import in.mcfad.cqlite.flight.sidecar.HostAddresses;
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
@@ -42,12 +45,17 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             Constraint constraint) {
         CqliteFlightTableHandle handle = (CqliteFlightTableHandle) table;
         TokenRangeReplicasResponse replicas = sidecar.tokenRangeReplicas(handle.keyspace());
-        // Read-mode wiring (issue #2105): in snapshot mode create (once per query) a
-        // Sidecar snapshot and stamp its name into every split's ticket so the whole
-        // scan reads one immutable file set; in live mode this is Optional.empty().
-        // Fails closed — a snapshot-create error propagates and the query fails.
+        // Read-mode wiring (issues #2105, #2227): in snapshot mode create (once per query)
+        // a Sidecar snapshot on EVERY distinct replica host the scan's splits will read —
+        // a snapshot PUT is instance-local, so a snapshot made only on the configured
+        // Sidecar's node leaves splits on other hosts reading a non-existent directory
+        // (NotFound). We stamp the same snapshot name into every split's ticket so the whole
+        // scan reads one immutable file set per host; in live mode this is Optional.empty().
+        // Fails closed — a create error on any host propagates (naming host + snapshot) and
+        // the query fails.
+        Set<String> replicaHosts = distinctReplicaHosts(replicas, config.localDatacenter());
         Optional<String> snapshot =
-                snapshots.snapshotFor(session.getQueryId(), handle.keyspace(), handle.table());
+                snapshots.snapshotFor(session.getQueryId(), handle.keyspace(), handle.table(), replicaHosts);
         List<CqliteFlightSplit> ranges =
                 buildSplits(handle, replicas, config.localDatacenter(), config.flightPort(), snapshot);
 
@@ -126,6 +134,24 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
     }
 
     /**
+     * The distinct set of replica hosts the scan's splits will read — the same
+     * deterministic {@link #pickReplica} choice used by {@link #buildSplits}, one host per
+     * range, deduplicated. Order-preserving (insertion order) so per-host snapshot creation
+     * is stable across re-planning. This is exactly the set of hosts a per-query snapshot
+     * must be created on (issue #2227).
+     */
+    static Set<String> distinctReplicaHosts(TokenRangeReplicasResponse replicas, String localDatacenter) {
+        Set<String> hosts = new LinkedHashSet<>();
+        for (ReplicaInfo range : replicas.readReplicas()) {
+            String replica = pickReplica(range.replicasByDatacenter(), localDatacenter);
+            if (replica != null) {
+                hosts.add(hostOnly(replica));
+            }
+        }
+        return hosts;
+    }
+
+    /**
      * Choose one replica for a range: prefer the local datacenter, else any DC.
      * Selection is deterministic (lexicographically smallest address) so repeated
      * planning yields stable splits.
@@ -144,14 +170,13 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                 .orElse(null);
     }
 
-    /** Strip a trailing {@code :port} from an {@code ip:port} replica address. */
+    /**
+     * Normalize an {@code ip:port} (or bracketed IPv6) replica address to a bare host
+     * literal via the single {@link HostAddresses} authority, so the split's pinned host
+     * and the per-host snapshot URI (issue #2227) agree on the exact host string.
+     */
     static String hostOnly(String address) {
-        int colon = address.lastIndexOf(':');
-        if (colon > 0 && address.indexOf(':') == colon
-                && address.substring(colon + 1).chars().allMatch(Character::isDigit)) {
-            return address.substring(0, colon);
-        }
-        return address; // no port, or IPv6 (left as-is)
+        return HostAddresses.hostOnly(address);
     }
 }
 

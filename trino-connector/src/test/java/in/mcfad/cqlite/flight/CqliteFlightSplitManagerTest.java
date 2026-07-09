@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -101,6 +102,53 @@ class CqliteFlightSplitManagerTest {
         // Live-dir overload: no snapshot on any split.
         var live = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
         live.forEach(s -> assertEquals(java.util.Optional.empty(), s.snapshot()));
+    }
+
+    /**
+     * The snapshot-target host set (issue #2227): every distinct replica a split reads,
+     * deduplicated, using the same deterministic {@link CqliteFlightSplitManager#pickReplica}
+     * choice as {@code buildSplits}. Two ranges pinned to the same host collapse to one host.
+     */
+    @Test
+    void distinctReplicaHostsAreEveryHostSplitsRead() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        range("-100", "0", Map.of("dc1", List.of("10.0.0.3:7000", "10.0.0.2:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("10.0.0.2:7000"))),
+                        range("100", "200", Map.of("dc1", List.of("10.0.0.5:7000")))));
+
+        Set<String> hosts = CqliteFlightSplitManager.distinctReplicaHosts(resp, "dc1");
+
+        // Range 1 → 10.0.0.2 (smallest), range 2 → 10.0.0.2 (dedup), range 3 → 10.0.0.5.
+        assertEquals(Set.of("10.0.0.2", "10.0.0.5"), hosts);
+        // Exactly the hosts the splits are pinned to.
+        var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals(hosts, splits.stream().map(CqliteFlightSplit::host).collect(java.util.stream.Collectors.toSet()));
+    }
+
+    /**
+     * IPv6 replica forms (issue #2227): a bracketed {@code [v6]:port} yields the bare v6
+     * literal for both the split's pinned host and the snapshot-host set, so per-host
+     * snapshot URI construction stays consistent. An unbracketed all-colons literal is
+     * treated as the whole host (no port stripped).
+     */
+    @Test
+    void ipv6ReplicaFormsPinBareHostConsistently() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        range("-100", "0", Map.of("dc1", List.of("[2001:db8::5]:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("2001:db8::9")))));
+
+        var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals("2001:db8::5", splits.get(0).host(), "bracketed IPv6 port stripped to bare literal");
+        assertEquals("2001:db8::9", splits.get(1).host(), "bare IPv6 kept whole");
+
+        // The snapshot-host set is exactly the splits' pinned hosts under these forms.
+        Set<String> hosts = CqliteFlightSplitManager.distinctReplicaHosts(resp, "dc1");
+        assertEquals(Set.of("2001:db8::5", "2001:db8::9"), hosts);
+        assertEquals(hosts, splits.stream().map(CqliteFlightSplit::host).collect(java.util.stream.Collectors.toSet()));
     }
 
     @Test
