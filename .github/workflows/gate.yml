@@ -44,7 +44,7 @@ env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v3
   DATASET_ASSET: cassandra5-small-full-v3.5.tar.gz
-  DATASET_SHA256: c3416c474b49dd532544837c95db2619eac8ff39ffc9691a14c2f73a7b76fa2b
+  DATASET_SHA256: ace8e0e371af8d254c2bc89d7a8e75f11f2552eca0c2a7ba9f0ab1ee3547dad6
 
 jobs:
   gate:

@@ -35,7 +35,7 @@ WF_DIR="$REPO_ROOT/.github/workflows"
 # This MUST match the asset/SHA actually committed across the workflows, or the
 # default next bump is a no-op/false-success. Currently v3.5 (issue #1935).
 OLD_ASSET="cassandra5-small-full-v3.5.tar.gz"
-OLD_SHA="c3416c474b49dd532544837c95db2619eac8ff39ffc9691a14c2f73a7b76fa2b"
+OLD_SHA="ace8e0e371af8d254c2bc89d7a8e75f11f2552eca0c2a7ba9f0ab1ee3547dad6"
 OLD_TAG="datasets-v3"
 
 # Next (to-be-written) pin — bump the asset version and pass the new --new-sha.
