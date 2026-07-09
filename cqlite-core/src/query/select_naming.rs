@@ -135,24 +135,49 @@ pub(crate) fn result_column_name(expr: &SelectExpression, index: usize) -> Strin
 /// CQLite's executor actually emits in `finalize_group`
 /// (`select_executor::aggregation`):
 ///   * `COUNT(*)` / `COUNT(col)` → `bigint` (emitted `Value::BigInt`)
-///   * `SUM(_)` / `AVG(_)`       → `double` (CQLite accumulates every numeric
-///     input into an `f64` and emits `Value::Float`, so the metadata type MUST
-///     be `double` to describe the produced value rather than lie about it)
+///   * `SUM(_)` / `AVG(_)`       → the integral RESULT type Cassandra promotes
+///     the argument to (issue #2202): `int`/`smallint`/`tinyint` → `int`,
+///     `bigint`/`counter` → `bigint`; every other numeric argument — `float`,
+///     `double`, `decimal`, `varint`, or an unknown/unresolved argument — →
+///     `double`. The executor accumulates integrally (i64, Cassandra wrapping)
+///     for the integral cases and in `f64` otherwise, and `finalize_group` emits
+///     the matching `Value` variant, so this metadata type never lies about the
+///     produced value (the #1941 invariant).
 ///   * `MIN(col)` / `MAX(col)`   → the argument column's type (the value is
 ///     cloned through unchanged)
 ///
 /// `arg_type` is the pre-resolved CQL type of the aggregate's argument column
-/// (from the schema); it is consulted ONLY for MIN/MAX. Returns `None` solely
-/// for a MIN/MAX whose argument type is unknown (no schema, or the argument is
-/// not a resolvable column), leaving the caller's existing untyped fallback.
+/// (from the schema); it drives the SUM/AVG promotion above and the MIN/MAX
+/// passthrough. Returns `None` solely for a MIN/MAX whose argument type is
+/// unknown (no schema, or the argument is not a resolvable column), leaving the
+/// caller's existing untyped fallback — SUM/AVG always resolve to a concrete
+/// type (`double` when the argument is unknown).
 pub(crate) fn aggregate_result_cql_type(
     function: &AggregateType,
     arg_type: Option<CqlType>,
 ) -> Option<CqlType> {
     match function {
         AggregateType::Count => Some(CqlType::BigInt),
-        AggregateType::Sum | AggregateType::Avg => Some(CqlType::Double),
+        // Issue #2202: preserve Cassandra's integral SUM/AVG result types instead
+        // of collapsing every numeric input to `double`.
+        AggregateType::Sum | AggregateType::Avg => Some(sum_avg_result_cql_type(arg_type)),
         AggregateType::Min | AggregateType::Max => arg_type,
+    }
+}
+
+/// Cassandra's SUM/AVG result-type promotion (issue #2202): integral argument
+/// types promote to the integral result Cassandra returns (`int`/`smallint`/
+/// `tinyint` → `int`; `bigint`/`counter` → `bigint`), and every other numeric
+/// argument (`float`, `double`, `decimal`, `varint`) — plus an unknown argument
+/// — yields `double`, preserving CQLite's prior float behaviour with no
+/// regression. This is the SINGLE source of truth the executor's accumulator
+/// (`init_aggregate_accumulators`) also consults, so the emitted value variant
+/// and the result metadata type can never disagree.
+pub(crate) fn sum_avg_result_cql_type(arg_type: Option<CqlType>) -> CqlType {
+    match arg_type {
+        Some(CqlType::TinyInt | CqlType::SmallInt | CqlType::Int) => CqlType::Int,
+        Some(CqlType::BigInt | CqlType::Counter) => CqlType::BigInt,
+        _ => CqlType::Double,
     }
 }
 
@@ -266,10 +291,12 @@ mod tests {
         assert!(aggregate_arg_source_columns(&col("value")).is_empty());
     }
 
-    /// Issue #1941: aggregate result type comes from the function (+ argument
-    /// type for MIN/MAX), never a name lookup. COUNT → bigint; SUM/AVG → double
-    /// (CQLite emits `Value::Float`); MIN/MAX preserve the argument type and are
-    /// the ONLY variants that return `None` when the argument type is unknown.
+    /// Issue #1941/#2202: aggregate result type comes from the function (+
+    /// argument type), never a name lookup. COUNT → bigint; SUM/AVG promote the
+    /// integral argument to Cassandra's integral result (int/smallint/tinyint →
+    /// int, bigint/counter → bigint) and fall back to double for float/double/
+    /// unknown; MIN/MAX preserve the argument type and are the ONLY variants that
+    /// return `None` when the argument type is unknown.
     #[test]
     fn aggregate_result_cql_type_derives_from_function_and_argument() {
         assert_eq!(
@@ -277,13 +304,53 @@ mod tests {
             Some(CqlType::BigInt),
             "COUNT is bigint regardless of any argument type"
         );
+        // Issue #2202: SUM/AVG preserve Cassandra's integral result types.
         assert_eq!(
             aggregate_result_cql_type(&AggregateType::Sum, Some(CqlType::Int)),
-            Some(CqlType::Double)
+            Some(CqlType::Int),
+            "SUM(int) is int"
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Sum, Some(CqlType::BigInt)),
+            Some(CqlType::BigInt),
+            "SUM(bigint) is bigint"
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Sum, Some(CqlType::SmallInt)),
+            Some(CqlType::Int),
+            "SUM(smallint) promotes to int"
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Sum, Some(CqlType::TinyInt)),
+            Some(CqlType::Int),
+            "SUM(tinyint) promotes to int"
         );
         assert_eq!(
             aggregate_result_cql_type(&AggregateType::Avg, Some(CqlType::Int)),
-            Some(CqlType::Double)
+            Some(CqlType::Int),
+            "AVG(int) is int"
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Avg, Some(CqlType::BigInt)),
+            Some(CqlType::BigInt),
+            "AVG(bigint) is bigint"
+        );
+        // Float/double inputs still return double (no regression).
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Sum, Some(CqlType::Double)),
+            Some(CqlType::Double),
+            "SUM(double) stays double"
+        );
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Avg, Some(CqlType::Float)),
+            Some(CqlType::Double),
+            "AVG(float) is double (no regression)"
+        );
+        // Unknown SUM/AVG argument → double (never None, unlike MIN/MAX).
+        assert_eq!(
+            aggregate_result_cql_type(&AggregateType::Sum, None),
+            Some(CqlType::Double),
+            "SUM with unknown argument falls back to double"
         );
         assert_eq!(
             aggregate_result_cql_type(&AggregateType::Min, Some(CqlType::Int)),
