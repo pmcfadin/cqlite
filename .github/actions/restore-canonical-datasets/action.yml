@@ -9,11 +9,11 @@ inputs:
   dataset-asset:
     description: Canonical dataset tarball asset name.
     required: false
-    default: cassandra5-small-full-v3.4.tar.gz
+    default: cassandra5-small-full-v3.5.tar.gz
   dataset-sha256:
     description: Expected SHA256 digest for the canonical dataset asset.
     required: false
-    default: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
+    default: 13d8da00743d9780c7ee89478649c280f9d91519a4561f6909cc4ce3bb7a3631
   dataset-root:
     description: Directory where the canonical dataset should be present.
     required: false
