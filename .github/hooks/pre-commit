@@ -66,12 +66,12 @@ run_clippy() {
     if [ -d "$dir" ]; then
         cd "$dir"
         
+        # Align with CI (RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
+        # --all-features). Root Cargo.toml sets pedantic/nursery/cargo = "allow"; do NOT
+        # re-deny them here.
         if ! cargo clippy --all-targets --all-features -- \
             -D warnings \
             -D clippy::all \
-            -D clippy::pedantic \
-            -D clippy::nursery \
-            -D clippy::cargo \
             -D unused-imports \
             -D unused-variables \
             -D dead-code \
@@ -127,8 +127,10 @@ ORIGINAL_DIR=$(pwd)
 # Track failures
 FAILED=0
 
-# Check all workspace members
-WORKSPACE_MEMBERS=("cqlite-core" "cqlite-cli" "testing-framework" "tests")
+# Top-level workspace member crates to check (see root Cargo.toml [workspace].members;
+# nested/glob members bindings/*, tests/format-compatibility, examples, tools/* are omitted
+# from this simple cd-by-dir loop).
+WORKSPACE_MEMBERS=("cqlite-core" "cqlite-cli" "cqlite-flight" "tests")
 
 echo -e "${BLUE}=== Dead Code Detection ===${NC}"
 for member in "${WORKSPACE_MEMBERS[@]}"; do

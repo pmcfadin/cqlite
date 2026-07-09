@@ -208,10 +208,12 @@ Without Data.db files, query tests pass but return 0 rows. Dataset pins:
 
 ## Feature Flags
 
-Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_machine`.
-Non-default: `cli-helpers` (#249), `parquet` (#682), `delta-scan` / `delta-export` (#696/#705),
-`legacy-heuristics` (opt-in pre-5.0 heuristic fallbacks, #28), `metrics`, `experimental` (bloom-filter
-tests + unimplemented write stubs). Build recipes: `docs/development/dev-cookbook.md`.
+Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_machine`,
+`write-support` (#558). Non-default: `cli-helpers` (#249), `parquet` (#682), `delta-scan` /
+`delta-export` (#696/#705), `legacy-heuristics` (opt-in pre-5.0 heuristic fallbacks, #28), `metrics`,
+`experimental` (gates `Database::flush()`/`compact()`, the INSERT executor path, the schema JSON
+exporter, bloom-filter tests (#65), and the unimplemented `Storage::put`/`delete` stubs (#175)). Build
+recipes: `docs/development/dev-cookbook.md`.
 
 ## Troubleshooting
 
