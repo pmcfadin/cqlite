@@ -115,6 +115,14 @@ mod streaming;
 #[cfg(feature = "write-support")]
 pub(crate) use streaming::{StreamingMerger, StreamingStep};
 
+/// Schema-aware heap-direct ordering proof (issue #1668, stage 5b) — proves
+/// cross-group emission order can be correct straight off a heap, with NO
+/// whole-partition `merged.sort_by` afterward. NOT yet wired into
+/// `KWayMerger.heap` itself (stage 5c/5d's job); see
+/// [`schema_order::schema_ordered_pop_all`].
+#[cfg(feature = "write-support")]
+mod schema_order;
+
 /// Adapt a merge-path [`CellData`] into the shared [`ReconcileCell`] view
 /// (issue #947) so per-cell winner resolution calls
 /// [`reconcile_rules::cell_wins`] — the one shared `Cells#reconcile` tie-break —
