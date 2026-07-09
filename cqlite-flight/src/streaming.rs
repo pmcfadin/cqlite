@@ -184,9 +184,19 @@ where
 {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(())) => {}
+        Ok(Err(ProducerError::Cancelled)) => {
+            // Do NOT forward a terminal `Cancelled` (issue #2264): cancellation
+            // means the client/receiver is already departing, so a `Cancelled`
+            // status has no value to deliver — and a bare, cancel-unaware
+            // `blocking_send` of it would park forever if this send raced ahead of
+            // the receiver's drop. Skipping it here makes liveness EXPLICIT rather
+            // than resting on `MeteredDoGetStream`'s implicit field-drop order (rx
+            // before guard), which a future field reorder could silently break.
+        }
         Ok(Err(e)) => {
-            // Forward a terminal error to the client (matches delta_scan error
-            // forwarding). Ignored if the receiver is already gone (client left).
+            // Forward a genuine terminal error to the client (matches delta_scan
+            // error forwarding). This applies normal bounded backpressure and
+            // resolves on read/disconnect; ignored if the receiver is already gone.
             let _ = tx.blocking_send(Err(e));
         }
         Err(payload) => {
