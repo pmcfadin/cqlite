@@ -146,7 +146,7 @@ layout, binding structure trees):
 
 ### No-heuristics mandate (issue #28)
 Authoritative metadata only — schema, else `Statistics.db`. No type guessing. Schema-aware decoding
-when schema present. Legacy heuristics live only behind the opt-in `experimental` feature flag.
+when schema present. Legacy heuristics live only behind the opt-in `legacy-heuristics` feature flag.
 Doctrine: [no-heuristics](https://pmcfadin.github.io/cqlite/agents-developing/no-heuristics/).
 
 ### Supported formats (version floor)
@@ -210,7 +210,8 @@ Without Data.db files, query tests pass but return 0 rows. Dataset pins:
 
 Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_machine`.
 Non-default: `cli-helpers` (#249), `parquet` (#682), `delta-scan` / `delta-export` (#696/#705),
-`metrics`, `experimental`. Build recipes: `docs/development/dev-cookbook.md`.
+`legacy-heuristics` (opt-in pre-5.0 heuristic fallbacks, #28), `metrics`, `experimental` (bloom-filter
+tests + unimplemented write stubs). Build recipes: `docs/development/dev-cookbook.md`.
 
 ## Troubleshooting
 
