@@ -31,25 +31,51 @@
 //! against the heap (not assumed) by the `heap_groups_contiguously_by_ord`
 //! test below.
 //!
-//! **Residual finding (documented, NOT fixed in this stage):** `ClusteringKey`'s
-//! fallback `Ord` (`mutation.rs`) is NOT schema-aware — it does not apply
-//! `DESC` clustering-column reversal, and treats an absent trailing component
-//! by zip-stopping rather than Cassandra's NULL-first rule (contrast
-//! `ClusteringKey::compare`, which IS schema-aware and DOES apply both). So
-//! while GROUPING (same-key contiguity, proven above) is safe to stream on,
-//! the ORDER in which DISTINCT clustering-key groups are emitted from the
-//! heap can diverge from the schema's true collation for `DESC` clustering
-//! columns or absent trailing components. Today's whole-partition path masks
-//! this with an explicit `merged.sort_by(schema-aware compare)` AFTER
-//! collecting every cluster in a partition (`merge_partition_rows`). A future
-//! stage that wires a true (non-buffering) streaming second pass to a real
-//! writer must either (a) make the heap comparator schema-aware, or (b)
-//! re-sort the emitted group sequence before/while writing. `step_streaming`
-//! below does not need to solve this: it drains an ALREADY schema-sorted
-//! `Vec<MergeEntry>` (the same one `step()` returns), so its own output order
-//! is byte-identical to `step()`'s regardless of this residual — but the
-//! residual applies to any FUTURE streaming pass that walks the heap directly
-//! without that final sort (stage 3+ design point, not resolved here).
+//! ## Cross-group emission order — resolved for THIS design (issue #1668, stage 3a)
+//!
+//! Stage 2 flagged a residual: `ClusteringKey`'s fallback `Ord`
+//! (`mutation.rs`) is NOT schema-aware — no `DESC` reversal, and an absent
+//! trailing component is handled by zip-stopping + a length tiebreak rather
+//! than Cassandra's explicit NULL-first rule (contrast the schema-aware
+//! `ClusteringKey::compare`). Stage 3a's blast-radius audit + new tests below
+//! resolve whether this is safe to wire a real consumer onto:
+//!
+//! **Blast radius**: `MergeEntry::Ord`/`PartialOrd` (the fallback comparator)
+//! has exactly ONE production consumer in the whole crate — `KWayMerger`'s
+//! `heap: BinaryHeap<Reverse<MergeEntry>>` (routing only, in `mod.rs`). No
+//! other file constructs a `BinaryHeap<Reverse<MergeEntry>>` or otherwise
+//! depends on `MergeEntry::Ord`'s specific clustering semantics; the one
+//! direct-heap unit test (`mod.rs::test_merge_entry_min_heap`) only exercises
+//! token ordering (`clustering_key: None` throughout), so it is untouched by
+//! clustering-comparator semantics either way. Changing `MergeEntry::Ord`
+//! globally would therefore be LOW risk in isolation — but it is UNNECESSARY:
+//!
+//! **Why no Ord change is needed for THIS design**: `step_streaming` (below)
+//! never consumes heap-pop order for cross-group sequencing. It drains the
+//! `Vec<MergeEntry>` `KWayMerger::step()` already returns, and `step()`
+//! (via `merge_partition_rows`) already applies an explicit
+//! `merged.sort_by(|a, b| ck_a.compare(ck_b, &self.schema) ...)` — the
+//! SCHEMA-AWARE comparator — as its LAST step, unconditionally, regardless of
+//! what order the heap or the `clustered_rows: BTreeMap` (also fallback-Ord-
+//! keyed) produced internally. So `step()`'s returned order is ALREADY
+//! schema-correct today, and `step_streaming` inherits that correctness
+//! unchanged. `step_streaming_matches_step_for_desc_clustering_fixture` and
+//! `step_streaming_matches_step_for_absent_trailing_component_fixture` below
+//! prove this directly: both assert the emitted clustering-key SEQUENCE
+//! (independently, not just old-path-equals-new-path) against the
+//! Cassandra-correct expected order for a `DESC` column and for an
+//! absent-trailing-component (NULL-first) case — neither the fallback Ord's
+//! ordering, proving the divergence does NOT leak through this design.
+//!
+//! **Residual still applies to a DIFFERENT, NOT-YET-BUILT design**: a FUTURE
+//! stage-5 rewrite that removes `merge_partition_rows`'s whole-partition
+//! buffer-then-sort and instead emits groups directly off the heap (true
+//! streaming, no per-partition buffer) would lose that final sort and must
+//! independently solve cross-group ordering then — either by making the heap
+//! comparator schema-aware (cheap: one production call site, per the blast-
+//! radius finding above) or by a small local re-sort at group boundaries.
+//! Flagged for that stage's design, not resolved here, because it does not
+//! yet exist.
 //!
 //! `step_streaming` does NOT yet avoid whole-partition buffering: it calls
 //! the unchanged [`KWayMerger::step`] (which still buffers a whole partition
@@ -256,6 +282,61 @@ mod tests {
         }
     }
 
+    /// A two-clustering-column schema (`ck1` ASC, `ck2` DESC) for the
+    /// absent-trailing-component (NULL-first) test (issue #1668, stage 3a).
+    fn two_col_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "ks_1668".to_string(),
+            table: "t_1668_multi".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![
+                ClusteringColumn {
+                    name: "ck1".to_string(),
+                    data_type: "int".to_string(),
+                    position: 0,
+                    order: ClusteringOrder::Asc,
+                },
+                ClusteringColumn {
+                    name: "ck2".to_string(),
+                    data_type: "int".to_string(),
+                    position: 1,
+                    order: ClusteringOrder::Desc,
+                },
+            ],
+            columns: vec![],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    /// Build a `ClusteringKey` from `(column, value)` pairs — may carry FEWER
+    /// components than the schema declares, modeling an absent trailing
+    /// component.
+    fn ck_multi(pairs: &[(&str, i32)]) -> ClusteringKey {
+        ClusteringKey::new(
+            pairs
+                .iter()
+                .map(|(n, v)| (n.to_string(), Value::Integer(*v)))
+                .collect(),
+        )
+    }
+
+    fn live_entry_ck(run_index: usize, token: i64, ck: ClusteringKey, ts: i64) -> MergeEntry {
+        MergeEntry::new(
+            run_index,
+            key(token),
+            Some(ck),
+            ts,
+            RowData::Live {
+                cells: vec![CellData::new("c".to_string(), Value::Integer(1), ts)],
+            },
+        )
+    }
+
     /// Test-only `SSTableRowIterator` over a pre-supplied `Vec<MergeEntry>`,
     /// mirroring the `VecIterator` pattern already used by `mod.rs`'s own
     /// merge unit tests (kept local here so `streaming.rs`'s tests need no
@@ -448,6 +529,100 @@ mod tests {
         let new_rows = drain_streaming(&mut new_merger);
 
         assert_eq!(old_rows, new_rows);
+    }
+
+    /// Extract the single-column `ck` value from a `MergeEntry` produced by
+    /// `live_entry`, for order-assertion readability.
+    fn ck_value(entry: &MergeEntry) -> i32 {
+        match entry
+            .clustering_key
+            .as_ref()
+            .and_then(|k| k.columns.first())
+        {
+            Some((_, Value::Integer(v))) => *v,
+            other => panic!("expected a single Integer clustering column, got {other:?}"),
+        }
+    }
+
+    /// Stage 3a correctness test: a `DESC` clustering column. The heap's
+    /// fallback `Ord` would (if consulted directly, uncorrected) pop these in
+    /// ASCENDING order (0, 1, 2) since it never applies `DESC` reversal — the
+    /// Cassandra-correct order is DESCENDING (2, 1, 0). Assert BOTH `step()`
+    /// and `step_streaming()` emit the CORRECT descending order — an
+    /// independent check against the expected sequence, not just
+    /// old-path-equals-new-path (which would pass even if both were equally
+    /// wrong).
+    #[test]
+    fn step_streaming_matches_step_for_desc_clustering_fixture() {
+        let schema = test_schema(ClusteringOrder::Desc);
+        let entries = vec![
+            live_entry(0, 1, 0, 100),
+            live_entry(0, 1, 1, 100),
+            live_entry(0, 1, 2, 100),
+        ];
+        let expected_order = [2, 1, 0];
+
+        let mut old_merger = merger_over(entries.clone(), schema.clone());
+        let old_rows = drain_whole_partition(&mut old_merger);
+        let old_order: Vec<i32> = old_rows.iter().map(ck_value).collect();
+        assert_eq!(
+            old_order, expected_order,
+            "step() must emit DESC clustering order"
+        );
+
+        let mut new_merger = merger_over(entries, schema);
+        let new_rows = drain_streaming(&mut new_merger);
+        let new_order: Vec<i32> = new_rows.iter().map(ck_value).collect();
+        assert_eq!(
+            new_order, expected_order,
+            "step_streaming() must ALSO emit DESC clustering order, matching step()"
+        );
+    }
+
+    /// Stage 3a correctness test: absent trailing clustering component
+    /// (Cassandra NULL-first rule) combined with a `DESC` second column.
+    /// Schema-aware order: the absent-`ck2` row sorts FIRST (NULL always
+    /// sorts first, regardless of `ck2`'s `DESC`-ness), then among the two
+    /// present-`ck2` rows the LARGER value sorts first (`DESC` reversal).
+    /// Expected sequence: `[absent, ck2=2, ck2=1]`.
+    #[test]
+    fn step_streaming_matches_step_for_absent_trailing_component_fixture() {
+        let schema = two_col_schema();
+        let entries = vec![
+            live_entry_ck(0, 1, ck_multi(&[("ck1", 5), ("ck2", 1)]), 100),
+            live_entry_ck(0, 1, ck_multi(&[("ck1", 5)]), 100), // absent ck2
+            live_entry_ck(0, 1, ck_multi(&[("ck1", 5), ("ck2", 2)]), 100),
+        ];
+
+        // Independent expectation: identify each row by its ck2 presence/value.
+        fn ck2_marker(entry: &MergeEntry) -> Option<i32> {
+            entry.clustering_key.as_ref().and_then(|k| {
+                k.columns
+                    .iter()
+                    .find(|(name, _)| name == "ck2")
+                    .map(|(_, v)| match v {
+                        Value::Integer(v) => *v,
+                        other => panic!("expected Integer ck2, got {other:?}"),
+                    })
+            })
+        }
+        let expected_order = [None, Some(2), Some(1)];
+
+        let mut old_merger = merger_over(entries.clone(), schema.clone());
+        let old_rows = drain_whole_partition(&mut old_merger);
+        let old_order: Vec<Option<i32>> = old_rows.iter().map(ck2_marker).collect();
+        assert_eq!(
+            old_order, expected_order,
+            "step() must put the absent-ck2 row first (NULL-first), then DESC by ck2"
+        );
+
+        let mut new_merger = merger_over(entries, schema);
+        let new_rows = drain_streaming(&mut new_merger);
+        let new_order: Vec<Option<i32>> = new_rows.iter().map(ck2_marker).collect();
+        assert_eq!(
+            new_order, expected_order,
+            "step_streaming() must ALSO put the absent-ck2 row first, then DESC by ck2"
+        );
     }
 
     /// A range-tombstone carrier round-trips through the streaming path as a
