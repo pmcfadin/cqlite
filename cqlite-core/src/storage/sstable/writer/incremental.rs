@@ -30,13 +30,15 @@
 //! result (offset/blocks/emit — plain owned values, no borrow) out from the
 //! remaining bookkeeping is exactly what makes this composable.
 
-use super::data_writer::IncrementalPartitionWriter;
+use super::data_writer::{IncrementalPartitionWriter, StaticMergedOp, StreamingPartitionSession};
 use super::stats_fold;
 use super::{PromotedIndexBlock, SSTableWriter, StatisticsMetadata};
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
 use crate::storage::sstable::writer::data_writer::PartitionEmitCounts;
-use crate::storage::write_engine::mutation::{DecoratedKey, PartitionTombstone, RangeTombstone};
+use crate::storage::write_engine::mutation::{
+    DecoratedKey, Mutation, PartitionTombstone, RangeTombstone,
+};
 
 impl SSTableWriter {
     /// This writer's OWN schema (issue #1668, stage 5c-iv part 2) — the
@@ -183,5 +185,90 @@ impl SSTableWriter {
         crate::observability::add_counter(crate::observability::catalog::WRITE_PARTITIONS, 1, &[]);
 
         Ok(())
+    }
+
+    /// Begin a CROSS-CALL RESUMABLE incremental partition write (issue
+    /// #1668, stage 5c-iv part 3) — for a caller that must be able to
+    /// return control to an outer scheduler mid-partition and resume later
+    /// (`WriteEngine::maintenance_step`'s budget-driven pause/resume, stage
+    /// 4), unlike [`Self::begin_partition_incremental`]'s session, which
+    /// borrows `self` for its whole lifetime and therefore cannot survive a
+    /// function return.
+    ///
+    /// Same pre-work and the same pre-seeded-baselines precondition as
+    /// [`Self::begin_partition_incremental`] — see its doc for the
+    /// rationale, which applies unchanged here.
+    pub(crate) fn begin_streaming_partition(
+        &mut self,
+        key: &DecoratedKey,
+        partition_tombstone: Option<&PartitionTombstone>,
+        range_tombstones: &[RangeTombstone],
+    ) -> Result<StreamingPartitionSession> {
+        debug_assert!(
+            self.baselines_locked,
+            "begin_streaming_partition requires pre-seeded encoding baselines \
+             (call pre_seed_encoding_baselines before streaming partitions) — \
+             see begin_partition_incremental's precondition doc, issue #1668"
+        );
+        if let Some(last_token) = self.last_token {
+            if key.token <= last_token {
+                return Err(Error::InvalidInput(format!(
+                    "Partitions must be written in token order: got token {} after {}",
+                    key.token, last_token
+                )));
+            }
+        }
+        self.last_token = Some(key.token);
+        self.stats.update_key_range(&key.key);
+
+        self.data_writer.begin_streaming_partition(
+            key,
+            partition_tombstone,
+            range_tombstones,
+            &self.schema,
+        )
+    }
+
+    /// Feed one clustering row into a [`StreamingPartitionSession`] (issue
+    /// #1668, stage 5c-iv part 3). Borrows `self.data_writer` for just this
+    /// one call — unlike [`IncrementalPartitionWriter`], `session` itself
+    /// never holds a borrow of `self`, so it can be stored (e.g. on
+    /// `ActiveMerge`) and fed across as many separate calls as needed.
+    pub(crate) fn feed_streaming_row(
+        &mut self,
+        session: &mut StreamingPartitionSession,
+        mutation: &Mutation,
+    ) -> Result<()> {
+        session.feed_row(&mut self.data_writer, mutation, &self.schema)
+    }
+
+    /// Feed the static-row prelude into a [`StreamingPartitionSession`]
+    /// (issue #1668, stage 5c-iv part 3) — called at most once, before any
+    /// [`Self::feed_streaming_row`] call for the same session.
+    pub(crate) fn feed_streaming_static_row(
+        &mut self,
+        session: &mut StreamingPartitionSession,
+        merged: &[StaticMergedOp],
+        first_mutation_ts: i64,
+    ) -> Result<()> {
+        session.feed_static_row(
+            &mut self.data_writer,
+            merged,
+            first_mutation_ts,
+            &self.schema,
+        )
+    }
+
+    /// Finalize a [`StreamingPartitionSession`] (issue #1668, stage 5c-iv
+    /// part 3) — returns the same `(offset, blocks, emit)` shape
+    /// [`IncrementalPartitionWriter::finish`] does; the caller must still
+    /// call [`Self::complete_partition_incremental`] with the result (that
+    /// method is shared by both sessions — it only needs the returned
+    /// values, not the session type).
+    pub(crate) fn finish_streaming_partition(
+        &mut self,
+        session: StreamingPartitionSession,
+    ) -> Result<(u64, Vec<PromotedIndexBlock>, PartitionEmitCounts)> {
+        session.finish(&mut self.data_writer, &self.schema)
     }
 }

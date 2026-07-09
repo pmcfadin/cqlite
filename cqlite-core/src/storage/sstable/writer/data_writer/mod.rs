@@ -224,6 +224,10 @@ mod schema_helpers;
 /// 5c-ii). See [`static_ops::StaticOpsTracker`].
 mod static_ops;
 mod static_rows;
+/// Cross-call resumable incremental partition-write session (issue #1668,
+/// stage 5c-iv part 3). See
+/// [`streaming_partition::StreamingPartitionSession`].
+mod streaming_partition;
 mod types;
 mod udt_canon;
 
@@ -248,6 +252,7 @@ pub(crate) use index_prefix::*;
 pub(crate) use partition::PartitionItem;
 pub(crate) use schema_helpers::*;
 pub(crate) use static_ops::StaticOpsTracker;
+pub(crate) use streaming_partition::StreamingPartitionSession;
 pub(crate) use types::*;
 pub(crate) use udt_canon::{canonicalize_static_value, canonicalize_udt_value};
 
