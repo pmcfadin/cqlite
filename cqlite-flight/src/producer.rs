@@ -611,6 +611,12 @@ impl MergeProducer {
             return Err(ProducerError::Cancelled);
         }
 
+        // Empty input: no SSTables to inspect, so skip all setup. As with
+        // the pre-hoist per-file loop, an empty list built no runtime at all.
+        if paths.is_empty() {
+            return Ok(paths);
+        }
+
         let total = paths.len();
         let mut kept: Vec<PathBuf> = Vec::with_capacity(total);
 
@@ -2109,6 +2115,21 @@ mod tests {
                 "reused-runtime span must equal per-file-runtime span"
             );
         }
+    }
+
+    /// (f) Issue #2240: a token-filtered prune of an EMPTY path list returns
+    /// empty and does zero setup — the empty guard short-circuits before any
+    /// `PruneRuntime` (tokio runtime + Platform) is constructed.
+    #[test]
+    fn prune_empty_paths_returns_empty_without_setup() {
+        let schema = simple_schema();
+        // A token filter is present, so the prune does NOT take the no-token
+        // early return — it reaches the empty guard.
+        let spec = spec_with_token(i64::MIN, i64::MAX);
+        assert!(spec.token.is_some(), "token filter must be set");
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let kept = producer.prune_paths(Vec::new()).unwrap();
+        assert!(kept.is_empty(), "empty input prunes to empty");
     }
 
     // ---- Issue #834: nested predicate pushdown (OR/NOT/IS NULL) ----
