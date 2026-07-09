@@ -78,19 +78,36 @@ INIT_SCRIPT='set -eu; mkdir -p /tmp/build; cp /workspace/build.gradle.kts /works
 # existing JAVA_TOOL_OPTIONS value wholesale — it is NOT additive at the k8s
 # env level. The trino kit (or the operator) may already set JAVA_TOOL_OPTIONS
 # for other reasons, so we must NOT clobber it. compute_java_tool_options()
-# therefore reads the container's current JAVA_TOOL_OPTIONS from the live
-# Deployment and appends our flag only when it is absent, preserving any
+# therefore reads the container's current LITERAL JAVA_TOOL_OPTIONS value from
+# the live Deployment and appends our flag only when it is absent, preserving any
 # existing value and never duplicating on re-run (idempotent). Applied to
-# coordinator AND worker alike (see patch_deployment). The connector also fails
-# fast at catalog load if the flag is somehow still absent
-# (ArrowMemoryPreflight, #2290).
+# coordinator AND worker alike (see patch_deployment).
+#
+# The operator may instead source JAVA_TOOL_OPTIONS INDIRECTLY — via `valueFrom`
+# on that env var, or via a container `envFrom` (ConfigMap/Secret ref). A literal
+# `value:` patch would silently drop that sourced value, so we do NOT overwrite
+# it: java_tool_options_sourced() detects the indirect case per-container and
+# patch_deployment then WARNS loudly and SKIPS the literal env patch for that
+# container (leaving the operator's sourced value intact), applying only the
+# volumes/initContainer/volumeMount. The connector also fails fast at catalog
+# load if the flag is somehow still absent (ArrowMemoryPreflight, #2290) — that
+# probe is the backstop for the skipped/indirect case.
 ARROW_ADD_OPENS='--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED'
 
-# Compute the JAVA_TOOL_OPTIONS value to set on ${dep}'s container: read the
-# container's current value from the live Deployment spec and append
-# ARROW_ADD_OPENS only if the flag isn't already present. Preserves any
+# Compute the literal JAVA_TOOL_OPTIONS value to set on ${dep}'s container: read
+# the container's current literal `env[].value` from the live Deployment spec and
+# append ARROW_ADD_OPENS only if the flag isn't already present. Preserves any
 # pre-existing value; idempotent (a value that already carries the flag is
 # returned unchanged, so the subsequent strategic-merge patch is a no-op).
+#
+# NOTE: this only handles a LITERAL `env[].value`. If JAVA_TOOL_OPTIONS is
+# instead sourced indirectly — via `valueFrom` on that env var, or via any
+# `envFrom` on the container (ConfigMap/Secret ref) — the literal value read
+# here is empty, and blindly writing a literal `value:` would CLOBBER the
+# operator's sourced JVM options. That case is detected separately by
+# java_tool_options_sourced() and handled in patch_deployment (warn + skip the
+# literal env patch), so this function is only ever consulted for the literal
+# path.
 compute_java_tool_options() {
   local dep="$1"
   local existing
@@ -105,6 +122,28 @@ compute_java_tool_options() {
   else
     printf '%s %s' "${existing}" "${ARROW_ADD_OPENS}"
   fi
+}
+
+# Detect whether ${dep}'s container gets JAVA_TOOL_OPTIONS from an INDIRECT
+# source we must not overwrite: either a `valueFrom` on the JAVA_TOOL_OPTIONS env
+# entry, or any `envFrom` (ConfigMap/Secret ref) on the container that could
+# supply it. Returns 0 (true) when sourced indirectly, 1 otherwise. In the true
+# case patch_deployment SKIPS the literal env patch and warns loudly, so the
+# operator's sourced value is left intact (the ArrowMemoryPreflight fail-fast
+# probe remains the backstop for a genuinely-missing flag).
+java_tool_options_sourced() {
+  local dep="$1"
+  local spec
+  spec=$(kubectl get deployment "${dep}" --namespace default -o json 2>/dev/null || true)
+  if [ -z "${spec}" ]; then
+    return 1
+  fi
+  printf '%s' "${spec}" | jq -e --arg c "${dep}" '
+    [ .spec.template.spec.containers[] | select(.name==$c) | (
+        (((.env // []) | map(select(.name=="JAVA_TOOL_OPTIONS")) | any(has("valueFrom"))))
+        or (((.envFrom // []) | length) > 0)
+    ) ] | any
+  ' >/dev/null 2>&1
 }
 
 # Issue #2120: create/refresh the ConfigMap the initContainer mounts BEFORE
@@ -168,8 +207,28 @@ patch_deployment() {
   fi
 
   echo "  - patching deployment/${dep} (container: ${dep})..."
-  local java_tool_options
-  java_tool_options=$(compute_java_tool_options "${dep}")
+  # Decide how to handle JAVA_TOOL_OPTIONS. If the operator sources it indirectly
+  # (valueFrom / envFrom), a literal `value:` in our strategic-merge patch would
+  # silently drop their JVM options — so in that case we WARN and omit the env
+  # entry entirely from the patch (leaving the sourced value intact), applying
+  # only the volumes/initContainer/volumeMount. Otherwise we set the literal
+  # append-if-absent value as before.
+  local inject_env="true"
+  local java_tool_options=""
+  if java_tool_options_sourced "${dep}"; then
+    inject_env="false"
+    echo "  ! WARNING: container '${dep}' sources JAVA_TOOL_OPTIONS indirectly" >&2
+    echo "    (via valueFrom and/or envFrom). NOT auto-injecting the Arrow" >&2
+    echo "    '${ARROW_ADD_OPENS}'" >&2
+    echo "    flag, because writing a literal env value would clobber the" >&2
+    echo "    operator's sourced JVM options. ACTION REQUIRED: add" >&2
+    echo "    '${ARROW_ADD_OPENS}'" >&2
+    echo "    to that JAVA_TOOL_OPTIONS source (the referenced ConfigMap/Secret)" >&2
+    echo "    yourself. The connector's ArrowMemoryPreflight probe (#2290) will" >&2
+    echo "    fail fast at catalog load if the flag is genuinely missing." >&2
+  else
+    java_tool_options=$(compute_java_tool_options "${dep}")
+  fi
   local patch
   patch=$(jq -n \
     --arg cm "${CONFIGMAP_NAME}" \
@@ -178,6 +237,7 @@ patch_deployment() {
     --arg container "${dep}" \
     --arg script "${INIT_SCRIPT}" \
     --arg javatooloptions "${java_tool_options}" \
+    --argjson injectenv "${inject_env}" \
     '{spec:{template:{spec:{
       volumes: [
         {name:"cqlite-plugin-src", configMap:{name:$cm}},
@@ -196,21 +256,23 @@ patch_deployment() {
         }
       ],
       containers: [
+        (
         {
           name:$container,
-          # JAVA_TOOL_OPTIONS carrying the Arrow add-opens flag (#2193/#2290),
-          # computed by compute_java_tool_options as <existing> + our flag (or
-          # <existing> unchanged if already present). A strategic-merge env entry
-          # keyed by name REPLACES the whole value, so we must supply the full
-          # append-if-absent result here — that keeps it idempotent and never
-          # clobbers a pre-existing JAVA_TOOL_OPTIONS.
-          env: [
-            {name:"JAVA_TOOL_OPTIONS", value:$javatooloptions}
-          ],
           volumeMounts: [
             {name:"cqlite-plugin-dir", mountPath:$mount, readOnly:true}
           ]
         }
+        # JAVA_TOOL_OPTIONS carrying the Arrow add-opens flag (#2193/#2290),
+        # computed by compute_java_tool_options as <existing> + our flag (or
+        # <existing> unchanged if already present). A strategic-merge env entry
+        # keyed by name REPLACES the whole value, so we supply the full
+        # append-if-absent result here — idempotent and never clobbers a
+        # pre-existing LITERAL JAVA_TOOL_OPTIONS. Omitted entirely when the value
+        # is sourced via valueFrom/envFrom ($injectenv=false), so we never
+        # overwrite an indirectly-sourced value with a literal.
+        + (if $injectenv then {env:[{name:"JAVA_TOOL_OPTIONS", value:$javatooloptions}]} else {} end)
+        )
       ]
     }}}}')
   local patch_output
