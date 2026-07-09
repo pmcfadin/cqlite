@@ -155,6 +155,29 @@ class CqliteFlightSplitManagerTest {
 
     private static final Map<String, List<String>> DC1 = Map.of("dc1", List.of("10.0.0.1:7000"));
     private static final String MIN = Long.toString(Long.MIN_VALUE);
+    private static final String MAX = Long.toString(Long.MAX_VALUE);
+
+    /**
+     * Ring-coverage guard (issue #2237): the UNWRAPPED full-coverage form the real Cassandra
+     * Sidecar emits — {@code (MIN,0]} + {@code (0,MAX]}, mirroring the fixture in
+     * {@code SidecarClientTest#parsesTokenRangeReplicasAndTokens} — spans the ring exactly once
+     * (first start == MIN, last end == MAX, no wrapping range) and MUST be accepted and build
+     * splits. This is the regression the fix closes: the old validator forced a wrap range and
+     * fail-closed on this healthy real-cluster topology.
+     */
+    @Test
+    void unwrappedFullCoverageFromSidecarAccepted() {
+        List<ReplicaInfo> tiling = List.of(
+                range(MIN, "0", DC1),
+                range("0", MAX, DC1));
+        // Does not throw — the unwrapped (MIN, MAX] tiling is full coverage.
+        CqliteFlightSplitManager.validateRingCoverage(tiling);
+        var resp = new TokenRangeReplicasResponse(List.of(), tiling);
+        var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals(2, splits.size(), "one split per range for the healthy unwrapped ring");
+        assertFalse(splits.get(0).wraparound(), "no range wraps in the unwrapped form");
+        assertFalse(splits.get(1).wraparound(), "no range wraps in the unwrapped form");
+    }
 
     /**
      * Ring-coverage guard (issue #2237): a set of ranges that tiles the Murmur3 ring
@@ -212,11 +235,82 @@ class CqliteFlightSplitManagerTest {
         assertTrue(ex.getMessage().contains("missing"), ex.getMessage());
     }
 
+    /**
+     * A GAP at the ring boundary in the UNWRAPPED form (issue #2237): {@code (MIN,0]} +
+     * {@code (100,MAX]} covers only (MIN,0] and (100,MAX] — tokens (0,100] are owned by no
+     * range and no range wraps to close the circle → gap → missing rows → rejected.
+     */
+    @Test
+    void unwrappedBoundaryGapRejected() {
+        List<ReplicaInfo> gapped = List.of(
+                range(MIN, "0", DC1),
+                range("100", MAX, DC1));
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(gapped));
+        assertTrue(ex.getMessage().contains("gap"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("missing"), ex.getMessage());
+    }
+
+    /**
+     * A GAP at the ring boundary because the ranges do not reach MIN/MAX and no range wraps:
+     * {@code (MIN,0]} alone leaves (0, MIN] (the whole rest of the ring) uncovered → gap.
+     */
+    @Test
+    void unwrappedNonFullSpanRejectedAsGap() {
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(List.of(range(MIN, "0", DC1))));
+        assertTrue(ex.getMessage().contains("gap"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("missing"), ex.getMessage());
+    }
+
+    /**
+     * An OVERLAP at the ring boundary: {@code (MIN,0]} + a wrapping {@code (-50,MIN]} whose
+     * inclusive end MIN is BELOW the first start... the wrap's end past first.start double-covers
+     * tokens (-50, 0] → overlap → duplicate rows → rejected.
+     */
+    @Test
+    void wrapBoundaryOverlapRejected() {
+        List<ReplicaInfo> overlap = List.of(
+                range(MIN, "0", DC1),
+                range("-50", MIN, DC1));
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(overlap));
+        assertTrue(ex.getMessage().contains("overlap"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("duplicate"), ex.getMessage());
+    }
+
+    /**
+     * Two wrapping ranges (or a wrap that is not the single closing range) double-cover the
+     * ring and are rejected as an overlap — closes the false-accept where an interior wrap /
+     * full-ring range could otherwise slip through the adjacency check.
+     */
+    @Test
+    void multipleWrappingRangesRejected() {
+        List<ReplicaInfo> twoWraps = List.of(
+                range("100", MIN, DC1),
+                range("200", "50", DC1));
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(twoWraps));
+        assertTrue(ex.getMessage().contains("overlap"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("double-covers"), ex.getMessage());
+    }
+
     /** Empty ranges fail closed rather than silently scanning nothing. */
     @Test
     void emptyRangesRejected() {
         TrinoException ex = assertThrows(TrinoException.class,
                 () -> CqliteFlightSplitManager.validateRingCoverage(List.of()));
+        assertTrue(ex.getMessage().contains("not covered"), ex.getMessage());
+    }
+
+    /**
+     * NIT (issue #2237): a null read-replica list (CqliteFlightMetadata can pass one) is
+     * treated like empty — a fail-closed typed error, not a raw NullPointerException.
+     */
+    @Test
+    void nullRangesFailClosedNotNpe() {
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(null));
         assertTrue(ex.getMessage().contains("not covered"), ex.getMessage());
     }
 
