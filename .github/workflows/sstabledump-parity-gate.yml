@@ -44,7 +44,7 @@ concurrency:
 env:
   DATASET_TAG: datasets-v3
   DATASET_ASSET: cassandra5-small-full-v3.5.tar.gz
-  DATASET_SHA256: 13d8da00743d9780c7ee89478649c280f9d91519a4561f6909cc4ce3bb7a3631
+  DATASET_SHA256: c3416c474b49dd532544837c95db2619eac8ff39ffc9691a14c2f73a7b76fa2b
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   # Fail closed: strict parity lanes must panic instead of skipping when dataset
   # binaries are absent. A vanished/unfetched dataset can never silently green a
