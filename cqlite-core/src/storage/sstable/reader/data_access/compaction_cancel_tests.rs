@@ -114,7 +114,9 @@ async fn index_less_fixture(n: i32) -> (TempDir, std::path::PathBuf) {
 async fn open_reader(data_path: &std::path::Path) -> SSTableReader {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
-    SSTableReader::open(data_path, &config, platform).await.unwrap()
+    SSTableReader::open(data_path, &config, platform)
+        .await
+        .unwrap()
 }
 
 /// Positive control (non-vacuity): with a never-cancelled token the scan streams

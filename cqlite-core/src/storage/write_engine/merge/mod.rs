@@ -424,7 +424,14 @@ impl SSTableRowIteratorAdapter {
         // Spawn the producer thread. It owns a fresh Tokio runtime so it never
         // collides with any runtime on the calling thread (Issue #587).
         let producer = std::thread::spawn(move || {
-            Self::producer_thread(path_buf, run_index, schema, udt_registry, scan_cancel, sender);
+            Self::producer_thread(
+                path_buf,
+                run_index,
+                schema,
+                udt_registry,
+                scan_cancel,
+                sender,
+            );
         });
 
         Ok(Self {

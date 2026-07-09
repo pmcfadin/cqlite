@@ -537,6 +537,7 @@ mod tests {
                 Error::Compaction(_) => {}
                 Error::Internal(_) => {}
                 Error::Parse(_) => {}
+                Error::Cancelled => {}
 
                 // Write-dir lock conflict — Concurrency category, maps to CONCURRENCY code
                 Error::WriteDirLocked { .. } => {

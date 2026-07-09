@@ -823,9 +823,8 @@ impl MergeProducer {
         let mut state = plan.new_state();
 
         if !paths.is_empty() {
-            let mut merger =
-                KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
-                    .map_err(ProducerError::Merge)?;
+            let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+                .map_err(ProducerError::Merge)?;
             self.drive_aggregate(plan, &mut merger, cancel, &mut state)?;
         }
 

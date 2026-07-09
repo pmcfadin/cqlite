@@ -399,6 +399,7 @@ mod tests {
                 Error::Compaction(_) => { /* Maps to CqliteError */ }
                 Error::Internal(_) => { /* Maps to CqliteError */ }
                 Error::Parse(_) => { /* Maps to CqliteError */ }
+                Error::Cancelled => { /* Maps to CqliteError (issue #2264) */ }
 
                 // Write-dir lock conflict — maps to CqliteError with clear message
                 Error::WriteDirLocked { .. } => { /* Maps to CqliteError */ }
