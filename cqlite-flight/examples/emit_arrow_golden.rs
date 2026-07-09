@@ -1,25 +1,45 @@
-//! Emit a tiny, deterministic Arrow IPC stream **exactly as the Flight server
-//! would** for a fixture covering every scalar CQL type the Trino connector
-//! supports, and write it to the path given on the command line.
+//! Emit the deterministic goldens the Trino connector decodes against, produced
+//! by the **REAL** cqlite-flight server emission path — never a hand-built blob.
 //!
-//! This is the generator behind the Trino connector's `ArrowToTrinoGoldenTest`
-//! (issue #2234). The whole point is that the golden bytes are produced by the
-//! REAL server emission path — [`MergeProducer`] over a real SSTable, wrapped in
-//! the server's wire [`arrow_schema`](MergeProducer::arrow_schema) (which carries
-//! the uuid extension metadata, `Timestamp(Millisecond, "UTC")` unit, `Date32`,
-//! and the `cqlite:pushdown` field metadata). A hand-built `VectorSchemaRoot` on
-//! the Java side cannot catch schema/type drift; decoding these server bytes can.
+//! Two goldens, both from the same `MergeProducer` + wire
+//! [`arrow_schema`](MergeProducer::arrow_schema) the server's `do_get` uses:
 //!
-//! Regenerate with `trino-connector/scripts/regen-arrow-golden.sh` — do NOT
-//! hand-edit the blob. Run:
-//! `cargo run -p cqlite-flight --example emit_arrow_golden -- <out>`.
+//! 1. **`all_scalars.arrows`** (issue #2234) — an Arrow IPC **stream** (via
+//!    [`StreamWriter`]) covering every scalar CQL type, decoded by
+//!    `ArrowToTrinoGoldenTest`. The wire schema carries the uuid extension
+//!    metadata, `Timestamp(Millisecond, "UTC")` unit, `Date32`, and the
+//!    `cqlite:pushdown` field metadata.
+//!
+//! 2. **`keyvalue.flightdata`** (issue #2193) — the protobuf-encoded
+//!    **`FlightData` message sequence** for the exact FIELD failure shape (a
+//!    3-row `cassandra_easy_stress.keyvalue`: `key text, value text`, 1 pk, 0 ck,
+//!    with the `cqlite:pushdown` field metadata), produced by the SAME
+//!    [`FlightDataEncoderBuilder`] path as production
+//!    (`streaming.rs::encode_do_get`). This is Flight's on-the-wire framing (a
+//!    bare IPC `Message` flatbuffer in each `data_header` + a separate
+//!    `data_body`), which is a DIFFERENT framing from the IPC stream in (1) —
+//!    `FlightDataGoldenDecodeTest` decodes it with arrow-java's Flight-level
+//!    machinery to catch cross-stack Flight interop failures that the
+//!    `ArrowStreamReader` golden cannot see. Length-delimited (each message
+//!    prefixed by a protobuf varint length) so Java can split the sequence with
+//!    `Flight.FlightData.parseDelimitedFrom`.
+//!
+//! Regenerate BOTH with `trino-connector/scripts/regen-arrow-golden.sh` — do NOT
+//! hand-edit either blob. Run:
+//! `cargo run -p cqlite-flight --example emit_arrow_golden -- <arrows-out> [<flightdata-out>]`.
 
 use std::collections::HashMap;
 use std::io::BufWriter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::ipc::writer::StreamWriter;
+use arrow::record_batch::RecordBatch;
+use arrow_flight::encode::FlightDataEncoderBuilder;
+use arrow_flight::error::FlightError;
+use arrow_flight::FlightData;
+use futures::TryStreamExt;
+use prost::Message as _;
 
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::write_engine::{
@@ -31,6 +51,16 @@ use cqlite_flight::producer::{DirSource, MergeProducer};
 
 const KS: &str = "golden_ks";
 const TBL: &str = "all_scalars";
+
+/// The FIELD failure shape (issue #2193): the cassandra-easy-stress `keyvalue`
+/// table — a text partition key + a single text value column, no clustering key.
+/// This is the exact header-extracted `nb` shape the round-3/4 field run fails on.
+const FIELD_KS: &str = "cassandra_easy_stress";
+const FIELD_TBL: &str = "keyvalue";
+/// The 3 rows the field `tiny` table holds; values pinned so the Java decode
+/// assertion can hard-code them. Row order in the output is the server's token
+/// order, so the Java side asserts the value SET, not positional order.
+const FIELD_ROWS: [(&str, &str); 3] = [("k1", "1"), ("k2", "2"), ("k3", "3")];
 
 /// A partition-keyed table with one column of every supported scalar CQL type.
 /// PK is `id int`; the rest are regular columns so a single mutation can write a
@@ -167,21 +197,63 @@ fn mutations() -> Vec<Mutation> {
     vec![full, nulls]
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .ok_or("usage: emit_arrow_golden <output-path>")?;
+/// The field-shape `keyvalue` schema (issue #2193): `key text` partition key +
+/// `value text` regular column, no clustering key.
+fn field_schema() -> TableSchema {
+    let col = |name: &str, nullable: bool| Column {
+        name: name.into(),
+        data_type: "text".into(),
+        nullable,
+        default: None,
+        is_static: false,
+    };
+    TableSchema {
+        keyspace: FIELD_KS.into(),
+        table: FIELD_TBL.into(),
+        partition_keys: vec![KeyColumn {
+            name: "key".into(),
+            data_type: "text".into(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![col("key", false), col("value", true)],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
 
-    let schema = schema();
+/// One `Write` mutation per field row: partition key `key`, regular column `value`.
+fn field_mutations() -> Vec<Mutation> {
+    FIELD_ROWS
+        .iter()
+        .map(|(key, value)| {
+            Mutation::new(
+                TableId::new(FIELD_KS, FIELD_TBL),
+                PartitionKey::single("key", Value::Text((*key).into())),
+                None,
+                vec![CellOperation::Write {
+                    column: "value".into(),
+                    value: Value::Text((*value).into()),
+                }],
+                100,
+                None,
+            )
+        })
+        .collect()
+}
 
-    // Build a real single-SSTable fixture via the write engine.
+/// Flush `mutations` into a fresh single-SSTable write-engine fixture under a
+/// temp dir; return the temp handle (kept alive by the caller) and the data dir.
+fn build_fixture(
+    schema: &TableSchema,
+    mutations: Vec<Mutation>,
+) -> Result<(tempfile::TempDir, PathBuf), Box<dyn std::error::Error>> {
     let temp = tempfile::TempDir::new()?;
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema.clone());
     let mut engine = WriteEngine::new(config)?;
-    for m in mutations() {
+    for m in mutations {
         engine.write(m)?;
     }
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -189,26 +261,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     rt.block_on(engine.flush())?
         .ok_or("flush produced no SSTable")?;
+    Ok((temp, data_dir))
+}
 
-    // Drive the SAME producer the server's `do_get` uses, and take the SAME wire
-    // schema `do_get` sends (uuid extension + Timestamp unit + pushdown metadata).
+/// Emit the `all_scalars` Arrow IPC **stream** golden (issue #2234). Serialized
+/// with the server's WIRE schema so the golden carries the exact field metadata
+/// (uuid extension, Timestamp unit, `cqlite:pushdown`) the connector receives.
+fn emit_arrows_golden(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = schema();
+    let (_temp, data_dir) = build_fixture(&schema, mutations())?;
+
     let producer = MergeProducer::new(schema, 1024)?;
     let wire_schema = Arc::new(producer.arrow_schema()?);
     let table_dir = data_dir.join(KS).join(TBL);
-    let source = DirSource::new(table_dir);
-    let batches = producer.produce(&source)?;
+    let batches = producer.produce(&DirSource::new(table_dir))?;
 
     if batches.is_empty() {
-        return Err("producer emitted no batches for the fixture".into());
+        return Err("producer emitted no batches for the all_scalars fixture".into());
     }
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     if total_rows != 2 {
-        return Err(format!("expected 2 fixture rows, got {total_rows}").into());
+        return Err(format!("expected 2 all_scalars fixture rows, got {total_rows}").into());
     }
 
-    // Serialize with the server's WIRE schema (not each batch's own schema) so
-    // the golden carries the exact field metadata the connector receives.
-    let file = std::fs::File::create(&out)?;
+    let file = std::fs::File::create(out)?;
     let mut writer = StreamWriter::try_new(BufWriter::new(file), &wire_schema)?;
     for batch in &batches {
         writer.write(batch)?;
@@ -219,5 +295,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "wrote golden Arrow IPC stream ({total_rows} rows) to {}",
         out.display()
     );
+    Ok(())
+}
+
+/// Emit the `keyvalue.flightdata` **FlightData message sequence** golden (issue
+/// #2193). Drives the SAME [`FlightDataEncoderBuilder`] construction production's
+/// `encode_do_get` uses (`FlightDataEncoderBuilder::new().with_schema(wire_schema)
+/// .build(batch_stream)`), then length-delimits the resulting protobuf
+/// `FlightData` messages so arrow-java can split and Flight-decode them.
+fn emit_flightdata_golden(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = field_schema();
+    let (_temp, data_dir) = build_fixture(&schema, field_mutations())?;
+
+    // Same producer + wire schema (carrying the `cqlite:pushdown` field metadata)
+    // the server's `do_get` uses.
+    let producer = MergeProducer::new(schema, 1024)?;
+    let wire_schema = Arc::new(producer.arrow_schema()?);
+    let table_dir = data_dir.join(FIELD_KS).join(FIELD_TBL);
+    let batches = producer.produce(&DirSource::new(table_dir))?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    if total_rows != FIELD_ROWS.len() {
+        return Err(format!(
+            "expected {} field fixture rows, got {total_rows}",
+            FIELD_ROWS.len()
+        )
+        .into());
+    }
+
+    // Encode via the SAME builder path as `streaming.rs::encode_do_get`. Collect
+    // the full FlightData sequence (schema message + record-batch message(s)).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let input = futures::stream::iter(batches.into_iter().map(Ok::<RecordBatch, FlightError>));
+    let encoder = FlightDataEncoderBuilder::new()
+        .with_schema(wire_schema)
+        .build(input);
+    let messages: Vec<FlightData> = rt.block_on(encoder.try_collect())?;
+
+    // The field shape (3 rows, one batch, no dictionaries) yields exactly the
+    // schema message + one record-batch message. Pin it so a drift fails regen.
+    if messages.len() != 2 {
+        return Err(format!(
+            "expected 2 FlightData messages (schema + 1 record batch), got {}",
+            messages.len()
+        )
+        .into());
+    }
+
+    // Length-delimited protobuf: each message is prefixed with a varint length so
+    // the Java side reads them with `Flight.FlightData.parseDelimitedFrom`.
+    let mut buf = Vec::new();
+    for msg in &messages {
+        msg.encode_length_delimited(&mut buf)?;
+    }
+    std::fs::write(out, &buf)?;
+
+    eprintln!(
+        "wrote golden FlightData sequence ({} messages, {total_rows} rows) to {}",
+        messages.len(),
+        out.display()
+    );
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(1);
+    let arrows_out = args
+        .next()
+        .map(PathBuf::from)
+        .ok_or("usage: emit_arrow_golden <arrows-out> [<flightdata-out>]")?;
+    let flightdata_out = args.next().map(PathBuf::from);
+
+    emit_arrows_golden(&arrows_out)?;
+    if let Some(out) = flightdata_out {
+        emit_flightdata_golden(&out)?;
+    }
     Ok(())
 }

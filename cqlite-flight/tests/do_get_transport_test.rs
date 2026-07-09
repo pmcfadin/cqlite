@@ -14,12 +14,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use arrow::array::{Array, StringArray};
+use arrow::ipc::{root_as_message, MessageHeader};
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use arrow_flight::Ticket;
+use arrow_flight::{FlightData, Ticket};
 use futures::StreamExt;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Channel, Server};
@@ -176,6 +177,62 @@ async fn do_get_batches_over_transport(
     batches
 }
 
+/// The SAME real gRPC round-trip as [`do_get_batches_over_transport`], but returns
+/// the RAW `Vec<FlightData>` protobuf messages straight off the response stream —
+/// i.e. the exact on-the-wire bytes, captured BEFORE they are wrapped into a
+/// `FlightRecordBatchStream` (the point where the arrow-java client would decode
+/// them). This lets a caller pin the server's message SEQUENCE at the Flight
+/// protobuf level, not the decoded-`RecordBatch` level (issue #2193).
+async fn do_get_raw_flight_data_over_transport(
+    svc: CqliteFlightService,
+    ticket: Vec<u8>,
+) -> Vec<FlightData> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
+
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(FlightServiceServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+
+    let endpoint = Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(5));
+    let mut channel = None;
+    let mut last_err = None;
+    for _ in 0..50 {
+        match endpoint.connect().await {
+            Ok(c) => {
+                channel = Some(c);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    let channel = channel.unwrap_or_else(|| panic!("connect failed: {last_err:?}"));
+
+    let mut client = FlightServiceClient::new(channel);
+    let resp = client
+        .do_get(Ticket::new(ticket))
+        .await
+        .expect("do_get rpc");
+    // `resp.into_inner()` yields the raw `FlightData` protobuf messages exactly as
+    // deframed off the wire — the pre-decode interception point.
+    let mut inner = resp.into_inner();
+    let mut messages = Vec::new();
+    while let Some(msg) = inner.next().await {
+        messages.push(msg.expect("raw FlightData message over transport"));
+    }
+    server.abort();
+    messages
+}
+
 /// Reproduces issue #2193: a 3-row nb-big table served over the real gRPC
 /// transport must decode to 3 rows with the real arrow-flight client. Before
 /// the fix the client fails with a "Failed to read message"-class decode error.
@@ -190,6 +247,45 @@ fn do_get_over_real_transport_decodes_all_rows() {
     assert_eq!(
         rows, 3,
         "all 3 rows must round-trip through the real transport"
+    );
+}
+
+/// **Message-sequence pin (issue #2193).** For the 3-row field shape the server's
+/// `do_get` must emit EXACTLY two `FlightData` messages on the wire — a Schema
+/// message followed by a single RecordBatch message — and each message's
+/// `data_header` must be the matching IPC `Message` flatbuffer. This pins the
+/// on-the-wire shape the arrow-java Flight decoder consumes (the Java oracle
+/// `FlightDataGoldenDecodeTest` decodes the committed form of exactly this
+/// sequence), capturing at the protobuf-message level rather than the decoded
+/// `RecordBatch` level so a framing/ordering regression surfaces here.
+#[test]
+fn do_get_over_transport_emits_schema_then_recordbatch() {
+    let (_temp, data_dir) = build_fixture();
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let messages = rt.block_on(do_get_raw_flight_data_over_transport(svc, ticket_bytes()));
+
+    assert_eq!(
+        messages.len(),
+        2,
+        "3-row field shape must emit [schema, record-batch], got {} messages",
+        messages.len()
+    );
+
+    let header_type = |fd: &FlightData| {
+        root_as_message(&fd.data_header)
+            .expect("data_header must be a valid IPC Message flatbuffer")
+            .header_type()
+    };
+    assert_eq!(
+        header_type(&messages[0]),
+        MessageHeader::Schema,
+        "message[0] data_header must parse as a Schema flatbuffer"
+    );
+    assert_eq!(
+        header_type(&messages[1]),
+        MessageHeader::RecordBatch,
+        "message[1] data_header must parse as a RecordBatch flatbuffer"
     );
 }
 
