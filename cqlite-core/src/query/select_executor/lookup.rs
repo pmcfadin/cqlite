@@ -790,6 +790,15 @@ mod tests {
     /// (2) the index-based build allocates strictly fewer times than that
     /// reference — the regression that fails on the old impl (where the two
     /// builds are the same code and allocate identically).
+    ///
+    /// `not(dhat-heap)`: issue #1668's dhat allocator (`lib.rs`'s
+    /// `DHAT_TEST_ALLOC`) mutually excludes `test_alloc_probe`'s own
+    /// `CountingAllocator` (only one `#[global_allocator]` per binary), so
+    /// under a feature combination with BOTH `state_machine` and
+    /// `dhat-heap` enabled (e.g. `--all-features`) `test_alloc_probe` is
+    /// configured out entirely — skip this specific allocation-count probe
+    /// rather than fail to resolve it.
+    #[cfg(not(feature = "dhat-heap"))]
     #[test]
     fn cartesian_product_builds_each_combo_in_one_allocation() {
         use crate::test_alloc_probe::measure;

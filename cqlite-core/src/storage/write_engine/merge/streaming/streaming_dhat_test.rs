@@ -189,7 +189,10 @@ fn streaming_merge_of_lazy_wide_partition_stays_within_heap_budget() {
     let mut rows_seen: u64 = 0;
     let mut partitions_seen: u64 = 0;
     loop {
-        match stream.step_streaming().expect("step_streaming must not error") {
+        match stream
+            .step_streaming()
+            .expect("step_streaming must not error")
+        {
             StreamingStep::ClusterGroup { row, .. } => {
                 assert!(
                     row.clustering_key.is_some(),

@@ -474,9 +474,16 @@ impl<'a> StreamingMerger<'a> {
     /// partial set here and a later-discovered remainder in a SECOND call
     /// would risk two marker pairs overlapping in the output (roborev #959
     /// High #1's concern).
-    fn flush_range_tombstones(&mut self, effective_gc_before: Option<i64>, max_purgeable_timestamp: i64) {
+    fn flush_range_tombstones(
+        &mut self,
+        effective_gc_before: Option<i64>,
+        max_purgeable_timestamp: i64,
+    ) {
         self.state.range_tombstones_emitted = true;
-        KWayMerger::coalesce_range_tombstones(&mut self.state.range_tombstones, &self.merger.schema);
+        KWayMerger::coalesce_range_tombstones(
+            &mut self.state.range_tombstones,
+            &self.merger.schema,
+        );
 
         if let Some((pmfda, _)) = self.state.max_partition_deletion {
             self.state
@@ -518,7 +525,10 @@ impl<'a> StreamingMerger<'a> {
         if self.state.awaiting_flush.is_empty() {
             return;
         }
-        KWayMerger::coalesce_range_tombstones(&mut self.state.range_tombstones, &self.merger.schema);
+        KWayMerger::coalesce_range_tombstones(
+            &mut self.state.range_tombstones,
+            &self.merger.schema,
+        );
         for entry in std::mem::take(&mut self.state.awaiting_flush) {
             if let Some(shadowed) = KWayMerger::apply_range_shadowing(
                 entry,
@@ -693,7 +703,8 @@ impl<'a> StreamingMerger<'a> {
                     // observability EXACTLY ONCE and signal PartitionEnd.
                     self.finalize_current_cluster()?;
                     self.reshadow_and_flush_awaiting();
-                    if !self.state.range_tombstones.is_empty() && !self.state.range_tombstones_emitted
+                    if !self.state.range_tombstones.is_empty()
+                        && !self.state.range_tombstones_emitted
                     {
                         let (effective_gc_before, max_purgeable_timestamp) =
                             self.merger.effective_gc_settings();
@@ -1210,9 +1221,19 @@ mod tests {
     fn step_streaming_matches_step_for_absent_trailing_component_fixture() {
         let schema = two_col_schema();
         let runs = vec![
-            vec![live_entry_ck(0, 1, ck_multi(&[("ck1", 5), ("ck2", 1)]), 100)],
+            vec![live_entry_ck(
+                0,
+                1,
+                ck_multi(&[("ck1", 5), ("ck2", 1)]),
+                100,
+            )],
             vec![live_entry_ck(1, 1, ck_multi(&[("ck1", 5)]), 100)], // absent ck2
-            vec![live_entry_ck(2, 1, ck_multi(&[("ck1", 5), ("ck2", 2)]), 100)],
+            vec![live_entry_ck(
+                2,
+                1,
+                ck_multi(&[("ck1", 5), ("ck2", 2)]),
+                100,
+            )],
         ];
 
         // Independent expectation: identify each row by its ck2 presence/value.
