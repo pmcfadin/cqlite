@@ -370,6 +370,34 @@ async fn read_nb_format_chunk_data(
         return Ok(None); // EOF
     }
 
+    // Degenerate empty trailing chunk (issue #2225): Cassandra compaction appends
+    // a final chunk whose logical start is at/after `data_length` and whose payload
+    // is 0 bytes (its CompressionInfo offset == end of Data.db). Its uncompressed
+    // length is 0, so handing it to a decompressor fails — Deflate rejects empty
+    // input; LZ4/Snappy only survive by accident. Cassandra's own reader never
+    // touches it: every logical position < data_length maps to an earlier chunk.
+    // Treat it (and any chunk beyond it — chunk starts are monotonically increasing)
+    // as EOF. This is the single chunk-yield source, so bounding here keeps EVERY
+    // decompress-per-chunk consumer (stitch_all_chunks, the compaction stitch loop,
+    // and the windowed scan_stream feed) from ever seeing the empty chunk without
+    // duplicating the bound in each. Metadata-driven from CompressionInfo only (no
+    // byte sniffing); mirrors `chunk_decompressor::expected_decompressed_len` and
+    // the point-read path's data_length bound.
+    let chunk_length = comp_info.chunk_length as u64;
+    if chunk_length > 0 {
+        let logical_start = (chunk_idx as u64).saturating_mul(chunk_length);
+        if logical_start >= comp_info.data_length {
+            tracing::debug!(
+                "read_nb_format_chunk_data: chunk {} is a degenerate empty trailing chunk \
+                 (logical_start={} >= data_length={}); treating as EOF (issue #2225)",
+                chunk_idx,
+                logical_start,
+                comp_info.data_length
+            );
+            return Ok(None);
+        }
+    }
+
     tracing::debug!(
         "read_nb_format_chunk_data: Reading chunk {}/{}",
         chunk_idx,
