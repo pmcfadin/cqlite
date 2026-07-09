@@ -414,6 +414,7 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: &TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
@@ -423,7 +424,7 @@ impl SSTableRowIteratorAdapter {
         // Spawn the producer thread. It owns a fresh Tokio runtime so it never
         // collides with any runtime on the calling thread (Issue #587).
         let producer = std::thread::spawn(move || {
-            Self::producer_thread(path_buf, run_index, schema, udt_registry, sender);
+            Self::producer_thread(path_buf, run_index, schema, udt_registry, scan_cancel, sender);
         });
 
         Ok(Self {
@@ -449,6 +450,7 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, String>>,
     ) {
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
@@ -499,6 +501,13 @@ impl SSTableRowIteratorAdapter {
                 if let Some(registry) = udt_registry {
                     reader.set_udt_registry(registry);
                 }
+
+                // Issue #2264: wire the cooperative-cancellation token so the
+                // (uninterruptible, fully-materialising for index-less inputs)
+                // compaction scan below abandons promptly when the Flight
+                // `do_get` driving this merge is cancelled. Default (never-cancel)
+                // for callers that pass `ScanCancel::default()`.
+                reader.set_scan_cancel(scan_cancel);
 
                 // Pass the schema so the parser uses the real clustering column
                 // names; the header-inferred fallback uses generic names like
@@ -2030,6 +2039,26 @@ impl KWayMerger {
         Self::new_with_gc(input_paths, schema, None, None)
     }
 
+    /// Like [`KWayMerger::new`], but wires a cooperative
+    /// [`ScanCancel`](crate::storage::scan_cancel::ScanCancel) into every input
+    /// reader's compaction scan (issue #2264). Used by the Flight `do_get` merge
+    /// so a client disconnect abandons an in-flight, index-less full-Data.db walk
+    /// within milliseconds instead of the ~1–2 min transport backstop.
+    pub fn new_cancellable(
+        input_paths: Vec<PathBuf>,
+        schema: &TableSchema,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Self> {
+        Self::new_with_gc_and_registry_cancellable(
+            input_paths,
+            schema,
+            None,
+            None,
+            None,
+            scan_cancel,
+        )
+    }
+
     /// Create a new k-way merger with explicit purge parameters.
     ///
     /// Identical to [`KWayMerger::new`] but threads an explicit gc_grace cutoff
@@ -2069,6 +2098,34 @@ impl KWayMerger {
         now_secs: Option<i64>,
         udt_registry: Option<crate::schema::UdtRegistry>,
     ) -> Result<Self> {
+        Self::new_with_gc_and_registry_cancellable(
+            input_paths,
+            schema,
+            gc_before_secs,
+            now_secs,
+            udt_registry,
+            crate::storage::scan_cancel::ScanCancel::default(),
+        )
+    }
+
+    /// K-way merge constructor that opens the input SSTables under a cooperative
+    /// [`ScanCancel`](crate::storage::scan_cancel::ScanCancel) (issue #2264).
+    ///
+    /// The token is wired onto every per-run reader so the compaction scan each
+    /// run's producer thread drives — which, for an index-less (Summary.db
+    /// absent) SSTable, otherwise fully materialises the whole Data.db in one
+    /// uninterruptible pass — polls it at a bounded interval and abandons the walk
+    /// promptly when a driving Flight `do_get` is cancelled. `new`/`new_with_gc*`
+    /// delegate here with a never-cancelled default token, so non-Flight callers
+    /// are unaffected.
+    pub fn new_with_gc_and_registry_cancellable(
+        input_paths: Vec<PathBuf>,
+        schema: &TableSchema,
+        gc_before_secs: Option<i64>,
+        now_secs: Option<i64>,
+        udt_registry: Option<crate::schema::UdtRegistry>,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Self> {
         if input_paths.is_empty() {
             return Err(Error::InvalidInput(
                 "K-way merge requires at least one input file".to_string(),
@@ -2087,8 +2144,13 @@ impl KWayMerger {
         // (issue #1234).
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
-            let adapter =
-                SSTableRowIteratorAdapter::open(path, run_index, schema, udt_registry.clone())?;
+            let adapter = SSTableRowIteratorAdapter::open(
+                path,
+                run_index,
+                schema,
+                udt_registry.clone(),
+                scan_cancel.clone(),
+            )?;
             runs.push(RunReader::new(Box::new(adapter)));
         }
 

@@ -144,6 +144,7 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         | Error::InvalidState(_)
         | Error::InvalidOperation(_)
         | Error::NotFound(_)
+        | Error::Cancelled
         | Error::Internal(_) => ErrorCategory::Other,
 
         #[cfg(target_arch = "wasm32")]

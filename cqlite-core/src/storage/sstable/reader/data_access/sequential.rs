@@ -861,6 +861,11 @@ impl SSTableReader {
         // Non-stitching path for other formats
         let mut block_count = 0;
         while let Some(block) = self.read_next_block(&cursor).await? {
+            // Cooperative cancellation (issue #2264): an index-less (Summary.db
+            // absent) SSTable materialises EVERY partition here in one pass; poll
+            // the token per block so a cancelled Flight `do_get` abandons the walk
+            // promptly instead of running to completion under the ~1–2 min backstop.
+            self.scan_cancel.check()?;
             block_count += 1;
             tracing::debug!(
                 "SSTableReader::sequential_scan - Read block {}, size {} bytes",

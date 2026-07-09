@@ -590,7 +590,12 @@ impl MergeProducer {
         if self.agg.is_some() || paths.is_empty() {
             return Ok(());
         }
-        let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        // Issue #2264: wire the shared synchronous cancel token into the merge so
+        // each run's producer thread (which fully materialises an index-less
+        // SSTable in one uninterruptible pass) abandons promptly on client
+        // disconnect, instead of the ~1–2 min transport backstop.
+        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+            .map_err(ProducerError::Merge)?;
         on_merger_built();
         self.drive_merge(&mut merger, cancel, sink, progress)
     }
@@ -687,7 +692,8 @@ impl MergeProducer {
             return Ok(batches);
         }
 
-        let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+            .map_err(ProducerError::Merge)?;
         let mut sink = CollectSink(&mut batches);
         // Collect path (parity oracle): a private seam — no external observer, but
         // the same incremental counter emission runs (issue #2162).
@@ -738,8 +744,19 @@ impl MergeProducer {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
             }
-            let MergeStep::Partition { key, rows } = merger.step().map_err(ProducerError::Merge)?
-            else {
+            // A step error while cancellation is set is the cancelled scan
+            // surfacing (issue #2264): the per-run producer thread's compaction
+            // scan aborted with `Error::Cancelled` and closed its channel. Map it
+            // to the clean `Cancelled` abort rather than an opaque `Merge` error so
+            // the client sees `aborted`, not `internal`.
+            let step = merger.step().map_err(|e| {
+                if cancel.is_cancelled() {
+                    ProducerError::Cancelled
+                } else {
+                    ProducerError::Merge(e)
+                }
+            })?;
+            let MergeStep::Partition { key, rows } = step else {
                 break;
             };
             // Token-range filter: drop whole partitions outside the split's range.
@@ -806,7 +823,9 @@ impl MergeProducer {
         let mut state = plan.new_state();
 
         if !paths.is_empty() {
-            let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+            let mut merger =
+                KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+                    .map_err(ProducerError::Merge)?;
             self.drive_aggregate(plan, &mut merger, cancel, &mut state)?;
         }
 

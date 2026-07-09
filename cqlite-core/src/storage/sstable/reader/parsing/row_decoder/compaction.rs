@@ -264,10 +264,19 @@ impl V5CompressedLegacyParser {
 
         let mut offset = 0;
         let mut skipped_partitions = 0;
+        let mut partition_index: usize = 0;
 
         let broke = std::cell::Cell::new(false);
 
         while offset < data.len() {
+            // Cooperative cancellation (issue #2264): poll the reader's cancel
+            // token at a bounded interval so a compressed, index-less SSTable's
+            // compaction stream (a Flight `do_get`) abandons promptly on client
+            // disconnect rather than draining the whole window under the backstop.
+            if partition_index & 0xFF == 0 {
+                reader.scan_cancel.check()?;
+            }
+            partition_index += 1;
             // Capture the partition-start offset BEFORE parsing this partition so
             // every row emitted for it is tagged with the same authoritative
             // decompressed-Data.db position.

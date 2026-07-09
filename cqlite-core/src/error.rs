@@ -176,6 +176,15 @@ pub enum Error {
     /// Unsupported query error
     #[error("Unsupported query: {0}")]
     UnsupportedQuery(String),
+
+    /// The operation was cooperatively cancelled (issue #2264).
+    ///
+    /// Raised by a long-running scan (e.g. the compaction streaming read) when
+    /// its cancellation token is tripped — a client disconnect propagated from
+    /// the Flight `do_get` path. Distinct from a genuine failure so callers can
+    /// treat it as a clean, expected abort rather than corruption.
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 impl Error {
@@ -377,6 +386,9 @@ impl Error {
             Error::InvalidState(_) => false,
             Error::Timeout(_) => false,
             Error::UnsupportedQuery(_) => false,
+            // A cancelled operation is deliberate, not a transient fault: re-running
+            // it would just be cancelled again. The caller decides whether to retry.
+            Error::Cancelled => false,
         }
     }
 
@@ -422,6 +434,7 @@ impl Error {
             Error::InvalidState(_) => ErrorCategory::Logic,
             Error::Timeout(_) => ErrorCategory::System,
             Error::UnsupportedQuery(_) => ErrorCategory::Query,
+            Error::Cancelled => ErrorCategory::System,
         }
     }
 }

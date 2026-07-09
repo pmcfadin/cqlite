@@ -100,6 +100,18 @@ impl V5CompressedLegacyParser {
         let mut partition_index = 0;
         let mut skipped_partitions = 0;
         while offset < data.len() {
+            // Cooperative cancellation (issue #2264): an uncompressed, index-less
+            // SSTable is returned to the scan as ONE contiguous block, so this loop
+            // is the 400k+-partition hot loop that the compaction streaming read
+            // (and thus a Flight `do_get`) spends its whole time in. Poll the
+            // reader's cancel token at a bounded interval so a disconnected client
+            // abandons the walk within milliseconds instead of running to
+            // completion under the coarse ~1–2 min backstop. Every 256 partitions
+            // keeps the relaxed-atomic load negligible against the per-partition
+            // parse cost.
+            if partition_index & 0xFF == 0 {
+                reader.scan_cancel.check()?;
+            }
             tracing::debug!(
                 "V5CompressedLegacy: === PARTITION {} at offset {} (block size: {}) ===",
                 partition_index,
