@@ -437,13 +437,21 @@ impl MergeProducer {
                     .as_ref()
                     .map(pushdown_capability)
                     .unwrap_or("none");
-                // Assemble in a BTreeMap for deterministic ASSEMBLY order — NOTE:
-                // this does NOT guarantee final wire order for fields with >= 2
-                // metadata keys, since arrow_schema::Field::with_metadata
-                // re-collects into its own HashMap before IPC serialization
-                // (arrow-ipc's metadata_to_fb iterates that HashMap unsorted).
-                // Safe today only because every field here carries exactly one
-                // metadata entry (order-trivial). See #2285 for the real fix.
+                // Assemble in a BTreeMap for deterministic ASSEMBLY order. NOTE:
+                // this does NOT guarantee final WIRE order — `Field::with_metadata`
+                // re-collects into its own HashMap before IPC serialization, and
+                // arrow-ipc's `metadata_to_fb` iterates that HashMap unsorted
+                // (confirmed against arrow-schema/arrow-ipc 53.4.1 source). So this
+                // BTreeMap step has NO observable effect on wire bytes today, for
+                // ANY field, regardless of entry count — it's a placeholder pending
+                // #2285's real fix (a canonicalization pass at the wire boundary, or
+                // upstream arrow-rs sorting). It's harmless for the `keyvalue`
+                // byte-pin golden specifically because those columns carry exactly
+                // one metadata entry each (order-trivial), but schemas with
+                // extension-typed columns (e.g. uuid: `ARROW:extension:name` +
+                // `cqlite:pushdown`, 2 entries — see `all_scalars`'s `c_uuid`
+                // column) are NOT covered by that trivial case, and their wire
+                // order is genuinely hash-seed-dependent until #2285 lands.
                 let mut metadata: std::collections::BTreeMap<String, String> =
                     field.metadata().clone().into_iter().collect();
                 metadata.insert("cqlite:pushdown".to_string(), capability.to_string());
