@@ -67,6 +67,25 @@ class CqliteFlightSplitManagerTest {
     }
 
     @Test
+    void fullRingRangeWithEqualEndpointsScansEverything() {
+        // #2228: a single full-ring range represented as `(T, T]` (start == end,
+        // a common single-token/single-node representation) must be treated as a
+        // wraparound/full-ring split, not the empty set. Otherwise the flight
+        // filter evaluates `token > T && token <= T` and `SELECT *` silently
+        // returns 0 rows.
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(range("42", "42", Map.of("dc1", List.of("10.0.0.1")))));
+        var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals(1, splits.size());
+        assertEquals(42, splits.get(0).tokenStart());
+        assertEquals(42, splits.get(0).tokenEnd());
+        assertTrue(
+                splits.get(0).wraparound(),
+                "start == end is the full ring — must scan everything");
+    }
+
+    @Test
     void stampsSnapshotOnEverySplit() {
         var resp = new TokenRangeReplicasResponse(
                 List.of(),

@@ -1534,11 +1534,11 @@ mod tests {
         let p = MergeProducer::with_spec(schema.clone(), 1024, all).unwrap();
         assert_eq!(total_rows(&p.produce(&DirSource::new(&dir)).unwrap()), 5);
 
-        // Empty range (MAX, MAX] keeps nothing.
+        // Empty narrow range (MAX-1, MAX] (equal endpoints = FULL ring per #2228).
         let none = spec_from(
             &schema,
             FlightTicket {
-                token_start: Some(i64::MAX),
+                token_start: Some(i64::MAX - 1),
                 token_end: Some(i64::MAX),
                 ..Default::default()
             },
@@ -2445,11 +2445,11 @@ mod tests {
             .collect::<Vec<_>>();
         let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
 
-        // A token range that excludes everything: (MAX, MAX].
+        // Excludes everything: narrow (MAX-1, MAX] (equal endpoints = ring, #2228).
         let spec = spec_from(
             &schema,
             FlightTicket {
-                token_start: Some(i64::MAX),
+                token_start: Some(i64::MAX - 1),
                 token_end: Some(i64::MAX),
                 ..Default::default()
             },

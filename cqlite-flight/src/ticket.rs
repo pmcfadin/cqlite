@@ -412,6 +412,14 @@ impl FlightTicket {
 /// wraparound range (crossing the ring's min-token boundary) keeps
 /// `token > start || token <= end`.
 pub fn token_in_half_open_range(token: i64, start: i64, end: i64, wraparound: bool) -> bool {
+    // #2228: equal endpoints denote the FULL ring, not the empty set — matching
+    // Cassandra's convention where a range `(T, T]` covers every token. The
+    // split planner can emit this for single-token topologies. Accept every
+    // token here regardless of the `wraparound` flag so no partition is silently
+    // dropped (which would make `SELECT *` return 0 rows with no error).
+    if start == end {
+        return true;
+    }
     if wraparound {
         token > start || token <= end
     } else {
@@ -851,6 +859,27 @@ mod tests {
         assert!(!t.token_in_range(0), "the gap is excluded");
         assert!(!t.token_in_range(100), "start still exclusive");
         assert!(t.token_in_range(-100), "end still inclusive");
+    }
+
+    #[test]
+    fn full_ring_range_with_equal_endpoints_accepts_all() {
+        // #2228: a range whose endpoints are equal (`(T, T]`) denotes the FULL
+        // ring, matching Cassandra's convention — NOT the empty set. The
+        // Sidecar/split planner may emit this for single-token topologies. It
+        // must accept every token regardless of the `wraparound` flag, so guard
+        // both flag states here.
+        for wrap in [true, false] {
+            let t = ticket_with_range(Some(42), Some(42), wrap);
+            assert!(t.token_in_range(i64::MIN), "MIN accepted (wrap={wrap})");
+            assert!(t.token_in_range(i64::MAX), "MAX accepted (wrap={wrap})");
+            assert!(t.token_in_range(42), "T itself accepted (wrap={wrap})");
+            assert!(t.token_in_range(41), "T-1 accepted (wrap={wrap})");
+            assert!(t.token_in_range(43), "T+1 accepted (wrap={wrap})");
+            assert!(
+                t.token_in_range(0),
+                "arbitrary token accepted (wrap={wrap})"
+            );
+        }
     }
 
     #[test]
