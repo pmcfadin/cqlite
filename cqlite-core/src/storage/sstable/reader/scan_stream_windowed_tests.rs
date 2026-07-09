@@ -738,11 +738,22 @@ mod fixture_drain {
         let _ = drain_handle.join().expect("join drain thread");
     }
 
+    // #1143 truncation guard fixture (issue #1935). Needs a fixture whose REAL
+    // Cassandra chunk boundaries straddle a partition mid-way, so dropping the last
+    // raw chunk leaves a genuinely unconfirmed trailing partition. The regenerated
+    // core-keyspace tables shrank below one chunk (all rows in chunk 0 + a
+    // degenerate trailing chunk), so their last-chunk boundary no longer truncates
+    // mid-partition. `test_comp/lz4_table` is a single 600-row partition spanning 12
+    // real LZ4 chunks with NO spurious trailing chunk — its chunk boundaries land
+    // strictly inside the partition, exactly the geometry #1143 needs.
+    const TRUNC_KEYSPACE: &str = "test_comp";
+    const TRUNC_TABLE: &str = "lz4_table";
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn io_failed_skips_terminal_drain_on_truncated_window() {
-        let Some(data_db) = fixture_data_db() else {
+        let Some(data_db) = fixture_data_db_for(TRUNC_KEYSPACE, TRUNC_TABLE) else {
             eprintln!(
-                "Skipping {KEYSPACE}.{TABLE}: no Data.db present (run fetch-datasets.sh). \
+                "Skipping {TRUNC_KEYSPACE}.{TRUNC_TABLE}: no Data.db present (run fetch-datasets.sh). \
                      The pure terminal_drain_skipped_iff_io_failed guard still runs."
             );
             return;
@@ -797,8 +808,19 @@ mod fixture_drain {
                  rows vs failed(io_failed=true)={failed} rows"
             );
 
+        // No-vacuous-pass guard: the clean run MUST actually confirm rows via the
+        // terminal drain of the truncated trailing partition, otherwise clean==0
+        // would trivially satisfy `clean > failed` against a failed==0 that proves
+        // nothing. With a single wide partition spanning every chunk, the truncated
+        // window is unconfirmed, so ONLY the terminal drain emits its rows.
+        assert!(
+            clean > 0,
+            "Issue #1143: the truncated window's terminal drain confirmed 0 rows — \
+                 the {TRUNC_KEYSPACE}.{TRUNC_TABLE} fixture no longer straddles a chunk \
+                 boundary mid-partition; pick a fixture whose tail straddles a chunk."
+        );
         // The clean run MUST have something to lose: its terminal drain parses
-        // the truncated trailing window into at least one extra partition.
+        // the truncated trailing window into a partition the io_failed run drops.
         // (If this fails the fixture's last chunk ended exactly on a partition
         // boundary — pick a fixture whose tail straddles a chunk.)
         assert!(

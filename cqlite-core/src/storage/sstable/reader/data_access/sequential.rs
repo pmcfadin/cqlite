@@ -1509,15 +1509,27 @@ mod tests {
             entries.len()
         );
 
-        // Expected: 100 rows (one per partition, static data merged into clustering row)
-        // Before fix: 0 rows (Snappy decompression failure)
-        // After fixing only decompression: 200 rows (static rows emitted separately)
-        // After full fix: 100 rows
+        // Expected: one row per partition (static merged into the clustering row).
+        // Derive the count from the sstabledump JSONL golden (one object/partition)
+        // instead of hardcoding it, so the guard survives corpus reshapes (issue
+        // #1935; cf. PR #2209). #480 regression: 0 rows (decompress fail) / 2x
+        // (static rows split) / one-per-partition (full fix).
+        let mut golden_path = data_path.clone().into_os_string();
+        golden_path.push(".jsonl");
+        let golden = std::fs::read_to_string(&golden_path)
+            .expect("static_columns_table sstabledump JSONL golden must exist");
+        let expected_rows = golden.lines().filter(|l| !l.trim().is_empty()).count();
+        // No-vacuous-pass guard: the golden must actually contain partitions.
+        assert!(
+            expected_rows > 0,
+            "golden must have >0 partitions (no vacuous pass)"
+        );
         assert_eq!(
             entries.len(),
-            100,
-            "static_columns_table should return 100 rows (one per partition), \
-             got {}. Regression for Issue #480: static cell duplication on read.",
+            expected_rows,
+            "static_columns_table should return one row per partition ({expected_rows} \
+             per the sstabledump JSONL golden), got {}. Regression for Issue #480: \
+             static cell duplication on read.",
             entries.len()
         );
     }
