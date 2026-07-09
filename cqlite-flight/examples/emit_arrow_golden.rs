@@ -64,6 +64,7 @@ fn schema() -> TableSchema {
             col("c_blob", "blob", true),
             col("c_timestamp", "timestamp", true),
             col("c_date", "date", true),
+            col("c_time", "time", true),
             col("c_uuid", "uuid", true),
         ],
         comments: HashMap::new(),
@@ -76,6 +77,12 @@ fn schema() -> TableSchema {
 const FIXTURE_UUID: [u8; 16] = [
     0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0x4d, 0xef, 0x81, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
 ];
+
+/// The single fixture CQL `time` value, hard-pinned as nanoseconds-of-day so the
+/// golden's `Time64(Nanosecond)` column is byte-deterministic and the Java
+/// assertion can hard-code the exact value. This is `13:14:15.123456789`
+/// = ((13*3600 + 14*60 + 15) * 1_000_000_000) + 123_456_789.
+const FIXTURE_TIME_NANOS: i64 = 47_655_123_456_789;
 
 /// One full row (`id = 1`) with a value for every scalar column, plus a sparse
 /// row (`id = 2`) that writes only `c_text` so every other non-key column is
@@ -126,6 +133,13 @@ fn mutations() -> Vec<Mutation> {
                 column: "c_date".into(),
                 value: Value::Date(19_000),
             },
+            // 13:14:15.123456789 as nanoseconds-of-day — a fixed, deterministic
+            // time-of-day (NOT wall-clock), pinned so the Java assertion can
+            // hard-code the exact nanosecond value.
+            CellOperation::Write {
+                column: "c_time".into(),
+                value: Value::Time(FIXTURE_TIME_NANOS),
+            },
             CellOperation::Write {
                 column: "c_uuid".into(),
                 value: Value::Uuid(FIXTURE_UUID),
@@ -135,8 +149,8 @@ fn mutations() -> Vec<Mutation> {
         None,
     );
     // Sparse row: writes ONLY `c_text` so every OTHER regular column (bool,
-    // the integer family, float/double, blob, timestamp, date, uuid) is null in
-    // the merged output — pinning the server's null encoding for each Arrow type.
+    // the integer family, float/double, blob, timestamp, date, time, uuid) is null
+    // in the merged output — pinning the server's null encoding for each Arrow type.
     // A live row needs at least one written cell (there is no bare row marker in
     // this mutation API), hence one non-null column here.
     let nulls = Mutation::new(

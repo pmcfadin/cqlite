@@ -10,6 +10,7 @@ import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
@@ -62,6 +63,15 @@ class ArrowToTrinoGoldenTest {
     /** Canonical form of the pinned FIXTURE_UUID in emit_arrow_golden.rs. */
     private static final String FIXTURE_UUID = "12345678-9abc-4def-8123-456789abcdef";
 
+    /**
+     * The pinned CQL {@code time} value from emit_arrow_golden.rs
+     * ({@code FIXTURE_TIME_NANOS}): {@code 13:14:15.123456789} as
+     * nanoseconds-of-day. Trino encodes TIME as picoseconds-of-day, so the
+     * decoded {@code TIME_NANOS} long is this value ×1000.
+     */
+    private static final long FIXTURE_TIME_NANOS = 47_655_123_456_789L;
+    private static final long FIXTURE_TIME_PICOS = FIXTURE_TIME_NANOS * 1_000L;
+
     @Test
     void decodesServerEmittedGoldenThroughArrowToTrino() throws Exception {
         try (BufferAllocator allocator = new RootAllocator();
@@ -88,7 +98,7 @@ class ArrowToTrinoGoldenTest {
                 // Assert the server emitted the expected field order + resolved types.
                 assertEquals(
                         List.of("id", "c_bool", "c_tinyint", "c_smallint", "c_bigint", "c_float",
-                                "c_double", "c_text", "c_blob", "c_timestamp", "c_date", "c_uuid"),
+                                "c_double", "c_text", "c_blob", "c_timestamp", "c_date", "c_time", "c_uuid"),
                         columns.stream().map(CqliteFlightColumnHandle::name).toList(),
                         "server field order drifted");
                 assertEquals(IntegerType.INTEGER, typeOf(columns, "id"));
@@ -102,6 +112,8 @@ class ArrowToTrinoGoldenTest {
                 assertEquals(VarbinaryType.VARBINARY, typeOf(columns, "c_blob"));
                 assertEquals(TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS, typeOf(columns, "c_timestamp"));
                 assertEquals(DateType.DATE, typeOf(columns, "c_date"));
+                // CQL time → Arrow Time64(Nanosecond) → Trino TIME(9) = TIME_NANOS.
+                assertEquals(TimeType.TIME_NANOS, typeOf(columns, "c_time"));
                 // uuid is FixedSizeBinary(16)+arrow.uuid extension → VARCHAR.
                 assertEquals(VarcharType.VARCHAR, typeOf(columns, "c_uuid"));
 
@@ -113,6 +125,14 @@ class ArrowToTrinoGoldenTest {
                         (ArrowType.Timestamp) fieldOf(schema, "c_timestamp").getType();
                 assertEquals(TimeUnit.MILLISECOND, tsType.getUnit(),
                         "server c_timestamp Arrow unit drifted from MILLISECOND");
+
+                // Schema-level time-unit pin: the server emits CQL time as
+                // Time64(Nanosecond). (TimeType above already distinguishes units,
+                // but pin the Arrow field directly to mirror the timestamp guard.)
+                ArrowType.Time timeType =
+                        (ArrowType.Time) fieldOf(schema, "c_time").getType();
+                assertEquals(TimeUnit.NANOSECOND, timeType.getUnit(),
+                        "server c_time Arrow unit drifted from NANOSECOND");
 
                 // Schema-metadata drift guard: assert the server-declared
                 // `cqlite:pushdown` capability the connector will gate pushdown on.
@@ -128,7 +148,7 @@ class ArrowToTrinoGoldenTest {
                 // Run the real conversion.
                 Page page = ArrowToTrino.toPage(root, columns);
                 assertEquals(2, page.getPositionCount(), "fixture has 2 rows");
-                assertEquals(12, page.getChannelCount());
+                assertEquals(13, page.getChannelCount());
 
                 // Row order is the server's token order (murmur3 of the pk), NOT
                 // id order — locate each fixture row by its `id` value.
@@ -154,6 +174,10 @@ class ArrowToTrinoGoldenTest {
                 assertEquals(1_700_000_000_000L, DateTimeEncoding.unpackMillisUtc(packed));
 
                 assertEquals(19_000, DateType.DATE.getInt(block(page, columns, "c_date"), full));
+                // TIME is decoded to picoseconds-of-day; assert the EXACT pinned value.
+                assertEquals(FIXTURE_TIME_PICOS,
+                        TimeType.TIME_NANOS.getLong(block(page, columns, "c_time"), full),
+                        "c_time value drifted from the pinned nanosecond-of-day");
                 assertEquals(FIXTURE_UUID,
                         VarcharType.VARCHAR.getSlice(block(page, columns, "c_uuid"), full).toStringUtf8());
 
@@ -161,7 +185,7 @@ class ArrowToTrinoGoldenTest {
                 assertEquals("only-text",
                         VarcharType.VARCHAR.getSlice(block(page, columns, "c_text"), sparse).toStringUtf8());
                 for (String nullable : List.of("c_bool", "c_tinyint", "c_smallint", "c_bigint",
-                        "c_float", "c_double", "c_blob", "c_timestamp", "c_date", "c_uuid")) {
+                        "c_float", "c_double", "c_blob", "c_timestamp", "c_date", "c_time", "c_uuid")) {
                     assertTrue(block(page, columns, nullable).isNull(sparse),
                             "expected null in " + nullable + " for the sparse row");
                 }
