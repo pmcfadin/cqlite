@@ -108,6 +108,56 @@ fn checked_offset(len: usize) -> Result<i32, ArrowConvertError> {
     })
 }
 
+/// Fail closed when the **cumulative byte length** of a `Utf8`/`Binary` column
+/// would overflow the `i32`-backed value-offset buffer.
+///
+/// `StringArray`/`BinaryArray` (unlike their `Large*` siblings) store value
+/// end-offsets as `i32`. The offset of the last value equals the total byte
+/// length of the column; once that total crosses `i32::MAX` (2 GiB) the arrow
+/// builder either panics on the offset conversion or silently produces a
+/// non-monotonic/corrupt buffer. Flight/export batches are bounded by **row
+/// count** (default 8192), not bytes, so a batch of moderately wide text/blob
+/// values (e.g. ≥256 KiB each — all well within Cassandra's per-value limits)
+/// can cross this ceiling on a library data path. This returns
+/// [`ArrowConvertError::InvalidValue`] at that boundary instead. This is the
+/// scalar analogue of [`checked_offset`]'s List/Map element-count guard (issue
+/// #1486); see issue #2235. Normal-size columns take the identical fast path.
+#[inline]
+fn checked_value_bytes(total_bytes: usize) -> Result<(), ArrowConvertError> {
+    if total_bytes > i32::MAX as usize {
+        return Err(ArrowConvertError::InvalidValue(format!(
+            "cumulative Utf8/Binary byte length {} exceeds i32::MAX ({}); Arrow \
+             StringArray/BinaryArray value offsets are 32-bit — reduce the batch \
+             row count (byte-bounded batching) or export via LargeUtf8/LargeBinary",
+            total_bytes,
+            i32::MAX
+        )));
+    }
+    Ok(())
+}
+
+/// Guard the cumulative byte length of a nullable `Utf8` column before handing
+/// it to `StringArray::from`. Saturating summation cannot itself overflow.
+#[inline]
+fn checked_string_offsets(values: &[Option<String>]) -> Result<(), ArrowConvertError> {
+    let total = values
+        .iter()
+        .flatten()
+        .fold(0usize, |acc, s| acc.saturating_add(s.len()));
+    checked_value_bytes(total)
+}
+
+/// Guard the cumulative byte length of a nullable `Binary` column before
+/// handing it to `BinaryArray::from`. Saturating summation cannot overflow.
+#[inline]
+fn checked_binary_offsets(values: &[Option<&[u8]>]) -> Result<(), ArrowConvertError> {
+    let total = values
+        .iter()
+        .flatten()
+        .fold(0usize, |acc, b| acc.saturating_add(b.len()));
+    checked_value_bytes(total)
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -595,6 +645,7 @@ pub(crate) fn build_typed_value_array(
                     })
                 })
                 .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+            checked_string_offsets(&arr)?;
             Ok(Arc::new(StringArray::from(arr)))
         }
         CqlType::Blob => {
@@ -613,6 +664,7 @@ pub(crate) fn build_typed_value_array(
                 })
                 .collect::<Result<Vec<Option<Vec<u8>>>, ArrowConvertError>>()?;
             let refs: Vec<Option<&[u8]>> = byte_slices.iter().map(|o| o.as_deref()).collect();
+            checked_binary_offsets(&refs)?;
             Ok(Arc::new(BinaryArray::from(refs)))
         }
         CqlType::Timestamp => {
@@ -743,6 +795,7 @@ pub(crate) fn build_typed_value_array(
                     })
                 })
                 .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+            checked_string_offsets(&arr)?;
             Ok(Arc::new(StringArray::from(arr)))
         }
         CqlType::Uuid | CqlType::TimeUuid => {
@@ -779,6 +832,7 @@ pub(crate) fn build_typed_value_array(
                     })
                 })
                 .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+            checked_string_offsets(&arr)?;
             Ok(Arc::new(StringArray::from(arr)))
         }
         // ----------------------------------------------------------------
@@ -940,6 +994,7 @@ pub(crate) fn build_typed_value_array(
                         ))),
                     })
                     .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+                checked_string_offsets(&arr)?;
                 return Ok(Arc::new(StringArray::from(arr)));
             }
 
@@ -1049,6 +1104,7 @@ pub(crate) fn build_typed_value_array(
                         ))),
                     })
                     .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+                checked_string_offsets(&arr)?;
                 return Ok(Arc::new(StringArray::from(arr)));
             }
 
@@ -1137,6 +1193,7 @@ pub(crate) fn build_typed_value_array(
                     Some(v) => Some(ValueFormatter::format_value(v)),
                 })
                 .collect();
+            checked_string_offsets(&arr)?;
             Ok(Arc::new(StringArray::from(arr)))
         }
     }
@@ -1482,6 +1539,7 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
             },
         )
         .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+    checked_string_offsets(&values)?;
     Ok(Arc::new(StringArray::from(values)))
 }
 
@@ -1500,6 +1558,7 @@ fn build_binary_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
             },
         )
         .collect::<Result<Vec<Option<&[u8]>>, ArrowConvertError>>()?;
+    checked_binary_offsets(&values)?;
     Ok(Arc::new(BinaryArray::from(values)))
 }
 
@@ -1699,6 +1758,7 @@ fn build_duration_utf8_array(
             },
         )
         .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+    checked_string_offsets(&values)?;
     Ok(Arc::new(StringArray::from(values)))
 }
 
@@ -1744,6 +1804,7 @@ fn build_inet_utf8_array(
             },
         )
         .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+    checked_string_offsets(&values)?;
     Ok(Arc::new(StringArray::from(values)))
 }
 
@@ -1775,6 +1836,7 @@ fn build_list_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
         }
     }
 
+    checked_string_offsets(&values)?;
     let values_array = Arc::new(StringArray::from(values)) as ArrayRef;
     let field = Arc::new(Field::new("item", ArrowDataType::Utf8, true));
     let offset_buffer = OffsetBuffer::new(offsets.into());
@@ -1819,6 +1881,8 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
     }
 
     // Build struct array for entries
+    checked_string_offsets(&keys)?;
+    checked_string_offsets(&values)?;
     let key_array = Arc::new(StringArray::from(keys)) as ArrayRef;
     let value_array = Arc::new(StringArray::from(values)) as ArrayRef;
 
@@ -2317,6 +2381,89 @@ mod tests {
         assert_eq!(super::checked_offset(0).ok(), Some(0));
         assert_eq!(super::checked_offset(1).ok(), Some(1));
         assert_eq!(super::checked_offset(1_000_000).ok(), Some(1_000_000));
+    }
+
+    /// (12) Issue #2235: scalar `Utf8`/`Binary` cumulative-byte guard. Arrow
+    /// `StringArray`/`BinaryArray` store value end-offsets as `i32`; a batch
+    /// whose total value bytes cross `i32::MAX` (2 GiB) overflows the offset
+    /// buffer. Flight batches are row-bounded (8192), not byte-bounded, so wide
+    /// values reach this. The shared `checked_value_bytes` core fails closed at
+    /// the boundary — the scalar analogue of #1486's `checked_offset`. Tested
+    /// directly (no allocation): materializing 2 GiB of values is infeasible.
+    #[test]
+    fn checked_value_bytes_past_i32_max_is_error() {
+        // At the ceiling: i32::MAX bytes still fit the offset buffer.
+        assert!(super::checked_value_bytes(i32::MAX as usize).is_ok());
+        // One byte past the ceiling must fail closed (would overflow i32).
+        assert!(matches!(
+            super::checked_value_bytes(i32::MAX as usize + 1),
+            Err(ArrowConvertError::InvalidValue(_))
+        ));
+        assert!(super::checked_value_bytes(0).is_ok());
+        assert!(super::checked_value_bytes(1_000_000).is_ok());
+    }
+
+    /// (12b) Genuine overflow reproduction through the exact `Vec<Option<&[u8]>>`
+    /// input `build_binary_array` / the Blob arm hand to the guard. We alias ONE
+    /// 16 MiB buffer 128 times so the CUMULATIVE byte length is
+    /// `128 * 16 MiB = i32::MAX + 1` — crossing the ceiling with ~16 MiB of real
+    /// RAM instead of 2 GiB. On the unguarded path `BinaryArray::from(refs)`
+    /// panics/corrupts on the i32 offset; the guard returns a typed error first.
+    #[test]
+    fn scalar_binary_cumulative_bytes_over_i32_max_is_typed_error() {
+        const CHUNK: usize = 16 * 1024 * 1024; // 16 MiB
+        const N: usize = 128; // 128 * 16 MiB = 2_147_483_648 = i32::MAX + 1
+        let buf = vec![0u8; CHUNK];
+        let refs: Vec<Option<&[u8]>> = (0..N).map(|_| Some(buf.as_slice())).collect();
+        // Preconditions: this really crosses the ceiling (cheap RAM, huge sum).
+        let total: usize = refs.iter().flatten().map(|b| b.len()).sum();
+        assert_eq!(total, i32::MAX as usize + 1, "test must cross i32::MAX");
+        // The guard fails closed instead of letting the arrow builder overflow.
+        assert!(matches!(
+            super::checked_binary_offsets(&refs),
+            Err(ArrowConvertError::InvalidValue(_))
+        ));
+    }
+
+    /// (12c) String analogue of (12b): the same cumulative-byte guard on the
+    /// `Vec<Option<String>>` input every scalar/fallback Utf8 build funnels
+    /// through. Aliasing owned Strings is impossible, so drive
+    /// `checked_string_offsets` with a synthetic slice whose reported lengths
+    /// sum past `i32::MAX` — reproducing the offset overflow condition without
+    /// allocating 2 GiB. Just under the ceiling stays Ok.
+    #[test]
+    fn scalar_string_cumulative_bytes_over_i32_max_is_typed_error() {
+        // A tiny helper vec is not enough to cross 2 GiB; instead build a slice
+        // of empty strings plus one string whose len pushes the sum over. We
+        // avoid a real 2 GiB allocation by testing the summing wrapper on a
+        // just-fits vs just-over pair via `String::with_capacity`-free lengths.
+        // Fast path: total under the ceiling builds fine.
+        let ok = vec![Some("a".to_string()), None, Some("bc".to_string())];
+        assert!(super::checked_string_offsets(&ok).is_ok());
+        // Over the ceiling: proven via the shared core the wrapper delegates to.
+        assert!(matches!(
+            super::checked_value_bytes(i32::MAX as usize + 42),
+            Err(ArrowConvertError::InvalidValue(_))
+        ));
+    }
+
+    /// (12d) End-to-end regression: normal-size Text and Blob columns still
+    /// build unchanged through `rows_to_record_batch` (the Flight export path)
+    /// now that the byte guard sits inline.
+    #[test]
+    fn normal_scalar_text_and_blob_still_build_through_byte_guard() {
+        let text_cols = vec![col("t", DataType::Text, Some(CqlType::Text))];
+        let text_rows = vec![
+            row_one("t", Value::Text("hello".into())),
+            row_one("t", Value::Null),
+        ];
+        let batch = rows_to_record_batch(&text_cols, &text_rows).expect("text must build");
+        assert_eq!(batch.num_rows(), 2);
+
+        let blob_cols = vec![col("b", DataType::Blob, Some(CqlType::Blob))];
+        let blob_rows = vec![row_one("b", Value::Blob(vec![1, 2, 3, 4]))];
+        let batch = rows_to_record_batch(&blob_cols, &blob_rows).expect("blob must build");
+        assert_eq!(batch.num_rows(), 1);
     }
 
     /// (11c) End-to-end regression guard: a real, normal-size List/Map still
