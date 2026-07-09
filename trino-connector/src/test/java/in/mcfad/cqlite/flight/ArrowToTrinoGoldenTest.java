@@ -19,6 +19,8 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,7 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -40,10 +43,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>Unlike {@link ArrowToTrinoTest} (which builds vectors by hand and so cannot
  * see server-side schema/type drift), this test is a drift guard: the golden's
- * field order, Arrow types, timestamp unit ({@code Timestamp(MILLISECOND,"UTC")}),
- * {@code Date32}, and the {@code arrow.uuid} extension all come from the server.
- * If the server's emitted schema drifts from what {@link ArrowTypeMapper} and
- * {@link ArrowToTrino} assume, decoding the golden here fails.
+ * field order, Arrow types, timestamp unit, {@code Date32}, the {@code arrow.uuid}
+ * extension, and the per-column {@code cqlite:pushdown} capability metadata all
+ * come from the server. If the server's emitted schema drifts from what
+ * {@link ArrowTypeMapper} and {@link ArrowToTrino} assume, this test fails.
+ *
+ * <p>Note that {@link ArrowTypeMapper#toTrino} collapses every Arrow
+ * {@code Timestamp} unit to {@code TIMESTAMP_TZ_MILLIS}, so the resolved Trino
+ * type is unit-agnostic; the {@code c_timestamp} timestamp-unit pin is therefore
+ * asserted directly on the Arrow field ({@code TimeUnit.MILLISECOND}) at the
+ * schema level, not merely via the decoded millisecond value.
  *
  * <p>Regenerate the golden deliberately with
  * {@code trino-connector/scripts/regen-arrow-golden.sh}.
@@ -64,13 +73,16 @@ class ArrowToTrinoGoldenTest {
                 VectorSchemaRoot root = reader.getVectorSchemaRoot();
                 Schema schema = root.getSchema();
 
-                // Resolve each column's Trino type via the SAME ArrowTypeMapper the
-                // connector uses at planning time — so a drifted Arrow type surfaces
-                // here as an UnsupportedOperationException, not at scan time.
+                // Resolve each column's Trino type AND pushdown capability via the
+                // SAME ArrowTypeMapper the connector uses at planning time — so a
+                // drifted Arrow type surfaces here as an UnsupportedOperationException,
+                // and drifted `cqlite:pushdown` field metadata surfaces as a capability
+                // mismatch, not silently at scan time.
                 List<CqliteFlightColumnHandle> columns = new ArrayList<>();
                 for (Field field : schema.getFields()) {
                     Type trinoType = ArrowTypeMapper.toTrino(field);
-                    columns.add(new CqliteFlightColumnHandle(field.getName(), trinoType));
+                    PushdownCapability capability = ArrowTypeMapper.capabilityOf(field);
+                    columns.add(new CqliteFlightColumnHandle(field.getName(), trinoType, capability));
                 }
 
                 // Assert the server emitted the expected field order + resolved types.
@@ -93,6 +105,26 @@ class ArrowToTrinoGoldenTest {
                 // uuid is FixedSizeBinary(16)+arrow.uuid extension → VARCHAR.
                 assertEquals(VarcharType.VARCHAR, typeOf(columns, "c_uuid"));
 
+                // Schema-level timestamp-unit pin: ArrowTypeMapper.toTrino collapses
+                // every Timestamp unit to TIMESTAMP_TZ_MILLIS, so the resolved Trino
+                // type above cannot catch a unit drift. Assert the server emitted a
+                // MILLISECOND-unit Timestamp directly on the Arrow field.
+                ArrowType.Timestamp tsType =
+                        (ArrowType.Timestamp) fieldOf(schema, "c_timestamp").getType();
+                assertEquals(TimeUnit.MILLISECOND, tsType.getUnit(),
+                        "server c_timestamp Arrow unit drifted from MILLISECOND");
+
+                // Schema-metadata drift guard: assert the server-declared
+                // `cqlite:pushdown` capability the connector will gate pushdown on.
+                // The three representative capabilities the fixture's columns span:
+                //   c_text (text)   -> FULL, c_uuid (uuid) -> EQUALITY, c_blob -> NONE.
+                assertEquals(PushdownCapability.FULL, capabilityOf(columns, "c_text"),
+                        "c_text pushdown capability drifted");
+                assertEquals(PushdownCapability.EQUALITY, capabilityOf(columns, "c_uuid"),
+                        "c_uuid pushdown capability drifted");
+                assertEquals(PushdownCapability.NONE, capabilityOf(columns, "c_blob"),
+                        "c_blob pushdown capability drifted");
+
                 // Run the real conversion.
                 Page page = ArrowToTrino.toPage(root, columns);
                 assertEquals(2, page.getPositionCount(), "fixture has 2 rows");
@@ -111,7 +143,11 @@ class ArrowToTrinoGoldenTest {
                 assertEquals(2.5f, Float.intBitsToFloat(RealType.REAL.getInt(block(page, columns, "c_float"), full)));
                 assertEquals(6.25, DoubleType.DOUBLE.getDouble(block(page, columns, "c_double"), full));
                 assertEquals("héllo", VarcharType.VARCHAR.getSlice(block(page, columns, "c_text"), full).toStringUtf8());
-                assertEquals(4, VarbinaryType.VARBINARY.getSlice(block(page, columns, "c_blob"), full).length());
+                // Assert the EXACT blob bytes (the fixture writes {0xde,0xad,0xbe,0xef}),
+                // not just the length — reordered/corrupted same-size bytes must fail.
+                assertArrayEquals(new byte[] {(byte) 0xde, (byte) 0xad, (byte) 0xbe, (byte) 0xef},
+                        VarbinaryType.VARBINARY.getSlice(block(page, columns, "c_blob"), full).getBytes(),
+                        "c_blob bytes drifted");
 
                 long packed = TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS.getLong(
                         block(page, columns, "c_timestamp"), full);
@@ -146,6 +182,14 @@ class ArrowToTrinoGoldenTest {
 
     private static Type typeOf(List<CqliteFlightColumnHandle> columns, String name) {
         return columns.stream().filter(c -> c.name().equals(name)).findFirst().orElseThrow().type();
+    }
+
+    private static PushdownCapability capabilityOf(List<CqliteFlightColumnHandle> columns, String name) {
+        return columns.stream().filter(c -> c.name().equals(name)).findFirst().orElseThrow().capability();
+    }
+
+    private static Field fieldOf(Schema schema, String name) {
+        return schema.getFields().stream().filter(f -> f.getName().equals(name)).findFirst().orElseThrow();
     }
 
     private static Block block(Page page, List<CqliteFlightColumnHandle> columns, String name) {
