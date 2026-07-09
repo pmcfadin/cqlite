@@ -686,4 +686,74 @@ mod tests {
             other => panic!("expected ClusterGroup, got {other:?}"),
         }
     }
+
+    /// Issue #1668, stage 5c-iv design verification (NOT yet a stage
+    /// deliverable — a load-bearing precondition check before building the
+    /// incremental writer entry point). Confirms CONCRETELY, through the
+    /// real production `step()`, that a partition's `clustering_key: None`
+    /// entry (the reconciled static row — `merge_partition_rows` groups it
+    /// into `clustered_rows[None]` alongside any other `None`-keyed carrier,
+    /// same as a range/partition-tombstone re-emission) ALWAYS sorts FIRST
+    /// in `MergeStep::Partition.rows`, before every `Some(ck)` clustering
+    /// row — regardless of how many regular rows the partition has. This
+    /// means the static row (and any range/partition-tombstone carriers) sit
+    /// in a SMALL, PARTITION-SIZE-INDEPENDENT prefix, decoupled from the
+    /// (potentially huge) clustering-row tail — the key fact the incremental
+    /// writer design leans on to avoid buffering the whole partition just to
+    /// resolve statics.
+    #[test]
+    fn static_row_carrier_always_sorts_first_regardless_of_partition_width() {
+        use crate::schema::Column;
+        use crate::storage::write_engine::merge::model::CellData;
+
+        let mut schema = test_schema(ClusteringOrder::Asc);
+        schema.columns = vec![Column {
+            name: "region".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+            is_static: true,
+        }];
+
+        // A static-row carrier (clustering_key: None, cells target the
+        // static column) PLUS a wide tail of 50 regular clustering rows.
+        let mut entries = vec![MergeEntry::new(
+            0,
+            key(1),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "region".to_string(),
+                    Value::Text("us-east".to_string()),
+                    100,
+                )],
+            },
+        )];
+        for ck in 0..50 {
+            entries.push(live_entry(0, 1, ck, 100));
+        }
+
+        let mut merger = merger_over(entries, schema);
+        let rows = match merger.step().unwrap() {
+            MergeStep::Partition { rows, .. } => rows,
+            other => panic!("expected Partition, got {other:?}"),
+        };
+
+        assert_eq!(
+            rows.len(),
+            51,
+            "expected the static row + 50 clustering rows"
+        );
+        assert!(
+            rows[0].clustering_key.is_none(),
+            "the static row (clustering_key: None) must be FIRST, regardless \
+             of the 50 regular clustering rows that follow"
+        );
+        assert!(
+            rows[1..].iter().all(|r| r.clustering_key.is_some()),
+            "every row AFTER the first must be a regular Some(ck) clustering \
+             row — the None-keyed prefix is exactly one entry wide here"
+        );
+    }
 }
