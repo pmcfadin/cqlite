@@ -4,10 +4,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
+import java.io.IOException;
 import java.net.URL;
 import java.security.CodeSource;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.apache.arrow.flight.FlightClient;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -126,6 +134,122 @@ class ArrowJavaVersionPinTest {
                 EXPECTED_NETTY_VERSION,
                 versionFromJar(nettyBuffer, "netty-buffer"),
                 "resolved netty-buffer drifted off arrow-19's tested 4.1.x baseline");
+    }
+
+    /**
+     * Minimum arrow-group jars expected on the runtime classpath (issue #2193):
+     * flight-core, arrow-format, arrow-vector, arrow-memory-core, arrow-memory-netty,
+     * arrow-memory-netty-buffer-patch. A lower count means the enumeration is broken
+     * (e.g. scanning the wrong classpath) rather than a legitimately smaller graph.
+     */
+    private static final int MIN_ARROW_JARS = 6;
+
+    /**
+     * Minimum "core" (non-tcnative) netty-group jars expected — netty-buffer,
+     * -codec(+http/http2/socks), -common, -handler(+proxy), -resolver, -transport
+     * (+native-unix-common) as pulled in by flight-core:19.0.0.
+     */
+    private static final int MIN_NETTY_CORE_JARS = 8;
+
+    /**
+     * Exhaustive full-set version check, closing the gap the per-class checks above
+     * leave open: those check ONE representative class per module, so a NEW
+     * transitive arrow/netty module Gradle resolution pulls in later (never anchored
+     * by a hand-picked class here) could silently drift to the wrong version and go
+     * undetected. This scans every jar on the runtime classpath, reads each one's
+     * OWN embedded Maven {@code pom.properties} for its authoritative groupId
+     * (rather than guessing from the filename — {@code flight-core-19.0.0.jar}
+     * contains no {@code "arrow"} substring, so a filename-prefix heuristic would
+     * silently miss it), and asserts EVERY {@code org.apache.arrow:*} jar is
+     * {@link #EXPECTED_ARROW_VERSION} and EVERY {@code io.netty:*} jar (excluding
+     * {@code netty-tcnative-*}, whose native-binding release train is
+     * independently versioned — 2.0.74.Final is not a drift, it never tracks
+     * netty core's 4.x line) is {@link #EXPECTED_NETTY_VERSION}. Non-empty minimum
+     * counts guard against a broken/vacuous scan silently passing.
+     */
+    @Test
+    void everyArrowAndNettyJarOnClasspathIsPinnedVersion() {
+        List<MavenCoordinate> coords = scanClasspathMavenCoordinates();
+
+        List<MavenCoordinate> arrowJars =
+                coords.stream().filter(c -> c.groupId.equals("org.apache.arrow")).collect(Collectors.toList());
+        assertTrue(
+                arrowJars.size() >= MIN_ARROW_JARS,
+                "expected >= " + MIN_ARROW_JARS + " org.apache.arrow:* jars on the classpath, found "
+                        + arrowJars.size() + ": " + arrowJars);
+        for (MavenCoordinate c : arrowJars) {
+            assertEquals(
+                    EXPECTED_ARROW_VERSION,
+                    c.version,
+                    "arrow jar drifted from the #2193 pin: " + c);
+        }
+
+        List<MavenCoordinate> nettyCoreJars = coords.stream()
+                .filter(c -> c.groupId.equals("io.netty"))
+                .filter(c -> !c.artifactId.startsWith("netty-tcnative"))
+                .collect(Collectors.toList());
+        assertTrue(
+                nettyCoreJars.size() >= MIN_NETTY_CORE_JARS,
+                "expected >= " + MIN_NETTY_CORE_JARS + " core io.netty:* jars on the classpath, found "
+                        + nettyCoreJars.size() + ": " + nettyCoreJars);
+        for (MavenCoordinate c : nettyCoreJars) {
+            assertEquals(
+                    EXPECTED_NETTY_VERSION,
+                    c.version,
+                    "netty jar drifted off arrow-19's tested 4.1.x baseline: " + c);
+        }
+    }
+
+    /** A resolved {@code groupId:artifactId:version} read from a jar's embedded Maven metadata. */
+    private record MavenCoordinate(String groupId, String artifactId, String version) {
+        @Override
+        public String toString() {
+            return groupId + ":" + artifactId + ":" + version;
+        }
+    }
+
+    /**
+     * Walk every jar on {@code java.class.path} — the actual resolved runtime
+     * classpath the test JVM (and, by the same Gradle resolution, the field's
+     * bundled plugin) loads classes from — and read each one's
+     * {@code META-INF/maven/<groupId>/<artifactId>/pom.properties} entry, the
+     * authoritative Maven coordinates Gradle/Maven-published jars embed. Jars
+     * without one (e.g. non-Maven-published) are silently skipped; none of the
+     * arrow/netty artifacts this test cares about lack one.
+     */
+    private static List<MavenCoordinate> scanClasspathMavenCoordinates() {
+        String classpath = System.getProperty("java.class.path");
+        assertNotNull(classpath, "java.class.path system property is unset");
+        List<MavenCoordinate> out = new ArrayList<>();
+        for (String entry : classpath.split(File.pathSeparator)) {
+            if (!entry.endsWith(".jar")) {
+                continue;
+            }
+            File jarFile = new File(entry);
+            if (!jarFile.isFile()) {
+                continue;
+            }
+            try (JarFile jar = new JarFile(jarFile)) {
+                jar.stream()
+                        .filter(e -> e.getName().startsWith("META-INF/maven/") && e.getName().endsWith("pom.properties"))
+                        .findFirst()
+                        .ifPresent(e -> out.add(readCoordinate(jar, e)));
+            } catch (IOException e) {
+                throw new AssertionError("failed to open classpath jar " + entry, e);
+            }
+        }
+        return out;
+    }
+
+    private static MavenCoordinate readCoordinate(JarFile jar, JarEntry pomProperties) {
+        Properties props = new Properties();
+        try (var in = jar.getInputStream(pomProperties)) {
+            props.load(in);
+        } catch (IOException e) {
+            throw new AssertionError("failed to read " + pomProperties.getName() + " from " + jar.getName(), e);
+        }
+        return new MavenCoordinate(
+                props.getProperty("groupId"), props.getProperty("artifactId"), props.getProperty("version"));
     }
 
     /**
