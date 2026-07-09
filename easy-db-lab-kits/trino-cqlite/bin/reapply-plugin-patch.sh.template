@@ -63,6 +63,21 @@ PLUGIN_MOUNT_PATH="/usr/lib/trino/plugin/cqlite_flight"
 # result into the shared emptyDir.
 INIT_SCRIPT='set -eu; mkdir -p /tmp/build; cp /workspace/build.gradle.kts /workspace/settings.gradle.kts /tmp/build/; cd /tmp/build; gradle --no-daemon --console=plain assemblePlugin; cp -r build/plugin/cqlite_flight/. /plugin-out/'
 
+# Issues #2193/#2290: arrow-java's MemoryUtil static initializer needs the
+# java.nio module opened to it on JDK 17+. Trino 481's stock jvm.config does
+# NOT carry this flag, so without it the CQLite Flight connector's first Arrow
+# off-heap touch dies and every do_get fails downstream with a cryptic
+# "Failed to read message". We inject the arrow-java-documented flag via
+# JAVA_TOOL_OPTIONS rather than a jvm.config file-mount: mounting a single file
+# at /etc/trino/jvm.config would REPLACE the image's whole stock jvm.config
+# (forcing us to reproduce + version-track every stock line), whereas
+# JAVA_TOOL_OPTIONS is purely ADDITIVE — the JVM appends it to the launcher's
+# args. It is idempotent under strategic merge (env entries merge by name, so
+# re-applying identical content is a no-op) and applies to coordinator AND
+# worker alike (see patch_deployment). The connector also fails fast at catalog
+# load if the flag is somehow still absent (ArrowMemoryPreflight, #2290).
+ARROW_ADD_OPENS='--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED'
+
 # Issue #2120: create/refresh the ConfigMap the initContainer mounts BEFORE
 # either deployment is patched to reference it. Same recipe as
 # bin/install.sh (kept in sync deliberately) — idempotent create-or-update
@@ -131,6 +146,7 @@ patch_deployment() {
     --arg mount "${PLUGIN_MOUNT_PATH}" \
     --arg container "${dep}" \
     --arg script "${INIT_SCRIPT}" \
+    --arg addopens "${ARROW_ADD_OPENS}" \
     '{spec:{template:{spec:{
       volumes: [
         {name:"cqlite-plugin-src", configMap:{name:$cm}},
@@ -151,6 +167,11 @@ patch_deployment() {
       containers: [
         {
           name:$container,
+          # Additive Arrow add-opens flag (#2193/#2290). Strategic merge keys env
+          # entries by name, so a fixed value re-applies as a no-op (idempotent).
+          env: [
+            {name:"JAVA_TOOL_OPTIONS", value:$addopens}
+          ],
           volumeMounts: [
             {name:"cqlite-plugin-dir", mountPath:$mount, readOnly:true}
           ]
