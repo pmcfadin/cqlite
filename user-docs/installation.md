@@ -171,8 +171,8 @@ Add `cqlite-core` to your `Cargo.toml`:
 cqlite-core = { git = "https://github.com/pmcfadin/cqlite.git" }
 ```
 
-Default features include `all-compression` (LZ4, Snappy, Deflate, Zstd) and
-`state_machine` (query engine). For a minimal build without the query engine:
+Default features include `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_machine`
+(query engine), and `write-support` (write path). For a minimal build without the query engine:
 
 ```toml
 cqlite-core = { git = "…", default-features = false, features = ["all-compression"] }
@@ -184,9 +184,10 @@ cqlite-core = { git = "…", default-features = false, features = ["all-compress
 |------|---------|-------------|
 | `all-compression` | yes | LZ4, Snappy, Deflate, Zstd support |
 | `state_machine` | yes | Query engine and schema-based discovery |
+| `write-support` | yes | Write path: SSTable writer + STCS compaction |
 | `cli-helpers` | no | CLI-specific ingestion and REPL API |
 | `metrics` | no | Performance metrics collection |
-| `experimental` | no | Experimental / unstable features |
+| `experimental` | no | Unstable/unfinished paths: `flush()`/`compact()`, the INSERT executor, the schema JSON exporter, bloom-filter tests, and unimplemented `Storage::put`/`delete` stubs |
 
 ## Verify your installation
 
