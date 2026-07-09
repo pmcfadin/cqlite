@@ -3,8 +3,10 @@ package in.mcfad.cqlite.flight;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.TimeType;
 import io.trino.spi.type.VarcharType;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -16,6 +18,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ArrowTypeMapperTest {
 
@@ -39,6 +42,29 @@ class ArrowTypeMapperTest {
         assertInstanceOf(io.trino.spi.type.RealType.class,
                 ArrowTypeMapper.toTrino(scalar("f",
                         new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE))));
+    }
+
+    @Test
+    void cqlTimeMapsToTrinoTime() {
+        // Rust emits CQL `time` as Time64(Nanosecond); it must surface as Trino
+        // TIME(9), not be hidden.
+        assertEquals(TimeType.TIME_NANOS,
+                ArrowTypeMapper.toTrino(scalar("t", new ArrowType.Time(TimeUnit.NANOSECOND, 64))));
+        // Other Arrow time units map to the Trino TIME of equal precision.
+        assertEquals(TimeType.TIME_MICROS,
+                ArrowTypeMapper.toTrino(scalar("t", new ArrowType.Time(TimeUnit.MICROSECOND, 64))));
+        assertEquals(TimeType.TIME_MILLIS,
+                ArrowTypeMapper.toTrino(scalar("t", new ArrowType.Time(TimeUnit.MILLISECOND, 32))));
+        assertEquals(TimeType.TIME_SECONDS,
+                ArrowTypeMapper.toTrino(scalar("t", new ArrowType.Time(TimeUnit.SECOND, 32))));
+    }
+
+    @Test
+    void toTrinoOrEmptyIsEmptyForUnsupportedAndPresentForSupported() {
+        Field decimal = scalar("d", new ArrowType.Decimal(38, 9, 128));
+        assertTrue(ArrowTypeMapper.toTrinoOrEmpty(decimal).isEmpty());
+        assertEquals(IntegerType.INTEGER,
+                ArrowTypeMapper.toTrinoOrEmpty(scalar("i", new ArrowType.Int(32, true))).orElseThrow());
     }
 
     @Test

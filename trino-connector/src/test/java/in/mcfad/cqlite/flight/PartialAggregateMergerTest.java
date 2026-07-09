@@ -188,6 +188,50 @@ class PartialAggregateMergerTest {
     }
 
     @Test
+    void minMaxOverTimeNanosCompareAsLongs() {
+        // TIME is carried as canonical nanoseconds-of-day (Long) through the finalize
+        // path (issue #2229). min/max across ranges must pick the right extreme by
+        // long order — 00:00:00.000000001 < 23:59:59.999999999.
+        long early = 1L;                                   // 00:00:00.000000001
+        long late = (24L * 3600 * 1_000_000_000L) - 1L;    // 23:59:59.999999999
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Min, "t", "agg0"),
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Max, "t", "agg1"));
+        var merger = new PartialAggregateMerger(aggregates);
+        var globalKey = new PartialAggregateMerger.GroupKey(List.of());
+        merger.combine(globalKey, row("agg0", late, "agg1", early));
+        merger.combine(globalKey, row("agg0", early, "agg1", late));
+
+        var out = merger.finish().get(0).outputs();
+        assertEquals(early, out.get("agg0"), "min(TIME) is the earliest time-of-day");
+        assertEquals(late, out.get("agg1"), "max(TIME) is the latest time-of-day");
+    }
+
+    @Test
+    void groupByTimeKeyMergesEqualNanosAndKeepsNullGroupSeparate() {
+        // GROUP BY on a TIME column: equal nanos-of-day keys merge across ranges;
+        // a null TIME group stays its own group (issue #2229).
+        long nine = 9L * 3600 * 1_000_000_000L; // 09:00:00
+        long ten = 10L * 3600 * 1_000_000_000L; // 10:00:00
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Count, null, "agg0"));
+        var merger = new PartialAggregateMerger(aggregates);
+        merger.combine(key(nine), row("agg0", 2L));
+        merger.combine(key(ten), row("agg0", 1L));
+        merger.combine(key(nine), row("agg0", 3L)); // same time-of-day → merges with the first
+        var nullKey = new PartialAggregateMerger.GroupKey(java.util.Arrays.asList((Object) null));
+        merger.combine(nullKey, row("agg0", 4L));
+
+        Map<Object, Long> byKey = new HashMap<>();
+        for (var g : merger.finish()) {
+            byKey.put(g.key().values().get(0), (Long) g.outputs().get("agg0"));
+        }
+        assertEquals(5L, byKey.get(nine), "09:00:00 group merged 2 + 3");
+        assertEquals(1L, byKey.get(ten), "10:00:00 group");
+        assertEquals(4L, byKey.get(null), "null TIME is its own group");
+    }
+
+    @Test
     void mergesDoubleSums() {
         var aggregates = List.of(
                 new AggregationSpec.Aggregate(AggregationSpec.Func.Sum, "x", "agg0"));

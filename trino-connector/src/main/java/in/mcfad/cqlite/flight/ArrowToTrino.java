@@ -12,6 +12,7 @@ import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
@@ -28,6 +29,10 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.SmallIntVector;
+import org.apache.arrow.vector.TimeMicroVector;
+import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeNanoVector;
+import org.apache.arrow.vector.TimeSecVector;
 import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarBinaryVector;
@@ -80,6 +85,7 @@ public final class ArrowToTrino {
             case TimestampWithTimeZoneType t -> t.writeLong(builder,
                     DateTimeEncoding.packDateTimeWithZone(
                             ((TimeStampVector) vector).get(i), TimeZoneKey.UTC_KEY));
+            case TimeType t -> t.writeLong(builder, timePicos(vector, i));
             case VarcharType t -> t.writeSlice(builder, varcharSlice(vector, i));
             case VarbinaryType t -> t.writeSlice(builder, binarySlice(vector, i));
             default -> throw new UnsupportedOperationException(
@@ -107,6 +113,13 @@ public final class ArrowToTrino {
             case BigIntVector v -> v.get(i);
             case DateDayVector v -> (long) v.get(i);
             case TimeStampVector v -> v.get(i);
+            // TIME → canonical nanoseconds-of-day (matches the unit writeJavaValue
+            // reads back below). All Arrow time widths normalize to nanos here so
+            // min/max longs compare correctly and GROUP BY keys stay equal.
+            case TimeSecVector v -> timeNanos(v, i);
+            case TimeMilliVector v -> timeNanos(v, i);
+            case TimeMicroVector v -> timeNanos(v, i);
+            case TimeNanoVector v -> timeNanos(v, i);
             case Float4Vector v -> v.get(i);
             case Float8Vector v -> v.get(i);
             case VarCharVector v -> new String(v.get(i), java.nio.charset.StandardCharsets.UTF_8);
@@ -136,6 +149,10 @@ public final class ArrowToTrino {
             case DoubleType t -> t.writeDouble(builder, ((Number) value).doubleValue());
             case TimestampWithTimeZoneType t -> t.writeLong(builder,
                     DateTimeEncoding.packDateTimeWithZone(((Number) value).longValue(), TimeZoneKey.UTC_KEY));
+            // The merged value is canonical nanoseconds-of-day (see readJavaValue);
+            // Trino TIME wants picoseconds-of-day — the same nanos→picos conversion
+            // the scan path uses (timePicos → nanosToPicos).
+            case TimeType t -> t.writeLong(builder, nanosToPicos(((Number) value).longValue()));
             case VarcharType t -> t.writeSlice(builder, value instanceof byte[] b
                     ? Slices.wrappedBuffer(b) : Slices.utf8Slice((String) value));
             case VarbinaryType t -> t.writeSlice(builder, value instanceof byte[] b
@@ -143,6 +160,34 @@ public final class ArrowToTrino {
             default -> throw new UnsupportedOperationException(
                     "Unsupported Trino type for merged-aggregate write: " + type);
         }
+    }
+
+    /**
+     * Canonical connector-side representation of an Arrow time-of-day value:
+     * nanoseconds since midnight. Rust emits CQL {@code time} as
+     * {@code Time64(Nanosecond)}; the other widths are normalized here so the
+     * scan path, aggregation merging, and GROUP BY keys all share one unit
+     * regardless of whatever precision {@link ArrowTypeMapper} mapped the column to.
+     */
+    private static long timeNanos(FieldVector vector, int i) {
+        return switch (vector) {
+            case TimeNanoVector v -> v.get(i);
+            case TimeMicroVector v -> v.get(i) * 1_000L;
+            case TimeMilliVector v -> v.get(i) * 1_000_000L;
+            case TimeSecVector v -> v.get(i) * 1_000_000_000L;
+            default -> throw new UnsupportedOperationException(
+                    "Cannot map Arrow vector " + vector.getClass().getSimpleName() + " to TIME");
+        };
+    }
+
+    /** Trino encodes TIME as picoseconds-of-day; nanos→picos is a single ×1000. */
+    private static long nanosToPicos(long nanos) {
+        return nanos * 1_000L;
+    }
+
+    /** Convert an Arrow time-of-day value to Trino's picoseconds-of-day encoding. */
+    private static long timePicos(FieldVector vector, int i) {
+        return nanosToPicos(timeNanos(vector, i));
     }
 
     /** VARBINARY may be backed by variable or fixed-size binary vectors. */
