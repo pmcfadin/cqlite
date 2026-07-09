@@ -73,6 +73,27 @@ public record CqliteFlightConfig(
             throw new IllegalArgumentException(
                     "cqlite.table-stats-timeout-ms must be > 0, got " + tableStatsTimeoutMillis);
         }
+        requireRootPerNodeBase(sidecarUri);
+    }
+
+    /**
+     * Per-host snapshot addressing (issue #2227) derives each replica host's Sidecar URI from
+     * this base's scheme + port with the host swapped, keeping nothing else. Any path, query,
+     * or fragment on the base would therefore be silently dropped from the per-host snapshot
+     * create/clear PUTs, sending them to the wrong endpoint. Reject a non-root base up front so
+     * a proxied/non-root Sidecar URI fails at config time, not as a silent snapshot-mode failure.
+     * The hostNetwork DaemonSet contract (README) requires a root-path per-node Sidecar base.
+     */
+    private static void requireRootPerNodeBase(URI base) {
+        String path = base.getPath();
+        boolean nonRootPath = path != null && !path.isEmpty() && !path.equals("/");
+        if (nonRootPath || base.getQuery() != null || base.getFragment() != null) {
+            throw new IllegalArgumentException(
+                    "cqlite.sidecar-uri must be a root-path per-node Sidecar base URI (e.g. "
+                            + "http://cassandra:9043) so per-host snapshot addressing can reach each "
+                            + "replica's Sidecar (hostNetwork DaemonSet contract, see README); a base with a "
+                            + "path/query/fragment (proxied or non-root) is unsupported, got: " + base);
+        }
     }
 
     public static CqliteFlightConfig fromMap(Map<String, String> config) {

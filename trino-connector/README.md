@@ -194,7 +194,11 @@ In `snapshot` mode the connector, at **split-planning time** (once per query, pe
 DaemonSet on **every** db node at the same fixed port. Each replica host's Sidecar URI is
 therefore derived from the configured URI's scheme + port and the split's host address —
 so `cqlite.sidecar-uri` **must include an explicit port** in `snapshot` mode (creation
-fails closed with a clear error otherwise).
+fails closed with a clear error otherwise). Because only the scheme + port carry over, the
+base **must be a root-path per-node Sidecar URI** (e.g. `http://cassandra:9043`): a proxied
+or non-root base with a path/query/fragment (e.g. `https://proxy.example/sidecar`) is
+unsupported and rejected at config time, since that path would be silently dropped from the
+per-host snapshot PUTs.
 
 Why per-query rather than a long-lived reusable snapshot: it needs no background reaper,
 each query gets an isolated consistent view, and the queryId makes the name collision-free

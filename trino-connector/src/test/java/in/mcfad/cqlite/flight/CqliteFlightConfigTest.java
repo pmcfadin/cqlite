@@ -109,6 +109,41 @@ class CqliteFlightConfigTest {
     }
 
     @Test
+    void rejectsSidecarUriWithNonRootPath() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "https://proxy.example/sidecar");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithQuery() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://cassandra:9043?token=abc");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsSidecarUriWithFragment() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://cassandra:9043#frag");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void acceptsRootPathSidecarUri() {
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://cassandra:9043/");
+        assertEquals("/", CqliteFlightConfig.fromMap(m).sidecarUri().getPath());
+    }
+
+    @Test
+    void acceptsEmptyPathSidecarUri() {
+        // base() uses http://cassandra:9043 (no trailing slash) — the existing default must stay valid.
+        assertEquals(java.net.URI.create("http://cassandra:9043"),
+                CqliteFlightConfig.fromMap(base()).sidecarUri());
+    }
+
+    @Test
     void rejectsOutOfRangeRatio() {
         Map<String, String> m = base();
         m.put("cqlite.aggregation-pushdown-max-group-ratio", "1.5");
