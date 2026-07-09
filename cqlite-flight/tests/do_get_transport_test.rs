@@ -10,8 +10,11 @@
 //! way the Trino client saw it.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
+use arrow::array::{Array, StringArray};
+use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_client::FlightServiceClient;
@@ -112,6 +115,20 @@ fn ticket_bytes() -> Vec<u8> {
 /// `FlightRecordBatchStream`. Returns the decoded row count. Any malformed
 /// egress surfaces exactly as it did for the Trino client (a decode `Err`).
 async fn do_get_rows_over_transport(svc: CqliteFlightService, ticket: Vec<u8>) -> usize {
+    do_get_batches_over_transport(svc, ticket)
+        .await
+        .iter()
+        .map(|b| b.num_rows())
+        .sum()
+}
+
+/// Same real-transport round-trip as [`do_get_rows_over_transport`] but returns
+/// every decoded `RecordBatch` so a caller can assert on the actual column set
+/// and cell values (not just the row count).
+async fn do_get_batches_over_transport(
+    svc: CqliteFlightService,
+    ticket: Vec<u8>,
+) -> Vec<RecordBatch> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
@@ -151,13 +168,12 @@ async fn do_get_rows_over_transport(svc: CqliteFlightService, ticket: Vec<u8>) -
     let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
-    let mut rows = 0usize;
+    let mut batches = Vec::new();
     while let Some(batch) = rb.next().await {
-        let batch = batch.expect("decode flight batch over transport");
-        rows += batch.num_rows();
+        batches.push(batch.expect("decode flight batch over transport"));
     }
     server.abort();
-    rows
+    batches
 }
 
 /// Reproduces issue #2193: a 3-row nb-big table served over the real gRPC
@@ -228,4 +244,222 @@ fn do_get_over_transport_real_compressed_fixture() {
         rows > 0,
         "real compressed nb-big fixture must decode to > 0 rows over transport"
     );
+}
+
+/// Flush `total` rows across two separate memtable flushes so the resulting
+/// `data_dir` holds TWO `nb-*-big-Data.db` SSTables the server must k-way-merge.
+/// A single-SSTable fixture would let a broken merge pass the LIMIT test, so the
+/// >N rows MUST span ≥2 SSTables to catch a #2157-class early-stop break.
+fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+    assert!(
+        total >= 4,
+        "need enough rows to span two flushes above a cap"
+    );
+    let schema = simple_schema();
+    let temp = tempfile::TempDir::new().unwrap();
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema);
+    let mut engine = WriteEngine::new(config).expect("engine");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let half = total / 2;
+    // Distinct keys with a fixed 6-digit width so string order == numeric order.
+    for i in 0..half {
+        engine
+            .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
+            .expect("write");
+    }
+    rt.block_on(engine.flush())
+        .expect("flush 1")
+        .expect("info 1");
+    for i in half..total {
+        engine
+            .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
+            .expect("write");
+    }
+    rt.block_on(engine.flush())
+        .expect("flush 2")
+        .expect("info 2");
+
+    // Prove the fixture really produced ≥2 SSTables — otherwise the LIMIT test
+    // is not exercising the multi-SSTable early-stop it claims to.
+    let table_dir = data_dir.join(KS).join(TBL);
+    let data_files = std::fs::read_dir(&table_dir)
+        .expect("table dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.ends_with("-Data.db"))
+        })
+        .count();
+    assert!(
+        data_files >= 2,
+        "fixture must span ≥2 SSTables (found {data_files}) so LIMIT exercises the k-way merge",
+    );
+    (temp, data_dir)
+}
+
+/// Count total rows and collect the values of the `key` column across all
+/// decoded batches. Used by the predicate/projection assertions.
+fn keys_of(batches: &[RecordBatch], column: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let idx = batch
+            .schema()
+            .index_of(column)
+            .unwrap_or_else(|_| panic!("column {column} present in output"));
+        let arr = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("text column decodes as StringArray");
+        for i in 0..arr.len() {
+            out.push(arr.value(i).to_string());
+        }
+    }
+    out
+}
+
+/// **LIMIT enforcement over the wire.** A ticket with `limit: Some(N)` against a
+/// fixture holding >N rows spanning TWO SSTables must decode to EXACTLY N rows
+/// through the real gRPC transport. This catches a #2157-class early-stop break
+/// where the k-way merge fails to apply the cap after merging generations.
+#[test]
+fn do_get_over_transport_enforces_limit() {
+    let total = 20usize;
+    let limit = 7u64;
+    let (_temp, data_dir) = build_multi_sstable_fixture(total);
+    let ticket = serde_json::to_vec(&serde_json::json!({
+        "keyspace": KS,
+        "table": TBL,
+        "ddl": DDL,
+        "limit": limit,
+    }))
+    .unwrap();
+
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rows = rt.block_on(do_get_rows_over_transport(svc, ticket));
+    assert_eq!(
+        rows, limit as usize,
+        "a LIMIT {limit} ticket over {total} rows across 2 SSTables must decode EXACTLY {limit} rows"
+    );
+}
+
+/// **Predicate + projection over the wire.** A ticket carrying a v2 filter tree
+/// (`value = "v3"`) plus a single-column projection (`["value"]`) must decode to
+/// exactly the matching row, with ONLY the projected column present. This closes
+/// the gap where the transport tests previously asserted only `count > 0`.
+#[test]
+fn do_get_over_transport_applies_predicate_and_projection() {
+    let (_temp, data_dir) = build_multi_sstable_fixture(20);
+    // Filter on the `value` column for the row written as v3 (key k000003), and
+    // project only `value` so the row-key column must be absent from the output.
+    let ticket = serde_json::to_vec(&serde_json::json!({
+        "keyspace": KS,
+        "table": TBL,
+        "ddl": DDL,
+        "columns": ["value"],
+        "filter": {"type": "Compare", "column": "value", "op": "Equal", "value": "v3"},
+    }))
+    .unwrap();
+
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let batches = rt.block_on(do_get_batches_over_transport(svc, ticket));
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 1,
+        "predicate value = 'v3' must select exactly one row over the wire"
+    );
+    let values = keys_of(&batches, "value");
+    assert_eq!(values, vec!["v3".to_string()], "the surviving row is v3");
+    // Projection: only `value` must be present, the `key` column projected out.
+    let schema = batches.first().expect("one batch").schema();
+    let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(
+        field_names,
+        vec!["value"],
+        "projection [\"value\"] must emit ONLY the value column, not key"
+    );
+}
+
+/// **live-mode file-set resolution.** A null-snapshot ticket against a table dir
+/// that contains BOTH a `snapshots/<name>/` subdir AND live `Data.db` files must
+/// read the LIVE set, never the snapshot. We build the live set with two rows and
+/// a snapshot with three DIFFERENT rows, so the decoded row count disambiguates
+/// which set the server actually read. This closes the read-mode server-behavior
+/// gap that was only field-level-tested.
+#[test]
+fn do_get_over_transport_reads_live_set_not_snapshot() {
+    // Live set: 2 rows in one SSTable.
+    let (_temp_live, live_dir) = build_fixture_n(2);
+    let live_table = live_dir.join(KS).join(TBL);
+
+    // Snapshot set: 5 rows (a distinct count) copied into snapshots/pinned/.
+    let (_temp_snap, snap_dir) = build_fixture_n(5);
+    let snap_table = snap_dir.join(KS).join(TBL);
+    let snapshot_dst = live_table.join("snapshots").join("pinned");
+    std::fs::create_dir_all(&snapshot_dst).expect("mk snapshot dir");
+    copy_sstable_components(&snap_table, &snapshot_dst);
+
+    // A null-snapshot ticket (live mode).
+    let ticket = serde_json::to_vec(&serde_json::json!({
+        "keyspace": KS,
+        "table": TBL,
+        "ddl": DDL,
+    }))
+    .unwrap();
+
+    let svc = CqliteFlightService::new(live_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rows = rt.block_on(do_get_rows_over_transport(svc, ticket));
+    assert_eq!(
+        rows, 2,
+        "a null-snapshot (live) ticket must read the 2-row LIVE set, not the 5-row snapshot"
+    );
+}
+
+/// Flush `n` distinct rows into a fresh single-SSTable fixture and return its
+/// data dir. Like [`build_fixture`] but with a caller-chosen row count so two
+/// fixtures can carry disambiguating counts.
+fn build_fixture_n(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+    let schema = simple_schema();
+    let temp = tempfile::TempDir::new().unwrap();
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema);
+    let mut engine = WriteEngine::new(config).expect("engine");
+    for i in 0..n {
+        engine
+            .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
+            .expect("write");
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.flush()).expect("flush").expect("info");
+    (temp, data_dir)
+}
+
+/// Copy every SSTable component file directly under `src` into `dst` (flat),
+/// mirroring how a Cassandra snapshot hardlinks the component set into
+/// `snapshots/<name>/`. Copies real bytes — never synthesizes SSTable content.
+fn copy_sstable_components(src: &Path, dst: &Path) {
+    for entry in std::fs::read_dir(src)
+        .expect("read source table dir")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.is_file() {
+            let name = entry.file_name();
+            std::fs::copy(&path, dst.join(&name)).expect("copy component");
+        }
+    }
 }
