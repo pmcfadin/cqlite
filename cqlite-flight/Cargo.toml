@@ -62,9 +62,25 @@ observability = [
 # `metrics_capture_tests` module. Run:
 #   cargo test -p cqlite-flight --features observability-testing
 observability-testing = ["cqlite-core/observability-testing"]
+# Test-only: compile the shared byte-pin infrastructure (`test_fixtures` — the
+# single-source-of-truth `keyvalue` field shape + the wire-metadata-order guard,
+# issues #2283/#2285). Kept OUT of the default build so this fixture/guard code
+# never ships in the production `cqlite-flight` library or binary. Enabled
+# automatically for the `examples/`/`tests/` targets via the self-referential
+# dev-dependency below (Cargo unifies features, so `cargo test`/`cargo build
+# --examples` build the lib with `test-util` on), following the same
+# feature-declaration convention as `observability-testing`.
+test-util = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Self-referential dev-dependency enabling the `test-util` feature, so the
+# `examples/emit_arrow_golden.rs` example and the `tests/*` integration targets
+# can reach `cqlite_flight::test_fixtures` (the shared `keyvalue` byte-pin
+# fixture + wire-metadata guard) WITHOUT that module being reachable from a real
+# consumer of the published library. `cargo test`/`cargo build --examples`
+# unify this feature onto the lib build; `cargo build`/the binary do not.
+cqlite-flight = { path = ".", features = ["test-util"] }
 # The golden emitter (`examples/emit_arrow_golden.rs`) length-delimit-encodes
 # the encoder's `FlightData` protobuf messages to a golden file, and the
 # transport test (`tests/do_get_transport_test.rs`) length-delimit-DECODES that
