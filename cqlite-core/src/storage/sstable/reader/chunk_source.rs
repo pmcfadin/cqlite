@@ -15,8 +15,8 @@ use crate::storage::sstable::reader::block_io::read_compressed_chunk_at;
 use crate::storage::sstable::reader::data_access::DECOMPRESS_CALLS;
 use crate::storage::sstable::reader::read_at::ReadAt;
 use crate::{Error, Result};
+use bytes::Bytes;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 /// Single chunk decode plane: positioned read → CRC → decompress → B1 cache.
 ///
@@ -77,7 +77,7 @@ impl<'a> ChunkSource<'a> {
     ///
     /// Used by the BTI target-chunk path (self-reading) and can be called by the windowed
     /// scan if it moves to positioned reads. Returns `Ok(None)` at EOF.
-    pub(crate) fn chunk(&self, index: usize) -> Result<Option<Arc<[u8]>>> {
+    pub(crate) fn chunk(&self, index: usize) -> Result<Option<Bytes>> {
         // Build cache key from absolute chunk index in this namespace
         let key = ChunkKey::new(self.cache_id ^ self.namespace, index as u64);
 
@@ -118,7 +118,7 @@ impl<'a> ChunkSource<'a> {
         key: ChunkKey,
         compressed: Vec<u8>,
         incompressible: bool,
-    ) -> Result<Arc<[u8]>> {
+    ) -> Result<Bytes> {
         let decompressed = if incompressible {
             // Stored uncompressed by Cassandra: pass raw bytes through (no decompress counter)
             compressed

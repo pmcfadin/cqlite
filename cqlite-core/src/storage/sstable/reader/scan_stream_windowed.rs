@@ -806,9 +806,9 @@ impl SSTableReader {
                 // D-choice, task 4.4). The key is ABSOLUTE chunk index (I/O half feeds
                 // from data-section start in order).
                 let incompressible = compressed_chunk.len() >= ctx.max_compressed_length;
-                let chunk: std::sync::Arc<[u8]> = if incompressible {
-                    // Raw passthrough: no cache, no decompress
-                    std::sync::Arc::from(compressed_chunk.into_boxed_slice())
+                let chunk: bytes::Bytes = if incompressible {
+                    // Raw passthrough: no cache, no decompress (zero-copy Vec->Bytes)
+                    bytes::Bytes::from(compressed_chunk)
                 } else {
                     let key = crate::storage::cache::ChunkKey::new(
                         self.chunk_cache_id ^ super::data_access::NS_WINDOWED_CHUNK,
