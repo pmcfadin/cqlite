@@ -474,107 +474,22 @@ pub(crate) fn is_primary_key_column(column: &str, schema: &TableSchema) -> bool 
 /// carries the originating mutation's timestamp and explicit local deletion
 /// time (Issue #764) so a surviving older static delete keeps its own LDT
 /// instead of inheriting the newest static mutation's value.
+///
+/// Issue #1668, stage 5c-ii: a thin wrapper over [`StaticOpsTracker`] — the
+/// SAME per-mutation last-write-wins fold, now factored into a running
+/// tracker so a future incremental writer entry point (stage 5c-iv) can feed
+/// it one cluster group at a time instead of requiring the whole `&[Mutation]`
+/// slice upfront. Byte-identical to the prior whole-slice implementation.
 pub(crate) fn collect_static_operations(
     mutations: &[Mutation],
     schema: &TableSchema,
     shadow_floor: Option<i64>,
 ) -> Vec<StaticMergedOp> {
-    use std::collections::HashMap;
-
-    // Map: column_name → winning StaticMergedOp (last-write-wins by timestamp).
-    let mut best: HashMap<String, StaticMergedOp> = HashMap::new();
-
+    let mut tracker = StaticOpsTracker::new();
     for mutation in mutations {
-        if shadow_floor.is_some_and(|floor| mutation.timestamp_micros <= floor) {
-            continue;
-        }
-        for op in &mutation.operations {
-            if !is_static_operation(op, schema) {
-                continue;
-            }
-            let col_name = match op {
-                crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
-                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                    column,
-                    ..
-                }
-                | crate::storage::write_engine::mutation::CellOperation::Delete {
-                    column, ..
-                } => column.clone(),
-                // Per-element complex ops (epic #899) are not produced for STATIC
-                // complex columns by the (Phase B) capability — they flow through
-                // the regular-row per-element path. Skip them here defensively.
-                crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
-                    ..
-                }
-                | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
-                    ..
-                } => continue,
-                crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
-            };
-            // Issue #1018: a static `Write`/`WriteWithTtl`/`Delete` cell carries
-            // its OWN per-cell timestamp when the compaction merge→mutation path
-            // recorded one in `Mutation::cell_write_timestamps` (it differs from
-            // the row's `timestamp_micros`) — a live cell's writetime OR a static
-            // cell tombstone's markedForDeleteAt. Use it for BOTH the stamped
-            // candidate timestamp AND the last-write-wins comparison below,
-            // mirroring the regular-row path in `rows.rs`. Otherwise a compacted
-            // static row with surviving static siblings at differing timestamps
-            // would rewrite older static cells (live OR tombstone) to the newest
-            // static mutation's row max — re-introducing the over-deletion bug for
-            // statics. For every other op (and for cells with no per-cell override)
-            // this is exactly `mutation.timestamp_micros`, so the single-writetime
-            // case is unchanged.
-            let candidate_ts = op_cell_write_timestamp(op, mutation);
-            // Issue #1018 (roborev HIGH): PER-CELL shadow filtering for statics. The
-            // mutation-level `shadow_floor` skip above gates on the ROW MAX
-            // (`mutation.timestamp_micros`), so a mutation that survives the floor
-            // (because a recent static sibling keeps its row max high) can still
-            // carry an individual static `Write`/`WriteWithTtl`/`Delete` whose OWN
-            // per-cell timestamp is `<= shadow_floor`. That cell is covered by the
-            // partition tombstone and MUST be shadowed exactly as it would have been
-            // when every static cell used the row max. Apply the SAME boundary the
-            // row-max skip uses (`<= floor`) to the resolved `candidate_ts`,
-            // dropping the static op here so it never reaches the LWW map (and so
-            // the static liveness/TTL the partition path derives from the SURVIVING
-            // ops below cannot resurrect it). A static cell tombstone is itself
-            // shadowed on the same floor using its OWN markedForDeleteAt. Every cell
-            // with no override already has `candidate_ts == mutation.timestamp_micros
-            // > floor`, leaving the single-writetime case unchanged.
-            if shadow_floor.is_some_and(|floor| candidate_ts <= floor)
-                && matches!(
-                    op,
-                    crate::storage::write_engine::mutation::CellOperation::Write { .. }
-                        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
-                        | crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                )
-            {
-                continue;
-            }
-            let candidate = StaticMergedOp {
-                // #921 finding 2: preserve a `Delete` cell tombstone's own surfaced
-                // LDT; other ops fall back to the mutation's effective LDT.
-                cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
-                op: op.clone(),
-                timestamp_micros: candidate_ts,
-                // #1196: carry statement-level TTL so a static `USING TTL` Write
-                // is emitted as an expiring cell, not a non-expiring one.
-                row_ttl_seconds: mutation.ttl_seconds,
-            };
-            match best.entry(col_name) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(candidate);
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    if candidate.timestamp_micros >= entry.get().timestamp_micros {
-                        entry.insert(candidate);
-                    }
-                }
-            }
-        }
+        tracker.feed(mutation, schema, shadow_floor);
     }
-
-    best.into_values().collect()
+    tracker.finish()
 }
 
 /// Derive a static row's liveness timestamp + TTL from the SURVIVING merged

@@ -213,6 +213,9 @@ mod index_prefix;
 mod partition;
 mod rows;
 mod schema_helpers;
+/// Incremental static-column last-write-wins tracker (issue #1668, stage
+/// 5c-ii). See [`static_ops::StaticOpsTracker`].
+mod static_ops;
 mod static_rows;
 mod types;
 mod udt_canon;
@@ -235,6 +238,7 @@ pub(crate) use collection_order::compare_collection_elements;
 pub(crate) use encoding::*;
 pub(crate) use index_prefix::*;
 pub(crate) use schema_helpers::*;
+pub(crate) use static_ops::StaticOpsTracker;
 pub(crate) use types::*;
 pub(crate) use udt_canon::{canonicalize_static_value, canonicalize_udt_value};
 
