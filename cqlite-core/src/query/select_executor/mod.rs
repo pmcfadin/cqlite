@@ -49,7 +49,7 @@ mod row_build;
 mod schemaless_point;
 mod stream_agg;
 mod streaming;
-mod value_ops;
+pub(in crate::query) mod value_ops;
 mod writetime_ttl;
 
 #[cfg(test)]

@@ -133,7 +133,7 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
 /// ORDER BY / MIN / MAX / clustering-key ordering, which must keep the
 /// NaN-greatest total order and existing f64-based numeric ordering
 /// (`try_compare_values`/`compare_values_ordering`, unchanged).
-pub(super) fn try_compare_values_predicate(
+pub(in crate::query) fn try_compare_values_predicate(
     a: &Value,
     b: &Value,
 ) -> Result<Option<std::cmp::Ordering>> {

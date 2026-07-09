@@ -603,22 +603,18 @@ impl QueryExecutor {
         match condition.operator {
             ComparisonOperator::Equal => Ok(row_value == &condition.value),
             ComparisonOperator::NotEqual => Ok(row_value != &condition.value),
-            ComparisonOperator::LessThan => Ok(matches!(
-                self.compare_values(row_value, &condition.value)?,
-                Ordering::Less
-            )),
-            ComparisonOperator::LessThanOrEqual => Ok(matches!(
-                self.compare_values(row_value, &condition.value)?,
-                Ordering::Less | Ordering::Equal
-            )),
-            ComparisonOperator::GreaterThan => Ok(matches!(
-                self.compare_values(row_value, &condition.value)?,
-                Ordering::Greater
-            )),
-            ComparisonOperator::GreaterThanOrEqual => Ok(matches!(
-                self.compare_values(row_value, &condition.value)?,
-                Ordering::Greater | Ordering::Equal
-            )),
+            ComparisonOperator::LessThan => Ok(self
+                .predicate_ordering(row_value, &condition.value)?
+                .is_some_and(|o| o == Ordering::Less)),
+            ComparisonOperator::LessThanOrEqual => Ok(self
+                .predicate_ordering(row_value, &condition.value)?
+                .is_some_and(|o| matches!(o, Ordering::Less | Ordering::Equal))),
+            ComparisonOperator::GreaterThan => Ok(self
+                .predicate_ordering(row_value, &condition.value)?
+                .is_some_and(|o| o == Ordering::Greater)),
+            ComparisonOperator::GreaterThanOrEqual => Ok(self
+                .predicate_ordering(row_value, &condition.value)?
+                .is_some_and(|o| matches!(o, Ordering::Greater | Ordering::Equal))),
             // Simplified IN / NOT IN: treat as equality / inequality for now.
             ComparisonOperator::In => Ok(row_value == &condition.value),
             ComparisonOperator::NotIn => Ok(row_value != &condition.value),
@@ -630,6 +626,31 @@ impl QueryExecutor {
                 (Value::Text(row_text), Value::Text(pattern)) => Ok(!row_text.contains(pattern)),
                 _ => Ok(true),
             },
+        }
+    }
+
+    /// Ordering for WHERE-predicate inequalities (`<`, `<=`, `>`, `>=`), with
+    /// SQL three-valued logic for IEEE NaN (issue #2257 — the legacy-executor
+    /// sibling of the Trino-pushdown fix #2231).
+    ///
+    /// Returns `Ok(None)` — SQL UNKNOWN, so the caller DROPS the row — when
+    /// either operand is a NaN float. It delegates to the SHARED, principled
+    /// predicate comparator `value_ops::try_compare_values_predicate` (the same
+    /// one #2231 introduced), which drops NaN and compares large integers
+    /// exactly (`i128`, no `f64` collapse). On `Err` (genuinely incomparable
+    /// operands, e.g. `Null` vs a value, or two disjoint non-numeric types) it
+    /// falls back to this path's own [`Self::compare_values`], preserving the
+    /// legacy executor's established `Null`-vs-value ordering and its
+    /// same-type/incomparable-type error semantics — the fix is scoped to the
+    /// NaN-predicate leak only, exactly like #2231.
+    ///
+    /// This is for filter/`WHERE` evaluation ONLY. ORDER BY / sort
+    /// ([`Self::apply_sort_step`]) still uses [`Self::compare_values`] directly,
+    /// keeping the Cassandra NaN-greatest total order unchanged.
+    fn predicate_ordering(&self, a: &Value, b: &Value) -> Result<Option<Ordering>> {
+        match crate::query::select_executor::value_ops::try_compare_values_predicate(a, b) {
+            Ok(ordering) => Ok(ordering),
+            Err(_) => self.compare_values(a, b).map(Some),
         }
     }
 
@@ -960,6 +981,138 @@ mod tests {
             value: Value::Text("test".to_string()),
         };
         assert!(executor.evaluate_condition(&row, &condition).unwrap());
+    }
+
+    /// Issue #2257 (legacy-executor sibling of #2231): a NaN `double`/`float`
+    /// must NOT satisfy `>`/`>=`/`<`/`<=` under WHERE-predicate evaluation.
+    /// Historically `Gt`/`Gte` leaked the NaN row because `compare_values`
+    /// (correctly) sorts NaN as the GREATEST value for ORDER BY. All four
+    /// inequalities must now drop it; `=` was already false for NaN.
+    #[tokio::test]
+    async fn evaluate_condition_drops_nan_for_all_relations() {
+        let (_tmp, executor, _) = make_executor().await;
+
+        let row_of = |v: Value| {
+            let mut m = HashMap::new();
+            m.insert("d".to_string(), v);
+            QueryRow::with_values(RowKey::new(vec![1]), m)
+        };
+        let cond = |op: ComparisonOperator, v: Value| Condition {
+            column: "d".to_string(),
+            operator: op,
+            value: v,
+        };
+
+        for nan in [Value::Float(f64::NAN), Value::Float32(f32::NAN)] {
+            let bound = match nan {
+                Value::Float(_) => Value::Float(1.5),
+                _ => Value::Float32(1.5),
+            };
+            let row = row_of(nan.clone());
+            use ComparisonOperator::*;
+            for op in [
+                GreaterThan,
+                GreaterThanOrEqual,
+                LessThan,
+                LessThanOrEqual,
+                Equal,
+            ] {
+                assert!(
+                    !executor
+                        .evaluate_condition(&row, &cond(op.clone(), bound.clone()))
+                        .unwrap(),
+                    "NaN must not satisfy {:?} (issue #2257)",
+                    op
+                );
+            }
+
+            // Finite operands still evaluate normally on the same path.
+            let two = match nan {
+                Value::Float(_) => Value::Float(2.0),
+                _ => Value::Float32(2.0),
+            };
+            let finite_row = row_of(two);
+            assert!(executor
+                .evaluate_condition(
+                    &finite_row,
+                    &cond(ComparisonOperator::GreaterThan, bound.clone())
+                )
+                .unwrap());
+            assert!(!executor
+                .evaluate_condition(&finite_row, &cond(ComparisonOperator::LessThan, bound))
+                .unwrap());
+        }
+    }
+
+    /// Issue #2257 end-to-end (within the live legacy path): a filter step of
+    /// `d > 1.5` — the reachable-from-`engine.rs` entry point routes through
+    /// `execute()` → `apply_execution_steps` → `apply_filter_step` →
+    /// `evaluate_condition` — must DROP the `d = NaN` row and keep the finite
+    /// `d = 2.0` row. This is the `d > 1.5 OR name = 'zzz'` repro's load-bearing
+    /// conjunct (the OR is combined above this per-condition evaluator).
+    #[tokio::test]
+    async fn apply_filter_step_drops_nan_row_for_gt() {
+        use super::super::planner::{ParallelizationInfo, StepType};
+        let (_tmp, executor, _) = make_executor().await;
+
+        let mk = |d: f64| {
+            let mut m = HashMap::new();
+            m.insert("d".to_string(), Value::Float(d));
+            m.insert("name".to_string(), Value::Text("aaa".to_string()));
+            QueryRow::with_values(RowKey::new(vec![1]), m)
+        };
+        let rows = vec![mk(f64::NAN), mk(2.0), mk(0.5)];
+
+        let step = ExecutionStep {
+            step_type: StepType::Filter,
+            columns: Vec::new(),
+            conditions: vec![Condition {
+                column: "d".to_string(),
+                operator: ComparisonOperator::GreaterThan,
+                value: Value::Float(1.5),
+            }],
+            cost: 0.0,
+            parallelization: ParallelizationInfo {
+                can_parallelize: false,
+                suggested_threads: 1,
+                partition_key: None,
+            },
+        };
+
+        let out = executor.apply_filter_step(rows, &step).unwrap();
+        // Only the finite 2.0 row survives: NaN dropped (was leaked pre-fix),
+        // 0.5 correctly excluded by `> 1.5`.
+        assert_eq!(out.len(), 1, "only d=2.0 survives d > 1.5");
+        assert!(matches!(out[0].values.get("d"), Some(Value::Float(x)) if *x == 2.0));
+    }
+
+    /// Issue #2257 guardrail: the ORDER BY / sort comparator (`compare_values`,
+    /// used by `apply_sort_step`) must be UNCHANGED — NaN still sorts GREATEST.
+    /// The predicate fix is scoped to WHERE evaluation only.
+    #[tokio::test]
+    async fn sort_order_nan_greatest_unchanged() {
+        let (_tmp, executor, _) = make_executor().await;
+        assert_eq!(
+            executor
+                .compare_values(&Value::Float(f64::NAN), &Value::Float(1.5))
+                .unwrap(),
+            Ordering::Greater,
+            "sort order still puts NaN last (unchanged by #2257)"
+        );
+        // But the predicate helper drops it.
+        assert!(executor
+            .predicate_ordering(&Value::Float(f64::NAN), &Value::Float(1.5))
+            .unwrap()
+            .is_none());
+        // Null-vs-value ordering is preserved via the compare_values fallback
+        // (predicate helper must not regress it to an error/Equal).
+        assert_eq!(
+            executor
+                .predicate_ordering(&Value::Null, &Value::Integer(5))
+                .unwrap(),
+            Some(Ordering::Less),
+            "Null < value ordering preserved (legacy semantics)"
+        );
     }
 
     // -- indexes_used access-path reporting (issue #760, Epic #756) --------
