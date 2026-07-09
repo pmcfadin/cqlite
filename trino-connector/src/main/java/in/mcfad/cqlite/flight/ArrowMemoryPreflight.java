@@ -2,6 +2,7 @@ package in.mcfad.cqlite.flight;
 
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.RootAllocator;
 
 /**
@@ -24,8 +25,9 @@ import org.apache.arrow.memory.RootAllocator;
  * {@code jvm.config} remedy — so the operator sees an actionable message at catalog load instead of
  * a masked read-time failure.
  *
- * <p>The probe is side-effect-free when the flag IS present: it opens a {@link RootAllocator} solely
- * to trigger {@code MemoryUtil} initialization and closes it immediately (try-with-resources).
+ * <p>The probe is side-effect-free when the flag IS present: it opens a {@link RootAllocator} and
+ * allocates a 1-byte off-heap {@link ArrowBuf} solely to force {@code MemoryUtil} initialization
+ * along the real off-heap/DirectByteBuffer path, then closes both immediately (try-with-resources).
  */
 final class ArrowMemoryPreflight {
     /** The exact arrow-java-documented flag that must be present in Trino's {@code jvm.config}. */
@@ -40,10 +42,13 @@ final class ArrowMemoryPreflight {
      * message names the exact missing flag and the {@code jvm.config} remedy.
      */
     static void verify() {
-        try (RootAllocator probe = new RootAllocator()) {
-            // Constructing the allocator forces MemoryUtil.<clinit>. Success => the flag is present;
-            // the allocator is closed immediately by try-with-resources, so the probe has no effect.
-            assert probe != null;
+        try (RootAllocator probe = new RootAllocator();
+                ArrowBuf ignored = probe.buffer(1)) {
+            // Constructing the allocator AND allocating a 1-byte off-heap buffer forces
+            // MemoryUtil.<clinit> along the real DirectByteBuffer/off-heap path (a bare RootAllocator
+            // may not). Success => the flag is present; both are closed immediately by
+            // try-with-resources, so the probe has no lasting effect.
+            assert ignored != null;
         } catch (LinkageError | RuntimeException e) {
             throwIfArrowMemoryInit(e);
         }
@@ -73,7 +78,11 @@ final class ArrowMemoryPreflight {
      * static initializer — matched by message text or by a {@code MemoryUtil} frame in a stack trace.
      */
     static boolean isArrowMemoryInitFailure(Throwable failure) {
-        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+        // Bounded walk: cap the depth so a self-referential (A->A) OR multi-node (A->B->A) cause
+        // cycle can never make this loop forever.
+        int depth = 0;
+        for (Throwable cause = failure; cause != null && depth < MAX_CAUSE_CHAIN_DEPTH;
+                cause = cause.getCause(), depth++) {
             String message = cause.getMessage();
             if (message != null && message.contains("MemoryUtil")) {
                 return true;
@@ -83,12 +92,12 @@ final class ArrowMemoryPreflight {
                     return true;
                 }
             }
-            if (cause.getCause() == cause) {
-                break;
-            }
         }
         return false;
     }
+
+    /** Hard cap on how many links of a Throwable cause chain to walk (guards against cause cycles). */
+    private static final int MAX_CAUSE_CHAIN_DEPTH = 50;
 
     /**
      * Build the operator-facing remedy message. Always names {@value #REQUIRED_ADD_OPENS} verbatim so

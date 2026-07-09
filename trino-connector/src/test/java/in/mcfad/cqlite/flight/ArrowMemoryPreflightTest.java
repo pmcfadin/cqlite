@@ -86,6 +86,46 @@ class ArrowMemoryPreflightTest {
         assertSame(original, rethrown);
     }
 
+    /**
+     * A Throwable whose cause is redirectable so tests can build a cause cycle without reflection
+     * ({@link Throwable#initCause} forbids cycles at runtime). Its stack trace is empty, so it never
+     * matches the MemoryUtil frame heuristic.
+     */
+    private static final class CyclicThrowable extends RuntimeException {
+        private transient Throwable redirected;
+
+        CyclicThrowable(String message) {
+            super(message);
+            setStackTrace(new StackTraceElement[0]);
+        }
+
+        void setCauseNode(Throwable next) {
+            this.redirected = next;
+        }
+
+        @Override
+        public synchronized Throwable getCause() {
+            return redirected;
+        }
+    }
+
+    @Test
+    void twoNodeCauseCycleTerminatesAndIsNotMisclassified() {
+        // A -> B -> A: a 2-node cause cycle. The classifier must terminate (bounded walk) and, since
+        // neither node points at MemoryUtil, must return false rather than hang or misclassify.
+        // assertTimeoutPreemptively guards against a regression to an unbounded walk.
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+                java.time.Duration.ofSeconds(5),
+                () -> {
+                    CyclicThrowable a = new CyclicThrowable("node A: unrelated");
+                    CyclicThrowable b = new CyclicThrowable("node B: unrelated");
+                    a.setCauseNode(b);
+                    b.setCauseNode(a);
+                    assertFalse(ArrowMemoryPreflight.isArrowMemoryInitFailure(a),
+                            "a 2-node cause cycle with no MemoryUtil frame must not be classified as arrow-init");
+                });
+    }
+
     @Test
     void verifyPassesWhenFlagPresent() {
         // The Gradle test JVM carries the add-opens flag, so the real probe must succeed and leave

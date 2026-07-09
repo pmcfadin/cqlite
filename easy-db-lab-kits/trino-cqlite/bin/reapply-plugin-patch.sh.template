@@ -67,16 +67,45 @@ INIT_SCRIPT='set -eu; mkdir -p /tmp/build; cp /workspace/build.gradle.kts /works
 # java.nio module opened to it on JDK 17+. Trino 481's stock jvm.config does
 # NOT carry this flag, so without it the CQLite Flight connector's first Arrow
 # off-heap touch dies and every do_get fails downstream with a cryptic
-# "Failed to read message". We inject the arrow-java-documented flag via
-# JAVA_TOOL_OPTIONS rather than a jvm.config file-mount: mounting a single file
-# at /etc/trino/jvm.config would REPLACE the image's whole stock jvm.config
-# (forcing us to reproduce + version-track every stock line), whereas
-# JAVA_TOOL_OPTIONS is purely ADDITIVE — the JVM appends it to the launcher's
-# args. It is idempotent under strategic merge (env entries merge by name, so
-# re-applying identical content is a no-op) and applies to coordinator AND
-# worker alike (see patch_deployment). The connector also fails fast at catalog
-# load if the flag is somehow still absent (ArrowMemoryPreflight, #2290).
+# "Failed to read message". We inject the arrow-java-documented flag via a k8s
+# JAVA_TOOL_OPTIONS env var rather than a jvm.config file-mount: mounting a
+# single file at /etc/trino/jvm.config would REPLACE the image's whole stock
+# jvm.config (forcing us to reproduce + version-track every stock line),
+# whereas JAVA_TOOL_OPTIONS is additive at the JVM launcher level — the JVM
+# appends its contents to the launcher's args.
+#
+# IMPORTANT: a strategic-merge env entry keyed by name REPLACES the container's
+# existing JAVA_TOOL_OPTIONS value wholesale — it is NOT additive at the k8s
+# env level. The trino kit (or the operator) may already set JAVA_TOOL_OPTIONS
+# for other reasons, so we must NOT clobber it. compute_java_tool_options()
+# therefore reads the container's current JAVA_TOOL_OPTIONS from the live
+# Deployment and appends our flag only when it is absent, preserving any
+# existing value and never duplicating on re-run (idempotent). Applied to
+# coordinator AND worker alike (see patch_deployment). The connector also fails
+# fast at catalog load if the flag is somehow still absent
+# (ArrowMemoryPreflight, #2290).
 ARROW_ADD_OPENS='--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED'
+
+# Compute the JAVA_TOOL_OPTIONS value to set on ${dep}'s container: read the
+# container's current value from the live Deployment spec and append
+# ARROW_ADD_OPENS only if the flag isn't already present. Preserves any
+# pre-existing value; idempotent (a value that already carries the flag is
+# returned unchanged, so the subsequent strategic-merge patch is a no-op).
+compute_java_tool_options() {
+  local dep="$1"
+  local existing
+  existing=$(kubectl get deployment "${dep}" --namespace default \
+    -o jsonpath="{.spec.template.spec.containers[?(@.name=='${dep}')].env[?(@.name=='JAVA_TOOL_OPTIONS')].value}" \
+    2>/dev/null || true)
+
+  if [ -z "${existing}" ]; then
+    printf '%s' "${ARROW_ADD_OPENS}"
+  elif printf '%s' "${existing}" | grep -qF -- "${ARROW_ADD_OPENS}"; then
+    printf '%s' "${existing}"
+  else
+    printf '%s %s' "${existing}" "${ARROW_ADD_OPENS}"
+  fi
+}
 
 # Issue #2120: create/refresh the ConfigMap the initContainer mounts BEFORE
 # either deployment is patched to reference it. Same recipe as
@@ -139,6 +168,8 @@ patch_deployment() {
   fi
 
   echo "  - patching deployment/${dep} (container: ${dep})..."
+  local java_tool_options
+  java_tool_options=$(compute_java_tool_options "${dep}")
   local patch
   patch=$(jq -n \
     --arg cm "${CONFIGMAP_NAME}" \
@@ -146,7 +177,7 @@ patch_deployment() {
     --arg mount "${PLUGIN_MOUNT_PATH}" \
     --arg container "${dep}" \
     --arg script "${INIT_SCRIPT}" \
-    --arg addopens "${ARROW_ADD_OPENS}" \
+    --arg javatooloptions "${java_tool_options}" \
     '{spec:{template:{spec:{
       volumes: [
         {name:"cqlite-plugin-src", configMap:{name:$cm}},
@@ -167,10 +198,14 @@ patch_deployment() {
       containers: [
         {
           name:$container,
-          # Additive Arrow add-opens flag (#2193/#2290). Strategic merge keys env
-          # entries by name, so a fixed value re-applies as a no-op (idempotent).
+          # JAVA_TOOL_OPTIONS carrying the Arrow add-opens flag (#2193/#2290),
+          # computed by compute_java_tool_options as <existing> + our flag (or
+          # <existing> unchanged if already present). A strategic-merge env entry
+          # keyed by name REPLACES the whole value, so we must supply the full
+          # append-if-absent result here — that keeps it idempotent and never
+          # clobbers a pre-existing JAVA_TOOL_OPTIONS.
           env: [
-            {name:"JAVA_TOOL_OPTIONS", value:$addopens}
+            {name:"JAVA_TOOL_OPTIONS", value:$javatooloptions}
           ],
           volumeMounts: [
             {name:"cqlite-plugin-dir", mountPath:$mount, readOnly:true}
