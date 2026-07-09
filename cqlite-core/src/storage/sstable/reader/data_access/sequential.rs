@@ -881,6 +881,18 @@ impl SSTableReader {
             );
 
             for (i, (entry_table_id, entry_key, entry_value)) in entries.iter().enumerate() {
+                // Cooperative cancellation (issue #2264, roborev): the per-block
+                // poll above fires ONCE per `read_next_block` call, but an
+                // uncompressed/BTI-direct block returns the WHOLE data section as
+                // one contiguous unit (per `read_next_block_impl`'s doc comment) —
+                // so for that shape `entries` alone can number in the hundreds of
+                // thousands. Poll again here at the SAME 256-entry cadence used
+                // elsewhere so materialisation honours the interval regardless of
+                // how large a single block turned out to be, independent of
+                // whichever inner parser branch produced `entries`.
+                if i & 0xFF == 0 {
+                    self.scan_cancel.check()?;
+                }
                 tracing::debug!(
                     "SSTableReader::sequential_scan - Block {} entry {}: table_id='{}', key={:?}",
                     block_count,

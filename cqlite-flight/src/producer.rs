@@ -744,17 +744,17 @@ impl MergeProducer {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
             }
-            // A step error while cancellation is set is the cancelled scan
-            // surfacing (issue #2264): the per-run producer thread's compaction
-            // scan aborted with `Error::Cancelled` and closed its channel. Map it
-            // to the clean `Cancelled` abort rather than an opaque `Merge` error so
-            // the client sees `aborted`, not `internal`.
-            let step = merger.step().map_err(|e| {
-                if cancel.is_cancelled() {
-                    ProducerError::Cancelled
-                } else {
-                    ProducerError::Merge(e)
-                }
+            // Map by VARIANT, not by racing the cancel flag (roborev, issue
+            // #2264): the per-run producer thread's compaction scan now
+            // propagates a genuine `Error::Cancelled` (preserved through the
+            // channel via `MergeProducerError`, not stringified) when it observes
+            // `scan_cancel`. Matching the variant directly means a real
+            // I/O/corruption error that happens to race a client disconnect is
+            // NEVER masked as a clean `Cancelled` abort — only an actual
+            // cancellation maps to `ProducerError::Cancelled`.
+            let step = merger.step().map_err(|e| match e {
+                cqlite_core::Error::Cancelled => ProducerError::Cancelled,
+                other => ProducerError::Merge(other),
             })?;
             let MergeStep::Partition { key, rows } = step else {
                 break;

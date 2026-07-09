@@ -377,9 +377,39 @@ pub(crate) use async_bridge::block_on_async;
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
     /// Receiving end of the bounded channel fed by the producer thread.
-    receiver: std::sync::mpsc::Receiver<std::result::Result<MergeEntry, String>>,
+    receiver: std::sync::mpsc::Receiver<std::result::Result<MergeEntry, MergeProducerError>>,
     /// JoinHandle for the producer thread (held so the thread is joined on drop).
     _producer: std::thread::JoinHandle<()>,
+}
+
+/// Channel-safe error payload sent from a producer thread to the merge (issue
+/// #2264).
+///
+/// The producer thread runs the reader's compaction scan under `Result<_,
+/// crate::Error>`, but `crate::Error` is not `Clone` and the channel item is
+/// consumed once anyway, so this small enum is the minimal payload that
+/// SURVIVES the thread boundary while still distinguishing a cooperative
+/// cancellation (`Error::Cancelled`) from every other failure. Without this,
+/// stringifying every error the same way would make a genuine I/O/corruption
+/// error indistinguishable from a cancelled scan at the receiving end — exactly
+/// the ambiguity `SSTableRowIterator::next` and `drive_merge` must NOT have.
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+enum MergeProducerError {
+    /// The scan was cooperatively cancelled (`Error::Cancelled`).
+    Cancelled,
+    /// Any other failure, stringified (matches the pre-#2264 behaviour).
+    Other(String),
+}
+
+#[cfg(feature = "write-support")]
+impl From<Error> for MergeProducerError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Cancelled => MergeProducerError::Cancelled,
+            other => MergeProducerError::Other(other.to_string()),
+        }
+    }
 }
 
 /// Number of pre-fetched `MergeEntry` objects buffered per source in the
@@ -458,7 +488,7 @@ impl SSTableRowIteratorAdapter {
         schema: TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
-        sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, String>>,
+        sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
     ) {
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
         // producer owns its single-purpose runtime, so the blocking
@@ -528,7 +558,7 @@ impl SSTableRowIteratorAdapter {
                         Some(&schema_for_reader),
                         |compaction_row| {
                             let msg = Self::build_merge_entry(run_index, compaction_row, &schema)
-                                .map_err(|e| e.to_string());
+                                .map_err(MergeProducerError::from);
                             match sender.send(msg) {
                                 Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
                                 Err(_) => Ok(std::ops::ControlFlow::Break(())),
@@ -540,8 +570,9 @@ impl SSTableRowIteratorAdapter {
         })();
 
         if let Err(e) = stream_result {
-            // Forward the error; ignore send failure (consumer may have dropped).
-            let _ = error_sender.send(Err(e.to_string()));
+            // Forward the error (preserving `Cancelled` distinctly, issue #2264);
+            // ignore send failure (consumer may have dropped).
+            let _ = error_sender.send(Err(MergeProducerError::from(e)));
         }
         // Channel closed naturally when sender is dropped here.
     }
@@ -992,7 +1023,12 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
     fn next(&mut self) -> Option<Result<MergeEntry>> {
         match self.receiver.recv() {
             Ok(Ok(entry)) => Some(Ok(entry)),
-            Ok(Err(msg)) => Some(Err(Error::Storage(format!(
+            // Issue #2264: reconstruct `Error::Cancelled` distinctly so a
+            // cancelled scan is never confused with a genuine I/O/corruption
+            // error at the merge/producer boundary — `drive_merge` matches on
+            // the variant, not on a side-channel flag.
+            Ok(Err(MergeProducerError::Cancelled)) => Some(Err(Error::Cancelled)),
+            Ok(Err(MergeProducerError::Other(msg))) => Some(Err(Error::Storage(format!(
                 "streaming merge producer error: {}",
                 msg
             )))),
