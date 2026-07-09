@@ -10,6 +10,7 @@ import io.trino.spi.type.TimeType;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.TimeNanoVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.junit.jupiter.api.Test;
@@ -109,8 +110,8 @@ class CqliteFlightAggregatePageSourceTest {
 
     /**
      * Issue #2262: a projected group-by column absent from the delivered Arrow batch
-     * (schema drift between the connector aggregation projection and the Flight server
-     * response) must surface a clear error NAMING the column via the real
+     * (schema drift between the connector projection and the Flight server response)
+     * must surface a clear error NAMING the column via the real
      * {@link CqliteFlightAggregatePageSource#accumulate} path — not silently produce
      * null group keys (a corrupted GROUP BY result set). Mirrors #2238's toPage guard.
      */
@@ -197,6 +198,30 @@ class CqliteFlightAggregatePageSourceTest {
                     "sum of a single null partial stays null (no regression)");
             root.close();
         }
+    }
+
+    /**
+     * Issue #2273 (mirrors {@code ArrowToTrinoTest.emptyBatchWithNonEmptyProjectionRaisesNamingTheFirstColumn}):
+     * a {@link VectorSchemaRoot} with ZERO vectors against a non-empty aggregation
+     * projection must fail loudly via the now-shared {@link ArrowToTrino#requireVector}
+     * guard — the first projected group-by column is absent — never silently accumulate
+     * null group keys.
+     */
+    @Test
+    void emptyBatchWithNonEmptyAggregationRaisesNamingTheFirstColumn() {
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Count, null, "agg0"));
+        var spec = new AggregationSpec(List.of("gc"), aggregates);
+        var merger = new PartialAggregateMerger(aggregates);
+
+        VectorSchemaRoot root = new VectorSchemaRoot(List.<FieldVector>of());
+        root.setRowCount(0);
+
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightAggregatePageSource.accumulate(root, spec, merger));
+        assertTrue(ex.getMessage().contains("gc"),
+                "error must name the missing group-by column, was: " + ex.getMessage());
+        root.close();
     }
 
     /** Mirror {@code accumulate()}: read one Arrow batch's group + count columns into the merger. */
