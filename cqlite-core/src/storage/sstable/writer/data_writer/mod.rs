@@ -209,6 +209,10 @@ mod cells;
 mod collection_order;
 mod complex;
 mod encoding;
+/// Incremental partition-write entry point (issue #1668, stage 5c-iv, part
+/// 1 — build + prove, not yet wired). See
+/// [`incremental_partition::IncrementalPartitionWriter`].
+mod incremental_partition;
 mod index_prefix;
 /// Incremental rows+markers interleave (issue #1668, stage 5c-iii). See
 /// [`marker_merge::merge_rows_and_markers`].
