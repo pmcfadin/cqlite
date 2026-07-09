@@ -124,13 +124,19 @@ async fn do_get_rows_over_transport(svc: CqliteFlightService, ticket: Vec<u8>) -
         .sum()
 }
 
-/// Same real-transport round-trip as [`do_get_rows_over_transport`] but returns
-/// every decoded `RecordBatch` so a caller can assert on the actual column set
-/// and cell values (not just the row count).
-async fn do_get_batches_over_transport(
+/// Stand up a real loopback tonic server serving `svc`, connect a real
+/// `FlightServiceClient` (retrying until it accepts), and run `do_get(ticket)`.
+/// Returns the server task handle (the caller `.abort()`s it once done
+/// draining) and the raw `tonic::codec::Streaming<FlightData>` response — the
+/// pre-decode interception point every real-transport test in this file
+/// shares, factored out so the connect-retry/bind boilerplate exists once.
+async fn do_get_stream_over_transport(
     svc: CqliteFlightService,
     ticket: Vec<u8>,
-) -> Vec<RecordBatch> {
+) -> (
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    tonic::codec::Streaming<FlightData>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
@@ -167,7 +173,18 @@ async fn do_get_batches_over_transport(
         .do_get(Ticket::new(ticket))
         .await
         .expect("do_get rpc");
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    (server, resp.into_inner())
+}
+
+/// Same real-transport round-trip as [`do_get_rows_over_transport`] but returns
+/// every decoded `RecordBatch` so a caller can assert on the actual column set
+/// and cell values (not just the row count).
+async fn do_get_batches_over_transport(
+    svc: CqliteFlightService,
+    ticket: Vec<u8>,
+) -> Vec<RecordBatch> {
+    let (server, inner) = do_get_stream_over_transport(svc, ticket).await;
+    let stream = inner.map(|r| r.map_err(FlightError::Tonic));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
     let mut batches = Vec::new();
@@ -188,44 +205,7 @@ async fn do_get_raw_flight_data_over_transport(
     svc: CqliteFlightService,
     ticket: Vec<u8>,
 ) -> Vec<FlightData> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
-
-    let server = tokio::spawn(async move {
-        Server::builder()
-            .add_service(FlightServiceServer::new(svc))
-            .serve_with_incoming(incoming)
-            .await
-    });
-
-    let endpoint = Channel::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect_timeout(Duration::from_secs(5));
-    let mut channel = None;
-    let mut last_err = None;
-    for _ in 0..50 {
-        match endpoint.connect().await {
-            Ok(c) => {
-                channel = Some(c);
-                break;
-            }
-            Err(e) => {
-                last_err = Some(e);
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    }
-    let channel = channel.unwrap_or_else(|| panic!("connect failed: {last_err:?}"));
-
-    let mut client = FlightServiceClient::new(channel);
-    let resp = client
-        .do_get(Ticket::new(ticket))
-        .await
-        .expect("do_get rpc");
-    // `resp.into_inner()` yields the raw `FlightData` protobuf messages exactly as
-    // deframed off the wire — the pre-decode interception point.
-    let mut inner = resp.into_inner();
+    let (server, mut inner) = do_get_stream_over_transport(svc, ticket).await;
     let mut messages = Vec::new();
     while let Some(msg) = inner.next().await {
         messages.push(msg.expect("raw FlightData message over transport"));
