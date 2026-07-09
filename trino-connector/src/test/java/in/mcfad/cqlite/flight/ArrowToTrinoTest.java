@@ -315,6 +315,59 @@ class ArrowToTrinoTest {
     }
 
     @Test
+    void projectedColumnMissingBeforePresentVectorsRaisesNamingTheColumn() {
+        // Issue #2270: the missing column is projected FIRST/MIDDLE relative to the
+        // present vectors — the guard must fire on the by-name lookup regardless of
+        // projection position, not only when the absent column happens to be last.
+        try (BufferAllocator allocator = new RootAllocator()) {
+            IntVector id = new IntVector("id", allocator);
+            BigIntVector big = new BigIntVector("big", allocator);
+            id.allocateNew(1);
+            big.allocateNew(1);
+            id.set(0, 10);
+            big.set(0, 100L);
+
+            var root = new VectorSchemaRoot(List.of(id, big));
+            root.setRowCount(1);
+
+            // "missing_col" is projected FIRST, between/before delivered vectors.
+            var columns = List.of(
+                    new CqliteFlightColumnHandle("missing_col", VarcharType.VARCHAR),
+                    new CqliteFlightColumnHandle("id", IntegerType.INTEGER),
+                    new CqliteFlightColumnHandle("big", BigintType.BIGINT));
+
+            TrinoException ex = assertThrows(TrinoException.class,
+                    () -> ArrowToTrino.toPage(root, columns));
+            assertTrue(ex.getMessage().contains("missing_col"),
+                    "error must name the missing column, was: " + ex.getMessage());
+
+            root.close();
+        }
+    }
+
+    @Test
+    void emptyBatchWithNonEmptyProjectionRaisesNamingTheFirstColumn() {
+        // Issue #2270: a VectorSchemaRoot with ZERO vectors against a non-empty
+        // projection must fail loudly (the first projected column is absent), never
+        // silently produce all-null blocks.
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var root = new VectorSchemaRoot(List.<org.apache.arrow.vector.FieldVector>of());
+            root.setRowCount(0);
+
+            var columns = List.of(
+                    new CqliteFlightColumnHandle("id", IntegerType.INTEGER),
+                    new CqliteFlightColumnHandle("name", VarcharType.VARCHAR));
+
+            TrinoException ex = assertThrows(TrinoException.class,
+                    () -> ArrowToTrino.toPage(root, columns));
+            assertTrue(ex.getMessage().contains("id"),
+                    "error must name the missing column, was: " + ex.getMessage());
+
+            root.close();
+        }
+    }
+
+    @Test
     void readJavaValueRejectsNanosecondUnitTimestampAsTyped() {
         // The aggregation finalize path reads a TIMESTAMP group/aggregate column via
         // readJavaValue; a NANOSECOND vector must be rejected with a typed error, not
