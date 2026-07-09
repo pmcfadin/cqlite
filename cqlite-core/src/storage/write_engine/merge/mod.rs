@@ -106,10 +106,14 @@ mod carriers;
 #[cfg(feature = "write-support")]
 mod reconcile;
 
-/// Streaming cluster-group step type (issue #1668, stage 2) — feature-
-/// internal, UNWIRED from every production consumer. See `streaming::StreamingMerger`.
+/// Streaming cluster-group step type (issue #1668, stages 2-3b). See
+/// [`StreamingMerger`]. Wired into [`KWayMerger::merge`] (stage 3b) and
+/// `write_engine::maintenance`'s compaction loop; the Flight producer is
+/// intentionally untouched (Q4/mid-partition-budget territory, later stage).
 #[cfg(feature = "write-support")]
 mod streaming;
+#[cfg(feature = "write-support")]
+pub(crate) use streaming::{StreamingMerger, StreamingStep};
 
 /// Adapt a merge-path [`CellData`] into the shared [`ReconcileCell`] view
 /// (issue #947) so per-cell winner resolution calls
@@ -2343,53 +2347,79 @@ impl KWayMerger {
             dropped_whole: Vec::new(),
         };
 
-        while let MergeStep::Partition { key, rows } = self.step()? {
-            // Skip truly-empty phantom entries on the writer path (#886/#899
-            // branch-review). A range-tombstone carrier is NO LONGER filtered here
-            // (#933): `merge_entry_to_mutation` turns it into a mutation carrying
-            // `range_tombstones`, which the writer emits as on-disk bound markers
-            // (and uses to shadow same-partition rows). See
-            // `MergeEntry::is_metadata_only_no_op`.
-            let mutations = rows
-                .into_iter()
-                .filter(|entry| !entry.is_metadata_only_no_op())
-                .map(|entry| Self::merge_entry_to_mutation(entry, &self.schema))
-                .collect::<Result<Vec<_>>>()?;
+        // Stage 3b (#1668): consume via the streaming increment API
+        // (`StreamingMerger`/`StreamingStep`) instead of the whole-partition
+        // `step()` directly. `step_streaming` still calls the UNCHANGED
+        // `step()` internally and drains its already-reconciled
+        // `Vec<MergeEntry>` one row at a time — proven byte-identical to
+        // `step()`'s own output by the stage-2/3a equivalence tests — so this
+        // does NOT yet reduce peak memory (stage 5's job); it proves the
+        // incremental-consumption plumbing composes end-to-end with the
+        // writer. Clone the schema up front: `stream` holds `&mut self` for
+        // the loop's duration, so the per-row conversion below cannot also
+        // borrow `self`.
+        let schema = self.schema.clone();
+        let mut stream = StreamingMerger::new(&mut self);
+        let mut pending_rows: Vec<MergeEntry> = Vec::new();
 
-            // If the partition has no writer-emittable content at all, skip
-            // `write_partition` to avoid a phantom EMPTY partition. A partition
-            // carrying ONLY range-tombstone markers (every data row covered) IS
-            // emittable — Cassandra writes such marker-only partitions — so it is
-            // kept here (#933).
-            if mutations.is_empty() {
-                continue;
+        loop {
+            match stream.step_streaming()? {
+                StreamingStep::ClusterGroup { row, .. } => pending_rows.push(*row),
+                StreamingStep::PartitionEnd { key } => {
+                    let rows = std::mem::take(&mut pending_rows);
+
+                    // Skip truly-empty phantom entries on the writer path
+                    // (#886/#899 branch-review). A range-tombstone carrier is
+                    // NO LONGER filtered here (#933): `merge_entry_to_mutation`
+                    // turns it into a mutation carrying `range_tombstones`,
+                    // which the writer emits as on-disk bound markers (and
+                    // uses to shadow same-partition rows). See
+                    // `MergeEntry::is_metadata_only_no_op`.
+                    let mutations = rows
+                        .into_iter()
+                        .filter(|entry| !entry.is_metadata_only_no_op())
+                        .map(|entry| Self::merge_entry_to_mutation(entry, &schema))
+                        .collect::<Result<Vec<_>>>()?;
+
+                    // If the partition has no writer-emittable content at
+                    // all, skip `write_partition` to avoid a phantom EMPTY
+                    // partition. A partition carrying ONLY range-tombstone
+                    // markers (every data row covered) IS emittable —
+                    // Cassandra writes such marker-only partitions — so it is
+                    // kept here (#933).
+                    if mutations.is_empty() {
+                        continue;
+                    }
+
+                    // Count only real rows toward `output_rows`. A pure
+                    // range-tombstone carrier (empty operations, no row
+                    // tombstone, only `range_tombstones`) emits a marker, not
+                    // a row (#933). A pure partition-tombstone carrier (empty
+                    // operations, no row tombstone, no range tombstones, only
+                    // `partition_tombstone`) emits a partition-header
+                    // deletion, not a row (#1072).
+                    let row_mutations = mutations
+                        .iter()
+                        .filter(|m| {
+                            let is_range_only = m.operations.is_empty()
+                                && m.partition_tombstone.is_none()
+                                && m.row_tombstone.is_none()
+                                && !m.range_tombstones.is_empty();
+                            let is_partition_only = m.operations.is_empty()
+                                && m.partition_tombstone.is_some()
+                                && m.row_tombstone.is_none()
+                                && m.range_tombstones.is_empty();
+                            !(is_range_only || is_partition_only)
+                        })
+                        .count();
+
+                    stats.output_partitions += 1;
+                    stats.output_rows += row_mutations as u64;
+
+                    output_writer.write_partition(key, mutations)?;
+                }
+                StreamingStep::Complete => break,
             }
-
-            // Count only real rows toward `output_rows`. A pure range-tombstone
-            // carrier (empty operations, no row tombstone, only `range_tombstones`)
-            // emits a marker, not a row (#933). A pure partition-tombstone carrier
-            // (empty operations, no row tombstone, no range tombstones, only
-            // `partition_tombstone`) emits a partition-header deletion, not a row
-            // (#1072).
-            let row_mutations = mutations
-                .iter()
-                .filter(|m| {
-                    let is_range_only = m.operations.is_empty()
-                        && m.partition_tombstone.is_none()
-                        && m.row_tombstone.is_none()
-                        && !m.range_tombstones.is_empty();
-                    let is_partition_only = m.operations.is_empty()
-                        && m.partition_tombstone.is_some()
-                        && m.row_tombstone.is_none()
-                        && m.range_tombstones.is_empty();
-                    !(is_range_only || is_partition_only)
-                })
-                .count();
-
-            stats.output_partitions += 1;
-            stats.output_rows += row_mutations as u64;
-
-            output_writer.write_partition(key, mutations)?;
         }
 
         // Issue #1238: report the REAL output Data.db byte count instead of a

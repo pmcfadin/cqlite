@@ -329,11 +329,34 @@ impl WriteEngine {
                 break;
             }
 
-            // Process one partition from the merge
-            let step = merge.merger.step()?;
+            // Process one partition from the merge.
+            //
+            // Stage 3b (#1668): drain ONE full partition via the streaming
+            // increment API (`StreamingMerger`/`StreamingStep`) instead of
+            // calling the whole-partition `step()` directly. `step_streaming`
+            // still calls the UNCHANGED `step()` internally and drains its
+            // already-reconciled `Vec<MergeEntry>` one row at a time — proven
+            // byte-identical to `step()`'s own output by the stage-2/3a
+            // equivalence tests — so this does NOT change the outer budget
+            // check's granularity (still exactly one partition per outer-loop
+            // iteration; a mid-partition budget check is stage 4's job) and
+            // does NOT yet reduce peak memory (stage 5's job). It proves the
+            // incremental-consumption plumbing composes end-to-end with the
+            // writer.
+            let mut stream = merge::StreamingMerger::new(&mut merge.merger);
+            let mut pending_rows: Vec<merge::MergeEntry> = Vec::new();
+            let partition = loop {
+                match stream.step_streaming()? {
+                    merge::StreamingStep::ClusterGroup { row, .. } => pending_rows.push(*row),
+                    merge::StreamingStep::PartitionEnd { key } => {
+                        break Some((key, std::mem::take(&mut pending_rows)));
+                    }
+                    merge::StreamingStep::Complete => break None,
+                }
+            };
 
-            match step {
-                merge::MergeStep::Partition { key, rows } => {
+            match partition {
+                Some((key, rows)) => {
                     partitions_processed += 1;
 
                     // Convert MergeEntry rows to Mutation format
@@ -404,7 +427,7 @@ impl WriteEngine {
                     // Update stats
                     report.rows_merged += row_count;
                 }
-                merge::MergeStep::Complete => {
+                None => {
                     // Merge is complete - finalize and clean up
                     // Use blocking call to handle async finalization
                     self.finalize_merge_blocking(&mut report)?;

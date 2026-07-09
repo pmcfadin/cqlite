@@ -1,16 +1,24 @@
-//! Streaming cluster-group step type (issue #1668, stage 2) — FEATURE-INTERNAL,
-//! UNWIRED from every production consumer.
+//! Streaming cluster-group step type (issue #1668, stages 2-3b).
 //!
-//! `maintenance.rs`, `compact_sstables`, and the Flight producer all still call
-//! [`KWayMerger::step`] (the whole-partition path), which remains the sole
-//! production path and is completely unchanged by this module.
-//! [`StreamingMerger`] below is an ADDITIONAL, not-yet-wired wrapper that
-//! proves the eventual streaming design (stage 3+) can hand a caller the SAME
-//! reconciled rows one cluster-group at a time instead of one
-//! `MergeStep::Partition { rows, .. }` blob per partition — without touching
-//! [`MergeStep`]'s shape (a distinct [`StreamingStep`] type) or `KWayMerger`'s
-//! own fields (a wrapper holding its own drain state, so none of the existing
-//! `KWayMerger { .. }` struct-literal unit tests in `mod.rs` need updating).
+//! **Wiring status (stage 3b)**: [`KWayMerger::merge`] (used by
+//! `compact_sstables_with_registry`) and `write_engine::maintenance`'s
+//! compaction loop both now drain a partition via [`StreamingMerger`]/
+//! [`StreamingStep`] instead of calling [`KWayMerger::step`] directly — each
+//! accumulates `ClusterGroup` rows until `PartitionEnd`, then hands the SAME
+//! `Vec<MergeEntry>` `step()` would have returned to the SAME unchanged
+//! writer call, so output stays byte-identical (see stage 3b's `#921`
+//! compaction-byte-parity harness run). `step_streaming` still calls the
+//! UNCHANGED [`KWayMerger::step`] internally and drains its already-
+//! reconciled `Vec<MergeEntry>` one row at a time, so peak memory is
+//! UNCHANGED by this wiring (stage 5 removes the whole-partition buffering
+//! that still lives inside `step()`/`merge_partition_rows`). The Flight
+//! producer (`cqlite-flight/src/producer.rs`) is INTENTIONALLY untouched —
+//! that is Q4/mid-partition-budget territory, a later stage.
+//!
+//! [`StreamingMerger`] does not touch [`MergeStep`]'s shape (a distinct
+//! [`StreamingStep`] type) or `KWayMerger`'s own fields (a wrapper holding its
+//! own drain state, so none of the existing `KWayMerger { .. }` struct-literal
+//! unit tests in `mod.rs` needed updating).
 //!
 //! ## Grouping-contiguity VERIFICATION (issue #1668 flags this as "the crux")
 //!
@@ -84,13 +92,6 @@
 //! resulting `Vec<MergeEntry>` one row at a time. Removing that buffering is
 //! stage 5's job; this stage proves the increment TYPE and consumer-loop
 //! shape are safe to build on.
-
-// Stage 2 (#1668) is deliberately UNWIRED: no production caller constructs a
-// `StreamingMerger` yet (that is stage 3), so a normal (non-test) build sees
-// every item here as unreachable. Matches the crate's existing convention for
-// carried-but-not-yet-consumed surface (see `KWayMerger::gc_before_secs` /
-// `now_secs` in `mod.rs`). Exercised directly by this module's own tests.
-#![cfg_attr(feature = "write-support", allow(dead_code))]
 
 #[cfg(feature = "write-support")]
 use super::model::MergeEntry;
