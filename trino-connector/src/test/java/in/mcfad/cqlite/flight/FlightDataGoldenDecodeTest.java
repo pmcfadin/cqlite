@@ -40,6 +40,21 @@ import org.junit.jupiter.api.Test;
  * production (see {@code cqlite-flight/examples/emit_arrow_golden.rs}).
  *
  * <p>Regenerate the golden with {@code trino-connector/scripts/regen-arrow-golden.sh}.
+ *
+ * <p><b>FAIL-FIRST SLOT (issue #2193 / #2286).</b> The {@code keyvalue.flightdata}
+ * golden below decodes under BOTH arrow-java 18.1.0 and 19.0.0, so it does not by
+ * itself prove the 18→19 bump fixes the field failure — that failure is
+ * shape-dependent (a field-specific schema/bytes shape, possibly the
+ * header-extracted degraded schema, not reproduced by this fixture). A field pcap
+ * carrying the LITERAL failing {@code FlightData} bytes is being captured
+ * separately (#2286 capture item 1). When it lands, drop those bytes at
+ * {@code src/test/resources/golden/field-tiny-r5.flightdata} and add a sibling
+ * test method here that decodes it via {@link org.apache.arrow.flight.FlightMessageDecoder}
+ * exactly as {@link #decodesServerEmittedFlightDataAtFlightLevel()} does. That
+ * golden is expected to FAIL to decode under arrow-java 18.1.0 (the field
+ * "Failed to read message") and PASS under 19.x — the true fail-first regression
+ * oracle for this fix. Do NOT fabricate those bytes; only the real field capture
+ * is authoritative.
  */
 class FlightDataGoldenDecodeTest {
 
