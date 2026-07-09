@@ -4,9 +4,11 @@ import in.mcfad.cqlite.flight.sidecar.HostSnapshotApis;
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -88,6 +90,47 @@ public final class SnapshotManager {
             createOnHost(forQuery, new SnapshotKey(host, keyspace, table), name);
         }
         return Optional.of(name);
+    }
+
+    /**
+     * Best-effort per-host snapshot availability for a candidate host set (issue #2241):
+     * attempts creation (the same memoized per-(query, host, keyspace, table) fan-out as
+     * {@link #snapshotFor}, so a host already created there — e.g. a split's primary — resolves
+     * instantly with no duplicate PUT) on every host in {@code hosts}, but — unlike {@link
+     * #snapshotFor} — does NOT fail closed on an individual host's creation failure. A host
+     * whose creation fails is logged and excluded from the returned set; the caller ({@link
+     * CqliteFlightSplitManager#getSplits}) uses this to restrict availability-failover fallback
+     * lists to hosts that actually have the snapshot, without failing the whole query over an
+     * optional fallback host (a required PRIMARY host still fails closed via {@link
+     * #snapshotFor}).
+     *
+     * <p>In {@link ReadMode#LIVE} this is a no-op returning every candidate host unchanged
+     * (fallback restriction is meaningful only in snapshot mode).
+     *
+     * @param hosts every candidate replica host to check/create snapshot availability for
+     * @return the subset of {@code hosts} that have (or now have) the snapshot
+     */
+    public Set<String> availableHosts(String queryId, String keyspace, String table, Collection<String> hosts) {
+        if (readMode == ReadMode.LIVE) {
+            return Set.copyOf(hosts);
+        }
+        String name = snapshotName(queryId);
+        Map<SnapshotKey, CompletableFuture<String>> forQuery =
+                created.computeIfAbsent(queryId, q -> new ConcurrentHashMap<>());
+        Set<String> available = new LinkedHashSet<>();
+        for (String host : hosts) {
+            SnapshotKey key = new SnapshotKey(host, keyspace, table);
+            try {
+                createOnHost(forQuery, key, name);
+                available.add(host);
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING,
+                        () -> "Snapshot unavailable on replica host " + host + " for " + keyspace + "." + table
+                                + " (issue #2241): excluded from availability-failover fallback "
+                                + "candidates — " + e.getMessage());
+            }
+        }
+        return available;
     }
 
     /**

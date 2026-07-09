@@ -172,6 +172,67 @@ class SnapshotManagerTest {
     }
 
     /**
+     * {@code availableHosts} (issue #2241): best-effort creates on every candidate host and
+     * returns the subset that succeeded — creating snapshots for hosts that were never
+     * {@code snapshotFor}'s required set (e.g. a fallback-only host that is never any range's
+     * primary), fixing the roborev finding that fallback restriction was primaries-only.
+     */
+    @Test
+    void availableHostsCreatesSnapshotOnEveryCandidateAndReturnsAllOnSuccess() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
+
+        Set<String> available = mgr.availableHosts("q1", "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+
+        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
+        assertEquals(List.of("10.0.0.2|ks.t/cqlite-q1/ttl=6h", "10.0.0.9|ks.t/cqlite-q1/ttl=6h"),
+                fake.creates.stream().sorted().toList());
+    }
+
+    /**
+     * A host whose creation fails is excluded from the returned set but does NOT propagate —
+     * unlike {@link SnapshotManager#snapshotFor}, this call never fails closed. Loud (fail-closed)
+     * behavior is reserved for REQUIRED (primary) hosts via {@code snapshotFor}.
+     */
+    @Test
+    void availableHostsExcludesFailedHostWithoutThrowing() {
+        FakeSidecars fake = new FakeSidecars();
+        fake.failCreateHosts = Set.of("10.0.0.9");
+        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
+
+        Set<String> available = mgr.availableHosts("q1", "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+
+        assertEquals(Set.of("10.0.0.2"), available, "the failed host is excluded, not propagated");
+    }
+
+    /**
+     * A host already created via {@code snapshotFor} (e.g. a range's primary, required and
+     * fail-closed) resolves instantly through {@code availableHosts} without a duplicate PUT —
+     * the memoized per-(query, host, keyspace, table) future is shared between both call paths.
+     */
+    @Test
+    void availableHostsReusesAlreadyCreatedSnapshotWithoutDuplicatePut() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
+
+        mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.2")); // required (primary) create
+        Set<String> available = mgr.availableHosts("q1", "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+
+        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
+        assertEquals(1, fake.creates.stream().filter(c -> c.startsWith("10.0.0.2|")).count(),
+                "the already-created primary host is not PUT again");
+    }
+
+    @Test
+    void liveModeAvailableHostsReturnsAllCandidatesWithoutTouchingSidecar() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.LIVE, Optional.empty());
+
+        assertEquals(Set.of("h1", "h2"), mgr.availableHosts("q1", "ks", "t", List.of("h1", "h2")));
+        assertTrue(fake.creates.isEmpty(), "live mode touches no Sidecar");
+    }
+
+    /**
      * Concurrent callers for the same (query, host, keyspace, table) must PUT exactly once,
      * even while the (slow) create is in flight. The per-key-future memoization (issue #2113
      * / N5) moves the network call off the ConcurrentHashMap bin lock but keeps exactly-once
