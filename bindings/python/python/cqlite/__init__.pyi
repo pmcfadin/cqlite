@@ -41,6 +41,10 @@ class ParseError(CqliteError):
     """Raised when CQL query parsing fails."""
     ...
 
+class CancelledError(CqliteError):
+    """Raised when a cooperatively-cancelled operation aborts (issue #2264)."""
+    ...
+
 # Configuration
 class StreamingConfig:
     """Configuration for streaming query execution.
