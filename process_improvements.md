@@ -454,3 +454,33 @@ issues have landed). Keep entries short so a future reader can re-run the measur
     for anyone touching the full gate's dataset-dependent components: verify
     dataset integrity isn't silently mutated by a test run, especially under
     concurrent full-gate load against one shared `CQLITE_DATASETS_ROOT`.
+  13. **2026-07-09 — `flow-closer`'s background-wait-then-resume pattern
+      silently stalls after the gate finishes, repeatedly, on one machine in
+      one session.** Observed on `ip-172-31-18-96`: THREE separate closers
+      (issues #2238, #2262, and #2257 — the last one twice, once per gate
+      run) each set up a background wait on the full `agent-gate.sh` process,
+      ended their turn to avoid idle-waiting (correct, per #1855), and then
+      never resumed on their own even though the gate had already finished
+      (PASS or FAIL) — sitting idle for 20–80+ minutes until the lead
+      manually nudged them via `SendMessage`. Each time, once nudged, the
+      closer immediately found the already-finished summary file and
+      proceeded correctly — so the gate/build tooling and the closer's logic
+      were fine; only the "wake me up when the background task completes"
+      mechanism failed to fire a resumption. A background *command* run via
+      the Bash tool with `run_in_background: true` reliably notifies the
+      *lead* on completion (confirmed working many times this session for
+      roborev/lite-gate waits run directly by the lead) — the failure mode is
+      specific to a *subagent* setting up its own internal background wait
+      and expecting to be woken *within its own context* without an external
+      nudge. **Standing lesson:** do not trust a closer's (or any subagent's)
+      self-reported "I'll wait for the notification" after a long
+      (12–25 min) background operation — the lead should proactively check
+      liveness (summary-file mtime + `ps aux` for the actual PID) on any
+      heartbeat/pulse cycle that spans a closer's expected full-gate window,
+      and nudge immediately if the artifact already exists with no
+      subsequent activity, rather than waiting for the closer's own
+      notification to arrive. This is now baked into the heartbeat prompt's
+      instructions but was not anticipated before this session — file as a
+      candidate for a `flow-closer` prompt fix (an explicit poll-loop with a
+      hard timeout, not a single background wait) rather than relying on the
+      lead's manual nudge as the permanent mitigation.
