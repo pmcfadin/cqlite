@@ -94,6 +94,13 @@ pub mod repair_state;
 #[cfg(feature = "write-support")]
 pub use repair_state::{classify_inputs, RepairState};
 
+/// Partition-scoped tombstone-carrier pre-scan (issue #1668, stage 1). Extracts
+/// the range-tombstone (#933) and partition-deletion (#1072) carriers out of a
+/// buffered partition into [`carriers::PartitionCarriers`] as a standalone,
+/// testable first pass — the seed for later streaming stages.
+#[cfg(feature = "write-support")]
+mod carriers;
+
 /// Clustering-group reconciliation kernel, decomposed into named steps
 /// (issue #945). See [`reconcile::ReconcileState`].
 #[cfg(feature = "write-support")]
@@ -2550,25 +2557,33 @@ impl KWayMerger {
             (None, i64::MIN)
         };
 
-        // Issue #933: split the range-tombstone carrier entries out of the row
-        // stream. They are partition-level markers spanning a clustering range —
-        // NOT per-`(pk, ck)` rows — so routing them through `reconcile_cluster`
-        // (which collapses a cluster to ONE entry, keeping a single max-deletion
-        // range) would lose every range but one. Collect them here, canonicalize
-        // overlapping duplicates, then (a) shadow covered cells per cluster and
-        // (b) re-emit the survivors so the writer persists the markers.
-        let mut range_tombstones: Vec<(DecoratedKey, RangeTombstone)> = Vec::new();
-        let mut clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>> = BTreeMap::new();
+        // Partition-scoped tombstone-carrier pre-scan (issue #1668, stage 1).
+        // A standalone read-only first pass extracts the partition-level
+        // markers — the range-tombstone carriers (#933) and the MAX
+        // partition-deletion floor (#1072) — out of the buffered partition into
+        // `PartitionCarriers`. This preserves the exact prior behavior:
+        //
+        //   * Issue #933: range-tombstone carriers are partition-level markers
+        //     spanning a clustering range — NOT per-`(pk, ck)` rows — so routing
+        //     them through `reconcile_cluster` (which collapses a cluster to ONE
+        //     entry) would lose every range but one. Collected here, then
+        //     canonicalized (below), then used to (a) shadow covered cells per
+        //     cluster and (b) re-emit the survivors so the writer persists them.
+        //   * Issue #1072: the synthetic partition-tombstone carriers yield the
+        //     MAX `markedForDeleteAt` across ALL sources (with the winning mfda's
+        //     localDeletionTime) — the partition's OUTERMOST shadow floor. The
+        //     partition key is the same for every entry in this call
+        //     (`merge_partition_rows` is per partition), so one floor covers all.
+        //
+        // Carriers are NOT pushed into `clustered_rows`; the buffering pass below
+        // skips them and keeps only the per-`(pk, ck)` rows, exactly as before.
+        let carriers::PartitionCarriers {
+            mut range_tombstones,
+            max_partition_deletion,
+            partition_delete_key,
+        } = carriers::scan_partition_carriers(&rows);
 
-        // Issue #1072: extract the synthetic partition-tombstone carriers and keep
-        // the MAX `markedForDeleteAt` across ALL merge sources (with the winning
-        // mfda's localDeletionTime). This is the partition's OUTERMOST shadow floor.
-        // Carriers are NOT pushed into `clustered_rows` (they are partition-level,
-        // not per-`(pk, ck)` rows). The partition key is the same for every entry in
-        // this call (`merge_partition_rows` is invoked per partition), so a single
-        // floor value covers the whole partition.
-        let mut max_partition_deletion: Option<(i64, i32)> = None;
-        let mut partition_delete_key: Option<DecoratedKey> = None;
+        let mut clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>> = BTreeMap::new();
 
         // Row-count reconciliation (issue #2163): rows entering the reconcile
         // boundary. `rows` is moved by the loop below, so snapshot the count here.
@@ -2577,21 +2592,15 @@ impl KWayMerger {
         let rows_in = rows.len() as u64;
 
         for row in rows {
-            if row.is_partition_delete_carrier() {
-                if let Some((mfda, ldt)) = row.partition_deletion {
-                    partition_delete_key.get_or_insert_with(|| row.key.clone());
-                    match max_partition_deletion {
-                        Some((cur_mfda, _)) if cur_mfda >= mfda => {}
-                        _ => max_partition_deletion = Some((mfda, ldt)),
-                    }
-                    continue;
-                }
+            // Skip the partition-scoped carriers already captured above so only
+            // per-`(pk, ck)` rows enter `clustered_rows` (mirrors the original
+            // inline `continue`s exactly: partition-deletion carrier first, then
+            // range-marker carrier).
+            if row.is_partition_delete_carrier() && row.partition_deletion.is_some() {
+                continue;
             }
-            if Self::is_range_marker_carrier(&row) {
-                if let Some(rt) = row.range_deletion.clone() {
-                    range_tombstones.push((row.key.clone(), rt));
-                    continue;
-                }
+            if carriers::is_range_marker_carrier(&row) {
+                continue;
             }
             clustered_rows
                 .entry(row.clustering_key.clone())
@@ -2819,17 +2828,6 @@ impl KWayMerger {
         }
 
         Ok(merged)
-    }
-
-    /// True when an entry exists ONLY to carry a range-tombstone marker (issue
-    /// #933): an empty live row whose only payload is `range_deletion`. These are
-    /// produced by [`Self::build_merge_entry`] from a reader `RangeMarker` and are
-    /// split out of the row stream by [`Self::merge_partition_rows`].
-    fn is_range_marker_carrier(entry: &MergeEntry) -> bool {
-        entry.range_deletion.is_some()
-            && entry.complex_deletions.is_empty()
-            && entry.row_deletion.is_none()
-            && matches!(&entry.row_data, RowData::Live { cells } if cells.is_empty())
     }
 
     /// Coalesce range tombstones into a NON-OVERLAPPING canonical sequence per
