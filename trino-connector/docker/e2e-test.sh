@@ -11,8 +11,52 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COMPOSE=(docker compose -f "$ROOT/trino-connector/docker/docker-compose.yml")
 FAILURES=0
 
+# Per-query timeout (issue #2233): a product-side streaming hang (observed live —
+# Trino cancels an over-satisfied LIMIT split mid-stream and the connector's
+# do_get never unblocks/completes, per the task landing in Trino's own
+# system.runtime.tasks as CANCELING forever) must fail this script in minutes,
+# not hang a CI job or a dev box indefinitely. GNU `timeout` ships on every CI
+# runner (Linux); a macOS dev box may only have `gtimeout` (coreutils) or
+# neither — fall back to a manual background+kill wrapper so the bound still
+# holds everywhere instead of silently reverting to unbounded.
+QUERY_TIMEOUT_SECS=180
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
+run_with_timeout() {
+  local secs="$1"; shift
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" "$secs" "$@"
+    return $?
+  fi
+  "$@" &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= secs )); then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
 log()  { echo "── $* ──"; }
-trino() { "${COMPOSE[@]}" exec -T trino trino --execute "$1" 2>&1; }
+# Both query helpers route through run_with_timeout so a hang surfaces as a
+# clear FATAL message + fast exit rather than either an indefinite stall or an
+# opaque `set -e` abort from an unhandled non-zero command-substitution status.
+trino() {
+  local out rc=0
+  set +e
+  out="$(run_with_timeout "$QUERY_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --execute "$1" 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -eq 124 ]]; then
+    echo "FATAL: query timed out after ${QUERY_TIMEOUT_SECS}s (possible product hang): $1" >&2
+    exit 1
+  fi
+  echo "$out"
+}
 
 assert_eq() {
   local desc="$1" expected="$2" actual="$3"
@@ -138,7 +182,18 @@ assert_eq "high-card group count"   '"10"'                                   "$(
 # Use count(*), which pushes without an inserted CAST projection (sum on an int
 # column gets a CAST that defeats single-Variable-arg pushdown — a separate,
 # pre-existing limitation unrelated to this gate).
-explain() { "${COMPOSE[@]}" exec -T trino trino --execute "EXPLAIN $1" 2>&1; }
+explain() {
+  local out rc=0
+  set +e
+  out="$(run_with_timeout "$QUERY_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --execute "EXPLAIN $1" 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -eq 124 ]]; then
+    echo "FATAL: EXPLAIN timed out after ${QUERY_TIMEOUT_SECS}s (possible product hang): $1" >&2
+    exit 1
+  fi
+  echo "$out"
+}
 pushed()    { grep -q 'aggregationJson=Optional\[' <<<"$1"; }
 assert_pushed() {
   local desc="$1" plan="$2"
@@ -164,6 +219,30 @@ assert_filter_pushed() {
   local desc="$1" plan="$2"
   if filter_pushed "$plan"; then echo "PASS: $desc";
   else echo "FAIL: $desc — handle had filterJson=Optional.empty (predicate not pushed)"; echo "$plan"; FAILURES=$((FAILURES + 1)); fi
+}
+
+# LIMIT pushdown via EXPLAIN (#2129). A row-count assertion alone (e.g. `LIMIT 2`
+# -> 2 rows) is NOT proof the connector pushed the limit: Trino applies its own
+# Limit/LimitPartial above the scan regardless, so the count is correct even if
+# the connector silently stopped pushing (the exact #2233 regression this test
+# exists to catch) — Trino's own cap would still trim to the right count. The
+# scan's cqlite table handle is a Java record with no custom toString, so its
+# default rendering carries every field verbatim; `limit` is an `OptionalLong`,
+# whose JDK toString is `OptionalLong[N]` when present or `OptionalLong.empty`
+# when absent (verified: `CqliteFlightTableHandle` record field order, JDK
+# java.util.OptionalLong#toString) — the same handle-rendering probe already used
+# above for `aggregationJson`/`filterJson`.
+limit_pushed() { grep -q 'limit=OptionalLong\[' <<<"$1"; }
+assert_limit_pushed() {
+  local desc="$1" plan="$2"
+  if limit_pushed "$plan"; then echo "PASS: $desc";
+  else echo "FAIL: $desc — handle had limit=OptionalLong.empty (LIMIT not pushed)"; echo "$plan"; FAILURES=$((FAILURES + 1)); fi
+}
+assert_limit_not_pushed() {
+  local desc="$1" plan="$2"
+  if limit_pushed "$plan"; then
+    echo "FAIL: $desc — handle carried limit=OptionalLong[...] (unexpectedly pushed)"; echo "$plan"; FAILURES=$((FAILURES + 1));
+  else echo "PASS: $desc"; fi
 }
 
 # Low-cardinality GROUP BY device (ratio ≈ 0.2 < 0.5): PUSHED into the scan.
@@ -192,21 +271,42 @@ assert_filter_pushed "range score > 25 is pushed" \
 # bounding regression (LIMIT ignored, or a limit pushed past a residual filter)
 # was structurally invisible. events has 5 rows here (the ghost row below is not
 # flushed yet). count(*) over a LIMIT subquery is a deterministic scalar.
-log "assert LIMIT result bounding"
+#
+# The row-count alone does NOT prove pushdown: Trino keeps its own Limit above
+# the scan and would trim to the right count even if the connector silently
+# stopped pushing. Assert the EXPLAIN handle rendering FIRST (the actual
+# regression signal), and keep the row counts as a secondary correctness check.
+log "assert LIMIT pushdown (EXPLAIN) + result bounding"
+assert_limit_pushed "LIMIT 2 is pushed onto the scan handle" \
+  "$(explain 'SELECT id FROM cqlite.analytics.events LIMIT 2')"
 assert_eq "LIMIT 2 returns exactly 2 rows"       '"2"' \
   "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events LIMIT 2)')"
+assert_limit_pushed "LIMIT 100 is pushed onto the scan handle" \
+  "$(explain 'SELECT id FROM cqlite.analytics.events LIMIT 100')"
 assert_eq "LIMIT above table size returns all 5" '"5"' \
   "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events LIMIT 100)')"
 
 # LIMIT + partially-pushable predicate (audit finding N13). `score > 15` pushes;
 # `length(name) > 3` is a function call the connector cannot translate, so it
-# stays a Trino residual FilterNode ABOVE the scan. Soundness rests on Trino NOT
-# pushing the LIMIT below that residual (applyLimit is residual-unaware,
-# CqliteFlightMetadata.java) — else the server would cap early, before the residual
-# ran, and drop rows Trino can never recover. Rows with score>15:
-# bob(20,len3) carol(30,len5) dave(40,len4) erin(50,len4); length>3 drops bob, so
-# carol,dave,erin (3 rows) satisfy BOTH conjuncts.
-log "assert LIMIT + partially-pushable predicate correctness"
+# stays a Trino residual FilterNode ABOVE the scan. `CqliteFlightMetadata.applyLimit`
+# itself is residual-unaware (no check for an unpushed conjunct — verified by
+# reading its source), so the soundness guard against capping before the residual
+# runs is NOT in our code; it is Trino's planner, which — verified empirically
+# against a live EXPLAIN below — never calls `applyLimit` while an active residual
+# FilterNode sits between the LimitNode and the TableScanNode. So the correct,
+# observed signal here is `limit=OptionalLong.empty`: the connector-side limit is
+# NOT pushed, and Trino's own (un-pushed) Limit does the final cut post-residual.
+# Assert that directly, alongside the score>15 filter conjunct still pushing, and
+# keep the row counts as the order-independent parity check that the residual
+# (length(name) > 3) was actually still applied rather than silently dropped.
+# Rows with score>15: bob(20,len3) carol(30,len5) dave(40,len4) erin(50,len4);
+# length>3 drops bob, so carol,dave,erin (3 rows) satisfy BOTH conjuncts.
+log "assert LIMIT + partially-pushable predicate pushdown (EXPLAIN) + correctness"
+partial_plan="$(explain \
+  'SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 2')"
+assert_limit_not_pushed "partial-predicate LIMIT stays with Trino (residual filter blocks push)" \
+  "$partial_plan"
+assert_filter_pushed "partial-predicate score>15 conjunct is pushed"          "$partial_plan"
 # LIMIT 2 (< 3 qualifying): the full 2 rows must survive — fewer would be the
 # symptom of a LIMIT pushed below the residual filter.
 assert_eq "partial-predicate LIMIT 2 returns 2 rows"          '"2"' \
