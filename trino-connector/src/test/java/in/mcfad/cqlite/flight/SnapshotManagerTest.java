@@ -1,12 +1,15 @@
 package in.mcfad.cqlite.flight;
 
+import in.mcfad.cqlite.flight.sidecar.HostSnapshotApis;
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 import in.mcfad.cqlite.flight.sidecar.SnapshotApi;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -18,38 +21,44 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Per-query snapshot lifecycle (issue #2105): create-at-planning, fail-closed,
- * idempotent, best-effort cleanup. Uses a recording fake {@link SnapshotApi} so no
- * live Sidecar / HTTP is needed.
+ * Per-query snapshot lifecycle (issues #2105, #2227): create-at-planning on EVERY replica
+ * host, fail-closed (naming host + snapshot), idempotent per (query, host, table),
+ * best-effort per-host cleanup. Uses a recording fake {@link HostSnapshotApis} so no live
+ * Sidecar / HTTP is needed.
  */
 class SnapshotManagerTest {
 
-    /** Records every create/clear and can be armed to throw on create. */
-    private static final class FakeSidecar implements SnapshotApi {
-        final List<String> creates = new ArrayList<>();
-        final List<String> clears = new ArrayList<>();
-        boolean failCreate;
+    /** Records every create/clear (prefixed with the host) and can be armed to throw. */
+    private static final class FakeSidecars implements HostSnapshotApis {
+        final List<String> creates = Collections.synchronizedList(new ArrayList<>());
+        final List<String> clears = Collections.synchronizedList(new ArrayList<>());
+        volatile Set<String> failCreateHosts = Set.of();
 
         @Override
-        public void createSnapshot(String keyspace, String table, String name, Optional<String> ttl) {
-            if (failCreate) {
-                throw new SidecarClient.SidecarException("boom", 500);
-            }
-            creates.add(keyspace + "." + table + "/" + name + "/ttl=" + ttl.orElse(""));
-        }
+        public SnapshotApi forHost(String host) {
+            return new SnapshotApi() {
+                @Override
+                public void createSnapshot(String keyspace, String table, String name, Optional<String> ttl) {
+                    if (failCreateHosts.contains(host)) {
+                        throw new SidecarClient.SidecarException("boom on " + host, 500);
+                    }
+                    creates.add(host + "|" + keyspace + "." + table + "/" + name + "/ttl=" + ttl.orElse(""));
+                }
 
-        @Override
-        public void clearSnapshot(String keyspace, String table, String name) {
-            clears.add(keyspace + "." + table + "/" + name);
+                @Override
+                public void clearSnapshot(String keyspace, String table, String name) {
+                    clears.add(host + "|" + keyspace + "." + table + "/" + name);
+                }
+            };
         }
     }
 
     @Test
     void liveModeNeverTouchesSidecar() {
-        FakeSidecar fake = new FakeSidecar();
+        FakeSidecars fake = new FakeSidecars();
         SnapshotManager mgr = new SnapshotManager(fake, ReadMode.LIVE, Optional.of("6h"));
 
-        assertEquals(Optional.empty(), mgr.snapshotFor("q1", "ks", "t"));
+        assertEquals(Optional.empty(), mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2")));
         mgr.cleanup("q1");
 
         assertTrue(fake.creates.isEmpty(), "live mode creates no snapshot");
@@ -58,33 +67,70 @@ class SnapshotManagerTest {
 
     @Test
     void snapshotModeCreatesNamedSnapshotWithTtl() {
-        FakeSidecar fake = new FakeSidecar();
+        FakeSidecars fake = new FakeSidecars();
         SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
 
-        Optional<String> name = mgr.snapshotFor("20260706_120000_00001_abcde", "ks", "t");
+        Optional<String> name =
+                mgr.snapshotFor("20260706_120000_00001_abcde", "ks", "t", List.of("10.0.0.1"));
 
         assertEquals(Optional.of("cqlite-20260706_120000_00001_abcde"), name);
-        assertEquals(List.of("ks.t/cqlite-20260706_120000_00001_abcde/ttl=6h"), fake.creates);
+        assertEquals(List.of("10.0.0.1|ks.t/cqlite-20260706_120000_00001_abcde/ttl=6h"), fake.creates);
+    }
+
+    /**
+     * AC1/AC2 (issue #2227): the snapshot must be created on EVERY replica host a split will
+     * read, not just the configured Sidecar's node — one PUT per distinct host, same name.
+     */
+    @Test
+    void createsSnapshotOnEveryReplicaHost() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
+
+        Optional<String> name = mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.1", "10.0.0.2", "10.0.0.3"));
+
+        assertEquals(Optional.of("cqlite-q1"), name);
+        assertEquals(List.of(
+                        "10.0.0.1|ks.t/cqlite-q1/ttl=6h",
+                        "10.0.0.2|ks.t/cqlite-q1/ttl=6h",
+                        "10.0.0.3|ks.t/cqlite-q1/ttl=6h"),
+                fake.creates.stream().sorted().toList());
+    }
+
+    /**
+     * AC3 (issue #2227): a create failure on one host fails closed with an actionable error
+     * naming the offending host AND the snapshot — never a bare NotFound / opaque failure.
+     */
+    @Test
+    void failsClosedNamingHostAndSnapshot() {
+        FakeSidecars fake = new FakeSidecars();
+        fake.failCreateHosts = Set.of("10.0.0.2");
+        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
+
+        SidecarClient.SidecarException ex = assertThrows(SidecarClient.SidecarException.class,
+                () -> mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.1", "10.0.0.2")));
+
+        assertTrue(ex.getMessage().contains("10.0.0.2"), "error names the failing host: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("cqlite-q1"), "error names the snapshot: " + ex.getMessage());
     }
 
     @Test
-    void createIsIdempotentPerQueryTable() {
-        FakeSidecar fake = new FakeSidecar();
+    void createIsIdempotentPerQueryHostTable() {
+        FakeSidecars fake = new FakeSidecars();
         SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
 
-        mgr.snapshotFor("q1", "ks", "t");
-        mgr.snapshotFor("q1", "ks", "t"); // re-plan same scan
+        mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2"));
+        mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2")); // re-plan same scan
 
-        assertEquals(1, fake.creates.size(), "at most one PUT per (query, keyspace, table)");
+        assertEquals(2, fake.creates.size(), "at most one PUT per (query, host, keyspace, table)");
     }
 
     @Test
     void failsClosedOnCreateError() {
-        FakeSidecar fake = new FakeSidecar();
-        fake.failCreate = true;
+        FakeSidecars fake = new FakeSidecars();
+        fake.failCreateHosts = Set.of("h1");
         SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
 
-        assertThrows(SidecarClient.SidecarException.class, () -> mgr.snapshotFor("q1", "ks", "t"));
+        assertThrows(SidecarClient.SidecarException.class, () -> mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
 
         // A failed create is NOT recorded, so cleanup won't try to delete a phantom snapshot.
         mgr.cleanup("q1");
@@ -92,21 +138,21 @@ class SnapshotManagerTest {
     }
 
     @Test
-    void cleanupDeletesEveryCreatedSnapshot() {
-        FakeSidecar fake = new FakeSidecar();
+    void cleanupDeletesEveryCreatedSnapshotOnEveryHost() {
+        FakeSidecars fake = new FakeSidecars();
         SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
 
-        mgr.snapshotFor("q1", "ks", "a");
-        mgr.snapshotFor("q1", "ks", "b");
+        mgr.snapshotFor("q1", "ks", "a", List.of("h1", "h2"));
+        mgr.snapshotFor("q1", "ks", "b", List.of("h1"));
         mgr.cleanup("q1");
 
-        assertEquals(List.of("ks.a/cqlite-q1", "ks.b/cqlite-q1"),
+        assertEquals(List.of("h1|ks.a/cqlite-q1", "h1|ks.b/cqlite-q1", "h2|ks.a/cqlite-q1"),
                 fake.clears.stream().sorted().toList());
     }
 
     @Test
     void cleanupSwallowsDeleteFailures() {
-        SnapshotApi throwing = new SnapshotApi() {
+        HostSnapshotApis throwing = host -> new SnapshotApi() {
             @Override
             public void createSnapshot(String k, String t, String n, Optional<String> ttl) {}
             @Override
@@ -115,7 +161,7 @@ class SnapshotManagerTest {
             }
         };
         SnapshotManager mgr = new SnapshotManager(throwing, ReadMode.SNAPSHOT, Optional.empty());
-        mgr.snapshotFor("q1", "ks", "t");
+        mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2"));
         // Best-effort: a delete failure must not propagate (TTL backstop reclaims it).
         mgr.cleanup("q1");
     }
@@ -126,17 +172,17 @@ class SnapshotManagerTest {
     }
 
     /**
-     * Concurrent callers for the same (query, keyspace, table) must PUT exactly once, even
-     * while the (slow) create is in flight. The per-key-future memoization (issue #2113 / N5)
-     * moves the network call off the ConcurrentHashMap bin lock but keeps exactly-once — this
-     * test gates the create on a latch so many threads pile up mid-create, then asserts one
-     * PUT and one shared snapshot name.
+     * Concurrent callers for the same (query, host, keyspace, table) must PUT exactly once,
+     * even while the (slow) create is in flight. The per-key-future memoization (issue #2113
+     * / N5) moves the network call off the ConcurrentHashMap bin lock but keeps exactly-once
+     * — this test gates the create on a latch so many threads pile up mid-create, then
+     * asserts one PUT and one shared snapshot name.
      */
     @Test
     void concurrentCallersPutExactlyOnce() throws Exception {
         AtomicInteger creates = new AtomicInteger();
         CountDownLatch release = new CountDownLatch(1);
-        SnapshotApi blocking = new SnapshotApi() {
+        HostSnapshotApis blocking = host -> new SnapshotApi() {
             @Override
             public void createSnapshot(String k, String t, String n, Optional<String> ttl) {
                 creates.incrementAndGet();
@@ -159,7 +205,7 @@ class SnapshotManagerTest {
         for (int i = 0; i < threads; i++) {
             results.add(pool.submit(() -> {
                 start.await();
-                return mgr.snapshotFor("q1", "ks", "t");
+                return mgr.snapshotFor("q1", "ks", "t", List.of("h1"));
             }));
         }
         start.countDown();          // fire all callers
@@ -186,7 +232,7 @@ class SnapshotManagerTest {
         AtomicInteger creates = new AtomicInteger();
         CountDownLatch winnerInCreate = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        SnapshotApi api = new SnapshotApi() {
+        HostSnapshotApis api = host -> new SnapshotApi() {
             @Override
             public void createSnapshot(String k, String t, String n, Optional<String> ttl) {
                 if (creates.incrementAndGet() == 1) {
@@ -209,10 +255,10 @@ class SnapshotManagerTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             java.util.concurrent.Future<Optional<String>> winner =
-                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t"));
+                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
             assertTrue(winnerInCreate.await(5, TimeUnit.SECONDS), "winner reached the create");
             java.util.concurrent.Future<Optional<String>> waiter =
-                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t"));
+                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
             Thread.sleep(50); // let the waiter pile up on the in-flight future
             release.countDown();
 
@@ -230,7 +276,7 @@ class SnapshotManagerTest {
 
             // (b) The failed future was removed, so a retry recomputes and succeeds —
             // with exactly one NEW PUT.
-            assertEquals(Optional.of("cqlite-q1"), mgr.snapshotFor("q1", "ks", "t"));
+            assertEquals(Optional.of("cqlite-q1"), mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
             assertEquals(2, creates.get(), "one failed PUT + one successful retry PUT");
 
             // cleanup deletes only the successfully created snapshot and must not throw.

@@ -185,6 +185,12 @@ public final class SidecarClient implements SnapshotApi {
             this.statusCode = statusCode;
         }
 
+        /** Preserve the underlying cause (e.g. when re-wrapping a per-host create failure). */
+        public SidecarException(String message, int statusCode, Throwable cause) {
+            super(message, cause);
+            this.statusCode = statusCode;
+        }
+
         public int statusCode() {
             return statusCode;
         }

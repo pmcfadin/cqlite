@@ -10,6 +10,7 @@ import io.trino.spi.transaction.IsolationLevel;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 
+import in.mcfad.cqlite.flight.sidecar.HostSnapshotApis;
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 
 public class CqliteFlightConnector implements Connector {
@@ -22,9 +23,12 @@ public class CqliteFlightConnector implements Connector {
     public CqliteFlightConnector(CqliteFlightConfig config, SidecarClient sidecar) {
         this.config = config;
         this.sidecar = sidecar;
-        // One shared snapshot manager (issue #2105): the split manager creates the
-        // per-query snapshot, the metadata cleans it up — both must see the same registry.
-        this.snapshots = new SnapshotManager(sidecar, config.readMode(), config.snapshotTtl());
+        // One shared snapshot manager (issues #2105, #2227): the split manager creates the
+        // per-query snapshot on each replica host, the metadata cleans it up — both must see
+        // the same registry. Each host's Sidecar is derived from the configured URI's scheme
+        // + port (uniform across the hostNetwork Sidecar DaemonSet) and the split host.
+        this.snapshots = new SnapshotManager(
+                HostSnapshotApis.fromBaseUri(config.sidecarUri()), config.readMode(), config.snapshotTtl());
         this.allocator = new RootAllocator();
         this.flight = new CqliteFlightClient(allocator);
     }

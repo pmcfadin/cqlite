@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -101,6 +102,29 @@ class CqliteFlightSplitManagerTest {
         // Live-dir overload: no snapshot on any split.
         var live = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
         live.forEach(s -> assertEquals(java.util.Optional.empty(), s.snapshot()));
+    }
+
+    /**
+     * The snapshot-target host set (issue #2227): every distinct replica a split reads,
+     * deduplicated, using the same deterministic {@link CqliteFlightSplitManager#pickReplica}
+     * choice as {@code buildSplits}. Two ranges pinned to the same host collapse to one host.
+     */
+    @Test
+    void distinctReplicaHostsAreEveryHostSplitsRead() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        range("-100", "0", Map.of("dc1", List.of("10.0.0.3:7000", "10.0.0.2:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("10.0.0.2:7000"))),
+                        range("100", "200", Map.of("dc1", List.of("10.0.0.5:7000")))));
+
+        Set<String> hosts = CqliteFlightSplitManager.distinctReplicaHosts(resp, "dc1");
+
+        // Range 1 → 10.0.0.2 (smallest), range 2 → 10.0.0.2 (dedup), range 3 → 10.0.0.5.
+        assertEquals(Set.of("10.0.0.2", "10.0.0.5"), hosts);
+        // Exactly the hosts the splits are pinned to.
+        var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals(hosts, splits.stream().map(CqliteFlightSplit::host).collect(java.util.stream.Collectors.toSet()));
     }
 
     @Test
