@@ -22,6 +22,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ArrowToTrinoTest {
@@ -232,6 +233,128 @@ class ArrowToTrinoTest {
             assertEquals(nanos * 1_000L, type.getLong(builder.build(), 0));
 
             nano.close();
+        }
+    }
+
+    @Test
+    void scanUpScalesSecondUnitTimestampToMillis() {
+        // A SECOND-unit timestamp column is mapped to TIMESTAMP_TZ_MILLIS; the scan
+        // path must up-scale the raw seconds ×1000 (lossless), not read them as millis
+        // — the pre-#2236 code packed the raw long, a 1000x error.
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var ts = new org.apache.arrow.vector.TimeStampSecTZVector("ts", allocator, "UTC");
+            ts.allocateNew(1);
+            long epochSeconds = 1_700_000_000L;
+            ts.set(0, epochSeconds);
+
+            var root = new VectorSchemaRoot(List.of(ts));
+            root.setRowCount(1);
+            var columns = List.of(new CqliteFlightColumnHandle(
+                    "ts", io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            long packed = io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS
+                    .getLong(page.getBlock(0), 0);
+            assertEquals(epochSeconds * 1_000L,
+                    io.trino.spi.type.DateTimeEncoding.unpackMillisUtc(packed));
+
+            root.close();
+        }
+    }
+
+    @Test
+    void scanRejectsMicrosecondUnitTimestampAsTyped() {
+        // If the server ever drifts and emits a MICROSECOND timestamp vector into a
+        // TIMESTAMP_TZ_MILLIS column, the scan path must fail closed (typed error
+        // naming the unit) rather than silently read micros as millis (1000x wrong).
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var ts = new org.apache.arrow.vector.TimeStampMicroTZVector("ts", allocator, "UTC");
+            ts.allocateNew(1);
+            ts.set(0, 1_700_000_000_000_000L);
+
+            var root = new VectorSchemaRoot(List.of(ts));
+            root.setRowCount(1);
+            var columns = List.of(new CqliteFlightColumnHandle(
+                    "ts", io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS));
+
+            UnsupportedOperationException ex = assertThrows(UnsupportedOperationException.class,
+                    () -> ArrowToTrino.toPage(root, columns));
+            assertTrue(ex.getMessage().contains("MICROSECOND"), ex.getMessage());
+
+            root.close();
+        }
+    }
+
+    @Test
+    void readJavaValueRejectsNanosecondUnitTimestampAsTyped() {
+        // The aggregation finalize path reads a TIMESTAMP group/aggregate column via
+        // readJavaValue; a NANOSECOND vector must be rejected with a typed error, not
+        // read raw (1_000_000x wrong).
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var ts = new org.apache.arrow.vector.TimeStampNanoVector("ts", allocator);
+            ts.allocateNew(1);
+            ts.set(0, 1_700_000_000_000_000_000L);
+
+            UnsupportedOperationException ex = assertThrows(UnsupportedOperationException.class,
+                    () -> ArrowToTrino.readJavaValue(ts, 0));
+            assertTrue(ex.getMessage().contains("NANOSECOND"), ex.getMessage());
+
+            ts.close();
+        }
+    }
+
+    @Test
+    void readJavaValueUpScalesSecondUnitTimestamp() {
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var ts = new org.apache.arrow.vector.TimeStampSecVector("ts", allocator);
+            ts.allocateNew(1);
+            ts.set(0, 1_700_000_000L);
+
+            assertEquals(1_700_000_000_000L, ArrowToTrino.readJavaValue(ts, 0));
+
+            ts.close();
+        }
+    }
+
+    @Test
+    void scanRejectsDateMilliVectorAsTypedNotClassCast() {
+        // A DateMilli vector (millis-since-epoch) reaching a DATE column previously
+        // threw a raw ClassCastException on the DateDayVector cast. It must now be a
+        // clear typed UnsupportedOperationException instead.
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var date = new org.apache.arrow.vector.DateMilliVector("d", allocator);
+            date.allocateNew(1);
+            date.set(0, 1_700_000_000_000L);
+
+            var root = new VectorSchemaRoot(List.of(date));
+            root.setRowCount(1);
+            var columns = List.of(new CqliteFlightColumnHandle(
+                    "d", io.trino.spi.type.DateType.DATE));
+
+            UnsupportedOperationException ex = assertThrows(UnsupportedOperationException.class,
+                    () -> ArrowToTrino.toPage(root, columns));
+            assertTrue(ex.getMessage().contains("DATE"), ex.getMessage());
+
+            root.close();
+        }
+    }
+
+    @Test
+    void scanReadsDayUnitDateAsEpochDay() {
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var date = new org.apache.arrow.vector.DateDayVector("d", allocator);
+            date.allocateNew(1);
+            date.set(0, 19_000);
+
+            var root = new VectorSchemaRoot(List.of(date));
+            root.setRowCount(1);
+            var columns = List.of(new CqliteFlightColumnHandle(
+                    "d", io.trino.spi.type.DateType.DATE));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            assertEquals(19_000, io.trino.spi.type.DateType.DATE.getInt(page.getBlock(0), 0));
+
+            root.close();
         }
     }
 

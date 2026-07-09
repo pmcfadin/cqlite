@@ -38,6 +38,7 @@ import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 
 import java.util.HexFormat;
 import java.util.List;
@@ -78,13 +79,13 @@ public final class ArrowToTrino {
             case TinyintType t -> t.writeLong(builder, ((TinyIntVector) vector).get(i));
             case SmallintType t -> t.writeLong(builder, ((SmallIntVector) vector).get(i));
             case IntegerType t -> t.writeLong(builder, ((IntVector) vector).get(i));
-            case DateType t -> t.writeLong(builder, ((DateDayVector) vector).get(i));
+            case DateType t -> t.writeLong(builder, epochDay(vector, i));
             case BigintType t -> t.writeLong(builder, ((BigIntVector) vector).get(i));
             case RealType t -> t.writeLong(builder, Float.floatToRawIntBits(((Float4Vector) vector).get(i)));
             case DoubleType t -> t.writeDouble(builder, ((Float8Vector) vector).get(i));
             case TimestampWithTimeZoneType t -> t.writeLong(builder,
                     DateTimeEncoding.packDateTimeWithZone(
-                            ((TimeStampVector) vector).get(i), TimeZoneKey.UTC_KEY));
+                            epochMillis(vector, i), TimeZoneKey.UTC_KEY));
             case TimeType t -> t.writeLong(builder, timePicos(vector, i));
             case VarcharType t -> t.writeSlice(builder, varcharSlice(vector, i));
             case VarbinaryType t -> t.writeSlice(builder, binarySlice(vector, i));
@@ -111,8 +112,12 @@ public final class ArrowToTrino {
             case SmallIntVector v -> (long) v.get(i);
             case IntVector v -> (long) v.get(i);
             case BigIntVector v -> v.get(i);
+            // DATE → epoch-day; TIMESTAMP → epoch-milli. Both delegate to the same
+            // unit-aware helpers the scan path uses so a micros/nanos timestamp (or a
+            // DateMilli vector) is rejected with a clear typed error rather than read
+            // 1000x wrong or thrown as a raw ClassCastException.
             case DateDayVector v -> (long) v.get(i);
-            case TimeStampVector v -> v.get(i);
+            case TimeStampVector v -> epochMillis(v, i);
             // TIME → canonical nanoseconds-of-day (matches the unit writeJavaValue
             // reads back below). All Arrow time widths normalize to nanos here so
             // min/max longs compare correctly and GROUP BY keys stay equal.
@@ -188,6 +193,68 @@ public final class ArrowToTrino {
     /** Convert an Arrow time-of-day value to Trino's picoseconds-of-day encoding. */
     private static long timePicos(FieldVector vector, int i) {
         return nanosToPicos(timeNanos(vector, i));
+    }
+
+    /**
+     * Read an Arrow {@code Timestamp} value as epoch-milliseconds, honoring the
+     * vector's DECLARED {@link org.apache.arrow.vector.types.TimeUnit unit}
+     * (issue #2236). Trino's {@code TIMESTAMP_TZ_MILLIS} stores epoch-millis, so:
+     * <ul>
+     *   <li>MILLISECOND — identity (the pinned server unit).</li>
+     *   <li>SECOND — up-scale ×1000, overflow-guarded with {@link Math#multiplyExact}
+     *       (a value that cannot fit in a {@code long} of millis is a typed
+     *       {@code ArithmeticException} wrapped below, never a silent wrap).</li>
+     *   <li>MICROSECOND/NANOSECOND — fail closed: down-scaling drops sub-millisecond
+     *       precision, so we throw a clear typed error naming the unit rather than
+     *       silently misreading the value (formerly a 1000x/1_000_000x error).</li>
+     * </ul>
+     * {@link ArrowTypeMapper} rejects the unsupported units at planning time; this is
+     * the matching mid-scan guard so a drifted server can never be read wrong.
+     */
+    private static long epochMillis(FieldVector vector, int i) {
+        if (!(vector instanceof TimeStampVector ts)) {
+            throw new UnsupportedOperationException(
+                    "Cannot map Arrow vector " + vector.getClass().getSimpleName()
+                            + " to a Trino timestamp");
+        }
+        long raw = ts.get(i);
+        ArrowType.Timestamp type = (ArrowType.Timestamp) ts.getField().getType();
+        return switch (type.getUnit()) {
+            case MILLISECOND -> raw;
+            case SECOND -> {
+                try {
+                    yield Math.multiplyExact(raw, 1_000L);
+                } catch (ArithmeticException e) {
+                    throw new UnsupportedOperationException(
+                            "Arrow timestamp value " + raw
+                                    + "s overflows epoch-milliseconds when scaled to Trino "
+                                    + "TIMESTAMP_TZ_MILLIS", e);
+                }
+            }
+            case MICROSECOND, NANOSECOND -> throw new UnsupportedOperationException(
+                    "Arrow timestamp unit " + type.getUnit() + " is not supported by the "
+                            + "connector (Trino materializes TIMESTAMP at millisecond precision; "
+                            + "sub-millisecond units would be silently truncated) — the server "
+                            + "must emit Timestamp(MILLISECOND)");
+        };
+    }
+
+    /**
+     * Read an Arrow {@code Date} value as an epoch-day count for Trino {@link
+     * DateType} (issue #2236). Only DAY-unit dates ({@link DateDayVector}) are
+     * representable; a {@link org.apache.arrow.vector.DateMilliVector DateMilliVector}
+     * (millis-since-epoch) is rejected with a clear typed error rather than thrown as
+     * a raw {@code ClassCastException} — deriving a calendar day from a millis instant
+     * is timezone-ambiguous. The Rust server pins {@code Date32} (DAY).
+     */
+    private static long epochDay(FieldVector vector, int i) {
+        if (vector instanceof DateDayVector v) {
+            return v.get(i);
+        }
+        throw new UnsupportedOperationException(
+                "Cannot map Arrow vector " + vector.getClass().getSimpleName()
+                        + " to a Trino DATE (only DAY-unit Date32 / DateDayVector is "
+                        + "representable as an epoch-day; the server must emit Date32)");
     }
 
     /** VARBINARY may be backed by variable or fixed-size binary vectors. */
