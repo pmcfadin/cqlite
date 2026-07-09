@@ -76,7 +76,9 @@ pub mod fuzz_support;
 // allocation regression test in the SELECT executor's `lookup` module). It
 // delegates every operation to the system allocator and only bumps a per-thread
 // counter while a measurement is ACTIVE, so it is inert for every other test.
-#[cfg(all(test, feature = "state_machine"))] // sole `measure` caller lives in the state_machine `query` module; else `-D dead-code` under minimal (#1981)
+// `not(dhat-heap)`: mutually exclusive with `DHAT_TEST_ALLOC` below (#1668) —
+// only one `#[global_allocator]` per binary.
+#[cfg(all(test, feature = "state_machine", not(feature = "dhat-heap")))] // sole `measure` caller lives in the state_machine `query` module; else `-D dead-code` under minimal (#1981)
 pub(crate) mod test_alloc_probe {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
@@ -130,9 +132,18 @@ pub(crate) mod test_alloc_probe {
     }
 }
 
-#[cfg(all(test, feature = "state_machine"))]
+#[cfg(all(test, feature = "state_machine", not(feature = "dhat-heap")))]
 #[global_allocator]
 static TEST_ALLOC: test_alloc_probe::CountingAllocator = test_alloc_probe::CountingAllocator;
+
+// Issue #1668: dhat allocator for `cqlite-core`'s unit-test binary, so an
+// in-tree `#[cfg(test)]` test can drive `pub(crate)` `StreamingMerger`
+// directly (see `merge::streaming::streaming_dhat_test`'s doc). Run with
+// `--no-default-features --features write-support,dhat-heap` (excludes
+// `state_machine`, whose own allocator this would otherwise collide with).
+#[cfg(all(test, feature = "dhat-heap"))]
+#[global_allocator]
+static DHAT_TEST_ALLOC: dhat::Alloc = dhat::Alloc;
 
 // Re-export main types for convenience
 pub use crate::{

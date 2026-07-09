@@ -192,6 +192,14 @@ use std::cmp::Reverse;
 #[cfg(feature = "write-support")]
 use std::collections::VecDeque;
 
+/// dhat memory-bound proof for the merge layer's OWN streaming bound,
+/// isolated from the reader (issue #1668 — see its module doc for why this
+/// must be an in-tree `#[cfg(test)]` module rather than a `tests/` integration
+/// test). Kept in its own file so this addition does not grow `streaming.rs`
+/// itself past the campsite threshold.
+#[cfg(all(test, feature = "write-support", feature = "dhat-heap"))]
+mod streaming_dhat_test;
+
 /// A single streaming increment from [`StreamingMerger::step_streaming`]
 /// (issue #1668, stage 2). Distinct from [`MergeStep`] (unchanged, still the
 /// production shape) so no existing `match`/`while let MergeStep::Partition`
