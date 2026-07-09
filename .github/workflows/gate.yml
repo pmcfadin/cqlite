@@ -43,8 +43,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v3
-  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
-  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
+  DATASET_ASSET: cassandra5-small-full-v3.5.tar.gz
+  DATASET_SHA256: 414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16
 
 jobs:
   gate:

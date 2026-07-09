@@ -1,20 +1,31 @@
 # Issue #1935 — TTL corpus regeneration notes (#1896 cluster A, owner-decided)
 
-Owner decision (2026-07-08, ref #1896): strip `default_time_to_live` from the
-five TTL-carrying corpus tables that time-bombed the fixtures, **keep**
-`test_basic.ttl_test_table` with its TTL as the dedicated #1853 seam.
+**Owner amendment (2026-07-09, FINAL):** strip TTL from only **4** tables
+(`app_metrics`, `log_entries`, `tick_data`, `test_oa.ttl_table`) and keep **2**
+aged-TTL seams:
+- `test_basic.ttl_test_table` — BIG (`nb`) seam, #1853 writetime/TTL parity.
+- `test_da.ttl_table` — BTI (`da`) seam, restored to v3.4 verbatim (TTL 86400,
+  expired 2026-06-11). It is the **sole BTI TTL-shadowing regression fixture**
+  guarding the #1741 P0 (`cqlite-core/tests/issue_660_bti_end_to_end_read.rs`),
+  which must keep returning 0 live rows at wall clock. Do NOT strip it.
+
+Prior decision (2026-07-08, ref #1896) had stripped `test_da.ttl_table` too (5
+tables); the 2026-07-09 amendment reinstates it as a second seam. Both seams keep
+their aged v3.4 fixtures UNTOUCHED — time-proof: "expired at wall clock" is
+forever true once past expiry.
 
 ## What is DONE in this PR (local, reviewable — no binary regen)
 
-1. **Schema edits** — `default_time_to_live` removed (and no `USING TTL` inserts
-   exist for these tables):
-   - `test-data/schemas/time-series.cql` — `app_metrics` (was 2592000),
-     `log_entries` (was 604800), `tick_data` (was 86400).
-   - `test-data/schemas/da-test.cql` — `ttl_table` (was 86400).
-   - `test-data/schemas/oa-test.cql` — `ttl_table` (was 86400).
-   - `test-data/schemas/basic-types.cql` — `ttl_test_table` **UNCHANGED**
-     (keeps `default_time_to_live = 86400`; it is the #1853 seam).
-   - `test-data/scripts/regenerate-datasets.sh` — comment updated (no TTL).
+1. **TTL removal (via the v3.4-splice re-cut, no schema-default change)** — the
+   4 stripped tables are re-inserted WITHOUT `USING TTL`:
+   - `test_timeseries` — `app_metrics`, `log_entries`, `tick_data`.
+   - `test_oa.ttl_table` (oa/BIG).
+   - `test_da.ttl_table` **KEPT** as the BTI (`da`) #1741/`issue_660` seam
+     (restored to v3.4 verbatim, TTL 86400) — NOT stripped.
+   - `test_basic.ttl_test_table` **KEPT** as the BIG (`nb`) #1853 seam
+     (aged TTL fixture UNTOUCHED).
+   - Schema `.cql` CREATE statements carry no `default_time_to_live` (TTL was
+     applied per-row via `USING TTL` at generation), so no schema file changed.
 2. **Test assertions** made TTL-aware / robust:
    - `cqlite-cli/tests/comprehensive_select_test.rs` — the four TTL tables
      (`ttl_test_table`, `app_metrics`, `log_entries`, `tick_data`) moved out of the
@@ -36,38 +47,94 @@ five TTL-carrying corpus tables that time-bombed the fixtures, **keep**
    `ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock` (wall-clock)
    still cover `test_basic.ttl_test_table` with TTL.
 
-## What is CI-GATED / owner-owned (NOT done here)
+## How v3.5 was actually produced — the v3.4-SPLICE strategy (FINAL, owner-decided)
 
-The whole-corpus binary regeneration (rm -rf + fresh UUIDs + new release asset +
-dataset-pin bump) is owned by CI + owner. Exact recipe:
+**v3.5 == v3.4 byte-identical EXCEPT the 4 stripped TTL tables** (`app_metrics`,
+`log_entries`, `tick_data`, `test_oa.ttl_table`); both TTL seams
+(`test_basic.ttl_test_table` BIG, `test_da.ttl_table` BTI) stay v3.4 verbatim.
+An earlier attempt did a
+whole-corpus `regenerate-datasets.sh --rows 50` uniform regen; that drifted EVERY
+table's UUID/shape/golden and was **discarded**. The shape-bearing generator that
+produced the original v3.4 corpus was never committed (ref #2222), so v3.5 is cut
+by **splicing** a bespoke no-TTL re-cut of only the 5 TTL tables onto the v3.4
+base tree. Exact flow that produced v3.5:
 
-1. **Regenerate binaries** — run the `exhaustive-regeneration.yml` workflow
-   (`workflow_dispatch`), which runs `test-data/scripts/regenerate-datasets.sh`
-   against real Cassandra 5, then `cassandra-parity -- corpus-audit` (must be
-   clean) and refreshes JSONL goldens. It packages the corpus to compute the asset
-   name + SHA256 but by design does NOT publish.
-2. **Publish the asset** — `test-data/scripts/publish_datasets.sh --type full
-   --tag datasets-v3` (uploads `cassandra5-small-full.tar.gz` with `--clobber`;
-   version lives in the TAG, not the filename — but the fetch pin keys on the
-   versioned asset name `cassandra5-small-full-v3.5.tar.gz`, so cut/upload the v3.5
-   asset). Mind the macOS tar AppleDouble gotcha when packing.
-3. **Bump the dataset pin** — `test-data/scripts/bump-dataset-pin.sh
-   --new-sha <sha256-of-new-asset> --new-asset cassandra5-small-full-v3.5.tar.gz`
-   (never tag-only: `DATASET_TAG` / `DATASET_ASSET` / `DATASET_SHA256` must ALL be
-   set consistently across `.github/workflows/*.yml` and
-   `test-data/scripts/fetch-datasets.sh`). Current pin: `datasets-v3` /
-   `cassandra5-small-full-v3.4.tar.gz` /
-   `3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33`.
-   Do NOT invent a SHA — it does not exist until the asset is built.
-4. **Round-trip verify** — `bash test-data/scripts/fetch-datasets.sh` pulls the
-   new asset, verifies the SHA, and the parity/CLI tests then see the regenerated
-   (no-TTL) fixtures returning their physical row counts.
+1. **Base tree** — fetch the v3.4 asset (`cassandra5-small-full-v3.4.tar.gz`,
+   sha `3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33`) and
+   extract it into `test-data/datasets/` (binaries are gitignored). This is the
+   byte-for-byte base for the ~40 unchanged tables.
+2. **Re-cut ONLY the 4 stripped TTL tables** in `cassandra:5.0.2` docker, WITHOUT
+   `default_time_to_live`, replaying each table's EXACT v3.4 shape. Rows are
+   reconstructed VERBATIM from the committed v3.4 goldens (keys, clustering,
+   cell values) and inserted with `USING TIMESTAMP <v3.4-micros>` and no TTL, so
+   the only golden delta vs v3.4 is TTL removal + row repack:
+   - nb phase (`storage_compatibility_mode: CASSANDRA_4`): `test_timeseries`
+     `app_metrics` (200 rows/200 parts), `log_entries` (200/200),
+     `tick_data` (200/24, deterministic bucket distribution).
+   - oa phase (`storage_compatibility_mode: NONE`): `test_oa.ttl_table` (3 rows).
+   - da/BTI phase: `test_da.ttl_table` is **NOT re-cut** — it is restored to v3.4
+     verbatim (extract just its table dir from the v3.4 asset) so it stays the
+     #1741/`issue_660` BTI TTL-shadowing seam.
+   Flush, then **rename the fresh dirs to the v3.4 UUID basenames + component
+   prefixes** (`nb-1-big` / `oa-2-big`) and splice them over the v3.4
+   base. Because the UUIDs/prefixes are reused, `references.yml`, `metadata.yml`
+   (`row_count` preserved) and `cassandra-parity-manifest.yml` stay
+   v3.4-identical — ONLY the 4 stripped tables' `Data.db.jsonl` / `Digest.crc32` /
+   `Statistics.db.txt` goldens change (TOC.txt is byte-identical). Both
+   `test_basic.ttl_test_table` (BIG) and `test_da.ttl_table` (BTI) keep their aged
+   TTL fixtures UNTOUCHED (#1853 + #1741 seams).
+3. **Re-export goldens** for the 5 tables (in-container `sstabledump -l` +
+   `sstablemetadata`); `cassandra-parity -- corpus-audit` clean; manifest lint +
+   `report --check` green.
+4. **Package** — `test-data/scripts/package_datasets.sh --full --suffix v3.5`
+   produces `cassandra5-small-full-v3.5.tar.gz`. Mind the macOS tar AppleDouble
+   gotcha.
+5. **Upload + pin (owner/lead)** — `gh release upload datasets-v3
+   cassandra5-small-full-v3.5.tar.gz --clobber`, capture its SHA256, then
+   `bump-dataset-pin.sh --new-sha <sha256>` (asset
+   `cassandra5-small-full-v3.5.tar.gz`, tag `datasets-v3`). `DATASET_TAG` /
+   `DATASET_ASSET` / `DATASET_SHA256` must ALL be set consistently across
+   `.github/workflows/*.yml` and `fetch-datasets.sh`. The sha does NOT exist
+   until the asset is built — do NOT invent one.
+6. **Round-trip verify** — `bash test-data/scripts/fetch-datasets.sh` pulls the
+   new asset, verifies the SHA; the parity/CLI tests then see the no-TTL fixtures
+   returning their physical row counts.
+
+> **WARNING — a wholesale fresh regen leaves leftover UNTRACKED (gitignored)
+> binary dirs.** The discarded uniform-50 regen wrote `<table>-<new-uuid>/` dirs
+> whose `Data.db` binaries are gitignored; `git rm` of the tracked goldens does
+> NOT delete them, so they linger as DUPLICATE table dirs that make the reader
+> resolve a spurious multi-generation table (breaks `issue_1333`, the #1143
+> windowed-scan guard, etc.). When restoring the v3.4 base, delete every sstable
+> dir NOT present in the canonical v3.4 tree.
+
+> **WARNING — do NOT wholesale fresh-regen the aged TTL fixtures.** TTL expiry
+> derives from the *real insertion wall-clock*, so a fresh regen of
+> `test_basic.ttl_test_table` re-seeds live rows and breaks the #1853
+> fully-expired seam (`ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock`)
+> for ~24h until the new TTLs lapse. The executed v3.5 flow deliberately
+> **preserved the aged v3.4 fixtures** for `test_basic.ttl_test_table` (and for
+> `test_da/wide_table` from `gen-wide-bti.sh`) rather than regenerating them.
 
 ## Expected outcome after regen
 
-- `app_metrics`, `log_entries`, `tick_data`, `test_da.ttl_table`,
-  `test_oa.ttl_table` return their physical (non-expired) row counts.
-- `test_basic.ttl_test_table` still returns 0 LIVE rows at wall clock (TTL kept) —
-  covered by the #1853 seam, not by a `> 0` assertion.
+- `app_metrics`, `log_entries`, `tick_data`, `test_oa.ttl_table` return their
+  physical (non-expired) row counts.
+- `test_basic.ttl_test_table` (BIG) and `test_da.ttl_table` (BTI) still return 0
+  LIVE rows at wall clock (aged TTL kept) — covered by the #1853 and
+  #1741/`issue_660` seams respectively, not by a `> 0` assertion.
 - Node CI `parity.test.js`, Python `test_parity.py`, CLI `comprehensive_select`,
   and `sstabledump-parity` all green (the TTL-aware assertions track the goldens).
+
+## Regen gotcha — references.yml must be refreshed too (fold into #2222)
+
+- The regen must also refresh `test-data/datasets/references.yml` (it is packaged
+  *inside* the dataset asset tarball, not committed). A v3.x regen that rewrites
+  the sstable dirs + `metadata.yml` with new table UUIDs but leaves
+  `references.yml` pinning the OLD UUID basenames silently breaks **every**
+  manifest-resolving suite: `resolve_table_dir_via_manifest`
+  (`cqlite-core/src/testing/dataset_helpers.rs`) trusts the stale `sstable_dir`
+  basename and returns a nonexistent path, **shadowing** the metadata.yml glob
+  fallback → ENOENT in core/cli/python/memory-budget/scan-offload suites and the
+  `sstabledump-parity` CI lane. Regenerate it via `export.sh` (or remap the
+  `sstable_dir` basenames to the on-disk v3.x dirs) as part of the same regen.

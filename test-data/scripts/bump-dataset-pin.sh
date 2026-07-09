@@ -33,13 +33,13 @@ WF_DIR="$REPO_ROOT/.github/workflows"
 
 # Current (to-be-replaced) pin — keep in sync with the committed workflows.
 # This MUST match the asset/SHA actually committed across the workflows, or the
-# default next bump is a no-op/false-success. Currently v3.4 (issue #1185).
-OLD_ASSET="cassandra5-small-full-v3.4.tar.gz"
-OLD_SHA="3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33"
+# default next bump is a no-op/false-success. Currently v3.5 (issue #1935).
+OLD_ASSET="cassandra5-small-full-v3.5.tar.gz"
+OLD_SHA="414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16"
 OLD_TAG="datasets-v3"
 
 # Next (to-be-written) pin — bump the asset version and pass the new --new-sha.
-NEW_ASSET="cassandra5-small-full-v3.5.tar.gz"
+NEW_ASSET="cassandra5-small-full-v3.6.tar.gz"
 NEW_SHA=""
 NEW_TAG="datasets-v3"
 
@@ -86,11 +86,22 @@ fi
 FETCH_HELPER="$REPO_ROOT/test-data/scripts/fetch-datasets.sh"
 SELF_PATH="$REPO_ROOT/test-data/scripts/bump-dataset-pin.sh"
 
+# Other pin-consuming files outside the workflows dir (issue #1935): local
+# pre-merge harness, the composite restore action, and the CI provenance guard.
+EXTRA_PIN_FILES=(
+  "$REPO_ROOT/scripts/local/pre-merge.sh"
+  "$REPO_ROOT/.github/actions/restore-canonical-datasets/action.yml"
+  "$REPO_ROOT/scripts/ci/ensure_real_dataset.sh"
+)
+
 FILES=()
 for f in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do
   [[ -e "$f" ]] && FILES+=("$f")
 done
 [[ -e "$FETCH_HELPER" ]] && FILES+=("$FETCH_HELPER")
+for f in "${EXTRA_PIN_FILES[@]}"; do
+  [[ -e "$f" ]] && FILES+=("$f")
+done
 
 # Portable in-place sed (BSD/macOS vs GNU).
 sed_inplace() {

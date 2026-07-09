@@ -37,8 +37,8 @@ concurrency:
 
 env:
   DATASET_TAG: datasets-v3
-  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
-  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
+  DATASET_ASSET: cassandra5-small-full-v3.5.tar.gz
+  DATASET_SHA256: 414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   # Tolerated median overhead of the export-disabled observability build over the
   # default build (see benches/observability_overhead.rs OVERHEAD_THRESHOLD_PCT).

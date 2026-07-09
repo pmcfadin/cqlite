@@ -87,12 +87,35 @@ fn create_counters_table_schema() -> TableSchema {
     }
 }
 
+/// Resolve the `counters` table SSTable directory dynamically.
+///
+/// The directory basename is `counters-<table-uuid>`, and the UUID changes on
+/// every corpus regeneration. Hardcoding a specific UUID (e.g. the v3.4
+/// `counters-6b12cbd0...`) breaks the suite after any re-cut, so we glob the
+/// `test_basic` keyspace for the single `counters-*` directory instead. This
+/// resolution survives ANY future regeneration.
+fn resolve_counters_table_dir() -> Option<PathBuf> {
+    let keyspace_dir = get_test_datasets_root().join("sstables/test_basic");
+    let entries = std::fs::read_dir(&keyspace_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("counters-") && entry.path().is_dir() {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
 /// Test that Counter SSTable directory exists (smoke test)
 #[test]
 fn test_counter_table_exists() {
-    let test_root = get_test_datasets_root();
-    let counter_table_path =
-        test_root.join("sstables/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9");
+    let counter_table_path = resolve_counters_table_dir().unwrap_or_else(|| {
+        panic!(
+            "Test requires full SSTable dataset: no `counters-*` directory found under {:?}",
+            get_test_datasets_root().join("sstables/test_basic")
+        )
+    });
 
     assert!(
         counter_table_path.exists(),
