@@ -2,6 +2,7 @@ package in.mcfad.cqlite.flight;
 
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
+import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -10,6 +11,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CqliteFlightSplitManagerTest {
@@ -149,6 +151,73 @@ class CqliteFlightSplitManagerTest {
         Set<String> hosts = CqliteFlightSplitManager.distinctReplicaHosts(resp, "dc1");
         assertEquals(Set.of("2001:db8::5", "2001:db8::9"), hosts);
         assertEquals(hosts, splits.stream().map(CqliteFlightSplit::host).collect(java.util.stream.Collectors.toSet()));
+    }
+
+    private static final Map<String, List<String>> DC1 = Map.of("dc1", List.of("10.0.0.1:7000"));
+    private static final String MIN = Long.toString(Long.MIN_VALUE);
+
+    /**
+     * Ring-coverage guard (issue #2237): a set of ranges that tiles the Murmur3 ring
+     * exactly once — INCLUDING the wraparound range that crosses the ring boundary —
+     * is accepted and splits are built normally (happy-path behavior unchanged).
+     */
+    @Test
+    void exactTilingIncludingWraparoundAccepted() {
+        // (MIN,-100] (-100,0] (0,100] (100,MIN] — the last wraps (start 100 > end MIN)
+        // and its inclusive end MIN meets the first range's exclusive start MIN, closing
+        // the circle with neither overlap nor gap.
+        List<ReplicaInfo> tiling = List.of(
+                range(MIN, "-100", DC1),
+                range("-100", "0", DC1),
+                range("0", "100", DC1),
+                range("100", MIN, DC1));
+        // Does not throw.
+        CqliteFlightSplitManager.validateRingCoverage(tiling);
+        // Happy path still builds one split per range.
+        var resp = new TokenRangeReplicasResponse(List.of(), tiling);
+        assertEquals(4, CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815).size());
+    }
+
+    /** A single full-ring range `(T, T]` (issue #2228) trivially tiles the circle. */
+    @Test
+    void singleFullRingRangeAccepted() {
+        CqliteFlightSplitManager.validateRingCoverage(List.of(range("42", "42", DC1)));
+    }
+
+    /** Overlapping ranges are rejected with an actionable typed error naming the overlap. */
+    @Test
+    void overlappingRangesRejected() {
+        // (MIN,10] and (0,MIN]: sorted, (MIN,10] ends at 10 but the next range starts at 0
+        // (< 10) — the two share tokens (0,10] → overlap → duplicate rows.
+        List<ReplicaInfo> overlap = List.of(
+                range(MIN, "10", DC1),
+                range("0", MIN, DC1));
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(overlap));
+        assertTrue(ex.getMessage().contains("overlap"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("duplicate"), ex.getMessage());
+    }
+
+    /** Gapped ranges are rejected with an actionable typed error naming the gap. */
+    @Test
+    void gappedRangesRejected() {
+        // (MIN,0] and (100,MIN]: sorted, (MIN,0] ends at 0 but the next starts at 100 (> 0)
+        // — tokens (0,100] are owned by no range → gap → missing rows.
+        List<ReplicaInfo> gapped = List.of(
+                range(MIN, "0", DC1),
+                range("100", MIN, DC1));
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(gapped));
+        assertTrue(ex.getMessage().contains("gap"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("missing"), ex.getMessage());
+    }
+
+    /** Empty ranges fail closed rather than silently scanning nothing. */
+    @Test
+    void emptyRangesRejected() {
+        TrinoException ex = assertThrows(TrinoException.class,
+                () -> CqliteFlightSplitManager.validateRingCoverage(List.of()));
+        assertTrue(ex.getMessage().contains("not covered"), ex.getMessage());
     }
 
     @Test
