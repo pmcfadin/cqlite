@@ -87,8 +87,10 @@ fi
 echo -e "${BLUE}Running initial code quality check...${NC}"
 FAILED=0
 
-# Check each workspace member
-WORKSPACE_MEMBERS=("cqlite-core" "cqlite-cli" "testing-framework" "tests")
+# Top-level workspace member crates to check (see root Cargo.toml [workspace].members;
+# nested/glob members bindings/*, tests/format-compatibility, examples, tools/* are omitted
+# from this simple cd-by-dir loop).
+WORKSPACE_MEMBERS=("cqlite-core" "cqlite-cli" "cqlite-flight" "tests")
 
 for member in "${WORKSPACE_MEMBERS[@]}"; do
     if [ -d "$member" ]; then

@@ -184,9 +184,10 @@ cqlite-core = { git = "…", default-features = false, features = ["all-compress
 |------|---------|-------------|
 | `all-compression` | yes | LZ4, Snappy, Deflate, Zstd support |
 | `state_machine` | yes | Query engine and schema-based discovery |
+| `write-support` | yes | Write path: SSTable writer + STCS compaction |
 | `cli-helpers` | no | CLI-specific ingestion and REPL API |
 | `metrics` | no | Performance metrics collection |
-| `experimental` | no | Experimental / unstable features |
+| `experimental` | no | Unstable/unfinished paths: `flush()`/`compact()`, the INSERT executor, the schema JSON exporter, bloom-filter tests, and unimplemented `Storage::put`/`delete` stubs |
 
 ## Verify your installation
 

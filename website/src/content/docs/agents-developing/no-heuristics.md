@@ -88,7 +88,7 @@ the library must not invent values.
 | `state_machine` (default) | No |
 | `cli-helpers` | No |
 | `metrics` | No |
-| `experimental` | No (bloom-filter tests + write stubs, not heuristics) |
+| `experimental` | No (gates `flush()`/`compact()`, the INSERT executor path, the schema JSON exporter, bloom-filter tests, and unimplemented `Storage::put`/`delete` stubs — not heuristics) |
 | `legacy-heuristics` | Yes — explicitly opt-in |
 
 See [Key source paths](/cqlite/agents-developing/source-map/) for where type decoding lives in the codebase.
