@@ -10,45 +10,15 @@ import java.util.List;
 /**
  * Streams one split's Arrow Flight batches, converting each to a Trino page.
  *
- * <p>Replica failover (issue #2241): the split carries an ORDERED replica list
- * ({@link CqliteFlightSplit#replicaHosts()}, primary first). Before the first batch is delivered,
- * a connection-establishment/UNAVAILABLE-class failure ({@link ReplicaFailover#isConnectClass})
- * fails over to the next replica that owns the range. Once ANY batch has been delivered the stream
- * is committed: a later failure is fatal and never retried, because re-reading from another replica
- * could duplicate already-emitted rows. If every replica is unreachable the query fails loudly —
- * CQLite never returns a silent partial/empty result.
+ * <p>Replica failover (issue #2241) is handled by the shared {@link ReplicaFailoverStream}: the
+ * split's ordered {@link CqliteFlightSplit#replicaHosts()} (primary first) are tried in order,
+ * failing over to the next replica on a connect-class failure before the first batch, and
+ * failing loudly once committed or when every replica is unreachable — CQLite never returns a
+ * silent partial/empty result.
  */
 public class CqliteFlightPageSource implements ConnectorPageSource {
-
-    /** One replica's open batch stream — abstracted so failover is unit-testable off-cluster. */
-    interface BatchStream extends AutoCloseable {
-        /**
-         * Advance to the next batch; {@code false} at end of stream. The FIRST call performs the
-         * actual gRPC and may throw a connect-class failure that triggers failover.
-         */
-        boolean next();
-
-        VectorSchemaRoot getRoot();
-
-        @Override
-        void close();
-    }
-
-    /** Opens a {@link BatchStream} against one replica {@code host:port} for a ticket. */
-    @FunctionalInterface
-    interface StreamOpener {
-        BatchStream open(String host, int port, byte[] ticket);
-    }
-
     private final List<CqliteFlightColumnHandle> columns;
-    private final List<String> hosts;
-    private final int port;
-    private final byte[] ticket;
-    private final StreamOpener opener;
-
-    private BatchStream stream;
-    private int hostIndex;
-    private boolean started;
+    private final ReplicaFailoverStream stream;
     private boolean finished;
     private long completedPositions;
 
@@ -57,7 +27,7 @@ public class CqliteFlightPageSource implements ConnectorPageSource {
             CqliteFlightSplit split,
             List<CqliteFlightColumnHandle> columns,
             byte[] ticket) {
-        this(split.replicaHosts(), split.port(), columns, ticket, adapt(client));
+        this(split.replicaHosts(), split.port(), columns, ticket, ReplicaFailoverStream.adapt(client));
     }
 
     /** Package-private seam: inject the ordered host list + opener directly for unit tests. */
@@ -66,35 +36,9 @@ public class CqliteFlightPageSource implements ConnectorPageSource {
             int port,
             List<CqliteFlightColumnHandle> columns,
             byte[] ticket,
-            StreamOpener opener) {
-        this.hosts = List.copyOf(hosts);
-        this.port = port;
+            ReplicaFailoverStream.StreamOpener opener) {
         this.columns = columns;
-        this.ticket = ticket;
-        this.opener = opener;
-    }
-
-    /** The production opener: a real DoGet stream wrapped so failover sees a uniform interface. */
-    private static StreamOpener adapt(CqliteFlightClient client) {
-        return (host, port, ticket) -> {
-            CqliteFlightClient.StreamHandle handle = client.openStream(host, port, ticket);
-            return new BatchStream() {
-                @Override
-                public boolean next() {
-                    return handle.stream().next();
-                }
-
-                @Override
-                public VectorSchemaRoot getRoot() {
-                    return handle.stream().getRoot();
-                }
-
-                @Override
-                public void close() {
-                    handle.close();
-                }
-            };
-        };
+        this.stream = new ReplicaFailoverStream(hosts, port, ticket, opener);
     }
 
     @Override
@@ -102,33 +46,20 @@ public class CqliteFlightPageSource implements ConnectorPageSource {
         if (finished) {
             return null;
         }
-        while (true) {
-            try {
-                if (stream == null) {
-                    stream = opener.open(hosts.get(hostIndex), port, ticket);
-                }
-                if (!stream.next()) {
-                    finished = true;
-                    return null;
-                }
-                VectorSchemaRoot root = stream.getRoot();
-                Page page = ArrowToTrino.toPage(root, columns);
-                completedPositions += page.getPositionCount();
-                started = true;
-                return SourcePage.create(page);
-            } catch (RuntimeException e) {
-                // Release the gRPC channel + Arrow buffers; Trino does not guarantee close() on
-                // the throw path.
-                closeStreamQuietly();
-                if (!started && hostIndex + 1 < hosts.size() && ReplicaFailover.isConnectClass(e)) {
-                    hostIndex++;
-                    continue; // fail over to the next replica that owns this range (#2241)
-                }
-                // Committed (rows already delivered) or no replica left, or a non-connect error:
-                // fail loudly — never a silent partial result.
+        try {
+            if (!stream.next()) {
                 finished = true;
-                throw e;
+                return null;
             }
+            VectorSchemaRoot root = stream.getRoot();
+            Page page = ArrowToTrino.toPage(root, columns);
+            completedPositions += page.getPositionCount();
+            return SourcePage.create(page);
+        } catch (RuntimeException e) {
+            // Release the gRPC channel + Arrow buffers; Trino does not guarantee close() on the
+            // throw path.
+            close();
+            throw e;
         }
     }
 
@@ -155,17 +86,6 @@ public class CqliteFlightPageSource implements ConnectorPageSource {
     @Override
     public void close() {
         finished = true;
-        closeStreamQuietly();
-    }
-
-    private void closeStreamQuietly() {
-        if (stream != null) {
-            try {
-                stream.close();
-            } catch (RuntimeException ignore) {
-                // best-effort release
-            }
-            stream = null;
-        }
+        stream.close();
     }
 }

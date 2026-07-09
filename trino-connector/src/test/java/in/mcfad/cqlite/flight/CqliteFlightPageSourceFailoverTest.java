@@ -37,7 +37,7 @@ class CqliteFlightPageSourceFailoverTest {
     }
 
     /** A batch stream that yields the given rows once, optionally throwing at a chosen point. */
-    private static final class FakeStream implements CqliteFlightPageSource.BatchStream {
+    private static final class FakeStream implements ReplicaFailoverStream.BatchStream {
         private final VectorSchemaRoot root;
         private final RuntimeException throwOnFirstNext;
         private final RuntimeException throwAfterFirstBatch;
@@ -77,16 +77,16 @@ class CqliteFlightPageSourceFailoverTest {
     }
 
     /** Tracks how many times each host was opened, so we can assert failover order + no over-reach. */
-    private static final class TrackingOpener implements CqliteFlightPageSource.StreamOpener {
-        private final Map<String, Supplier<CqliteFlightPageSource.BatchStream>> byHost;
+    private static final class TrackingOpener implements ReplicaFailoverStream.StreamOpener {
+        private final Map<String, Supplier<ReplicaFailoverStream.BatchStream>> byHost;
         final Map<String, Integer> opens = new LinkedHashMap<>();
 
-        TrackingOpener(Map<String, Supplier<CqliteFlightPageSource.BatchStream>> byHost) {
+        TrackingOpener(Map<String, Supplier<ReplicaFailoverStream.BatchStream>> byHost) {
             this.byHost = byHost;
         }
 
         @Override
-        public CqliteFlightPageSource.BatchStream open(String host, int port, byte[] ticket) {
+        public ReplicaFailoverStream.BatchStream open(String host, int port, byte[] ticket) {
             opens.merge(host, 1, Integer::sum);
             return byHost.get(host).get();
         }
@@ -137,9 +137,9 @@ class CqliteFlightPageSourceFailoverTest {
     void failsOverWhenPrimaryOpenThrowsUnavailable() {
         try (BufferAllocator allocator = new RootAllocator()) {
             VectorSchemaRoot good = bigintRoot(allocator, 42L);
-            var opener = new CqliteFlightPageSource.StreamOpener() {
+            var opener = new ReplicaFailoverStream.StreamOpener() {
                 @Override
-                public CqliteFlightPageSource.BatchStream open(String host, int port, byte[] ticket) {
+                public ReplicaFailoverStream.BatchStream open(String host, int port, byte[] ticket) {
                     if (host.equals("downHost")) {
                         throw unavailable(); // connection failed at establishment
                     }
