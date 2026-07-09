@@ -30,11 +30,17 @@ import java.util.Optional;
  * per group whose Arrow columns are [group_by cols..., one column per aggregate
  * output]. We accumulate, then build output blocks in the order of the requested
  * column handles using the {@link FinalizeAggregationPlan}.
+ *
+ * <p>Replica failover (issue #2241): each range's fan-out DoGet uses the shared {@link
+ * ReplicaFailoverStream} over that range's ordered {@link CqliteFlightSplit#replicaHosts()}, so
+ * a down primary fails over to the next replica owning the range before any of ITS partial rows
+ * are consumed. A range whose every replica is unreachable propagates loudly — an aggregate
+ * partial is never silently dropped.
  */
 public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final CqliteFlightClient client;
+    private final ReplicaFailoverStream.StreamOpener opener;
     private final CqliteFlightAggregateSplit split;
     private final List<CqliteFlightColumnHandle> columns;
     private final AggregationSpec spec;
@@ -46,7 +52,15 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
             CqliteFlightClient client,
             CqliteFlightAggregateSplit split,
             List<CqliteFlightColumnHandle> columns) {
-        this.client = client;
+        this(ReplicaFailoverStream.adapt(client), split, columns);
+    }
+
+    /** Package-private seam: inject the opener directly for unit tests (issue #2241). */
+    CqliteFlightAggregatePageSource(
+            ReplicaFailoverStream.StreamOpener opener,
+            CqliteFlightAggregateSplit split,
+            List<CqliteFlightColumnHandle> columns) {
+        this.opener = opener;
         this.split = split;
         this.columns = columns;
         this.spec = parseSpec(split.aggregationJson());
@@ -65,13 +79,15 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
         JsonNode filterNode = filter.map(CqliteFlightAggregatePageSource::parse).orElse(null);
         JsonNode aggregationNode = parse(split.aggregationJson());
 
-        // Fan out: one DoGet per range to its pinned replica, accumulating partials.
+        // Fan out: one DoGet per range, with availability failover across that range's ordered
+        // replica list (issue #2241) — a range's partial is never silently dropped: an
+        // unreachable range propagates loudly instead of being skipped.
         for (CqliteFlightSplit range : split.ranges()) {
             byte[] ticket = buildRangeTicket(range, filterNode, aggregationNode);
-            try (CqliteFlightClient.StreamHandle handle =
-                    client.openStream(range.host(), range.port(), ticket)) {
-                while (handle.stream().next()) {
-                    accumulate(handle.stream().getRoot(), spec, merger);
+            try (ReplicaFailoverStream stream =
+                    new ReplicaFailoverStream(range.replicaHosts(), range.port(), ticket, opener)) {
+                while (stream.next()) {
+                    accumulate(stream.getRoot(), spec, merger);
                 }
             }
         }

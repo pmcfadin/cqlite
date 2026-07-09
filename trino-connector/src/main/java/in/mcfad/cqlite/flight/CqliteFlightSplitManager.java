@@ -60,13 +60,27 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         // Sidecar's node leaves splits on other hosts reading a non-existent directory
         // (NotFound). We stamp the same snapshot name into every split's ticket so the whole
         // scan reads one immutable file set per host; in live mode this is Optional.empty().
-        // Fails closed — a create error on any host propagates (naming host + snapshot) and
-        // the query fails.
-        Set<String> replicaHosts = distinctReplicaHosts(replicas, config.localDatacenter());
+        // Fails closed — a create error on a PRIMARY host propagates (naming host + snapshot)
+        // and the query fails; that host must have the snapshot, no failover is possible without it.
+        Set<String> primaryHosts = distinctReplicaHosts(replicas, config.localDatacenter());
         Optional<String> snapshot =
-                snapshots.snapshotFor(session.getQueryId(), handle.keyspace(), handle.table(), replicaHosts);
-        List<CqliteFlightSplit> ranges =
-                buildSplits(handle, replicas, config.localDatacenter(), config.flightPort(), snapshot);
+                snapshots.snapshotFor(session.getQueryId(), handle.keyspace(), handle.table(), primaryHosts);
+        // Availability failover (issue #2241): a fallback host is only usable if IT ALSO has the
+        // snapshot. Roborev on #2241: restricting to `primaryHosts` here would only ever admit a
+        // fallback that happens to be some OTHER range's primary — a fallback-only host (never a
+        // primary anywhere) would be dropped even when its own snapshot creation would have
+        // succeeded, so a primary outage could still fail the scan despite another live replica
+        // owning the range. Instead, best-effort-create the snapshot on the FULL replica-owner
+        // union (every host in every range's replicaHosts()) and keep only the hosts that
+        // succeeded. Best-effort here is safe: every host in `primaryHosts` is already required
+        // above (fail-closed); only the EXTRA fallback-only hosts can be silently excluded, and a
+        // split simply won't list an excluded host as a fallback — never a silent partial result.
+        Set<String> availableHosts = snapshot.isPresent()
+                ? snapshots.availableHosts(session.getQueryId(), handle.keyspace(), handle.table(),
+                        allReplicaHosts(replicas, config.localDatacenter()))
+                : Set.of();
+        List<CqliteFlightSplit> ranges = buildSplits(
+                handle, replicas, config.localDatacenter(), config.flightPort(), snapshot, availableHosts);
 
         // Aggregated handle: Trino does not re-aggregate across splits, so return
         // ONE finalize split carrying all range→replica assignments. Its PageSource
@@ -235,10 +249,12 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
     }
 
     /**
-     * Pure split-building: one split per read-replica token range, each pinned to
-     * a single deterministically-chosen replica, all stamped with the same
-     * {@code snapshot} (issue #2105). Static for unit testing without a live Sidecar
-     * or Trino session.
+     * Convenience overload without explicit per-host snapshot-availability data: defaults the
+     * fallback-availability set to {@link #distinctReplicaHosts} (primaries only) — a
+     * conservative default for callers that stamp a snapshot name without wiring the real
+     * per-host availability. The live query path ({@link #getSplits}) always calls the 6-arg
+     * overload below with the FULL replica-owner availability set (issue #2241), which is NOT
+     * restricted to primaries.
      */
     public static List<CqliteFlightSplit> buildSplits(
             CqliteFlightTableHandle table,
@@ -246,15 +262,48 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             String localDatacenter,
             int flightPort,
             Optional<String> snapshot) {
+        return buildSplits(table, replicas, localDatacenter, flightPort, snapshot,
+                distinctReplicaHosts(replicas, localDatacenter));
+    }
+
+    /**
+     * Pure split-building: one split per read-replica token range, each pinned to a single
+     * deterministically-chosen replica, all stamped with the same {@code snapshot} (issue
+     * #2105). Static for unit testing without a live Sidecar or Trino session.
+     *
+     * <p>Availability failover (issue #2241): each split carries an ORDERED replica list
+     * (primary first, then the range's other owners) that the page source retries on a
+     * connect-class failure. In SNAPSHOT mode a fallback is only usable if its host is in
+     * {@code availableSnapshotHosts} — the set of hosts whose snapshot creation actually
+     * succeeded ({@link #getSplits} computes this over the FULL replica-owner union, not just
+     * primaries, so a fallback-only host is eligible whenever its own snapshot creation
+     * succeeded). In LIVE mode ({@code snapshot} empty) every replica owner is eligible and
+     * {@code availableSnapshotHosts} is ignored.
+     */
+    public static List<CqliteFlightSplit> buildSplits(
+            CqliteFlightTableHandle table,
+            TokenRangeReplicasResponse replicas,
+            String localDatacenter,
+            int flightPort,
+            Optional<String> snapshot,
+            Set<String> availableSnapshotHosts) {
         List<CqliteFlightSplit> splits = new ArrayList<>();
         for (ReplicaInfo range : replicas.readReplicas()) {
-            String replica = pickReplica(range.replicasByDatacenter(), localDatacenter);
-            if (replica == null) {
+            // Sidecar returns replicas as "ip:storage_port"; the flight server listens on
+            // flightPort at the same host, so keep only the host. The ordered list's first
+            // entry is exactly the pickReplica choice (same local-DC-then-global ordering).
+            List<String> ordered = orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter);
+            if (ordered.isEmpty()) {
                 continue; // range with no known replica — nothing to read
             }
-            // Sidecar returns replicas as "ip:storage_port"; the flight server
-            // listens on flightPort at the same host, so keep only the host.
-            String host = hostOnly(replica);
+            String host = ordered.get(0);
+            List<String> fallbacks = new ArrayList<>();
+            for (int i = 1; i < ordered.size(); i++) {
+                String candidate = ordered.get(i);
+                if (snapshot.isEmpty() || availableSnapshotHosts.contains(candidate)) {
+                    fallbacks.add(candidate);
+                }
+            }
             long start = range.startToken();
             long end = range.endToken();
             // #2228: equal endpoints (start == end) denote the FULL ring — the
@@ -273,9 +322,41 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                     start,
                     end,
                     wraparound,
-                    snapshot));
+                    snapshot,
+                    fallbacks));
         }
         return splits;
+    }
+
+    /**
+     * The range's replica hosts in try order (issue #2241): local-datacenter owners first
+     * (lexicographic by address), then every other datacenter's owners (lexicographic),
+     * mapped to bare hosts via {@link #hostOnly} and de-duplicated preserving order. The
+     * first element equals {@link #pickReplica}'s choice, so it is the split's primary and
+     * the rest are ordered availability fallbacks.
+     */
+    static List<String> orderedReplicaHosts(Map<String, List<String>> replicasByDatacenter, String localDatacenter) {
+        List<String> orderedAddresses = new ArrayList<>();
+        if (localDatacenter != null) {
+            List<String> local = replicasByDatacenter.get(localDatacenter);
+            if (local != null) {
+                local.stream().sorted().forEach(orderedAddresses::add);
+            }
+        }
+        replicasByDatacenter.entrySet().stream()
+                .filter(e -> !e.getKey().equals(localDatacenter))
+                .flatMap(e -> e.getValue().stream())
+                .sorted()
+                .forEach(orderedAddresses::add);
+        List<String> hosts = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (String address : orderedAddresses) {
+            String host = hostOnly(address);
+            if (seen.add(host)) {
+                hosts.add(host);
+            }
+        }
+        return hosts;
     }
 
     /**
@@ -292,6 +373,23 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             if (replica != null) {
                 hosts.add(hostOnly(replica));
             }
+        }
+        return hosts;
+    }
+
+    /**
+     * The union of every replica host that owns ANY token range the scan will read (issue
+     * #2241) — primaries AND every other owner, per range via {@link #orderedReplicaHosts},
+     * deduplicated across ranges (insertion order). This is the full candidate set for
+     * best-effort per-host snapshot creation, so an availability-failover fallback is not
+     * silently restricted to {@link #distinctReplicaHosts} (primaries only): a fallback host
+     * that is never any range's primary must still be eligible when its own snapshot creation
+     * succeeds.
+     */
+    static Set<String> allReplicaHosts(TokenRangeReplicasResponse replicas, String localDatacenter) {
+        Set<String> hosts = new LinkedHashSet<>();
+        for (ReplicaInfo range : replicas.readReplicas()) {
+            hosts.addAll(orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter));
         }
         return hosts;
     }
