@@ -537,8 +537,10 @@ mod tests {
         row.values.get("r").cloned().expect("result present")
     }
 
-    /// SUM over integral inputs preserves the integral result type and value
-    /// (issue #2202): int/smallint/tinyint → `Value::Integer`, bigint → BigInt.
+    /// SUM over integral inputs preserves the ARGUMENT's own integral type and
+    /// value (issue #2202, `AggregateFcts.java`): int → `Value::Integer`,
+    /// bigint → `Value::BigInt`, and — Cassandra does NOT promote these —
+    /// smallint → `Value::SmallInt`, tinyint → `Value::TinyInt`.
     #[test]
     fn sum_integral_inputs_preserve_integral_result() {
         assert_eq!(
@@ -565,8 +567,8 @@ mod tests {
                 Some(CqlType::SmallInt),
                 &[Value::SmallInt(100), Value::SmallInt(50)],
             ),
-            Value::Integer(150),
-            "SUM(smallint) promotes to Value::Integer (int)"
+            Value::SmallInt(150),
+            "SUM(smallint) stays Value::SmallInt — Cassandra does not promote to int"
         );
         assert_eq!(
             run_scalar_agg(
@@ -574,8 +576,8 @@ mod tests {
                 Some(CqlType::TinyInt),
                 &[Value::TinyInt(40), Value::TinyInt(2)],
             ),
-            Value::Integer(42),
-            "SUM(tinyint) promotes to Value::Integer (int)"
+            Value::TinyInt(42),
+            "SUM(tinyint) stays Value::TinyInt — Cassandra does not promote to int"
         );
     }
 
@@ -643,13 +645,53 @@ mod tests {
             Value::Float(1.5),
             "AVG(double) divides in f64",
         );
+        // Issue #2202: AVG(smallint)/AVG(tinyint) stay their own narrow width —
+        // Cassandra does not promote them to int.
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::SmallInt),
+                &[Value::SmallInt(10), Value::SmallInt(21)],
+            ),
+            Value::SmallInt(15),
+            "AVG(smallint) integer division stays smallint"
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::TinyInt),
+                &[Value::TinyInt(10), Value::TinyInt(21)],
+            ),
+            Value::TinyInt(15),
+            "AVG(tinyint) integer division stays tinyint"
+        );
     }
 
     /// Integral SUM overflow WRAPS (Cassandra's two's-complement Java semantics),
-    /// never saturating or panicking. `int` wraps at the i32 boundary; `bigint`
-    /// wraps at the i64 boundary.
+    /// never saturating or panicking, at EACH type's OWN width: `tinyint` wraps
+    /// at the i8 boundary, `smallint` at i16, `int` at i32, `bigint` at i64.
     #[test]
     fn sum_integral_overflow_wraps() {
+        // i8::MAX + 1 wraps to i8::MIN (tinyint stays tinyint, no promotion).
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::TinyInt),
+                &[Value::TinyInt(i8::MAX), Value::TinyInt(1)],
+            ),
+            Value::TinyInt(i8::MIN),
+            "SUM(tinyint) wraps at the i8 boundary"
+        );
+        // i16::MAX + 1 wraps to i16::MIN (smallint stays smallint).
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::SmallInt),
+                &[Value::SmallInt(i16::MAX), Value::SmallInt(1)],
+            ),
+            Value::SmallInt(i16::MIN),
+            "SUM(smallint) wraps at the i16 boundary"
+        );
         // i32::MAX + 1 wraps to i32::MIN.
         assert_eq!(
             run_scalar_agg(

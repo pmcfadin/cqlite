@@ -1,20 +1,28 @@
-//! Issue #2202: SUM/AVG must preserve Cassandra's integral result TYPE (not
-//! collapse every numeric input to `double`), and the result metadata type must
-//! match the value variant CQLite actually emits (the #1941 invariant).
+//! Issue #2202: SUM/AVG must preserve Cassandra's result TYPE (not collapse
+//! every numeric input to `double`), and the result metadata type must match
+//! the value variant CQLite actually emits (the #1941 invariant).
 //!
-//! Cassandra 5.0 promotion this pins:
-//!   * SUM/AVG over `int`      → `int`     (`Value::Integer`)
-//!   * SUM/AVG over `bigint`   → `bigint`  (`Value::BigInt`)
-//!   * SUM/AVG over `double`   → `double`  (`Value::Float`, no regression)
-//!   * SUM/AVG over `float`    → `double`  (`Value::Float`, no regression)
+//! Cassandra 5.0's rule this pins (`AggregateFcts.java`): SUM/AVG return the
+//! SAME type as an integral argument — NO promotion of `tinyint`/`smallint` to
+//! `int`:
+//!   * SUM/AVG over `tinyint`  → `tinyint`  (`Value::TinyInt`)
+//!   * SUM/AVG over `smallint` → `smallint` (`Value::SmallInt`)
+//!   * SUM/AVG over `int`      → `int`      (`Value::Integer`)
+//!   * SUM/AVG over `bigint`   → `bigint`   (`Value::BigInt`)
+//!   * SUM/AVG over `double`   → `double`   (`Value::Float`, no regression)
+//!   * SUM/AVG over `float`    → `double`   (`Value::Float`, no regression)
 //!
 //! AVG over an integral column uses integer division (truncated toward zero).
+//! SUM over a narrow integral column WRAPS at that column's own width (two's
+//! complement, Java semantics) — the `tinyint`/`smallint` case below exercises
+//! a REAL i8/i16 overflow-wrap on the fixture data, not a synthetic boundary.
 //!
 //! Exercised THROUGH the public `Database::execute` surface on real Cassandra 5.0
 //! fixtures (`test_basic`): BIGINT `value` (`multi_partition_table`), INT
-//! `row_value` (`static_columns_table`), and DOUBLE `weight` / FLOAT `height`
-//! (`simple_table`). Requires `CQLITE_DATASETS_ROOT` + fetched Data.db binaries;
-//! skips loudly (never a false 0-row pass) when a fixture is absent.
+//! `row_value` (`static_columns_table`), TINYINT `small_number` / SMALLINT
+//! `medium_number` / DOUBLE `weight` / FLOAT `height` (`simple_table`). Requires
+//! `CQLITE_DATASETS_ROOT` + fetched Data.db binaries; skips loudly (never a
+//! false 0-row pass) when a fixture is absent.
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
@@ -119,7 +127,9 @@ fn assert_type_matches_value(
     assert_eq!(data_type, expect_data, "{label}: metadata data_type");
     let variant_ok = matches!(
         (&data_type, value),
-        (DataType::Integer, Value::Integer(_))
+        (DataType::TinyInt, Value::TinyInt(_))
+            | (DataType::SmallInt, Value::SmallInt(_))
+            | (DataType::Integer, Value::Integer(_))
             | (DataType::BigInt, Value::BigInt(_))
             | (DataType::Float, Value::Float(_))
     );
@@ -189,6 +199,86 @@ async fn sum_avg_int_column_is_int() {
     let (cql, dt, v) =
         run_scalar_aggregate(&db, &format!("SELECT AVG(row_value) FROM {tbl}")).await;
     assert_type_matches_value("AVG(int)", cql, dt, &v, CqlType::Int, DataType::Integer);
+}
+
+/// SUM/AVG over TINYINT/SMALLINT columns stay their OWN narrow width — Cassandra
+/// does NOT promote them to `int`. `simple_table.small_number` (tinyint) is
+/// dense enough (1000 rows) that its real SUM naturally overflows the i8 range,
+/// so this exercises a REAL wrap, not a synthetic boundary case. Reference
+/// values computed by hand from the committed JSONL golden
+/// (`nb-1-big-Data.db.jsonl`): sum(small_number) = 61_456 → wraps to 16 (i8);
+/// avg(small_number) = 61_456 / 1000 = 61 (fits, no wrap); sum(medium_number) =
+/// 15_459_417 → wraps to -7_079 (i16); avg(medium_number) = 15_459 (fits).
+#[tokio::test]
+async fn sum_avg_tinyint_smallint_columns_stay_narrow_and_wrap() {
+    let db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping sum_avg_tinyint_smallint_columns_stay_narrow_and_wrap: {e}");
+            return;
+        }
+    };
+    let tbl = "test_basic.simple_table";
+
+    let (cql, dt, v) =
+        run_scalar_aggregate(&db, &format!("SELECT SUM(small_number) FROM {tbl}")).await;
+    assert_type_matches_value(
+        "SUM(tinyint)",
+        cql,
+        dt,
+        &v,
+        CqlType::TinyInt,
+        DataType::TinyInt,
+    );
+    assert_eq!(
+        v,
+        Value::TinyInt(16),
+        "SUM(tinyint): real sum 61_456 wraps at the i8 boundary to 16"
+    );
+
+    let (cql, dt, v) =
+        run_scalar_aggregate(&db, &format!("SELECT AVG(small_number) FROM {tbl}")).await;
+    assert_type_matches_value(
+        "AVG(tinyint)",
+        cql,
+        dt,
+        &v,
+        CqlType::TinyInt,
+        DataType::TinyInt,
+    );
+    assert_eq!(v, Value::TinyInt(61), "AVG(tinyint): 61_456 / 1000 = 61");
+
+    let (cql, dt, v) =
+        run_scalar_aggregate(&db, &format!("SELECT SUM(medium_number) FROM {tbl}")).await;
+    assert_type_matches_value(
+        "SUM(smallint)",
+        cql,
+        dt,
+        &v,
+        CqlType::SmallInt,
+        DataType::SmallInt,
+    );
+    assert_eq!(
+        v,
+        Value::SmallInt(-7_079),
+        "SUM(smallint): real sum 15_459_417 wraps at the i16 boundary to -7_079"
+    );
+
+    let (cql, dt, v) =
+        run_scalar_aggregate(&db, &format!("SELECT AVG(medium_number) FROM {tbl}")).await;
+    assert_type_matches_value(
+        "AVG(smallint)",
+        cql,
+        dt,
+        &v,
+        CqlType::SmallInt,
+        DataType::SmallInt,
+    );
+    assert_eq!(
+        v,
+        Value::SmallInt(15_459),
+        "AVG(smallint): 15_459_417 / 1000 = 15_459"
+    );
 }
 
 /// SUM/AVG over FLOAT/DOUBLE columns still return `double` (`Value::Float`) — the
