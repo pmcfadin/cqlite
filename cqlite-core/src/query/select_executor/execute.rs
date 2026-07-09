@@ -16,7 +16,7 @@
 
 use super::schemaless_point::classify_schemaless_point_lookup;
 use super::{
-    build_row_from_scan, classify_partition_lookup, collect_capped_materialized,
+    build_row_from_scan_cached, classify_partition_lookup, collect_capped_materialized,
     column_info_from_type_str, honest_targeted_path, parse_table_id, project_expr_reshapes_row,
     scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
     PartitionLookupOutcome, SSTablePredicate,
@@ -537,13 +537,22 @@ impl SelectExecutor {
             // count up front, so the metric reflects real scan work, while the
             // LIMIT/OFFSET `scan_cap` only bounds the per-row build/predicate work.
             // Counting ACCEPTED rows toward the cap never drops a matching row.
+            // Issue #1817: hoist the partition-key decode across the rows of a
+            // partition (the scan yields a partition's rows consecutively).
+            let mut pk_cache = super::PartitionKeyCache::default();
             collect_capped_materialized(
                 scan_results,
                 scan_cap,
                 predicates,
                 context,
                 |(key, value, cell_meta)| {
-                    let mut row = build_row_from_scan(key, value, projection, schema_opt)?;
+                    let mut row = build_row_from_scan_cached(
+                        key,
+                        value,
+                        projection,
+                        schema_opt,
+                        &mut pk_cache,
+                    )?;
                     // Attach per-cell metadata so evaluate_writetime_ttl can read it.
                     if !cell_meta.is_empty() {
                         row.set_cell_metadata(cell_meta);
@@ -722,12 +731,16 @@ impl SelectExecutor {
             // real scan), while the `scan_cap` only bounds per-row build work.
             // Counting ACCEPTED rows toward the cap (build_row_from_scan returns
             // None for tombstoned/null rows, Issue #191) never drops a match.
+            // Issue #1817: hoist the partition-key decode across a partition's rows.
+            let mut pk_cache = super::PartitionKeyCache::default();
             collect_capped_materialized(
                 scan_results,
                 scan_cap,
                 predicates,
                 context,
-                |(key, value)| build_row_from_scan(key, value, projection, schema_opt),
+                |(key, value)| {
+                    build_row_from_scan_cached(key, value, projection, schema_opt, &mut pk_cache)
+                },
             )?
         };
 

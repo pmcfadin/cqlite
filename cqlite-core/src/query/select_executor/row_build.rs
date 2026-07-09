@@ -72,6 +72,119 @@ pub(super) fn column_info_from_type_str(
     col_info
 }
 
+/// A decoded partition's identity + its interned `(name, value)` partition-key
+/// columns (Issue #1817). The identity is the raw key bytes PAIRED WITH a cheap
+/// schema fingerprint (`pk_schema_fingerprint`), so a hit requires BOTH to match.
+/// Names are interned once per partition.
+type DecodedPartitionKey = (Arc<[u8]>, u64, Vec<(Arc<str>, Value)>);
+
+/// Cheap fingerprint of a schema's partition-key column list — the `(name, type,
+/// position)` of every partition-key column, in order (Issue #1817, roborev).
+///
+/// The decoded partition-key columns depend ONLY on the raw key bytes and this
+/// list, so two schemas with identical partition-key columns decode identically
+/// and may safely share a cache entry, while any difference (column names, types,
+/// count, order) yields a different fingerprint → a cache MISS and re-decode.
+/// This closes the cross-schema footgun where a cache reused across two tables
+/// whose partition keys share raw bytes but differ in schema would return columns
+/// decoded for the WRONG schema.
+fn pk_schema_fingerprint(schema: &crate::schema::TableSchema) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    schema.partition_keys.len().hash(&mut hasher);
+    for col in &schema.partition_keys {
+        col.name.hash(&mut hasher);
+        col.data_type.hash(&mut hasher);
+        col.position.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Cross-row memoization of the decoded partition-key columns (Issue #1817).
+///
+/// Partition-key column VALUES are constant within a partition, but
+/// [`build_row_from_scan`] historically re-decoded them from the raw key bytes
+/// for EVERY row. Because a scan yields the rows of one partition consecutively
+/// (token-ordered full scans, partition-targeted lookups, and the Flight k-way
+/// merge all group a partition's rows), memoizing the last partition's decoded
+/// columns makes the byte-parse + name-intern happen ONCE per partition
+/// (`O(partitions)`) rather than once per row (`O(rows)`). The decoded values are
+/// `clone`d into each row (an `Arc` ref-count bump for the name + a `Value`
+/// clone — each row needs its own copy), so the materialized rows are
+/// byte-identical to the prior per-row decode.
+///
+/// If the input is NOT partition-ordered the cache simply misses and re-decodes,
+/// so correctness never depends on ordering — only the decode COUNT does.
+///
+/// A cache hit also requires the requesting schema's partition-key fingerprint to
+/// match the cached one (roborev): `PartitionKeyCache` is publicly re-exported and
+/// could be reused across tables whose partition keys share raw bytes but differ
+/// in schema — matching the fingerprint makes any such difference a MISS so the
+/// columns are never decoded for the wrong schema.
+#[derive(Default)]
+pub struct PartitionKeyCache {
+    /// Raw partition-key bytes + partition-key schema fingerprint of the last
+    /// decoded partition and its decoded `(interned name, value)` columns
+    /// (unfiltered by projection — the projection filter is applied when cloning
+    /// into each row, so a cache entry is reusable across queries with different
+    /// projections).
+    decoded: Option<DecodedPartitionKey>,
+}
+
+impl PartitionKeyCache {
+    /// Return the decoded partition-key columns for `key_bytes`, decoding through
+    /// the canonical codec (and interning names once) only on a cache MISS — i.e.
+    /// once per distinct partition when rows arrive partition-grouped.
+    fn columns_for<'a>(
+        &'a mut self,
+        key_bytes: &Arc<[u8]>,
+        schema: &crate::schema::TableSchema,
+    ) -> &'a [(Arc<str>, Value)] {
+        let fingerprint = pk_schema_fingerprint(schema);
+        let hit = self.decoded.as_ref().is_some_and(|(cached, fp, _)| {
+            *fp == fingerprint && cached.as_ref() == key_bytes.as_ref()
+        });
+        if !hit {
+            // Test-only decode/name-derivation counter (Issue #1817): a cache MISS
+            // is exactly one decode. A partition-grouped scan of N rows over P
+            // partitions increments this P times, not N — the O(partitions) pin.
+            #[cfg(test)]
+            super::PARTITION_KEY_DECODES.with(|c| c.set(c.get() + 1));
+
+            let cols = match crate::storage::partition_key_codec::decode_partition_key_columns(
+                key_bytes, schema,
+            ) {
+                // Intern each name into a shared `Arc<str>` ONCE (per partition),
+                // so cloning into a row is a ref-count bump, not a `String` alloc.
+                Ok(pk_columns) => pk_columns
+                    .into_iter()
+                    .map(|(name, value)| (Arc::<str>::from(name), value))
+                    .collect(),
+                // Surface — never silently swallow — a decode failure, so a
+                // missing partition-key column can't ship invisibly (Issue #586).
+                // Cache the empty result so a failing partition is not re-decoded
+                // (and not re-warned) once per row.
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to reconstruct partition-key columns from row key \
+                         (len={} bytes) for {}.{}: {}",
+                        key_bytes.len(),
+                        schema.keyspace,
+                        schema.table,
+                        e
+                    );
+                    Vec::new()
+                }
+            };
+            self.decoded = Some((Arc::clone(key_bytes), fingerprint, cols));
+        }
+        match &self.decoded {
+            Some((_, _, cols)) => cols,
+            None => &[],
+        }
+    }
+}
+
 /// Build a `QueryRow` from a single `(RowKey, ScanRow)` produced by storage scan,
 /// applying optional projection and synthesising partition-key columns from the
 /// raw key bytes when a schema is available.
@@ -91,11 +204,32 @@ pub(super) fn column_info_from_type_str(
 /// output parity. The `row` carries the decoded non-partition-key cells as the
 /// single [`ScanRow`] row carrier (issue #1334); partition-key columns are
 /// reconstructed from `key`.
+///
+/// This is a thin wrapper over [`build_row_from_scan_cached`] with a single-use
+/// [`PartitionKeyCache`], so a one-off build decodes the key exactly once (as
+/// before). Loops over many rows should call [`build_row_from_scan_cached`] with
+/// a shared cache to hoist the per-partition decode (Issue #1817).
 pub fn build_row_from_scan(
     key: RowKey,
     row: ScanRow,
     projection: &[String],
     schema: Option<&crate::schema::TableSchema>,
+) -> Option<QueryRow> {
+    let mut pk_cache = PartitionKeyCache::default();
+    build_row_from_scan_cached(key, row, projection, schema, &mut pk_cache)
+}
+
+/// [`build_row_from_scan`] with a caller-owned [`PartitionKeyCache`] that hoists
+/// the partition-key decode across the rows of a partition (Issue #1817).
+///
+/// The output is byte-identical to [`build_row_from_scan`] — the cache only
+/// avoids re-decoding the partition key for consecutive rows that share it.
+pub fn build_row_from_scan_cached(
+    key: RowKey,
+    row: ScanRow,
+    projection: &[String],
+    schema: Option<&crate::schema::TableSchema>,
+    pk_cache: &mut PartitionKeyCache,
 ) -> Option<QueryRow> {
     // Suppress tombstoned / absent rows from user-visible output. A row tombstone
     // or null row reaches here as `ScanRow::Marker` (Issue #505); it must never
@@ -121,30 +255,16 @@ pub fn build_row_from_scan(
         }
     }
     // Cassandra never serialises partition-key columns in the cell payload;
-    // reconstruct them from the raw row key when the schema is known. We
-    // decode through the canonical codec shared with the write engine so
-    // single-component (raw bytes) and composite (`[u16 len][bytes][0x00]`)
-    // keys are handled identically on both paths (Issue #586).
+    // reconstruct them from the raw row key when the schema is known. We decode
+    // through the canonical codec shared with the write engine so single-component
+    // (raw bytes) and composite (`[u16 len][bytes][0x00]`) keys are handled
+    // identically on both paths (Issue #586). Issue #1817: the decode is memoized
+    // per partition by `pk_cache`, so consecutive rows of a partition clone the
+    // already-decoded columns instead of re-parsing the key bytes.
     if let Some(schema) = schema {
-        match crate::storage::partition_key_codec::decode_partition_key_columns(&key.0, schema) {
-            Ok(pk_columns) => {
-                for (name, value) in pk_columns {
-                    if project(&name) {
-                        row_values.insert(name.into(), value);
-                    }
-                }
-            }
-            // Surface — never silently swallow — a decode failure, so a
-            // missing partition-key column can't ship invisibly (Issue #586).
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to reconstruct partition-key columns from row key \
-                     (len={} bytes) for {}.{}: {}",
-                    key.0.len(),
-                    schema.keyspace,
-                    schema.table,
-                    e
-                );
+        for (name, value) in pk_cache.columns_for(&key.0, schema) {
+            if project(name) {
+                row_values.insert(Arc::clone(name), value.clone());
             }
         }
     }
@@ -272,6 +392,171 @@ mod tests {
              (>= 8), not grown from empty to the projected size; got capacity {}",
             row.values.capacity()
         );
+    }
+
+    /// Issue #1817: partition-key columns are CONSTANT within a partition, so a
+    /// [`PartitionKeyCache`] shared across the rows of a partition must decode the
+    /// key ONCE (`O(partitions)`), not once per row (`O(rows)`). Pinned by the
+    /// deterministic `PARTITION_KEY_DECODES` counter — NOT a wall-clock bench.
+    ///
+    /// Red-first: with the pre-hoist per-row decode (or a fresh cache per row),
+    /// `N` rows of one partition would record `N` decodes; the shared cache makes
+    /// it exactly `1`. Output must stay byte-identical — every row still carries
+    /// the reconstructed `id` PK column plus its own regular cell.
+    #[test]
+    fn pk_decode_is_once_per_partition_not_per_row() {
+        use super::super::PARTITION_KEY_DECODES;
+
+        let schema = single_pk_schema("id", "text");
+        let key_bytes = b"partition-A".to_vec();
+        const N: usize = 50;
+
+        PARTITION_KEY_DECODES.with(|c| c.set(0));
+        let mut pk_cache = PartitionKeyCache::default();
+        let mut rows = Vec::with_capacity(N);
+        for i in 0..N {
+            let cells = ScanRow::Row(vec![(Arc::from("v"), Value::Integer(i as i32))]);
+            let row = build_row_from_scan_cached(
+                RowKey::new(key_bytes.clone()),
+                cells,
+                &[],
+                Some(&schema),
+                &mut pk_cache,
+            )
+            .expect("a live row must build");
+            rows.push(row);
+        }
+        let decodes = PARTITION_KEY_DECODES.with(|c| c.get());
+
+        assert_eq!(
+            decodes, 1,
+            "issue #1817: {N} rows of ONE partition must decode the partition key \
+             ONCE (O(partitions)), not once per row (would be {N})"
+        );
+        // Output byte-identical: every row has the reconstructed PK + its own cell.
+        assert_eq!(rows.len(), N);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.values.get("id"),
+                Some(&Value::Text("partition-A".to_string())),
+                "each row must carry the reconstructed PK column value"
+            );
+            assert_eq!(row.values.get("v"), Some(&Value::Integer(i as i32)));
+        }
+    }
+
+    /// Issue #1817: across `P` DISTINCT partitions (each with several rows), a
+    /// shared cache decodes exactly `P` times — the decode count tracks
+    /// `O(partitions)`, independent of the total row count. Rows are supplied
+    /// partition-grouped, as every scan/merge site delivers them.
+    #[test]
+    fn pk_decode_counts_partitions_not_rows() {
+        use super::super::PARTITION_KEY_DECODES;
+
+        let schema = single_pk_schema("id", "text");
+        const P: usize = 4;
+        const ROWS_PER_PART: usize = 10;
+
+        PARTITION_KEY_DECODES.with(|c| c.set(0));
+        let mut pk_cache = PartitionKeyCache::default();
+        let mut total_rows = 0;
+        for p in 0..P {
+            let key_bytes = format!("partition-{p}").into_bytes();
+            for r in 0..ROWS_PER_PART {
+                let cells = ScanRow::Row(vec![(Arc::from("v"), Value::Integer(r as i32))]);
+                let row = build_row_from_scan_cached(
+                    RowKey::new(key_bytes.clone()),
+                    cells,
+                    &[],
+                    Some(&schema),
+                    &mut pk_cache,
+                )
+                .expect("a live row must build");
+                assert_eq!(
+                    row.values.get("id"),
+                    Some(&Value::Text(format!("partition-{p}"))),
+                    "PK column reconstructed per partition"
+                );
+                total_rows += 1;
+            }
+        }
+        let decodes = PARTITION_KEY_DECODES.with(|c| c.get());
+
+        assert_eq!(total_rows, P * ROWS_PER_PART);
+        assert_eq!(
+            decodes,
+            P,
+            "issue #1817: decode count must be O(partitions) = {P}, not O(rows) = {}",
+            P * ROWS_PER_PART
+        );
+    }
+
+    /// Issue #1817 (control / red-anchor): the wrapper [`build_row_from_scan`]
+    /// uses a FRESH single-use cache each call, so calling it per row decodes per
+    /// row — this is exactly the O(rows) behavior the shared-cache hoist replaces.
+    /// It documents that the hoist requires threading ONE cache through the loop
+    /// (a per-row fresh cache is the pre-fix cost). Output is still byte-identical.
+    #[test]
+    fn build_row_from_scan_wrapper_decodes_per_call() {
+        use super::super::PARTITION_KEY_DECODES;
+
+        let schema = single_pk_schema("id", "text");
+        let key_bytes = b"partition-A".to_vec();
+        const N: usize = 20;
+
+        PARTITION_KEY_DECODES.with(|c| c.set(0));
+        for i in 0..N {
+            let cells = ScanRow::Row(vec![(Arc::from("v"), Value::Integer(i as i32))]);
+            let row =
+                build_row_from_scan(RowKey::new(key_bytes.clone()), cells, &[], Some(&schema))
+                    .expect("a live row must build");
+            assert_eq!(
+                row.values.get("id"),
+                Some(&Value::Text("partition-A".to_string()))
+            );
+        }
+        let decodes = PARTITION_KEY_DECODES.with(|c| c.get());
+        assert_eq!(
+            decodes, N,
+            "the single-use wrapper decodes once per call ({N}); the shared-cache \
+             `build_row_from_scan_cached` is what makes a loop O(partitions)"
+        );
+    }
+
+    /// Issue #1817 (roborev): `PartitionKeyCache` is publicly re-exported and could
+    /// be reused across tables whose partition keys happen to share the SAME raw key
+    /// bytes but have DIFFERENT schemas. A hit keyed only on the raw bytes would
+    /// return the columns decoded for the FIRST schema — silently wrong output for
+    /// the second. The schema-fingerprint guard makes the second call a cache MISS,
+    /// re-decoding for its own schema.
+    #[test]
+    fn pk_cache_reuse_across_schemas_does_not_leak_columns() {
+        // Both schemas have a single TEXT partition key, so the SAME raw key bytes
+        // decode to a valid TEXT value under either — but the COLUMN NAME differs
+        // (`id_a` vs `id_b`). A bytes-only cache would return `id_a` for schema B.
+        let schema_a = single_pk_schema("id_a", "text");
+        let schema_b = single_pk_schema("id_b", "text");
+        let key_bytes: Arc<[u8]> = Arc::from(b"shared-key".as_slice());
+
+        let mut cache = PartitionKeyCache::default();
+
+        // First call: schema A. Columns must be decoded for A.
+        let cols_a: Vec<(Arc<str>, Value)> = cache.columns_for(&key_bytes, &schema_a).to_vec();
+        assert_eq!(cols_a.len(), 1);
+        assert_eq!(cols_a[0].0.as_ref(), "id_a");
+        assert_eq!(cols_a[0].1, Value::Text("shared-key".to_string()));
+
+        // Second call: schema B with the SAME key bytes. Columns MUST reflect B
+        // (`id_b`), NOT the cached A columns (`id_a`).
+        let cols_b: Vec<(Arc<str>, Value)> = cache.columns_for(&key_bytes, &schema_b).to_vec();
+        assert_eq!(cols_b.len(), 1);
+        assert_eq!(
+            cols_b[0].0.as_ref(),
+            "id_b",
+            "roborev: a cache reused across schemas must NOT leak the first \
+             schema's partition-key column names — differing schema is a MISS"
+        );
+        assert_eq!(cols_b[0].1, Value::Text("shared-key".to_string()));
     }
 
     /// A suppressed marker (row tombstone / null row) yields no user-visible row.
