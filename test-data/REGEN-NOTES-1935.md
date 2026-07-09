@@ -36,35 +36,61 @@ five TTL-carrying corpus tables that time-bombed the fixtures, **keep**
    `ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock` (wall-clock)
    still cover `test_basic.ttl_test_table` with TTL.
 
-## What is CI-GATED / owner-owned (regen + asset cut — how v3.5 was produced)
+## How v3.5 was actually produced — the v3.4-SPLICE strategy (FINAL, owner-decided)
 
-The whole-corpus binary regeneration + new release asset + dataset-pin bump is
-owner-owned. The `exhaustive-regeneration.yml` CI workflow **audits** the corpus
-(runs `regenerate-datasets.sh` against real Cassandra 5 + `cassandra-parity --
-corpus-audit`) but **by design exports no tarball** — the published asset is cut
-from a **local regeneration**. Exact flow that produced v3.5:
+**v3.5 == v3.4 byte-identical EXCEPT the 5 TTL tables.** An earlier attempt did a
+whole-corpus `regenerate-datasets.sh --rows 50` uniform regen; that drifted EVERY
+table's UUID/shape/golden and was **discarded**. The shape-bearing generator that
+produced the original v3.4 corpus was never committed (ref #2222), so v3.5 is cut
+by **splicing** a bespoke no-TTL re-cut of only the 5 TTL tables onto the v3.4
+base tree. Exact flow that produced v3.5:
 
-1. **Regenerate binaries locally** — `test-data/scripts/regenerate-datasets.sh`
-   against real Cassandra 5, then refresh the JSONL goldens + manifest
-   (`cassandra-parity -- corpus-audit` must be clean).
-2. **Package** — `test-data/scripts/package_datasets.sh --full --suffix v3.5`
-   produces `cassandra5-small-full-v3.5.tar.gz` (version in the suffix; the fetch
-   pin keys on this versioned asset name). Mind the macOS tar AppleDouble gotcha.
-3. **Upload** — `gh release upload datasets-v3 cassandra5-small-full-v3.5.tar.gz
-   --clobber` and capture its SHA256.
-4. **Bump the dataset pin** — `test-data/scripts/bump-dataset-pin.sh
-   --new-sha <sha256-of-new-asset>` (defaults: asset
-   `cassandra5-small-full-v3.5.tar.gz`, tag `datasets-v3`, old v3.4). Never
-   tag-only: `DATASET_TAG` / `DATASET_ASSET` / `DATASET_SHA256` must ALL be set
-   consistently across `.github/workflows/*.yml` and
-   `test-data/scripts/fetch-datasets.sh`; the script's self-check fails on any
-   stale v3.4 pin. Pin after this PR: `datasets-v3` /
-   `cassandra5-small-full-v3.5.tar.gz` /
-   `13d8da00743d9780c7ee89478649c280f9d91519a4561f6909cc4ce3bb7a3631`.
-   Do NOT invent a SHA — it does not exist until the asset is built.
-5. **Round-trip verify** — `bash test-data/scripts/fetch-datasets.sh` pulls the
-   new asset, verifies the SHA, and the parity/CLI tests then see the regenerated
-   (no-TTL) fixtures returning their physical row counts.
+1. **Base tree** — fetch the v3.4 asset (`cassandra5-small-full-v3.4.tar.gz`,
+   sha `3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33`) and
+   extract it into `test-data/datasets/` (binaries are gitignored). This is the
+   byte-for-byte base for the ~40 unchanged tables.
+2. **Re-cut ONLY the 5 TTL tables** in `cassandra:5.0.2` docker, WITHOUT
+   `default_time_to_live`, replaying each table's EXACT v3.4 shape. Rows are
+   reconstructed VERBATIM from the committed v3.4 goldens (keys, clustering,
+   cell values) and inserted with `USING TIMESTAMP <v3.4-micros>` and no TTL, so
+   the only golden delta vs v3.4 is TTL removal + row repack:
+   - nb phase (`storage_compatibility_mode: CASSANDRA_4`): `test_timeseries`
+     `app_metrics` (200 rows/200 parts), `log_entries` (200/200),
+     `tick_data` (200/24, deterministic bucket distribution).
+   - oa phase (`storage_compatibility_mode: NONE`): `test_oa.ttl_table` (3 rows).
+   - da/BTI phase (`NONE` + `sstable.selected_format: bti`):
+     `test_da.ttl_table` (2 rows).
+   Flush, then **rename the fresh dirs to the v3.4 UUID basenames + component
+   prefixes** (`nb-1-big` / `oa-2-big` / `da-2-bti`) and splice them over the v3.4
+   base. Because the UUIDs/prefixes are reused, `references.yml`, `metadata.yml`
+   (`row_count` preserved) and `cassandra-parity-manifest.yml` stay
+   v3.4-identical — ONLY the 5 tables' `Data.db.jsonl` / `Digest.crc32` /
+   `Statistics.db.txt` goldens change (TOC.txt is byte-identical). `test_basic`
+   `ttl_test_table` keeps its aged TTL fixture UNTOUCHED (#1853 seam).
+3. **Re-export goldens** for the 5 tables (in-container `sstabledump -l` +
+   `sstablemetadata`); `cassandra-parity -- corpus-audit` clean; manifest lint +
+   `report --check` green.
+4. **Package** — `test-data/scripts/package_datasets.sh --full --suffix v3.5`
+   produces `cassandra5-small-full-v3.5.tar.gz`. Mind the macOS tar AppleDouble
+   gotcha.
+5. **Upload + pin (owner/lead)** — `gh release upload datasets-v3
+   cassandra5-small-full-v3.5.tar.gz --clobber`, capture its SHA256, then
+   `bump-dataset-pin.sh --new-sha <sha256>` (asset
+   `cassandra5-small-full-v3.5.tar.gz`, tag `datasets-v3`). `DATASET_TAG` /
+   `DATASET_ASSET` / `DATASET_SHA256` must ALL be set consistently across
+   `.github/workflows/*.yml` and `fetch-datasets.sh`. The sha does NOT exist
+   until the asset is built — do NOT invent one.
+6. **Round-trip verify** — `bash test-data/scripts/fetch-datasets.sh` pulls the
+   new asset, verifies the SHA; the parity/CLI tests then see the no-TTL fixtures
+   returning their physical row counts.
+
+> **WARNING — a wholesale fresh regen leaves leftover UNTRACKED (gitignored)
+> binary dirs.** The discarded uniform-50 regen wrote `<table>-<new-uuid>/` dirs
+> whose `Data.db` binaries are gitignored; `git rm` of the tracked goldens does
+> NOT delete them, so they linger as DUPLICATE table dirs that make the reader
+> resolve a spurious multi-generation table (breaks `issue_1333`, the #1143
+> windowed-scan guard, etc.). When restoring the v3.4 base, delete every sstable
+> dir NOT present in the canonical v3.4 tree.
 
 > **WARNING — do NOT wholesale fresh-regen the aged TTL fixtures.** TTL expiry
 > derives from the *real insertion wall-clock*, so a fresh regen of
