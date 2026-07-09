@@ -2,8 +2,20 @@ package in.mcfad.cqlite.flight;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.type.BigintType;
+import io.trino.spi.type.TimeType;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.TimeNanoVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,5 +60,70 @@ class CqliteFlightAggregatePageSourceTest {
         JsonNode node = MAPPER.readTree(ticket);
 
         assertTrue(node.get("snapshot").isNull());
+    }
+
+    /**
+     * Issue #2229: a pushed-down {@code GROUP BY} on a TIME column must survive the
+     * finalize path. This reproduces exactly what {@code accumulate()} + {@code
+     * buildPage()} do to each range's Arrow batch — read every group/aggregate value
+     * with {@link ArrowToTrino#readJavaValue} into the {@link PartialAggregateMerger},
+     * then write each merged group's TIME key back with {@link ArrowToTrino#writeJavaValue}.
+     * Before the fix, {@code readJavaValue} threw on the {@code TimeNanoVector} group
+     * column and {@code writeJavaValue} had no TIME case; both would fail here.
+     */
+    @Test
+    void groupByTimeColumnSurvivesFinalizeReadMergeWrite() {
+        long nine = 9L * 3600 * 1_000_000_000L;  // 09:00:00
+        long ten = 10L * 3600 * 1_000_000_000L;  // 10:00:00
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Count, null, "agg0"));
+        var merger = new PartialAggregateMerger(aggregates);
+
+        try (BufferAllocator allocator = new RootAllocator()) {
+            // Two "ranges": range A has groups {09:00 -> count 2, 10:00 -> count 1},
+            // range B has {09:00 -> count 3}. Same TIME key must merge across ranges.
+            accumulateBatch(allocator, merger, new long[] {nine, ten}, new long[] {2L, 1L});
+            accumulateBatch(allocator, merger, new long[] {nine}, new long[] {3L});
+        }
+
+        // buildPage: write each merged group's TIME key + count into result blocks.
+        Map<Long, Long> countByPicos = new HashMap<>();
+        for (var g : merger.finish()) {
+            long timeNanos = (Long) g.key().values().get(0);
+            BlockBuilder timeBuilder = TimeType.TIME_NANOS.createBlockBuilder(null, 1);
+            ArrowToTrino.writeJavaValue(TimeType.TIME_NANOS, timeNanos, timeBuilder);
+            long picos = TimeType.TIME_NANOS.getLong(timeBuilder.build(), 0);
+
+            BlockBuilder countBuilder = BigintType.BIGINT.createBlockBuilder(null, 1);
+            ArrowToTrino.writeJavaValue(BigintType.BIGINT, g.outputs().get("agg0"), countBuilder);
+            long count = BigintType.BIGINT.getLong(countBuilder.build(), 0);
+            countByPicos.put(picos, count);
+        }
+
+        assertEquals(2, countByPicos.size(), "two distinct time-of-day groups");
+        assertEquals(5L, countByPicos.get(nine * 1_000L), "09:00 group merged 2 + 3 across ranges");
+        assertEquals(1L, countByPicos.get(ten * 1_000L), "10:00 group");
+    }
+
+    /** Mirror {@code accumulate()}: read one Arrow batch's group + count columns into the merger. */
+    private static void accumulateBatch(
+            BufferAllocator allocator, PartialAggregateMerger merger, long[] timeNanos, long[] counts) {
+        TimeNanoVector time = new TimeNanoVector("t", allocator);
+        BigIntVector count = new BigIntVector("agg0", allocator);
+        time.allocateNew(timeNanos.length);
+        count.allocateNew(counts.length);
+        for (int i = 0; i < timeNanos.length; i++) {
+            time.set(i, timeNanos[i]);
+            count.set(i, counts[i]);
+        }
+        VectorSchemaRoot root = new VectorSchemaRoot(List.of(time, count));
+        root.setRowCount(timeNanos.length);
+        for (int r = 0; r < timeNanos.length; r++) {
+            Object key = ArrowToTrino.readJavaValue(root.getVector("t"), r);
+            Map<String, Object> partials = new HashMap<>();
+            partials.put("agg0", ArrowToTrino.readJavaValue(root.getVector("agg0"), r));
+            merger.combine(new PartialAggregateMerger.GroupKey(List.of(key)), partials);
+        }
+        root.close();
     }
 }
