@@ -34,10 +34,32 @@ use super::data_writer::IncrementalPartitionWriter;
 use super::stats_fold;
 use super::{PromotedIndexBlock, SSTableWriter, StatisticsMetadata};
 use crate::error::{Error, Result};
+use crate::schema::TableSchema;
 use crate::storage::sstable::writer::data_writer::PartitionEmitCounts;
 use crate::storage::write_engine::mutation::{DecoratedKey, PartitionTombstone, RangeTombstone};
 
 impl SSTableWriter {
+    /// This writer's OWN schema (issue #1668, stage 5c-iv part 2) — the
+    /// header/column layout ACTUALLY on disk (e.g. a compaction's
+    /// `write_schema`, with fully-purged dropped columns already stripped),
+    /// as opposed to a merge layer's DECODE-time schema (e.g.
+    /// `KWayMerger::schema`/`effective_schema`, which still declares a
+    /// dropped column so its cells can be decoded and purge-evaluated).
+    ///
+    /// `write_partition` never needed this exposed: it always used its OWN
+    /// `&self.schema` internally for emission, decoupled from whatever schema
+    /// the caller used to decode/reconcile the `Vec<Mutation>` it was handed.
+    /// The incremental streaming path's `feed_row`/`feed_static_row`/`finish`
+    /// take an EXPLICIT schema argument instead (issue #1668 stage 5c-iv part
+    /// 1), so a caller assembling that argument from the WRONG schema (its
+    /// own decode-time schema, not this writer's) silently corrupts the
+    /// row/header encoding — passing MORE (or fewer) columns than the header
+    /// this writer already committed to declares. Callers MUST pass
+    /// `writer.schema()` here, never their own decode-time schema.
+    pub(crate) fn schema(&self) -> &TableSchema {
+        &self.schema
+    }
+
     /// Begin an incremental partition write (issue #1668, stage 5c-iv part
     /// 2). Performs the SAME pre-work `write_partition` does before handing
     /// off to `DataWriter` (token-order validation, key-range tracking), then

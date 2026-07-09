@@ -2385,8 +2385,23 @@ impl KWayMerger {
         // static ops that `begin_partition_incremental`/`feed_static_row`
         // need UPFRONT. Every subsequent `Some(ck)` row streams straight
         // through `feed_row` with NO `Vec<Mutation>` accumulation.
-        let schema_has_static = self.schema.columns.iter().any(|c| c.is_static);
-        let schema = self.schema.clone();
+        //
+        // TWO DISTINCT schemas are in play, and mixing them up silently
+        // corrupts the output (found via the real #1019 2-generation
+        // dropped-column fixture, which no single-run synthetic unit test
+        // exercised): `self.schema` is this merger's DECODE-time schema
+        // (e.g. `compact_sstables_with_registry`'s `effective_schema`, which
+        // still declares a fully-purged dropped column so its cells can be
+        // decoded and purge-evaluated) — used ONLY for
+        // `merge_entry_to_mutation`. `output_writer`'s OWN schema is the
+        // ENCODE-time `write_schema` — the header/column layout actually
+        // committed to Data.db (with fully-purged dropped columns already
+        // stripped) — required by every `feed_row`/`feed_static_row`/
+        // `finish` call, exactly as `write_partition` always used its own
+        // `&self.schema` internally rather than a caller-decoded schema.
+        let decode_schema = self.schema.clone();
+        let write_schema = output_writer.schema().clone();
+        let schema_has_static = write_schema.columns.iter().any(|c| c.is_static);
         let mut stream = StreamingMerger::new(&mut self);
 
         // Outer loop: one iteration per PARTITION, with all partition-scoped
@@ -2439,7 +2454,7 @@ impl KWayMerger {
                         if row.is_metadata_only_no_op() {
                             continue;
                         }
-                        let mutation = Self::merge_entry_to_mutation(*row, &schema)?;
+                        let mutation = Self::merge_entry_to_mutation(*row, &decode_schema)?;
                         // Single fold point for EVERY mutation of this
                         // partition (carrier, static, or clustered row) —
                         // mirrors `write_partition`'s
@@ -2453,7 +2468,7 @@ impl KWayMerger {
 
                         if let Some(active) = session.as_mut() {
                             // Already streaming this partition's Some(ck) tail.
-                            active.feed_row(&mutation, &schema)?;
+                            active.feed_row(&mutation, &write_schema)?;
                             row_count += 1;
                             continue;
                         }
@@ -2502,7 +2517,7 @@ impl KWayMerger {
                             if !saw_carrier_or_static {
                                 static_first_ts = mutation.timestamp_micros;
                             }
-                            static_tracker.feed(&mutation, &schema, None);
+                            static_tracker.feed(&mutation, &write_schema, None);
                             saw_carrier_or_static = true;
                             row_count += 1;
                             continue;
@@ -2525,9 +2540,9 @@ impl KWayMerger {
                         )?;
                         if schema_has_static {
                             let merged = std::mem::take(&mut static_tracker).finish();
-                            new_session.feed_static_row(&merged, static_first_ts, &schema)?;
+                            new_session.feed_static_row(&merged, static_first_ts, &write_schema)?;
                         }
-                        new_session.feed_row(&mutation, &schema)?;
+                        new_session.feed_row(&mutation, &write_schema)?;
                         row_count += 1;
                         stats.output_partitions += 1;
                         session = Some(new_session);
@@ -2535,7 +2550,7 @@ impl KWayMerger {
                     StreamingStep::PartitionEnd { key } => {
                         match session.take() {
                             Some(active) => {
-                                let (offset, blocks, emit) = active.finish(&schema)?;
+                                let (offset, blocks, emit) = active.finish(&write_schema)?;
                                 output_writer.complete_partition_incremental(
                                     &key,
                                     partition_tombstone.as_ref(),
@@ -2563,10 +2578,10 @@ impl KWayMerger {
                                     new_session.feed_static_row(
                                         &merged,
                                         static_first_ts,
-                                        &schema,
+                                        &write_schema,
                                     )?;
                                 }
-                                let (offset, blocks, emit) = new_session.finish(&schema)?;
+                                let (offset, blocks, emit) = new_session.finish(&write_schema)?;
                                 output_writer.complete_partition_incremental(
                                     &key,
                                     partition_tombstone.as_ref(),
