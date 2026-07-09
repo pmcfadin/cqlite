@@ -91,7 +91,7 @@ public final class ArrowToTrino {
      * the CQLite stack — INTERNAL_ERROR is the correct category. A connector-specific
      * {@code ErrorCodeSupplier} would be idiomatic but is out of scope.
      */
-    public static FieldVector requireVector(VectorSchemaRoot root, String column, String contextLabel) {
+    static FieldVector requireVector(VectorSchemaRoot root, String column, String contextLabel) {
         FieldVector vector = root.getVector(column);
         if (vector == null) {
             throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,

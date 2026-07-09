@@ -110,8 +110,8 @@ class CqliteFlightAggregatePageSourceTest {
 
     /**
      * Issue #2262: a projected group-by column absent from the delivered Arrow batch
-     * (schema drift between the connector aggregation projection and the Flight server
-     * response) must surface a clear error NAMING the column via the real
+     * (schema drift between the connector projection and the Flight server response)
+     * must surface a clear error NAMING the column via the real
      * {@link CqliteFlightAggregatePageSource#accumulate} path — not silently produce
      * null group keys (a corrupted GROUP BY result set). Mirrors #2238's toPage guard.
      */

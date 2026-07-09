@@ -1,6 +1,7 @@
 package in.mcfad.cqlite.flight;
 
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
@@ -16,7 +17,6 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
