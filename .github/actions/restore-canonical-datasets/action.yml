@@ -13,7 +13,7 @@ inputs:
   dataset-sha256:
     description: Expected SHA256 digest for the canonical dataset asset.
     required: false
-    default: ace8e0e371af8d254c2bc89d7a8e75f11f2552eca0c2a7ba9f0ab1ee3547dad6
+    default: 414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16
   dataset-root:
     description: Directory where the canonical dataset should be present.
     required: false

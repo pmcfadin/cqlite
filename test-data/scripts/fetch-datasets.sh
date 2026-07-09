@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # Fetch canonical Cassandra 5 datasets into test-data/datasets
-# Usage: DATASET_TAG=datasets-v3 DATASET_ASSET=cassandra5-small-full-v3.5.tar.gz DATASET_SHA256=ace8e0e371af8d254c2bc89d7a8e75f11f2552eca0c2a7ba9f0ab1ee3547dad6 ./test-data/scripts/fetch-datasets.sh
+# Usage: DATASET_TAG=datasets-v3 DATASET_ASSET=cassandra5-small-full-v3.5.tar.gz DATASET_SHA256=414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16 ./test-data/scripts/fetch-datasets.sh
 
 TAG="${DATASET_TAG:-datasets-v3}"
 ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.5.tar.gz}"
-SHA256_EXPECTED="${DATASET_SHA256:-ace8e0e371af8d254c2bc89d7a8e75f11f2552eca0c2a7ba9f0ab1ee3547dad6}"
+SHA256_EXPECTED="${DATASET_SHA256:-414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16}"
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
 ARCHIVE_DATASET_ROOT="test-data/datasets"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"
