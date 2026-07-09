@@ -134,13 +134,19 @@ public record CqliteFlightConfig(
                         + redactUserInfo(base));
     }
 
-    /** Render {@code base} for an error message, replacing any userinfo with {@code ***}. */
+    /**
+     * Render {@code base} for an error message, replacing any userinfo with {@code ***}.
+     * {@code base.toString()} renders the <b>raw</b> (percent-encoded) form, so the match must
+     * use {@link URI#getRawUserInfo()} rather than the decoded {@link URI#getUserInfo()} —
+     * otherwise encoded credentials (e.g. {@code us%40er:p%23ss}) would fail to match and leak
+     * into the exception message verbatim.
+     */
     private static String redactUserInfo(URI base) {
-        String userInfo = base.getUserInfo();
-        if (userInfo == null) {
+        String rawUserInfo = base.getRawUserInfo();
+        if (rawUserInfo == null) {
             return base.toString();
         }
-        return base.toString().replace(userInfo + "@", "***@");
+        return base.toString().replace(rawUserInfo + "@", "***@");
     }
 
     public static CqliteFlightConfig fromMap(Map<String, String> config) {

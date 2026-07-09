@@ -186,6 +186,26 @@ class CqliteFlightConfigTest {
     }
 
     @Test
+    void rejectsSidecarUriWithPercentEncodedUserInfoWithoutLeaking() {
+        // getUserInfo() decodes percent-escapes but URI#toString() renders the raw (encoded)
+        // form; redaction must match the RAW userinfo or the encoded credential leaks verbatim
+        // into the exception message (roborev job 1567).
+        Map<String, String> m = base();
+        m.put("cqlite.sidecar-uri", "http://us%40er:p%23ss@10.0.0.5:9043");
+        IllegalArgumentException ex =
+                assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+        String message = ex.getMessage();
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("p%23ss"),
+                "raw-encoded credential must not leak: " + message);
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("p#ss"),
+                "decoded credential must not leak: " + message);
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("us%40er"),
+                "raw-encoded userinfo must not leak: " + message);
+        org.junit.jupiter.api.Assertions.assertFalse(message.contains("us@er"),
+                "decoded userinfo must not leak: " + message);
+    }
+
+    @Test
     void acceptsIpv4RootSidecarUri() {
         Map<String, String> m = base();
         m.put("cqlite.sidecar-uri", "http://10.0.0.5:9043");
