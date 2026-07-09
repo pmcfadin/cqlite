@@ -1,17 +1,13 @@
-//! Schema-aware heap-direct ordering proof (issue #1668, stage 5b) — the
-//! "deferred crux" from stage 3a, solved for real this time.
+//! Schema-aware heap-direct ordering (issue #1668, stages 5b-5c-i) — the
+//! "deferred crux" from stage 3a, solved for real.
 //!
-//! Stage 3a proved cross-group emission order is safe TODAY only because
-//! [`super::KWayMerger::step_streaming`] drains a `Vec<MergeEntry>` that
-//! `merge_partition_rows` already schema-aware-sorted (`merged.sort_by(|a,
+//! Stage 3a proved cross-group emission order was safe pre-5c-i only because
+//! [`super::KWayMerger::step_streaming`] drained a `Vec<MergeEntry>` that
+//! `merge_partition_rows` had already schema-aware-sorted (`merged.sort_by(|a,
 //! b| ck_a.compare(ck_b, &self.schema) ...)`) as its unconditional last step.
-//! Removing that whole-partition sort (stage 5d's job) requires a heap whose
-//! POP ORDER is *itself* schema-correct — this module proves that is
-//! achievable and correct, WITHOUT yet touching [`super::KWayMerger`]'s own
-//! `heap: BinaryHeap<Reverse<MergeEntry>>` field (that wiring is stage 5c/5d's
-//! job, once the writer can also accept true increments — mirroring the
-//! stage-2-before-stage-3b precedent: introduce and prove the mechanism
-//! first, wire it into production once every dependency is ready).
+//! [`super::KWayMerger`]'s `heap` field now uses [`SchemaOrderedEntry`]
+//! directly (stage 5c-i), so the heap's OWN pop order is schema-correct —
+//! see [`SchemaOrderedEntry`]'s `Ord` impl.
 //!
 //! ## Why a bounded lookahead/reorder buffer is NOT sufficient
 //!
@@ -23,45 +19,31 @@
 //! FIRST — which is the LAST value the fallback order would ever produce.
 //! Emitting the correct first item therefore requires having already seen
 //! ALL N items — the required lookahead is O(N), not a fixed constant
-//! independent of partition size. This is proven directly by
-//! `stage3a`'s `step_streaming_matches_step_for_desc_clustering_fixture`
-//! (fed via the SAME merger machinery) and is why this module makes the
-//! comparator itself schema-aware instead.
+//! independent of partition size. This is why the comparator itself must be
+//! schema-aware.
 //!
-//! ## Design: a schema-aware comparator with NO lifetime on `KWayMerger`
+//! ## Design: `Arc<TableSchema>`, not a borrowed lifetime
 //!
 //! `MergeEntry::Ord` cannot be made schema-aware directly: `Ord::cmp(&self,
 //! &other) -> Ordering` takes no extra context, and `ClusteringKey::compare`
-//! needs `&TableSchema`. Storing a `&'a TableSchema` (or `Arc<TableSchema>`)
-//! on every heap entry, if that heap were a LONG-LIVED struct field (like
-//! `KWayMerger.heap`), would need `KWayMerger` to be self-referential (the
-//! heap borrowing a sibling field of the SAME struct) — not expressible in
-//! safe Rust. This module sidesteps the problem entirely by keeping the
-//! schema-aware heap PURELY LOCAL to one function call
-//! ([`schema_ordered_pop_all`]): the wrapper's `&'a TableSchema` borrow and
-//! the heap it lives in are both stack-local to that call, so there is no
-//! self-reference. Wiring this into `KWayMerger.heap` itself (stage 5c/5d)
-//! will need ONE of: (a) an `Arc<TableSchema>` field alongside the existing
-//! plain `schema: TableSchema` (cheap, additive, no lifetime issue), or (b)
-//! a per-entry precomputed schema-independent sort key. Not resolved here —
-//! this module only proves the COMPARATOR is correct and sufficient.
-
-// Stage 5b (#1668) is deliberately UNWIRED: no production caller constructs a
-// `SchemaOrderedEntry` yet (that is stage 5c/5d), so a normal (non-test)
-// build sees every item here as unreachable. Matches the crate's existing
-// convention for proof-only surface pending production wiring (see
-// `streaming.rs`'s stage-2 history). Exercised directly by this module's own
-// tests.
-#![cfg_attr(feature = "write-support", allow(dead_code))]
+//! needs `&TableSchema`. A borrowed `&'a TableSchema` on every heap entry
+//! would make `KWayMerger` self-referential once the heap is a LONG-LIVED
+//! struct field (the heap borrowing a sibling field of the SAME struct) —
+//! not expressible in safe Rust. [`SchemaOrderedEntry`] instead holds an
+//! `Arc<TableSchema>` (cheap to clone per entry — a refcount bump, not a
+//! deep copy), populated from [`super::KWayMerger`]'s ADDITIVE `schema_arc`
+//! field (the pre-existing plain `schema: TableSchema` field is untouched,
+//! keeping every OTHER existing `self.schema` use-site in `mod.rs`
+//! unaffected by this change).
 
 #[cfg(feature = "write-support")]
 use super::model::MergeEntry;
 #[cfg(feature = "write-support")]
 use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
-use std::cmp::{Ordering, Reverse};
+use std::cmp::Ordering;
 #[cfg(feature = "write-support")]
-use std::collections::BinaryHeap;
+use std::sync::Arc;
 
 /// Heap element pairing a [`MergeEntry`] with the schema it should be
 /// ordered against. `Ord` mirrors [`MergeEntry::Ord`] EXACTLY (same
@@ -71,37 +53,38 @@ use std::collections::BinaryHeap;
 /// and `write_partition` already use for a malformed clustering key (more
 /// components than the schema declares).
 #[cfg(feature = "write-support")]
-struct SchemaOrderedEntry<'a> {
-    entry: MergeEntry,
-    schema: &'a TableSchema,
+#[derive(Debug, Clone)]
+pub(crate) struct SchemaOrderedEntry {
+    pub(crate) entry: MergeEntry,
+    pub(crate) schema: Arc<TableSchema>,
 }
 
 #[cfg(feature = "write-support")]
-impl<'a> SchemaOrderedEntry<'a> {
-    fn new(entry: MergeEntry, schema: &'a TableSchema) -> Self {
+impl SchemaOrderedEntry {
+    pub(crate) fn new(entry: MergeEntry, schema: Arc<TableSchema>) -> Self {
         Self { entry, schema }
     }
 }
 
 #[cfg(feature = "write-support")]
-impl PartialEq for SchemaOrderedEntry<'_> {
+impl PartialEq for SchemaOrderedEntry {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
 #[cfg(feature = "write-support")]
-impl Eq for SchemaOrderedEntry<'_> {}
+impl Eq for SchemaOrderedEntry {}
 
 #[cfg(feature = "write-support")]
-impl PartialOrd for SchemaOrderedEntry<'_> {
+impl PartialOrd for SchemaOrderedEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 #[cfg(feature = "write-support")]
-impl Ord for SchemaOrderedEntry<'_> {
+impl Ord for SchemaOrderedEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.entry.key.token.cmp(&other.entry.key.token) {
             Ordering::Equal => match self.entry.key.key.cmp(&other.entry.key.key) {
@@ -113,7 +96,7 @@ impl Ord for SchemaOrderedEntry<'_> {
                         (Some(a), Some(b)) => {
                             // THE schema-aware substitution for MergeEntry's
                             // fallback `a.cmp(b)`.
-                            match a.compare(b, self.schema).unwrap_or_else(|_| a.cmp(b)) {
+                            match a.compare(b, &self.schema).unwrap_or_else(|_| a.cmp(b)) {
                                 Ordering::Equal => self.entry.run_index.cmp(&other.entry.run_index),
                                 other_ord => other_ord,
                             }
@@ -128,21 +111,25 @@ impl Ord for SchemaOrderedEntry<'_> {
 }
 
 /// Push every entry onto a schema-aware min-heap and pop them all, in order
-/// (issue #1668, stage 5b).
+/// (issue #1668, stage 5b proof — still used by this module's own tests as a
+/// standalone equivalence check independent of a real `KWayMerger`). Test-only
+/// now that stage 5c-i wires `SchemaOrderedEntry` directly into
+/// `KWayMerger.heap` for production use.
 ///
 /// Proves cross-group emission order can be correct DIRECTLY off a heap —
-/// no `merged.sort_by` needed afterward. The heap and its `&schema` borrow
-/// are both local to this call, so there is no self-referential-storage
-/// problem (see the module doc). NOT yet called by any production path;
-/// `KWayMerger.heap` (`BinaryHeap<Reverse<MergeEntry>>`) is unchanged.
-#[cfg(feature = "write-support")]
+/// no `merged.sort_by` needed afterward.
+#[cfg(all(test, feature = "write-support"))]
 pub(crate) fn schema_ordered_pop_all(
     entries: Vec<MergeEntry>,
     schema: &TableSchema,
 ) -> Vec<MergeEntry> {
-    let mut heap: BinaryHeap<Reverse<SchemaOrderedEntry<'_>>> = BinaryHeap::new();
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let schema_arc = Arc::new(schema.clone());
+    let mut heap: BinaryHeap<Reverse<SchemaOrderedEntry>> = BinaryHeap::new();
     for entry in entries {
-        heap.push(Reverse(SchemaOrderedEntry::new(entry, schema)));
+        heap.push(Reverse(SchemaOrderedEntry::new(entry, schema_arc.clone())));
     }
     let mut out = Vec::with_capacity(heap.len());
     while let Some(Reverse(wrapped)) = heap.pop() {
@@ -179,12 +166,13 @@ mod tests {
     fn merger_over(entries: Vec<MergeEntry>, schema: TableSchema) -> KWayMerger {
         KWayMerger {
             runs: vec![RunReader::new(Box::new(VecIterator(entries.into_iter())))],
-            heap: BinaryHeap::new(),
+            heap: std::collections::BinaryHeap::new(),
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: Arc::new(schema.clone()),
             schema,
         }
     }
@@ -414,6 +402,46 @@ mod tests {
             vec![None, Some(2), Some(1)],
             "absent-ck2 must sort first (NULL-first), then DESC by ck2 — \
              directly off the heap, no final sort"
+        );
+    }
+
+    /// Stage 5c-i finding: even though the heap's OWN pop order is now
+    /// schema-aware (this module), `merge_partition_rows`'s intermediate
+    /// `clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>>`
+    /// STILL discards that arrival order — a `BTreeMap`'s iteration order is
+    /// governed ENTIRELY by its own `Ord` impl on the key type (here
+    /// `ClusteringKey`'s FALLBACK, non-schema-aware `Ord`), independent of
+    /// insertion order. Inserting keys in schema-correct (DESC) arrival order
+    /// and then iterating the map yields the FALLBACK (ASC) order, not the
+    /// arrival order — proving `merge_partition_rows`'s final
+    /// `merged.sort_by(schema-aware compare)` is STILL load-bearing and NOT
+    /// yet redundant. This is a general property of `BTreeMap`, demonstrated
+    /// directly against the SAME type shape `clustered_rows` uses, without
+    /// touching (or removing anything from) `merge_partition_rows` itself.
+    #[test]
+    fn clustered_rows_btreemap_discards_schema_aware_arrival_order() {
+        use std::collections::BTreeMap;
+
+        // Simulate the NOW-schema-aware heap's arrival order for a DESC
+        // clustering column: 2, 1, 0 (descending — schema-correct).
+        let mut clustered_rows: BTreeMap<Option<ClusteringKey>, i32> = BTreeMap::new();
+        for v in [2, 1, 0] {
+            clustered_rows.insert(Some(ClusteringKey::single("ck", Value::Integer(v))), v);
+        }
+
+        let iterated: Vec<i32> = clustered_rows.into_values().collect();
+
+        // The map's OWN key Ord (fallback, ASC) governs iteration — NOT
+        // insertion order — so it comes out ascending, the OPPOSITE of the
+        // schema-correct DESC order the heap delivered.
+        assert_eq!(
+            iterated,
+            vec![0, 1, 2],
+            "BTreeMap iteration order is governed by the key's Ord, not \
+             insertion order — this is WHY merge_partition_rows's final \
+             merged.sort_by(schema-aware compare) is still necessary after \
+             stage 5c-i's schema-aware heap wiring: `clustered_rows` re-\
+             imposes the FALLBACK order regardless of arrival order"
         );
     }
 }

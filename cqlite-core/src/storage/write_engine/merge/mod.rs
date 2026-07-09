@@ -1143,12 +1143,25 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
 pub struct KWayMerger {
     /// Input runs (one per SSTable)
     runs: Vec<RunReader>,
-    /// Min-heap for efficient merge
-    heap: BinaryHeap<Reverse<MergeEntry>>,
+    /// Min-heap for efficient merge (issue #1668, stage 5c-i): each element
+    /// pairs a `MergeEntry` with `schema_arc` so the heap's OWN pop order is
+    /// schema-aware (DESC clustering columns, NULL-first absent trailing
+    /// components) — see `schema_order::SchemaOrderedEntry`. Was
+    /// `BinaryHeap<Reverse<MergeEntry>>` (the fallback, non-schema-aware
+    /// `MergeEntry::Ord`) through stage 5b.
+    heap: BinaryHeap<Reverse<schema_order::SchemaOrderedEntry>>,
     /// Current partition being merged (for partition boundary detection)
     current_partition: Option<DecoratedKey>,
     /// Table schema for schema-aware merging
     schema: TableSchema,
+    /// `Arc`-wrapped clone of `schema`, ADDITIVE (issue #1668, stage 5c-i) —
+    /// cheap to clone per heap entry (a refcount bump, not a deep copy),
+    /// used ONLY by `schema_order::SchemaOrderedEntry` so the heap's
+    /// comparator can be schema-aware without `KWayMerger` becoming
+    /// self-referential (a heap entry cannot hold `&self.schema` while
+    /// living inside a sibling field of the SAME struct). Every OTHER
+    /// existing `self.schema` use-site in this file is UNCHANGED.
+    schema_arc: std::sync::Arc<TableSchema>,
     /// gc_grace cutoff (seconds since epoch): tombstones/cells whose
     /// `local_deletion_time < gc_before_secs` are purgeable.
     ///
@@ -2281,6 +2294,9 @@ impl KWayMerger {
             heap,
             current_partition: None,
             schema: schema.clone(),
+            // Issue #1668, stage 5c-i: `Arc`-wrapped clone of `schema`, used
+            // only by the heap's schema-aware comparator (see the field doc).
+            schema_arc: std::sync::Arc::new(schema.clone()),
             gc_before_secs,
             now_secs,
             // Conservatively unsafe by default (#921 finding 1): purging is
@@ -2472,23 +2488,24 @@ impl KWayMerger {
         let mut partition_rows = Vec::new();
         let mut partition_key: Option<DecoratedKey> = None;
 
-        while let Some(Reverse(entry)) = self.heap.peek() {
+        while let Some(Reverse(wrapped)) = self.heap.peek() {
             // Check if we've moved to a new partition
             if let Some(ref current_key) = partition_key {
-                if &entry.key != current_key {
+                if &wrapped.entry.key != current_key {
                     // Partition boundary - stop here
                     break;
                 }
             } else {
                 // First entry of new partition
-                partition_key = Some(entry.key.clone());
+                partition_key = Some(wrapped.entry.key.clone());
             }
 
             // Pop entry from heap
-            let Reverse(entry) = self
+            let Reverse(wrapped) = self
                 .heap
                 .pop()
                 .ok_or_else(|| Error::InvalidInput("Merge heap unexpectedly empty".to_string()))?;
+            let entry = wrapped.entry;
 
             // Add to partition rows
             partition_rows.push(entry.clone());
@@ -2526,9 +2543,14 @@ impl KWayMerger {
         let run = &mut self.runs[run_index];
         if !run.is_exhausted() {
             if let Some(entry) = run.peek()? {
-                // Clone and push to heap
+                // Clone and push to heap, paired with the schema-aware
+                // comparator's schema (issue #1668, stage 5c-i).
                 let entry = entry.clone();
-                self.heap.push(Reverse(entry));
+                self.heap
+                    .push(Reverse(schema_order::SchemaOrderedEntry::new(
+                        entry,
+                        self.schema_arc.clone(),
+                    )));
             }
 
             // Advance the run reader
@@ -4357,6 +4379,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -4479,6 +4502,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -4626,6 +4650,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -4775,6 +4800,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -4923,6 +4949,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -5056,6 +5083,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -5151,6 +5179,7 @@ mod tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -6491,6 +6520,7 @@ mod merge_property_tests {
                     purge_safe: false,
                     max_purgeable_timestamp: None,
                     schema: schema.clone(),
+                    schema_arc: std::sync::Arc::new(schema.clone()),
                 };
                 let real_merged = merger.merge_partition_rows(merge_entries.clone())
                     .expect("merge_partition_rows must not fail");
@@ -6617,6 +6647,7 @@ mod merge_property_tests {
                     purge_safe: false,
                     max_purgeable_timestamp: None,
                     schema: schema.clone(),
+                    schema_arc: std::sync::Arc::new(schema.clone()),
                 };
                 let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
                     .expect("merge_partition_rows must not fail");
@@ -6827,6 +6858,7 @@ mod streaming_tests {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         };
 
@@ -8867,6 +8899,7 @@ mod issue_822_merge_ordering_semantics {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         }
     }
@@ -9764,6 +9797,7 @@ mod issue_886_empty_partition_skip {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         }
     }
@@ -10053,6 +10087,7 @@ mod issue_912_row_tombstone_clustering_identity {
             purge_safe: false,
             max_purgeable_timestamp: None,
             schema: schema.clone(),
+            schema_arc: std::sync::Arc::new(schema.clone()),
         };
         let merged = merger
             .merge_partition_rows(vec![e5, e9])
@@ -10445,6 +10480,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             purge_safe: false,
             max_purgeable_timestamp: None,
             schema: schema.clone(),
+            schema_arc: std::sync::Arc::new(schema.clone()),
         };
 
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -10980,6 +11016,7 @@ mod issue_845_gc_grace_purge {
             heap: BinaryHeap::new(),
             current_partition: None,
             schema: unclustered_schema(),
+            schema_arc: std::sync::Arc::new(unclustered_schema()),
             gc_before_secs: Some(GC_BEFORE),
             now_secs: None,
             purge_safe,
@@ -11034,6 +11071,7 @@ mod issue_845_gc_grace_purge {
             heap: BinaryHeap::new(),
             current_partition: None,
             schema: unclustered_schema(),
+            schema_arc: std::sync::Arc::new(unclustered_schema()),
             gc_before_secs: Some(GC_BEFORE),
             now_secs: None,
             purge_safe,
@@ -11548,6 +11586,7 @@ mod issue_845_gc_grace_purge {
             purge_safe: false,
             max_purgeable_timestamp: None,
             schema: write_schema.clone(),
+            schema_arc: std::sync::Arc::new(write_schema.clone()),
         };
 
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
