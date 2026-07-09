@@ -4,33 +4,34 @@ Bloom Filter FP chance: 0.01
 Minimum timestamp: 06/10/2026 16:17:37 (1781108257420438)
 Maximum timestamp: 06/10/2026 16:17:37 (1781108257423077)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
-SSTable min local deletion time: no tombstones (9223372036854775807)
-SSTable max local deletion time: no tombstones (9223372036854775807)
+SSTable min local deletion time: 06/11/2026 16:17:37 (1781194657)
+SSTable max local deletion time: 06/11/2026 16:17:37 (1781194657)
 Compressor: org.apache.cassandra.io.compress.LZ4Compressor
-Compression ratio: 0.6853932584269663
-TTL min: 0
-TTL max: 0
+Compression ratio: 0.7311827956989247
+TTL min: 86400 (1 day)
+TTL max: 86400 (1 day)
 First token: -2824192546314762522 (ffffffff-ffff-ffff-ffff-ffffffffffff)
 Last token: 2589554819249504804 (00000000-0000-0000-0000-000000000001)
 Covered clusterings: [, ]
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 2772b55b-b850-480f-abb7-ba7f0d00fcb5
+Originating host id: bb515a3f-c802-4921-83de-733bb2da4510
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1783570696191, position=49918)=CommitLogPosition(segmentId=1783570696191, position=51156)}
+Replay positions covered: {CommitLogPosition(segmentId=1781108218108, position=53774)=CommitLogPosition(segmentId=1781108218108, position=163821)}
 totalColumnsSet: 4
 totalRows: 2
 Estimated tombstone drop times: 
-   Drop Time | Count  (%)  Histogram 
+   Drop Time                        | Count  (%)  Histogram 
+   1781194680 (06/11/2026 16:18:00) |     6 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
-   50th      0 
-   75th      0 
-   95th      0 
-   98th      0 
-   99th      0 
-   Min       0 
-   Max       0 
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
 Partition Size: 
    Size (bytes) | Count  (%)  Histogram 
    50 (50 B)    |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
@@ -55,8 +56,8 @@ Column Count:
    Max       2
 Local token space coverage: NaN
 Estimated cardinality: 2
-EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTTL: 86400 (1 day)
+EncodingStats minLocalDeletionTime: 06/11/2026 16:17:37 (1781194657)
 EncodingStats minTimestamp: 06/10/2026 16:17:37 (1781108257420438)
 KeyType: org.apache.cassandra.db.marshal.UUIDType
 ClusteringTypes: []

@@ -1,20 +1,31 @@
 # Issue #1935 — TTL corpus regeneration notes (#1896 cluster A, owner-decided)
 
-Owner decision (2026-07-08, ref #1896): strip `default_time_to_live` from the
-five TTL-carrying corpus tables that time-bombed the fixtures, **keep**
-`test_basic.ttl_test_table` with its TTL as the dedicated #1853 seam.
+**Owner amendment (2026-07-09, FINAL):** strip TTL from only **4** tables
+(`app_metrics`, `log_entries`, `tick_data`, `test_oa.ttl_table`) and keep **2**
+aged-TTL seams:
+- `test_basic.ttl_test_table` — BIG (`nb`) seam, #1853 writetime/TTL parity.
+- `test_da.ttl_table` — BTI (`da`) seam, restored to v3.4 verbatim (TTL 86400,
+  expired 2026-06-11). It is the **sole BTI TTL-shadowing regression fixture**
+  guarding the #1741 P0 (`cqlite-core/tests/issue_660_bti_end_to_end_read.rs`),
+  which must keep returning 0 live rows at wall clock. Do NOT strip it.
+
+Prior decision (2026-07-08, ref #1896) had stripped `test_da.ttl_table` too (5
+tables); the 2026-07-09 amendment reinstates it as a second seam. Both seams keep
+their aged v3.4 fixtures UNTOUCHED — time-proof: "expired at wall clock" is
+forever true once past expiry.
 
 ## What is DONE in this PR (local, reviewable — no binary regen)
 
-1. **Schema edits** — `default_time_to_live` removed (and no `USING TTL` inserts
-   exist for these tables):
-   - `test-data/schemas/time-series.cql` — `app_metrics` (was 2592000),
-     `log_entries` (was 604800), `tick_data` (was 86400).
-   - `test-data/schemas/da-test.cql` — `ttl_table` (was 86400).
-   - `test-data/schemas/oa-test.cql` — `ttl_table` (was 86400).
-   - `test-data/schemas/basic-types.cql` — `ttl_test_table` **UNCHANGED**
-     (keeps `default_time_to_live = 86400`; it is the #1853 seam).
-   - `test-data/scripts/regenerate-datasets.sh` — comment updated (no TTL).
+1. **TTL removal (via the v3.4-splice re-cut, no schema-default change)** — the
+   4 stripped tables are re-inserted WITHOUT `USING TTL`:
+   - `test_timeseries` — `app_metrics`, `log_entries`, `tick_data`.
+   - `test_oa.ttl_table` (oa/BIG).
+   - `test_da.ttl_table` **KEPT** as the BTI (`da`) #1741/`issue_660` seam
+     (restored to v3.4 verbatim, TTL 86400) — NOT stripped.
+   - `test_basic.ttl_test_table` **KEPT** as the BIG (`nb`) #1853 seam
+     (aged TTL fixture UNTOUCHED).
+   - Schema `.cql` CREATE statements carry no `default_time_to_live` (TTL was
+     applied per-row via `USING TTL` at generation), so no schema file changed.
 2. **Test assertions** made TTL-aware / robust:
    - `cqlite-cli/tests/comprehensive_select_test.rs` — the four TTL tables
      (`ttl_test_table`, `app_metrics`, `log_entries`, `tick_data`) moved out of the
@@ -38,7 +49,10 @@ five TTL-carrying corpus tables that time-bombed the fixtures, **keep**
 
 ## How v3.5 was actually produced — the v3.4-SPLICE strategy (FINAL, owner-decided)
 
-**v3.5 == v3.4 byte-identical EXCEPT the 5 TTL tables.** An earlier attempt did a
+**v3.5 == v3.4 byte-identical EXCEPT the 4 stripped TTL tables** (`app_metrics`,
+`log_entries`, `tick_data`, `test_oa.ttl_table`); both TTL seams
+(`test_basic.ttl_test_table` BIG, `test_da.ttl_table` BTI) stay v3.4 verbatim.
+An earlier attempt did a
 whole-corpus `regenerate-datasets.sh --rows 50` uniform regen; that drifted EVERY
 table's UUID/shape/golden and was **discarded**. The shape-bearing generator that
 produced the original v3.4 corpus was never committed (ref #2222), so v3.5 is cut
@@ -49,7 +63,7 @@ base tree. Exact flow that produced v3.5:
    sha `3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33`) and
    extract it into `test-data/datasets/` (binaries are gitignored). This is the
    byte-for-byte base for the ~40 unchanged tables.
-2. **Re-cut ONLY the 5 TTL tables** in `cassandra:5.0.2` docker, WITHOUT
+2. **Re-cut ONLY the 4 stripped TTL tables** in `cassandra:5.0.2` docker, WITHOUT
    `default_time_to_live`, replaying each table's EXACT v3.4 shape. Rows are
    reconstructed VERBATIM from the committed v3.4 goldens (keys, clustering,
    cell values) and inserted with `USING TIMESTAMP <v3.4-micros>` and no TTL, so
@@ -58,15 +72,17 @@ base tree. Exact flow that produced v3.5:
      `app_metrics` (200 rows/200 parts), `log_entries` (200/200),
      `tick_data` (200/24, deterministic bucket distribution).
    - oa phase (`storage_compatibility_mode: NONE`): `test_oa.ttl_table` (3 rows).
-   - da/BTI phase (`NONE` + `sstable.selected_format: bti`):
-     `test_da.ttl_table` (2 rows).
+   - da/BTI phase: `test_da.ttl_table` is **NOT re-cut** — it is restored to v3.4
+     verbatim (extract just its table dir from the v3.4 asset) so it stays the
+     #1741/`issue_660` BTI TTL-shadowing seam.
    Flush, then **rename the fresh dirs to the v3.4 UUID basenames + component
-   prefixes** (`nb-1-big` / `oa-2-big` / `da-2-bti`) and splice them over the v3.4
+   prefixes** (`nb-1-big` / `oa-2-big`) and splice them over the v3.4
    base. Because the UUIDs/prefixes are reused, `references.yml`, `metadata.yml`
    (`row_count` preserved) and `cassandra-parity-manifest.yml` stay
-   v3.4-identical — ONLY the 5 tables' `Data.db.jsonl` / `Digest.crc32` /
-   `Statistics.db.txt` goldens change (TOC.txt is byte-identical). `test_basic`
-   `ttl_test_table` keeps its aged TTL fixture UNTOUCHED (#1853 seam).
+   v3.4-identical — ONLY the 4 stripped tables' `Data.db.jsonl` / `Digest.crc32` /
+   `Statistics.db.txt` goldens change (TOC.txt is byte-identical). Both
+   `test_basic.ttl_test_table` (BIG) and `test_da.ttl_table` (BTI) keep their aged
+   TTL fixtures UNTOUCHED (#1853 + #1741 seams).
 3. **Re-export goldens** for the 5 tables (in-container `sstabledump -l` +
    `sstablemetadata`); `cassandra-parity -- corpus-audit` clean; manifest lint +
    `report --check` green.
@@ -102,10 +118,11 @@ base tree. Exact flow that produced v3.5:
 
 ## Expected outcome after regen
 
-- `app_metrics`, `log_entries`, `tick_data`, `test_da.ttl_table`,
-  `test_oa.ttl_table` return their physical (non-expired) row counts.
-- `test_basic.ttl_test_table` still returns 0 LIVE rows at wall clock (TTL kept) —
-  covered by the #1853 seam, not by a `> 0` assertion.
+- `app_metrics`, `log_entries`, `tick_data`, `test_oa.ttl_table` return their
+  physical (non-expired) row counts.
+- `test_basic.ttl_test_table` (BIG) and `test_da.ttl_table` (BTI) still return 0
+  LIVE rows at wall clock (aged TTL kept) — covered by the #1853 and
+  #1741/`issue_660` seams respectively, not by a `> 0` assertion.
 - Node CI `parity.test.js`, Python `test_parity.py`, CLI `comprehensive_select`,
   and `sstabledump-parity` all green (the TTL-aware assertions track the goldens).
 
