@@ -171,8 +171,8 @@ Add `cqlite-core` to your `Cargo.toml`:
 cqlite-core = { git = "https://github.com/pmcfadin/cqlite.git" }
 ```
 
-Default features include `all-compression` (LZ4, Snappy, Deflate, Zstd) and
-`state_machine` (query engine). For a minimal build without the query engine:
+Default features include `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_machine`
+(query engine), and `write-support` (write path). For a minimal build without the query engine:
 
 ```toml
 cqlite-core = { git = "…", default-features = false, features = ["all-compression"] }

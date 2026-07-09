@@ -67,11 +67,11 @@ run_clippy() {
         cd "$dir"
         
         # Align with CI (RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
-        # --all-features). Root Cargo.toml sets pedantic/nursery = "allow"; do NOT re-deny them.
+        # --all-features). Root Cargo.toml sets pedantic/nursery/cargo = "allow"; do NOT
+        # re-deny them here.
         if ! cargo clippy --all-targets --all-features -- \
             -D warnings \
             -D clippy::all \
-            -D clippy::cargo \
             -D unused-imports \
             -D unused-variables \
             -D dead-code \
