@@ -455,6 +455,58 @@ mod tests {
         assert_eq!(evaluate_leaf(&row_992, &in_wrong), LeafOutcome::False);
     }
 
+    /// Issue #2231 follow-up (roborev blocker): the SAME 2^53 boundary pair as
+    /// `large_bigint_equality_no_f64_collapse`, but for `Gt`/`Range` — the
+    /// leak-once-pushed-down mechanism applies identically to inequalities.
+    /// `bigcol > 9007199254740992` must match a row where
+    /// `bigcol = 9007199254740993` (they collapse to the SAME f64, so an
+    /// f64-based ordering would wrongly report `Equal` and drop the row).
+    #[test]
+    fn large_bigint_gt_and_range_no_f64_collapse() {
+        let row_993 = row_with_value("bigcol", Value::BigInt(9_007_199_254_740_993));
+
+        let gt_992 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(9_007_199_254_740_992)],
+        );
+        assert_eq!(
+            evaluate_leaf(&row_993, &gt_992),
+            LeafOutcome::True,
+            "9007199254740993 > 9007199254740992 must hold exactly"
+        );
+
+        // The row must NOT satisfy `> itself` (no false positive from rounding).
+        let gt_993 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(9_007_199_254_740_993)],
+        );
+        assert_eq!(evaluate_leaf(&row_993, &gt_993), LeafOutcome::False);
+
+        // Range [992, 992] must exclude a row holding 993 exactly.
+        let range_at_992 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Range,
+            vec![
+                Value::BigInt(9_007_199_254_740_992),
+                Value::BigInt(9_007_199_254_740_992),
+            ],
+        );
+        assert_eq!(evaluate_leaf(&row_993, &range_at_992), LeafOutcome::False);
+
+        // Range [993, 993] must include the row holding exactly 993.
+        let range_at_993 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Range,
+            vec![
+                Value::BigInt(9_007_199_254_740_993),
+                Value::BigInt(9_007_199_254_740_993),
+            ],
+        );
+        assert_eq!(evaluate_leaf(&row_993, &range_at_993), LeafOutcome::True);
+    }
+
     /// FINDING 2: a `token(...)` over the FULL partition key in declared order is
     /// accepted (validation passes), so the existing token fast-path/evaluation
     /// behaviour is preserved.

@@ -778,7 +778,10 @@ impl SelectExecutor {
             (In, ComparisonRightSide::ValueList(value_exprs)) => {
                 for value_expr in value_exprs {
                     let value = self.evaluate_select_expression(value_expr, row)?;
-                    if left_value == value {
+                    // Coerce like `Equal` (`values_equal`), matching predicate.rs's
+                    // `In` arm — keeps membership consistent with scalar equality
+                    // (e.g. a narrow column type against a wide IN operand).
+                    if value_ops::values_equal(&left_value, &value) {
                         return Ok(true);
                     }
                 }
