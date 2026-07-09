@@ -81,9 +81,7 @@ use lookup::{
     classify_partition_lookup, honest_targeted_path, sort_rows_by_token, PartitionLookupOutcome,
 };
 use row_build::{column_info_from_type_str, parse_cql_type_str, parse_table_id};
-use value_ops::{
-    compare_values_ordering, const_arithmetic, eval_arithmetic, try_compare_values, values_equal,
-};
+use value_ops::{compare_values_ordering, const_arithmetic, eval_arithmetic};
 use writetime_ttl::{
     evaluate_writetime_ttl, like_pattern_to_regex, select_has_writetime_ttl,
     writetime_ttl_column_name, SystemClock,
@@ -773,21 +771,17 @@ impl SelectExecutor {
                 ComparisonRightSide::Value(right_expr),
             ) => {
                 let right_value = self.evaluate_select_expression(right_expr, row)?;
-                let result = match op {
-                    Equal => values_equal(&left_value, &right_value),
-                    NotEqual => !values_equal(&left_value, &right_value),
-                    LessThan => try_compare_values(&left_value, &right_value)?.is_lt(),
-                    LessThanOrEqual => try_compare_values(&left_value, &right_value)?.is_le(),
-                    GreaterThan => try_compare_values(&left_value, &right_value)?.is_gt(),
-                    GreaterThanOrEqual => try_compare_values(&left_value, &right_value)?.is_ge(),
-                    _ => unreachable!("guarded by outer match"),
-                };
-                Ok(result)
+                // Scalar comparison with SQL predicate semantics (issue #2231):
+                // exact integer equality + NaN → UNKNOWN(drop) for inequalities.
+                value_ops::eval_scalar_comparison(op, &left_value, &right_value)
             }
             (In, ComparisonRightSide::ValueList(value_exprs)) => {
                 for value_expr in value_exprs {
                     let value = self.evaluate_select_expression(value_expr, row)?;
-                    if left_value == value {
+                    // Coerce like `Equal` (`values_equal`), matching predicate.rs's
+                    // `In` arm — keeps membership consistent with scalar equality
+                    // (e.g. a narrow column type against a wide IN operand).
+                    if value_ops::values_equal(&left_value, &value) {
                         return Ok(true);
                     }
                 }

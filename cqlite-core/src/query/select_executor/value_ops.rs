@@ -5,7 +5,7 @@
 //! `select_executor.rs`; centralising them keeps one copy of the comparison and
 //! arithmetic semantics across every execution path.
 
-use super::super::select_ast::ArithmeticOperator;
+use super::super::select_ast::{ArithmeticOperator, ComparisonOperator};
 use crate::{types::Value, Error, Result};
 
 /// Compare two `Value`s for equality, including limited cross-type numeric
@@ -18,14 +18,52 @@ pub(super) fn values_equal(a: &Value, b: &Value) -> bool {
     if a == b {
         return true;
     }
-    // Only coerce when both operands are numeric — otherwise non-numeric
-    // pairs (e.g. Text vs Integer) would spuriously compare equal via `as_f64`.
+    // Integer-vs-integer must compare as the widest native integer (`i128`),
+    // NEVER via `as_f64` (issue #2231): two distinct `i64` above 2^53 collapse
+    // to the same `f64` mantissa, so an f64 fallback would report them equal and
+    // — because a fully-translated Trino conjunct is removed from the plan — leak
+    // rows Trino would drop. Every CQL integral type fits losslessly in `i128`.
+    if let (Some(x), Some(y)) = (as_integral_i128(a), as_integral_i128(b)) {
+        return x == y;
+    }
+    // Otherwise coerce only when both operands are numeric — a genuine float on
+    // at least one side. Non-numeric pairs (e.g. Text vs Integer) must not
+    // spuriously compare equal via `as_f64`.
     if same_numeric_family(a, b) {
         if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
             return x == y;
         }
     }
     false
+}
+
+/// The exact integer value of an integral CQL numeric `Value`, or `None` for
+/// float/non-numeric variants. Widened to `i128` so every integral type
+/// (`tinyint`..`bigint`, `counter`) is represented losslessly, enabling exact
+/// integer equality/comparison without an `f64` round-trip (issue #2231).
+pub(super) fn as_integral_i128(v: &Value) -> Option<i128> {
+    match v {
+        Value::Integer(i) => Some(*i as i128),
+        Value::BigInt(i) => Some(*i as i128),
+        Value::Counter(i) => Some(*i as i128),
+        Value::TinyInt(i) => Some(*i as i128),
+        Value::SmallInt(i) => Some(*i as i128),
+        _ => None,
+    }
+}
+
+/// True when `v` is an IEEE floating-point value that is NaN (CQL `float`/
+/// `double`). Predicate (WHERE) evaluation uses this to implement SQL
+/// three-valued logic: any relational comparison (`<`, `<=`, `>`, `>=`) with a
+/// NaN operand is UNKNOWN, so the row is dropped (issue #2231). Only the `float`
+/// variants can be NaN — integral types never are, so this is principled, not a
+/// bit-pattern heuristic.
+pub(super) fn is_nan_value(v: &Value) -> bool {
+    match v {
+        Value::Float(x) => x.is_nan(),
+        Value::Float32(x) => x.is_nan(),
+        _ => false,
+    }
 }
 
 /// True when both `Value`s are numeric variants eligible for cross-type coercion.
@@ -71,6 +109,88 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
     Err(Error::query_execution(
         "Cannot compare incompatible types".to_string(),
     ))
+}
+
+/// Relational comparison for PREDICATE (WHERE) evaluation, with SQL
+/// three-valued logic for IEEE NaN AND exact-integer ordering above the f64
+/// precision boundary.
+///
+/// Returns `Ok(None)` — SQL UNKNOWN, so the caller DROPS the row — when either
+/// operand is a NaN float. Cassandra's total order (`cassandra_double_cmp`, used
+/// by `try_compare_values`/`compare_values_ordering`) sorts NaN as the GREATEST
+/// value, which would make `d > 1.5` TRUE for `d = NaN` and leak rows Trino
+/// would drop once the conjunct is pushed down and removed from the plan (issue
+/// #2231).
+///
+/// When both operands are integral (mirroring `values_equal`'s own structure),
+/// compares them as exact `i128` BEFORE any f64 fallback: two distinct `i64`
+/// above 2^53 collapse to the same f64 mantissa, so `bigcol > 9007199254740992`
+/// against a row where `bigcol = 9007199254740993` would otherwise compare
+/// `Equal` via `cassandra_double_cmp` and wrongly evaluate `is_gt()` to `false`
+/// — the same leak-once-pushed-down mechanism as the `=` divergence.
+///
+/// This function is for filter/`WHERE` evaluation ONLY — do NOT use it for
+/// ORDER BY / MIN / MAX / clustering-key ordering, which must keep the
+/// NaN-greatest total order and existing f64-based numeric ordering
+/// (`try_compare_values`/`compare_values_ordering`, unchanged).
+pub(super) fn try_compare_values_predicate(
+    a: &Value,
+    b: &Value,
+) -> Result<Option<std::cmp::Ordering>> {
+    if is_nan_value(a) || is_nan_value(b) {
+        return Ok(None);
+    }
+    if let (Some(x), Some(y)) = (as_integral_i128(a), as_integral_i128(b)) {
+        return Ok(Some(x.cmp(&y)));
+    }
+    try_compare_values(a, b).map(Some)
+}
+
+/// `compare_values_ordering` counterpart for predicate evaluation: routes
+/// through [`try_compare_values_predicate`] so it shares BOTH predicate-only
+/// fixes (issue #2231) — NaN → `None` (SQL UNKNOWN → drop the row) and exact
+/// `i128` integer ordering above the f64 precision boundary — then swallows any
+/// remaining comparison error to `Ordering::Equal`, matching
+/// `compare_values_ordering`'s error-tolerant behaviour for non-NaN,
+/// non-integral pairs. Used by the SSTable leaf-predicate evaluator's
+/// inequalities so neither a NaN nor a large `bigint` pair is mishandled.
+pub(super) fn compare_values_ordering_predicate(
+    a: &Value,
+    b: &Value,
+) -> Option<std::cmp::Ordering> {
+    match try_compare_values_predicate(a, b) {
+        Ok(ordering) => ordering,
+        Err(_) => Some(std::cmp::Ordering::Equal),
+    }
+}
+
+/// Evaluate a scalar `ComparisonOperator` (`=`, `!=`, `<`, `<=`, `>`, `>=`)
+/// over two already-evaluated operands with SQL PREDICATE semantics (issue
+/// #2231). Shared by the expression-pushdown WHERE evaluator so equality uses
+/// exact integer comparison (`values_equal`, no `f64` collapse above 2^53) and
+/// the four inequalities treat a NaN operand as UNKNOWN → `false` (row dropped),
+/// never NaN-greatest. Non-scalar operators (`IN`, `LIKE`, `IS [NOT] NULL`, …)
+/// have their own branches and are rejected here.
+pub(super) fn eval_scalar_comparison(
+    op: &ComparisonOperator,
+    left: &Value,
+    right: &Value,
+) -> Result<bool> {
+    use ComparisonOperator::*;
+    Ok(match op {
+        Equal => values_equal(left, right),
+        NotEqual => !values_equal(left, right),
+        LessThan => try_compare_values_predicate(left, right)?.is_some_and(|o| o.is_lt()),
+        LessThanOrEqual => try_compare_values_predicate(left, right)?.is_some_and(|o| o.is_le()),
+        GreaterThan => try_compare_values_predicate(left, right)?.is_some_and(|o| o.is_gt()),
+        GreaterThanOrEqual => try_compare_values_predicate(left, right)?.is_some_and(|o| o.is_ge()),
+        other => {
+            return Err(Error::query_execution(format!(
+                "operator {:?} is not a scalar comparison",
+                other
+            )))
+        }
+    })
 }
 
 /// Apply an `ArithmeticOperator` to two same-typed numeric `Value`s.
@@ -197,6 +317,180 @@ mod tests {
             try_compare_values(&Value::Integer(5), &Value::Integer(5)).unwrap(),
             Ordering::Equal
         );
+    }
+
+    /// Issue #2231, divergence 2: `values_equal` distinguishes two DISTINCT
+    /// `i64` values straddling the 2^53 f64-precision boundary. An `as_f64`
+    /// fallback would round both to the same mantissa and report them equal,
+    /// leaking rows once a `bigcol = ...` conjunct is pushed down and removed
+    /// from the Trino plan.
+    #[test]
+    fn values_equal_distinguishes_large_i64_across_f64_boundary() {
+        let two53 = 1_i64 << 53; // 9_007_199_254_740_992
+        let plus1 = two53 + 1; // 9_007_199_254_740_993 (not representable as f64)
+                               // Sanity: the two integers DO collapse to the same f64.
+        assert_eq!(
+            two53 as f64, plus1 as f64,
+            "precondition: f64 collapses them"
+        );
+
+        // The exact-integer comparison must keep them distinct.
+        assert!(
+            !values_equal(&Value::BigInt(two53), &Value::BigInt(plus1)),
+            "2^53 != 2^53 + 1 as bigint"
+        );
+        assert!(
+            values_equal(&Value::BigInt(plus1), &Value::BigInt(plus1)),
+            "identical large bigints are equal"
+        );
+        // Repro operand: bigcol = 9_007_199_254_740_993 must NOT match 992.
+        assert!(!values_equal(
+            &Value::BigInt(9_007_199_254_740_992),
+            &Value::BigInt(9_007_199_254_740_993),
+        ));
+
+        // Cross-integral-type equality still holds (int == bigint numerically).
+        assert!(values_equal(&Value::Integer(7), &Value::BigInt(7)));
+        assert!(values_equal(&Value::TinyInt(7), &Value::SmallInt(7)));
+        assert!(!values_equal(&Value::Integer(7), &Value::BigInt(8)));
+        // Integer-vs-float equality still coerces (genuine float on one side).
+        assert!(values_equal(&Value::BigInt(2), &Value::Float(2.0)));
+        assert!(!values_equal(&Value::BigInt(2), &Value::Float(2.5)));
+    }
+
+    /// Issue #2231 follow-up (roborev blocker): `try_compare_values_predicate` /
+    /// `compare_values_ordering_predicate` must ALSO compare large integers
+    /// exactly — not just `values_equal`. Without the `as_integral_i128`
+    /// short-circuit, `bigcol > 9007199254740992` against a row where
+    /// `bigcol = 9007199254740993` would coerce both to the same f64 mantissa,
+    /// compare `Equal`, and wrongly evaluate `is_gt()` to `false` (row dropped).
+    #[test]
+    fn predicate_ordering_distinguishes_large_i64_across_f64_boundary() {
+        use std::cmp::Ordering;
+        let two53 = 1_i64 << 53; // 9_007_199_254_740_992
+        let plus1 = two53 + 1; // 9_007_199_254_740_993
+
+        // ...993 > ...992 must hold exactly (f64 would report Equal).
+        assert_eq!(
+            try_compare_values_predicate(&Value::BigInt(plus1), &Value::BigInt(two53)).unwrap(),
+            Some(Ordering::Greater),
+            "9007199254740993 > 9007199254740992 must hold exactly"
+        );
+        assert_eq!(
+            compare_values_ordering_predicate(&Value::BigInt(plus1), &Value::BigInt(two53)),
+            Some(Ordering::Greater)
+        );
+        // The symmetric direction: ...992 is NOT greater than ...993.
+        assert_eq!(
+            try_compare_values_predicate(&Value::BigInt(two53), &Value::BigInt(plus1)).unwrap(),
+            Some(Ordering::Less)
+        );
+        // Equal large integers still compare Equal.
+        assert_eq!(
+            try_compare_values_predicate(&Value::BigInt(plus1), &Value::BigInt(plus1)).unwrap(),
+            Some(Ordering::Equal)
+        );
+    }
+
+    /// Issue #2231, divergence 1: under PREDICATE (WHERE) semantics a NaN
+    /// operand makes every relational comparison UNKNOWN, so the row is dropped.
+    /// Historically only `Lt`/`Lte`/`Eq` dropped NaN while `Gt`/`Gte` leaked it
+    /// (NaN sorts greatest under `cassandra_double_cmp`); all four inequalities
+    /// must now drop it, and `Eq` continues to.
+    #[test]
+    fn nan_predicate_comparison_is_unknown_for_all_relations() {
+        let nan = Value::Float(f64::NAN);
+        let bound = Value::Float(1.5);
+
+        // `d > 1.5` / `d >= 1.5` with d = NaN: previously TRUE (leak), now dropped.
+        let cmp = try_compare_values_predicate(&nan, &bound).unwrap();
+        assert!(cmp.is_none(), "NaN vs 1.5 is UNKNOWN (Gt/Gte)");
+        assert!(
+            !cmp.is_some_and(|o| o.is_gt()),
+            "d > 1.5 with NaN is dropped"
+        );
+        assert!(
+            !cmp.is_some_and(|o| o.is_ge()),
+            "d >= 1.5 with NaN is dropped"
+        );
+        // Lt/Lte were already consistent (dropped) — confirm they stay dropped.
+        assert!(
+            !cmp.is_some_and(|o| o.is_lt()),
+            "d < 1.5 with NaN is dropped"
+        );
+        assert!(
+            !cmp.is_some_and(|o| o.is_le()),
+            "d <= 1.5 with NaN is dropped"
+        );
+        // NaN on the right-hand side is symmetric.
+        assert!(try_compare_values_predicate(&bound, &nan)
+            .unwrap()
+            .is_none());
+        // Two NaNs are also UNKNOWN under predicate comparison.
+        assert!(try_compare_values_predicate(&nan, &nan).unwrap().is_none());
+        // Float32 (CQL `float`) NaN behaves identically.
+        assert!(
+            try_compare_values_predicate(&Value::Float32(f32::NAN), &Value::Float32(1.5))
+                .unwrap()
+                .is_none()
+        );
+
+        // Eq already dropped NaN (no NaN-aware equality) — confirm unchanged.
+        assert!(!values_equal(&nan, &bound), "NaN = 1.5 is false");
+        assert!(!values_equal(&nan, &nan), "NaN = NaN is false (SQL)");
+
+        // Non-NaN floats keep normal ordering under predicate comparison.
+        let ok = try_compare_values_predicate(&Value::Float(2.0), &bound).unwrap();
+        assert!(ok.is_some_and(|o| o.is_gt()), "2.0 > 1.5 holds");
+    }
+
+    /// Issue #2231: the NaN-drop is scoped to PREDICATE comparison only — the
+    /// total-order comparator (`compare_values_ordering`, used by ORDER BY /
+    /// MIN / MAX / clustering) must STILL sort NaN as the greatest value.
+    #[test]
+    fn nan_ordering_total_order_unchanged_by_predicate_fix() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_values_ordering(&Value::Float(f64::NAN), &Value::Float(1.5)),
+            Ordering::Greater,
+            "sort order still puts NaN last (unchanged)"
+        );
+        // The predicate variant agrees for non-NaN but diverges (None) on NaN.
+        assert_eq!(
+            compare_values_ordering_predicate(&Value::Float(2.0), &Value::Float(1.5)),
+            Some(Ordering::Greater)
+        );
+        assert!(
+            compare_values_ordering_predicate(&Value::Float(f64::NAN), &Value::Float(1.5))
+                .is_none()
+        );
+    }
+
+    /// `eval_scalar_comparison` dispatches each of the 6 scalar operators to the
+    /// right predicate-semantics comparator (issue #2231's `mod.rs` expression
+    /// path calls this directly, so its per-operator wiring deserves its own
+    /// direct test rather than only transitive coverage).
+    #[test]
+    fn eval_scalar_comparison_dispatches_all_six_operators() {
+        use ComparisonOperator::*;
+        let five = Value::Integer(5);
+        let three = Value::Integer(3);
+
+        assert!(!eval_scalar_comparison(&Equal, &five, &three).unwrap());
+        assert!(eval_scalar_comparison(&Equal, &five, &five).unwrap());
+        assert!(eval_scalar_comparison(&NotEqual, &five, &three).unwrap());
+        assert!(!eval_scalar_comparison(&NotEqual, &five, &five).unwrap());
+        assert!(eval_scalar_comparison(&GreaterThan, &five, &three).unwrap());
+        assert!(!eval_scalar_comparison(&GreaterThan, &three, &five).unwrap());
+        assert!(eval_scalar_comparison(&GreaterThanOrEqual, &five, &five).unwrap());
+        assert!(!eval_scalar_comparison(&GreaterThanOrEqual, &three, &five).unwrap());
+        assert!(eval_scalar_comparison(&LessThan, &three, &five).unwrap());
+        assert!(!eval_scalar_comparison(&LessThan, &five, &three).unwrap());
+        assert!(eval_scalar_comparison(&LessThanOrEqual, &five, &five).unwrap());
+        assert!(!eval_scalar_comparison(&LessThanOrEqual, &five, &three).unwrap());
+
+        // A non-scalar operator is rejected rather than silently mishandled.
+        assert!(eval_scalar_comparison(&In, &five, &three).is_err());
     }
 
     /// The query ordering comparator (used by ORDER BY / MIN / MAX) must match

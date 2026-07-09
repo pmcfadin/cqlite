@@ -7,7 +7,7 @@
 
 use super::super::result::QueryRow;
 use super::super::select_optimizer::SSTablePredicate;
-use super::value_ops::{compare_values_ordering, values_equal};
+use super::value_ops::{compare_values_ordering_predicate, values_equal};
 use crate::{types::Value, Error, Result};
 
 /// Three-valued (SQL Kleene) outcome of evaluating a single leaf predicate
@@ -98,28 +98,28 @@ pub fn evaluate_leaf(row: &QueryRow, predicate: &SSTablePredicate) -> LeafOutcom
             } else {
                 let lo = &predicate.values[0];
                 let hi = &predicate.values[1];
-                compare_values_ordering(column_value, lo).is_ge()
-                    && compare_values_ordering(column_value, hi).is_le()
+                // SQL NaN semantics (issue #2231): a NaN column value makes the
+                // range comparison UNKNOWN (`None`) → the row is dropped.
+                compare_values_ordering_predicate(column_value, lo).is_some_and(|o| o.is_ge())
+                    && compare_values_ordering_predicate(column_value, hi)
+                        .is_some_and(|o| o.is_le())
             }
         }
         // Single-bound clustering inequalities (Issue #788). A missing bound
-        // rejects the row, mirroring the `Range` len-guard above.
-        SSTableFilterOp::Gt => predicate
-            .values
-            .first()
-            .is_some_and(|b| compare_values_ordering(column_value, b).is_gt()),
-        SSTableFilterOp::Gte => predicate
-            .values
-            .first()
-            .is_some_and(|b| compare_values_ordering(column_value, b).is_ge()),
-        SSTableFilterOp::Lt => predicate
-            .values
-            .first()
-            .is_some_and(|b| compare_values_ordering(column_value, b).is_lt()),
-        SSTableFilterOp::Lte => predicate
-            .values
-            .first()
-            .is_some_and(|b| compare_values_ordering(column_value, b).is_le()),
+        // rejects the row, mirroring the `Range` len-guard above. A NaN operand
+        // makes the comparison UNKNOWN → the row is dropped (issue #2231).
+        SSTableFilterOp::Gt => predicate.values.first().is_some_and(|b| {
+            compare_values_ordering_predicate(column_value, b).is_some_and(|o| o.is_gt())
+        }),
+        SSTableFilterOp::Gte => predicate.values.first().is_some_and(|b| {
+            compare_values_ordering_predicate(column_value, b).is_some_and(|o| o.is_ge())
+        }),
+        SSTableFilterOp::Lt => predicate.values.first().is_some_and(|b| {
+            compare_values_ordering_predicate(column_value, b).is_some_and(|o| o.is_lt())
+        }),
+        SSTableFilterOp::Lte => predicate.values.first().is_some_and(|b| {
+            compare_values_ordering_predicate(column_value, b).is_some_and(|o| o.is_le())
+        }),
         SSTableFilterOp::Prefix => matches!(
             (column_value, predicate.values.first()),
             (Value::Text(s), Some(Value::Text(p))) if s.starts_with(p)
@@ -214,7 +214,7 @@ pub(super) fn validate_token_predicates(
 mod tests {
     use super::super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
     use super::super::test_support::{
-        composite_pk_schema, row_with_int, row_with_key, single_pk_schema,
+        composite_pk_schema, row_with_int, row_with_key, row_with_value, single_pk_schema,
     };
     use super::*;
     use crate::types::RowKey;
@@ -377,6 +377,134 @@ mod tests {
         assert!(!in_slice(200), "upper bound is exclusive");
         assert!(!in_slice(1000), "rows past the slice are excluded");
         assert!(!in_slice(-1), "rows below the slice are excluded");
+    }
+
+    /// Issue #2231, divergence 1 (repro `WHERE d > 1.5 ...`): a NaN `double`
+    /// column value must NOT satisfy `>` / `>=` (SQL UNKNOWN → dropped). Under
+    /// the old `cassandra_double_cmp` (NaN sorts greatest) the row leaked once
+    /// the conjunct was pushed down and removed from the Trino plan.
+    #[test]
+    fn nan_double_column_dropped_by_inequality_predicates() {
+        let nan_row = row_with_value("d", Value::Float(f64::NAN));
+        let gt = |op| SSTablePredicate::column("d", op, vec![Value::Float(1.5)]);
+
+        // Gt / Gte on NaN: previously True (leak), now False (dropped).
+        assert_eq!(
+            evaluate_leaf(&nan_row, &gt(SSTableFilterOp::Gt)),
+            LeafOutcome::False
+        );
+        assert_eq!(
+            evaluate_leaf(&nan_row, &gt(SSTableFilterOp::Gte)),
+            LeafOutcome::False
+        );
+        // Lt / Lte on NaN: already False, still False.
+        assert_eq!(
+            evaluate_leaf(&nan_row, &gt(SSTableFilterOp::Lt)),
+            LeafOutcome::False
+        );
+        assert_eq!(
+            evaluate_leaf(&nan_row, &gt(SSTableFilterOp::Lte)),
+            LeafOutcome::False
+        );
+        // Range on NaN is dropped too.
+        let range = SSTablePredicate::column(
+            "d",
+            SSTableFilterOp::Range,
+            vec![Value::Float(0.0), Value::Float(9.0)],
+        );
+        assert_eq!(evaluate_leaf(&nan_row, &range), LeafOutcome::False);
+
+        // A non-NaN double still evaluates normally (regression guard).
+        let ok_row = row_with_value("d", Value::Float(2.0));
+        assert_eq!(
+            evaluate_leaf(&ok_row, &gt(SSTableFilterOp::Gt)),
+            LeafOutcome::True
+        );
+    }
+
+    /// Issue #2231, divergence 2 (repro `WHERE bigcol = 9007199254740993 ...`):
+    /// leaf equality must distinguish two distinct large `i64` that collapse to
+    /// the same `f64`. The old `as_f64` fallback matched `...992` against `...993`.
+    #[test]
+    fn large_bigint_equality_no_f64_collapse() {
+        let eq = |target: i64| {
+            SSTablePredicate::column(
+                "bigcol",
+                SSTableFilterOp::Equal,
+                vec![Value::BigInt(target)],
+            )
+        };
+        let row_992 = row_with_value("bigcol", Value::BigInt(9_007_199_254_740_992));
+
+        // = ...993 must NOT match a row holding ...992.
+        assert_eq!(
+            evaluate_leaf(&row_992, &eq(9_007_199_254_740_993)),
+            LeafOutcome::False
+        );
+        // Exact match still holds.
+        assert_eq!(
+            evaluate_leaf(&row_992, &eq(9_007_199_254_740_992)),
+            LeafOutcome::True
+        );
+        // IN with the wrong large operand also does not match.
+        let in_wrong = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::In,
+            vec![Value::BigInt(9_007_199_254_740_993)],
+        );
+        assert_eq!(evaluate_leaf(&row_992, &in_wrong), LeafOutcome::False);
+    }
+
+    /// Issue #2231 follow-up (roborev blocker): the SAME 2^53 boundary pair as
+    /// `large_bigint_equality_no_f64_collapse`, but for `Gt`/`Range` — the
+    /// leak-once-pushed-down mechanism applies identically to inequalities.
+    /// `bigcol > 9007199254740992` must match a row where
+    /// `bigcol = 9007199254740993` (they collapse to the SAME f64, so an
+    /// f64-based ordering would wrongly report `Equal` and drop the row).
+    #[test]
+    fn large_bigint_gt_and_range_no_f64_collapse() {
+        let row_993 = row_with_value("bigcol", Value::BigInt(9_007_199_254_740_993));
+
+        let gt_992 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(9_007_199_254_740_992)],
+        );
+        assert_eq!(
+            evaluate_leaf(&row_993, &gt_992),
+            LeafOutcome::True,
+            "9007199254740993 > 9007199254740992 must hold exactly"
+        );
+
+        // The row must NOT satisfy `> itself` (no false positive from rounding).
+        let gt_993 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(9_007_199_254_740_993)],
+        );
+        assert_eq!(evaluate_leaf(&row_993, &gt_993), LeafOutcome::False);
+
+        // Range [992, 992] must exclude a row holding 993 exactly.
+        let range_at_992 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Range,
+            vec![
+                Value::BigInt(9_007_199_254_740_992),
+                Value::BigInt(9_007_199_254_740_992),
+            ],
+        );
+        assert_eq!(evaluate_leaf(&row_993, &range_at_992), LeafOutcome::False);
+
+        // Range [993, 993] must include the row holding exactly 993.
+        let range_at_993 = SSTablePredicate::column(
+            "bigcol",
+            SSTableFilterOp::Range,
+            vec![
+                Value::BigInt(9_007_199_254_740_993),
+                Value::BigInt(9_007_199_254_740_993),
+            ],
+        );
+        assert_eq!(evaluate_leaf(&row_993, &range_at_993), LeafOutcome::True);
     }
 
     /// FINDING 2: a `token(...)` over the FULL partition key in declared order is

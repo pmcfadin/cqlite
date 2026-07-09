@@ -65,6 +65,21 @@ pub(crate) fn row_with_int(column: &str, value: i64) -> QueryRow {
     }
 }
 
+/// Build a one-column `QueryRow` holding an arbitrary [`Value`] — for
+/// predicate-evaluation tests over non-`Integer` column types (e.g. a `double`
+/// NaN or a large `bigint`), issue #2231.
+pub(crate) fn row_with_value(column: &str, value: Value) -> QueryRow {
+    let mut values: std::collections::HashMap<std::sync::Arc<str>, Value> =
+        std::collections::HashMap::new();
+    values.insert(column.into(), value);
+    QueryRow {
+        values,
+        key: RowKey::new(Vec::new()),
+        metadata: Default::default(),
+        cell_metadata: None,
+    }
+}
+
 /// Build a `QueryRow` with only a partition key (no column values).
 pub(crate) fn row_with_key(partition: &[u8]) -> QueryRow {
     QueryRow {
