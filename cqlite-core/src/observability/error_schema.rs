@@ -20,6 +20,7 @@
 //! | `Concurrency`  | `concurrency`    | `Concurrency`, `Transaction`                                       |
 //! | `Constraints`  | `constraints`    | `ConstraintViolation`, `AlreadyExists`                            |
 //! | `Query`        | `query`          | `QueryExecution`, `UnsupportedQuery`, `InvalidInput`             |
+//! | `Cancelled`    | `cancelled`      | `Cancelled` (issue #2264 — a cooperative abort, never `Io`)       |
 //! | `Other`        | `other`          | `Configuration`, `InvalidState`, `InvalidOperation`, `NotFound`,  |
 //! |                |                  | `Internal`, `Wasm`, and any future variant (catch-all)            |
 //!
@@ -60,6 +61,11 @@ pub enum ErrorCategory {
     Constraints,
     /// Query execution / unsupported queries / bad input.
     Query,
+    /// A cooperative cancellation / abort (issue #2264). Kept distinct from
+    /// `Other` (and never `Io`) so dashboards can see cancellation rate
+    /// separately from genuine errors — a cancelled `do_get` is an expected
+    /// outcome, not a fault.
+    Cancelled,
     /// Everything else (configuration, internal, platform, catch-all).
     Other,
 }
@@ -78,6 +84,7 @@ impl ErrorCategory {
             ErrorCategory::Concurrency => "concurrency",
             ErrorCategory::Constraints => "constraints",
             ErrorCategory::Query => "query",
+            ErrorCategory::Cancelled => "cancelled",
             ErrorCategory::Other => "other",
         }
     }
@@ -93,6 +100,7 @@ impl ErrorCategory {
         ErrorCategory::Concurrency,
         ErrorCategory::Constraints,
         ErrorCategory::Query,
+        ErrorCategory::Cancelled,
         ErrorCategory::Other,
     ];
 }
@@ -137,6 +145,10 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         | Error::UnsupportedQuery(_)
         | Error::InvalidInput(_) => ErrorCategory::Query,
 
+        // Issue #2264: a cooperative cancellation is an expected outcome, not a
+        // fault — kept out of both `Io` and the `Other` catch-all.
+        Error::Cancelled => ErrorCategory::Cancelled,
+
         // Catch-all for the remaining variants and any future additions. Listed
         // explicitly (no wildcard arm besides wasm) so that adding a new Error
         // variant forces a compile decision here.
@@ -144,7 +156,6 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         | Error::InvalidState(_)
         | Error::InvalidOperation(_)
         | Error::NotFound(_)
-        | Error::Cancelled
         | Error::Internal(_) => ErrorCategory::Other,
 
         #[cfg(target_arch = "wasm32")]
@@ -231,5 +242,10 @@ mod tests {
         assert_eq!(Error::invalid_operation("o").obs_category(), Other);
         assert_eq!(Error::not_found("n").obs_category(), Other);
         assert_eq!(Error::internal("i").obs_category(), Other);
+
+        // Issue #2264: a cooperative cancellation must be its OWN bucket, not
+        // `Io` (misleading — it is not a transport failure) and not lumped into
+        // the generic `Other` catch-all (would hide cancellation rate).
+        assert_eq!(Error::Cancelled.obs_category(), Cancelled);
     }
 }

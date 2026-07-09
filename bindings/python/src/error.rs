@@ -33,6 +33,12 @@ create_exception!(cqlite, QueryError, CqliteError);
 // CQL parsing errors (CqlParse variant)
 create_exception!(cqlite, ParseError, CqliteError);
 
+// A cooperative cancellation / abort (issue #2264). Dedicated so a cancelled
+// scan is never mislabeled as (or silently folded into) a generic CqliteError
+// — callers can `except cqlite.CancelledError` precisely, matching the Node
+// binding's dedicated `CANCELLED` code.
+create_exception!(cqlite, CancelledError, CqliteError);
+
 /// Register all exception types with the Python module.
 ///
 /// This function must be called during module initialization to make
@@ -42,6 +48,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SchemaError", m.py().get_type::<SchemaError>())?;
     m.add("QueryError", m.py().get_type::<QueryError>())?;
     m.add("ParseError", m.py().get_type::<ParseError>())?;
+    m.add("CancelledError", m.py().get_type::<CancelledError>())?;
     Ok(())
 }
 
@@ -61,6 +68,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// | `Configuration`, `InvalidInput` | `ValueError` (builtin) |
 /// | `Timeout` | `TimeoutError` (builtin) |
 /// | `Memory` | `MemoryError` (builtin) |
+/// | `Cancelled` | `CancelledError` (issue #2264 — never `IOError`) |
 /// | All others | `CqliteError` (base) |
 pub fn to_py_err(err: cqlite_core::Error) -> PyErr {
     let message = err.to_string();
@@ -102,6 +110,11 @@ pub fn to_py_err(err: cqlite_core::Error) -> PyErr {
         // Write-dir lock conflict -> CqliteError with clear message
         // The formatted message already contains the path and advice
         cqlite_core::Error::WriteDirLocked { .. } => CqliteError::new_err(message),
+
+        // A cooperative cancellation -> dedicated CancelledError (issue #2264),
+        // NOT the base CqliteError (would be indistinguishable from any other
+        // failure) and NEVER IOError (not a transport/filesystem failure).
+        cqlite_core::Error::Cancelled => CancelledError::new_err(message),
 
         // All other errors -> CqliteError (base exception)
         // See test_error_mapping_completeness() for the complete list of unmapped variants
@@ -263,6 +276,22 @@ mod tests {
         });
     }
 
+    /// Issue #2264: a cooperative cancellation must surface as a DEDICATED
+    /// `CancelledError`, and explicitly NEVER as `IOError` (the pre-fix
+    /// behaviour: `Error::Cancelled` fell into `ErrorCategory::System`).
+    #[test]
+    fn test_cancelled_maps_to_cancellederror_not_ioerror() {
+        let py_err = to_py_err(Error::Cancelled);
+
+        Python::with_gil(|py| {
+            assert!(py_err.is_instance_of::<CancelledError>(py));
+            assert!(
+                !py_err.is_instance_of::<PyIOError>(py),
+                "a cooperative cancellation must never surface as IOError"
+            );
+        });
+    }
+
     #[test]
     fn test_other_errors_map_to_cqliteerror() {
         // Test several "other" error types that should map to base CqliteError
@@ -337,6 +366,7 @@ mod tests {
     /// | `Timeout` | `TimeoutError` (builtin) | Operation timeouts |
     /// | `Memory` | `MemoryError` (builtin) | Memory allocation |
     /// | `InvalidState` | `RuntimeError` (builtin) | Invalid state (e.g., closed DB) |
+    /// | `Cancelled` | `CancelledError` | Cooperative abort (issue #2264) — never `IOError` |
     /// | `Serialization` | `CqliteError` (base) | Unmapped - generic error |
     /// | `Corruption` | `CqliteError` (base) | Unmapped - generic error |
     /// | `InvalidFormat` | `CqliteError` (base) | Unmapped - generic error |
@@ -379,6 +409,7 @@ mod tests {
                 Error::Timeout(_) => { /* Maps to PyTimeoutError */ }
                 Error::Memory(_) => { /* Maps to PyMemoryError */ }
                 Error::InvalidState(_) => { /* Maps to PyRuntimeError */ }
+                Error::Cancelled => { /* Maps to CancelledError (issue #2264) — NEVER IOError */ }
 
                 // === Unmapped variants (fall through to base CqliteError) ===
                 Error::Serialization { .. } => { /* Maps to CqliteError */ }
@@ -399,7 +430,6 @@ mod tests {
                 Error::Compaction(_) => { /* Maps to CqliteError */ }
                 Error::Internal(_) => { /* Maps to CqliteError */ }
                 Error::Parse(_) => { /* Maps to CqliteError */ }
-                Error::Cancelled => { /* Maps to CqliteError (issue #2264) */ }
 
                 // Write-dir lock conflict — maps to CqliteError with clear message
                 Error::WriteDirLocked { .. } => { /* Maps to CqliteError */ }
@@ -421,6 +451,7 @@ mod tests {
                 message: "test".to_string(),
                 source: None,
             },
+            Error::Cancelled,
         ];
 
         for err in &test_errors {

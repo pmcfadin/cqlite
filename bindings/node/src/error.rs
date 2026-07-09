@@ -28,6 +28,7 @@
 //! | Transaction | `TRANSACTION` | (original) |
 //! | Platform | `PLATFORM` | (original) |
 //! | Internal | `INTERNAL` | (original) |
+//! | Cancelled | `CANCELLED` | `CancelledError:` (issue #2264 — never `IO`) |
 //!
 //! # Example
 //!
@@ -83,6 +84,10 @@ pub fn category_to_code(category: ErrorCategory) -> &'static str {
         ErrorCategory::Transaction => "TRANSACTION",
         ErrorCategory::Platform => "PLATFORM",
         ErrorCategory::Internal => "INTERNAL",
+        // Issue #2264: a cooperative cancellation gets its OWN code — it must
+        // never fall through to (or be confused with) `IO`, a genuine
+        // transport/filesystem failure.
+        ErrorCategory::Cancelled => "CANCELLED",
     }
 }
 
@@ -95,6 +100,7 @@ fn category_to_prefix(category: ErrorCategory) -> Option<&'static str> {
         ErrorCategory::Data => Some("ParseError"),
         ErrorCategory::Configuration => Some("ValueError"),
         ErrorCategory::Logic => Some("RuntimeError"),
+        ErrorCategory::Cancelled => Some("CancelledError"),
         // Other categories don't have special prefixes
         _ => None,
     }
@@ -517,6 +523,13 @@ mod tests {
                 Error::InvalidState(_) => {
                     assert_eq!(err.category(), ErrorCategory::Logic);
                 }
+                // Issue #2264: a cooperative cancellation must classify as
+                // `Cancelled` — NEVER `System` (which `category_to_code` maps
+                // to the misleading "IO" JS code).
+                Error::Cancelled => {
+                    assert_eq!(err.category(), ErrorCategory::Cancelled);
+                    assert_eq!(category_to_code(err.category()), "CANCELLED");
+                }
 
                 // All other variants are handled by category
                 Error::Serialization { .. } => {}
@@ -537,7 +550,6 @@ mod tests {
                 Error::Compaction(_) => {}
                 Error::Internal(_) => {}
                 Error::Parse(_) => {}
-                Error::Cancelled => {}
 
                 // Write-dir lock conflict — Concurrency category, maps to CONCURRENCY code
                 Error::WriteDirLocked { .. } => {
@@ -554,6 +566,7 @@ mod tests {
             Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test")),
             Error::Schema("test".to_string()),
             Error::Corruption("test".to_string()),
+            Error::Cancelled,
         ];
 
         for err in &test_errors {
@@ -581,6 +594,7 @@ mod tests {
             ErrorCategory::Transaction,
             ErrorCategory::Platform,
             ErrorCategory::Internal,
+            ErrorCategory::Cancelled,
         ];
 
         for category in categories {

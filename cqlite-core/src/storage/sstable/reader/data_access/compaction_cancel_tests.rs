@@ -22,6 +22,12 @@
 //! own between-step poll is absent) — the reader's `scan_cancel` poll is the
 //! ONLY thing that can abort the walk here, so a green test proves THIS fix, not
 //! the pre-existing between-step check.
+//!
+//! The final test in this file (`pre_cancelled_scan_does_not_probe_index_on_
+//! index_backed_path`, roborev round 3) instead calls `iterate_all_partitions`
+//! directly against a REAL Cassandra fixture (`CQLITE_DATASETS_ROOT`) — see its
+//! doc comment for why a synthesized `SSTableWriter` fixture cannot exercise
+//! that resolution mode.
 
 use crate::schema::{Column, KeyColumn, TableSchema};
 use crate::storage::scan_cancel::ScanCancel;
@@ -78,11 +84,10 @@ fn mutation(id: i32) -> Mutation {
     )
 }
 
-/// Write `n` single-row partitions to a fresh uncompressed SSTable, then strip
-/// the `Summary.db`/`Index.db`/`Filter.db` sidecars to reproduce the field's
-/// index-less snapshot (only Data.db + Statistics.db remain). Returns the temp
-/// dir (keep alive) and the `Data.db` path.
-async fn index_less_fixture(n: i32) -> (TempDir, std::path::PathBuf) {
+/// Write `n` single-row partitions to a fresh uncompressed SSTable, keeping
+/// EVERY emitted component (Summary.db/Index.db/Filter.db included). Returns
+/// the temp dir (keep alive) and the `Data.db` path.
+async fn write_fixture(n: i32) -> (TempDir, std::path::PathBuf) {
     let schema = schema();
     let temp = TempDir::new().unwrap();
     let mut writer =
@@ -103,6 +108,15 @@ async fn index_less_fixture(n: i32) -> (TempDir, std::path::PathBuf) {
     }
     let info = writer.finish().await.unwrap();
     let data_path = info.data_path.clone();
+    (temp, data_path)
+}
+
+/// Write `n` single-row partitions to a fresh uncompressed SSTable, then strip
+/// the `Summary.db`/`Index.db`/`Filter.db` sidecars to reproduce the field's
+/// index-less snapshot (only Data.db + Statistics.db remain). Returns the temp
+/// dir (keep alive) and the `Data.db` path.
+async fn index_less_fixture(n: i32) -> (TempDir, std::path::PathBuf) {
+    let (temp, data_path) = write_fixture(n).await;
 
     // Strip the partition-index sidecars so the reader takes the full-scan
     // fallback the field hit — the fix must be correct for legitimately
@@ -340,5 +354,107 @@ async fn mid_scan_cancel_aborts_before_finishing() {
     assert!(
         count >= TRIP_AT && count < TOTAL as usize,
         "must abort after the trip point but well before the full {TOTAL} partitions, got {count}"
+    );
+}
+
+/// The Summary.db/Index.db-PRESENT resolution mode (roborev round 3, issue
+/// #2264): `iterate_all_partitions` (`partition_lookup.rs`) has TWO resolution
+/// modes — the index-backed per-entry lookup (this poll's target) and the
+/// `sequential_scan` fallback (already covered above via `index_less_fixture`,
+/// which strips Summary/Index/Filter).
+///
+/// Reaching a FULLY-RESOLVED index-backed pass (`results.len() ==
+/// entries.len()`, needed for `iterate_all_partitions` to actually RETURN the
+/// index-backed result instead of falling through) needs a REAL Cassandra
+/// fixture: investigation for this test found `SSTableWriter`-produced
+/// Summary.db/Index.db pairs never fully resolve — `lookup_partition_with_index`
+/// DOES find a byte-identical key, but the resolved `PartitionIndexEntry`'s
+/// `data_offset`/`data_size` are degenerate (`(0, 0)`) for CQLite's own writer
+/// output, a pre-existing gap unrelated to #2264 (NOT fixed here — filed
+/// separately). So `write_fixture`'s output cannot exercise the FULLY-RESOLVED
+/// branch, and `iterate_all_partitions` returns one materialised `Vec` with no
+/// emit callback — a cancelled call has no partition-count observable either
+/// way, so the callback-based "trip at partition N" technique the other tests
+/// use does not apply here.
+///
+/// This proves the loop's poll instead via the process-global
+/// `read_work_counters::index_probes()` counter (same oracle technique as
+/// `chunk_cache_wiring_tests.rs`): a pre-cancelled call over a REAL fixture with
+/// at least one Summary.db entry must record ZERO Index.db probes — proving the
+/// poll aborts BEFORE the loop attempts even the FIRST lookup. Disabling ONLY
+/// this poll lets `lookup_partition_with_index` run for entry 0 (recording a
+/// probe) before the function falls through to `sequential_scan`'s (unrelated,
+/// pre-existing) poll for the SAME final `Err(Cancelled)` — so the probe-count
+/// assertion, not the `Err` alone, discriminates this specific poll from the
+/// downstream fallback's. `#[serial]`: the counter is process-global.
+fn datasets_root() -> Option<std::path::PathBuf> {
+    std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+}
+
+/// `test_basic.multi_partition_table`: a real fixture with Summary.db +
+/// Index.db present and at least one Summary.db entry (confirmed during
+/// investigation for this test).
+fn real_index_backed_fixture() -> Option<std::path::PathBuf> {
+    let base = datasets_root()?.join("sstables/test_basic");
+    for entry in std::fs::read_dir(&base).ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("multi_partition_table-") {
+            let candidate = entry.path().join("nb-1-big-Data.db");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Skip (not fail) when the real fixture binary is absent — matches the
+/// established convention (`issue_1594_fanout_deadlock_test.rs` et al.) for
+/// tests needing `CQLITE_DATASETS_ROOT`'s local-only binaries.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
+    let Some(data_path) = real_index_backed_fixture() else {
+        eprintln!(
+            "Skipping (index-backed cancel poll): real multi_partition_table \
+             fixture not present (set CQLITE_DATASETS_ROOT)"
+        );
+        return;
+    };
+    let mut reader = open_reader(&data_path).await;
+
+    // Non-vacuity: the loop body must actually run at least once, or disabling
+    // the poll would trivially leave `index_probes()` at 0 regardless.
+    let entry_count = reader
+        .summary_reader
+        .as_ref()
+        .map(|s| s.get_entries().len())
+        .unwrap_or(0);
+    assert!(
+        entry_count > 0,
+        "fixture must have at least one Summary.db entry for this test to be non-vacuous"
+    );
+
+    crate::storage::sstable::read_work_counters::reset();
+    let cancel = ScanCancel::new();
+    cancel.cancel();
+    reader.set_scan_cancel(cancel);
+
+    let result = reader.iterate_all_partitions().await;
+
+    assert!(
+        matches!(result, Err(crate::Error::Cancelled)),
+        "a pre-cancelled index-backed scan must abort with Error::Cancelled, got {result:?}"
+    );
+    assert_eq!(
+        crate::storage::sstable::read_work_counters::index_probes(),
+        0,
+        "the index-backed loop's poll must abort BEFORE attempting even the first \
+         Index.db lookup — a nonzero probe count means the loop ran ahead of the \
+         cancel check (issue #2264, roborev round 3)"
     );
 }

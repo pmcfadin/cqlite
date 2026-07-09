@@ -611,6 +611,14 @@ impl SSTableReader {
 
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block(&cursor).await? {
+            // Cooperative cancellation (issue #2264, roborev round 3): a poll
+            // every 256 chunks catches the edge case `drain_compaction_window`'s
+            // per-PARTITION poll cannot — a single partition so wide it spans
+            // hundreds of chunks without ever completing (so the drain loop's
+            // counter never advances).
+            if chunk_count & 0xFF == 0 {
+                self.scan_cancel.check()?;
+            }
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
                 tracing::debug!(

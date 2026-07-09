@@ -574,7 +574,21 @@ impl SSTableReader {
             let entries = summary_reader.get_entries();
             let mut results = Vec::new();
 
-            for entry in entries {
+            for entry in entries.iter() {
+                // Cooperative cancellation (issue #2264, roborev round 3): with
+                // Summary.db PRESENT, this per-entry index-random-read loop is the
+                // O(partitions) work a Flight `do_get` spends its time in — the
+                // outer poll in `stream_all_partitions_for_compaction`'s
+                // non-stitching branch fires only ONCE, AFTER this whole loop (and
+                // the whole `Vec`) has already been materialised. Poll EVERY
+                // entry (not the 256-cadence used for raw in-memory partition
+                // loops elsewhere): Summary.db already samples ~1-in-128 raw
+                // partitions, and each entry here costs a real Index.db lookup +
+                // Data.db decompress/parse — orders of magnitude more expensive
+                // per iteration than a byte-parse step, so checking every entry
+                // adds negligible overhead while keeping the observed latency
+                // bound proportionate to that per-entry cost.
+                self.scan_cancel.check()?;
                 // Use Summary.db entry to find the corresponding Index.db entry
                 if let Some(_index_reader) = &self.index_reader {
                     // The summary entry provides a position in Index.db

@@ -434,7 +434,7 @@ impl Error {
             Error::InvalidState(_) => ErrorCategory::Logic,
             Error::Timeout(_) => ErrorCategory::System,
             Error::UnsupportedQuery(_) => ErrorCategory::Query,
-            Error::Cancelled => ErrorCategory::System,
+            Error::Cancelled => ErrorCategory::Cancelled,
         }
     }
 }
@@ -470,6 +470,10 @@ pub enum ErrorCategory {
     Platform,
     /// Internal errors
     Internal,
+    /// A cooperative cancellation / abort (issue #2264). Distinct from
+    /// `System` (I/O, memory) so a cancelled operation is never mislabeled as
+    /// a transport/IO failure by a consumer that switches on category.
+    Cancelled,
 }
 
 impl fmt::Display for ErrorCategory {
@@ -489,6 +493,7 @@ impl fmt::Display for ErrorCategory {
             ErrorCategory::Transaction => "Transaction",
             ErrorCategory::Platform => "Platform",
             ErrorCategory::Internal => "Internal",
+            ErrorCategory::Cancelled => "Cancelled",
         };
         write!(f, "{}", name)
     }
@@ -711,6 +716,9 @@ mod tests {
             Error::write_dir_locked("/tmp/test").category(),
             ErrorCategory::Concurrency
         );
+        // Issue #2264: a cooperative cancellation must NEVER classify as
+        // `System` (which downstream bindings map to an I/O error code).
+        assert_eq!(Error::Cancelled.category(), ErrorCategory::Cancelled);
     }
 
     #[test]
@@ -758,6 +766,7 @@ mod tests {
         assert_eq!(ErrorCategory::Transaction.to_string(), "Transaction");
         assert_eq!(ErrorCategory::Platform.to_string(), "Platform");
         assert_eq!(ErrorCategory::Internal.to_string(), "Internal");
+        assert_eq!(ErrorCategory::Cancelled.to_string(), "Cancelled");
     }
 
     #[test]
