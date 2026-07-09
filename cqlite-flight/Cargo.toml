@@ -65,6 +65,12 @@ observability-testing = ["cqlite-core/observability-testing"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The golden emitter (`examples/emit_arrow_golden.rs`) length-delimit-encodes
+# the encoder's `FlightData` protobuf messages to a golden file, and the
+# transport test (`tests/do_get_transport_test.rs`) length-delimit-DECODES that
+# same committed golden to cross-check it against the live wire bytes; pinned
+# to the same prost line arrow-flight 53 uses so the `Message` impl unifies.
+prost = "0.13"
 
 [lints]
 workspace = true

@@ -14,13 +14,15 @@ use std::path::Path;
 use std::time::Duration;
 
 use arrow::array::{Array, StringArray};
+use arrow::ipc::{root_as_message, MessageHeader};
 use arrow::record_batch::RecordBatch;
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::flight_service_server::FlightServiceServer;
-use arrow_flight::Ticket;
+use arrow_flight::{FlightData, Ticket};
 use futures::StreamExt;
+use prost::Message as _;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Channel, Server};
 
@@ -122,13 +124,19 @@ async fn do_get_rows_over_transport(svc: CqliteFlightService, ticket: Vec<u8>) -
         .sum()
 }
 
-/// Same real-transport round-trip as [`do_get_rows_over_transport`] but returns
-/// every decoded `RecordBatch` so a caller can assert on the actual column set
-/// and cell values (not just the row count).
-async fn do_get_batches_over_transport(
+/// Stand up a real loopback tonic server serving `svc`, connect a real
+/// `FlightServiceClient` (retrying until it accepts), and run `do_get(ticket)`.
+/// Returns the server task handle (the caller `.abort()`s it once done
+/// draining) and the raw `tonic::codec::Streaming<FlightData>` response — the
+/// pre-decode interception point every real-transport test in this file
+/// shares, factored out so the connect-retry/bind boilerplate exists once.
+async fn do_get_stream_over_transport(
     svc: CqliteFlightService,
     ticket: Vec<u8>,
-) -> Vec<RecordBatch> {
+) -> (
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    tonic::codec::Streaming<FlightData>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
@@ -165,7 +173,18 @@ async fn do_get_batches_over_transport(
         .do_get(Ticket::new(ticket))
         .await
         .expect("do_get rpc");
-    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    (server, resp.into_inner())
+}
+
+/// Same real-transport round-trip as [`do_get_rows_over_transport`] but returns
+/// every decoded `RecordBatch` so a caller can assert on the actual column set
+/// and cell values (not just the row count).
+async fn do_get_batches_over_transport(
+    svc: CqliteFlightService,
+    ticket: Vec<u8>,
+) -> Vec<RecordBatch> {
+    let (server, inner) = do_get_stream_over_transport(svc, ticket).await;
+    let stream = inner.map(|r| r.map_err(FlightError::Tonic));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
 
     let mut batches = Vec::new();
@@ -174,6 +193,25 @@ async fn do_get_batches_over_transport(
     }
     server.abort();
     batches
+}
+
+/// The SAME real gRPC round-trip as [`do_get_batches_over_transport`], but returns
+/// the RAW `Vec<FlightData>` protobuf messages straight off the response stream —
+/// i.e. the exact on-the-wire bytes, captured BEFORE they are wrapped into a
+/// `FlightRecordBatchStream` (the point where the arrow-java client would decode
+/// them). This lets a caller pin the server's message SEQUENCE at the Flight
+/// protobuf level, not the decoded-`RecordBatch` level (issue #2193).
+async fn do_get_raw_flight_data_over_transport(
+    svc: CqliteFlightService,
+    ticket: Vec<u8>,
+) -> Vec<FlightData> {
+    let (server, mut inner) = do_get_stream_over_transport(svc, ticket).await;
+    let mut messages = Vec::new();
+    while let Some(msg) = inner.next().await {
+        messages.push(msg.expect("raw FlightData message over transport"));
+    }
+    server.abort();
+    messages
 }
 
 /// Reproduces issue #2193: a 3-row nb-big table served over the real gRPC
@@ -191,6 +229,94 @@ fn do_get_over_real_transport_decodes_all_rows() {
         rows, 3,
         "all 3 rows must round-trip through the real transport"
     );
+}
+
+/// **Message-sequence pin (issue #2193).** For the 3-row field shape the server's
+/// `do_get` must emit EXACTLY two `FlightData` messages on the wire — a Schema
+/// message followed by a single RecordBatch message — and each message's
+/// `data_header` must be the matching IPC `Message` flatbuffer. This pins the
+/// on-the-wire shape the arrow-java Flight decoder consumes (the Java oracle
+/// `FlightDataGoldenDecodeTest` decodes the committed form of exactly this
+/// sequence), capturing at the protobuf-message level rather than the decoded
+/// `RecordBatch` level so a framing/ordering regression surfaces here.
+#[test]
+fn do_get_over_transport_emits_schema_then_recordbatch() {
+    let (_temp, data_dir) = build_fixture();
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let messages = rt.block_on(do_get_raw_flight_data_over_transport(svc, ticket_bytes()));
+
+    assert_eq!(
+        messages.len(),
+        2,
+        "3-row field shape must emit [schema, record-batch], got {} messages",
+        messages.len()
+    );
+
+    let header_type = |fd: &FlightData| {
+        root_as_message(&fd.data_header)
+            .expect("data_header must be a valid IPC Message flatbuffer")
+            .header_type()
+    };
+    assert_eq!(
+        header_type(&messages[0]),
+        MessageHeader::Schema,
+        "message[0] data_header must parse as a Schema flatbuffer"
+    );
+    assert_eq!(
+        header_type(&messages[1]),
+        MessageHeader::RecordBatch,
+        "message[1] data_header must parse as a RecordBatch flatbuffer"
+    );
+}
+
+/// **Golden cross-check (issue #2193 review).** The transport-captured raw
+/// `FlightData` sequence for this SAME field-shape fixture must be
+/// byte-identical to the committed `keyvalue.flightdata` golden that
+/// `FlightDataGoldenDecodeTest` decodes on the Java side — closing the loop
+/// between "what the golden contains" and "what the wire actually carries" so
+/// a Java-side PASS against the golden is genuinely evidence about the real
+/// transport, not just about a possibly-stale fixture.
+#[test]
+fn do_get_over_transport_matches_committed_golden() {
+    let (_temp, data_dir) = build_fixture();
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let wire = rt.block_on(do_get_raw_flight_data_over_transport(svc, ticket_bytes()));
+
+    // `cqlite-flight` and `trino-connector` are sibling crates/dirs at the repo
+    // root; the golden is committed there, not under `cqlite-flight`.
+    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../trino-connector/src/test/resources/golden/keyvalue.flightdata");
+    let golden_bytes = std::fs::read(&golden_path)
+        .unwrap_or_else(|e| panic!("read committed golden {}: {e}", golden_path.display()));
+
+    // Length-delimited protobuf: decode each `FlightData` message in turn,
+    // consuming the shared cursor (`&mut buf`) as prost advances it.
+    let mut buf: &[u8] = golden_bytes.as_slice();
+    let mut golden = Vec::new();
+    while !buf.is_empty() {
+        golden.push(
+            FlightData::decode_length_delimited(&mut buf)
+                .expect("decode a FlightData message from the committed golden"),
+        );
+    }
+
+    assert_eq!(
+        wire.len(),
+        golden.len(),
+        "live-transport message count must match the committed golden's message count"
+    );
+    for (i, (w, g)) in wire.iter().zip(golden.iter()).enumerate() {
+        assert_eq!(
+            w.data_header, g.data_header,
+            "message[{i}] data_header drifted from the committed golden"
+        );
+        assert_eq!(
+            w.data_body, g.data_body,
+            "message[{i}] data_body drifted from the committed golden"
+        );
+    }
 }
 
 /// The field failure was against a REAL Cassandra 5.0 `nb-big` + compressed
