@@ -243,6 +243,7 @@ pub use types::PartitionEmitCounts;
 // this `mod.rs` and reach the submodules as ancestor privates.
 pub(crate) use collection_order::compare_collection_elements;
 pub(crate) use encoding::*;
+pub(crate) use incremental_partition::IncrementalPartitionWriter;
 pub(crate) use index_prefix::*;
 pub(crate) use partition::PartitionItem;
 pub(crate) use schema_helpers::*;
