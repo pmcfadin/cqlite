@@ -244,12 +244,6 @@ assert_limit_pushed() {
   if limit_pushed "$plan"; then echo "PASS: $desc";
   else echo "FAIL: $desc — handle had limit=OptionalLong.empty (LIMIT not pushed)"; echo "$plan"; FAILURES=$((FAILURES + 1)); fi
 }
-assert_limit_not_pushed() {
-  local desc="$1" plan="$2"
-  if limit_pushed "$plan"; then
-    echo "FAIL: $desc — handle carried limit=OptionalLong[...] (unexpectedly pushed)"; echo "$plan"; FAILURES=$((FAILURES + 1));
-  else echo "PASS: $desc"; fi
-}
 
 # Low-cardinality GROUP BY device (ratio ≈ 0.2 < 0.5): PUSHED into the scan.
 assert_pushed     "low-card GROUP BY device is pushed" \
@@ -297,21 +291,21 @@ assert_eq "LIMIT above table size returns all 5" '"5"' \
 # stays a Trino residual FilterNode ABOVE the scan. `CqliteFlightMetadata.applyLimit`
 # itself is residual-unaware (no check for an unpushed conjunct — verified by
 # reading its source), so the soundness guard against capping before the residual
-# runs is NOT in our code; it is Trino's planner, which — verified empirically
-# against a live EXPLAIN below — never calls `applyLimit` while an active residual
-# FilterNode sits between the LimitNode and the TableScanNode. So the correct,
-# observed signal here is `limit=OptionalLong.empty`: the connector-side limit is
-# NOT pushed, and Trino's own (un-pushed) Limit does the final cut post-residual.
-# Assert that directly, alongside the score>15 filter conjunct still pushing, and
-# keep the row counts as the order-independent parity check that the residual
-# (length(name) > 3) was actually still applied rather than silently dropped.
-# Rows with score>15: bob(20,len3) carol(30,len5) dave(40,len4) erin(50,len4);
-# length>3 drops bob, so carol,dave,erin (3 rows) satisfy BOTH conjuncts.
+# runs is NOT in our code; it is Trino's planner. We do NOT assert the limit is
+# absent from the scan handle here: that would encode current planner behavior
+# (observed live: Trino never calls applyLimit while an active residual
+# FilterNode sits between Limit and the scan) as a connector CONTRACT — a future
+# valid plan could carry a non-guaranteed limit hint under a residual filter
+# (applyLimit's limitGuaranteed=false) and still be correct, which would then
+# break CI on a valid shape. Assert only what IS the contract: the pushable
+# score>15 conjunct pushes, and the row counts are the order-independent parity
+# check that the residual (length(name) > 3) was actually still applied rather
+# than silently dropped. Rows with score>15: bob(20,len3) carol(30,len5)
+# dave(40,len4) erin(50,len4); length>3 drops bob, so carol,dave,erin (3 rows)
+# satisfy BOTH conjuncts.
 log "assert LIMIT + partially-pushable predicate pushdown (EXPLAIN) + correctness"
 partial_plan="$(explain \
   'SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 2')"
-assert_limit_not_pushed "partial-predicate LIMIT stays with Trino (residual filter blocks push)" \
-  "$partial_plan"
 assert_filter_pushed "partial-predicate score>15 conjunct is pushed"          "$partial_plan"
 # LIMIT 2 (< 3 qualifying): the full 2 rows must survive — fewer would be the
 # symptom of a LIMIT pushed below the residual filter.
