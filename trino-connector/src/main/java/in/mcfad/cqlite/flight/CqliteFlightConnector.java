@@ -29,6 +29,11 @@ public class CqliteFlightConnector implements Connector {
         // + port (uniform across the hostNetwork Sidecar DaemonSet) and the split host.
         this.snapshots = new SnapshotManager(
                 HostSnapshotApis.fromBaseUri(config.sidecarUri()), config.readMode(), config.snapshotTtl());
+        // Fail fast at catalog load if arrow-java's off-heap memory init is broken by a missing JVM
+        // flag (issues #2193, #2290) — otherwise every do_get dies far downstream with a cryptic
+        // "Failed to read message". Runs before the first RootAllocator (the earliest Arrow touch)
+        // and is a no-op when the flag is present.
+        ArrowMemoryPreflight.verify();
         this.allocator = new RootAllocator();
         this.flight = new CqliteFlightClient(allocator);
     }
