@@ -1,4 +1,4 @@
-name: "CI: Coverage Gate (90%)"
+name: "CI: Coverage Gate (read-path, ≥77%)"
 
 on:
   schedule:
@@ -19,7 +19,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  COVERAGE_THRESHOLD: 90
+  # Issue #2022 (Layer 3, owner decision): the enforced gate is now scoped to
+  # the READ-PATH module set only (see the `READPATH_IGNORE` comment below);
+  # crate-wide-equivalent 90% was never achievable at that scope. Measured
+  # read-path line coverage was 77.64% at the time this floor was set — 77%
+  # gives a small safety margin so ordinary measurement noise doesn't flip
+  # the gate red. This is a realistic floor to ratchet UP over time via
+  # follow-up coverage-focused issues, not a permanent target. If you change
+  # this number, update it here ONLY — every other reference in this file
+  # reads from this single source (`$COVERAGE_THRESHOLD` in bash steps,
+  # `os.environ['COVERAGE_THRESHOLD']` in the Python step).
+  COVERAGE_THRESHOLD: 77
 
 permissions:
   contents: read
@@ -30,7 +40,10 @@ concurrency:
 
 jobs:
   coverage-gate:
-    name: Coverage Gate ≥90% (Phase 2 Enforcement)
+    # Issue #2022: 77% is the read-path-scoped floor (see the `COVERAGE_THRESHOLD`
+    # comment above) — job-level `name:` is static YAML and cannot read env, so
+    # keep this literal in sync with `COVERAGE_THRESHOLD` by hand.
+    name: Coverage Gate ≥77% (Phase 2 Enforcement, read-path scope)
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -115,6 +128,19 @@ jobs:
         else
           echo "✅ Cache hit - core Data.db fixture present"
         fi
+
+        # Restore git-tracked reference fixtures UNCONDITIONALLY (#2022) — this MUST
+        # run on BOTH paths: the fresh-download path (rm -rf + asset extraction above)
+        # AND the cache-hit path, because the actions/cache/restore step can bring back
+        # a PREVIOUSLY-clobbered dataset (an earlier run cached the asset's copy). The
+        # published asset carries stale/non-corrupt copies of COMMITTED fixtures — e.g.
+        # corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-Data.db, which
+        # verify_sstable must flag as corrupt to match the captured Cassandra oracle.
+        # If the committed copy is overwritten, issue_1396_uncompressed_crc_verify panics
+        # and the enforced coverage run exits 101 before any coverage % is computed. The
+        # committed versions are authoritative and must win. Mirrors
+        # fetch-datasets.sh::restore_ci_tracked_dataset_files.
+        git restore --source=HEAD -- test-data/datasets
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
@@ -160,7 +186,10 @@ jobs:
         cargo fmt --all --check
         cargo clippy --all-targets --all-features -- -D warnings
     
-    - name: Run Enforced Coverage Analysis (≥90% REQUIRED - Phase 2)
+    # Issue #2022: literal "90%" in this step's display name is misleading post
+    # re-scope; keep in sync with `COVERAGE_THRESHOLD` above by hand (step
+    # `name:` is static YAML, no env interpolation).
+    - name: Run Enforced Coverage Analysis (≥77% REQUIRED - Phase 2, read-path scope)
       if: matrix.coverage-type == 'enforced'
       env:
         CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
@@ -174,27 +203,58 @@ jobs:
           exit 1
         fi
         echo "📊 Running enforced coverage analysis with $DB_COUNT real Cassandra 5 SSTable files"
-        echo "🎯 Phase 2 requirement: ≥90% coverage for core modules"
+        echo "🎯 Phase 2 requirement (Issue #2022, read-path scope): ≥${COVERAGE_THRESHOLD}% coverage for core modules"
 
         # Use cargo-llvm-cov for more accurate coverage. The tool supports one
         # output format per report invocation, so run tests once, then emit the
         # HTML and LCOV reports from the captured profile data.
+        #
+        # Issue #2022: the enforced gate (floor: $COVERAGE_THRESHOLD%, see the
+        # env-var comment at the top of this file) is scoped to the READ-PATH
+        # module set ONLY, matching the include list documented in root `tarpaulin.toml`
+        # ([core_reading_focus].include) — that file is the SOURCE OF TRUTH for
+        # this module set; keep the two in sync so they never silently drift.
+        # Read-path modules that exist today: `src/storage/sstable/*` and
+        # `src/parser/*` (the tarpaulin list also names reader/format/validation,
+        # which are not present as top-level dirs — `storage/sstable/reader` is
+        # already covered by `storage/sstable/*`).
+        #
+        # cargo-llvm-cov (0.8.7) has no include-only filter and the `regex` crate
+        # has no lookahead, so we cannot write one negative-lookahead pattern.
+        # Instead we EXCLUDE every top-level module dir / file that is NOT in the
+        # read-path set, plus the non-sstable subdirs/files under `storage/`, and
+        # keep excluding test/bench/examples as before. `spec` and `bin` are
+        # anchored with `\b` word boundaries (the `regex` crate supports plain
+        # word-boundary assertions, just not lookahead) so they only match
+        # "spec"/"bin" as a WHOLE WORD (e.g. an actual `*_spec_test.rs` file,
+        # or a path segment like `/bin/`) and NOT as a substring inside a
+        # genuine read-path source file's name — `parser/binary.rs` ("bin" is
+        # a substring of "binary", not a whole word) and
+        # `storage/sstable/header_spec.rs` ("spec" is preceded by "_", a word
+        # char, so no boundary) are correctly KEPT/INCLUDED by this anchor;
+        # before the anchor, the plain (unanchored) substring match was
+        # incidentally EXCLUDING both from the measurement. Patterns anchor
+        # on `src/...` so a keep-dir like
+        # `src/parser/types/` is never matched by a top-level exclusion like
+        # `src/types/`. `--ignore-filename-regex` runs a substring (find) match
+        # against the file path llvm-cov reports.
+        READPATH_IGNORE='(test|\bspec\b|bench|examples|\bbin\b|src/benchmarks/|src/config\.rs|src/cql/|src/discovery/|src/error\.rs|src/export/|src/float_cmp\.rs|src/fuzz_support\.rs|src/ingestion\.rs|src/lib\.rs|src/memory/|src/observability/|src/platform/|src/query/|src/schema/|src/testing/|src/types/|src/types\.rs|src/util/|src/version_hints\.rs|src/storage/cache/|src/storage/serialization/|src/storage/write_engine/|src/storage/mod\.rs|src/storage/partition_key_codec\.rs|src/storage/repl_data_api\.rs|src/storage/schema_discovery\.rs|src/storage/sstable_data_manager\.rs)'
         cargo llvm-cov clean --workspace
         cargo llvm-cov \
           --package cqlite-core \
           --no-report \
-          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
+          --ignore-filename-regex="$READPATH_IGNORE" \
           --verbose
         cargo llvm-cov report \
           --html \
           --output-dir ../validation_artifacts/coverage/html \
-          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
-          --fail-under-lines 90 \
+          --ignore-filename-regex="$READPATH_IGNORE" \
+          --fail-under-lines "$COVERAGE_THRESHOLD" \
           --verbose
         cargo llvm-cov report \
           --lcov \
           --output-path ../validation_artifacts/coverage/lcov.info \
-          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
+          --ignore-filename-regex="$READPATH_IGNORE" \
           --verbose
           
     - name: Run Comprehensive Coverage (Informational)
@@ -227,10 +287,21 @@ jobs:
         mkdir -p validation_artifacts/coverage/reports
 
         # Parse LCOV results for detailed analysis
+        #
+        # Issue #2022: threshold is read from the single-source COVERAGE_THRESHOLD
+        # env var (set at the top of this workflow) instead of a hardcoded 90 —
+        # this heredoc uses a quoted 'EOF' delimiter (no bash interpolation), so
+        # the Python reads it via os.environ rather than a $VAR substitution.
         python3 << 'EOF'
         import re
         import json
         import os
+        from datetime import datetime, timezone
+
+        COVERAGE_THRESHOLD = float(os.environ.get('COVERAGE_THRESHOLD', '90'))
+        # Mid-tier "WARNING" badge stays a fixed 10-point band below the pass
+        # threshold, scaling with it rather than a second hardcoded literal.
+        WARNING_THRESHOLD = max(COVERAGE_THRESHOLD - 10, 0)
 
         def parse_lcov_coverage(lcov_file):
             """Parse LCOV file and extract detailed coverage metrics."""
@@ -274,10 +345,10 @@ jobs:
             print(f"📈 Lines Covered: {coverage_data['covered_lines']}/{coverage_data['total_lines']}")
 
             # Generate badge
-            if coverage_pct >= 90:
+            if coverage_pct >= COVERAGE_THRESHOLD:
                 color = "brightgreen"
                 status = "PASSED"
-            elif coverage_pct >= 80:
+            elif coverage_pct >= WARNING_THRESHOLD:
                 color = "yellow"
                 status = "WARNING"
             else:
@@ -293,11 +364,11 @@ jobs:
             report = {
                 "coverage_percentage": coverage_pct,
                 "status": status,
-                "threshold": 90,
+                "threshold": COVERAGE_THRESHOLD,
                 "total_lines": coverage_data['total_lines'],
                 "covered_lines": coverage_data['covered_lines'],
                 "files": len(coverage_data['files']),
-                "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
             with open("validation_artifacts/coverage/reports/coverage-report.json", "w") as f:
@@ -306,11 +377,11 @@ jobs:
             print(f"✅ Coverage report generated: {status}")
 
             # Enforce threshold
-            if coverage_pct < 90:
-                print(f"❌ Coverage gate FAILED: {coverage_pct:.2f}% < 90% (Phase 2 requirement)")
+            if coverage_pct < COVERAGE_THRESHOLD:
+                print(f"❌ Coverage gate FAILED: {coverage_pct:.2f}% < {COVERAGE_THRESHOLD:.0f}% (Phase 2 requirement, read-path scope, Issue #2022)")
                 exit(1)
             else:
-                print(f"✅ Coverage gate PASSED: {coverage_pct:.2f}% ≥ 90%")
+                print(f"✅ Coverage gate PASSED: {coverage_pct:.2f}% ≥ {COVERAGE_THRESHOLD:.0f}%")
         else:
             print("❌ Failed to parse coverage data")
             exit(1)
@@ -360,7 +431,7 @@ jobs:
         echo "✅ Phase 2 coverage gate enforcement completed"
         echo "📊 Using real Cassandra 5 datasets from test-data/datasets/"
         echo "🚫 Test files, examples, and binaries excluded from coverage analysis"
-        echo "🎯 Phase 2 requirement: ≥90% coverage for core reading library"
+        echo "🎯 Phase 2 requirement (Issue #2022, read-path scope): ≥${COVERAGE_THRESHOLD}% coverage for core reading library"
         echo "🔄 Coverage results available for coordination with multi-arch and performance gates"
 
   # Quality gate integration job
@@ -378,14 +449,14 @@ jobs:
 
         if [ "${{ needs.coverage-gate.result }}" != "success" ]; then
           echo "❌ Coverage gate failed"
-          echo "💡 Coverage must be ≥90% for Phase 2 requirements"
+          echo "💡 Coverage must be ≥${COVERAGE_THRESHOLD}% for Phase 2 requirements (read-path scope, Issue #2022)"
           echo "💡 Add more tests to increase coverage"
           echo "💡 Review uncovered code paths in the HTML report"
           exit 1
         fi
 
         echo "✅ Coverage gate passed!"
-        echo "📊 Core modules meet ≥90% coverage requirement"
+        echo "📊 Core modules meet ≥${COVERAGE_THRESHOLD}% coverage requirement"
 
     - name: Write aggregate coverage summary
       if: always()
