@@ -157,4 +157,37 @@ mod tests {
             "a disarmed guard must not cancel on drop"
         );
     }
+
+    #[test]
+    fn cancel_trips_the_shared_scan_cancel() {
+        // Issue #2264: the ScanCancel handed to a cqlite-core merge must observe a
+        // cancellation of the owning flag (or any clone), so the CPU-bound scan
+        // poll fires. Snapshot the token BEFORE cancelling — a merge already
+        // holds its handle when the client later disconnects.
+        let flag = CancelFlag::new();
+        let scan = flag.scan_cancel();
+        assert!(!scan.is_cancelled(), "fresh scan token is not cancelled");
+        flag.clone().cancel();
+        assert!(
+            scan.is_cancelled(),
+            "cancelling a clone must trip the previously-handed-out scan token"
+        );
+        assert!(flag.is_cancelled(), "and the async token too");
+    }
+
+    #[test]
+    fn drop_guard_trips_the_shared_scan_cancel() {
+        // The future-drop (client disconnect) path must also reach the sync scan
+        // token, not just the async channel race.
+        let flag = CancelFlag::new();
+        let scan = flag.scan_cancel();
+        {
+            let _guard = flag.drop_guard();
+            assert!(!scan.is_cancelled());
+        }
+        assert!(
+            scan.is_cancelled(),
+            "dropping an armed guard must trip the scan token"
+        );
+    }
 }

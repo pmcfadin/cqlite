@@ -36,6 +36,13 @@ mod big_promoted_crc_tests;
 // `tests/`.
 #[cfg(test)]
 mod chunk_cache_wiring_tests;
+// In-crate proof that the compaction streaming scan polls the reader's
+// cooperative cancel token and abandons a multi-partition Data.db mid-scan
+// (issue #2264 — the World-2 un-cancellable full-materialise loop). Needs the
+// `pub(crate)` `set_scan_cancel` + `stream_all_partitions_for_compaction`, so it
+// cannot live in `tests/`.
+#[cfg(all(test, feature = "write-support"))]
+mod compaction_cancel_tests;
 // BIG ("nb"/uncompressed) point lookup: raw-key Index.db resolve + covering-chunk
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
