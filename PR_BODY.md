@@ -1,4 +1,5 @@
 Closes #2193
+Closes #2290
 
 ## Problem
 
@@ -45,10 +46,22 @@ form so the docker stack, the kit, and the fail-fast message all name the identi
 
 ## Verification
 
-- `cd trino-connector && ./gradlew test` — GREEN (313 tests, 0 failures), including the new
-  `ArrowMemoryPreflightTest` (8 cases: message names the exact flag, classifier matches
+- `cd trino-connector && ./gradlew test` — GREEN (314 tests, 0 failures), including the new
+  `ArrowMemoryPreflightTest` (9 cases: message names the exact flag, classifier matches
   MemoryUtil-init failures by message and by stack frame, arrow-init → `CONFIGURATION_INVALID`,
-  unrelated errors rethrown unchanged, and `verify()` passes side-effect-free when the flag is
-  present in the Gradle test JVM).
+  unrelated errors rethrown unchanged, a 2-node cause-cycle terminates without hang/misclassification,
+  and `verify()` passes side-effect-free — forcing a 1-byte off-heap `ArrowBuf` allocation so the probe
+  truly exercises the `MemoryUtil` path — when the flag is present in the Gradle test JVM).
 - Kit template: `shellcheck` clean; jq patch validated to emit the correct `env` entry; idempotent
   by strategic-merge semantics.
+
+## Review hardening (addressed in-branch)
+
+- The preflight probe now forces a 1-byte off-heap `ArrowBuf` allocation, so it genuinely exercises the
+  `MemoryUtil`/java.nio path a bare `RootAllocator` could skip.
+- The kit **appends** to `JAVA_TOOL_OPTIONS` if-absent rather than clobbering an existing literal value,
+  and when the var is sourced via `valueFrom`/`envFrom` it emits a loud actionable warning and skips the
+  literal overwrite (the connector fail-fast probe is the backstop).
+- The cause-chain walk is now bounded so any cyclic cause chain terminates.
+
+Non-blocking follow-up nits (uninstall flag-strip; two additional test branches) are batched in #2296.
