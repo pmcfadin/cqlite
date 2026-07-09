@@ -437,25 +437,24 @@ impl MergeProducer {
                     .as_ref()
                     .map(pushdown_capability)
                     .unwrap_or("none");
-                // Assemble in a BTreeMap for deterministic ASSEMBLY order. NOTE:
-                // this does NOT guarantee final WIRE order — `Field::with_metadata`
-                // re-collects into its own HashMap before IPC serialization, and
-                // arrow-ipc's `metadata_to_fb` iterates that HashMap unsorted
-                // (confirmed against arrow-schema/arrow-ipc 53.4.1 source). So this
-                // BTreeMap step has NO observable effect on wire bytes today, for
-                // ANY field, regardless of entry count — it's a placeholder pending
-                // #2285's real fix (a canonicalization pass at the wire boundary, or
-                // upstream arrow-rs sorting). It's harmless for the `keyvalue`
-                // byte-pin golden specifically because those columns carry exactly
-                // one metadata entry each (order-trivial), but schemas with
-                // extension-typed columns (e.g. uuid: `ARROW:extension:name` +
-                // `cqlite:pushdown`, 2 entries — see `all_scalars`'s `c_uuid`
-                // column) are NOT covered by that trivial case, and their wire
-                // order is genuinely hash-seed-dependent until #2285 lands.
-                let mut metadata: std::collections::BTreeMap<String, String> =
-                    field.metadata().clone().into_iter().collect();
+                // NOTE on metadata ORDER (not addressed here — see #2285): the
+                // final WIRE order of this `HashMap`'s entries is NOT guaranteed
+                // stable across process runs once a field carries >= 2 metadata
+                // entries, since `Field::with_metadata` stores a `HashMap` as-is
+                // and arrow-ipc's `metadata_to_fb` iterates it unsorted
+                // (confirmed against arrow-schema/arrow-ipc 53.4.1 source) — a
+                // sort/canonicalization pass would need to happen at the actual
+                // wire boundary (or upstream in arrow-rs), not here, so no such
+                // pass is attempted in this function. Harmless for the
+                // `keyvalue` byte-pin golden specifically because those columns
+                // carry exactly one metadata entry each (order-trivial), but
+                // schemas with extension-typed columns (e.g. uuid:
+                // `ARROW:extension:name` + `cqlite:pushdown`, 2 entries — see
+                // `all_scalars`'s `c_uuid` column) are NOT covered by that
+                // trivial case, and their wire order is genuinely
+                // hash-seed-dependent until #2285 lands.
+                let mut metadata = field.metadata().clone();
                 metadata.insert("cqlite:pushdown".to_string(), capability.to_string());
-                let metadata: std::collections::HashMap<_, _> = metadata.into_iter().collect();
                 field.as_ref().clone().with_metadata(metadata)
             })
             .collect();
