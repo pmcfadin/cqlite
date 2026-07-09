@@ -78,6 +78,41 @@ class ArrowTypeMapperTest {
     }
 
     @Test
+    void timestampMapsByDeclaredUnit() {
+        // The connector materializes TIMESTAMP at millisecond precision. MILLISECOND
+        // (the pinned server unit) and SECOND (up-scaled ×1000, lossless) are
+        // representable; MICROSECOND/NANOSECOND would lose sub-ms precision so they
+        // fail closed rather than silently misread (issue #2236, was a 1000x error).
+        assertEquals(io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS,
+                ArrowTypeMapper.toTrino(scalar("ts",
+                        new ArrowType.Timestamp(TimeUnit.MILLISECOND, "UTC"))));
+        assertEquals(io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS,
+                ArrowTypeMapper.toTrino(scalar("ts",
+                        new ArrowType.Timestamp(TimeUnit.SECOND, "UTC"))));
+
+        assertTrue(ArrowTypeMapper.toTrinoOrEmpty(scalar("ts",
+                new ArrowType.Timestamp(TimeUnit.MICROSECOND, "UTC"))).isEmpty());
+        assertTrue(ArrowTypeMapper.toTrinoOrEmpty(scalar("ts",
+                new ArrowType.Timestamp(TimeUnit.NANOSECOND, "UTC"))).isEmpty());
+        assertThrows(UnsupportedOperationException.class, () -> ArrowTypeMapper.toTrino(
+                scalar("ts", new ArrowType.Timestamp(TimeUnit.NANOSECOND, "UTC"))));
+    }
+
+    @Test
+    void dateMapsByDeclaredUnit() {
+        // DAY (epoch-day, the pinned Date32 server unit) is representable as Trino
+        // DATE; DateMilli (millis-since-epoch) is timezone-ambiguous → fail closed
+        // rather than let a wrong-typed vector cast throw a raw ClassCastException.
+        assertEquals(io.trino.spi.type.DateType.DATE,
+                ArrowTypeMapper.toTrino(scalar("d",
+                        new ArrowType.Date(org.apache.arrow.vector.types.DateUnit.DAY))));
+        assertTrue(ArrowTypeMapper.toTrinoOrEmpty(scalar("d",
+                new ArrowType.Date(org.apache.arrow.vector.types.DateUnit.MILLISECOND))).isEmpty());
+        assertThrows(UnsupportedOperationException.class, () -> ArrowTypeMapper.toTrino(
+                scalar("d", new ArrowType.Date(org.apache.arrow.vector.types.DateUnit.MILLISECOND))));
+    }
+
+    @Test
     void complexTypesAreRejectedAtPlanning() {
         // v1 supports scalar columns; collections/decimal must fail clearly at
         // planning rather than crash mid-scan (mapper↔ArrowToTrino stay in lockstep).

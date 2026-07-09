@@ -101,14 +101,57 @@ public final class ArrowTypeMapper {
             case ArrowType.LargeUtf8 ignored -> VarcharType.VARCHAR;
             case ArrowType.Binary ignored -> VarbinaryType.VARBINARY;
             case ArrowType.FixedSizeBinary ignored -> VarbinaryType.VARBINARY;
-            case ArrowType.Date ignored -> DateType.DATE;
+            case ArrowType.Date date -> dateType(date);
             // CQL time → Arrow Time (Rust emits Time64(Nanosecond)); Trino has a
             // native TIME whose precision mirrors the Arrow unit.
             case ArrowType.Time t -> timeType(t);
-            case ArrowType.Timestamp ignored -> TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+            case ArrowType.Timestamp ts -> timestampType(ts);
             default -> null;
         };
         return Optional.ofNullable(mapped);
+    }
+
+    /**
+     * Map an Arrow {@code Date} unit to Trino {@link DateType} (epoch-day). Only
+     * {@link org.apache.arrow.vector.types.DateUnit#DAY DAY}-unit dates are
+     * representable: Trino DATE stores an epoch-day count, which is exactly what a
+     * DAY-unit Arrow date (and Cassandra's {@code date} type) already carries.
+     *
+     * <p>{@code DateMilli} (millisecond-since-epoch) is <b>rejected</b> (returns
+     * {@code null} → hidden by {@link #toTrinoOrEmpty} / typed error from
+     * {@link #toTrino}). Deriving a calendar day from a millis instant is timezone-
+     * ambiguous, so we fail closed rather than silently pick a day — and never let a
+     * {@code DateMilliVector} reach {@link ArrowToTrino} where the DAY-typed cast
+     * would throw a raw {@code ClassCastException}. The Rust server pins {@code Date32}
+     * (DAY); this hardens the Java side against drift.
+     */
+    private static Type dateType(ArrowType.Date date) {
+        return switch (date.getUnit()) {
+            case DAY -> DateType.DATE;
+            case MILLISECOND -> null;
+        };
+    }
+
+    /**
+     * Map an Arrow {@code Timestamp} unit to Trino {@link TimestampWithTimeZoneType}.
+     * The connector materializes timestamps at millisecond precision
+     * ({@code TIMESTAMP_TZ_MILLIS}), so:
+     * <ul>
+     *   <li>{@code MILLISECOND} — identity (the value is already millis; the pinned
+     *       server unit).</li>
+     *   <li>{@code SECOND} — representable: {@link ArrowToTrino} up-scales ×1000
+     *       exactly (overflow-guarded), no precision loss.</li>
+     *   <li>{@code MICROSECOND}/{@code NANOSECOND} — <b>rejected</b> (returns
+     *       {@code null}). Down-scaling to millis would silently drop sub-millisecond
+     *       precision, so we fail closed with a clear typed error rather than
+     *       misinterpret the value (a 1000x/1_000_000x error before this fix).</li>
+     * </ul>
+     */
+    private static Type timestampType(ArrowType.Timestamp ts) {
+        return switch (ts.getUnit()) {
+            case SECOND, MILLISECOND -> TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+            case MICROSECOND, NANOSECOND -> null;
+        };
     }
 
     /** Map an Arrow {@code Time} unit to the Trino {@link TimeType} of equal precision. */
