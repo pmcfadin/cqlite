@@ -949,38 +949,50 @@ pub(crate) fn schema_columns(schema: &TableSchema) -> Result<Vec<ColumnInfo>, Pr
     Ok(columns)
 }
 
-/// Declare how the server can push predicates on a column of this CQL type.
+/// Declare the server-side comparison capability for a column of this CQL type.
 ///
-/// The capability is the INTERSECTION of two requirements — the server must be
-/// able to lower the operand ([`crate::filter`]`::json_to_value`) AND the Trino
-/// connector must be able to encode a constant of the column's Trino type
-/// (`PredicateTreeTranslator.constantValue`). A capability the connector cannot
-/// actually emit is a dead lie that only invites future correctness drift
-/// (issue #2239), so it is demoted to `"none"` here:
-/// - `"full"` — every operator (Equal, In, ordering Gt/Gte/Lt/Lte, Prefix) is
-///   safe. These are the types both sides handle: the integer family
-///   (TinyInt/SmallInt/Int/BigInt), `Counter` (lowered from a JSON integer;
-///   Trino BIGINT), `Float`/`Double`, `Boolean`, and the textual family
-///   (Text/Ascii/Varchar).
-/// - `"equality"` — `json_to_value` lowers `Uuid`/`TimeUuid` to `Value::Uuid`,
-///   which only supports exact match (Equal/In/IsNull); the connector encodes
-///   them via their VARCHAR surface form. Ordering and prefix on a uuid would
-///   compare by uuid bytes, not by the VARCHAR surface form, so they must stay a
-///   Trino residual.
-/// - `"none"` — everything else. Note `Timestamp`: the server COULD lower it
-///   (epoch-millis integer), but `constantValue` has no case for Trino's
-///   `TimestampWithTimeZoneType`, so a timestamp predicate is never encoded and
-///   never pushed. Advertising `"full"` for it was a dead capability; it is
-///   `"none"` until a tz-aware encoder with matching epoch-millis/UTC comparison
-///   semantics lands on the Java side (tracked as a follow-up to #2239). Likewise
-///   `Inet`, `Duration`, `Varint`, `Decimal`, `Blob`, `Date`, `Time`, and the
-///   collection/tuple/UDT/custom types have no faithful connector encoding.
+/// This flag describes what the SERVER can do with values of the type — order
+/// them, test them for equality, or neither. It is consumed by TWO independent
+/// Trino-connector optimizations, so it deliberately does NOT encode whether a
+/// predicate constant can be *encoded* by the connector (issue #2239, Option A —
+/// decouple):
+///  1. Predicate pushdown (`PredicateTreeTranslator`): a leaf is only pushed when
+///     the connector can also encode its operand (`constantValue`). That path
+///     already fails closed — when `constantValue` returns empty the leaf stays a
+///     Trino residual — so a type that is comparable server-side but has no
+///     connector encoder (e.g. `Timestamp`) is simply never pushed as a predicate,
+///     with no wrong results. The capability flag must NOT be demoted for such a
+///     type, or it would silently disable optimization (2).
+///  2. Aggregate pushdown (`CqliteFlightMetadata.supportsValueAggregate`): gates
+///     server-side `min`/`max`/`sum`/`avg` on `capability == FULL`. The server
+///     compares values directly (`agg.rs`), needing no connector-side operand
+///     encoder, so `min(ts)`/`max(ts)` on a `Timestamp` column ARE pushed.
+///
+/// - `"full"` — values are totally ordered server-side, so every operator (Equal,
+///   In, ordering Gt/Gte/Lt/Lte, Prefix) and every value aggregate are safe. The
+///   integer family (TinyInt/SmallInt/Int/BigInt), `Counter`, `Float`/`Double`,
+///   `Boolean`, the textual family (Text/Ascii/Varchar), and `Timestamp`.
+///   `Timestamp` keeps `"full"` for the aggregate path; its predicate simply
+///   fails closed on the (currently absent) connector encoder — see (1).
+/// - `"equality"` — `Uuid`/`TimeUuid` lower to `Value::Uuid`, which only supports
+///   exact match (Equal/In/IsNull); the connector encodes them via their VARCHAR
+///   surface form. Ordering and prefix on a uuid would compare by uuid bytes, not
+///   by the VARCHAR surface form, so they must stay a Trino residual, and value
+///   aggregates on them are declined.
+/// - `"none"` — the server cannot faithfully compare these operands at all
+///   (`json_to_value` rejects them): `Inet`, `Duration`, `Varint`, `Decimal`,
+///   `Blob`, `Date`, `Time`, and the collection/tuple/UDT/custom types. Nothing
+///   is pushed (neither predicate nor aggregate).
 ///
 /// `Frozen(inner)` is unwrapped recursively (it never changes comparability).
 ///
-/// The Java-side drift guard (`ArrowToTrinoGoldenTest`, issue #2239) asserts that
-/// every column the server marks non-`"none"` is one `constantValue` can encode,
-/// so re-promoting a type here without adding its encoder fails the build loudly.
+/// The predicate-encoder frontier (which types the connector can turn into a
+/// pushed constant) is guarded on the Java side by
+/// `PredicateTreeTranslatorTest`: it drives the real translation path and asserts
+/// each advertised-pushable column is pushed IFF `constantValue` encodes it, so a
+/// `Timestamp` predicate is correctly retained as a residual while its aggregate
+/// stays pushable. The Rust-side peer guard in `filter.rs` asserts every non-none
+/// capability is one `json_to_value` can lower.
 pub(crate) fn pushdown_capability(ty: &CqlType) -> &'static str {
     match ty {
         CqlType::Frozen(inner) => pushdown_capability(inner),
@@ -994,12 +1006,14 @@ pub(crate) fn pushdown_capability(ty: &CqlType) -> &'static str {
         | CqlType::Double
         | CqlType::Text
         | CqlType::Ascii
-        | CqlType::Varchar => "full",
+        | CqlType::Varchar
+        // `Timestamp` is comparable server-side and lowered by `json_to_value`
+        // (epoch-millis i64), so it stays FULL to keep min(ts)/max(ts) aggregate
+        // pushdown. Its PREDICATE fails closed on the connector's missing
+        // `TimestampWithTimeZoneType` encoder (#2239 Option A: decouple).
+        | CqlType::Timestamp => "full",
         CqlType::Uuid | CqlType::TimeUuid => "equality",
-        // `Timestamp` COULD be lowered server-side but the Trino connector has no
-        // encoder for TimestampWithTimeZoneType, so it is never pushed (#2239).
-        CqlType::Timestamp
-        | CqlType::Decimal
+        CqlType::Decimal
         | CqlType::Blob
         | CqlType::Date
         | CqlType::Time
@@ -1251,8 +1265,7 @@ mod tests {
         // Full: ordering + equality + prefix are all safe.
         assert_eq!(pushdown_capability(&CqlType::Text), "full");
         assert_eq!(pushdown_capability(&CqlType::BigInt), "full");
-        // Counter lowers to a JSON integer and surfaces as Trino BIGINT, which
-        // constantValue encodes.
+        // Counter lowers to a JSON integer and surfaces as Trino BIGINT.
         assert_eq!(pushdown_capability(&CqlType::Counter), "full");
         // Equality-only: uuid/timeuuid lower to Value::Uuid (exact match only).
         assert_eq!(pushdown_capability(&CqlType::Uuid), "equality");
@@ -1261,29 +1274,34 @@ mod tests {
             pushdown_capability(&CqlType::Frozen(Box::new(CqlType::Uuid))),
             "equality"
         );
-        // None: json_to_value rejects these, so nothing is pushable.
+        // None: json_to_value rejects these, so nothing is comparable server-side.
         assert_eq!(pushdown_capability(&CqlType::Inet), "none");
         assert_eq!(pushdown_capability(&CqlType::Duration), "none");
-        // #2239: Timestamp is demoted to "none" — the server could lower it, but
-        // the Trino connector's constantValue has no TimestampWithTimeZoneType
-        // encoder, so it is never pushed. Advertising "full" was a dead lie.
-        assert_eq!(pushdown_capability(&CqlType::Timestamp), "none");
+        // #2239 (Option A): Timestamp stays FULL. It is comparable server-side
+        // (lowered by json_to_value as epoch-millis i64), which keeps
+        // min(ts)/max(ts) aggregate pushdown working. Its PREDICATE is never
+        // pushed because the Trino connector has no TimestampWithTimeZoneType
+        // constant encoder — but that fail-closed lives in the connector's
+        // constantValue path, NOT in this capability flag.
+        assert_eq!(pushdown_capability(&CqlType::Timestamp), "full");
     }
 
-    /// Issue #2239: guard the Rust side of the cross-language capability
-    /// contract. Every non-`"none"` capability MUST correspond to a CQL type
-    /// whose Trino surface `PredicateTreeTranslator.constantValue` can encode; a
-    /// type with no connector encoder must be `"none"` or it advertises a dead
-    /// capability (a standing correctness-drift trap). The peer guard lives in
-    /// `ArrowToTrinoGoldenTest` on the Java side, which diffs the server-emitted
-    /// `cqlite:pushdown` metadata against `constantValue`'s encodable set.
+    /// Issue #2239 (Option A): the Rust-side peer of the capability contract.
+    /// The `pushdown_capability` flag describes SERVER-SIDE comparability (used by
+    /// both predicate AND aggregate pushdown), so every non-`"none"` capability
+    /// MUST be a CQL type `json_to_value` can lower into a comparable `Value` — a
+    /// non-none capability the server cannot even compare would be a dead flag.
+    /// This is intentionally NOT the connector-encoder frontier: a type can be
+    /// FULL (server-comparable, aggregate-pushable) yet have no Trino predicate
+    /// encoder (e.g. `Timestamp`), in which case its predicate fails closed in the
+    /// connector's `constantValue` path — asserted by `PredicateTreeTranslatorTest`
+    /// on the Java side, not here.
     #[test]
-    fn only_connector_encodable_types_are_pushable() {
+    fn server_comparable_types_match_json_to_value() {
+        use crate::filter::capability_json_to_value_probe;
         use cqlite_core::schema::CqlType;
-        // CQL types whose Trino surface `constantValue` genuinely encodes today:
-        // integer family (+Counter→BIGINT), Float/Double, Boolean, text family,
-        // and uuid/timeuuid (via their VARCHAR form, equality-only).
-        for ty in [
+        // Representative type per capability class the server advertises.
+        let cases = [
             CqlType::Boolean,
             CqlType::TinyInt,
             CqlType::SmallInt,
@@ -1295,33 +1313,25 @@ mod tests {
             CqlType::Text,
             CqlType::Ascii,
             CqlType::Varchar,
+            CqlType::Timestamp,
             CqlType::Uuid,
             CqlType::TimeUuid,
-        ] {
-            assert_ne!(
-                pushdown_capability(&ty),
-                "none",
-                "{ty:?} is connector-encodable and should stay pushable"
-            );
-        }
-        // CQL types with NO connector encoder — MUST be "none" so no dead
-        // capability is advertised. Timestamp/Date/Time/Decimal are the drift
-        // traps called out by #2239.
-        for ty in [
-            CqlType::Timestamp,
-            CqlType::Date,
-            CqlType::Time,
             CqlType::Decimal,
             CqlType::Blob,
+            CqlType::Date,
+            CqlType::Time,
             CqlType::Inet,
             CqlType::Duration,
             CqlType::Varint,
-        ] {
+        ];
+        for ty in cases {
+            let comparable = capability_json_to_value_probe(&ty);
+            let advertised = pushdown_capability(&ty) != "none";
             assert_eq!(
-                pushdown_capability(&ty),
-                "none",
-                "{ty:?} has no PredicateTreeTranslator.constantValue encoder; \
-                 advertising a non-none capability is a dead lie (#2239)"
+                advertised, comparable,
+                "{ty:?}: capability advertises server-comparable={advertised} but \
+                 json_to_value can lower it={comparable} — the capability flag and \
+                 the server's operand lowering have drifted (#2239)"
             );
         }
     }

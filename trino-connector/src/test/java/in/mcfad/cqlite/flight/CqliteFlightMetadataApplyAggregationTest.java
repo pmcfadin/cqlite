@@ -21,6 +21,7 @@ import java.util.Optional;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -45,8 +46,15 @@ class CqliteFlightMetadataApplyAggregationTest {
     // d: a double column (FULL) — used to verify float min/max is declined.
     private static final CqliteFlightColumnHandle D = new CqliteFlightColumnHandle("d", DOUBLE, PushdownCapability.FULL);
 
+    // ts: a CQL `timestamp` column (FULL) — value aggregates (min/max) must push
+    // server-side. It surfaces as TIMESTAMP_TZ_MILLIS and, per issue #2239
+    // (Option A), stays FULL specifically to keep this aggregate pushdown working
+    // even though its predicate cannot be pushed (no connector constant encoder).
+    private static final CqliteFlightColumnHandle TS = new CqliteFlightColumnHandle(
+            "ts", TIMESTAMP_TZ_MILLIS, PushdownCapability.FULL);
+
     private static final Map<String, ColumnHandle> ASSIGN = Map.of(
-            "x", X, "c1", C1, "y", NOPUSH, "d", D);
+            "x", X, "c1", C1, "y", NOPUSH, "d", D, "ts", TS);
 
     private static final ConnectorTableHandle TABLE = new CqliteFlightTableHandle("ks", "t", "ddl");
 
@@ -227,6 +235,32 @@ class CqliteFlightMetadataApplyAggregationTest {
                 ASSIGN, List.of(List.of())).orElseThrow();
         JsonNode dblAggs = aggSpec((CqliteFlightTableHandle) doubleResult.getHandle()).get("aggregates");
         assertEquals("SumDouble", dblAggs.get(0).get("func").asText());
+    }
+
+    @Test
+    void pushesMinMaxOnTimestampColumn() throws Exception {
+        // Issue #2239 (Option A — decouple): a CQL `timestamp` column stays FULL
+        // so its value aggregates push server-side. The server compares
+        // Value::Timestamp directly (agg.rs), needing no connector-side operand
+        // encoder — so min(ts)/max(ts) ARE pushed even though a timestamp PREDICATE
+        // cannot be (verified in PredicateTreeTranslatorTest). Demoting the
+        // capability (the reverted approach) would have silently killed this.
+        var minResult = metadata.applyAggregation(
+                null, TABLE, List.of(agg("min", TIMESTAMP_TZ_MILLIS, new Variable("ts", TIMESTAMP_TZ_MILLIS))),
+                ASSIGN, List.of(List.of())).orElseThrow();
+        assertEquals("Min",
+                aggSpec((CqliteFlightTableHandle) minResult.getHandle())
+                        .get("aggregates").get(0).get("func").asText());
+        assertEquals("ts",
+                aggSpec((CqliteFlightTableHandle) minResult.getHandle())
+                        .get("aggregates").get(0).get("column").asText());
+
+        var maxResult = metadata.applyAggregation(
+                null, TABLE, List.of(agg("max", TIMESTAMP_TZ_MILLIS, new Variable("ts", TIMESTAMP_TZ_MILLIS))),
+                ASSIGN, List.of(List.of())).orElseThrow();
+        assertEquals("Max",
+                aggSpec((CqliteFlightTableHandle) maxResult.getHandle())
+                        .get("aggregates").get(0).get("func").asText());
     }
 
     @Test

@@ -8,6 +8,7 @@ import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.FunctionName;
 import io.trino.spi.expression.StandardFunctions;
 import io.trino.spi.expression.Variable;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 
@@ -43,7 +44,12 @@ class PredicateTreeTranslatorTest {
                 "age", new CqliteFlightColumnHandle("age", BIGINT, PushdownCapability.FULL),
                 "score", new CqliteFlightColumnHandle("score", INTEGER, PushdownCapability.FULL),
                 "active", new CqliteFlightColumnHandle("active", BOOLEAN, PushdownCapability.FULL),
-                "ratio", new CqliteFlightColumnHandle("ratio", DOUBLE, PushdownCapability.FULL));
+                "ratio", new CqliteFlightColumnHandle("ratio", DOUBLE, PushdownCapability.FULL),
+                // A CQL `timestamp` column: FULL server-side (so min/max aggregate
+                // pushdown works), but the connector has no TimestampWithTimeZoneType
+                // constant encoder, so its PREDICATE must fail closed (issue #2239).
+                "ts", new CqliteFlightColumnHandle(
+                        "ts", TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS, PushdownCapability.FULL));
     }
 
     private static Variable var(String name, Type type) {
@@ -302,6 +308,40 @@ class PredicateTreeTranslatorTest {
                 lit(Slices.utf8Slice("127.0.0.1"), VARCHAR));
         var in = call(StandardFunctions.IN_PREDICATE_FUNCTION_NAME, BOOLEAN, var("inet", VARCHAR), array);
         assertTrue(translate(in).pushed().isEmpty(), "IN on a NONE column must not push");
+    }
+
+    @Test
+    void timestampPredicateIsNotPushedDespiteFullCapability() {
+        // Issue #2239 (Option A): `ts` is FULL server-side to keep min(ts)/max(ts)
+        // aggregate pushdown, but the connector's constantValue has no
+        // TimestampWithTimeZoneType encoder. Every predicate operator must
+        // therefore fail closed (retained as a Trino residual), NOT be pushed —
+        // this is achieved by constantValue returning empty, not by demoting the
+        // capability. Both equality and ordering are exercised.
+        var eq = compare(StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME, "ts",
+                TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS, 1_700_000_000_000L,
+                TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS);
+        PredicateTreeTranslator.Result eqr = translate(eq);
+        assertTrue(eqr.pushed().isEmpty(),
+                "timestamp equality must not be pushed (no connector encoder)");
+        assertEquals(List.of(eq), eqr.residual());
+
+        var gt = compare(StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME, "ts",
+                TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS, 1_700_000_000_000L,
+                TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS);
+        PredicateTreeTranslator.Result gtr = translate(gt);
+        assertTrue(gtr.pushed().isEmpty(),
+                "timestamp ordering must not be pushed (no connector encoder)");
+        assertEquals(List.of(gt), gtr.residual());
+
+        // IN on timestamp also stays residual (constantValue fails per-element).
+        var array = call(StandardFunctions.ARRAY_CONSTRUCTOR_FUNCTION_NAME,
+                TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS,
+                lit(1_700_000_000_000L, TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS));
+        var in = call(StandardFunctions.IN_PREDICATE_FUNCTION_NAME, BOOLEAN,
+                var("ts", TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS), array);
+        assertTrue(translate(in).pushed().isEmpty(),
+                "timestamp IN must not be pushed (no connector encoder)");
     }
 
     @Test
