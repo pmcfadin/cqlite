@@ -31,12 +31,34 @@ repositories {
 // at runtime from the engine classpath; bundling it would clash. It must stay
 // out of the published POM's runtime dependencies for the same reason.
 val trinoVersion = "481"
-val arrowVersion = "18.1.0"
+// arrow-java pinned to 19.0.0 to align with Trino 481's own arrow-consuming
+// plugins (pinot/bigquery) and to fix the round-5 field decode failure
+// ("Failed to read message" on every table read) under 18.1.0 (issue #2193).
+// `flight-core` is the sole arrow artifact declared; every other arrow module
+// (arrow-vector, arrow-memory-core/-netty, arrow-format, flight-grpc) rides in
+// transitively at this SAME version, so bumping this one variable moves the
+// whole arrow-java stack in lockstep. Enforced at runtime by
+// ArrowJavaVersionPinTest against a silent dependency-resolution downgrade.
+val arrowVersion = "19.0.0"
 val jacksonVersion = "2.18.2"
+// Netty is pinned to the 4.1.x line arrow-java 19.0.0 was built and tested
+// against (issue #2193). flight-core:19.0.0's published Gradle metadata drags
+// several netty modules UP to 4.2.9.Final via conflict resolution, but arrow's
+// own `arrow-memory-netty-buffer-patch:19.0.0` and `grpc-netty:1.79.0` both
+// request netty 4.1.130.Final — and arrow's netty allocator is INCOMPATIBLE
+// with netty 4.2.x: its `UnsafeDirectLittleEndian.<init>` calls
+// `EmptyByteBuf.memoryAddress()`, which netty 4.2 changed to throw
+// `UnsupportedOperationException`, failing `NettyAllocationManager`'s static
+// init (`ExceptionInInitializerError`) on the FIRST RootAllocator — i.e. every
+// table read. The enforced BOM below forces the whole netty stack down to the
+// arrow-19-tested 4.1.130.Final so the allocator initializes. This mirrors a
+// real Trino runtime, which supplies netty 4.1.x.
+val nettyVersion = "4.1.130.Final"
 
 dependencies {
     compileOnly("io.trino:trino-spi:$trinoVersion")
 
+    implementation(enforcedPlatform("io.netty:netty-bom:$nettyVersion"))
     implementation("org.apache.arrow:flight-core:$arrowVersion")
     implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonVersion")
 
