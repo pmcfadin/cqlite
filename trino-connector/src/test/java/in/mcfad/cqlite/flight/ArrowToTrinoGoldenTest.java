@@ -1,7 +1,13 @@
 package in.mcfad.cqlite.flight;
 
+import io.airlift.slice.Slices;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
+import io.trino.spi.expression.Call;
+import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Constant;
+import io.trino.spi.expression.StandardFunctions;
+import io.trino.spi.expression.Variable;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DateTimeEncoding;
@@ -29,9 +35,11 @@ import org.junit.jupiter.api.Test;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -210,6 +218,137 @@ class ArrowToTrinoGoldenTest {
 
     private static PushdownCapability capabilityOf(List<CqliteFlightColumnHandle> columns, String name) {
         return columns.stream().filter(c -> c.name().equals(name)).findFirst().orElseThrow().capability();
+    }
+
+    /**
+     * Predicate-push / constant-encoder desync guard (issue #2239, Option A —
+     * decouple).
+     *
+     * <p>The server-declared {@code cqlite:pushdown} capability is OVERLOADED: it
+     * gates BOTH predicate pushdown (`PredicateTreeTranslator`) AND value-aggregate
+     * pushdown (`CqliteFlightMetadata.supportsValueAggregate`, {@code min}/{@code
+     * max}/etc. on {@code FULL}). So it is NOT the connector's predicate-encoder
+     * frontier: a type can be {@code FULL} (server-comparable, aggregate-pushable)
+     * yet have no {@code constantValue} encoder (e.g. {@code timestamp}). Demoting
+     * such a type would silently kill its working aggregate pushdown, so the
+     * capability stays {@code FULL} and the predicate simply fails closed.
+     *
+     * <p>This test therefore guards the real invariant: for every column the server
+     * emits, the REAL {@link PredicateTreeTranslator#translate} path must push an
+     * {@code Equal} leaf <em>iff</em> the column is capability-pushable AND its
+     * constant is {@code constantValue}-encodable. It reads the server's
+     * {@code cqlite:pushdown} metadata from the golden and drives the actual
+     * translation, so a push path that ever emits a leaf for a type
+     * {@code constantValue} cannot encode (a real predicate-push/encoder desync)
+     * fails loudly — while {@code timestamp} (FULL, no encoder → not pushed but
+     * still aggregate-pushable) is correctly consistent.
+     */
+    @Test
+    void predicatePushPathIsGatedByConstantEncoder() throws Exception {
+        try (BufferAllocator allocator = new RootAllocator();
+                InputStream in = getClass().getResourceAsStream("/golden/all_scalars.arrows")) {
+            assertNotNull(in, "golden resource /golden/all_scalars.arrows must be on the test classpath");
+            try (ArrowStreamReader reader = new ArrowStreamReader(in, allocator)) {
+                assertTrue(reader.loadNextBatch(), "golden stream must carry at least one record batch");
+                Schema schema = reader.getVectorSchemaRoot().getSchema();
+
+                for (Field field : schema.getFields()) {
+                    String name = field.getName();
+                    PushdownCapability capability = ArrowTypeMapper.capabilityOf(field);
+                    Type trinoType = ArrowTypeMapper.toTrino(field);
+                    Constant sample = new Constant(sampleValue(name, trinoType), trinoType);
+
+                    boolean encodable = PredicateTreeTranslator.encodeConstantForDriftGuard(sample).isPresent();
+                    boolean capabilityPushable = capability != PushdownCapability.NONE;
+
+                    // Drive the REAL predicate translation with `name = sample`.
+                    CqliteFlightColumnHandle handle =
+                            new CqliteFlightColumnHandle(name, trinoType, capability);
+                    ConnectorExpression equal = new Call(
+                            BooleanType.BOOLEAN,
+                            StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME,
+                            List.of(new Variable(name, trinoType), sample));
+                    boolean pushed = PredicateTreeTranslator
+                            .translate(equal, Map.of(name, handle))
+                            .pushed()
+                            .isPresent();
+
+                    assertTrue(
+                            pushAgreesWithEncoder(capabilityPushable, encodable, pushed),
+                            "predicate-push / encoder desync for column '" + name + "' ("
+                                    + trinoType + ", capability " + capability + "): pushed=" + pushed
+                                    + " but capability-pushable=" + capabilityPushable
+                                    + " AND constantValue-encodable=" + encodable
+                                    + ". A predicate leaf must be pushed IFF the column is pushable and"
+                                    + " its constant is encodable (issue #2239). If a push path now emits"
+                                    + " a leaf for a type constantValue cannot encode, gate it on"
+                                    + " constantValue; a FULL-but-unencodable type (e.g. timestamp, kept"
+                                    + " FULL for aggregate pushdown) must fail closed.");
+                }
+            }
+        }
+    }
+
+    /**
+     * The desync guard has teeth (issue #2239): prove {@link #pushAgreesWithEncoder}
+     * FLAGS the real desync class — a predicate push path that emits a leaf for a
+     * capability-pushable type whose constant {@code constantValue} cannot encode
+     * (push-without-encoder) — while accepting the intentional Option-A shape where
+     * a FULL-but-unencodable type (timestamp) correctly fails closed (not pushed).
+     */
+    @Test
+    void desyncGuardFlagsPushWithoutEncoder() {
+        // Induced real desync: a pushable column, no encoder, yet a leaf was pushed.
+        assertFalse(pushAgreesWithEncoder(true, false, true),
+                "a push path emitting a leaf for a type constantValue cannot encode is a desync");
+        // Intentional Option-A shape: FULL-but-unencodable (e.g. timestamp) → not pushed.
+        assertTrue(pushAgreesWithEncoder(true, false, false),
+                "a capability-pushable but unencodable type that is NOT pushed is consistent");
+        // The ordinary pushable+encodable+pushed case is consistent.
+        assertTrue(pushAgreesWithEncoder(true, true, true));
+        // A NONE column that pushed nothing is consistent; if it somehow pushed, flag it.
+        assertTrue(pushAgreesWithEncoder(false, false, false));
+        assertFalse(pushAgreesWithEncoder(false, true, true),
+                "a NONE column must never push a leaf");
+    }
+
+    /**
+     * The predicate-push contract: a leaf is pushed IFF the column is
+     * capability-pushable AND its constant is {@code constantValue}-encodable.
+     */
+    private static boolean pushAgreesWithEncoder(
+            boolean capabilityPushable, boolean encodable, boolean pushed) {
+        return pushed == (capabilityPushable && encodable);
+    }
+
+    /**
+     * A representative internal Trino operand for {@code type}, in the exact Java
+     * representation Trino hands the connector (Long-backed integrals/REAL/DATE/
+     * TIME/TIMESTAMP_TZ, Slice for VARCHAR/VARBINARY, …). Covers every scalar type
+     * the golden emits so the desync guard can drive the real translation for all
+     * of them; throws for an unmapped type so a newly-emitted column fails loudly
+     * instead of silently skipping.
+     */
+    private static Object sampleValue(String column, Type type) {
+        if (type instanceof VarcharType || type instanceof VarbinaryType) {
+            return Slices.utf8Slice(column + "-sample");
+        }
+        if (type instanceof BigintType || type instanceof IntegerType
+                || type instanceof SmallintType || type instanceof TinyintType
+                || type instanceof RealType || type instanceof DateType
+                || type instanceof TimeType || type instanceof TimestampWithTimeZoneType) {
+            // Long-backed operands: integrals/REAL(int bits)/DATE/TIME/TIMESTAMP_TZ.
+            return 1L;
+        }
+        if (type instanceof DoubleType) {
+            return 1.0d;
+        }
+        if (type instanceof BooleanType) {
+            return Boolean.TRUE;
+        }
+        throw new IllegalStateException(
+                "no drift-guard sample operand for column '" + column + "' of type " + type
+                        + "; add a representative value (issue #2239)");
     }
 
     private static Field fieldOf(Schema schema, String name) {

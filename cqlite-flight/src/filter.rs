@@ -469,6 +469,31 @@ fn parse_uuid(s: &str) -> Option<[u8; 16]> {
     Some(bytes)
 }
 
+/// Drift-guard probe (issue #2239): does the server's operand lowering
+/// (`json_to_value`) accept ANY predicate operand for `cql`?
+///
+/// This drives the REAL `json_to_value` path (the sole authority for which
+/// operands the server can compare) with a small set of canonical operands and
+/// reports whether the type is comparable server-side at all. It exists so the
+/// `producer.rs` capability guard can assert that every advertised non-`"none"`
+/// capability corresponds to a type the server can actually lower — without
+/// duplicating `json_to_value`'s type table. It is NOT the connector-encoder
+/// frontier (that is a Java-side concern; see `PredicateTreeTranslator`).
+#[cfg(test)]
+pub(crate) fn capability_json_to_value_probe(cql: &CqlType) -> bool {
+    // One operand of each JSON shape json_to_value can consume. A type is
+    // server-comparable iff at least one lowers successfully.
+    let operands = [
+        serde_json::json!(1),
+        serde_json::json!(1.5),
+        serde_json::json!(true),
+        serde_json::json!("11111111-1111-1111-1111-111111111111"),
+    ];
+    operands
+        .iter()
+        .any(|op| json_to_value(op, cql, "probe").is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
