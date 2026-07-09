@@ -77,6 +77,13 @@ impl TokenFilter {
     /// `(start, MAX] ∪ [MIN, end]`, so overlap holds if the SSTable reaches past
     /// `start` OR starts at or before `end`.
     pub fn overlaps(&self, min_token: i64, max_token: i64) -> bool {
+        // #2228: equal endpoints (`(T, T]`) denote the FULL ring, so every
+        // SSTable span overlaps. Mirror the per-token semantics in
+        // [`token_in_half_open_range`] regardless of the `wraparound` flag,
+        // otherwise SSTable-level pruning could silently drop every table.
+        if self.start == self.end {
+            return true;
+        }
         if self.wraparound {
             max_token > self.start || min_token <= self.end
         } else {
@@ -557,6 +564,26 @@ mod tests {
         assert!(!tf.overlaps(101, 200), "min_token>end excluded");
         // Span covering the whole range.
         assert!(tf.overlaps(i64::MIN, i64::MAX));
+    }
+
+    #[test]
+    fn overlaps_full_ring_equal_endpoints() {
+        // #2228: an equal-endpoint range `(T, T]` is the full ring, so every
+        // SSTable span overlaps it regardless of the `wraparound` flag.
+        for wrap in [true, false] {
+            let tf = TokenFilter {
+                start: 42,
+                end: 42,
+                wraparound: wrap,
+            };
+            assert!(tf.overlaps(i64::MIN, i64::MAX), "whole ring (wrap={wrap})");
+            assert!(tf.overlaps(100, 200), "span entirely above T (wrap={wrap})");
+            assert!(
+                tf.overlaps(-200, -100),
+                "span entirely below T (wrap={wrap})"
+            );
+            assert!(tf.overlaps(42, 42), "single-token span at T (wrap={wrap})");
+        }
     }
 
     #[test]

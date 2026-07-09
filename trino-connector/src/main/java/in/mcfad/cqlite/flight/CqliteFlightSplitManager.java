@@ -104,6 +104,13 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             String host = hostOnly(replica);
             long start = range.startToken();
             long end = range.endToken();
+            // #2228: equal endpoints (start == end) denote the FULL ring — the
+            // Cassandra convention for a range `(T, T]` — not the empty set. The
+            // Sidecar can emit this for single-token/single-node topologies.
+            // Treating it as wraparound makes the flight-side filter accept every
+            // token (`token > T || token <= T`), so `SELECT *` scans everything
+            // instead of silently returning 0 rows.
+            boolean wraparound = start >= end;
             splits.add(new CqliteFlightSplit(
                     table.keyspace(),
                     table.table(),
@@ -112,7 +119,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                     flightPort,
                     start,
                     end,
-                    start > end,
+                    wraparound,
                     snapshot));
         }
         return splits;
