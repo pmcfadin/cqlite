@@ -437,22 +437,21 @@ impl MergeProducer {
                     .as_ref()
                     .map(pushdown_capability)
                     .unwrap_or("none");
-                // NOTE on metadata ORDER (not addressed here — see #2285): the
-                // final WIRE order of this `HashMap`'s entries is NOT guaranteed
-                // stable across process runs once a field carries >= 2 metadata
-                // entries, since `Field::with_metadata` stores a `HashMap` as-is
-                // and arrow-ipc's `metadata_to_fb` iterates it unsorted
-                // (confirmed against arrow-schema/arrow-ipc 53.4.1 source) — a
-                // sort/canonicalization pass would need to happen at the actual
-                // wire boundary (or upstream in arrow-rs), not here, so no such
-                // pass is attempted in this function. Harmless for the
-                // `keyvalue` byte-pin golden specifically because those columns
-                // carry exactly one metadata entry each (order-trivial), but
-                // schemas with extension-typed columns (e.g. uuid:
-                // `ARROW:extension:name` + `cqlite:pushdown`, 2 entries — see
-                // `all_scalars`'s `c_uuid` column) are NOT covered by that
-                // trivial case, and their wire order is genuinely
-                // hash-seed-dependent until #2285 lands.
+                // NOTE on metadata ORDER (issue #2285, resolved as a documented
+                // limitation): the final WIRE order of this `HashMap`'s entries is
+                // NOT stable across process runs once a field carries >= 2 metadata
+                // entries, because `Field::with_metadata` stores a `HashMap` as-is
+                // and arrow-ipc's `metadata_to_fb` iterates it UNSORTED (confirmed
+                // against arrow-schema/arrow-ipc 53.4.1). This is a fundamental
+                // arrow-rs limitation with no public hook to control wire order, so
+                // NO sort pass is attempted here — it could not survive to the wire
+                // anyway. This is HARMLESS for live `do_get` (Arrow decodes metadata
+                // by key, order-independently) and for the `keyvalue` byte-pin
+                // golden (its fields carry exactly one metadata entry each). To stop
+                // anyone byte-pinning a >= 2-metadata-key field (e.g. uuid columns:
+                // `ARROW:extension:name` + `cqlite:pushdown`), the byte-pin call
+                // sites gate on `test_fixtures::assert_wire_deterministic_metadata`,
+                // which fails loudly for such a schema.
                 let mut metadata = field.metadata().clone();
                 metadata.insert("cqlite:pushdown".to_string(), capability.to_string());
                 field.as_ref().clone().with_metadata(metadata)

@@ -235,6 +235,18 @@ fn do_get_over_transport_emits_schema_then_recordbatch() {
 #[test]
 fn do_get_over_transport_matches_committed_golden() {
     let (_temp, data_dir) = build_fixture();
+
+    // Byte-pin safety gate (issue #2285): a field with >= 2 metadata entries has a
+    // process-random on-wire metadata order, which would make this byte comparison
+    // flaky. Assert the fixture's wire schema is guard-clean BEFORE relying on a
+    // byte-identical match, so a future 2-metadata-key fixture fails loudly here
+    // rather than flaking intermittently across CI runs.
+    let producer =
+        cqlite_flight::producer::MergeProducer::new(fx::keyvalue_schema(), fx::KEYVALUE_BATCH_SIZE)
+            .expect("build keyvalue producer");
+    fx::assert_wire_deterministic_metadata(&producer.arrow_schema().expect("wire schema"))
+        .expect("keyvalue byte-pin schema must have deterministic wire metadata order");
+
     let svc = CqliteFlightService::new(data_dir, 8192);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let wire = rt.block_on(do_get_raw_flight_data_over_transport(svc, ticket_bytes()));

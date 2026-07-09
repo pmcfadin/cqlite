@@ -20,11 +20,16 @@ pub mod shutdown;
 pub mod stats;
 pub mod streaming;
 
-// Shared field-shape fixture (issue #2283): the single source of truth for the
-// `cassandra_easy_stress.keyvalue` shape used by BOTH the golden emitter example
-// and the transport byte-pin test. `#[doc(hidden)]` keeps it out of the public
+// Shared byte-pin infrastructure (issues #2283/#2285): the single source of
+// truth for the `cassandra_easy_stress.keyvalue` field shape AND the
+// wire-metadata-order guard, used by BOTH the golden emitter example and the
+// transport byte-pin test. Gated behind the default-off `test-util` feature so
+// this test-only code never compiles into the production library/binary (it is
+// enabled for the `examples/`/`tests/` targets via the self-referential
+// dev-dependency in `Cargo.toml`). `#[doc(hidden)]` keeps it out of the public
 // docs; it must be `pub` (not `pub(crate)`) because both callers are separate
 // crates linked against this library.
+#[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub mod test_fixtures;
 

@@ -264,6 +264,11 @@ fn emit_flightdata_golden(out: &Path) -> Result<(), Box<dyn std::error::Error>> 
     // with what the golden and the real-transport pin actually exercise.
     let producer = MergeProducer::new(schema, fx::KEYVALUE_BATCH_SIZE)?;
     let wire_schema = Arc::new(producer.arrow_schema()?);
+    // Byte-pin safety gate (issue #2285): this golden is byte-compared on the wire
+    // (unlike the semantically-decoded `all_scalars.arrows`), so its schema must
+    // NOT carry a field whose metadata order is process-random. Fail regeneration
+    // loudly if a future fixture introduces a >= 2-metadata-key field.
+    fx::assert_wire_deterministic_metadata(&wire_schema)?;
     let table_dir = data_dir.join(fx::KEYVALUE_KS).join(fx::KEYVALUE_TBL);
     let batches = producer.produce(&DirSource::new(table_dir))?;
 
