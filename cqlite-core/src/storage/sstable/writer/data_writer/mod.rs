@@ -210,6 +210,9 @@ mod collection_order;
 mod complex;
 mod encoding;
 mod index_prefix;
+/// Incremental rows+markers interleave (issue #1668, stage 5c-iii). See
+/// [`marker_merge::merge_rows_and_markers`].
+mod marker_merge;
 mod partition;
 mod rows;
 mod schema_helpers;
@@ -237,6 +240,7 @@ pub use types::PartitionEmitCounts;
 pub(crate) use collection_order::compare_collection_elements;
 pub(crate) use encoding::*;
 pub(crate) use index_prefix::*;
+pub(crate) use partition::PartitionItem;
 pub(crate) use schema_helpers::*;
 pub(crate) use static_ops::StaticOpsTracker;
 pub(crate) use types::*;
