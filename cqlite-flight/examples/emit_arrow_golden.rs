@@ -48,19 +48,14 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 
 use cqlite_flight::producer::{DirSource, MergeProducer};
+// The field-shape `keyvalue` fixture (schema/rows/mutations/batch size) is the
+// single source of truth shared with `tests/do_get_transport_test.rs` so the
+// golden this example emits and the wire bytes that test byte-compares against it
+// can never drift apart (issue #2283).
+use cqlite_flight::test_fixtures as fx;
 
 const KS: &str = "golden_ks";
 const TBL: &str = "all_scalars";
-
-/// The FIELD failure shape (issue #2193): the cassandra-easy-stress `keyvalue`
-/// table — a text partition key + a single text value column, no clustering key.
-/// This is the exact header-extracted `nb` shape the round-3/4 field run fails on.
-const FIELD_KS: &str = "cassandra_easy_stress";
-const FIELD_TBL: &str = "keyvalue";
-/// The 3 rows the field `tiny` table holds; values pinned so the Java decode
-/// assertion can hard-code them. Row order in the output is the server's token
-/// order, so the Java side asserts the value SET, not positional order.
-const FIELD_ROWS: [(&str, &str); 3] = [("k1", "1"), ("k2", "2"), ("k3", "3")];
 
 /// A partition-keyed table with one column of every supported scalar CQL type.
 /// PK is `id int`; the rest are regular columns so a single mutation can write a
@@ -197,51 +192,6 @@ fn mutations() -> Vec<Mutation> {
     vec![full, nulls]
 }
 
-/// The field-shape `keyvalue` schema (issue #2193): `key text` partition key +
-/// `value text` regular column, no clustering key.
-fn field_schema() -> TableSchema {
-    let col = |name: &str, nullable: bool| Column {
-        name: name.into(),
-        data_type: "text".into(),
-        nullable,
-        default: None,
-        is_static: false,
-    };
-    TableSchema {
-        keyspace: FIELD_KS.into(),
-        table: FIELD_TBL.into(),
-        partition_keys: vec![KeyColumn {
-            name: "key".into(),
-            data_type: "text".into(),
-            position: 0,
-        }],
-        clustering_keys: vec![],
-        columns: vec![col("key", false), col("value", true)],
-        comments: HashMap::new(),
-        dropped_columns: HashMap::new(),
-    }
-}
-
-/// One `Write` mutation per field row: partition key `key`, regular column `value`.
-fn field_mutations() -> Vec<Mutation> {
-    FIELD_ROWS
-        .iter()
-        .map(|(key, value)| {
-            Mutation::new(
-                TableId::new(FIELD_KS, FIELD_TBL),
-                PartitionKey::single("key", Value::Text((*key).into())),
-                None,
-                vec![CellOperation::Write {
-                    column: "value".into(),
-                    value: Value::Text((*value).into()),
-                }],
-                100,
-                None,
-            )
-        })
-        .collect()
-}
-
 /// Flush `mutations` into a fresh single-SSTable write-engine fixture under a
 /// temp dir; return the temp handle (kept alive by the caller) and the data dir.
 fn build_fixture(
@@ -304,24 +254,24 @@ fn emit_arrows_golden(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// .build(batch_stream)`), then length-delimits the resulting protobuf
 /// `FlightData` messages so arrow-java can split and Flight-decode them.
 fn emit_flightdata_golden(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let schema = field_schema();
-    let (_temp, data_dir) = build_fixture(&schema, field_mutations())?;
+    let schema = fx::keyvalue_schema();
+    let (_temp, data_dir) = build_fixture(&schema, fx::keyvalue_mutations())?;
 
     // Same producer + wire schema (carrying the `cqlite:pushdown` field metadata)
-    // the server's `do_get` uses. `batch_size = 8192` matches BOTH the field
+    // the server's `do_get` uses. `KEYVALUE_BATCH_SIZE` matches BOTH the field
     // flight image AND `do_get_transport_test.rs`'s `CqliteFlightService::new`
     // batch size, so a future larger fixture's batch boundaries stay aligned
     // with what the golden and the real-transport pin actually exercise.
-    let producer = MergeProducer::new(schema, 8192)?;
+    let producer = MergeProducer::new(schema, fx::KEYVALUE_BATCH_SIZE)?;
     let wire_schema = Arc::new(producer.arrow_schema()?);
-    let table_dir = data_dir.join(FIELD_KS).join(FIELD_TBL);
+    let table_dir = data_dir.join(fx::KEYVALUE_KS).join(fx::KEYVALUE_TBL);
     let batches = producer.produce(&DirSource::new(table_dir))?;
 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    if total_rows != FIELD_ROWS.len() {
+    if total_rows != fx::KEYVALUE_ROWS.len() {
         return Err(format!(
             "expected {} field fixture rows, got {total_rows}",
-            FIELD_ROWS.len()
+            fx::KEYVALUE_ROWS.len()
         )
         .into());
     }
