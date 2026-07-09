@@ -41,6 +41,9 @@ dependencies {
     implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonVersion")
 
     testImplementation("io.trino:trino-spi:$trinoVersion")
+    // Optional<>-aware (de)serialization mirrors Trino's split codec so the
+    // CqliteFlightSplit JSON round-trip test (issue #2241) is faithful.
+    testImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jdk8:$jacksonVersion")
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

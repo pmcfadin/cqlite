@@ -246,15 +246,32 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             String localDatacenter,
             int flightPort,
             Optional<String> snapshot) {
+        // Availability failover (issue #2241): each split carries an ORDERED replica list
+        // (primary first, then the range's other owners) that the page source retries on a
+        // connect-class failure. In SNAPSHOT mode a fallback is only usable if its host also
+        // has the snapshot — issue #2227 creates the snapshot on exactly distinctReplicaHosts
+        // (the primary of each range) and fails closed, so reaching here in snapshot mode means
+        // every one of those hosts has it. Restrict fallbacks to that set; a range's primary is
+        // always in it. In LIVE mode (snapshot empty) every replica owner is eligible.
+        Set<String> snapshotHosts =
+                snapshot.isPresent() ? distinctReplicaHosts(replicas, localDatacenter) : null;
         List<CqliteFlightSplit> splits = new ArrayList<>();
         for (ReplicaInfo range : replicas.readReplicas()) {
-            String replica = pickReplica(range.replicasByDatacenter(), localDatacenter);
-            if (replica == null) {
+            // Sidecar returns replicas as "ip:storage_port"; the flight server listens on
+            // flightPort at the same host, so keep only the host. The ordered list's first
+            // entry is exactly the pickReplica choice (same local-DC-then-global ordering).
+            List<String> ordered = orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter);
+            if (ordered.isEmpty()) {
                 continue; // range with no known replica — nothing to read
             }
-            // Sidecar returns replicas as "ip:storage_port"; the flight server
-            // listens on flightPort at the same host, so keep only the host.
-            String host = hostOnly(replica);
+            String host = ordered.get(0);
+            List<String> fallbacks = new ArrayList<>();
+            for (int i = 1; i < ordered.size(); i++) {
+                String candidate = ordered.get(i);
+                if (snapshotHosts == null || snapshotHosts.contains(candidate)) {
+                    fallbacks.add(candidate);
+                }
+            }
             long start = range.startToken();
             long end = range.endToken();
             // #2228: equal endpoints (start == end) denote the FULL ring — the
@@ -273,9 +290,41 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                     start,
                     end,
                     wraparound,
-                    snapshot));
+                    snapshot,
+                    fallbacks));
         }
         return splits;
+    }
+
+    /**
+     * The range's replica hosts in try order (issue #2241): local-datacenter owners first
+     * (lexicographic by address), then every other datacenter's owners (lexicographic),
+     * mapped to bare hosts via {@link #hostOnly} and de-duplicated preserving order. The
+     * first element equals {@link #pickReplica}'s choice, so it is the split's primary and
+     * the rest are ordered availability fallbacks.
+     */
+    static List<String> orderedReplicaHosts(Map<String, List<String>> replicasByDatacenter, String localDatacenter) {
+        List<String> orderedAddresses = new ArrayList<>();
+        if (localDatacenter != null) {
+            List<String> local = replicasByDatacenter.get(localDatacenter);
+            if (local != null) {
+                local.stream().sorted().forEach(orderedAddresses::add);
+            }
+        }
+        replicasByDatacenter.entrySet().stream()
+                .filter(e -> !e.getKey().equals(localDatacenter))
+                .flatMap(e -> e.getValue().stream())
+                .sorted()
+                .forEach(orderedAddresses::add);
+        List<String> hosts = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (String address : orderedAddresses) {
+            String host = hostOnly(address);
+            if (seen.add(host)) {
+                hosts.add(host);
+            }
+        }
+        return hosts;
     }
 
     /**

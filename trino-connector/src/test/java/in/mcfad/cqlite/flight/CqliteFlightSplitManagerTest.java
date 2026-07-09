@@ -321,4 +321,88 @@ class CqliteFlightSplitManagerTest {
                 List.of(range("0", "100", Map.of())));
         assertTrue(CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815).isEmpty());
     }
+
+    /**
+     * Availability failover (issue #2241): in LIVE mode every other replica owner of a range is
+     * an ordered fallback (primary first). {@code orderedReplicaHosts} sorts by address and
+     * de-dups by host; the primary equals {@link CqliteFlightSplitManager#pickReplica}'s choice.
+     */
+    @Test
+    void liveModeCarriesAllOtherOwnersAsOrderedFallbacks() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(range("-100", "0",
+                        Map.of("dc1", List.of("10.0.0.3:7000", "10.0.0.2:7000", "10.0.0.4:7000")))));
+
+        var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals(1, splits.size());
+        assertEquals("10.0.0.2", splits.get(0).host(), "primary = smallest address");
+        assertEquals(List.of("10.0.0.3", "10.0.0.4"), splits.get(0).fallbackHosts());
+        assertEquals(List.of("10.0.0.2", "10.0.0.3", "10.0.0.4"), splits.get(0).replicaHosts());
+    }
+
+    /**
+     * Snapshot-mode restriction (issue #2241 × #2227): a fallback is only usable if its host also
+     * has the snapshot. The snapshot is created on exactly {@code distinctReplicaHosts} (each
+     * range's primary), so a fallback that is not a primary of any range is dropped in snapshot
+     * mode but kept in live mode.
+     */
+    @Test
+    void snapshotModeRestrictsFallbacksToSnapshotHosts() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        // 10.0.0.9 owns range A but is never a primary → not a snapshot host.
+                        range("-100", "0", Map.of("dc1", List.of("10.0.0.2:7000", "10.0.0.9:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("10.0.0.2:7000")))));
+
+        var snap = CqliteFlightSplitManager.buildSplits(
+                TABLE, resp, "dc1", 8815, java.util.Optional.of("cqlite-q1"));
+        // Range A primary 10.0.0.2; its only other owner 10.0.0.9 has no snapshot → no fallback.
+        assertEquals("10.0.0.2", snap.get(0).host());
+        assertEquals(List.of(), snap.get(0).fallbackHosts(), "non-snapshot host dropped as fallback");
+
+        // Live mode keeps 10.0.0.9 as a fallback (all owners eligible).
+        var live = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals(List.of("10.0.0.9"), live.get(0).fallbackHosts());
+    }
+
+    /**
+     * In snapshot mode a fallback that IS a primary of another range (hence a snapshot host) is
+     * kept — availability failover still works across ranges' primaries.
+     */
+    @Test
+    void snapshotModeKeepsFallbackThatIsAnotherRangesPrimary() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        range("-100", "0", Map.of("dc1", List.of("10.0.0.2:7000", "10.0.0.3:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("10.0.0.3:7000")))));
+
+        var snap = CqliteFlightSplitManager.buildSplits(
+                TABLE, resp, "dc1", 8815, java.util.Optional.of("cqlite-q1"));
+        // 10.0.0.3 is range B's primary → a snapshot host → kept as range A's fallback.
+        assertEquals("10.0.0.2", snap.get(0).host());
+        assertEquals(List.of("10.0.0.3"), snap.get(0).fallbackHosts());
+    }
+
+    /**
+     * {@code orderedReplicaHosts} prefers local-DC owners (sorted), then every other DC's owners
+     * (sorted), mapping to bare hosts and de-duplicating in order. The first entry matches
+     * {@link CqliteFlightSplitManager#pickReplica}.
+     */
+    @Test
+    void orderedReplicaHostsPrefersLocalDcThenOthers() {
+        Map<String, List<String>> byDc = Map.of(
+                "dc1", List.of("10.0.1.5:7000", "10.0.1.2:7000"),
+                "dc2", List.of("10.0.2.9:7000"));
+
+        assertEquals(
+                List.of("10.0.1.2", "10.0.1.5", "10.0.2.9"),
+                CqliteFlightSplitManager.orderedReplicaHosts(byDc, "dc1"));
+        assertEquals(
+                "10.0.1.2",
+                CqliteFlightSplitManager.pickReplica(byDc, "dc1").split(":")[0],
+                "ordered head equals pickReplica");
+    }
 }
