@@ -15,6 +15,7 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -286,6 +287,34 @@ class ArrowToTrinoTest {
     }
 
     @Test
+    void projectedColumnAbsentFromBatchRaisesNamingTheColumn() {
+        // Issue #2238: a column requested in the projection but missing from the
+        // delivered Arrow batch (server/connector schema drift) must surface a clear
+        // error naming the column — NOT be masked as a silent all-null column.
+        try (BufferAllocator allocator = new RootAllocator()) {
+            IntVector id = new IntVector("id", allocator);
+            id.allocateNew(2);
+            id.set(0, 10);
+            id.set(1, 20);
+
+            var root = new VectorSchemaRoot(List.of(id));
+            root.setRowCount(2);
+
+            // "missing_col" is projected but never delivered in the batch.
+            var columns = List.of(
+                    new CqliteFlightColumnHandle("id", IntegerType.INTEGER),
+                    new CqliteFlightColumnHandle("missing_col", VarcharType.VARCHAR));
+
+            TrinoException ex = assertThrows(TrinoException.class,
+                    () -> ArrowToTrino.toPage(root, columns));
+            assertTrue(ex.getMessage().contains("missing_col"),
+                    "error must name the missing column, was: " + ex.getMessage());
+
+            root.close();
+        }
+    }
+
+    @Test
     void readJavaValueRejectsNanosecondUnitTimestampAsTyped() {
         // The aggregation finalize path reads a TIMESTAMP group/aggregate column via
         // readJavaValue; a NANOSECOND vector must be rejected with a typed error, not
@@ -353,6 +382,28 @@ class ArrowToTrinoTest {
 
             Page page = ArrowToTrino.toPage(root, columns);
             assertEquals(19_000, io.trino.spi.type.DateType.DATE.getInt(page.getBlock(0), 0));
+
+            root.close();
+        }
+    }
+
+    @Test
+    void nullValueWithinPresentVectorStaysNullNotError() {
+        // Guardrail (issue #2238): a null CELL within a delivered vector is normal and
+        // must still yield an appended null — only an ENTIRELY absent vector errors.
+        try (BufferAllocator allocator = new RootAllocator()) {
+            IntVector id = new IntVector("id", allocator);
+            id.allocateNew(2);
+            id.set(0, 10);
+            id.setNull(1);
+
+            var root = new VectorSchemaRoot(List.of(id));
+            root.setRowCount(2);
+
+            var columns = List.of(new CqliteFlightColumnHandle("id", IntegerType.INTEGER));
+            Page page = ArrowToTrino.toPage(root, columns);
+            assertEquals(10, IntegerType.INTEGER.getInt(page.getBlock(0), 0));
+            assertTrue(page.getBlock(0).isNull(1), "null cell must stay null, not error");
 
             root.close();
         }

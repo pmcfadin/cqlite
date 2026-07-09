@@ -2,6 +2,8 @@ package in.mcfad.cqlite.flight;
 
 import io.airlift.slice.Slices;
 import io.trino.spi.Page;
+import io.trino.spi.StandardErrorCode;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.BigintType;
@@ -56,15 +58,30 @@ public final class ArrowToTrino {
         for (int c = 0; c < columns.size(); c++) {
             CqliteFlightColumnHandle col = columns.get(c);
             FieldVector vector = root.getVector(col.name());
+            if (vector == null) {
+                // Issue #2238: the column was requested in the projection but is absent
+                // from the delivered batch — server/connector schema drift. Surface it
+                // as a clear error naming the column instead of masking it as an
+                // all-null column (which would silently hide a real correctness bug).
+                throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
+                        "Projected column '" + col.name()
+                                + "' is missing from the delivered Arrow batch; "
+                                + "the server did not return a vector for this column "
+                                + "(schema drift between the connector projection and "
+                                + "the Flight server response)");
+            }
             blocks[c] = toBlock(col.type(), vector, rowCount);
         }
         return new Page(rowCount, blocks);
     }
 
     private static Block toBlock(Type type, FieldVector vector, int rowCount) {
+        // Callers (toPage) guarantee {@code vector != null}; an absent projected
+        // column is rejected upstream (issue #2238). A null CELL within the present
+        // vector is normal and still yields an appended null below.
         BlockBuilder builder = type.createBlockBuilder(null, rowCount);
         for (int i = 0; i < rowCount; i++) {
-            if (vector == null || vector.isNull(i)) {
+            if (vector.isNull(i)) {
                 builder.appendNull();
                 continue;
             }
