@@ -131,6 +131,14 @@ impl<'a> ChunkSource<'a> {
                 ))
             })?;
             DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
+            // CHUNK_PATH_ALLOCS (consumer E3/#1940): the decompress OUTPUT buffer is
+            // a per-chunk copy-chain heap allocation. It is the ONE surviving
+            // allocation after the D2 substrate work — it flows zero-copy into the
+            // B1 cache as `Bytes` (no `Arc::from` re-copy) and is the refcounted
+            // substrate the window borrows. Recording it here (not the old
+            // compressed-read-buffer site, which D2 turned into a reused scratch)
+            // makes the ≤1-alloc/chunk bound measurable. No-op in release.
+            crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
             d
         } else {
             // No compression reader: treat raw bytes as decompressed
