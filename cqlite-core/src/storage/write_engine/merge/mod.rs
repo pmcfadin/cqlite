@@ -106,6 +106,11 @@ mod carriers;
 #[cfg(feature = "write-support")]
 mod reconcile;
 
+/// Streaming cluster-group step type (issue #1668, stage 2) — feature-
+/// internal, UNWIRED from every production consumer. See `streaming::StreamingMerger`.
+#[cfg(feature = "write-support")]
+mod streaming;
+
 /// Adapt a merge-path [`CellData`] into the shared [`ReconcileCell`] view
 /// (issue #947) so per-cell winner resolution calls
 /// [`reconcile_rules::cell_wins`] — the one shared `Cells#reconcile` tie-break —
