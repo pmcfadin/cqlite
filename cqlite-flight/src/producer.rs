@@ -241,33 +241,66 @@ fn generation_of(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// A reusable async driver for the token prune (issue #2240).
+///
+/// [`sstable_token_span`] needs a tokio runtime (to drive the async
+/// `SummaryReader::open`) and a [`Platform`](cqlite_core::Platform). Building
+/// both is pure setup cost; doing it per SSTable made a many-SSTable prune under
+/// concurrent `do_get` load pay that cost once per file per split (a #2157 stall
+/// suspect). This bundles them so [`MergeProducer::prune_paths_cancellable`] can
+/// construct ONCE per prune request and reuse across every SSTable in the loop.
+///
+/// The runtime is a single current-thread runtime; the prune loop is a sync
+/// caller (it runs on a `spawn_blocking` thread), so driving many sequential
+/// `block_on` calls off one runtime is safe — no nested-runtime panic and no
+/// cross-thread `Send` requirement.
+struct PruneRuntime {
+    runtime: tokio::runtime::Runtime,
+    platform: std::sync::Arc<cqlite_core::Platform>,
+}
+
+impl PruneRuntime {
+    /// Build the runtime + platform once. Returns `None` on any construction
+    /// failure so the caller can fail open (keep every path) exactly as the
+    /// old per-file path did when it could not build its runtime/platform.
+    fn new() -> Option<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        let platform = std::sync::Arc::new(
+            runtime
+                .block_on(cqlite_core::Platform::new(&cqlite_core::Config::default()))
+                .ok()?,
+        );
+        Some(Self { runtime, platform })
+    }
+}
+
 /// Read an SSTable's `[minToken, maxToken]` span from its sibling `Summary.db`.
 ///
 /// SSTables store partitions in token order, so the first key carries the
 /// minimum token and the last key the maximum. The `Summary.db` path is derived
 /// by replacing the `-Data.db` suffix. Returns `None` on any failure (missing
 /// file, parse error, unparseable name) so callers can fail open.
-fn sstable_token_span(data_path: &Path) -> Option<(i64, i64)> {
+///
+/// The runtime + platform are supplied by the caller (see [`PruneRuntime`]) and
+/// reused across every SSTable in a prune, rather than rebuilt per file.
+fn sstable_token_span(data_path: &Path, rt: &PruneRuntime) -> Option<(i64, i64)> {
     let name = data_path.file_name()?.to_str()?;
     if !name.ends_with("-Data.db") {
         return None;
     }
     let summary_path = data_path.with_file_name(name.replace("-Data.db", "-Summary.db"));
 
-    // `SummaryReader::open` is async; drive it on a short-lived current-thread
-    // runtime. The prune is a one-shot, low-frequency step per DoGet split.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    let platform = runtime
-        .block_on(cqlite_core::Platform::new(&cqlite_core::Config::default()))
-        .ok()?;
-    let reader = runtime
+    // `SummaryReader::open` is async; drive it on the shared current-thread
+    // runtime. `block_on` is called sequentially per SSTable — safe reuse.
+    let reader = rt
+        .runtime
         .block_on(
             cqlite_core::storage::sstable::summary_reader::SummaryReader::open(
                 &summary_path,
-                std::sync::Arc::new(platform),
+                std::sync::Arc::clone(&rt.platform),
             ),
         )
         .ok()?;
@@ -571,16 +604,32 @@ impl MergeProducer {
             return Ok(paths);
         };
 
+        // Honour a pre-cancel before any setup, so a cancelled prune does ZERO
+        // work (as the pre-change per-file loop did — its first act was this
+        // same cancel poll, before building anything).
+        if cancel.is_cancelled() {
+            return Err(ProducerError::Cancelled);
+        }
+
         let total = paths.len();
         let mut kept: Vec<PathBuf> = Vec::with_capacity(total);
+
+        // Build the async driver (tokio runtime + Platform) ONCE per prune and
+        // reuse it for every SSTable (issue #2240), instead of rebuilding it per
+        // file. If it cannot be built, `rt` is `None` and every path fails open
+        // below — identical to the old per-file behaviour when construction
+        // failed. Constructed AFTER the token/empty/cancel guards so neither an
+        // unfiltered nor a cancelled prune pays the setup cost.
+        let rt = PruneRuntime::new();
         for path in paths {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
             }
-            let keep = match sstable_token_span(&path) {
+            let keep = match rt.as_ref().and_then(|rt| sstable_token_span(&path, rt)) {
                 // Span known: keep only if it overlaps the split's range.
                 Some((min_token, max_token)) => token.overlaps(min_token, max_token),
-                // Span unknown (missing/unreadable Summary.db): fail open.
+                // Span unknown (missing/unreadable Summary.db, or no runtime):
+                // fail open.
                 None => true,
             };
             if keep {
@@ -2026,6 +2075,40 @@ mod tests {
             kept.contains(&paths[0]),
             "path with missing Summary.db must be kept (fail open)"
         );
+    }
+
+    /// (e) Issue #2240: a SINGLE reused [`PruneRuntime`] reads every SSTable's
+    /// span identically to the pre-change per-file construction (`span_of`
+    /// builds its own runtime + Platform each call). This proves the hoisted,
+    /// reused runtime yields byte-identical prune inputs — no behaviour change —
+    /// while constructing the runtime + Platform ONCE for the whole loop.
+    #[test]
+    fn prune_runtime_is_reused_across_sstables_with_identical_spans() {
+        let schema = simple_schema();
+        // Three SSTables so one reused runtime drives several block_on calls.
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100)],
+                vec![write_row(2, "b", 20, 100)],
+                vec![write_row(3, "c", 30, 100)],
+            ],
+        );
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+        assert_eq!(paths.len(), 3, "fixture has three SSTables");
+
+        // Build the driver ONCE and reuse it for every file.
+        let rt = PruneRuntime::new().expect("prune runtime builds");
+        for path in &paths {
+            let reused = sstable_token_span(path, &rt).expect("reused span read");
+            // `span_of` constructs a fresh runtime + Platform per call — the
+            // pre-change behaviour — so equality proves the reuse is faithful.
+            let per_file = span_of(path);
+            assert_eq!(
+                reused, per_file,
+                "reused-runtime span must equal per-file-runtime span"
+            );
+        }
     }
 
     // ---- Issue #834: nested predicate pushdown (OR/NOT/IS NULL) ----
