@@ -3,8 +3,6 @@ package in.mcfad.cqlite.flight;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.spi.Page;
-import io.trino.spi.StandardErrorCode;
-import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -128,18 +126,18 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
         List<String> groupBy = spec.groupBy();
         List<AggregationSpec.Aggregate> aggregates = spec.aggregates();
 
-        // Resolve every projected vector ONCE, up front (issue #2262). A missing vector
-        // means the Flight server did not deliver a column the connector's aggregation
-        // projection expects (schema drift) — a hard error naming the column, NOT a
-        // silently null group key / partial-aggregate value that would corrupt the
-        // GROUP BY result set undetected. Mirrors ArrowToTrino.toPage's guard (#2238).
+        // Resolve every projected vector ONCE, up front (issue #2262), via the shared
+        // missing-column guard (issue #2273) — a missing vector is a hard error naming
+        // the column, NOT a silently null group key / partial-aggregate value that would
+        // corrupt the GROUP BY result set undetected. See ArrowToTrino#requireVector for
+        // the full schema-drift + error-code rationale (shared with ArrowToTrino#toPage).
         List<FieldVector> groupVectors = new ArrayList<>(groupBy.size());
         for (String gc : groupBy) {
-            groupVectors.add(requireVector(root, gc));
+            groupVectors.add(ArrowToTrino.requireVector(root, gc, "Aggregate group-by column"));
         }
         List<FieldVector> aggregateVectors = new ArrayList<>(aggregates.size());
         for (AggregationSpec.Aggregate a : aggregates) {
-            aggregateVectors.add(requireVector(root, a.output()));
+            aggregateVectors.add(ArrowToTrino.requireVector(root, a.output(), "Aggregate output column"));
         }
 
         for (int r = 0; r < rows; r++) {
@@ -153,33 +151,6 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
             }
             merger.combine(new PartialAggregateMerger.GroupKey(keyValues), partials);
         }
-    }
-
-    /**
-     * Resolve a projected group-by / aggregate-output vector, or fail loudly. An absent
-     * vector means the Flight server did not return a column the connector's aggregation
-     * projection expects (schema drift) — surfaced as a clear error naming the column
-     * (issue #2262), never masked as a silent all-null column.
-     */
-    private static FieldVector requireVector(VectorSchemaRoot root, String column) {
-        FieldVector vector = root.getVector(column);
-        if (vector == null) {
-            // Error-code choice (issue #2270, mirrors ArrowToTrino#toPage): GENERIC_INTERNAL_ERROR
-            // is deliberate. trino-spi's StandardErrorCode has no EXTERNAL-category code for "a
-            // connector's data source returned a contract-violating response"; the REMOTE_* codes
-            // are all ErrorType.INTERNAL_ERROR for Trino's own worker/exchange failures and would
-            // misdirect operators. The Flight server is CQLite's own paired component, so an
-            // aggregation projection/response mismatch is genuinely an internal contract bug in the
-            // CQLite stack — INTERNAL_ERROR is the correct category. A shared connector-specific
-            // ErrorCodeSupplier is out of scope here (follow-up #2273).
-            throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
-                    "Aggregate/group-by column '" + column
-                            + "' is missing from the delivered Arrow batch; "
-                            + "the server did not return a vector for this column "
-                            + "(schema drift between the connector aggregation "
-                            + "projection and the Flight server response)");
-        }
-        return vector;
     }
 
     /** Build the single output page, one block per requested column. */

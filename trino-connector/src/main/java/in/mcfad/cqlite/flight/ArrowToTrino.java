@@ -57,34 +57,51 @@ public final class ArrowToTrino {
         Block[] blocks = new Block[columns.size()];
         for (int c = 0; c < columns.size(); c++) {
             CqliteFlightColumnHandle col = columns.get(c);
-            FieldVector vector = root.getVector(col.name());
-            if (vector == null) {
-                // Issue #2238: the column was requested in the projection but is absent
-                // from the delivered batch — schema drift between the connector projection
-                // and its paired CQLite Flight server response. Surface it as a clear error
-                // naming the column instead of masking it as an all-null column (which would
-                // silently hide a real correctness bug).
-                //
-                // Error-code choice (issue #2270): GENERIC_INTERNAL_ERROR is deliberate.
-                // trino-spi's StandardErrorCode exposes no EXTERNAL-category code for "a
-                // connector's data source returned a contract-violating response" (its sole
-                // EXTERNAL code is UNSUPPORTED_TABLE_TYPE); every REMOTE_* code is
-                // ErrorType.INTERNAL_ERROR denoting Trino's own worker/exchange failures and
-                // would misdirect operators toward the cluster. The Flight server is CQLite's
-                // own paired component, so a projection/response mismatch is genuinely an
-                // internal contract bug in the CQLite stack — INTERNAL_ERROR is the correct
-                // category. A connector-specific ErrorCodeSupplier would be idiomatic but is
-                // out of scope here (follow-up #2273).
-                throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
-                        "Projected column '" + col.name()
-                                + "' is missing from the delivered Arrow batch; "
-                                + "the server did not return a vector for this column "
-                                + "(schema drift between the connector projection and "
-                                + "the Flight server response)");
-            }
+            // Absent projected column (schema drift) fails loudly — see requireVector.
+            FieldVector vector = requireVector(root, col.name(), "Projected column");
             blocks[c] = toBlock(col.type(), vector, rowCount);
         }
         return new Page(rowCount, blocks);
+    }
+
+    /**
+     * Resolve a projected vector from {@code root} by column name, or fail loudly. Shared
+     * missing-column guard for both read paths — the scalar/projection scan ({@link
+     * #toPage}) and the aggregate finalize path ({@code
+     * CqliteFlightAggregatePageSource.accumulate}) — so their logic and rationale live in
+     * one place (issue #2273).
+     *
+     * <p>An absent vector means the paired CQLite Flight server did not deliver a column
+     * the connector's projection expects: schema drift between the connector projection
+     * and the server response. It is surfaced as a clear error naming the column (issues
+     * #2238, #2262) instead of masked as a silent all-null column — masking would hide a
+     * real correctness bug (a spurious all-null projected column, or a corrupted GROUP BY
+     * result set). A null CELL within a PRESENT vector is normal and handled by callers,
+     * not here. {@code contextLabel} names the column's role in the thrown message (e.g.
+     * {@code "Projected column"} vs {@code "Aggregate group-by column"} / {@code
+     * "Aggregate output column"}) so the error stays specific to its call site.
+     *
+     * <p>Error-code choice (issue #2270): {@link StandardErrorCode#GENERIC_INTERNAL_ERROR}
+     * is deliberate. trino-spi's {@code StandardErrorCode} exposes no EXTERNAL-category
+     * code that fits "a connector's data source returned a contract-violating response"
+     * (e.g. {@code UNSUPPORTED_TABLE_TYPE} does not); every {@code REMOTE_*} code is {@code
+     * ErrorType.INTERNAL_ERROR} denoting Trino's own worker/exchange failures and would
+     * misdirect operators toward the cluster. The Flight server is CQLite's own paired
+     * component, so a projection/response mismatch is genuinely an internal contract bug in
+     * the CQLite stack — INTERNAL_ERROR is the correct category. A connector-specific
+     * {@code ErrorCodeSupplier} would be idiomatic but is out of scope.
+     */
+    public static FieldVector requireVector(VectorSchemaRoot root, String column, String contextLabel) {
+        FieldVector vector = root.getVector(column);
+        if (vector == null) {
+            throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
+                    contextLabel + " '" + column
+                            + "' is missing from the delivered Arrow batch; "
+                            + "the server did not return a vector for this column "
+                            + "(schema drift between the connector projection and "
+                            + "the Flight server response)");
+        }
+        return vector;
     }
 
     private static Block toBlock(Type type, FieldVector vector, int rowCount) {
