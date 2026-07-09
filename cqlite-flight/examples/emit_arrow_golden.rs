@@ -308,8 +308,11 @@ fn emit_flightdata_golden(out: &Path) -> Result<(), Box<dyn std::error::Error>> 
     let (_temp, data_dir) = build_fixture(&schema, field_mutations())?;
 
     // Same producer + wire schema (carrying the `cqlite:pushdown` field metadata)
-    // the server's `do_get` uses.
-    let producer = MergeProducer::new(schema, 1024)?;
+    // the server's `do_get` uses. `batch_size = 8192` matches BOTH the field
+    // flight image AND `do_get_transport_test.rs`'s `CqliteFlightService::new`
+    // batch size, so a future larger fixture's batch boundaries stay aligned
+    // with what the golden and the real-transport pin actually exercise.
+    let producer = MergeProducer::new(schema, 8192)?;
     let wire_schema = Arc::new(producer.arrow_schema()?);
     let table_dir = data_dir.join(FIELD_KS).join(FIELD_TBL);
     let batches = producer.produce(&DirSource::new(table_dir))?;

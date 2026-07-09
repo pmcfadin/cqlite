@@ -7,10 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.TreeSet;
 import org.apache.arrow.flight.FlightMessageDecoder;
-import org.apache.arrow.flight.impl.Flight;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VarCharVector;
@@ -98,21 +98,45 @@ class FlightDataGoldenDecodeTest {
     }
 
     /**
-     * Split the committed golden into per-message protobuf byte arrays using the
-     * generated {@code Flight.FlightData} protobuf class ({@code parseDelimitedFrom}
-     * reverses the length-delimited framing the emitter wrote). Each element is the
-     * raw serialized bytes of one FlightData message — exactly what gRPC hands the
-     * Flight marshaller on the client receive path.
+     * Split the committed golden into per-message protobuf byte arrays by manually
+     * walking the length-delimited framing (a protobuf varint length, then that
+     * many literal message bytes — the same framing {@code parseDelimitedFrom}
+     * reads) and SLICING the raw bytes directly.
+     *
+     * <p>Deliberately does NOT go through {@code Flight.FlightData.parseDelimitedFrom}
+     * + {@code toByteArray()}: that would parse the bytes into Java's generated
+     * protobuf object model and then RE-SERIALIZE them to canonical form before the
+     * Flight marshaller ever saw them — masking any anomaly the Java protobuf parser
+     * tolerates and normalizes away (non-canonical field order, an unexpected field,
+     * a subtle framing difference) that a real {@code FlightClient} would still hand
+     * to the marshaller as literal bytes. This test exists to prove prost's literal
+     * wire bytes decode cleanly, not a canonicalized re-encoding of them, so the
+     * marshaller must see exactly the bytes prost wrote to the golden file.
      */
     private static List<byte[]> readGoldenMessages() throws Exception {
-        List<byte[]> out = new ArrayList<>();
+        byte[] all;
         try (InputStream in =
                 FlightDataGoldenDecodeTest.class.getResourceAsStream("/golden/keyvalue.flightdata")) {
             assertNotNull(in, "golden resource /golden/keyvalue.flightdata must be on the test classpath");
-            Flight.FlightData data;
-            while ((data = Flight.FlightData.parseDelimitedFrom(in)) != null) {
-                out.add(data.toByteArray());
-            }
+            all = in.readAllBytes();
+        }
+        List<byte[]> out = new ArrayList<>();
+        int pos = 0;
+        while (pos < all.length) {
+            // Read the length prefix as a standard protobuf varint (LEB128,
+            // little-endian 7-bit groups, MSB = continuation bit). This only
+            // decodes the FRAMING, never the message payload itself.
+            long length = 0;
+            int shift = 0;
+            byte b;
+            do {
+                b = all[pos++];
+                length |= (long) (b & 0x7F) << shift;
+                shift += 7;
+            } while ((b & 0x80) != 0);
+            int len = (int) length;
+            out.add(Arrays.copyOfRange(all, pos, pos + len));
+            pos += len;
         }
         return out;
     }

@@ -22,6 +22,7 @@ use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use arrow_flight::{FlightData, Ticket};
 use futures::StreamExt;
+use prost::Message as _;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Channel, Server};
 
@@ -287,6 +288,55 @@ fn do_get_over_transport_emits_schema_then_recordbatch() {
         MessageHeader::RecordBatch,
         "message[1] data_header must parse as a RecordBatch flatbuffer"
     );
+}
+
+/// **Golden cross-check (issue #2193 review).** The transport-captured raw
+/// `FlightData` sequence for this SAME field-shape fixture must be
+/// byte-identical to the committed `keyvalue.flightdata` golden that
+/// `FlightDataGoldenDecodeTest` decodes on the Java side — closing the loop
+/// between "what the golden contains" and "what the wire actually carries" so
+/// a Java-side PASS against the golden is genuinely evidence about the real
+/// transport, not just about a possibly-stale fixture.
+#[test]
+fn do_get_over_transport_matches_committed_golden() {
+    let (_temp, data_dir) = build_fixture();
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let wire = rt.block_on(do_get_raw_flight_data_over_transport(svc, ticket_bytes()));
+
+    // `cqlite-flight` and `trino-connector` are sibling crates/dirs at the repo
+    // root; the golden is committed there, not under `cqlite-flight`.
+    let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../trino-connector/src/test/resources/golden/keyvalue.flightdata");
+    let golden_bytes = std::fs::read(&golden_path)
+        .unwrap_or_else(|e| panic!("read committed golden {}: {e}", golden_path.display()));
+
+    // Length-delimited protobuf: decode each `FlightData` message in turn,
+    // consuming the shared cursor (`&mut buf`) as prost advances it.
+    let mut buf: &[u8] = golden_bytes.as_slice();
+    let mut golden = Vec::new();
+    while !buf.is_empty() {
+        golden.push(
+            FlightData::decode_length_delimited(&mut buf)
+                .expect("decode a FlightData message from the committed golden"),
+        );
+    }
+
+    assert_eq!(
+        wire.len(),
+        golden.len(),
+        "live-transport message count must match the committed golden's message count"
+    );
+    for (i, (w, g)) in wire.iter().zip(golden.iter()).enumerate() {
+        assert_eq!(
+            w.data_header, g.data_header,
+            "message[{i}] data_header drifted from the committed golden"
+        );
+        assert_eq!(
+            w.data_body, g.data_body,
+            "message[{i}] data_body drifted from the committed golden"
+        );
+    }
 }
 
 /// The field failure was against a REAL Cassandra 5.0 `nb-big` + compressed
