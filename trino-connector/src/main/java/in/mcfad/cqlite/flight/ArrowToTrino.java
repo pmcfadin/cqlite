@@ -60,9 +60,21 @@ public final class ArrowToTrino {
             FieldVector vector = root.getVector(col.name());
             if (vector == null) {
                 // Issue #2238: the column was requested in the projection but is absent
-                // from the delivered batch — server/connector schema drift. Surface it
-                // as a clear error naming the column instead of masking it as an
-                // all-null column (which would silently hide a real correctness bug).
+                // from the delivered batch — schema drift between the connector projection
+                // and its paired CQLite Flight server response. Surface it as a clear error
+                // naming the column instead of masking it as an all-null column (which would
+                // silently hide a real correctness bug).
+                //
+                // Error-code choice (issue #2270): GENERIC_INTERNAL_ERROR is deliberate.
+                // trino-spi's StandardErrorCode exposes no EXTERNAL-category code for "a
+                // connector's data source returned a contract-violating response" (its sole
+                // EXTERNAL code is UNSUPPORTED_TABLE_TYPE); every REMOTE_* code is
+                // ErrorType.INTERNAL_ERROR denoting Trino's own worker/exchange failures and
+                // would misdirect operators toward the cluster. The Flight server is CQLite's
+                // own paired component, so a projection/response mismatch is genuinely an
+                // internal contract bug in the CQLite stack — INTERNAL_ERROR is the correct
+                // category. A connector-specific ErrorCodeSupplier would be idiomatic but is
+                // out of scope here (follow-up #2273).
                 throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
                         "Projected column '" + col.name()
                                 + "' is missing from the delivered Arrow batch; "

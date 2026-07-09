@@ -164,6 +164,14 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
     private static FieldVector requireVector(VectorSchemaRoot root, String column) {
         FieldVector vector = root.getVector(column);
         if (vector == null) {
+            // Error-code choice (issue #2270, mirrors ArrowToTrino#toPage): GENERIC_INTERNAL_ERROR
+            // is deliberate. trino-spi's StandardErrorCode has no EXTERNAL-category code for "a
+            // connector's data source returned a contract-violating response"; the REMOTE_* codes
+            // are all ErrorType.INTERNAL_ERROR for Trino's own worker/exchange failures and would
+            // misdirect operators. The Flight server is CQLite's own paired component, so an
+            // aggregation projection/response mismatch is genuinely an internal contract bug in the
+            // CQLite stack — INTERNAL_ERROR is the correct category. A shared connector-specific
+            // ErrorCodeSupplier is out of scope here (follow-up #2273).
             throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
                     "Aggregate/group-by column '" + column
                             + "' is missing from the delivered Arrow batch; "
