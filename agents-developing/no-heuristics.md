@@ -15,7 +15,7 @@ from value patterns. Guessing produced silent wrong answers on valid Cassandra d
 
 - When a schema is present, use it for all type decoding. Schema-aware decoding is not optional.
 - When no schema is present, use the serialization metadata embedded in `Statistics.db` (encoding stats, column definitions). Do not fall back to type guessing.
-- Legacy heuristics (blob fallback, type inference from byte patterns) exist only behind the `experimental` feature flag and are disabled by default.
+- Legacy heuristics (blob fallback, type inference from byte patterns) exist only behind the `legacy-heuristics` feature flag and are disabled by default.
 
 ## What this means in practice
 
@@ -30,14 +30,14 @@ let value = stats.column_type("name")?.decode(bytes)?;
 
 **Not allowed:**
 ```rust
-// Guess type from value — forbidden without feature flag
+// Guess type from value — forbidden without the `legacy-heuristics` feature
 if bytes.len() == 16 { return Ok(CqlValue::Uuid(...)) }
 if bytes.starts_with(b"\x00") { return Ok(CqlValue::Int(...)) }
 ```
 
-**Behind the `experimental` flag only:**
+**Behind the `legacy-heuristics` flag only:**
 ```rust
-#[cfg(feature = "experimental")]
+#[cfg(feature = "legacy-heuristics")]
 fn decode_with_fallback(bytes: &[u8]) -> CqlValue {
     // Heuristic fallback — acceptable only here
 }
@@ -52,7 +52,7 @@ on real production data.
 
 The one test that exercises legacy blob fallback
 (`test_legacy_format_allows_blob_fallback_with_feature`) is explicitly excluded from
-the default `core-tests` gate run. It requires `--features experimental` and is
+the default `core-tests` gate run. It requires `--features legacy-heuristics` and is
 intentionally not in CI defaults.
 
 ## Code quality requirements
@@ -88,7 +88,8 @@ the library must not invent values.
 | `state_machine` (default) | No |
 | `cli-helpers` | No |
 | `metrics` | No |
-| `experimental` | Yes — explicitly opt-in |
+| `experimental` | No (bloom-filter tests + write stubs, not heuristics) |
+| `legacy-heuristics` | Yes — explicitly opt-in |
 
 See [Key source paths](/cqlite/agents-developing/source-map/) for where type decoding lives in the codebase.
 The full feature-flags table and feature-gated test notes are in [Gate Contract](/cqlite/agents-developing/gate-contract/).
