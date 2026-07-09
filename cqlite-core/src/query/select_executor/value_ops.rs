@@ -58,7 +58,7 @@ pub(super) fn as_integral_i128(v: &Value) -> Option<i128> {
 /// NaN operand is UNKNOWN, so the row is dropped (issue #2231). Only the `float`
 /// variants can be NaN — integral types never are, so this is principled, not a
 /// bit-pattern heuristic.
-pub(super) fn is_nan_value(v: &Value) -> bool {
+pub(in crate::query) fn is_nan_value(v: &Value) -> bool {
     match v {
         Value::Float(x) => x.is_nan(),
         Value::Float32(x) => x.is_nan(),
