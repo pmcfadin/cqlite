@@ -115,7 +115,7 @@ mod reconcile;
 #[cfg(feature = "write-support")]
 mod streaming;
 #[cfg(feature = "write-support")]
-pub(crate) use streaming::{StreamingMerger, StreamingStep};
+pub(crate) use streaming::{PartitionReconcileCheckpoint, StreamingMerger, StreamingStep};
 
 /// Schema-aware heap-direct ordering proof (issue #1668, stage 5b) — proves
 /// cross-group emission order can be correct straight off a heap, with NO
@@ -2749,6 +2749,39 @@ impl KWayMerger {
     ///      entry whose row timestamp is the max surviving cell timestamp; else if a
     ///      row tombstone was present, emit a `Tombstone` entry at `row_del` so the
     ///      row stays shadowed downstream; else emit nothing.
+    ///
+    /// Overlap-safety gate for tombstone purging (#921 finding 1, #935):
+    /// decide BOTH the effective gc_grace cutoff and the overlap-aware
+    /// max-purgeable timestamp every cluster in this merger's output is
+    /// reconciled with. Constant for this `KWayMerger`'s whole lifetime
+    /// (derived only from its own `purge_safe`/`gc_before_secs`/
+    /// `max_purgeable_timestamp` fields, set once at construction) — callers
+    /// may compute it once and reuse it across every partition, rather than
+    /// re-deriving it per partition.
+    ///
+    /// Extracted from [`Self::merge_partition_rows`] (issue #1668 stage 5d)
+    /// so the streaming reconciliation path (`streaming.rs`) can reuse the
+    /// EXACT same derivation without duplicating it.
+    ///
+    /// - FULL compaction (`purge_safe == true`): no non-included overlapping
+    ///   SSTable exists, so the overlap bound is `+inf` (`i64::MAX`) — every
+    ///   gc-purgeable tombstone passes the overlap gate, exactly as #845.
+    /// - PARTIAL compaction with an overlap bound (#935): purge a tombstone
+    ///   only when its own deletion timestamp is STRICTLY LESS THAN the min
+    ///   write timestamp of every non-included overlapping SSTable, proving
+    ///   it shadows nothing outside the set.
+    /// - PARTIAL compaction without a bound (#921 default): retain every
+    ///   tombstone — collapse the cutoff to `None` (purge no-op).
+    fn effective_gc_settings(&self) -> (Option<i64>, i64) {
+        if self.purge_safe {
+            (self.gc_before_secs, i64::MAX)
+        } else if let Some(bound) = self.max_purgeable_timestamp {
+            (self.gc_before_secs, bound)
+        } else {
+            (None, i64::MIN)
+        }
+    }
+
     fn merge_partition_rows(&self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
         use std::collections::BTreeMap;
 
@@ -2775,13 +2808,7 @@ impl KWayMerger {
         //
         // Issue #933 builds `clustered_rows` (and splits out range-tombstone
         // carriers) AFTER this gate, below.
-        let (effective_gc_before, max_purgeable_timestamp) = if self.purge_safe {
-            (self.gc_before_secs, i64::MAX)
-        } else if let Some(bound) = self.max_purgeable_timestamp {
-            (self.gc_before_secs, bound)
-        } else {
-            (None, i64::MIN)
-        };
+        let (effective_gc_before, max_purgeable_timestamp) = self.effective_gc_settings();
 
         // Partition-scoped tombstone-carrier pre-scan (issue #1668, stage 1).
         // A standalone read-only first pass extracts the partition-level

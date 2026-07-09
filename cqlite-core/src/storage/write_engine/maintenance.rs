@@ -21,7 +21,6 @@ use crate::schema::TableSchema;
 use crate::storage::sstable::writer::data_writer::{StaticOpsTracker, StreamingPartitionSession};
 use crate::storage::sstable::writer::stats_fold;
 use crate::storage::sstable::writer::StatisticsMetadata;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -212,10 +211,15 @@ pub(crate) struct ActiveMerge {
     /// - `.0` the partition key (needed both to resume draining and for the
     ///   eventual `write_partition` call).
     /// - `.1` rows `KWayMerger::step()` ALREADY fully reconciled for this
-    ///   partition but not yet POPPED off `StreamingMerger`'s queue
-    ///   (extracted via `StreamingMerger::into_paused_state`, restored via
-    ///   `StreamingMerger::resume`) — nothing here is re-computed by a
-    ///   resumed call, and nothing is lost.
+    ///   partition's raw-entry reconciliation state (carrier accumulator,
+    ///   in-progress cluster, already-reconciled-but-not-yet-popped rows —
+    ///   issue #1668 stage 5d widened this from a plain
+    ///   `VecDeque<MergeEntry>` once `StreamingMerger` stopped buffering a
+    ///   whole partition via `KWayMerger::step`). Extracted via
+    ///   `StreamingMerger::into_paused_state`, restored via
+    ///   `StreamingMerger::resume` — nothing here is re-computed by a
+    ///   resumed call, and nothing is lost. Held OPAQUELY: this file never
+    ///   inspects a field of it.
     /// - `.2` this partition's [`PartitionStreamState`] (issue #1668, stage
     ///   5c-iv part 3): either still resolving the bounded carrier/static
     ///   prefix, or an already-open `StreamingPartitionSession` with rows
@@ -229,7 +233,7 @@ pub(crate) struct ActiveMerge {
     ///   growing in-memory buffer for a wide partition either.
     pub(crate) pending_partition: Option<(
         DecoratedKey,
-        VecDeque<merge::MergeEntry>,
+        merge::PartitionReconcileCheckpoint,
         PartitionStreamState,
     )>,
 }
@@ -518,17 +522,18 @@ impl WriteEngine {
 
         while let Some(merge) = &mut self.active_merge {
             // Resume a partition paused by a PRIOR call's budget check, if
-            // any (issue #1668, stage 4). `raw_remaining` are rows `step()`
-            // already reconciled but not yet popped; `stream_state` is this
-            // partition's `PartitionStreamState` from EARLIER in this same
-            // partition (this or a prior call) — possibly still resolving
-            // the carrier/static prefix, or an already-open session with
-            // rows fed so far.
+            // any (issue #1668, stage 4). `resume_state` is
+            // `StreamingMerger`'s own raw-entry reconciliation checkpoint
+            // (issue #1668 stage 5d); `stream_state` is this partition's
+            // `PartitionStreamState` from EARLIER in this same partition
+            // (this or a prior call) — possibly still resolving the
+            // carrier/static prefix, or an already-open session with rows
+            // fed so far.
             let (resume_state, mut stream_state): (
-                Option<(DecoratedKey, VecDeque<merge::MergeEntry>)>,
+                Option<(DecoratedKey, merge::PartitionReconcileCheckpoint)>,
                 PartitionStreamState,
             ) = match merge.pending_partition.take() {
-                Some((key, rows, state)) => (Some((key, rows)), state),
+                Some((key, checkpoint, state)) => (Some((key, checkpoint)), state),
                 None => (None, PartitionStreamState::fresh()),
             };
 
@@ -802,9 +807,9 @@ impl WriteEngine {
                     // partition — guaranteed here because `progressed_this_call`
                     // (or a non-empty `resume_state`, which also seeds
                     // `stream`'s partition key) must be true to reach `Paused`.
-                    if let Some((key, raw_remaining)) = stream.into_paused_state() {
+                    if let Some((key, checkpoint)) = stream.into_paused_state() {
                         if let Some(merge) = &mut self.active_merge {
-                            merge.pending_partition = Some((key, raw_remaining, stream_state));
+                            merge.pending_partition = Some((key, checkpoint, stream_state));
                         }
                     }
                     break;

@@ -1,106 +1,194 @@
-//! Streaming cluster-group step type (issue #1668, stages 2-3b).
+//! Streaming cluster-group step type (issue #1668, stages 2-5d).
 //!
 //! **Wiring status (stage 3b)**: [`KWayMerger::merge`] (used by
 //! `compact_sstables_with_registry`) and `write_engine::maintenance`'s
-//! compaction loop both now drain a partition via [`StreamingMerger`]/
-//! [`StreamingStep`] instead of calling [`KWayMerger::step`] directly — each
-//! accumulates `ClusterGroup` rows until `PartitionEnd`, then hands the SAME
-//! `Vec<MergeEntry>` `step()` would have returned to the SAME unchanged
-//! writer call, so output stays byte-identical (see stage 3b's `#921`
-//! compaction-byte-parity harness run). `step_streaming` still calls the
-//! UNCHANGED [`KWayMerger::step`] internally and drains its already-
-//! reconciled `Vec<MergeEntry>` one row at a time, so peak memory is
-//! UNCHANGED by this wiring (stage 5 removes the whole-partition buffering
-//! that still lives inside `step()`/`merge_partition_rows`). The Flight
-//! producer (`cqlite-flight/src/producer.rs`) is INTENTIONALLY untouched —
-//! that is Q4/mid-partition-budget territory, a later stage.
+//! compaction loop both drain a partition via [`StreamingMerger`]/
+//! [`StreamingStep`] instead of calling [`KWayMerger::step`] directly.
 //!
-//! [`StreamingMerger`] does not touch [`MergeStep`]'s shape (a distinct
-//! [`StreamingStep`] type) or `KWayMerger`'s own fields (a wrapper holding its
-//! own drain state, so none of the existing `KWayMerger { .. }` struct-literal
-//! unit tests in `mod.rs` needed updating).
+//! **Stage 5d — the whole-partition buffer is GONE.** Through stage 5c,
+//! `step_streaming` called the UNCHANGED [`KWayMerger::step`] (which still
+//! buffered a WHOLE partition into `partition_rows: Vec<MergeEntry>`,
+//! grouped it into `clustered_rows: BTreeMap<Option<ClusteringKey>, _>`, and
+//! produced one `merged: Vec<MergeEntry>` via `merge_partition_rows`) and
+//! merely DRAINED that already-fully-computed `Vec` one row at a time — peak
+//! memory still scaled with partition width. `step_streaming` now pulls
+//! DIRECTLY off `KWayMerger`'s heap and reconciles ONE clustering-key group
+//! at a time (bounded by the number of input runs sharing that EXACT key,
+//! never partition width) via [`StreamingMerger::pull_one`]/
+//! [`StreamingMerger::finalize_current_cluster`], calling the SAME
+//! `reconcile_cluster_with_overlap_counted`/`apply_range_shadowing`/
+//! `apply_partition_shadowing`/`coalesce_range_tombstones` primitives
+//! `merge_partition_rows` always used — just triggered per-group instead of
+//! in a bulk loop over a pre-built map. `KWayMerger::step`/
+//! `merge_partition_rows` are UNCHANGED (nothing else calls them in
+//! production; they remain this module's own byte-for-byte oracle — see the
+//! `step_streaming_matches_step_for_*` tests below, which now prove the
+//! NATIVE streaming path, not a thin drain wrapper, matches the buffered
+//! path row-for-row).
+//!
+//! ## Two independent accumulation dimensions (issue #1668, stage 5d finding)
+//!
+//! A partition's raw entry stream has TWO things that must be tracked
+//! SIMULTANEOUSLY, not sequentially:
+//!
+//! 1. **Carriers** (partition-tombstone / range-tombstone markers,
+//!    [`MergeEntry::is_partition_delete_carrier`] /
+//!    [`super::carriers::is_range_marker_carrier`]) — siphoned into
+//!    `range_tombstones`/`max_partition_deletion` as encountered.
+//! 2. **The current clustering-key group** — non-carrier entries sharing
+//!    ONE `clustering_key`, accumulated until a DIFFERENT key (or the
+//!    partition/heap) ends it, then reconciled via
+//!    `reconcile_cluster_with_overlap_counted` + shadowed by the (by-then
+//!    fully resolved) carrier state.
+//!
+//! For a table WITH clustering columns, [`schema_order::SchemaOrderedEntry`]'s
+//! `Ord` puts EVERY `clustering_key: None` entry (carriers AND the static-row
+//! candidates, which are ordinary non-carrier entries with `clustering_key:
+//! None`) strictly before ANY `Some(ck)` entry — so carriers form a clean
+//! prefix relative to the clustering-row tail. But for an UNCLUSTERED table
+//! (no clustering columns declared), EVERY entry — carriers AND the sole
+//! row's cross-run duplicates — shares `clustering_key: None` and is
+//! tie-broken ONLY by `run_index`, so a carrier can sort BETWEEN two of that
+//! row's duplicates (e.g. run 0's row, run 1's OWN partition-tombstone
+//! carrier, run 1's row, run 2's row — all four tie on `(token, key, None,
+//! run_index)` pairwise except run_index, so a same-run carrier and row are
+//! not even guaranteed relative order). This is why carriers are classified
+//! and siphoned UNCONDITIONALLY on every pulled entry — never assumed to
+//! form a clean prefix relative to the group currently accumulating.
+//!
+//! `partition_deletion_resolved` (the PARTITION-tombstone half only — see
+//! below for why range tombstones are handled separately) still flips ONCE
+//! per partition: by the time the FIRST cluster needs shadowing, every
+//! partition-tombstone carrier has necessarily already been seen, because
+//! the partition-level deletion is always part of the on-disk HEADER (never
+//! interleaved with rows), so it precedes anything else in that run's own
+//! sequence, and thus (by the same argument as above) everything currently
+//! poppable from the heap for this partition.
+//!
+//! ## Range tombstones can arrive AFTER the rows they cover (issue #1668, stage 5d finding — bounded-open-range design)
+//!
+//! Unlike the partition tombstone, a range tombstone is NOT guaranteed to
+//! precede its covered rows. Tracing the real reader
+//! (`row_decoder/compaction.rs`'s `on_range_marker`/`on_data_row`): the
+//! parser holds the OPEN bound in `self.pending_range_start` (purely
+//! internal state, never surfaced) while rows between it and the CLOSE
+//! bound are pushed to the merge stream via `on_data_row` IMMEDIATELY, one
+//! at a time; the COMPLETE, paired `RangeMarker` `MergeEntry` is only
+//! pushed once the CLOSE bound is parsed — i.e. strictly AFTER every row it
+//! covers. This matches the on-disk format
+//! (`docs/sstables-definitive-guide/chapters/05-data-db-format.md`: markers
+//! sit "between rows in a partition", not bunched into a prefix). So a
+//! cluster can reconcile and be ready to flush BEFORE we've seen the range
+//! tombstone that should shadow it.
+//!
+//! **Design (issue #1668, per-issue owner decision — the two-pass
+//! reader-side redesign that would let the READER expose the open bound
+//! early is explicitly OUT OF SCOPE; filed as a follow-up, see
+//! `PartitionReconcileCheckpoint::awaiting_flush`'s doc)**: a cluster's
+//! survivor flushes straight to `pending_rows` with ZERO extra buffering
+//! as long as NO range tombstone has been seen for this partition yet (the
+//! common case — most partitions have none at all, and the issue's own
+//! motivating scenario is a huge ROW COUNT, not necessarily a wide range
+//! tombstone). Once the FIRST range tombstone's complete entry arrives,
+//! every SUBSEQUENT survivor is held in `awaiting_flush` instead — it
+//! might still need shadowing from a DIFFERENT/later range tombstone (e.g.
+//! from a slower-moving run in a multi-run merge) — and every entry
+//! currently held there is re-shadowed and flushed as soon as EITHER
+//! another range tombstone resolves or the partition ends. This bounds
+//! peak memory to `max(current cluster group size, rows accumulated since
+//! the last flush point)` for the common case of narrow/occasional range
+//! tombstones, degrading toward whole-partition width only for a
+//! pathological range tombstone whose span covers nearly the entire
+//! partition — an honestly documented residual, not a silent correctness
+//! gap (every row is STILL correctly shadowed once its covering marker
+//! resolves; only the PEAK MEMORY bound degrades for that specific shape).
+//!
+//! ## Load-bearing precondition: each run must arrive pre-sorted (issue #1668, stage 5d finding)
+//!
+//! `KWayMerger`'s heap holds AT MOST one "candidate" entry per input run at
+//! any time (`initialize_heap`/`refill_heap` — the classic K-WAY MERGE
+//! shape: interleave `k` ALREADY-SORTED streams, never re-sort within one).
+//! Consequently the heap can only ever choose correctly ACROSS runs; it
+//! cannot reorder a single run's OWN entries relative to each other, since
+//! it never sees more than one of that run's entries at a time. This is
+//! SAFE for real data: a genuine SSTable file's rows are always written in
+//! schema-consistent order (`SSTableWriter::write_partition`'s own
+//! `mutations.sort_by(|a, b| ck_a.compare(ck_b, &self.schema) ...)` — the
+//! SAME schema-aware comparator, which DOES reverse `DESC` columns — always
+//! runs before ANY row is written), so a `RunReader` backed by a real file
+//! naturally yields that file's rows already in the correct order; the
+//! heap's real job is purely to interleave MULTIPLE such runs. A test
+//! fixture that pushes a SINGLE run's entries in an order inconsistent with
+//! the CURRENT schema (e.g. ascending `MergeEntry`s for a `DESC` column) is
+//! therefore not modeling a real SSTable file — `merger_over_runs` (below)
+//! puts each independently-orderable entry in its OWN run so the fixture
+//! exercises the heap's REAL job (cross-run interleaving) instead of an
+//! unrealistic single-run reordering. The pre-stage-5d `step()` masked one
+//! such unrealistic fixture (raw carriers tagged with a `usize::MAX`
+//! run_index sentinel, which real carriers never carry — see
+//! `build_merge_entry`) via an unrelated bug: `current_partition` is never
+//! actually assigned, so `step()`'s "lazy init" guard re-triggers
+//! `initialize_heap()` — which happens to force-refill a stalled run — on
+//! EVERY subsequent `step()` call whenever the heap empties, silently
+//! splitting one logical partition into extra `MergeStep::Partition` steps
+//! that `drain_whole_partition` then concatenates back together. This
+//! module's tests construct carriers with their REAL run_index instead
+//! (see `range_carrier`/`partition_carrier`'s docs), matching
+//! `build_merge_entry`.
 //!
 //! ## Grouping-contiguity VERIFICATION (issue #1668 flags this as "the crux")
 //!
-//! The increment design assumes that once a caller has moved past a
-//! clustering key while draining the heap, it never sees that key again —
-//! i.e. the heap pop order groups every entry for the same `(pk, ck)`
-//! contiguously, so "accumulate only the entries for the current clustering
-//! key, then move on" never re-opens a finished group. This DOES hold:
-//! [`MergeEntry`]'s `Ord` (`model.rs`) orders primarily by
-//! `(token, key bytes, clustering_key, run_index)`, and `clustering_key`
-//! compares via `ClusteringKey`'s FALLBACK `Ord` (lexicographic by value) —
-//! the SAME fallback `Ord`/`Eq` that `merge_partition_rows`'s
-//! `clustered_rows: BTreeMap<Option<ClusteringKey>, _>` already groups by
-//! today. Since `BinaryHeap::pop` yields a non-increasing (here: `Reverse`,
-//! so non-decreasing) sequence under one fixed comparator, and grouping
-//! identity here is that SAME comparator's notion of equality, entries for
-//! one clustering key are contiguous in heap-pop order — proven directly
-//! against the heap (not assumed) by the `heap_groups_contiguously_by_ord`
-//! test below.
+//! The design assumes that once processing has moved past a clustering key
+//! while draining the heap, it never sees that key again — i.e. the heap pop
+//! order groups every NON-CARRIER entry for the same `(pk, ck)` contiguously
+//! (carriers interleave freely, per the finding above, but never split a
+//! real group since they are filtered out before the grouping decision).
+//! [`MergeEntry`]'s `Ord` (`model.rs`) orders primarily by `(token, key
+//! bytes, clustering_key, run_index)`; [`schema_order::SchemaOrderedEntry`]'s
+//! `Ord` (stage 5c-i, now what the heap actually uses) substitutes a
+//! schema-aware clustering-key comparison at that same step. Since
+//! `BinaryHeap::pop` yields a non-increasing (here: `Reverse`, so
+//! non-decreasing) sequence under one fixed total order, and grouping
+//! identity is that SAME comparator's notion of equality, entries for one
+//! clustering key are contiguous in heap-pop order — proven directly against
+//! the heap (not assumed) by the `heap_groups_contiguously_by_ord`/
+//! `heap_groups_contiguously_by_schema_aware_ord` tests.
 //!
-//! ## Cross-group emission order — resolved for THIS design (issue #1668, stage 3a)
+//! ## Cross-group emission order — schema-aware, no final sort (issue #1668, stages 3a/5c-i/5d)
 //!
-//! Stage 2 flagged a residual: `ClusteringKey`'s fallback `Ord`
-//! (`mutation.rs`) is NOT schema-aware — no `DESC` reversal, and an absent
-//! trailing component is handled by zip-stopping + a length tiebreak rather
-//! than Cassandra's explicit NULL-first rule (contrast the schema-aware
-//! `ClusteringKey::compare`). Stage 3a's blast-radius audit + new tests below
-//! resolve whether this is safe to wire a real consumer onto:
+//! Stage 2 flagged a residual: the (then-fallback, non-schema-aware) heap
+//! `Ord` doesn't reverse `DESC` columns or NULL-first an absent trailing
+//! component. Stage 5c-i made the heap's OWN comparator schema-aware
+//! (`schema_order::SchemaOrderedEntry`), so stage 5d's native per-group
+//! emission needs no compensating final sort (`schema_order.rs`'s
+//! `schema_ordered_pop_all_matches_todays_step_output_for_desc_fixture` test
+//! already proved heap-direct order matches `merge_partition_rows`'s
+//! sorted output for a DESC fixture; the tests below prove the SAME for the
+//! native per-group reconciliation path specifically). Stage 3a's residual
+//! (below) documents the ORIGINAL fallback-Ord concern, since superseded:
 //!
-//! **Blast radius**: `MergeEntry::Ord`/`PartialOrd` (the fallback comparator)
-//! has exactly ONE production consumer in the whole crate — `KWayMerger`'s
-//! `heap: BinaryHeap<Reverse<MergeEntry>>` (routing only, in `mod.rs`). No
-//! other file constructs a `BinaryHeap<Reverse<MergeEntry>>` or otherwise
-//! depends on `MergeEntry::Ord`'s specific clustering semantics; the one
-//! direct-heap unit test (`mod.rs::test_merge_entry_min_heap`) only exercises
-//! token ordering (`clustering_key: None` throughout), so it is untouched by
-//! clustering-comparator semantics either way. Changing `MergeEntry::Ord`
-//! globally would therefore be LOW risk in isolation — but it is UNNECESSARY:
-//!
-//! **Why no Ord change is needed for THIS design**: `step_streaming` (below)
-//! never consumes heap-pop order for cross-group sequencing. It drains the
-//! `Vec<MergeEntry>` `KWayMerger::step()` already returns, and `step()`
-//! (via `merge_partition_rows`) already applies an explicit
-//! `merged.sort_by(|a, b| ck_a.compare(ck_b, &self.schema) ...)` — the
-//! SCHEMA-AWARE comparator — as its LAST step, unconditionally, regardless of
-//! what order the heap or the `clustered_rows: BTreeMap` (also fallback-Ord-
-//! keyed) produced internally. So `step()`'s returned order is ALREADY
-//! schema-correct today, and `step_streaming` inherits that correctness
-//! unchanged. `step_streaming_matches_step_for_desc_clustering_fixture` and
-//! `step_streaming_matches_step_for_absent_trailing_component_fixture` below
-//! prove this directly: both assert the emitted clustering-key SEQUENCE
-//! (independently, not just old-path-equals-new-path) against the
-//! Cassandra-correct expected order for a `DESC` column and for an
-//! absent-trailing-component (NULL-first) case — neither the fallback Ord's
-//! ordering, proving the divergence does NOT leak through this design.
-//!
-//! **Residual still applies to a DIFFERENT, NOT-YET-BUILT design**: a FUTURE
-//! stage-5 rewrite that removes `merge_partition_rows`'s whole-partition
-//! buffer-then-sort and instead emits groups directly off the heap (true
-//! streaming, no per-partition buffer) would lose that final sort and must
-//! independently solve cross-group ordering then — either by making the heap
-//! comparator schema-aware (cheap: one production call site, per the blast-
-//! radius finding above) or by a small local re-sort at group boundaries.
-//! Flagged for that stage's design, not resolved here, because it does not
-//! yet exist.
-//!
-//! `step_streaming` does NOT yet avoid whole-partition buffering: it calls
-//! the unchanged [`KWayMerger::step`] (which still buffers a whole partition
-//! and fully reconciles it via `merge_partition_rows`, itself now built on the
-//! stage-1 `carriers::scan_partition_carriers` pre-scan) and then drains the
-//! resulting `Vec<MergeEntry>` one row at a time. Removing that buffering is
-//! stage 5's job; this stage proves the increment TYPE and consumer-loop
-//! shape are safe to build on.
+//! **Historical note (stage 3a, since superseded by 5c-i/5d)**:
+//! `MergeEntry::Ord`/`PartialOrd` (the fallback comparator) still has exactly
+//! ONE production consumer in the whole crate — nothing else constructs a
+//! `BinaryHeap<Reverse<MergeEntry>>` or depends on its clustering semantics
+//! (the one direct-heap unit test, `mod.rs::test_merge_entry_min_heap`, only
+//! exercises token ordering). Stage 3a reasoned that changing it was
+//! unnecessary because `step()`'s final `merged.sort_by` already fixed up
+//! any heap-order imperfection; stage 5c-i made the heap's OWN comparator
+//! schema-aware anyway (`schema_order::SchemaOrderedEntry`), and stage 5d
+//! now relies on THAT comparator directly (no final sort at all) — so this
+//! residual is fully closed, not merely deferred.
 
 #[cfg(feature = "write-support")]
-use super::model::MergeEntry;
+use super::model::{MergeEntry, RowData};
 #[cfg(feature = "write-support")]
-use super::{KWayMerger, MergeStep};
+use super::{carriers, KWayMerger, PurgeCounts};
 #[cfg(feature = "write-support")]
-use crate::error::Result;
+use crate::error::{Error, Result};
 #[cfg(feature = "write-support")]
-use crate::storage::write_engine::mutation::DecoratedKey;
+use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey, RangeTombstone};
+#[cfg(feature = "write-support")]
+use std::cmp::Reverse;
 #[cfg(feature = "write-support")]
 use std::collections::VecDeque;
 
@@ -140,11 +228,97 @@ pub(crate) enum StreamingStep {
 /// Holds ONLY its own drain state (`partition_key` / `pending_rows`); it does
 /// not add fields to `KWayMerger` itself, so the existing `KWayMerger { .. }`
 /// struct-literal unit tests in `mod.rs` are unaffected by this addition.
+/// Opaque, resumable snapshot of a [`StreamingMerger`]'s per-partition
+/// reconciliation state (issue #1668, stage 5d). Bundles EVERYTHING
+/// [`StreamingMerger::into_paused_state`]/[`StreamingMerger::resume`] need
+/// to survive a `maintenance_step_inner` budget pause with zero
+/// re-computation and zero lost/duplicated rows, now that reconciliation
+/// happens incrementally (cluster by cluster, directly off the heap)
+/// instead of via one whole-partition `step()` call whose OUTPUT `Vec` was
+/// simply drained. `write_engine::maintenance` holds this OPAQUELY (it never
+/// inspects a field) — see `ActiveMerge::pending_partition`.
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+pub(crate) struct PartitionReconcileCheckpoint {
+    pending_rows: VecDeque<MergeEntry>,
+    /// EVERY range tombstone seen so far for this partition (never removed
+    /// once added — issue #1668 stage 5d's bounded-open-range design keeps
+    /// this deliberately simple: a row is re-checked against the FULL set
+    /// seen so far each time it might be affected, rather than tracking
+    /// exactly which ranges are still "in flight").
+    range_tombstones: Vec<(DecoratedKey, RangeTombstone)>,
+    max_partition_deletion: Option<(i64, i32)>,
+    partition_delete_key: Option<DecoratedKey>,
+    /// Resolves EXACTLY ONCE per partition, when the bounded `clustering_key:
+    /// None` PREFIX ends (the first non-carrier entry arrives) — covers the
+    /// PARTITION-level tombstone (always part of the on-disk header, so
+    /// always fully known by then) and re-emits whatever range tombstones
+    /// happened to also be seen during that prefix. Renamed from
+    /// `carriers_resolved` (issue #1668 stage 5d): a range tombstone
+    /// specifically can ALSO arrive well after this point (see
+    /// `awaiting_flush`'s doc) — this flag no longer covers that case.
+    partition_deletion_resolved: bool,
+    current_cluster: Option<(Option<ClusteringKey>, Vec<MergeEntry>)>,
+    purges: PurgeCounts,
+    /// Reconciled rows held back from `pending_rows` because at least one
+    /// range tombstone has been seen for this partition (issue #1668 stage
+    /// 5d's bounded-open-range design — see the module doc). A row lands
+    /// here instead of `pending_rows` whenever `range_tombstones` is
+    /// non-empty at the moment its cluster reconciles; every entry here is
+    /// re-shadowed and flushed to `pending_rows` as soon as either ANOTHER
+    /// range tombstone's complete entry arrives (it might affect an entry
+    /// held from before we knew about it) or the partition ends. Bounds
+    /// peak memory to "rows accumulated since the last flush point" for the
+    /// common case of narrow/occasional range tombstones, degrading toward
+    /// whole-partition width only for a tombstone spanning nearly the whole
+    /// partition — the documented residual (see the module doc and the
+    /// linked follow-up issue).
+    awaiting_flush: VecDeque<MergeEntry>,
+    /// Set once [`StreamingMerger::flush_range_tombstones`] has re-emitted
+    /// every range tombstone known so far as its own marker entry. Issue
+    /// #1668 stage 5d: a range tombstone's complete entry can arrive at any
+    /// point relative to the rows it covers (see `awaiting_flush`'s doc), so
+    /// this marker re-emission is deferred to a SINGLE point — partition end
+    /// — where the FULL, final set is known and can be coalesced exactly
+    /// once (coalescing a partial set early, then coalescing again later,
+    /// risks re-emitting overlapping marker pairs — roborev #959 High #1's
+    /// concern — if a later-discovered range overlaps an already-emitted
+    /// one). This flag makes that single call idempotent across the
+    /// `step_streaming` loop's repeated visits to the exhausted-partition
+    /// branch.
+    range_tombstones_emitted: bool,
+}
+
+#[cfg(feature = "write-support")]
+impl PartitionReconcileCheckpoint {
+    fn fresh() -> Self {
+        Self {
+            pending_rows: VecDeque::new(),
+            range_tombstones: Vec::new(),
+            max_partition_deletion: None,
+            partition_delete_key: None,
+            partition_deletion_resolved: false,
+            current_cluster: None,
+            purges: PurgeCounts::default(),
+            awaiting_flush: VecDeque::new(),
+            range_tombstones_emitted: false,
+        }
+    }
+}
+
+/// Feature-internal streaming wrapper around [`KWayMerger`] (issue #1668,
+/// stages 2-5d) — reconciles ONE clustering-key group at a time DIRECTLY off
+/// `merger`'s heap (see the module doc's "two independent accumulation
+/// dimensions" section for the full design and its correctness proof).
+///
+/// Holds ONLY its own drain/reconciliation state; it does not add fields to
+/// `KWayMerger` itself, so the existing `KWayMerger { .. }` struct-literal
+/// unit tests in `mod.rs` are unaffected by this module's changes.
 #[cfg(feature = "write-support")]
 pub(crate) struct StreamingMerger<'a> {
     merger: &'a mut KWayMerger,
     partition_key: Option<DecoratedKey>,
-    pending_rows: VecDeque<MergeEntry>,
+    state: PartitionReconcileCheckpoint,
 }
 
 #[cfg(feature = "write-support")]
@@ -154,93 +328,388 @@ impl<'a> StreamingMerger<'a> {
         Self {
             merger,
             partition_key: None,
-            pending_rows: VecDeque::new(),
+            state: PartitionReconcileCheckpoint::fresh(),
         }
     }
 
     /// Resume (or start fresh) draining, seeded with a PREVIOUSLY paused
-    /// partition's remaining, not-yet-yielded rows (issue #1668, stage 4).
+    /// partition's full reconciliation checkpoint (issue #1668, stage 4;
+    /// checkpoint shape widened in stage 5d — see
+    /// [`PartitionReconcileCheckpoint`]).
     ///
     /// `StreamingMerger` cannot itself be stored across calls — it borrows
     /// `&'a mut KWayMerger`, so it is not self-referential-storable on a
     /// struct that also owns that `KWayMerger` (e.g. `ActiveMerge`). A
     /// caller that must pause mid-partition (the "Q4" mid-partition budget
-    /// check) instead persists the OWNED `(key, remaining_rows)` extracted
-    /// via [`Self::into_paused_state`], then reconstructs a fresh
+    /// check) instead persists the OWNED `(key, checkpoint)` extracted via
+    /// [`Self::into_paused_state`], then reconstructs a fresh
     /// `StreamingMerger` next call via THIS constructor, seeded with that
     /// saved state. `saved: None` starts fresh, identical to [`Self::new`].
     ///
-    /// Nothing is re-computed and nothing is lost: `remaining_rows` are rows
-    /// `step()` ALREADY fully reconciled for `key`'s partition in a PRIOR
-    /// call — the underlying `merger`'s heap has already moved past them, so
-    /// re-calling `merger.step()` for this partition would silently skip
-    /// them. Resuming via this seeded queue (instead of starting a fresh,
-    /// empty `StreamingMerger` and calling `step()` again) is therefore
-    /// required for correctness, not just an optimization.
+    /// Nothing is re-computed and nothing is lost: the checkpoint carries
+    /// every raw entry already popped off the heap for `key`'s partition but
+    /// not yet fully reconciled (the in-progress cluster's raw rows, the
+    /// carrier accumulator) PLUS every already-reconciled, not-yet-yielded
+    /// row — the heap itself has moved past them, so resuming via this
+    /// checkpoint (instead of starting fresh and re-scanning) is required
+    /// for correctness, not just an optimization.
     pub(crate) fn resume(
         merger: &'a mut KWayMerger,
-        saved: Option<(DecoratedKey, VecDeque<MergeEntry>)>,
+        saved: Option<(DecoratedKey, PartitionReconcileCheckpoint)>,
     ) -> Self {
-        let (partition_key, pending_rows) = match saved {
-            Some((key, rows)) => (Some(key), rows),
-            None => (None, VecDeque::new()),
+        let (partition_key, state) = match saved {
+            Some((key, checkpoint)) => (Some(key), checkpoint),
+            None => (None, PartitionReconcileCheckpoint::fresh()),
         };
         Self {
             merger,
             partition_key,
-            pending_rows,
+            state,
         }
     }
 
-    /// Extract the in-progress partition's remaining, not-yet-yielded rows
-    /// (issue #1668, stage 4), for a caller that must pause mid-partition and
-    /// resume later via [`Self::resume`]. Returns `None` if no partition was
-    /// in progress (nothing to resume — the next call should start fresh via
-    /// [`Self::new`]/`resume(merger, None)`).
-    pub(crate) fn into_paused_state(self) -> Option<(DecoratedKey, VecDeque<MergeEntry>)> {
-        self.partition_key.map(|key| (key, self.pending_rows))
+    /// Extract the in-progress partition's full reconciliation checkpoint
+    /// (issue #1668, stage 4/5d), for a caller that must pause mid-partition
+    /// and resume later via [`Self::resume`]. Returns `None` if no partition
+    /// was in progress (nothing to resume — the next call should start fresh
+    /// via [`Self::new`]/`resume(merger, None)`).
+    pub(crate) fn into_paused_state(self) -> Option<(DecoratedKey, PartitionReconcileCheckpoint)> {
+        self.partition_key.map(|key| (key, self.state))
+    }
+
+    /// Pop one raw entry belonging to the CURRENT partition
+    /// (`self.partition_key`, which must already be `Some`) off the heap,
+    /// refilling from its run — the SAME peek/pop/refill mechanism
+    /// `KWayMerger::step` uses, just triggered one entry at a time instead
+    /// of in a bulk `while let` loop. Returns `None` if the heap is empty or
+    /// its next entry belongs to a DIFFERENT partition — i.e. the current
+    /// partition has no more entries.
+    fn pull_one(&mut self) -> Result<Option<MergeEntry>> {
+        let Some(current_key) = &self.partition_key else {
+            return Ok(None);
+        };
+        match self.merger.heap.peek() {
+            Some(Reverse(top)) if &top.entry.key == current_key => {}
+            _ => return Ok(None),
+        }
+        let Reverse(top) = self
+            .merger
+            .heap
+            .pop()
+            .ok_or_else(|| Error::InvalidInput("Merge heap unexpectedly empty".to_string()))?;
+        let entry = top.entry;
+        self.merger.refill_heap(entry.run_index)?;
+        Ok(Some(entry))
+    }
+
+    /// Resolve the partition-tombstone half of the carrier accumulator
+    /// EXACTLY ONCE per partition, when the bounded `clustering_key: None`
+    /// PREFIX ends (see the module doc's "load-bearing precondition"
+    /// section: the partition-level tombstone is always part of the on-disk
+    /// header, so it is FULLY known by the time any non-carrier entry
+    /// arrives). Re-emits the partition tombstone (gc/overlap-purge-gated)
+    /// into `pending_rows` — mirrors `merge_partition_rows`'s equivalent
+    /// re-emission, just triggered at the moment it is first NEEDED instead
+    /// of unconditionally after the whole partition is buffered.
+    ///
+    /// Deliberately does NOT also flush range tombstones here (issue #1668
+    /// stage 5d): a range tombstone's complete entry can arrive well after
+    /// this point (see `awaiting_flush`'s doc), so ALL range-tombstone
+    /// marker re-emission is deferred to the single partition-end call —
+    /// see `range_tombstones_emitted`'s doc for why.
+    fn resolve_partition_prefix(&mut self) {
+        if self.state.partition_deletion_resolved {
+            return;
+        }
+        self.state.partition_deletion_resolved = true;
+
+        let (effective_gc_before, max_purgeable_timestamp) = self.merger.effective_gc_settings();
+
+        if let (Some((pmfda, pldt)), Some(key)) = (
+            self.state.max_partition_deletion,
+            self.state.partition_delete_key.take(),
+        ) {
+            let purge = match effective_gc_before {
+                Some(gc_before) => {
+                    i64::from(pldt as u32) < gc_before && pmfda < max_purgeable_timestamp
+                }
+                None => false,
+            };
+            if purge {
+                self.state.purges.partition_tombstones += 1;
+            } else {
+                self.state.purges.emitted += 1;
+                self.state.pending_rows.push_back(
+                    MergeEntry::new(
+                        usize::MAX,
+                        key,
+                        None,
+                        pmfda,
+                        RowData::Tombstone {
+                            deletion_time: pmfda,
+                            local_deletion_time: pldt,
+                        },
+                    )
+                    .with_partition_deletion((pmfda, pldt)),
+                );
+            }
+        }
+    }
+
+    /// Coalesce `range_tombstones`, drop any subsumed by the partition
+    /// floor, gc/overlap-purge-gate every survivor, and re-emit the
+    /// retained markers into `pending_rows` — the marker-persistence half
+    /// of what `merge_partition_rows` does. Called EXACTLY ONCE per
+    /// partition, at partition end (guarded by `range_tombstones_emitted`
+    /// in the `step_streaming` caller), once the FULL, final set of range
+    /// tombstones is known — coalescing (and therefore re-emitting) a
+    /// partial set here and a later-discovered remainder in a SECOND call
+    /// would risk two marker pairs overlapping in the output (roborev #959
+    /// High #1's concern).
+    fn flush_range_tombstones(&mut self, effective_gc_before: Option<i64>, max_purgeable_timestamp: i64) {
+        self.state.range_tombstones_emitted = true;
+        KWayMerger::coalesce_range_tombstones(&mut self.state.range_tombstones, &self.merger.schema);
+
+        if let Some((pmfda, _)) = self.state.max_partition_deletion {
+            self.state
+                .range_tombstones
+                .retain(|(_, rt)| rt.deletion_time > pmfda);
+        }
+
+        for (key, rt) in self.state.range_tombstones.clone() {
+            if let Some(gc_before) = effective_gc_before {
+                if i64::from(rt.local_deletion_time as u32) < gc_before
+                    && rt.deletion_time < max_purgeable_timestamp
+                {
+                    self.state.purges.range_tombstones += 1;
+                    continue;
+                }
+            }
+            self.state.purges.emitted += 1;
+            self.state.pending_rows.push_back(
+                MergeEntry::new(
+                    usize::MAX,
+                    key,
+                    None,
+                    rt.deletion_time,
+                    RowData::Live { cells: Vec::new() },
+                )
+                .with_range_deletion(rt),
+            );
+        }
+    }
+
+    /// Re-apply range- then partition-shadowing (using EVERY range
+    /// tombstone known so far) to everything currently held in
+    /// `awaiting_flush`, then move every survivor into `pending_rows`
+    /// (issue #1668 stage 5d's bounded-open-range design — see
+    /// `awaiting_flush`'s field doc and the module doc's finding on why a
+    /// range tombstone's complete entry can arrive strictly after every row
+    /// it covers has already been popped off the heap).
+    fn reshadow_and_flush_awaiting(&mut self) {
+        if self.state.awaiting_flush.is_empty() {
+            return;
+        }
+        KWayMerger::coalesce_range_tombstones(&mut self.state.range_tombstones, &self.merger.schema);
+        for entry in std::mem::take(&mut self.state.awaiting_flush) {
+            if let Some(shadowed) = KWayMerger::apply_range_shadowing(
+                entry,
+                &self.state.range_tombstones,
+                &self.merger.schema,
+            ) {
+                if let Some(survivor) = KWayMerger::apply_partition_shadowing(
+                    shadowed,
+                    self.state.max_partition_deletion,
+                ) {
+                    self.state.pending_rows.push_back(survivor);
+                }
+            }
+        }
+    }
+
+    /// Finalize whatever cluster is currently accumulating (if any):
+    /// reconcile its raw rows, apply range- then partition-shadowing, and
+    /// route the survivor to `pending_rows` (zero extra buffering — the
+    /// common case, when no range tombstone has been seen for this
+    /// partition YET) or `awaiting_flush` (issue #1668 stage 5d's
+    /// bounded-open-range design: held because a range tombstone HAS been
+    /// seen, so a DIFFERENT/later one might still need to shadow this
+    /// survivor too). A no-op beyond resolving the partition-tombstone
+    /// prefix if no cluster is in progress (the tombstone-only or
+    /// truly-empty partition cases).
+    fn finalize_current_cluster(&mut self) -> Result<()> {
+        let Some((ck, rows)) = self.state.current_cluster.take() else {
+            self.resolve_partition_prefix();
+            return Ok(());
+        };
+        self.resolve_partition_prefix();
+
+        let (effective_gc_before, max_purgeable_timestamp) = self.merger.effective_gc_settings();
+        if let Some(entry) = KWayMerger::reconcile_cluster_with_overlap_counted(
+            ck,
+            rows,
+            &self.merger.schema.dropped_columns,
+            effective_gc_before,
+            max_purgeable_timestamp,
+            self.merger.now_secs,
+            &mut self.state.purges,
+        ) {
+            if self.state.range_tombstones.is_empty() {
+                // Common case: nothing has EVER shadowed anything in this
+                // partition so far — partition-shadowing alone still
+                // applies (it resolves fully during the prefix, unlike
+                // range tombstones), then flush straight through with zero
+                // extra buffering.
+                if let Some(survivor) =
+                    KWayMerger::apply_partition_shadowing(entry, self.state.max_partition_deletion)
+                {
+                    self.state.pending_rows.push_back(survivor);
+                }
+            } else {
+                self.state.awaiting_flush.push_back(entry);
+            }
+        }
+        Ok(())
     }
 
     /// Yield the next streaming increment.
     ///
-    /// Drains any in-progress partition's buffered rows one at a time as
-    /// `ClusterGroup`, emits `PartitionEnd` once exhausted, then pulls the
-    /// next whole partition from the wrapped [`KWayMerger::step`] and starts
-    /// draining it. See the module doc for why this reproduces `step()`'s
-    /// output exactly, row-for-row, just split into increments.
+    /// Drains any already-reconciled, ready-to-emit rows first; otherwise
+    /// pulls raw entries directly off the heap, siphoning carriers into the
+    /// running accumulator and growing the current clustering-key group,
+    /// until either a reconciled row becomes available, the partition ends
+    /// (`PartitionEnd`), or the whole merge ends (`Complete`). See the
+    /// module doc for the full design and its correctness proof.
     pub(crate) fn step_streaming(&mut self) -> Result<StreamingStep> {
-        if let Some(key) = self.partition_key.clone() {
-            if let Some(row) = self.pending_rows.pop_front() {
+        loop {
+            if let Some(row) = self.state.pending_rows.pop_front() {
+                let Some(key) = self.partition_key.clone() else {
+                    return Err(Error::InvalidInput(
+                        "pending row without an active partition key".to_string(),
+                    ));
+                };
                 return Ok(StreamingStep::ClusterGroup {
                     key,
                     row: Box::new(row),
                 });
             }
-            self.partition_key = None;
-            return Ok(StreamingStep::PartitionEnd { key });
-        }
 
-        match self.merger.step()? {
-            MergeStep::Partition { key, rows } => {
-                let mut pending: VecDeque<MergeEntry> = rows.into();
-                match pending.pop_front() {
-                    Some(row) => {
-                        self.partition_key = Some(key.clone());
-                        self.pending_rows = pending;
-                        Ok(StreamingStep::ClusterGroup {
-                            key,
-                            row: Box::new(row),
-                        })
+            if self.partition_key.is_none() {
+                // Lazy heap init on first use — mirrors `KWayMerger::step`'s
+                // OWN check exactly (issue #1668 stage 5d: `step_streaming`
+                // no longer delegates to `step`, so it must replicate this
+                // one-time setup itself).
+                if self.merger.heap.is_empty() && self.merger.current_partition.is_none() {
+                    self.merger.initialize_heap()?;
+                }
+                let Some(Reverse(top)) = self.merger.heap.peek() else {
+                    return Ok(StreamingStep::Complete);
+                };
+                self.partition_key = Some(top.entry.key.clone());
+                self.state = PartitionReconcileCheckpoint::fresh();
+            }
+
+            match self.pull_one()? {
+                Some(entry) => {
+                    // Carriers are siphoned off REGARDLESS of any in-progress
+                    // cluster (issue #1668 stage 5d finding: a carrier can
+                    // share a run_index tie-break with — and interleave
+                    // arbitrarily with — the current cluster for an
+                    // unclustered table's sole `ck: None` group).
+                    if entry.is_partition_delete_carrier() {
+                        if let Some((mfda, ldt)) = entry.partition_deletion {
+                            self.state
+                                .partition_delete_key
+                                .get_or_insert_with(|| entry.key.clone());
+                            match self.state.max_partition_deletion {
+                                Some((cur_mfda, _)) if cur_mfda >= mfda => {}
+                                _ => self.state.max_partition_deletion = Some((mfda, ldt)),
+                            }
+                            continue;
+                        }
                     }
-                    // A partition with no writer-emittable content still runs
-                    // through the SAME boundary the whole-partition path
-                    // would traverse — mirror it with an immediate
-                    // PartitionEnd rather than silently skipping the
-                    // boundary.
-                    None => Ok(StreamingStep::PartitionEnd { key }),
+                    if carriers::is_range_marker_carrier(&entry) {
+                        if let Some(rt) = entry.range_deletion.clone() {
+                            self.state.range_tombstones.push((entry.key.clone(), rt));
+                            // Issue #1668 stage 5d: a range tombstone's
+                            // COMPLETE entry can arrive strictly AFTER the
+                            // bounded prefix (the reader only surfaces it
+                            // once its close bound is parsed — see the
+                            // module doc's finding). Once the prefix has
+                            // already resolved, this is a NEW mid-partition
+                            // discovery: immediately re-check every row
+                            // held in `awaiting_flush` against it (and
+                            // every range tombstone seen so far) rather
+                            // than waiting — bounding the buffer to "since
+                            // the last flush point," not the whole
+                            // partition.
+                            if self.state.partition_deletion_resolved {
+                                self.reshadow_and_flush_awaiting();
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Not a carrier: belongs to a clustering-key group.
+                    let starts_new_cluster = match &self.state.current_cluster {
+                        Some((ck, _)) => *ck != entry.clustering_key,
+                        None => false,
+                    };
+                    if starts_new_cluster {
+                        self.finalize_current_cluster()?;
+                    }
+                    match &mut self.state.current_cluster {
+                        Some((_, rows)) => rows.push(entry),
+                        None => {
+                            self.state.current_cluster =
+                                Some((entry.clustering_key.clone(), vec![entry]));
+                        }
+                    }
+                }
+                None => {
+                    // The current partition is exhausted (pulling again is
+                    // safe and cheap — the heap's `peek()` stays exhausted
+                    // for this partition, and `finalize_current_cluster` is
+                    // idempotent once `current_cluster` has already been
+                    // taken — issue #1668 stage 5d note): finalize the last
+                    // cluster (if any) and resolve any never-needed
+                    // carriers, then flush whatever `awaiting_flush` still
+                    // holds — the partition is DEFINITELY ending, so this
+                    // is the final, authoritative flush regardless of
+                    // whether ANOTHER range tombstone ever showed up to
+                    // trigger an earlier one. If any of this produced NEW
+                    // ready rows, loop back to drain them (via step 1,
+                    // `partition_key` untouched) before ending the
+                    // partition. Only once finalization truly yields
+                    // nothing further do we emit the purge-counter
+                    // observability EXACTLY ONCE and signal PartitionEnd.
+                    self.finalize_current_cluster()?;
+                    self.reshadow_and_flush_awaiting();
+                    if !self.state.range_tombstones.is_empty() && !self.state.range_tombstones_emitted
+                    {
+                        let (effective_gc_before, max_purgeable_timestamp) =
+                            self.merger.effective_gc_settings();
+                        self.flush_range_tombstones(effective_gc_before, max_purgeable_timestamp);
+                    }
+                    if !self.state.pending_rows.is_empty() {
+                        continue;
+                    }
+                    let purged = self.state.purges.total();
+                    if purged > 0 {
+                        crate::observability::add_counter(
+                            crate::observability::catalog::COMPACTION_TOMBSTONES_PURGED,
+                            purged,
+                            &[],
+                        );
+                    }
+                    let Some(key) = self.partition_key.take() else {
+                        return Err(Error::InvalidInput(
+                            "partition ended without an active key".to_string(),
+                        ));
+                    };
+                    return Ok(StreamingStep::PartitionEnd { key });
                 }
             }
-            MergeStep::Complete => Ok(StreamingStep::Complete),
         }
     }
 }
@@ -248,6 +717,11 @@ impl<'a> StreamingMerger<'a> {
 #[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
+    // `MergeStep` is only exercised by these tests' `drain_whole_partition`
+    // oracle (the unchanged `KWayMerger::step` reference path) — not by any
+    // non-test code in this module (issue #1668 stage 5d removed the
+    // production `step()` delegation from `step_streaming`).
+    use super::super::MergeStep;
     use crate::schema::{ClusteringColumn, ClusteringOrder, KeyColumn, TableSchema};
     use crate::storage::write_engine::merge::model::{CellData, RowData};
     use crate::storage::write_engine::merge::{RunReader, SSTableRowIterator};
@@ -276,7 +750,29 @@ mod tests {
         )
     }
 
-    fn range_carrier(token: i64, deletion_time: i64, ldt: i32) -> MergeEntry {
+    /// A RAW range-tombstone carrier, as a real reader would construct it
+    /// (`KWayMerger::build_merge_entry`'s `CompactionRowData::RangeMarker`
+    /// branch) — tagged with the run it ACTUALLY came from, `run_index`,
+    /// NOT the `usize::MAX` sentinel `merge_partition_rows`'s OWN
+    /// re-emission logic uses for its SYNTHETIC output entries (issue #1668
+    /// stage 5d finding: a raw carrier's `run_index` field must match its
+    /// real `self.runs` slot, or `KWayMerger::refill_heap` — which indexes
+    /// `self.runs` by the popped entry's OWN `run_index` field — silently
+    /// stops refilling that run after this carrier is popped, exactly as a
+    /// genuine multi-entry run would starve if mis-tagged this way. The
+    /// PRE-stage-5d `step()` masked this with an unrelated bug of its own:
+    /// `current_partition` is never actually assigned, so `step()`'s "lazy
+    /// init" guard (`heap.is_empty() && current_partition.is_none()`) is
+    /// unconditionally true whenever the heap empties, re-triggering
+    /// `initialize_heap()` — which happens to "rescue" a stalled run by
+    /// force-refilling it — on EVERY subsequent `step()` call, silently
+    /// splitting one logical partition into extra `MergeStep::Partition`
+    /// steps that `drain_whole_partition` then concatenates back together.
+    /// `step_streaming` has no such accidental rescue (by design — one
+    /// partition is one cohesive state machine, not repeated fresh
+    /// `step()` calls), so a mis-tagged carrier's absence is no longer
+    /// masked.
+    fn range_carrier(run_index: usize, token: i64, deletion_time: i64, ldt: i32) -> MergeEntry {
         let rt = RangeTombstone {
             start: crate::storage::write_engine::mutation::ClusteringBound::Bottom,
             end: crate::storage::write_engine::mutation::ClusteringBound::Inclusive(ck(1)),
@@ -284,7 +780,7 @@ mod tests {
             local_deletion_time: ldt,
         };
         MergeEntry::new(
-            usize::MAX,
+            run_index,
             key(token),
             None,
             deletion_time,
@@ -293,9 +789,11 @@ mod tests {
         .with_range_deletion(rt)
     }
 
-    fn partition_carrier(token: i64, mfda: i64, ldt: i32) -> MergeEntry {
+    /// A RAW partition-tombstone carrier — see [`range_carrier`]'s doc for
+    /// why `run_index` must be the entry's REAL run, not `usize::MAX`.
+    fn partition_carrier(run_index: usize, token: i64, mfda: i64, ldt: i32) -> MergeEntry {
         MergeEntry::new(
-            usize::MAX,
+            run_index,
             key(token),
             None,
             mfda,
@@ -396,8 +894,25 @@ mod tests {
     /// `merger_over` test helper (not reusable directly here — private to a
     /// sibling module — so reconstructed with the same shape).
     fn merger_over(entries: Vec<MergeEntry>, schema: TableSchema) -> KWayMerger {
+        merger_over_runs(vec![entries], schema)
+    }
+
+    /// Build a `KWayMerger` with ONE run PER `Vec<MergeEntry>` in `runs` —
+    /// for tests that must exercise the heap's REAL cross-run interleaving
+    /// (issue #1668 stage 5d), not just a single run's own (already
+    /// necessarily monotonic) content. Each inner `Vec` must already be in
+    /// its OWN correct on-disk order — real SSTable files are always
+    /// written via the schema-aware sort `write_partition` applies before
+    /// writing (`ClusteringKey::compare`, which DOES reverse `DESC`
+    /// columns), so a genuine `RunReader` for one file never needs
+    /// re-sorting; only the heap's job of picking the next-smallest
+    /// candidate ACROSS runs remains.
+    fn merger_over_runs(runs: Vec<Vec<MergeEntry>>, schema: TableSchema) -> KWayMerger {
         KWayMerger {
-            runs: vec![RunReader::new(Box::new(VecIterator(entries.into_iter())))],
+            runs: runs
+                .into_iter()
+                .map(|entries| RunReader::new(Box::new(VecIterator(entries.into_iter()))))
+                .collect(),
             heap: BinaryHeap::new(),
             current_partition: None,
             gc_before_secs: None,
@@ -521,20 +1036,56 @@ mod tests {
         }
     }
 
-    /// THE proof stage 3 needs: for a fixture mixing plain rows, a row
+    /// Split a drained partition's rows into (carrier entries, clustering
+    /// rows) — `clustering_key.is_none()` marks a carrier (a range- or
+    /// partition-tombstone re-emission), matching `merge_partition_rows`'s
+    /// own `clustered_rows[None]` grouping.
+    fn split_carriers_and_rows(rows: Vec<MergeEntry>) -> (Vec<MergeEntry>, Vec<MergeEntry>) {
+        rows.into_iter()
+            .partition(|entry| entry.clustering_key.is_none())
+    }
+
+    /// A stable sort key for a carrier entry, independent of WHEN it was
+    /// re-emitted — distinguishes a range-tombstone marker from a
+    /// partition-tombstone marker (this fixture has at most one of each),
+    /// so two carrier sets can be compared as sets regardless of order.
+    fn carrier_sort_key(entry: &MergeEntry) -> (bool, i64) {
+        (entry.partition_deletion.is_some(), entry.timestamp)
+    }
+
+    /// THE proof stage 3/5d needs: for a fixture mixing plain rows, a row
     /// tombstone, a range-tombstone carrier (#933), and a partition-deletion
     /// carrier (#1072) — i.e. exercising stage-1's `scan_partition_carriers`
-    /// end to end — the streaming path yields EXACTLY the same reconciled
-    /// rows, in the same order, as the old whole-partition path.
+    /// end to end — the streaming path reconciles the SAME rows, with the
+    /// SAME shadowing outcome, as the old whole-partition path.
+    ///
+    /// Unlike the plain-fixture / DESC / absent-component tests, this test
+    /// does NOT assert byte-identical SEQUENCE order: issue #1668 stage 5d's
+    /// bounded-open-range design (see the module doc) defers a range
+    /// tombstone's own marker re-emission to partition end so the FULL,
+    /// final set can be coalesced exactly once, so a range marker can land
+    /// AFTER the clustering rows it shadows in the streaming path, whereas
+    /// `merge_partition_rows`'s whole-partition buffering always sorts
+    /// EVERY carrier before EVERY clustering row. The two invariants that
+    /// DO still hold — and that this test asserts — are: (a) the clustering
+    /// ROWS appear in the identical order in both paths (grouping/
+    /// reconciliation correctness is unaffected), and (b) the SET of
+    /// carrier entries (their content, not their position) is identical.
     #[test]
     fn step_streaming_matches_step_for_mixed_tombstone_fixture() {
         let schema = test_schema(ClusteringOrder::Asc);
+        // Realistic ordering (issue #1668 stage 5d finding): the partition
+        // tombstone is always part of the on-disk header, so it precedes
+        // every row; the range tombstone [Bottom, ck=1] closes right after
+        // the last row it covers (ck=1), before the row it does NOT cover
+        // (ck=2) — matching how the real reader pairs open/close bounds
+        // (`row_decoder/compaction.rs`'s `on_range_marker`/`on_data_row`).
         let entries = vec![
+            partition_carrier(0, 1, 10, 1),
             live_entry(0, 1, 0, 100),
             live_entry(0, 1, 1, 100),
+            range_carrier(0, 1, 50, 5),
             live_entry(0, 1, 2, 100),
-            range_carrier(1, 50, 5),
-            partition_carrier(1, 10, 1),
         ];
 
         let mut old_merger = merger_over(entries.clone(), schema.clone());
@@ -547,10 +1098,20 @@ mod tests {
             !old_rows.is_empty(),
             "fixture must produce at least one row"
         );
+
+        let (mut old_carriers, old_clustering_rows) = split_carriers_and_rows(old_rows);
+        let (mut new_carriers, new_clustering_rows) = split_carriers_and_rows(new_rows);
         assert_eq!(
-            old_rows, new_rows,
-            "streaming path must yield the SAME rows, in the SAME order, as \
-             the whole-partition path"
+            old_clustering_rows, new_clustering_rows,
+            "streaming path must reconcile the SAME clustering rows, in the \
+             SAME order, as the whole-partition path"
+        );
+        old_carriers.sort_by_key(carrier_sort_key);
+        new_carriers.sort_by_key(carrier_sort_key);
+        assert_eq!(
+            old_carriers, new_carriers,
+            "streaming path must re-emit the SAME carrier markers (content, \
+             not necessarily position) as the whole-partition path"
         );
     }
 
@@ -589,25 +1150,31 @@ mod tests {
         }
     }
 
-    /// Stage 3a correctness test: a `DESC` clustering column. The heap's
-    /// fallback `Ord` would (if consulted directly, uncorrected) pop these in
-    /// ASCENDING order (0, 1, 2) since it never applies `DESC` reversal — the
-    /// Cassandra-correct order is DESCENDING (2, 1, 0). Assert BOTH `step()`
+    /// Stage 3a/5d correctness test: a `DESC` clustering column, across
+    /// GENUINELY SEPARATE runs (issue #1668 stage 5d finding — see
+    /// `merger_over_runs`'s doc: a REAL SSTable file is always written in
+    /// schema-consistent order via `write_partition`'s own sort, so a
+    /// single run's entries never need reordering; the property THIS test
+    /// exercises is the HEAP correctly choosing, across MULTIPLE runs
+    /// (`ck=2`'s run, `ck=1`'s run, `ck=0`'s run — each independently
+    /// correctly "sorted" since it holds a single entry), the Cassandra-
+    /// correct DESCENDING order (2, 1, 0), which the FALLBACK
+    /// (non-schema-aware) `Ord` would get backwards. Assert BOTH `step()`
     /// and `step_streaming()` emit the CORRECT descending order — an
     /// independent check against the expected sequence, not just
-    /// old-path-equals-new-path (which would pass even if both were equally
-    /// wrong).
+    /// old-path-equals-new-path (which would pass even if both were
+    /// equally wrong).
     #[test]
     fn step_streaming_matches_step_for_desc_clustering_fixture() {
         let schema = test_schema(ClusteringOrder::Desc);
-        let entries = vec![
-            live_entry(0, 1, 0, 100),
-            live_entry(0, 1, 1, 100),
-            live_entry(0, 1, 2, 100),
+        let runs = vec![
+            vec![live_entry(0, 1, 2, 100)],
+            vec![live_entry(1, 1, 1, 100)],
+            vec![live_entry(2, 1, 0, 100)],
         ];
         let expected_order = [2, 1, 0];
 
-        let mut old_merger = merger_over(entries.clone(), schema.clone());
+        let mut old_merger = merger_over_runs(runs.clone(), schema.clone());
         let old_rows = drain_whole_partition(&mut old_merger);
         let old_order: Vec<i32> = old_rows.iter().map(ck_value).collect();
         assert_eq!(
@@ -615,7 +1182,7 @@ mod tests {
             "step() must emit DESC clustering order"
         );
 
-        let mut new_merger = merger_over(entries, schema);
+        let mut new_merger = merger_over_runs(runs, schema);
         let new_rows = drain_streaming(&mut new_merger);
         let new_order: Vec<i32> = new_rows.iter().map(ck_value).collect();
         assert_eq!(
@@ -624,19 +1191,20 @@ mod tests {
         );
     }
 
-    /// Stage 3a correctness test: absent trailing clustering component
-    /// (Cassandra NULL-first rule) combined with a `DESC` second column.
-    /// Schema-aware order: the absent-`ck2` row sorts FIRST (NULL always
-    /// sorts first, regardless of `ck2`'s `DESC`-ness), then among the two
-    /// present-`ck2` rows the LARGER value sorts first (`DESC` reversal).
-    /// Expected sequence: `[absent, ck2=2, ck2=1]`.
+    /// Stage 3a/5d correctness test: absent trailing clustering component
+    /// (Cassandra NULL-first rule) combined with a `DESC` second column,
+    /// across GENUINELY SEPARATE runs (see the DESC test's doc for why —
+    /// same finding). Schema-aware order: the absent-`ck2` row sorts FIRST
+    /// (NULL always sorts first, regardless of `ck2`'s `DESC`-ness), then
+    /// among the two present-`ck2` rows the LARGER value sorts first
+    /// (`DESC` reversal). Expected sequence: `[absent, ck2=2, ck2=1]`.
     #[test]
     fn step_streaming_matches_step_for_absent_trailing_component_fixture() {
         let schema = two_col_schema();
-        let entries = vec![
-            live_entry_ck(0, 1, ck_multi(&[("ck1", 5), ("ck2", 1)]), 100),
-            live_entry_ck(0, 1, ck_multi(&[("ck1", 5)]), 100), // absent ck2
-            live_entry_ck(0, 1, ck_multi(&[("ck1", 5), ("ck2", 2)]), 100),
+        let runs = vec![
+            vec![live_entry_ck(0, 1, ck_multi(&[("ck1", 5), ("ck2", 1)]), 100)],
+            vec![live_entry_ck(1, 1, ck_multi(&[("ck1", 5)]), 100)], // absent ck2
+            vec![live_entry_ck(2, 1, ck_multi(&[("ck1", 5), ("ck2", 2)]), 100)],
         ];
 
         // Independent expectation: identify each row by its ck2 presence/value.
@@ -653,7 +1221,7 @@ mod tests {
         }
         let expected_order = [None, Some(2), Some(1)];
 
-        let mut old_merger = merger_over(entries.clone(), schema.clone());
+        let mut old_merger = merger_over_runs(runs.clone(), schema.clone());
         let old_rows = drain_whole_partition(&mut old_merger);
         let old_order: Vec<Option<i32>> = old_rows.iter().map(ck2_marker).collect();
         assert_eq!(
@@ -661,7 +1229,7 @@ mod tests {
             "step() must put the absent-ck2 row first (NULL-first), then DESC by ck2"
         );
 
-        let mut new_merger = merger_over(entries, schema);
+        let mut new_merger = merger_over_runs(runs, schema);
         let new_rows = drain_streaming(&mut new_merger);
         let new_order: Vec<Option<i32>> = new_rows.iter().map(ck2_marker).collect();
         assert_eq!(
@@ -673,16 +1241,28 @@ mod tests {
     /// A range-tombstone carrier round-trips through the streaming path as a
     /// `ClusterGroup` with `clustering_key: None`, exactly as it would sit in
     /// `MergeStep::Partition.rows` (proving stage-1's carriers thread through
-    /// the increment API unchanged).
+    /// the increment API unchanged). The re-emitted entry matches the raw
+    /// input carrier in every field EXCEPT `run_index`: both the old
+    /// (`merge_partition_rows`) and new (`flush_range_tombstones`) paths
+    /// always reconstruct the re-emitted marker with `run_index: usize::MAX`
+    /// (it's a synthetic entry, not read from any particular run) —
+    /// `range_carrier`'s OWN `run_index` (its REAL run, since #1668 stage 5d
+    /// fixed this fixture to match `build_merge_entry`'s convention) is
+    /// deliberately different, so a literal round-trip was never the real
+    /// contract.
     #[test]
     fn range_tombstone_carrier_round_trips_as_cluster_group() {
-        let carrier = range_carrier(9, 500, 50);
+        let carrier = range_carrier(0, 9, 500, 50);
         assert!(super::super::carriers::is_range_marker_carrier(&carrier));
+        let expected = MergeEntry {
+            run_index: usize::MAX,
+            ..carrier.clone()
+        };
 
-        let mut merger = merger_over(vec![carrier.clone()], test_schema(ClusteringOrder::Asc));
+        let mut merger = merger_over(vec![carrier], test_schema(ClusteringOrder::Asc));
         let mut stream = StreamingMerger::new(&mut merger);
         match stream.step_streaming().unwrap() {
-            StreamingStep::ClusterGroup { row, .. } => assert_eq!(*row, carrier),
+            StreamingStep::ClusterGroup { row, .. } => assert_eq!(*row, expected),
             other => panic!("expected ClusterGroup, got {other:?}"),
         }
     }
