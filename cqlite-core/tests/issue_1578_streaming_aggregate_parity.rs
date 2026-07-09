@@ -257,18 +257,16 @@ async fn streaming_aggregate_parity_matrix() {
     )
     .await;
 
-    // SUM (as f64) over each numeric type.
-    assert_agg(&db, &format!("SELECT SUM(i) {from}"), Value::Float(46.0)).await;
-    assert_agg(&db, &format!("SELECT SUM(b) {from}"), Value::Float(1037.0)).await;
+    // SUM preserves the integral result type (issue #2202): SUM(int) → int,
+    // SUM(bigint) → bigint; SUM(double) stays double.
+    assert_agg(&db, &format!("SELECT SUM(i) {from}"), Value::Integer(46)).await;
+    assert_agg(&db, &format!("SELECT SUM(b) {from}"), Value::BigInt(1037)).await;
     assert_agg(&db, &format!("SELECT SUM(d) {from}"), Value::Float(9.5)).await;
 
-    // AVG = sum/count over the NON-NULL values (i: 46/4, d: 9.5/4).
-    assert_agg(
-        &db,
-        &format!("SELECT AVG(i) {from}"),
-        Value::Float(46.0 / 4.0),
-    )
-    .await;
+    // AVG = sum/count over the NON-NULL values. Integral AVG uses Cassandra's
+    // integer division (issue #2202): AVG(int) = 46/4 = 11 (truncated), not 11.5.
+    // AVG(double) still divides in f64 (9.5/4).
+    assert_agg(&db, &format!("SELECT AVG(i) {from}"), Value::Integer(11)).await;
     assert_agg(
         &db,
         &format!("SELECT AVG(d) {from}"),
@@ -286,7 +284,7 @@ async fn streaming_aggregate_parity_matrix() {
     assert_agg(
         &db,
         &format!("SELECT SUM(i) {from} WHERE i >= 10 ALLOW FILTERING"),
-        Value::Float(50.0),
+        Value::Integer(50),
     )
     .await;
 }

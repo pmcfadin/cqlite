@@ -43,6 +43,7 @@ mod aggregation;
 mod execute;
 mod limit_pushdown;
 mod lookup;
+mod numeric_acc;
 mod predicate;
 mod row_build;
 mod schemaless_point;
@@ -2478,21 +2479,20 @@ mod tests {
         assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
     }
 
-    /// Issue #1941: SUM/AVG report `double` — CQLite's aggregation accumulates all
-    /// numeric input into an f64 and `finalize_group` emits `Value::Float`, so the
-    /// metadata type MUST be `double` to match the produced value (never the
-    /// argument column's `int` type, and never `Text`).
+    /// Issue #2202: SUM/AVG preserve Cassandra's integral result type — over the
+    /// `int` column `amount` they report `int` (the `Value::Integer` emitted),
+    /// never `double`; over `double` `price` they stay `double`. (AVG shares the
+    /// SUM metadata path; its int typing is pinned end-to-end in
+    /// `issue_2202_sum_avg_result_type` + `select_naming`.)
     #[tokio::test]
-    async fn aggregate_sum_and_avg_report_double() {
-        let sum = agg_result_columns("SELECT SUM(amount) FROM ks.t").await;
-        assert_eq!(sum.len(), 1);
-        assert_eq!(sum[0].cql_type, Some(CqlType::Double));
-        assert_eq!(sum[0].data_type, crate::types::DataType::Float);
-
-        let avg = agg_result_columns("SELECT AVG(amount) FROM ks.t").await;
-        assert_eq!(avg.len(), 1);
-        assert_eq!(avg[0].cql_type, Some(CqlType::Double));
-        assert_eq!(avg[0].data_type, crate::types::DataType::Float);
+    async fn aggregate_sum_and_avg_preserve_integral_type() {
+        use crate::types::DataType;
+        let i = agg_result_columns("SELECT SUM(amount) FROM ks.t").await;
+        assert_eq!(i[0].cql_type, Some(CqlType::Int));
+        assert_eq!(i[0].data_type, DataType::Integer);
+        let d = agg_result_columns("SELECT SUM(price) FROM ks.t").await;
+        assert_eq!(d[0].cql_type, Some(CqlType::Double));
+        assert_eq!(d[0].data_type, DataType::Float);
     }
 
     /// Issue #1941: MIN/MAX preserve the ARGUMENT column's type (the value is

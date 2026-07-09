@@ -12,6 +12,7 @@ use super::aggregation::{
     build_group_key, finalize_empty_global_aggregate, finalize_group, find_or_init_group,
     init_aggregate_accumulators, update_aggregate, AggregationState,
 };
+use super::row_build::parse_cql_type_str;
 use super::{
     build_row_from_scan_cached, classify_partition_lookup, evaluate_predicates,
     validate_token_predicates, AccessPath, ExecutionContext, ExecutionStep, PartitionKeyCache,
@@ -19,9 +20,40 @@ use super::{
 };
 use crate::query::result::QueryRow;
 use crate::query::select_ast::WhereExpression;
+use crate::query::select_naming::aggregate_result_cql_type;
 use crate::query::select_optimizer::{AggregationPlan, SSTablePredicate};
-use crate::schema::TableSchema;
+use crate::schema::{CqlType, TableSchema};
 use crate::{Error, Result, TableId, Value};
+
+/// Resolve each aggregate's RESULT CQL type (parallel to `agg_plan.aggregates`)
+/// from the schema, using the SAME `aggregate_result_cql_type` the result
+/// metadata is built from (issue #2202). This fixes each SUM/AVG accumulator's
+/// numeric domain (integral vs floating) so the emitted value variant can never
+/// disagree with the metadata type — and it is resolved ONCE per query, then
+/// shared across every group's accumulator init.
+fn resolve_aggregate_result_types(
+    agg_plan: &AggregationPlan,
+    schema: Option<&TableSchema>,
+) -> Vec<Option<CqlType>> {
+    agg_plan
+        .aggregates
+        .iter()
+        .map(|agg| {
+            // `*` (COUNT(*)) has no argument column; SUM/AVG never take `*`.
+            let arg_type = if agg.column == "*" {
+                None
+            } else {
+                schema.and_then(|s| {
+                    s.columns
+                        .iter()
+                        .find(|c| c.name == agg.column)
+                        .and_then(|c| parse_cql_type_str(&c.data_type))
+                })
+            };
+            aggregate_result_cql_type(&agg.function, arg_type)
+        })
+        .collect()
+}
 
 /// Read-ahead window for the D2 aggregate fold's scan stream. The fold retains
 /// only the running accumulator, so this bounds the in-flight scan rows (not the
@@ -47,6 +79,7 @@ impl SelectExecutor {
         &self,
         rows: Vec<QueryRow>,
         agg_plan: &AggregationPlan,
+        schema_opt: Option<&TableSchema>,
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         const PER_ROW_MEMORY_ESTIMATE_BYTES: usize = 100;
@@ -65,9 +98,18 @@ impl SelectExecutor {
             memory_limit_bytes: DEFAULT_AGGREGATION_MEMORY_LIMIT,
         };
 
+        // Issue #2202: resolve the per-aggregate result types ONCE, then reuse for
+        // every group's accumulator init (drives integral vs floating SUM/AVG).
+        let result_types = resolve_aggregate_result_types(agg_plan, schema_opt);
+
         for row in rows {
             let group_key = build_group_key(&row, &agg_plan.group_by_columns);
-            let group_index = find_or_init_group(&mut agg_state, group_key, &agg_plan.aggregates);
+            let group_index = find_or_init_group(
+                &mut agg_state,
+                group_key,
+                &agg_plan.aggregates,
+                &result_types,
+            );
             let group_aggregates = &mut agg_state.groups[group_index].1;
 
             for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
@@ -155,7 +197,10 @@ impl SelectExecutor {
         context.access_path = Some(AccessPath::FallbackFullScan { reason });
         crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
 
-        let mut accumulators = init_aggregate_accumulators(&agg_plan.aggregates);
+        // Issue #2202: fix each SUM/AVG accumulator's numeric domain from the
+        // resolved result types (same source as the result metadata).
+        let result_types = resolve_aggregate_result_types(agg_plan, schema_opt);
+        let mut accumulators = init_aggregate_accumulators(&agg_plan.aggregates, &result_types);
         let mut folded_any = false;
 
         // Issue #1592: fold over the BATCHED streaming surface — one async wake per

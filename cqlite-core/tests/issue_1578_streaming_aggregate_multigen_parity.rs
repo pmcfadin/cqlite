@@ -24,7 +24,7 @@
 //!   SUM(v)    = 999 + 5 + 40 = 1044
 //!   MIN(v)    = 5
 //!   MAX(v)    = 999
-//!   AVG(v)    = 1044 / 3 = 348.0
+//!   AVG(v)    = 1044 / 3 = 348   (v is int → integer division, issue #2202)
 //!   MIN(name) = "alpha2"   ('a' < 'c' < 'd': alpha2 < charlie < delta)
 //!   MAX(name) = "delta"
 //!
@@ -250,15 +250,11 @@ async fn streaming_aggregate_multigen_parity() {
 
     assert_agg(&db, &format!("SELECT COUNT(*) {from}"), Value::BigInt(3)).await;
     assert_agg(&db, &format!("SELECT COUNT(v) {from}"), Value::BigInt(3)).await;
-    assert_agg(&db, &format!("SELECT SUM(v) {from}"), Value::Float(1044.0)).await;
+    // Issue #2202: v is int → SUM(int) → int, AVG(int) → int (integer division).
+    assert_agg(&db, &format!("SELECT SUM(v) {from}"), Value::Integer(1044)).await;
     assert_agg(&db, &format!("SELECT MIN(v) {from}"), Value::Integer(5)).await;
     assert_agg(&db, &format!("SELECT MAX(v) {from}"), Value::Integer(999)).await;
-    assert_agg(
-        &db,
-        &format!("SELECT AVG(v) {from}"),
-        Value::Float(1044.0 / 3.0),
-    )
-    .await;
+    assert_agg(&db, &format!("SELECT AVG(v) {from}"), Value::Integer(348)).await;
     assert_agg(
         &db,
         &format!("SELECT MIN(name) {from}"),

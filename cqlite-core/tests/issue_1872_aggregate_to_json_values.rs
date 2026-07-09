@@ -156,7 +156,8 @@ async fn sum_aggregate_to_json_carries_value_under_stable_name() {
     let value = first_row.get("Sum_value").unwrap_or_else(|| {
         panic!("issue #1872: to_json must key SUM by `Sum_value`; row was {first_row}")
     });
-    // BIGINT summed as f64 → JSON number equal to the reference sum.
+    // SUM over a BIGINT column stays bigint (issue #2202) → JSON number equal to
+    // the reference sum.
     let got = value
         .as_f64()
         .unwrap_or_else(|| panic!("issue #1872: `Sum_value` must be numeric, not {value}"));

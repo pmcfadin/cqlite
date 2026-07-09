@@ -80,7 +80,8 @@ async fn setup(schema_file: &str, keyspace_filter: &str) -> Result<Database, Str
 }
 
 /// Numeric view of an aggregate result `Value`, normalizing the BIGINT-typed
-/// `MIN`/`MAX` clone and the `f64` `SUM`/`AVG` into one comparable type.
+/// `MIN`/`MAX`/`SUM`/`AVG` (issue #2202: SUM/AVG over a BIGINT column stay
+/// `bigint`, using integer division for AVG) into one comparable type.
 fn as_num(v: &Value) -> f64 {
     v.as_f64()
         .unwrap_or_else(|| panic!("aggregate result must be numeric, got {v:?}"))
@@ -144,8 +145,10 @@ async fn ungrouped_numeric_aggregates_match_reference() {
         (agg(&result, 0, "Sum_value") - 51_641_479.0).abs() < EPS,
         "global SUM(value)"
     );
+    // Issue #2202: AVG over a BIGINT column uses integer division (truncated):
+    // 51_641_479 / 100 = 516_414 (not 516_414.79).
     assert!(
-        (agg(&result, 0, "Avg_value") - 516_414.79).abs() < EPS,
+        (agg(&result, 0, "Avg_value") - 516_414.0).abs() < EPS,
         "global AVG(value)"
     );
     assert!(
@@ -183,11 +186,14 @@ async fn grouped_numeric_aggregates_match_reference_per_group() {
         .await
         .expect("grouped numeric-aggregate query must execute");
 
-    // (category, sum, avg, min, max)
+    // (category, sum, avg, min, max). Issue #2202: value is BIGINT, so SUM/AVG
+    // stay bigint and AVG is integer division (truncated toward zero):
+    //   A: 18_785_439 / 36 = 521_817   B: 17_144_227 / 36 = 476_228
+    //   C: 15_711_813 / 28 = 561_136
     let expected: [(&str, f64, f64, f64, f64); 3] = [
-        ("A", 18_785_439.0, 521_817.75, 42_438.0, 990_685.0),
-        ("B", 17_144_227.0, 476_228.527_777_78, 34_344.0, 941_836.0),
-        ("C", 15_711_813.0, 561_136.178_571_43, 73_596.0, 979_921.0),
+        ("A", 18_785_439.0, 521_817.0, 42_438.0, 990_685.0),
+        ("B", 17_144_227.0, 476_228.0, 34_344.0, 941_836.0),
+        ("C", 15_711_813.0, 561_136.0, 73_596.0, 979_921.0),
     ];
 
     assert_eq!(

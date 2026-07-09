@@ -7,7 +7,9 @@
 
 use super::super::select_ast::AggregateType;
 use super::super::select_optimizer::{AggregateComputation, AggregationPlan};
+use super::numeric_acc::NumericAcc;
 use super::value_ops::compare_values_ordering;
+use crate::schema::CqlType;
 use crate::{
     query::result::QueryRow,
     types::{RowKey, Value},
@@ -121,8 +123,8 @@ fn hash_one_value<H: Hasher>(v: &Value, h: &mut H) {
 #[derive(Debug, Clone)]
 pub(super) enum AggregateValue {
     Count(u64),
-    Sum(f64),
-    Avg { sum: f64, count: u64 },
+    Sum(NumericAcc),
+    Avg { acc: NumericAcc, count: u64 },
     Min(Value),
     Max(Value),
 }
@@ -131,17 +133,31 @@ pub(super) enum AggregateValue {
 /// [`find_or_init_group`] (the buffered GROUP BY path) and the streaming
 /// GROUP-BY-free fold (issue #1578, D2) so the initial state — and thus the
 /// per-row update + finalize semantics — are defined in exactly one place.
+///
+/// Issue #2202: `result_types[i]` is the aggregate's resolved RESULT CQL type
+/// (from `select_naming::aggregate_result_cql_type`, the SAME source the result
+/// metadata uses), parallel to `aggregates`. It fixes each SUM/AVG accumulator's
+/// numeric domain (integral vs floating) up front, so the emitted value variant
+/// matches the metadata type even for an all-null group that folds no input.
 pub(super) fn init_aggregate_accumulators(
     aggregates: &[AggregateComputation],
+    result_types: &[Option<CqlType>],
 ) -> Vec<AggregateValue> {
     aggregates
         .iter()
-        .map(|c| match c.function {
-            AggregateType::Count => AggregateValue::Count(0),
-            AggregateType::Sum => AggregateValue::Sum(0.0),
-            AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
-            AggregateType::Min => AggregateValue::Min(Value::Null),
-            AggregateType::Max => AggregateValue::Max(Value::Null),
+        .enumerate()
+        .map(|(i, c)| {
+            let result_type = result_types.get(i).and_then(|t| t.as_ref());
+            match c.function {
+                AggregateType::Count => AggregateValue::Count(0),
+                AggregateType::Sum => AggregateValue::Sum(NumericAcc::init(result_type)),
+                AggregateType::Avg => AggregateValue::Avg {
+                    acc: NumericAcc::init(result_type),
+                    count: 0,
+                },
+                AggregateType::Min => AggregateValue::Min(Value::Null),
+                AggregateType::Max => AggregateValue::Max(Value::Null),
+            }
         })
         .collect()
 }
@@ -172,6 +188,7 @@ pub(super) fn find_or_init_group(
     state: &mut AggregationState,
     key: Vec<Value>,
     aggregates: &[AggregateComputation],
+    result_types: &[Option<CqlType>],
 ) -> usize {
     let hash = hash_group_key(&key);
     if let Some(candidates) = state.group_index.get(&hash) {
@@ -183,7 +200,7 @@ pub(super) fn find_or_init_group(
             }
         }
     }
-    let initial = init_aggregate_accumulators(aggregates);
+    let initial = init_aggregate_accumulators(aggregates, result_types);
     let new_index = state.groups.len();
     state.groups.push((key, initial));
     state.group_index.entry(hash).or_default().push(new_index);
@@ -215,15 +232,21 @@ pub(super) fn update_aggregate(
                 *count += 1;
             }
         }
-        AggregateValue::Sum(sum) => {
-            if let Some(v) = value.and_then(Value::as_f64) {
-                *sum += v;
+        AggregateValue::Sum(acc) => {
+            if let Some(v) = value {
+                if !v.is_null() {
+                    acc.add(v);
+                }
             }
         }
-        AggregateValue::Avg { sum, count } => {
-            if let Some(v) = value.and_then(Value::as_f64) {
-                *sum += v;
-                *count += 1;
+        AggregateValue::Avg { acc, count } => {
+            if let Some(v) = value {
+                // Count only inputs the accumulator's numeric domain accepts, so
+                // AVG's divisor matches SUM's contributor set — a `0` still
+                // counts (issue #2202).
+                if !v.is_null() && acc.add(v) {
+                    *count += 1;
+                }
             }
         }
         AggregateValue::Min(min_val) => {
@@ -273,10 +296,13 @@ pub(super) fn finalize_group(
     for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
         let result_value = match &group_aggregates[i] {
             AggregateValue::Count(count) => Value::BigInt(*count as i64),
-            AggregateValue::Sum(sum) => Value::Float(*sum),
-            AggregateValue::Avg { sum, count } => {
+            // Issue #2202: emit the value variant matching the accumulator's
+            // numeric domain (int/bigint/double), which was fixed from the
+            // resolved result type, so it agrees with the result metadata type.
+            AggregateValue::Sum(acc) => acc.finalize_sum(),
+            AggregateValue::Avg { acc, count } => {
                 if *count > 0 {
-                    Value::Float(sum / (*count as f64))
+                    acc.finalize_avg(*count)
                 } else {
                     Value::Null
                 }
@@ -305,7 +331,7 @@ pub(super) fn finalize_group(
 /// only reach this helper on the GROUP-BY-free path.
 ///
 /// We cannot reuse [`init_aggregate_accumulators`] + [`finalize_group`] for this
-/// because a fresh `AggregateValue::Sum(0.0)` finalizes to `Float(0.0)`, whereas
+/// because a fresh SUM accumulator finalizes to a typed zero (`0`/`0.0`), whereas
 /// the empty-input answer must be `NULL`. This builds the row directly instead.
 pub(super) fn finalize_empty_global_aggregate(agg_plan: &AggregationPlan) -> QueryRow {
     let mut row_values: HashMap<std::sync::Arc<str>, Value> =
@@ -375,7 +401,7 @@ mod tests {
         for r in 0..repeats {
             for g in 0..groups_count {
                 let key = vec![Value::Integer(g as i32)];
-                let idx = find_or_init_group(&mut state, key, &plan.aggregates);
+                let idx = find_or_init_group(&mut state, key, &plan.aggregates, &[]);
                 // Groups are created on first pass in ascending order.
                 assert_eq!(idx, g, "row (repeat {r}, group {g}) maps to a stable index");
             }
@@ -445,18 +471,286 @@ mod tests {
         let mut state = new_state();
 
         // -0.0 and +0.0 are `==` → same group.
-        let i0 = find_or_init_group(&mut state, vec![Value::Float(0.0)], &plan.aggregates);
-        let i1 = find_or_init_group(&mut state, vec![Value::Float(-0.0)], &plan.aggregates);
+        let i0 = find_or_init_group(&mut state, vec![Value::Float(0.0)], &plan.aggregates, &[]);
+        let i1 = find_or_init_group(&mut state, vec![Value::Float(-0.0)], &plan.aggregates, &[]);
         assert_eq!(i0, i1, "-0.0 and +0.0 must land in the same group");
 
         // Two NaN keys are never `==` → two distinct groups.
-        let n0 = find_or_init_group(&mut state, vec![Value::Float(f64::NAN)], &plan.aggregates);
-        let n1 = find_or_init_group(&mut state, vec![Value::Float(f64::NAN)], &plan.aggregates);
+        let n0 = find_or_init_group(
+            &mut state,
+            vec![Value::Float(f64::NAN)],
+            &plan.aggregates,
+            &[],
+        );
+        let n1 = find_or_init_group(
+            &mut state,
+            vec![Value::Float(f64::NAN)],
+            &plan.aggregates,
+            &[],
+        );
         assert_ne!(n0, n1, "each NaN key forms its own group (NaN != NaN)");
 
         // Same-value different-variant keys stay separate.
-        let a = find_or_init_group(&mut state, vec![Value::Integer(1)], &plan.aggregates);
-        let b = find_or_init_group(&mut state, vec![Value::BigInt(1)], &plan.aggregates);
+        let a = find_or_init_group(&mut state, vec![Value::Integer(1)], &plan.aggregates, &[]);
+        let b = find_or_init_group(&mut state, vec![Value::BigInt(1)], &plan.aggregates, &[]);
         assert_ne!(a, b, "Integer(1) and BigInt(1) are distinct groups");
+    }
+
+    // ---- Issue #2202: SUM/AVG integral result-type preservation ----
+
+    /// Build a single-group (global) plan with one SUM or AVG over column `col`.
+    fn scalar_agg_plan(function: AggregateType, col: &str) -> AggregationPlan {
+        AggregationPlan {
+            group_by_columns: Vec::new(),
+            group_by_output_names: Vec::new(),
+            aggregates: vec![AggregateComputation {
+                function,
+                column: col.to_string(),
+                alias: "r".to_string(),
+                distinct: false,
+            }],
+        }
+    }
+
+    /// Drive `init → update per value → finalize_group` for one scalar aggregate
+    /// with a resolved result type, returning the emitted result value.
+    fn run_scalar_agg(
+        function: AggregateType,
+        result_type: Option<CqlType>,
+        values: &[Value],
+    ) -> Value {
+        let plan = scalar_agg_plan(function, "v");
+        let result_types = vec![result_type];
+        let mut accs = init_aggregate_accumulators(&plan.aggregates, &result_types);
+        for v in values {
+            let row = QueryRow {
+                values: [(std::sync::Arc::<str>::from("v"), v.clone())]
+                    .into_iter()
+                    .collect(),
+                key: RowKey::new(vec![]),
+                metadata: Default::default(),
+                cell_metadata: None,
+            };
+            update_aggregate(&mut accs[0], &plan.aggregates[0], &row);
+        }
+        let row = finalize_group(vec![Value::Null], accs, &plan);
+        row.values.get("r").cloned().expect("result present")
+    }
+
+    /// SUM over integral inputs preserves the ARGUMENT's own integral type and
+    /// value (issue #2202, `AggregateFcts.java`): int → `Value::Integer`,
+    /// bigint → `Value::BigInt`, and — Cassandra does NOT promote these —
+    /// smallint → `Value::SmallInt`, tinyint → `Value::TinyInt`.
+    #[test]
+    fn sum_integral_inputs_preserve_integral_result() {
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::Int),
+                &[Value::Integer(1), Value::Integer(2), Value::Integer(3)],
+            ),
+            Value::Integer(6),
+            "SUM(int) emits Value::Integer, not a float"
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::BigInt),
+                &[Value::BigInt(10), Value::BigInt(20)],
+            ),
+            Value::BigInt(30),
+            "SUM(bigint) emits Value::BigInt"
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::SmallInt),
+                &[Value::SmallInt(100), Value::SmallInt(50)],
+            ),
+            Value::SmallInt(150),
+            "SUM(smallint) stays Value::SmallInt — Cassandra does not promote to int"
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::TinyInt),
+                &[Value::TinyInt(40), Value::TinyInt(2)],
+            ),
+            Value::TinyInt(42),
+            "SUM(tinyint) stays Value::TinyInt — Cassandra does not promote to int"
+        );
+    }
+
+    /// SUM over float/double inputs still yields `Value::Float` (double) — no
+    /// regression from the pre-#2202 behaviour.
+    #[test]
+    fn sum_float_inputs_stay_double() {
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::Double),
+                &[Value::Float(1.5), Value::Float(2.25)],
+            ),
+            Value::Float(3.75),
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::Float),
+                &[Value::Float32(1.0), Value::Float32(2.0)],
+            ),
+            Value::Float(3.0),
+            "SUM(float) stays double (Value::Float)"
+        );
+    }
+
+    /// AVG uses integer division for integral inputs and preserves the result
+    /// type; bigint stays wide; float/double divide in f64.
+    #[test]
+    fn avg_integral_uses_integer_division_and_preserves_type() {
+        // AVG(int) of [1, 2] = 1 (integer division truncates, like Cassandra).
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::Int),
+                &[Value::Integer(1), Value::Integer(2)],
+            ),
+            Value::Integer(1),
+        );
+        // A zero still counts toward AVG's divisor.
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::Int),
+                &[Value::Integer(0), Value::Integer(0), Value::Integer(3)],
+            ),
+            Value::Integer(1),
+            "AVG counts zeros: 3/3 = 1"
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::BigInt),
+                &[Value::BigInt(10), Value::BigInt(21)],
+            ),
+            Value::BigInt(15),
+            "AVG(bigint) integer division stays bigint"
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::Double),
+                &[Value::Float(1.0), Value::Float(2.0)],
+            ),
+            Value::Float(1.5),
+            "AVG(double) divides in f64",
+        );
+        // Issue #2202: AVG(smallint)/AVG(tinyint) stay their own narrow width —
+        // Cassandra does not promote them to int.
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::SmallInt),
+                &[Value::SmallInt(10), Value::SmallInt(21)],
+            ),
+            Value::SmallInt(15),
+            "AVG(smallint) integer division stays smallint"
+        );
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Avg,
+                Some(CqlType::TinyInt),
+                &[Value::TinyInt(10), Value::TinyInt(21)],
+            ),
+            Value::TinyInt(15),
+            "AVG(tinyint) integer division stays tinyint"
+        );
+    }
+
+    /// Integral SUM overflow WRAPS (Cassandra's two's-complement Java semantics),
+    /// never saturating or panicking, at EACH type's OWN width: `tinyint` wraps
+    /// at the i8 boundary, `smallint` at i16, `int` at i32, `bigint` at i64.
+    #[test]
+    fn sum_integral_overflow_wraps() {
+        // i8::MAX + 1 wraps to i8::MIN (tinyint stays tinyint, no promotion).
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::TinyInt),
+                &[Value::TinyInt(i8::MAX), Value::TinyInt(1)],
+            ),
+            Value::TinyInt(i8::MIN),
+            "SUM(tinyint) wraps at the i8 boundary"
+        );
+        // i16::MAX + 1 wraps to i16::MIN (smallint stays smallint).
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::SmallInt),
+                &[Value::SmallInt(i16::MAX), Value::SmallInt(1)],
+            ),
+            Value::SmallInt(i16::MIN),
+            "SUM(smallint) wraps at the i16 boundary"
+        );
+        // i32::MAX + 1 wraps to i32::MIN.
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::Int),
+                &[Value::Integer(i32::MAX), Value::Integer(1)],
+            ),
+            Value::Integer(i32::MIN),
+            "SUM(int) wraps at the i32 boundary"
+        );
+        // i64::MAX + 1 wraps to i64::MIN.
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::BigInt),
+                &[Value::BigInt(i64::MAX), Value::BigInt(1)],
+            ),
+            Value::BigInt(i64::MIN),
+            "SUM(bigint) wraps at the i64 boundary"
+        );
+    }
+
+    /// NULLs are ignored by SUM/AVG; an all-null group's SUM finalizes to the
+    /// typed zero (matching its result-type metadata) and AVG (count 0) is NULL.
+    #[test]
+    fn sum_avg_ignore_nulls_typed_zero_and_null() {
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                Some(CqlType::Int),
+                &[Value::Null, Value::Integer(5), Value::Null],
+            ),
+            Value::Integer(5),
+            "SUM ignores NULLs"
+        );
+        assert_eq!(
+            run_scalar_agg(AggregateType::Sum, Some(CqlType::Int), &[Value::Null]),
+            Value::Integer(0),
+            "all-null int SUM group is a typed integer zero (not a float)"
+        );
+        assert_eq!(
+            run_scalar_agg(AggregateType::Avg, Some(CqlType::Int), &[Value::Null]),
+            Value::Null,
+            "AVG over no counted inputs is NULL"
+        );
+    }
+
+    /// With an unknown argument type (no schema), SUM/AVG fall back to the
+    /// floating domain → `Value::Float` (double), consistent with the `double`
+    /// result metadata `aggregate_result_cql_type` returns for `None`.
+    #[test]
+    fn sum_avg_unknown_type_falls_back_to_double() {
+        assert_eq!(
+            run_scalar_agg(
+                AggregateType::Sum,
+                None,
+                &[Value::Integer(1), Value::Integer(2)],
+            ),
+            Value::Float(3.0),
+        );
     }
 }

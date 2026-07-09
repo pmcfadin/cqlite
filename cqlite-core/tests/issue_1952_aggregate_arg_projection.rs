@@ -118,7 +118,7 @@ async fn grouped_sum_with_selected_dimension_is_exact() {
         let got = agg_value(&result.rows, cat, "Sum_value");
         assert_eq!(
             got,
-            Some(&Value::Float(sum as f64)),
+            Some(&Value::BigInt(sum)),
             "SUM(value) for category {cat}; scan projection must include the \
              aggregate argument column `value`",
         );
@@ -229,7 +229,7 @@ async fn grouped_sum_with_unselected_dimension_is_per_group() {
         let got = agg_value(&result.rows, cat, "Sum_value");
         assert_eq!(
             got,
-            Some(&Value::Float(sum as f64)),
+            Some(&Value::BigInt(sum)),
             "SUM(value) for category {cat}; GROUP BY column `category` must be \
              scanned even though it is not in the SELECT clause",
         );
@@ -310,7 +310,7 @@ async fn single_sum_filtered_by_unselected_where_column_is_exact() {
     let sum = result.rows[0].values.get("Sum_value");
     assert_eq!(
         sum,
-        Some(&Value::Float(18_785_439.0)),
+        Some(&Value::BigInt(18_785_439)),
         "SUM(value) WHERE category = 'A' must equal the category-A total; the WHERE \
          column `category` must be in the scan projection so the predicate backstop \
          can evaluate it (pre-fix: `category` filtered out → every row rejected → \
@@ -346,7 +346,7 @@ async fn single_sum_filtered_by_unselected_and_agg_arg_columns_is_exact() {
     assert_eq!(result.rows.len(), 1, "an ungrouped SUM returns one row");
     assert_eq!(
         result.rows[0].values.get("Sum_value"),
-        Some(&Value::Float(12_520_796.0)),
+        Some(&Value::BigInt(12_520_796)),
         "SUM(value) WHERE category = 'A' AND value > 500000 must equal the exact \
          filtered subtotal; `category` (WHERE-only) must be scanned alongside \
          `value` (the aggregate argument)",
@@ -388,7 +388,7 @@ async fn grouped_sum_filtered_by_agg_arg_column_is_per_group() {
     for &(cat, sum) in filtered {
         assert_eq!(
             agg_value(&result.rows, cat, "Sum_value"),
-            Some(&Value::Float(sum as f64)),
+            Some(&Value::BigInt(sum)),
             "SUM(value) WHERE value > 500000 for category {cat} must be the exact \
              per-group filtered subtotal",
         );

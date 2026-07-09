@@ -212,8 +212,12 @@ impl SelectExecutor {
                         }
                     }
                     ExecutionStep::Aggregate { plan: agg_plan, .. } => {
-                        intermediate_results =
-                            self.execute_aggregation(intermediate_results, agg_plan, &mut context)?;
+                        intermediate_results = self.execute_aggregation(
+                            intermediate_results,
+                            agg_plan,
+                            query_schema.as_deref(),
+                            &mut context,
+                        )?;
                     }
                     ExecutionStep::PerPartitionLimit { count } => {
                         intermediate_results =
