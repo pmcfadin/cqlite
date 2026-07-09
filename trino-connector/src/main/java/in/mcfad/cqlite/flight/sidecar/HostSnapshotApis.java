@@ -51,16 +51,12 @@ public interface HostSnapshotApis {
                         "cqlite.sidecar-uri must include an explicit port so per-host snapshot "
                                 + "creation can reach each replica's Sidecar (snapshot read-mode); host=" + host);
             }
-            return cache.computeIfAbsent(host,
-                    h -> new SidecarClient(URI.create(scheme + "://" + bracketIfIpv6(h) + ":" + port)));
-        }
-
-        /** Wrap a bare IPv6 literal in {@code [...]} so the authority parses. */
-        private static String bracketIfIpv6(String host) {
-            if (host.indexOf(':') >= 0 && host.charAt(0) != '[') {
-                return "[" + host + "]";
-            }
-            return host;
+            // Normalize defensively through the single host authority (issue #2227): even
+            // if a caller passes a still-port-bearing or bracketed IPv6 form, the cache key
+            // and derived URI stay consistent with the split's pinned host.
+            String bare = HostAddresses.hostOnly(host);
+            return cache.computeIfAbsent(bare,
+                    h -> new SidecarClient(URI.create(scheme + "://" + HostAddresses.authority(h, port))));
         }
     }
 }

@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -44,5 +45,35 @@ class HostSnapshotApisTest {
         // A bare IPv6 literal must be bracketed or URI.create would throw — this must not.
         SnapshotApi client = factory.forHost("2001:db8::5");
         assertTrue(client instanceof SidecarClient);
+        assertEquals(URI.create("http://[2001:db8::5]:9043"), ((SidecarClient) client).base());
+    }
+
+    /**
+     * IPv6 in port-bearing forms (issue #2227): a bracketed {@code [v6]:port} or a bare
+     * {@code v6} must all derive the SAME valid Sidecar URI at the configured port — and
+     * collapse to one cached client, since they name the same host.
+     */
+    @Test
+    void ipv6PortBearingFormsAllDeriveTheSameConfiguredPortUri() {
+        HostSnapshotApis factory = HostSnapshotApis.fromBaseUri(URI.create("https://db0:9043"));
+        URI expected = URI.create("https://[2001:db8::5]:9043");
+
+        SnapshotApi fromBracketedPort = factory.forHost("[2001:db8::5]:7000");
+        SnapshotApi fromBracketed = factory.forHost("[2001:db8::5]");
+        SnapshotApi fromBare = factory.forHost("2001:db8::5");
+
+        assertEquals(expected, ((SidecarClient) fromBracketedPort).base());
+        assertEquals(expected, ((SidecarClient) fromBracketed).base());
+        assertEquals(expected, ((SidecarClient) fromBare).base());
+        // Same host across the three forms → one cached client.
+        assertSame(fromBracketedPort, fromBracketed);
+        assertSame(fromBracketed, fromBare);
+    }
+
+    @Test
+    void ipv4PortBearingFormDerivesHostOnlyUri() {
+        HostSnapshotApis factory = HostSnapshotApis.fromBaseUri(URI.create("http://db0:9043"));
+        SnapshotApi client = factory.forHost("10.0.0.5:7000");
+        assertEquals(URI.create("http://10.0.0.5:9043"), ((SidecarClient) client).base());
     }
 }

@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import in.mcfad.cqlite.flight.sidecar.HostAddresses;
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
@@ -169,14 +170,13 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                 .orElse(null);
     }
 
-    /** Strip a trailing {@code :port} from an {@code ip:port} replica address. */
+    /**
+     * Normalize an {@code ip:port} (or bracketed IPv6) replica address to a bare host
+     * literal via the single {@link HostAddresses} authority, so the split's pinned host
+     * and the per-host snapshot URI (issue #2227) agree on the exact host string.
+     */
     static String hostOnly(String address) {
-        int colon = address.lastIndexOf(':');
-        if (colon > 0 && address.indexOf(':') == colon
-                && address.substring(colon + 1).chars().allMatch(Character::isDigit)) {
-            return address.substring(0, colon);
-        }
-        return address; // no port, or IPv6 (left as-is)
+        return HostAddresses.hostOnly(address);
     }
 }
 

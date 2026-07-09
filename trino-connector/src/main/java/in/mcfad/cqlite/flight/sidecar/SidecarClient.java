@@ -49,6 +49,11 @@ public final class SidecarClient implements SnapshotApi {
                 .build();
     }
 
+    /** The base URI this client resolves requests against (package-visible for tests). */
+    URI base() {
+        return base;
+    }
+
     /** Cluster ring across all keyspaces. */
     public SidecarModels.RingResponse ring() {
         return parseRing(get("/api/v1/cassandra/ring"));

@@ -127,6 +127,30 @@ class CqliteFlightSplitManagerTest {
         assertEquals(hosts, splits.stream().map(CqliteFlightSplit::host).collect(java.util.stream.Collectors.toSet()));
     }
 
+    /**
+     * IPv6 replica forms (issue #2227): a bracketed {@code [v6]:port} yields the bare v6
+     * literal for both the split's pinned host and the snapshot-host set, so per-host
+     * snapshot URI construction stays consistent. An unbracketed all-colons literal is
+     * treated as the whole host (no port stripped).
+     */
+    @Test
+    void ipv6ReplicaFormsPinBareHostConsistently() {
+        var resp = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        range("-100", "0", Map.of("dc1", List.of("[2001:db8::5]:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("2001:db8::9")))));
+
+        var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
+        assertEquals("2001:db8::5", splits.get(0).host(), "bracketed IPv6 port stripped to bare literal");
+        assertEquals("2001:db8::9", splits.get(1).host(), "bare IPv6 kept whole");
+
+        // The snapshot-host set is exactly the splits' pinned hosts under these forms.
+        Set<String> hosts = CqliteFlightSplitManager.distinctReplicaHosts(resp, "dc1");
+        assertEquals(Set.of("2001:db8::5", "2001:db8::9"), hosts);
+        assertEquals(hosts, splits.stream().map(CqliteFlightSplit::host).collect(java.util.stream.Collectors.toSet()));
+    }
+
     @Test
     void skipsRangesWithNoReplica() {
         var resp = new TokenRangeReplicasResponse(
