@@ -19,6 +19,15 @@ pub mod service;
 pub mod shutdown;
 pub mod stats;
 pub mod streaming;
+
+// Shared field-shape fixture (issue #2283): the single source of truth for the
+// `cassandra_easy_stress.keyvalue` shape used by BOTH the golden emitter example
+// and the transport byte-pin test. `#[doc(hidden)]` keeps it out of the public
+// docs; it must be `pub` (not `pub(crate)`) because both callers are separate
+// crates linked against this library.
+#[doc(hidden)]
+pub mod test_fixtures;
+
 pub mod ticket;
 
 #[cfg(test)]

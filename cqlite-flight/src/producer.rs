@@ -437,6 +437,22 @@ impl MergeProducer {
                     .as_ref()
                     .map(pushdown_capability)
                     .unwrap_or("none");
+                // NOTE on metadata ORDER (not addressed here — see #2285): the
+                // final WIRE order of this `HashMap`'s entries is NOT guaranteed
+                // stable across process runs once a field carries >= 2 metadata
+                // entries, since `Field::with_metadata` stores a `HashMap` as-is
+                // and arrow-ipc's `metadata_to_fb` iterates it unsorted
+                // (confirmed against arrow-schema/arrow-ipc 53.4.1 source) — a
+                // sort/canonicalization pass would need to happen at the actual
+                // wire boundary (or upstream in arrow-rs), not here, so no such
+                // pass is attempted in this function. Harmless for the
+                // `keyvalue` byte-pin golden specifically because those columns
+                // carry exactly one metadata entry each (order-trivial), but
+                // schemas with extension-typed columns (e.g. uuid:
+                // `ARROW:extension:name` + `cqlite:pushdown`, 2 entries — see
+                // `all_scalars`'s `c_uuid` column) are NOT covered by that
+                // trivial case, and their wire order is genuinely
+                // hash-seed-dependent until #2285 lands.
                 let mut metadata = field.metadata().clone();
                 metadata.insert("cqlite:pushdown".to_string(), capability.to_string());
                 field.as_ref().clone().with_metadata(metadata)

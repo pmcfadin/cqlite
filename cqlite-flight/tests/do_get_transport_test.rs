@@ -9,7 +9,6 @@
 //! `FlightRecordBatchStream`, so a malformed egress message surfaces the same
 //! way the Trino client saw it.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -26,70 +25,26 @@ use prost::Message as _;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Channel, Server};
 
-use cqlite_core::schema::{Column, KeyColumn, TableSchema};
-use cqlite_core::storage::write_engine::{
-    CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
-};
-use cqlite_core::types::Value;
+use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use cqlite_flight::service::CqliteFlightService;
-
-const KS: &str = "cassandra_easy_stress";
-const TBL: &str = "keyvalue";
-// The exact cassandra-easy-stress KeyValue shape from the round-3 field run:
-// a text partition key + a single text value column, no clustering key.
-const DDL: &str = "CREATE TABLE cassandra_easy_stress.keyvalue (key text PRIMARY KEY, value text)";
-
-fn simple_schema() -> TableSchema {
-    let col = |name: &str, ty: &str, nullable: bool| Column {
-        name: name.into(),
-        data_type: ty.into(),
-        nullable,
-        default: None,
-        is_static: false,
-    };
-    TableSchema {
-        keyspace: KS.into(),
-        table: TBL.into(),
-        partition_keys: vec![KeyColumn {
-            name: "key".into(),
-            data_type: "text".into(),
-            position: 0,
-        }],
-        clustering_keys: vec![],
-        columns: vec![col("key", "text", false), col("value", "text", true)],
-        comments: HashMap::new(),
-        dropped_columns: HashMap::new(),
-    }
-}
-
-fn write_row(key: &str, value: &str, ts: i64) -> Mutation {
-    Mutation::new(
-        TableId::new(KS, TBL),
-        PartitionKey::single("key", Value::Text(key.into())),
-        None,
-        vec![CellOperation::Write {
-            column: "value".into(),
-            value: Value::Text(value.into()),
-        }],
-        ts,
-        None,
-    )
-}
+// The field-shape `keyvalue` fixture (keyspace/table/DDL, columns, the canonical
+// k1/k2/k3 rows, timestamp, batch size) is the single source of truth shared with
+// `examples/emit_arrow_golden.rs`, so the committed golden this test byte-compares
+// against and the wire bytes it produces can never drift apart (issue #2283).
+use cqlite_flight::test_fixtures as fx;
 
 /// Flush the 3-row single-SSTable fixture (matching the field `tiny` table:
-/// a small flushed table that reads cleanly) and return its data dir.
+/// a small flushed table that reads cleanly) and return its data dir. Uses the
+/// SAME mutations the golden emitter flushes ([`fx::keyvalue_mutations`]) so the
+/// byte-identical golden cross-check stays honest.
 fn build_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
-    let schema = simple_schema();
+    let schema = fx::keyvalue_schema();
     let temp = tempfile::TempDir::new().unwrap();
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema);
     let mut engine = WriteEngine::new(config).expect("engine");
-    for m in [
-        write_row("k1", "1", 100),
-        write_row("k2", "2", 100),
-        write_row("k3", "3", 100),
-    ] {
+    for m in fx::keyvalue_mutations() {
         engine.write(m).expect("write");
     }
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -105,9 +60,9 @@ fn build_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 /// would send. The server's `from_bytes` applies serde defaults for the rest.
 fn ticket_bytes() -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
-        "keyspace": KS,
-        "table": TBL,
-        "ddl": DDL,
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
     }))
     .unwrap()
 }
@@ -389,7 +344,7 @@ fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::P
         total >= 4,
         "need enough rows to span two flushes above a cap"
     );
-    let schema = simple_schema();
+    let schema = fx::keyvalue_schema();
     let temp = tempfile::TempDir::new().unwrap();
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
@@ -404,7 +359,7 @@ fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::P
     // interleaves rows from both SSTables (see the doc comment above).
     for i in (0..total).step_by(2) {
         engine
-            .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
+            .write(fx::keyvalue_write(&format!("k{i:06}"), &format!("v{i}")))
             .expect("write");
     }
     rt.block_on(engine.flush())
@@ -412,7 +367,7 @@ fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::P
         .expect("info 1");
     for i in (1..total).step_by(2) {
         engine
-            .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
+            .write(fx::keyvalue_write(&format!("k{i:06}"), &format!("v{i}")))
             .expect("write");
     }
     rt.block_on(engine.flush())
@@ -421,7 +376,7 @@ fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::P
 
     // Prove the fixture really produced ≥2 SSTables — otherwise the LIMIT test
     // is not exercising the multi-SSTable early-stop it claims to.
-    let table_dir = data_dir.join(KS).join(TBL);
+    let table_dir = data_dir.join(fx::KEYVALUE_KS).join(fx::KEYVALUE_TBL);
     let data_files = std::fs::read_dir(&table_dir)
         .expect("table dir")
         .filter_map(|e| e.ok())
@@ -481,9 +436,9 @@ fn do_get_over_transport_enforces_limit() {
     let limit = 7u64;
     let (_temp, data_dir) = build_multi_sstable_fixture(total);
     let ticket = serde_json::to_vec(&serde_json::json!({
-        "keyspace": KS,
-        "table": TBL,
-        "ddl": DDL,
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
         "limit": limit,
     }))
     .unwrap();
@@ -521,9 +476,9 @@ fn do_get_over_transport_applies_predicate_and_projection() {
     // Filter on the `value` column for the row written as v3 (key k000003), and
     // project only `value` so the row-key column must be absent from the output.
     let ticket = serde_json::to_vec(&serde_json::json!({
-        "keyspace": KS,
-        "table": TBL,
-        "ddl": DDL,
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
         "columns": ["value"],
         "filter": {"type": "Compare", "column": "value", "op": "Equal", "value": "v3"},
     }))
@@ -560,20 +515,20 @@ fn do_get_over_transport_applies_predicate_and_projection() {
 fn do_get_over_transport_reads_live_set_not_snapshot() {
     // Live set: 2 rows in one SSTable.
     let (_temp_live, live_dir) = build_fixture_n(2);
-    let live_table = live_dir.join(KS).join(TBL);
+    let live_table = live_dir.join(fx::KEYVALUE_KS).join(fx::KEYVALUE_TBL);
 
     // Snapshot set: 5 rows (a distinct count) copied into snapshots/pinned/.
     let (_temp_snap, snap_dir) = build_fixture_n(5);
-    let snap_table = snap_dir.join(KS).join(TBL);
+    let snap_table = snap_dir.join(fx::KEYVALUE_KS).join(fx::KEYVALUE_TBL);
     let snapshot_dst = live_table.join("snapshots").join("pinned");
     std::fs::create_dir_all(&snapshot_dst).expect("mk snapshot dir");
     copy_sstable_components(&snap_table, &snapshot_dst);
 
     // A null-snapshot ticket (live mode).
     let ticket = serde_json::to_vec(&serde_json::json!({
-        "keyspace": KS,
-        "table": TBL,
-        "ddl": DDL,
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
     }))
     .unwrap();
 
@@ -683,9 +638,9 @@ fn do_get_client_drop_midstream_releases_producer_under_backpressure() {
     let total = 200usize;
     let (_temp, data_dir) = build_multi_sstable_fixture(total);
     let ticket = serde_json::to_vec(&serde_json::json!({
-        "keyspace": KS,
-        "table": TBL,
-        "ddl": DDL,
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
     }))
     .unwrap();
 
@@ -717,9 +672,9 @@ fn do_get_limit_ticket_completes_promptly_after_client_stops_reading() {
     // A LIMIT larger than the channel but smaller than the table, so the producer
     // still fills the channel and parks before the (capped) merge finishes.
     let ticket = serde_json::to_vec(&serde_json::json!({
-        "keyspace": KS,
-        "table": TBL,
-        "ddl": DDL,
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
         "limit": 50u64,
     }))
     .unwrap();
@@ -743,7 +698,7 @@ fn do_get_limit_ticket_completes_promptly_after_client_stops_reading() {
 /// data dir. Like [`build_fixture`] but with a caller-chosen row count so two
 /// fixtures can carry disambiguating counts.
 fn build_fixture_n(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
-    let schema = simple_schema();
+    let schema = fx::keyvalue_schema();
     let temp = tempfile::TempDir::new().unwrap();
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
@@ -751,7 +706,7 @@ fn build_fixture_n(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     let mut engine = WriteEngine::new(config).expect("engine");
     for i in 0..n {
         engine
-            .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
+            .write(fx::keyvalue_write(&format!("k{i:06}"), &format!("v{i}")))
             .expect("write");
     }
     let rt = tokio::runtime::Builder::new_current_thread()
