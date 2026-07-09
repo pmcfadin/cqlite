@@ -152,6 +152,20 @@ assert_not_pushed() {
   else echo "PASS: $desc"; fi
 }
 
+# Filter pushdown (#2164): the cqlite table handle the scan prints carries
+# `filterJson=Optional[...]` when a predicate was translated and pushed into the
+# Flight ticket, or `filterJson=Optional.empty` when it stayed a pure Trino
+# residual. Same handle-toString probe as the aggregation gate above (the record
+# renders every component field), so it is a reliable per-predicate signal — and
+# unlike a count assertion it catches a SILENT pushdown loss (#2164-class): Trino
+# re-applies residuals, so a dropped pushdown still returns the right count.
+filter_pushed() { grep -q 'filterJson=Optional\[' <<<"$1"; }
+assert_filter_pushed() {
+  local desc="$1" plan="$2"
+  if filter_pushed "$plan"; then echo "PASS: $desc";
+  else echo "FAIL: $desc — handle had filterJson=Optional.empty (predicate not pushed)"; echo "$plan"; FAILURES=$((FAILURES + 1)); fi
+}
+
 # Low-cardinality GROUP BY device (ratio ≈ 0.2 < 0.5): PUSHED into the scan.
 assert_pushed     "low-card GROUP BY device is pushed" \
   "$(explain 'SELECT device, count(*) FROM cqlite.analytics.readings GROUP BY device')"
@@ -161,6 +175,46 @@ assert_not_pushed "high-card GROUP BY device,ts is left to Trino" \
 # Global aggregate always pushes regardless of the gate.
 assert_pushed     "global count(*) is pushed" \
   "$(explain 'SELECT count(*) FROM cqlite.analytics.readings')"
+
+# Predicate pushdown via EXPLAIN (#2164). Prove domain-shaped predicates are
+# actually PUSHED onto the scan handle, not merely count-correct: Trino re-applies
+# residuals and its own LIMIT, so a silent pushdown/bounding loss keeps the counts
+# right and would sail through every assert_eq above. `id = 3` arrives as a
+# TupleDomain summary (a partition point read); `score > 25` as an ordering
+# comparison — both must translate into `filterJson`.
+log "assert predicate pushdown via EXPLAIN (filterJson on the scan handle)"
+assert_filter_pushed "point read id = 3 is pushed" \
+  "$(explain 'SELECT name FROM cqlite.analytics.events WHERE id = 3')"
+assert_filter_pushed "range score > 25 is pushed" \
+  "$(explain 'SELECT name FROM cqlite.analytics.events WHERE score > 25')"
+
+# LIMIT bounding (#2129). No LIMIT query existed elsewhere in this script, so a
+# bounding regression (LIMIT ignored, or a limit pushed past a residual filter)
+# was structurally invisible. events has 5 rows here (the ghost row below is not
+# flushed yet). count(*) over a LIMIT subquery is a deterministic scalar.
+log "assert LIMIT result bounding"
+assert_eq "LIMIT 2 returns exactly 2 rows"       '"2"' \
+  "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events LIMIT 2)')"
+assert_eq "LIMIT above table size returns all 5" '"5"' \
+  "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events LIMIT 100)')"
+
+# LIMIT + partially-pushable predicate (audit finding N13). `score > 15` pushes;
+# `length(name) > 3` is a function call the connector cannot translate, so it
+# stays a Trino residual FilterNode ABOVE the scan. Soundness rests on Trino NOT
+# pushing the LIMIT below that residual (applyLimit is residual-unaware,
+# CqliteFlightMetadata.java) — else the server would cap early, before the residual
+# ran, and drop rows Trino can never recover. Rows with score>15:
+# bob(20,len3) carol(30,len5) dave(40,len4) erin(50,len4); length>3 drops bob, so
+# carol,dave,erin (3 rows) satisfy BOTH conjuncts.
+log "assert LIMIT + partially-pushable predicate correctness"
+# LIMIT 2 (< 3 qualifying): the full 2 rows must survive — fewer would be the
+# symptom of a LIMIT pushed below the residual filter.
+assert_eq "partial-predicate LIMIT 2 returns 2 rows"          '"2"' \
+  "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 2)')"
+# LIMIT 5 (> 3 qualifying): exactly the 3 rows satisfying both conjuncts — if the
+# residual length filter were dropped, score>15 alone would yield 4 (incl. bob).
+assert_eq "partial-predicate LIMIT 5 applies residual (3 rows)" '"3"' \
+  "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 5)')"
 
 # Proof it reads SSTables (not live CQL): an unflushed row must be invisible.
 log "assert SSTable semantics (memtable invisible until flush)"
