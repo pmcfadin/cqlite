@@ -3,6 +3,8 @@ package in.mcfad.cqlite.flight;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.spi.Page;
+import io.trino.spi.StandardErrorCode;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -69,7 +71,7 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
             try (CqliteFlightClient.StreamHandle handle =
                     client.openStream(range.host(), range.port(), ticket)) {
                 while (handle.stream().next()) {
-                    accumulate(handle.stream().getRoot(), merger);
+                    accumulate(handle.stream().getRoot(), spec, merger);
                 }
             }
         }
@@ -100,21 +102,60 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
                 aggregationNode);
     }
 
-    /** Read each partial row from one Arrow batch into the merger. */
-    private void accumulate(VectorSchemaRoot root, PartialAggregateMerger merger) {
+    /**
+     * Read each partial row from one Arrow batch into the merger. Package-private and
+     * static so {@code CqliteFlightAggregatePageSourceTest} exercises this exact
+     * production path with a real {@link VectorSchemaRoot} + {@link AggregationSpec}.
+     */
+    static void accumulate(VectorSchemaRoot root, AggregationSpec spec, PartialAggregateMerger merger) {
         int rows = root.getRowCount();
         List<String> groupBy = spec.groupBy();
+        List<AggregationSpec.Aggregate> aggregates = spec.aggregates();
+
+        // Resolve every projected vector ONCE, up front (issue #2262). A missing vector
+        // means the Flight server did not deliver a column the connector's aggregation
+        // projection expects (schema drift) — a hard error naming the column, NOT a
+        // silently null group key / partial-aggregate value that would corrupt the
+        // GROUP BY result set undetected. Mirrors ArrowToTrino.toPage's guard (#2238).
+        List<FieldVector> groupVectors = new ArrayList<>(groupBy.size());
+        for (String gc : groupBy) {
+            groupVectors.add(requireVector(root, gc));
+        }
+        List<FieldVector> aggregateVectors = new ArrayList<>(aggregates.size());
+        for (AggregationSpec.Aggregate a : aggregates) {
+            aggregateVectors.add(requireVector(root, a.output()));
+        }
+
         for (int r = 0; r < rows; r++) {
             List<Object> keyValues = new ArrayList<>(groupBy.size());
-            for (String gc : groupBy) {
-                keyValues.add(rawValue(root.getVector(gc), r));
+            for (FieldVector v : groupVectors) {
+                keyValues.add(rawValue(v, r));
             }
             Map<String, Object> partials = new HashMap<>();
-            for (AggregationSpec.Aggregate a : spec.aggregates()) {
-                partials.put(a.output(), rawValue(root.getVector(a.output()), r));
+            for (int i = 0; i < aggregates.size(); i++) {
+                partials.put(aggregates.get(i).output(), rawValue(aggregateVectors.get(i), r));
             }
             merger.combine(new PartialAggregateMerger.GroupKey(keyValues), partials);
         }
+    }
+
+    /**
+     * Resolve a projected group-by / aggregate-output vector, or fail loudly. An absent
+     * vector means the Flight server did not return a column the connector's aggregation
+     * projection expects (schema drift) — surfaced as a clear error naming the column
+     * (issue #2262), never masked as a silent all-null column.
+     */
+    private static FieldVector requireVector(VectorSchemaRoot root, String column) {
+        FieldVector vector = root.getVector(column);
+        if (vector == null) {
+            throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
+                    "Aggregate/group-by column '" + column
+                            + "' is missing from the delivered Arrow batch; "
+                            + "the server did not return a vector for this column "
+                            + "(schema drift between the connector aggregation "
+                            + "projection and the Flight server response)");
+        }
+        return vector;
     }
 
     /** Build the single output page, one block per requested column. */
@@ -174,7 +215,10 @@ public class CqliteFlightAggregatePageSource implements ConnectorPageSource {
 
     /** Read a raw Java value out of an Arrow vector at row {@code i}, or null. */
     private static Object rawValue(FieldVector vector, int i) {
-        if (vector == null || vector.isNull(i)) {
+        // Callers (accumulate via requireVector) guarantee vector != null — an absent
+        // projected vector is rejected upstream (issue #2262). A null CELL within the
+        // present vector is normal and still yields null here (no regression to #2238).
+        if (vector.isNull(i)) {
             return null;
         }
         return ArrowToTrino.readJavaValue(vector, i);

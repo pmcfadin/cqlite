@@ -2,6 +2,7 @@ package in.mcfad.cqlite.flight;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.BigintType;
@@ -19,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -103,6 +105,98 @@ class CqliteFlightAggregatePageSourceTest {
         assertEquals(2, countByPicos.size(), "two distinct time-of-day groups");
         assertEquals(5L, countByPicos.get(nine * 1_000L), "09:00 group merged 2 + 3 across ranges");
         assertEquals(1L, countByPicos.get(ten * 1_000L), "10:00 group");
+    }
+
+    /**
+     * Issue #2262: a projected group-by column absent from the delivered Arrow batch
+     * (schema drift between the connector aggregation projection and the Flight server
+     * response) must surface a clear error NAMING the column via the real
+     * {@link CqliteFlightAggregatePageSource#accumulate} path — not silently produce
+     * null group keys (a corrupted GROUP BY result set). Mirrors #2238's toPage guard.
+     */
+    @Test
+    void missingGroupByVectorRaisesNamingTheColumn() {
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Count, null, "agg0"));
+        var spec = new AggregationSpec(List.of("missing_gc"), aggregates);
+        var merger = new PartialAggregateMerger(aggregates);
+
+        try (BufferAllocator allocator = new RootAllocator()) {
+            // Batch delivers the aggregate output but NOT the projected group-by column.
+            BigIntVector count = new BigIntVector("agg0", allocator);
+            count.allocateNew(1);
+            count.set(0, 5L);
+            VectorSchemaRoot root = new VectorSchemaRoot(List.of(count));
+            root.setRowCount(1);
+
+            TrinoException ex = assertThrows(TrinoException.class,
+                    () -> CqliteFlightAggregatePageSource.accumulate(root, spec, merger));
+            assertTrue(ex.getMessage().contains("missing_gc"),
+                    "error must name the missing group-by column, was: " + ex.getMessage());
+            root.close();
+        }
+    }
+
+    /**
+     * Issue #2262 (aggregate-output arm): an aggregate-output vector absent from the
+     * delivered batch must likewise error naming the column — not silently produce null
+     * partial-aggregate values.
+     */
+    @Test
+    void missingAggregateOutputVectorRaisesNamingTheColumn() {
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Count, null, "agg_missing"));
+        var spec = new AggregationSpec(List.of("gc"), aggregates);
+        var merger = new PartialAggregateMerger(aggregates);
+
+        try (BufferAllocator allocator = new RootAllocator()) {
+            // Batch delivers the group-by column but NOT the aggregate output vector.
+            BigIntVector gc = new BigIntVector("gc", allocator);
+            gc.allocateNew(1);
+            gc.set(0, 7L);
+            VectorSchemaRoot root = new VectorSchemaRoot(List.of(gc));
+            root.setRowCount(1);
+
+            TrinoException ex = assertThrows(TrinoException.class,
+                    () -> CqliteFlightAggregatePageSource.accumulate(root, spec, merger));
+            assertTrue(ex.getMessage().contains("agg_missing"),
+                    "error must name the missing aggregate-output column, was: " + ex.getMessage());
+            root.close();
+        }
+    }
+
+    /**
+     * Guardrail (issue #2262, mirrors #2238): a null CELL within a PRESENT vector is
+     * normal and must still yield a null value with NO error — only an ENTIRELY absent
+     * vector errors. The group key is retained; the aggregate partial is a normal null.
+     */
+    @Test
+    void nullCellWithinPresentVectorStaysNullNotError() {
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Sum, "v", "agg0"));
+        var spec = new AggregationSpec(List.of("gc"), aggregates);
+        var merger = new PartialAggregateMerger(aggregates);
+
+        try (BufferAllocator allocator = new RootAllocator()) {
+            BigIntVector gc = new BigIntVector("gc", allocator);
+            BigIntVector agg0 = new BigIntVector("agg0", allocator);
+            gc.allocateNew(1);
+            agg0.allocateNew(1);
+            gc.set(0, 42L);
+            agg0.setNull(0); // null CELL within a PRESENT vector — a normal null, not drift
+            VectorSchemaRoot root = new VectorSchemaRoot(List.of(gc, agg0));
+            root.setRowCount(1);
+
+            // Must NOT throw: the present-vector null cell is normal null handling.
+            CqliteFlightAggregatePageSource.accumulate(root, spec, merger);
+
+            var groups = merger.finish();
+            assertEquals(1, groups.size(), "one group survives with its non-null key");
+            assertEquals(42L, groups.get(0).key().values().get(0), "group key read normally");
+            assertTrue(groups.get(0).outputs().get("agg0") == null,
+                    "sum of a single null partial stays null (no regression)");
+            root.close();
+        }
     }
 
     /** Mirror {@code accumulate()}: read one Arrow batch's group + count columns into the merger. */
