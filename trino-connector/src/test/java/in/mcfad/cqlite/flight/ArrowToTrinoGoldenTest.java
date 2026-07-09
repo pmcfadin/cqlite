@@ -1,7 +1,9 @@
 package in.mcfad.cqlite.flight;
 
+import io.airlift.slice.Slices;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
+import io.trino.spi.expression.Constant;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DateTimeEncoding;
@@ -210,6 +212,77 @@ class ArrowToTrinoGoldenTest {
 
     private static PushdownCapability capabilityOf(List<CqliteFlightColumnHandle> columns, String name) {
         return columns.stream().filter(c -> c.name().equals(name)).findFirst().orElseThrow().capability();
+    }
+
+    /**
+     * Cross-language pushdown-capability drift guard (issue #2239).
+     *
+     * <p>The Rust server's {@code pushdown_capability} table and the connector's
+     * {@code PredicateTreeTranslator.constantValue} encoder set MUST agree: any
+     * column the server advertises as pushable ({@code cqlite:pushdown != NONE})
+     * has to be one the connector can actually encode a constant for, else the
+     * FULL/EQUALITY capability is a dead lie that only invites future correctness
+     * drift. This test reads the server-emitted {@code cqlite:pushdown} metadata
+     * from the golden and, for every non-{@code NONE} column, asserts a
+     * representative constant of its Trino type is encodable by {@code
+     * constantValue}. It fails loudly if the two sides desync — e.g. if the server
+     * re-promotes {@code timestamp} to FULL before a
+     * {@code TimestampWithTimeZoneType} encoder is added here (the exact drift
+     * demoted in #2239).
+     */
+    @Test
+    void serverPushableCapabilitiesAllHaveAConnectorEncoder() throws Exception {
+        try (BufferAllocator allocator = new RootAllocator();
+                InputStream in = getClass().getResourceAsStream("/golden/all_scalars.arrows")) {
+            assertNotNull(in, "golden resource /golden/all_scalars.arrows must be on the test classpath");
+            try (ArrowStreamReader reader = new ArrowStreamReader(in, allocator)) {
+                assertTrue(reader.loadNextBatch(), "golden stream must carry at least one record batch");
+                Schema schema = reader.getVectorSchemaRoot().getSchema();
+
+                for (Field field : schema.getFields()) {
+                    PushdownCapability capability = ArrowTypeMapper.capabilityOf(field);
+                    if (capability == PushdownCapability.NONE) {
+                        continue;
+                    }
+                    Type trinoType = ArrowTypeMapper.toTrino(field);
+                    Constant sample = new Constant(sampleValue(field.getName(), trinoType), trinoType);
+                    assertTrue(
+                            PredicateTreeTranslator.encodeConstantForDriftGuard(sample).isPresent(),
+                            "server marks column '" + field.getName() + "' as " + capability
+                                    + " pushable, but PredicateTreeTranslator.constantValue cannot"
+                                    + " encode its Trino type " + trinoType + " — the capability"
+                                    + " table and the encoder set have drifted (issue #2239). Either"
+                                    + " demote the type server-side or add its constantValue encoder.");
+                }
+            }
+        }
+    }
+
+    /**
+     * A representative internal Trino operand for {@code type}, in the exact Java
+     * representation Trino hands the connector (Long-backed integrals/REAL, Slice
+     * for VARCHAR, …). Throws for any type not covered here so a newly-pushable
+     * column with no sample mapping fails the drift guard loudly instead of
+     * silently skipping.
+     */
+    private static Object sampleValue(String column, Type type) {
+        if (type instanceof VarcharType) {
+            return Slices.utf8Slice(column + "-sample");
+        }
+        if (type instanceof BigintType || type instanceof IntegerType
+                || type instanceof SmallintType || type instanceof TinyintType
+                || type instanceof RealType) {
+            return 1L;
+        }
+        if (type instanceof DoubleType) {
+            return 1.0d;
+        }
+        if (type instanceof BooleanType) {
+            return Boolean.TRUE;
+        }
+        throw new IllegalStateException(
+                "no drift-guard sample operand for pushable column '" + column + "' of type " + type
+                        + "; add a representative value (issue #2239)");
     }
 
     private static Field fieldOf(Schema schema, String name) {

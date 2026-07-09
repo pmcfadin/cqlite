@@ -585,6 +585,21 @@ public final class PredicateTreeTranslator {
     }
 
     /**
+     * Test seam for the cross-language pushdown-capability drift guard (issue
+     * #2239): exposes {@link #constantValue} — the SOLE authority for which
+     * constants the connector can encode — so {@code ArrowToTrinoGoldenTest} can
+     * assert that every column the Rust server advertises as pushable
+     * ({@code cqlite:pushdown != none}) is in fact one this encoder handles. A
+     * type re-promoted server-side without an encoder here therefore fails the
+     * build loudly rather than silently advertising a dead capability.
+     *
+     * <p>Package-private on purpose; not part of the connector's runtime surface.
+     */
+    static Optional<JsonNode> encodeConstantForDriftGuard(Constant constant) {
+        return constantValue(constant);
+    }
+
+    /**
      * Combine two already-translated predicate trees with a logical {@code And},
      * flattening either side that is itself an {@code And} so repeated
      * accumulation across {@code applyFilter} calls does not nest unboundedly, and
