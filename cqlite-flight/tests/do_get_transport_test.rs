@@ -250,6 +250,14 @@ fn do_get_over_transport_real_compressed_fixture() {
 /// `data_dir` holds TWO `nb-*-big-Data.db` SSTables the server must k-way-merge.
 /// A single-SSTable fixture would let a broken merge pass the LIMIT test, so the
 /// >N rows MUST span ≥2 SSTables to catch a #2157-class early-stop break.
+///
+/// Key assignment is **interleaved** across the two flushes — EVEN-numbered keys
+/// (`k000000`, `k000002`, …) go to flush 1 and ODD-numbered keys (`k000001`,
+/// `k000003`, …) to flush 2. This is what makes the LIMIT test meaningful: after
+/// the merge sorts keys ascending, the first `N` rows for any `N >= 2`
+/// necessarily draw from BOTH generations, so an implementation that reads only
+/// one SSTable (or drops the second generation) can no longer return N rows and
+/// pass. [`key_index`]/the LIMIT test assert that span directly.
 fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     assert!(
         total >= 4,
@@ -265,9 +273,10 @@ fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::P
         .enable_all()
         .build()
         .unwrap();
-    let half = total / 2;
     // Distinct keys with a fixed 6-digit width so string order == numeric order.
-    for i in 0..half {
+    // Flush 1 = even indices, flush 2 = odd indices, so the sorted first-N result
+    // interleaves rows from both SSTables (see the doc comment above).
+    for i in (0..total).step_by(2) {
         engine
             .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
             .expect("write");
@@ -275,7 +284,7 @@ fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::P
     rt.block_on(engine.flush())
         .expect("flush 1")
         .expect("info 1");
-    for i in half..total {
+    for i in (1..total).step_by(2) {
         engine
             .write(write_row(&format!("k{i:06}"), &format!("v{i}"), 100))
             .expect("write");
@@ -303,8 +312,8 @@ fn build_multi_sstable_fixture(total: usize) -> (tempfile::TempDir, std::path::P
     (temp, data_dir)
 }
 
-/// Count total rows and collect the values of the `key` column across all
-/// decoded batches. Used by the predicate/projection assertions.
+/// Collect the string values of the named `column` across all decoded batches.
+/// Used by the predicate/projection and LIMIT-span assertions.
 fn keys_of(batches: &[RecordBatch], column: &str) -> Vec<String> {
     let mut out = Vec::new();
     for batch in batches {
@@ -324,10 +333,22 @@ fn keys_of(batches: &[RecordBatch], column: &str) -> Vec<String> {
     out
 }
 
-/// **LIMIT enforcement over the wire.** A ticket with `limit: Some(N)` against a
-/// fixture holding >N rows spanning TWO SSTables must decode to EXACTLY N rows
-/// through the real gRPC transport. This catches a #2157-class early-stop break
-/// where the k-way merge fails to apply the cap after merging generations.
+/// Parse the numeric index `N` out of a `kNNNNNN` fixture key. Even indices were
+/// flushed to SSTable 1, odd indices to SSTable 2 (see [`build_multi_sstable_fixture`]).
+fn key_index(key: &str) -> usize {
+    key.strip_prefix('k')
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("fixture key {key:?} must be of the form kNNNNNN"))
+}
+
+/// **LIMIT enforcement over the wire, PROVABLY across ≥2 SSTables.** A ticket with
+/// `limit: Some(N)` against a fixture holding >N rows must decode to EXACTLY N rows
+/// through the real gRPC transport. Because the fixture interleaves keys across two
+/// flushes (even → SSTable 1, odd → SSTable 2), the sorted first-N result MUST draw
+/// from BOTH generations — so we also assert the returned key set contains at least
+/// one flush-1 key AND at least one flush-2 key. This catches a #2157-class early-stop
+/// break where the k-way merge reads only one generation (which would still return N
+/// contiguous rows and pass a naive count-only assertion).
 #[test]
 fn do_get_over_transport_enforces_limit() {
     let total = 20usize;
@@ -343,10 +364,24 @@ fn do_get_over_transport_enforces_limit() {
 
     let svc = CqliteFlightService::new(data_dir, 8192);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let rows = rt.block_on(do_get_rows_over_transport(svc, ticket));
+    let batches = rt.block_on(do_get_batches_over_transport(svc, ticket));
+
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
         rows, limit as usize,
         "a LIMIT {limit} ticket over {total} rows across 2 SSTables must decode EXACTLY {limit} rows"
+    );
+
+    // The capped result must genuinely span both generations: at least one key
+    // from flush 1 (even index) AND at least one from flush 2 (odd index).
+    let keys = keys_of(&batches, "key");
+    assert_eq!(keys.len(), limit as usize, "one key per returned row");
+    let from_flush1 = keys.iter().any(|k| key_index(k) % 2 == 0);
+    let from_flush2 = keys.iter().any(|k| key_index(k) % 2 == 1);
+    assert!(
+        from_flush1 && from_flush2,
+        "capped LIMIT {limit} result must span BOTH SSTables (flush1={from_flush1}, \
+         flush2={from_flush2}); keys={keys:?}"
     );
 }
 
