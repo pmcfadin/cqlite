@@ -82,3 +82,16 @@ from a **local regeneration**. Exact flow that produced v3.5:
   covered by the #1853 seam, not by a `> 0` assertion.
 - Node CI `parity.test.js`, Python `test_parity.py`, CLI `comprehensive_select`,
   and `sstabledump-parity` all green (the TTL-aware assertions track the goldens).
+
+## Regen gotcha — references.yml must be refreshed too (fold into #2222)
+
+- The regen must also refresh `test-data/datasets/references.yml` (it is packaged
+  *inside* the dataset asset tarball, not committed). A v3.x regen that rewrites
+  the sstable dirs + `metadata.yml` with new table UUIDs but leaves
+  `references.yml` pinning the OLD UUID basenames silently breaks **every**
+  manifest-resolving suite: `resolve_table_dir_via_manifest`
+  (`cqlite-core/src/testing/dataset_helpers.rs`) trusts the stale `sstable_dir`
+  basename and returns a nonexistent path, **shadowing** the metadata.yml glob
+  fallback → ENOENT in core/cli/python/memory-budget/scan-offload suites and the
+  `sstabledump-parity` CI lane. Regenerate it via `export.sh` (or remap the
+  `sstable_dir` basenames to the on-disk v3.x dirs) as part of the same regen.
