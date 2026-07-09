@@ -9,6 +9,7 @@ import java.security.CodeSource;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.arrow.flight.FlightClient;
+import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.junit.jupiter.api.Test;
 
@@ -55,6 +56,60 @@ class ArrowJavaVersionPinTest {
                 EXPECTED_ARROW_VERSION,
                 versionFromJar(VectorSchemaRoot.class, "arrow-vector"),
                 "resolved arrow-vector version drifted from flight-core — a split arrow-java stack");
+    }
+
+    @Test
+    void arrowMemoryCoreJarIsExpectedArrowVersion() {
+        // RootAllocator lives in arrow-memory-core — the SAME module whose
+        // ImmutableConfig -> BaseAllocator startup path was the site of the
+        // 18->19 regression this test guards against.
+        assertEquals(
+                EXPECTED_ARROW_VERSION,
+                versionFromJar(RootAllocator.class, "arrow-memory-core"),
+                "resolved arrow-memory-core version drifted from flight-core — a split arrow-java stack");
+    }
+
+    @Test
+    void arrowMemoryNettyJarIsExpectedArrowVersion() {
+        // NettyAllocationManager is the exact class whose static <clinit> threw
+        // ExceptionInInitializerError under netty 4.2.x (issue #2193) — the
+        // allocator module a version/netty-baseline mismatch would reproduce the
+        // field failure in, even with flight-core/arrow-vector/netty-buffer green.
+        // It is loaded reflectively by DefaultAllocationManagerFactory and so is a
+        // runtime-only (not compile-time) dependency — resolved via Class.forName,
+        // same as the netty-buffer and buffer-patch checks below.
+        Class<?> nettyAllocationManager;
+        try {
+            nettyAllocationManager = Class.forName("org.apache.arrow.memory.netty.NettyAllocationManager");
+        } catch (ClassNotFoundException e) {
+            throw new AssertionError("arrow-memory-netty's NettyAllocationManager is not on the runtime classpath", e);
+        }
+        assertEquals(
+                EXPECTED_ARROW_VERSION,
+                versionFromJar(nettyAllocationManager, "arrow-memory-netty"),
+                "resolved arrow-memory-netty version drifted — the allocator module that broke under 18->19");
+    }
+
+    @Test
+    void arrowMemoryNettyBufferPatchJarIsExpectedArrowVersion() {
+        // arrow-memory-netty-buffer-patch is a DISTINCT bundled artifact (see
+        // build/plugin/cqlite_flight/) that shims netty's UnsafeDirectLittleEndian
+        // for arrow's allocator; it is the artifact that actually depends on the
+        // 4.1.x netty baseline pinned in build.gradle.kts, so verify it directly
+        // by its known member class rather than only asserting siblings.
+        Class<?> patchClass;
+        try {
+            patchClass = Class.forName("org.apache.arrow.memory.patch.ArrowByteBufAllocator");
+        } catch (ClassNotFoundException e) {
+            throw new AssertionError(
+                    "arrow-memory-netty-buffer-patch's ArrowByteBufAllocator is not on the "
+                            + "runtime classpath",
+                    e);
+        }
+        assertEquals(
+                EXPECTED_ARROW_VERSION,
+                versionFromJar(patchClass, "arrow-memory-netty-buffer-patch"),
+                "resolved arrow-memory-netty-buffer-patch version drifted from the #2193 pin");
     }
 
     @Test
