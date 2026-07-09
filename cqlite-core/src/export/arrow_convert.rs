@@ -138,23 +138,32 @@ fn checked_value_bytes(total_bytes: usize) -> Result<(), ArrowConvertError> {
 
 /// Guard the cumulative byte length of a nullable `Utf8` column before handing
 /// it to `StringArray::from`. Saturating summation cannot itself overflow.
+///
+/// Generic over `AsRef<str>` so the wide-text scalar/element paths can guard on
+/// **borrowed** `&str`/`Cow<str>` slices of the already-materialized row values
+/// — the check runs before any owned copy is made, so the fail-closed path
+/// never clones ~2 GiB just to reject it (issue #2235).
 #[inline]
-fn checked_string_offsets(values: &[Option<String>]) -> Result<(), ArrowConvertError> {
+fn checked_string_offsets<S: AsRef<str>>(values: &[Option<S>]) -> Result<(), ArrowConvertError> {
     let total = values
         .iter()
         .flatten()
-        .fold(0usize, |acc, s| acc.saturating_add(s.len()));
+        .fold(0usize, |acc, s| acc.saturating_add(s.as_ref().len()));
     checked_value_bytes(total)
 }
 
 /// Guard the cumulative byte length of a nullable `Binary` column before
 /// handing it to `BinaryArray::from`. Saturating summation cannot overflow.
+///
+/// Generic over `AsRef<[u8]>` so callers can guard on **borrowed** `&[u8]`
+/// slices of the row values before any owned copy — see
+/// [`checked_string_offsets`] (issue #2235).
 #[inline]
-fn checked_binary_offsets(values: &[Option<&[u8]>]) -> Result<(), ArrowConvertError> {
+fn checked_binary_offsets<B: AsRef<[u8]>>(values: &[Option<B>]) -> Result<(), ArrowConvertError> {
     let total = values
         .iter()
         .flatten()
-        .fold(0usize, |acc, b| acc.saturating_add(b.len()));
+        .fold(0usize, |acc, b| acc.saturating_add(b.as_ref().len()));
     checked_value_bytes(total)
 }
 
@@ -631,12 +640,16 @@ pub(crate) fn build_typed_value_array(
             Ok(Arc::new(Float64Array::from(arr)))
         }
         CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
-            let arr: Vec<Option<String>> = values
+            // Guard on BORROWED &str slices of the already-materialized row
+            // values — the i32-offset check runs before StringArray::from
+            // copies them, so the fail-closed path never clones ~2 GiB just to
+            // reject it (issue #2235).
+            let refs: Vec<Option<&str>> = values
                 .iter()
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Text(s) => Ok(Some(s.clone())),
+                        Value::Text(s) => Ok(Some(s.as_str())),
                         Value::Null => Ok(None),
                         other => Err(ArrowConvertError::InvalidValue(format!(
                             "expected Text value in element, got {:?}",
@@ -644,17 +657,19 @@ pub(crate) fn build_typed_value_array(
                         ))),
                     })
                 })
-                .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
-            checked_string_offsets(&arr)?;
-            Ok(Arc::new(StringArray::from(arr)))
+                .collect::<Result<Vec<Option<&str>>, ArrowConvertError>>()?;
+            checked_string_offsets(&refs)?;
+            Ok(Arc::new(StringArray::from(refs)))
         }
         CqlType::Blob => {
-            let byte_slices: Vec<Option<Vec<u8>>> = values
+            // Guard on BORROWED &[u8] slices before BinaryArray::from copies
+            // them (issue #2235) — no owned Vec<u8> clone precedes the check.
+            let refs: Vec<Option<&[u8]>> = values
                 .iter()
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Blob(b) => Ok(Some(b.clone())),
+                        Value::Blob(b) => Ok(Some(b.as_slice())),
                         Value::Null => Ok(None),
                         other => Err(ArrowConvertError::InvalidValue(format!(
                             "expected Blob value in element, got {:?}",
@@ -662,8 +677,7 @@ pub(crate) fn build_typed_value_array(
                         ))),
                     })
                 })
-                .collect::<Result<Vec<Option<Vec<u8>>>, ArrowConvertError>>()?;
-            let refs: Vec<Option<&[u8]>> = byte_slices.iter().map(|o| o.as_deref()).collect();
+                .collect::<Result<Vec<Option<&[u8]>>, ArrowConvertError>>()?;
             checked_binary_offsets(&refs)?;
             Ok(Arc::new(BinaryArray::from(refs)))
         }
@@ -1520,6 +1534,30 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
         col.cql_type.as_ref().map(unwrap_frozen_type),
         Some(CqlType::Text | CqlType::Ascii | CqlType::Varchar)
     );
+    if strict_text {
+        // Authoritative wide-text column: values are raw `Value::Text` payloads
+        // (or null/error). Guard on BORROWED &str slices before StringArray::from
+        // copies them, so the fail-closed path never clones ~2 GiB of raw text
+        // just to reject it (issue #2235).
+        let refs: Vec<Option<&str>> = rows
+            .iter()
+            .map(
+                |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Text(s)) => Ok(Some(s.as_str())),
+                    Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                        "column '{}': expected Text value, got {:?}",
+                        col.name, other
+                    ))),
+                },
+            )
+            .collect::<Result<Vec<Option<&str>>, ArrowConvertError>>()?;
+        checked_string_offsets(&refs)?;
+        return Ok(Arc::new(StringArray::from(refs)));
+    }
+    // Opaque / untyped fallback: `format_value` produces NEW owned strings
+    // (small, computed representations — not a raw multi-GiB payload). The guard
+    // checks these already-materialized formatted strings.
     let values: Vec<Option<String>> = rows
         .iter()
         .map(
@@ -1527,14 +1565,7 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
                 None => Ok(None),
                 Some(Value::Null) => Ok(None),
                 Some(Value::Text(s)) => Ok(Some(s.clone())),
-                // `Json` is only a valid string source on the opaque fallback;
-                // an authoritative text column must fail closed on it.
-                Some(Value::Json(j)) if !strict_text => Ok(Some(j.to_string())),
-                Some(other) if strict_text => Err(ArrowConvertError::InvalidValue(format!(
-                    "column '{}': expected Text value, got {:?}",
-                    col.name, other
-                ))),
-                // Opaque / untyped fallback: format complex types as strings.
+                Some(Value::Json(j)) => Ok(Some(j.to_string())),
                 Some(other) => Ok(Some(ValueFormatter::format_value(other))),
             },
         )
@@ -2401,6 +2432,43 @@ mod tests {
         ));
         assert!(super::checked_value_bytes(0).is_ok());
         assert!(super::checked_value_bytes(1_000_000).is_ok());
+    }
+
+    /// (12e) Bounded fail-closed through the REAL typed Blob builder path.
+    /// We alias ONE 16 MiB blob `Value` across 128 rows (`Vec<Option<&Value>>`)
+    /// so the cumulative byte length is `128 * 16 MiB = i32::MAX + 1`, yet peak
+    /// RAM stays ~16 MiB. Post-#2235 the Blob arm guards on the borrowed `&[u8]`
+    /// slices BEFORE `BinaryArray::from` copies them, so it returns a typed
+    /// error without ever cloning ~2 GiB of owned `Vec<u8>` (the earlier
+    /// `b.clone()` path would have OOM'd/allocated 2 GiB before failing closed).
+    #[test]
+    fn typed_blob_builder_over_i32_max_fails_closed_without_2gib_clone() {
+        const CHUNK: usize = 16 * 1024 * 1024; // 16 MiB
+        const N: usize = 128; // 128 * 16 MiB = i32::MAX + 1
+        let big = Value::Blob(vec![0u8; CHUNK]);
+        let refs: Vec<Option<&Value>> = (0..N).map(|_| Some(&big)).collect();
+        let err = super::build_typed_value_array(&CqlType::Blob, &refs);
+        assert!(
+            matches!(err, Err(ArrowConvertError::InvalidValue(_))),
+            "Blob arm must fail closed at the i32 offset ceiling"
+        );
+    }
+
+    /// (12f) Bounded fail-closed through the REAL typed Text builder path.
+    /// Aliases ONE 16 MiB text `Value` across 128 rows: the arm guards on
+    /// borrowed `&str` before `StringArray::from` copies, so no ~2 GiB clone
+    /// precedes the typed error (issue #2235).
+    #[test]
+    fn typed_text_builder_over_i32_max_fails_closed_without_2gib_clone() {
+        const CHUNK: usize = 16 * 1024 * 1024; // 16 MiB
+        const N: usize = 128; // 128 * 16 MiB = i32::MAX + 1
+        let big = Value::Text("a".repeat(CHUNK));
+        let refs: Vec<Option<&Value>> = (0..N).map(|_| Some(&big)).collect();
+        let err = super::build_typed_value_array(&CqlType::Text, &refs);
+        assert!(
+            matches!(err, Err(ArrowConvertError::InvalidValue(_))),
+            "Text arm must fail closed at the i32 offset ceiling"
+        );
     }
 
     /// (12b) Genuine overflow reproduction through the exact `Vec<Option<&[u8]>>`
