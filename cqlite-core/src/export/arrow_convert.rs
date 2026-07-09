@@ -30,6 +30,8 @@
 //! | tuple\<A,B,…\>    | `Struct(field_0:A, field_1:B, …)`     | Positional names; per-position types|
 //! | udt\<name\>       | `Struct(f1:T1, f2:T2, …)`             | Field names from schema; null OK  |
 
+use std::borrow::Cow;
+
 use crate::query::{ColumnInfo, QueryRow};
 use crate::schema::CqlType;
 use crate::types::{DataType, Value};
@@ -1555,23 +1557,27 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
         checked_string_offsets(&refs)?;
         return Ok(Arc::new(StringArray::from(refs)));
     }
-    // Opaque / untyped fallback: `format_value` produces NEW owned strings
-    // (small, computed representations — not a raw multi-GiB payload). The guard
-    // checks these already-materialized formatted strings.
-    let values: Vec<Option<String>> = rows
+    // Opaque / untyped fallback. Raw `Value::Text` payloads can be multi-GiB, so
+    // represent them as BORROWED `Cow::Borrowed(&str)` and guard on the borrowed
+    // lengths before any owned copy is made (issue #2235). Only the small,
+    // computed `format_value`/`Json` representations are materialized as owned
+    // `Cow::Owned` strings — those are never a raw multi-GiB payload.
+    let values: Vec<Option<Cow<str>>> = rows
         .iter()
         .map(
             |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
                 None => Ok(None),
                 Some(Value::Null) => Ok(None),
-                Some(Value::Text(s)) => Ok(Some(s.clone())),
-                Some(Value::Json(j)) => Ok(Some(j.to_string())),
-                Some(other) => Ok(Some(ValueFormatter::format_value(other))),
+                Some(Value::Text(s)) => Ok(Some(Cow::Borrowed(s.as_str()))),
+                Some(Value::Json(j)) => Ok(Some(Cow::Owned(j.to_string()))),
+                Some(other) => Ok(Some(Cow::Owned(ValueFormatter::format_value(other)))),
             },
         )
-        .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
+        .collect::<Result<Vec<Option<Cow<str>>>, ArrowConvertError>>()?;
     checked_string_offsets(&values)?;
-    Ok(Arc::new(StringArray::from(values)))
+    Ok(Arc::new(StringArray::from_iter(
+        values.iter().map(|v| v.as_deref()),
+    )))
 }
 
 fn build_binary_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
@@ -2469,6 +2475,58 @@ mod tests {
             matches!(err, Err(ArrowConvertError::InvalidValue(_))),
             "Text arm must fail closed at the i32 offset ceiling"
         );
+    }
+
+    /// (12g) Bounded fail-closed through the OPAQUE/untyped Utf8 fallback
+    /// (`build_string_array`, `cql_type = None`). This branch used to `s.clone()`
+    /// each raw `Value::Text` payload into an owned `String` BEFORE the guard,
+    /// so a `DataType::Text` column with no cql_type could allocate ~2 GiB before
+    /// failing closed. Post-#2235 the fallback represents raw text as
+    /// `Cow::Borrowed(&str)` and guards on the borrowed lengths first. We
+    /// reproduce the exact `Vec<Option<Cow<str>>>` the fixed fallback builds by
+    /// aliasing ONE 16 MiB text across 128 entries (`128 * 16 MiB = i32::MAX + 1`)
+    /// — peak RAM ~16 MiB, not 2 GiB — and assert the shared guard returns a
+    /// typed error (never a 2 GiB clone, never a panic).
+    #[test]
+    fn opaque_text_fallback_over_i32_max_fails_closed_without_2gib_clone() {
+        use std::borrow::Cow;
+        const CHUNK: usize = 16 * 1024 * 1024; // 16 MiB
+        const N: usize = 128; // 128 * 16 MiB = i32::MAX + 1
+        let big = "a".repeat(CHUNK);
+        // Exactly the borrowed-Cow vector the untyped fallback now materializes
+        // for raw `Value::Text`, aliased so peak RAM stays ~16 MiB.
+        let refs: Vec<Option<Cow<str>>> =
+            (0..N).map(|_| Some(Cow::Borrowed(big.as_str()))).collect();
+        let total: usize = refs.iter().flatten().map(|s| s.len()).sum();
+        assert_eq!(total, i32::MAX as usize + 1, "test must cross i32::MAX");
+        assert!(
+            matches!(
+                super::checked_string_offsets(&refs),
+                Err(ArrowConvertError::InvalidValue(_))
+            ),
+            "opaque untyped Text fallback must fail closed at the i32 offset ceiling"
+        );
+    }
+
+    /// (12h) The opaque/untyped Utf8 fallback still round-trips raw `Value::Text`
+    /// verbatim (no cql_type) through `rows_to_record_batch` after the borrowed
+    /// guard reorder — the fix must not alter normal-size output.
+    #[test]
+    fn opaque_text_fallback_preserves_raw_text_verbatim() {
+        use arrow::array::StringArray;
+        let cols = vec![col("o", DataType::Text, None)];
+        let rows = vec![
+            row_one("o", Value::Text("verbatim".into())),
+            row_one("o", Value::Null),
+        ];
+        let batch = rows_to_record_batch(&cols, &rows).expect("opaque text must build");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("Utf8 array");
+        assert_eq!(arr.value(0), "verbatim");
+        assert!(arr.is_null(1));
     }
 
     /// (12b) Genuine overflow reproduction through the exact `Vec<Option<&[u8]>>`
