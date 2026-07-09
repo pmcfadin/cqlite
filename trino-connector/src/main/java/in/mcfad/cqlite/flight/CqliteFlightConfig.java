@@ -77,23 +77,70 @@ public record CqliteFlightConfig(
     }
 
     /**
-     * Per-host snapshot addressing (issue #2227) derives each replica host's Sidecar URI from
-     * this base's scheme + port with the host swapped, keeping nothing else. Any path, query,
-     * or fragment on the base would therefore be silently dropped from the per-host snapshot
-     * create/clear PUTs, sending them to the wrong endpoint. Reject a non-root base up front so
-     * a proxied/non-root Sidecar URI fails at config time, not as a silent snapshot-mode failure.
-     * The hostNetwork DaemonSet contract (README) requires a root-path per-node Sidecar base.
+     * Validate the whole per-host-addressing contract on {@code cqlite.sidecar-uri} up front
+     * (issue #2227). Per-host snapshot addressing derives each replica host's Sidecar URI from
+     * this base's <b>scheme + port only</b> ({@code HostSnapshotApis.PerHostSidecarClients}),
+     * swapping the host and keeping nothing else. Every assumption that derivation (and the db0
+     * discovery {@code SidecarClient}) makes about the base must hold at config load, so a
+     * misconfiguration fails at catalog load rather than surfacing later at first snapshot use:
+     * <ul>
+     *   <li>an <b>explicit port</b> ({@code getPort() >= 0}) — the per-host URI is built from it;
+     *   <li>a <b>scheme</b> that is present and {@code http}/{@code https} — the derived URI and
+     *       the HTTP client both require it;
+     *   <li>a non-empty <b>host</b> — the db0 discovery client resolves requests against it;
+     *   <li><b>no userinfo</b> — per-host derivation drops it, so credentials would reach db0
+     *       discovery but never the per-host snapshot PUTs (silent partial auth);
+     *   <li><b>root path, no query, no fragment</b> — all dropped from the derived per-host URI.
+     * </ul>
+     * {@code HostSnapshotApis.fromBaseUri}/{@code forHost} keep their own port check as
+     * defence-in-depth; this is the first failure point. The hostNetwork DaemonSet contract
+     * (README) requires a root-path per-node Sidecar base.
      */
     private static void requireRootPerNodeBase(URI base) {
+        String scheme = base.getScheme();
+        if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+            throw rejectBase(base, "must have an http or https scheme");
+        }
+        String host = base.getHost();
+        if (host == null || host.isEmpty()) {
+            throw rejectBase(base, "must include a host");
+        }
+        if (base.getPort() < 0) {
+            throw rejectBase(base, "must include an explicit port (e.g. http://cassandra:9043) so "
+                    + "per-host snapshot addressing can reach each replica's Sidecar");
+        }
+        if (base.getUserInfo() != null) {
+            throw rejectBase(base, "must not carry userinfo/credentials — per-host snapshot "
+                    + "addressing keeps only scheme + port, so any credentials would be silently "
+                    + "dropped from the per-host snapshot PUTs");
+        }
         String path = base.getPath();
         boolean nonRootPath = path != null && !path.isEmpty() && !path.equals("/");
         if (nonRootPath || base.getQuery() != null || base.getFragment() != null) {
-            throw new IllegalArgumentException(
-                    "cqlite.sidecar-uri must be a root-path per-node Sidecar base URI (e.g. "
-                            + "http://cassandra:9043) so per-host snapshot addressing can reach each "
-                            + "replica's Sidecar (hostNetwork DaemonSet contract, see README); a base with a "
-                            + "path/query/fragment (proxied or non-root) is unsupported, got: " + base);
+            throw rejectBase(base, "must be a root-path per-node Sidecar base URI (e.g. "
+                    + "http://cassandra:9043); a base with a path/query/fragment (proxied or "
+                    + "non-root) is unsupported");
         }
+    }
+
+    /**
+     * Build a rejection for an invalid {@code cqlite.sidecar-uri}, naming the property, the
+     * constraint, and the offending URI with any userinfo/credentials redacted so a secret in
+     * the catalog properties never leaks into logs.
+     */
+    private static IllegalArgumentException rejectBase(URI base, String constraint) {
+        return new IllegalArgumentException(
+                "cqlite.sidecar-uri " + constraint + " (hostNetwork DaemonSet contract, see README); got: "
+                        + redactUserInfo(base));
+    }
+
+    /** Render {@code base} for an error message, replacing any userinfo with {@code ***}. */
+    private static String redactUserInfo(URI base) {
+        String userInfo = base.getUserInfo();
+        if (userInfo == null) {
+            return base.toString();
+        }
+        return base.toString().replace(userInfo + "@", "***@");
     }
 
     public static CqliteFlightConfig fromMap(Map<String, String> config) {
