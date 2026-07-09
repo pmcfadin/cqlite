@@ -460,6 +460,159 @@ fn do_get_over_transport_reads_live_set_not_snapshot() {
     );
 }
 
+// ---- Issue #2264: a client that stops reading mid-stream must release the
+// ---- do_get merge producer (no forever-parked blocking_send under backpressure).
+
+/// Open a `do_get` response over the real transport, read `read_batches`
+/// batches, then DROP the client stream (and the whole client + channel) without
+/// draining it. Returns once the stream is dropped, leaving the server to observe
+/// the client disconnect. The server task is left running so the test can then
+/// observe the server-side in-flight accounting settle.
+async fn do_get_drop_after(
+    svc: CqliteFlightService,
+    ticket: Vec<u8>,
+    read_batches: usize,
+) -> tokio::task::JoinHandle<Result<(), tonic::transport::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = TcpIncoming::from_listener(listener, true, None).unwrap();
+
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(FlightServiceServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+
+    let endpoint = Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(5));
+    let mut channel = None;
+    for _ in 0..50 {
+        if let Ok(c) = endpoint.connect().await {
+            channel = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let channel = channel.expect("connect");
+
+    let mut client = FlightServiceClient::new(channel);
+    let resp = client
+        .do_get(Ticket::new(ticket))
+        .await
+        .expect("do_get rpc");
+    let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
+    let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
+
+    let mut read = 0usize;
+    while read < read_batches {
+        match rb.next().await {
+            Some(Ok(_batch)) => read += 1,
+            // Fewer batches than requested arrived before EOF/err — still a valid
+            // "client stops early" scenario; proceed to drop.
+            _ => break,
+        }
+    }
+    // Client stops reading and disconnects: drop the decode stream, the client,
+    // and the whole gRPC channel WITHOUT draining the remaining batches.
+    drop(rb);
+    drop(client);
+    server
+}
+
+/// Poll the process-wide `cqlite.rpc.in_flight` level for `do_get` until it drops
+/// to `<= baseline` or `timeout` elapses. Returns the final observed level.
+async fn await_in_flight_settled(baseline: i64, timeout: Duration) -> i64 {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let level = cqlite_flight::obs::in_flight_level("do_get");
+        if level <= baseline {
+            return level;
+        }
+        if std::time::Instant::now() >= deadline {
+            return level;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// **Issue #2264 repro (backpressure).** A multi-SSTable fixture with far more
+/// rows than the 4-slot `do_get` channel can hold, served with a tiny batch size
+/// so the merge producer fills the channel and PARKS in `blocking_send` while the
+/// client is still reading. The client reads two batches then DROPS the stream
+/// without draining. Within 5s the server-side `do_get` in-flight accounting must
+/// return to its pre-RPC baseline — proving the parked producer was released and
+/// the RPC did not leak.
+///
+/// On the UNFIXED code the merge producer parks forever in `tx.blocking_send`
+/// (which never polls the cancel flag), pinning a blocking-pool thread and
+/// holding the RPC accounting, so the in-flight level never returns to baseline
+/// and this times out.
+#[test]
+fn do_get_client_drop_midstream_releases_producer_under_backpressure() {
+    // batch_size = 1 → one row per batch; 200 rows across 2 SSTables produce far
+    // more batches than the 4-slot channel, so the producer must park in
+    // blocking_send after the client stops reading.
+    let total = 200usize;
+    let (_temp, data_dir) = build_multi_sstable_fixture(total);
+    let ticket = serde_json::to_vec(&serde_json::json!({
+        "keyspace": KS,
+        "table": TBL,
+        "ddl": DDL,
+    }))
+    .unwrap();
+
+    let svc = CqliteFlightService::new(data_dir, 1);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let baseline = cqlite_flight::obs::in_flight_level("do_get");
+        let server = do_get_drop_after(svc, ticket, 2).await;
+        let level = await_in_flight_settled(baseline, Duration::from_secs(5)).await;
+        assert!(
+            level <= baseline,
+            "do_get in-flight level must return to its {baseline} baseline within 5s after the \
+             client stops reading under backpressure (got {level}); a higher level means the \
+             merge producer is still parked in blocking_send"
+        );
+        server.abort();
+    });
+}
+
+/// **Issue #2264 repro (LIMIT-shaped).** A `LIMIT`-carrying ticket over a
+/// multi-SSTable fixture (the shape Trino issues, which stops reading once the
+/// limit is satisfied): the client reads one batch, satisfies its interest, and
+/// drops the stream. The server-side `do_get` in-flight accounting must return to
+/// baseline within 5s. Same forever-park failure mode on the unfixed code.
+#[test]
+fn do_get_limit_ticket_completes_promptly_after_client_stops_reading() {
+    let total = 200usize;
+    let (_temp, data_dir) = build_multi_sstable_fixture(total);
+    // A LIMIT larger than the channel but smaller than the table, so the producer
+    // still fills the channel and parks before the (capped) merge finishes.
+    let ticket = serde_json::to_vec(&serde_json::json!({
+        "keyspace": KS,
+        "table": TBL,
+        "ddl": DDL,
+        "limit": 50u64,
+    }))
+    .unwrap();
+
+    let svc = CqliteFlightService::new(data_dir, 1);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let baseline = cqlite_flight::obs::in_flight_level("do_get");
+        let server = do_get_drop_after(svc, ticket, 1).await;
+        let level = await_in_flight_settled(baseline, Duration::from_secs(5)).await;
+        assert!(
+            level <= baseline,
+            "LIMIT do_get in-flight level must return to its {baseline} baseline within 5s after \
+             the client stops reading (got {level})"
+        );
+        server.abort();
+    });
+}
+
 /// Flush `n` distinct rows into a fresh single-SSTable fixture and return its
 /// data dir. Like [`build_fixture`] but with a caller-chosen row count so two
 /// fixtures can carry disambiguating counts.

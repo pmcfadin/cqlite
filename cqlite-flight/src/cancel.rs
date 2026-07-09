@@ -13,17 +13,24 @@
 //! cancels its flag on `Drop` unless disarmed, so holding the guard inside the
 //! `do_get` future makes a future-drop (client disconnect) cancel the in-flight
 //! merge deterministically.
+//!
+//! Backing (issue #2264): the flag wraps a [`tokio_util::sync::CancellationToken`]
+//! rather than a bare `AtomicBool`. The polling API ([`CancelFlag::is_cancelled`])
+//! is unchanged for the between-step merge checks, but the token additionally
+//! exposes an ASYNC-WAKEABLE [`CancelFlag::cancelled`] future. The streaming sink
+//! races that future against the bounded-channel backpressure send
+//! (`ChannelSink::emit`), so a client disconnect wakes a producer otherwise parked
+//! forever in `blocking_send` — a bare `AtomicBool` has no waker and could only be
+//! observed between merge steps, never while blocked in a full channel.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 /// A cheap, cloneable cooperative-cancellation flag.
 ///
-/// All clones share one atomic, so cancelling any clone is observed by the
-/// merge loop polling another. `Relaxed` ordering is sufficient: this is a
-/// best-effort "stop soon" signal, not a lock guarding other memory.
+/// All clones share one [`CancellationToken`], so cancelling any clone is observed
+/// by the merge loop polling another AND wakes anyone awaiting [`Self::cancelled`].
 #[derive(Clone, Debug, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag(CancellationToken);
 
 impl CancelFlag {
     /// Create a fresh, un-cancelled flag.
@@ -33,12 +40,24 @@ impl CancelFlag {
 
     /// Request cancellation. Idempotent.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.cancel();
     }
 
-    /// Whether cancellation has been requested.
+    /// Whether cancellation has been requested. This is the between-step polling
+    /// API the merge loop uses; unchanged in semantics from the `AtomicBool`.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.is_cancelled()
+    }
+
+    /// An owned future that resolves when this flag is cancelled (issue #2264).
+    ///
+    /// Used by the streaming sink to race a client disconnect against a blocked
+    /// backpressure send, so a producer parked in `blocking_send` on a full
+    /// channel is woken by the cancellation rather than blocking forever. Owned
+    /// (not borrowed) so it can be moved into a `tokio::select!` on a blocking
+    /// thread's local runtime handle without borrowing `self`.
+    pub fn cancelled(&self) -> WaitForCancellationFutureOwned {
+        self.0.clone().cancelled_owned()
     }
 
     /// Arm a [`CancelGuard`] that cancels this flag when dropped (unless
