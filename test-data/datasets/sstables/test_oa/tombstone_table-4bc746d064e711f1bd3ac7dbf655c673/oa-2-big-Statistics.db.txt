@@ -1,0 +1,68 @@
+SSTable: /var/lib/cassandra/data/test_oa/tombstone_table-4bc746d064e711f1bd3ac7dbf655c673/oa-2-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 06/10/2026 16:14:00 (1781108040859663)
+Maximum timestamp: 06/10/2026 16:14:00 (1781108040875009)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 06/10/2026 16:14:00 (1781108040)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.8932038834951457
+TTL min: 0
+TTL max: 0
+First token: -84528594471792017 (bbbbbbbb-bbbb-bbbb-bbbb-000000000001)
+Last token: 5503635291743950380 (aaaaaaaa-aaaa-aaaa-aaaa-000000000001)
+Covered clusterings: [2025-01-01T00:00:00.000Z, 2025-02-01T00:00:00.000Z]
+Estimated droppable tombstones: 0.6666666666666666
+SSTable Level: 0
+Repaired at: 0
+Originating host id: bb515a3f-c802-4921-83de-733bb2da4510
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1781107962741, position=130301)=CommitLogPosition(segmentId=1781107962741, position=134848)}
+totalColumnsSet: 6
+totalRows: 4
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1781108040 (06/10/2026 16:14:00) |     4 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   103 (103 B)  |     1 ( 50) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   124 (124 B)  |     1 ( 50) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      103 (103 B)
+   75th      124 (124 B)
+   95th      124 (124 B)
+   98th      124 (124 B)
+   99th      124 (124 B)
+   Min       87 (87 B)
+   Max       124 (124 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   2       |     1 ( 50) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   4       |     1 ( 50) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      2
+   75th      4
+   95th      4
+   98th      4
+   99th      4
+   Min       2
+   Max       4
+Local token space coverage: NaN
+Estimated cardinality: 2
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 06/10/2026 16:14:00 (1781108040)
+EncodingStats minTimestamp: 06/10/2026 16:14:00 (1781108040859663)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: [org.apache.cassandra.db.marshal.TimestampType]
+StaticColumns: 
+RegularColumns: extra:org.apache.cassandra.db.marshal.UTF8Type, value:org.apache.cassandra.db.marshal.UTF8Type
+IsTransient: false

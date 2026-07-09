@@ -1,0 +1,65 @@
+SSTable: /data/test_basic/counters-6b12cbd0a25111f0a3fef1a551383fb9/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 10/06/2025 01:12:06 (1759713126628985)
+Maximum timestamp: 10/06/2025 01:12:06 (1759713126635464)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.2598091198303287
+TTL min: 0
+TTL max: 0
+First token: -2563579537244089446 (products)
+Last token: 6016718268737978269 (contact)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: f35cf98a-220c-40fb-8b04-f4ff7ffcf681
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1759713042248, position=83105)=CommitLogPosition(segmentId=1759713042248, position=2793560)}
+totalColumnsSet: 20
+totalRows: 5
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   215 (215 B)  |     5 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      215 (215 B)
+   75th      215 (215 B)
+   95th      215 (215 B)
+   98th      215 (215 B)
+   99th      215 (215 B)
+   Min       180 (180 B)
+   Max       215 (215 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   4       |     5 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      4
+   75th      4
+   95th      4
+   98th      4
+   99th      4
+   Min       4
+   Max       4
+Local token space coverage: NaN
+Estimated cardinality: 5
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTimestamp: 10/06/2025 01:12:06 (1759713126508534)
+KeyType: org.apache.cassandra.db.marshal.UTF8Type
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: share_count:org.apache.cassandra.db.marshal.CounterColumnType, total_interactions:org.apache.cassandra.db.marshal.CounterColumnType, like_count:org.apache.cassandra.db.marshal.CounterColumnType, view_count:org.apache.cassandra.db.marshal.CounterColumnType
+IsTransient: false
