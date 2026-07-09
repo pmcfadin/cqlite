@@ -305,8 +305,21 @@ mod fixture_drain {
     use std::path::PathBuf;
     use tokio::io::AsyncSeekExt;
 
+    // #1143 mid-stream-error guard fixture (issue #1935). Needs a compressed
+    // fixture with MULTIPLE real Cassandra chunks that straddle partition
+    // boundaries, so a chunk-prefix confirms a partial pending batch (1 row per
+    // partition, held at NeedMore on the straddling final partition) BEFORE the
+    // appended corrupt chunk errors. The regenerated `wide_partition_table`
+    // shrank to a single real chunk (data_len 6333 B < the 16 KiB chunk_length,
+    // plus a degenerate empty trailing chunk that #2225 now skips), so its
+    // `collect_raw_chunks` yields only 1 chunk. `test_wide_rows/chat_messages`
+    // is a Snappy-compressed table of 50 single-row partitions spanning 3 real
+    // 16 KiB chunks — chunk boundaries land mid-partition-stream, exactly the
+    // multi-chunk multi-partition geometry this guard needs. Total confirmable
+    // rows (50) stay < BATCH_EMIT_ROWS (256), so the confirmed prefix sits in a
+    // single pending batch, which is the regression under test.
     const KEYSPACE: &str = "test_wide_rows";
-    const TABLE: &str = "wide_partition_table";
+    const TABLE: &str = "chat_messages";
 
     fn datasets_root() -> Option<PathBuf> {
         std::env::var("CQLITE_DATASETS_ROOT")
