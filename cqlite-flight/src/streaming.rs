@@ -120,17 +120,50 @@ pub(crate) struct StreamProbe {
 struct ChannelSink {
     tx: mpsc::Sender<Result<RecordBatch, ProducerError>>,
     produced: Arc<AtomicUsize>,
+    /// The SAME cancel flag threaded through the merge (issue #2264). The
+    /// backpressure send below races this flag's async cancellation, so a client
+    /// disconnect wakes a producer otherwise parked forever in a full channel.
+    cancel: CancelFlag,
 }
 
 impl BatchSink for ChannelSink {
     fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError> {
         self.produced.fetch_add(1, Ordering::Relaxed);
-        // `blocking_send` applies backpressure: it parks this blocking-pool thread
-        // while the channel is full, so the merge never runs ahead of the consumer
-        // by more than the channel capacity. `Err` == receiver dropped == cancel.
-        self.tx
-            .blocking_send(Ok(batch))
-            .map_err(|_| ProducerError::Cancelled)
+        // Cancellation-aware backpressure (issue #2264). `reserve()` still applies
+        // backpressure — it only resolves once the bounded channel has a free slot,
+        // so the merge never runs ahead of the consumer by more than the channel
+        // capacity. But unlike a bare `blocking_send` (which wakes ONLY on a freed
+        // permit or a dropped receiver, never on the cancel flag), this races the
+        // reservation against the flag's async cancellation. When a client
+        // disconnects mid-stream while the channel is full — the exact case where
+        // tonic/h2 may not promptly drop the receiver — the cancel arm fires and the
+        // producer stops instead of pinning a blocking-pool thread forever.
+        //
+        // `emit` runs on a `spawn_blocking` thread, which carries the runtime handle
+        // in TLS; `Handle::block_on` there is permitted (it is a blocking thread, not
+        // an async worker) and drives the `select!` to completion.
+        let handle = tokio::runtime::Handle::current();
+        let cancelled = self.cancel.cancelled();
+        handle.block_on(async {
+            tokio::select! {
+                // Bias the send arm so a ready permit is taken deterministically
+                // even if cancellation fires in the same poll — a batch that CAN be
+                // delivered without blocking is, keeping normal-path behaviour and
+                // the stream/collect byte-parity identical.
+                biased;
+                permit = self.tx.reserve() => match permit {
+                    // Receiver still present: deliver this batch.
+                    Ok(permit) => {
+                        permit.send(Ok(batch));
+                        Ok(())
+                    }
+                    // Receiver dropped (client gone): stop the merge.
+                    Err(_) => Err(ProducerError::Cancelled),
+                },
+                // Client disconnected while we were parked waiting for a slot.
+                _ = cancelled => Err(ProducerError::Cancelled),
+            }
+        })
     }
 }
 
@@ -151,9 +184,19 @@ where
 {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(())) => {}
+        Ok(Err(ProducerError::Cancelled)) => {
+            // Do NOT forward a terminal `Cancelled` (issue #2264): cancellation
+            // means the client/receiver is already departing, so a `Cancelled`
+            // status has no value to deliver — and a bare, cancel-unaware
+            // `blocking_send` of it would park forever if this send raced ahead of
+            // the receiver's drop. Skipping it here makes liveness EXPLICIT rather
+            // than resting on `MeteredDoGetStream`'s implicit field-drop order (rx
+            // before guard), which a future field reorder could silently break.
+        }
         Ok(Err(e)) => {
-            // Forward a terminal error to the client (matches delta_scan error
-            // forwarding). Ignored if the receiver is already gone (client left).
+            // Forward a genuine terminal error to the client (matches delta_scan
+            // error forwarding). This applies normal bounded backpressure and
+            // resolves on read/disconnect; ignored if the receiver is already gone.
             let _ = tx.blocking_send(Err(e));
         }
         Err(payload) => {
@@ -204,6 +247,9 @@ pub(crate) fn spawn_streaming(
     // (client disconnect); `blocking_send` failure is the second, independent stop
     // signal. AA3 machinery (#1473) is reused, not replaced.
     let guard = cancel.drop_guard();
+    // Clone for the sink's cancellation-aware backpressure race (issue #2264); the
+    // remaining clone drives the between-step merge polling.
+    let sink_cancel = cancel.clone();
     let merge_cancel = cancel;
     let produced = probe.produced_batches.clone();
     // The incremental scan-progress seam (issue #2162) is threaded into the merge
@@ -216,7 +262,11 @@ pub(crate) fn spawn_streaming(
     // inside the closure catch_unwind guards, and unwinding drops it.
     let handle = tokio::task::spawn_blocking(move || {
         let error_tx = tx.clone();
-        let mut sink = ChannelSink { tx, produced };
+        let mut sink = ChannelSink {
+            tx,
+            produced,
+            cancel: sink_cancel,
+        };
         run_merge_catching_panics(&error_tx, move || {
             // `timer` enters `do_get` already in the `merge_setup` phase (the
             // caller transitioned `resolve` → `merge_setup` before spawning). The
@@ -233,7 +283,19 @@ pub(crate) fn spawn_streaming(
     });
 
     let inner = Box::pin(ReceiverStream { rx });
-    let metered = MeteredDoGetStream::new(inner, metrics, Some(guard), probe.clone());
+    // Belt-and-suspenders (issue #2264): hand the merge task's `AbortHandle` to the
+    // response stream so dropping it (client disconnect) also aborts the detached
+    // `spawn_blocking` at its next await point. The cancellation-aware send above
+    // is the core fix (abort alone cannot unpark a `blocking_send`); this is
+    // defense-in-depth for a task that has since moved past its send. The
+    // `JoinHandle` is still returned so tests await completion deterministically.
+    let metered = MeteredDoGetStream::new(
+        inner,
+        metrics,
+        Some(guard),
+        probe.clone(),
+        Some(handle.abort_handle()),
+    );
     (encode_do_get(metered, schema_ref, probe), handle)
 }
 
@@ -280,7 +342,7 @@ pub(crate) async fn build_aggregate_response(
 
     let iter = futures::stream::iter(batches.into_iter().map(Ok::<_, ProducerError>));
     let probe = StreamProbe::default();
-    let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, probe.clone());
+    let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, probe.clone(), None);
     Ok(encode_do_get(metered, schema_ref, probe))
 }
 
@@ -373,6 +435,10 @@ struct MeteredDoGetStream {
     /// Cancels the merge on drop unless disarmed; `None` for the aggregate route
     /// (already materialized — nothing to cancel).
     guard: Option<CancelGuard>,
+    /// Aborts the detached merge `spawn_blocking` task on Drop (issue #2264),
+    /// defense-in-depth beyond the cancellation-aware send + `CancelGuard`. `None`
+    /// for the aggregate route (already materialized — nothing to abort).
+    abort: Option<tokio::task::AbortHandle>,
     probe: StreamProbe,
     rows: u64,
     bytes: u64,
@@ -396,11 +462,13 @@ impl MeteredDoGetStream {
         metrics: RpcMetrics,
         guard: Option<CancelGuard>,
         probe: StreamProbe,
+        abort: Option<tokio::task::AbortHandle>,
     ) -> Self {
         Self {
             inner,
             metrics: Some(metrics),
             guard,
+            abort,
             probe,
             rows: 0,
             bytes: 0,
@@ -533,6 +601,16 @@ impl Drop for MeteredDoGetStream {
         // after this fn body runs). `finalize` is idempotent, so a stream that
         // already ended normally records nothing more here.
         self.finalize(false);
+
+        // Belt-and-suspenders (issue #2264): abort the detached merge task at its
+        // next await point. The cancellation-aware send is what actually unparks a
+        // producer blocked in the full channel (abort cannot interrupt a blocking
+        // `reserve`/send synchronously); this covers a task that has moved past its
+        // send but not yet observed the between-step cancel poll. Harmless for a
+        // task that already completed (abort of a finished task is a no-op).
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
     }
 }
 

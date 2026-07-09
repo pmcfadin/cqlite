@@ -19,6 +19,10 @@ arrow = { workspace = true, features = ["ipc"] }
 arrow-flight = "53"
 tonic = "0.12"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+# `CancellationToken` — an async-wakeable cooperative-cancellation signal so the
+# `do_get` merge producer's backpressure park (`ChannelSink::emit`) can race a
+# client disconnect instead of blocking forever in `blocking_send` (issue #2264).
+tokio-util = "0.7"
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

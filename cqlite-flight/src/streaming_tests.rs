@@ -255,7 +255,8 @@ fn do_get_stream_surfaces_panic_as_internal_status_not_eof() {
         );
         let inner = Box::pin(ReceiverStream { rx });
         let pr = probe();
-        let metered = MeteredDoGetStream::new(inner, RpcMetrics::start("do_get"), None, pr.clone());
+        let metered =
+            MeteredDoGetStream::new(inner, RpcMetrics::start("do_get"), None, pr.clone(), None);
         let mut stream = encode_do_get(metered, schema_ref, pr.clone());
 
         // First message is the schema; the panic must arrive as an `Err` Status
@@ -388,10 +389,12 @@ fn stream_batches_raw(producer: MergeProducer, paths: Vec<PathBuf>) -> Vec<Recor
         let (tx, mut rx) =
             mpsc::channel::<Result<RecordBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
         let cancel = CancelFlag::new();
+        let sink_cancel = cancel.clone();
         let handle = tokio::task::spawn_blocking(move || {
             let mut sink = ChannelSink {
                 tx,
                 produced: Arc::new(AtomicUsize::new(0)),
+                cancel: sink_cancel,
             };
             if let Err(e) = producer.produce_streaming(
                 paths,
@@ -918,6 +921,69 @@ fn count_value(batch: &RecordBatch) -> i64 {
         .downcast_ref::<arrow::array::Int64Array>()
         .expect("count is Int64")
         .value(0)
+}
+
+/// **Issue #2264 core regression.** `ChannelSink::emit` parked in the bounded
+/// channel (a full channel whose Receiver is kept ALIVE, so no send failure fires)
+/// must be UNPARKED by the shared cancel flag — the exact forever-park the bug
+/// filed. Fill the single-slot channel, spawn the merge sink `emit` on a blocking
+/// thread where it must park in `reserve()`, then cancel the flag. Within 3s the
+/// emit must return `Err(ProducerError::Cancelled)`.
+///
+/// FAILS on the pre-fix `emit` (bare `tx.blocking_send`): `blocking_send` wakes
+/// ONLY on a freed permit or a dropped receiver, NEVER on the cancel flag, so with
+/// the receiver held alive the task parks forever and this times out. PASSES after
+/// the fix because `emit` races `reserve()` against `cancel.cancelled()`.
+#[test]
+fn channel_sink_emit_unparks_on_cancel_when_receiver_alive() {
+    let schema = simple_schema();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        // Cap 1 so a single pre-filled batch fills the channel; keep `_rx` bound so
+        // the channel never closes (the send can only be released by cancellation).
+        let (tx, _rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(1);
+        let cancel = CancelFlag::new();
+
+        // A minimal 1-row batch matching `simple_schema`'s Arrow schema.
+        let batch = {
+            let producer = MergeProducer::new(schema.clone(), 1).unwrap();
+            let arrow_schema = Arc::new(producer.arrow_schema().unwrap());
+            let ncols = arrow_schema.fields().len();
+            let cols: Vec<arrow::array::ArrayRef> = arrow_schema
+                .fields()
+                .iter()
+                .map(|f| arrow::array::new_null_array(f.data_type(), 1))
+                .collect();
+            assert_eq!(cols.len(), ncols);
+            RecordBatch::try_new(arrow_schema, cols).unwrap()
+        };
+
+        // Fill the single slot so the sink's next emit must park in `reserve()`.
+        tx.send(Ok(batch.clone())).await.unwrap();
+
+        let sink_cancel = cancel.clone();
+        let emit_task = tokio::task::spawn_blocking(move || {
+            let mut sink = ChannelSink {
+                tx,
+                produced: Arc::new(AtomicUsize::new(0)),
+                cancel: sink_cancel,
+            };
+            sink.emit(batch)
+        });
+
+        // Let the emit park waiting for a permit, then cancel (client disconnect).
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel.cancel();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), emit_task).await;
+        let joined = outcome.expect("emit must return within 3s once cancelled, not park forever");
+        match joined.expect("emit task joins") {
+            Err(ProducerError::Cancelled) => {}
+            other => {
+                panic!("cancelled emit under backpressure must return Cancelled, got {other:?}")
+            }
+        }
+    });
 }
 
 /// A cancelled stream (one batch read, then dropped) attributes exactly the

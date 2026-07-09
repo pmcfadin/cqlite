@@ -340,6 +340,17 @@ fn method_attr(method: &'static str) -> (&'static str, AttrValue) {
     (catalog::attr::RPC_METHOD, AttrValue::StaticStr(method))
 }
 
+/// Read the current process-wide in-flight RPC level for `method` (issue #2264).
+///
+/// Exposes the same shared per-method counter that drives the `cqlite.rpc.in_flight`
+/// gauge, so an end-to-end test can assert that a `do_get` whose client stopped
+/// reading and disconnected releases its RPC accounting (the level returns to its
+/// pre-RPC baseline). Unknown method names resolve to the bounded catch-all slot
+/// (never panics), matching [`RpcMetrics::start`].
+pub fn in_flight_level(method: &str) -> i64 {
+    IN_FLIGHT[method_index(method)].load(Ordering::Relaxed)
+}
+
 /// Record an RPC failure into the error-rate signal (`cqlite.errors.total`,
 /// subsystem `flight`), emit a `tracing` log line, and mark the active span
 /// errored.
