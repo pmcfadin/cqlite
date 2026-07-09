@@ -310,6 +310,8 @@ impl WriteEngine {
             started_at: Instant::now(),
             effective_schema,
             dropped_whole,
+            // Stage 4 (#1668): no partition is mid-drain when a merge starts.
+            pending_partition: None,
         });
 
         Ok(())

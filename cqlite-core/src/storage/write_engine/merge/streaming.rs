@@ -158,6 +158,49 @@ impl<'a> StreamingMerger<'a> {
         }
     }
 
+    /// Resume (or start fresh) draining, seeded with a PREVIOUSLY paused
+    /// partition's remaining, not-yet-yielded rows (issue #1668, stage 4).
+    ///
+    /// `StreamingMerger` cannot itself be stored across calls — it borrows
+    /// `&'a mut KWayMerger`, so it is not self-referential-storable on a
+    /// struct that also owns that `KWayMerger` (e.g. `ActiveMerge`). A
+    /// caller that must pause mid-partition (the "Q4" mid-partition budget
+    /// check) instead persists the OWNED `(key, remaining_rows)` extracted
+    /// via [`Self::into_paused_state`], then reconstructs a fresh
+    /// `StreamingMerger` next call via THIS constructor, seeded with that
+    /// saved state. `saved: None` starts fresh, identical to [`Self::new`].
+    ///
+    /// Nothing is re-computed and nothing is lost: `remaining_rows` are rows
+    /// `step()` ALREADY fully reconciled for `key`'s partition in a PRIOR
+    /// call — the underlying `merger`'s heap has already moved past them, so
+    /// re-calling `merger.step()` for this partition would silently skip
+    /// them. Resuming via this seeded queue (instead of starting a fresh,
+    /// empty `StreamingMerger` and calling `step()` again) is therefore
+    /// required for correctness, not just an optimization.
+    pub(crate) fn resume(
+        merger: &'a mut KWayMerger,
+        saved: Option<(DecoratedKey, VecDeque<MergeEntry>)>,
+    ) -> Self {
+        let (partition_key, pending_rows) = match saved {
+            Some((key, rows)) => (Some(key), rows),
+            None => (None, VecDeque::new()),
+        };
+        Self {
+            merger,
+            partition_key,
+            pending_rows,
+        }
+    }
+
+    /// Extract the in-progress partition's remaining, not-yet-yielded rows
+    /// (issue #1668, stage 4), for a caller that must pause mid-partition and
+    /// resume later via [`Self::resume`]. Returns `None` if no partition was
+    /// in progress (nothing to resume — the next call should start fresh via
+    /// [`Self::new`]/`resume(merger, None)`).
+    pub(crate) fn into_paused_state(self) -> Option<(DecoratedKey, VecDeque<MergeEntry>)> {
+        self.partition_key.map(|key| (key, self.pending_rows))
+    }
+
     /// Yield the next streaming increment.
     ///
     /// Drains any in-progress partition's buffered rows one at a time as
