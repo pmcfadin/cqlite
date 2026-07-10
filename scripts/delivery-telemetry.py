@@ -2,9 +2,14 @@
 """delivery-telemetry.py — delivery-pipeline telemetry ledger + recurring retro.
 
 Closes the pipeline self-improvement loop:
-  sense    -> an append-only ledger, one record per completed issue (`record`)
+  sense    -> an append-only ledger, one record per delivery cycle (issue, pr) (`record`)
   diagnose -> rank recorded failures, file a deduped flow-meta issue (`retro`)
   improve  -> that issue runs through the normal pipeline
+
+A "delivery cycle" is one shipped PR: a reopened issue that ships more than once
+legitimately has one record per shipped PR (e.g. #2264 via PR #2282 then PR #2301), so the
+dup key is the (issue, pr) pair, not the issue alone. Retro aggregation by issue should
+treat such multi-cycle issues as multiple deliveries (they are), not fold them into one.
 
 Authoritative-data-only mandate (CLAUDE.md / issue #28): every field is an observed
 event — a GitHub timestamp/label or a run counter supplied by the stamping step — or
@@ -259,7 +264,7 @@ def build_record(args, gh_fields: dict) -> dict:
     Error convention: caller-input / precondition errors (a missing counter, a null
     timestamp, an undeterminable priority/routing) `raise SystemExit` here — they are bad
     invocations, like an argparse failure. Ledger-state outcomes (a built record that
-    fails schema validation, a duplicate issue) are reported by `cmd_record` with a stderr
+    fails schema validation, a duplicate (issue, pr) cycle) are reported by `cmd_record` with a stderr
     message + `return 1`. Both surface as a non-zero exit.
     """
     for counter in REQUIRED_COUNTERS:
@@ -353,11 +358,12 @@ def cmd_record(args) -> int:
         return 1
 
     ledger = Path(args.ledger)
-    # Idempotency: one record per completed issue. A re-run / double finalize must not
-    # append a second record (which would double-count that issue in retro). Refuse
-    # unless --allow-duplicate is given. This check is best-effort, not atomic — the real
-    # cross-session serializer is the per-issue branch lock (one worktree → one finalize);
-    # `lint` is the after-the-fact backstop that flags any duplicate that slips through.
+    # Idempotency: one record per delivery cycle (issue, pr). A re-run / double finalize of
+    # the SAME cycle must not append a second record (which would double-count it in retro).
+    # Refuse a same-(issue, pr) re-stamp unless --allow-duplicate is given. A reopened issue
+    # that ships again under a NEW pr is a legitimate new cycle and appends freely. This
+    # check is best-effort, not atomic — the real cross-session serializer is the per-issue
+    # branch lock (one worktree → one finalize); `lint` is the after-the-fact backstop.
     if ledger.exists():
         for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
             if not raw.strip():
@@ -369,10 +375,12 @@ def cmd_record(args) -> int:
                 print(f"warning: existing ledger line {lineno} is unparseable — run `lint`",
                       file=sys.stderr)
                 continue
-            if (isinstance(existing, dict) and existing.get("issue") == record["issue"]
+            if (isinstance(existing, dict)
+                    and existing.get("issue") == record["issue"]
+                    and existing.get("pr") == record["pr"]
                     and not args.allow_duplicate):
-                print(f"error: issue #{record['issue']} already has a ledger record "
-                      f"(pass --allow-duplicate to override)", file=sys.stderr)
+                print(f"error: issue #{record['issue']} / pr #{record['pr']} already has a "
+                      f"ledger record (pass --allow-duplicate to override)", file=sys.stderr)
                 return 1
 
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -386,12 +394,18 @@ def cmd_record(args) -> int:
 
 def load_ledger(ledger: Path, schema: dict):
     """Parse + validate every ledger line. Returns (records, errors) where errors is a
-    list of (lineno, message): malformed JSON, schema violations, AND duplicate issue
-    numbers (one-record-per-issue). Shared by `lint` and `retro` so both apply the exact
-    same rules — neither can rank/accept a ledger the other would reject.
+    list of (lineno, message): malformed JSON, schema violations, AND duplicate delivery
+    cycles (one record per (issue, pr)). Shared by `lint` and `retro` so both apply the
+    exact same rules — neither can rank/accept a ledger the other would reject.
+
+    The dup key is the (issue, pr) pair, not the issue alone: a REOPENED issue that ships
+    more than once legitimately has one record per shipped PR (e.g. #2264 via PR #2282 then
+    PR #2301). Only a genuine same-(issue, pr) re-stamp is a duplicate. Retro consumers
+    that aggregate by issue should treat such multi-cycle issues as multiple deliveries
+    (they are), not fold them into one.
     """
     records, errors = [], []
-    seen_issues: dict = {}
+    seen_cycles: dict = {}
     for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
         if not raw.strip():
             continue
@@ -402,14 +416,18 @@ def load_ledger(ledger: Path, schema: dict):
             continue
         for e in validate_record(record, schema):
             errors.append((lineno, e))
-        # one record per completed issue — a duplicate 'issue' skews retro. A non-object
-        # line already produced a type error above; skip the bookkeeping (no .get crash).
-        issue = record.get("issue") if isinstance(record, dict) else None
-        if issue is not None and issue in seen_issues:
-            errors.append((lineno, f"duplicate record for issue #{issue} "
-                                   f"(first seen line {seen_issues[issue]})"))
-        elif issue is not None:
-            seen_issues[issue] = lineno
+        # one record per delivery cycle (issue, pr) — a duplicate cycle skews retro. A
+        # non-object line already produced a type error above; skip the bookkeeping. A
+        # record missing 'pr' already failed schema validation above; key on (issue, None)
+        # so we still don't crash and still flag an exact repeat of that malformed line.
+        if isinstance(record, dict) and record.get("issue") is not None:
+            key = (record.get("issue"), record.get("pr"))
+            if key in seen_cycles:
+                issue, pr = key
+                errors.append((lineno, f"duplicate record for issue #{issue} / pr #{pr} "
+                                       f"(first seen line {seen_cycles[key]})"))
+            else:
+                seen_cycles[key] = lineno
         records.append(record)
     return records, errors
 
@@ -514,7 +532,7 @@ def cmd_retro(args) -> int:
         print(f"error: ledger not found: {ledger}", file=sys.stderr)
         return 1
     # Refuse to rank a non-conforming ledger: a malformed/partial line, a record missing a
-    # counter, OR a duplicate issue (which would double-count in the tally) must be a clean
+    # counter, OR a duplicate (issue, pr) cycle (which would double-count in the tally) must be a clean
     # error (run `lint`), never silently parsed/defaulted/double-counted. Same loader as
     # `lint`, so retro applies the identical bar.
     records, errors = load_ledger(ledger, load_schema(Path(args.schema)))
@@ -623,7 +641,8 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--from-json", dest="from_json", default=None,
                      help="inject GitHub-derived fields from a JSON file (else pull via gh)")
     rec.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
-                     help="append even if the issue already has a record (default: refuse)")
+                     help="append even if this (issue, pr) cycle already has a record "
+                          "(default: refuse; a reopened issue's NEW pr never needs this)")
     rec.set_defaults(func=cmd_record)
 
     lint = sub.add_parser("lint", aliases=["validate"], help="schema-validate the ledger")
