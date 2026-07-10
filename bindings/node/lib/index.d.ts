@@ -791,7 +791,8 @@ export type ErrorCode =
   | 'CONSTRAINT'   // Constraint violations
   | 'TRANSACTION'  // Transaction errors
   | 'PLATFORM'     // Platform-specific errors (WASM)
-  | 'INTERNAL';    // Internal errors
+  | 'INTERNAL'     // Internal errors
+  | 'CANCELLED';   // Cooperative scan cancellation (issue #2264 — never 'IO')
 
 /**
  * Error category names for CQLite errors.
@@ -813,7 +814,8 @@ export type ErrorCategory =
   | 'Constraint'
   | 'Transaction'
   | 'Platform'
-  | 'Internal';
+  | 'Internal'
+  | 'Cancelled';
 
 /**
  * CQLite error interface.

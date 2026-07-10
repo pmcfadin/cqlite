@@ -861,6 +861,11 @@ impl SSTableReader {
         // Non-stitching path for other formats
         let mut block_count = 0;
         while let Some(block) = self.read_next_block(&cursor).await? {
+            // Cooperative cancellation (issue #2264): an index-less (Summary.db
+            // absent) SSTable materialises EVERY partition here in one pass; poll
+            // the token per block so a cancelled Flight `do_get` abandons the walk
+            // promptly instead of running to completion under the ~1–2 min backstop.
+            self.scan_cancel.check()?;
             block_count += 1;
             tracing::debug!(
                 "SSTableReader::sequential_scan - Read block {}, size {} bytes",
@@ -876,6 +881,18 @@ impl SSTableReader {
             );
 
             for (i, (entry_table_id, entry_key, entry_value)) in entries.iter().enumerate() {
+                // Cooperative cancellation (issue #2264, roborev): the per-block
+                // poll above fires ONCE per `read_next_block` call, but an
+                // uncompressed/BTI-direct block returns the WHOLE data section as
+                // one contiguous unit (per `read_next_block_impl`'s doc comment) —
+                // so for that shape `entries` alone can number in the hundreds of
+                // thousands. Poll again here at the SAME 256-entry cadence used
+                // elsewhere so materialisation honours the interval regardless of
+                // how large a single block turned out to be, independent of
+                // whichever inner parser branch produced `entries`.
+                if i & 0xFF == 0 {
+                    self.scan_cancel.check()?;
+                }
                 tracing::debug!(
                     "SSTableReader::sequential_scan - Block {} entry {}: table_id='{}', key={:?}",
                     block_count,

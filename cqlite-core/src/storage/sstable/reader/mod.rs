@@ -823,6 +823,7 @@ impl SSTableReader {
             #[cfg(feature = "state_machine")]
             registry_schema: None, // Resolved by resolve_registry_schema() at wiring time (#1692)
             udt_registry: None, // Will be set when available for UDT-aware parsing
+            scan_cancel: crate::storage::scan_cancel::ScanCancel::default(), // #2264: set via set_scan_cancel
             compression_info: compression_info.map(Arc::new),
             crc_reader,
             verified_uncompressed_chunks: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1222,6 +1223,18 @@ impl SSTableReader {
             self.header.keyspace,
             self.header.table_name
         );
+    }
+
+    /// Wire a cooperative-cancellation token into this reader's long-running
+    /// scans (issue #2264).
+    ///
+    /// The compaction streaming read and its sequential-scan fallback poll this
+    /// token at a bounded interval, so a cancelled Flight `do_get` abandons an
+    /// otherwise uninterruptible full-Data.db walk within milliseconds instead of
+    /// waiting out the coarse ~1–2 min transport backstop. Idempotent; the last
+    /// token set wins. Readers never wired keep the default never-cancel flag.
+    pub fn set_scan_cancel(&mut self, cancel: crate::storage::scan_cancel::ScanCancel) {
+        self.scan_cancel = cancel;
     }
 
     /// Get reader statistics

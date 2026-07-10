@@ -564,8 +564,16 @@ impl SSTableReader {
         // Non-stitching formats are single-block / small: emit via the
         // materialising iterator with ts=0 (matches the Vec-variant fallback).
         if !self.requires_chunk_stitching() {
+            // The heavy, previously-uninterruptible work is inside
+            // `iterate_all_partitions` (→ `sequential_scan` → the block parser),
+            // which now polls `scan_cancel` per partition (issue #2264). Poll again
+            // per emitted row so a cancel that lands during the drain of the
+            // already-materialised Vec is also honoured promptly.
             let entries = self.iterate_all_partitions().await?;
-            for (key, value) in entries {
+            for (i, (key, value)) in entries.into_iter().enumerate() {
+                if i & 0xFF == 0 {
+                    self.scan_cancel.check()?;
+                }
                 let row =
                     super::super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
                 match emit(row)? {
@@ -603,6 +611,14 @@ impl SSTableReader {
 
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block(&cursor).await? {
+            // Cooperative cancellation (issue #2264, roborev round 3): a poll
+            // every 256 chunks catches the edge case `drain_compaction_window`'s
+            // per-PARTITION poll cannot — a single partition so wide it spans
+            // hundreds of chunks without ever completing (so the drain loop's
+            // counter never advances).
+            if chunk_count & 0xFF == 0 {
+                self.scan_cancel.check()?;
+            }
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
                 tracing::debug!(
@@ -683,10 +699,20 @@ impl SSTableReader {
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
     {
         use crate::storage::sstable::reader::parsing::ParseStep;
+        let mut drained: usize = 0;
         loop {
             if *broke || window.is_empty() {
                 return Ok(());
             }
+            // Cooperative cancellation (issue #2264): for a chunk-stitched ('nb')
+            // SSTable this is the per-partition hot loop the compaction stream (and
+            // thus a Flight `do_get`) spends its time in. Poll the reader's cancel
+            // token at a bounded interval so a disconnected client abandons the
+            // walk within milliseconds instead of the coarse ~1–2 min backstop.
+            if drained & 0xFF == 0 {
+                self.scan_cancel.check()?;
+            }
+            drained += 1;
             let mut local_break = false;
             let step = parser.parse_one_partition_for_compaction(
                 window.as_slice(),

@@ -590,7 +590,12 @@ impl MergeProducer {
         if self.agg.is_some() || paths.is_empty() {
             return Ok(());
         }
-        let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        // Issue #2264: wire the shared synchronous cancel token into the merge so
+        // each run's producer thread (which fully materialises an index-less
+        // SSTable in one uninterruptible pass) abandons promptly on client
+        // disconnect, instead of the ~1–2 min transport backstop.
+        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+            .map_err(ProducerError::Merge)?;
         on_merger_built();
         self.drive_merge(&mut merger, cancel, sink, progress)
     }
@@ -687,7 +692,8 @@ impl MergeProducer {
             return Ok(batches);
         }
 
-        let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+            .map_err(ProducerError::Merge)?;
         let mut sink = CollectSink(&mut batches);
         // Collect path (parity oracle): a private seam — no external observer, but
         // the same incremental counter emission runs (issue #2162).
@@ -738,8 +744,19 @@ impl MergeProducer {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
             }
-            let MergeStep::Partition { key, rows } = merger.step().map_err(ProducerError::Merge)?
-            else {
+            // Map by VARIANT, not by racing the cancel flag (roborev, issue
+            // #2264): the per-run producer thread's compaction scan now
+            // propagates a genuine `Error::Cancelled` (preserved through the
+            // channel via `MergeProducerError`, not stringified) when it observes
+            // `scan_cancel`. Matching the variant directly means a real
+            // I/O/corruption error that happens to race a client disconnect is
+            // NEVER masked as a clean `Cancelled` abort — only an actual
+            // cancellation maps to `ProducerError::Cancelled`.
+            let step = merger.step().map_err(|e| match e {
+                cqlite_core::Error::Cancelled => ProducerError::Cancelled,
+                other => ProducerError::Merge(other),
+            })?;
+            let MergeStep::Partition { key, rows } = step else {
                 break;
             };
             // Token-range filter: drop whole partitions outside the split's range.
@@ -806,7 +823,8 @@ impl MergeProducer {
         let mut state = plan.new_state();
 
         if !paths.is_empty() {
-            let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+            let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+                .map_err(ProducerError::Merge)?;
             self.drive_aggregate(plan, &mut merger, cancel, &mut state)?;
         }
 
@@ -839,8 +857,16 @@ impl MergeProducer {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
             }
-            let MergeStep::Partition { key, rows } = merger.step().map_err(ProducerError::Merge)?
-            else {
+            // Map by VARIANT, not by racing the cancel flag (mirrors
+            // `drive_merge`, issue #2264 roborev): a real I/O/corruption error
+            // that happens to land while a client is disconnecting must never
+            // be masked as a clean `Cancelled` abort — only a genuine
+            // `Error::Cancelled` maps to `ProducerError::Cancelled`.
+            let step = merger.step().map_err(|e| match e {
+                cqlite_core::Error::Cancelled => ProducerError::Cancelled,
+                other => ProducerError::Merge(other),
+            })?;
+            let MergeStep::Partition { key, rows } = step else {
                 break;
             };
             if let Some(token) = &self.spec.token {
@@ -1129,6 +1155,23 @@ mod tests {
             matches!(err, ProducerError::Cancelled),
             "expected ProducerError::Cancelled, got {err:?}"
         );
+    }
+
+    /// A [`PartitionStepper`] that, on its first `step()`, sets a [`CancelFlag`]
+    /// (simulating a client disconnect landing concurrently with a step) AND
+    /// returns a genuine (non-`Cancelled`) `cqlite_core::Error` — the exact race
+    /// issue #2264's roborev fix targets: mapping by ERROR VARIANT, not by
+    /// racing `cancel.is_cancelled()` against ANY step error, so this genuine
+    /// error is never masked as a clean `Cancelled` abort.
+    struct CancellingErrorStepper {
+        cancel: CancelFlag,
+    }
+
+    impl PartitionStepper for CancellingErrorStepper {
+        fn step(&mut self) -> Result<MergeStep, cqlite_core::Error> {
+            self.cancel.cancel();
+            Err(cqlite_core::Error::Storage("genuine I/O failure".into()))
+        }
     }
 
     /// A [`PartitionStepper`] that counts `step()` calls, so a test can prove the
@@ -2530,6 +2573,43 @@ mod tests {
             .downcast_ref::<arrow::array::Int32Array>()
             .unwrap()
             .clone()
+    }
+
+    /// Issue #2264 roborev: `drive_aggregate` must map `merger.step()`'s error
+    /// by VARIANT, not by racing `cancel.is_cancelled()` against ANY step error.
+    /// [`CancellingErrorStepper`] reproduces the exact race — the cancel flag
+    /// becomes `true` AS PART OF the same `step()` call that returns a genuine
+    /// (non-`Cancelled`) error, simulating a client disconnect landing
+    /// concurrently with an unrelated I/O failure. FAILS on the pre-fix mapping
+    /// (`if cancel.is_cancelled() { Cancelled } else { Merge(e) }`, checked
+    /// AFTER the step returns): it would see `is_cancelled() == true` and wrongly
+    /// return `Cancelled`, masking the real error.
+    #[test]
+    fn aggregate_genuine_error_is_not_masked_as_cancelled() {
+        let schema = simple_schema();
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![count_star("agg0")],
+        };
+        let producer = agg_producer(schema, ScanSpec::default(), agg);
+        let plan = producer.agg.as_ref().expect("aggregation plan set");
+        let mut state = plan.new_state();
+
+        let cancel = CancelFlag::new();
+        let mut stepper = CancellingErrorStepper {
+            cancel: cancel.clone(),
+        };
+
+        let err = producer
+            .drive_aggregate(plan, &mut stepper, &cancel, &mut state)
+            .expect_err("a genuine step error must abort drive_aggregate");
+
+        assert!(cancel.is_cancelled(), "the stepper did set the cancel flag");
+        assert!(
+            matches!(err, ProducerError::Merge(_)),
+            "a genuine step error concurrent with cancellation must surface as \
+             ProducerError::Merge, not be masked as Cancelled — got {err:?}"
+        );
     }
 
     /// Global `count(*)` over N rows → exactly one partial row, count = N.

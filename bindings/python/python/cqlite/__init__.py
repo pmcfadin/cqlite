@@ -14,6 +14,7 @@ from cqlite._cqlite import (
     SchemaError,
     QueryError,
     ParseError,
+    CancelledError,
     # Configuration
     StreamingConfig,
     memory_optimized,
@@ -54,6 +55,7 @@ __all__ = [
     "SchemaError",
     "QueryError",
     "ParseError",
+    "CancelledError",
     # Configuration
     "StreamingConfig",
     "memory_optimized",

@@ -314,6 +314,15 @@ pub struct SSTableReader {
     pub(super) registry_schema: Option<Arc<TableSchema>>,
     /// UDT registry for UDT-aware parsing (cached for sync access)
     pub(crate) udt_registry: Option<UdtRegistry>,
+    /// Cooperative cancellation for long-running scans (issue #2264).
+    ///
+    /// Polled at a bounded interval inside the compaction streaming read and its
+    /// sequential-scan fallback so a Flight `do_get` whose client disconnected
+    /// abandons the (otherwise uninterruptible, fully-materialising) walk
+    /// promptly instead of burning CPU until the coarse ~1–2 min backstop. The
+    /// default is a never-cancelled flag, so readers opened without a wired token
+    /// behave exactly as before. Set via [`SSTableReader::set_scan_cancel`].
+    pub(crate) scan_cancel: crate::storage::scan_cancel::ScanCancel,
     /// CompressionInfo metadata for chunked decompression (if compressed)
     pub compression_info: Option<Arc<CompressionInfo>>,
     /// `CRC.db` per-chunk checksums for read-time integrity of **uncompressed**

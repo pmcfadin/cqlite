@@ -377,9 +377,39 @@ pub(crate) use async_bridge::block_on_async;
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
     /// Receiving end of the bounded channel fed by the producer thread.
-    receiver: std::sync::mpsc::Receiver<std::result::Result<MergeEntry, String>>,
+    receiver: std::sync::mpsc::Receiver<std::result::Result<MergeEntry, MergeProducerError>>,
     /// JoinHandle for the producer thread (held so the thread is joined on drop).
     _producer: std::thread::JoinHandle<()>,
+}
+
+/// Channel-safe error payload sent from a producer thread to the merge (issue
+/// #2264).
+///
+/// The producer thread runs the reader's compaction scan under `Result<_,
+/// crate::Error>`, but `crate::Error` is not `Clone` and the channel item is
+/// consumed once anyway, so this small enum is the minimal payload that
+/// SURVIVES the thread boundary while still distinguishing a cooperative
+/// cancellation (`Error::Cancelled`) from every other failure. Without this,
+/// stringifying every error the same way would make a genuine I/O/corruption
+/// error indistinguishable from a cancelled scan at the receiving end — exactly
+/// the ambiguity `SSTableRowIterator::next` and `drive_merge` must NOT have.
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+enum MergeProducerError {
+    /// The scan was cooperatively cancelled (`Error::Cancelled`).
+    Cancelled,
+    /// Any other failure, stringified (matches the pre-#2264 behaviour).
+    Other(String),
+}
+
+#[cfg(feature = "write-support")]
+impl From<Error> for MergeProducerError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Cancelled => MergeProducerError::Cancelled,
+            other => MergeProducerError::Other(other.to_string()),
+        }
+    }
 }
 
 /// Number of pre-fetched `MergeEntry` objects buffered per source in the
@@ -414,6 +444,7 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: &TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
@@ -423,7 +454,14 @@ impl SSTableRowIteratorAdapter {
         // Spawn the producer thread. It owns a fresh Tokio runtime so it never
         // collides with any runtime on the calling thread (Issue #587).
         let producer = std::thread::spawn(move || {
-            Self::producer_thread(path_buf, run_index, schema, udt_registry, sender);
+            Self::producer_thread(
+                path_buf,
+                run_index,
+                schema,
+                udt_registry,
+                scan_cancel,
+                sender,
+            );
         });
 
         Ok(Self {
@@ -449,7 +487,8 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
-        sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, String>>,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
+        sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
     ) {
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
         // producer owns its single-purpose runtime, so the blocking
@@ -500,6 +539,13 @@ impl SSTableRowIteratorAdapter {
                     reader.set_udt_registry(registry);
                 }
 
+                // Issue #2264: wire the cooperative-cancellation token so the
+                // (uninterruptible, fully-materialising for index-less inputs)
+                // compaction scan below abandons promptly when the Flight
+                // `do_get` driving this merge is cancelled. Default (never-cancel)
+                // for callers that pass `ScanCancel::default()`.
+                reader.set_scan_cancel(scan_cancel);
+
                 // Pass the schema so the parser uses the real clustering column
                 // names; the header-inferred fallback uses generic names like
                 // "clustering_key", which would defeat extract_clustering_key.
@@ -512,7 +558,7 @@ impl SSTableRowIteratorAdapter {
                         Some(&schema_for_reader),
                         |compaction_row| {
                             let msg = Self::build_merge_entry(run_index, compaction_row, &schema)
-                                .map_err(|e| e.to_string());
+                                .map_err(MergeProducerError::from);
                             match sender.send(msg) {
                                 Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
                                 Err(_) => Ok(std::ops::ControlFlow::Break(())),
@@ -524,8 +570,9 @@ impl SSTableRowIteratorAdapter {
         })();
 
         if let Err(e) = stream_result {
-            // Forward the error; ignore send failure (consumer may have dropped).
-            let _ = error_sender.send(Err(e.to_string()));
+            // Forward the error (preserving `Cancelled` distinctly, issue #2264);
+            // ignore send failure (consumer may have dropped).
+            let _ = error_sender.send(Err(MergeProducerError::from(e)));
         }
         // Channel closed naturally when sender is dropped here.
     }
@@ -976,7 +1023,12 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
     fn next(&mut self) -> Option<Result<MergeEntry>> {
         match self.receiver.recv() {
             Ok(Ok(entry)) => Some(Ok(entry)),
-            Ok(Err(msg)) => Some(Err(Error::Storage(format!(
+            // Issue #2264: reconstruct `Error::Cancelled` distinctly so a
+            // cancelled scan is never confused with a genuine I/O/corruption
+            // error at the merge/producer boundary — `drive_merge` matches on
+            // the variant, not on a side-channel flag.
+            Ok(Err(MergeProducerError::Cancelled)) => Some(Err(Error::Cancelled)),
+            Ok(Err(MergeProducerError::Other(msg))) => Some(Err(Error::Storage(format!(
                 "streaming merge producer error: {}",
                 msg
             )))),
@@ -2030,6 +2082,26 @@ impl KWayMerger {
         Self::new_with_gc(input_paths, schema, None, None)
     }
 
+    /// Like [`KWayMerger::new`], but wires a cooperative
+    /// [`ScanCancel`](crate::storage::scan_cancel::ScanCancel) into every input
+    /// reader's compaction scan (issue #2264). Used by the Flight `do_get` merge
+    /// so a client disconnect abandons an in-flight, index-less full-Data.db walk
+    /// within milliseconds instead of the ~1–2 min transport backstop.
+    pub fn new_cancellable(
+        input_paths: Vec<PathBuf>,
+        schema: &TableSchema,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Self> {
+        Self::new_with_gc_and_registry_cancellable(
+            input_paths,
+            schema,
+            None,
+            None,
+            None,
+            scan_cancel,
+        )
+    }
+
     /// Create a new k-way merger with explicit purge parameters.
     ///
     /// Identical to [`KWayMerger::new`] but threads an explicit gc_grace cutoff
@@ -2069,6 +2141,34 @@ impl KWayMerger {
         now_secs: Option<i64>,
         udt_registry: Option<crate::schema::UdtRegistry>,
     ) -> Result<Self> {
+        Self::new_with_gc_and_registry_cancellable(
+            input_paths,
+            schema,
+            gc_before_secs,
+            now_secs,
+            udt_registry,
+            crate::storage::scan_cancel::ScanCancel::default(),
+        )
+    }
+
+    /// K-way merge constructor that opens the input SSTables under a cooperative
+    /// [`ScanCancel`](crate::storage::scan_cancel::ScanCancel) (issue #2264).
+    ///
+    /// The token is wired onto every per-run reader so the compaction scan each
+    /// run's producer thread drives — which, for an index-less (Summary.db
+    /// absent) SSTable, otherwise fully materialises the whole Data.db in one
+    /// uninterruptible pass — polls it at a bounded interval and abandons the walk
+    /// promptly when a driving Flight `do_get` is cancelled. `new`/`new_with_gc*`
+    /// delegate here with a never-cancelled default token, so non-Flight callers
+    /// are unaffected.
+    pub fn new_with_gc_and_registry_cancellable(
+        input_paths: Vec<PathBuf>,
+        schema: &TableSchema,
+        gc_before_secs: Option<i64>,
+        now_secs: Option<i64>,
+        udt_registry: Option<crate::schema::UdtRegistry>,
+        scan_cancel: crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Self> {
         if input_paths.is_empty() {
             return Err(Error::InvalidInput(
                 "K-way merge requires at least one input file".to_string(),
@@ -2087,8 +2187,13 @@ impl KWayMerger {
         // (issue #1234).
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
-            let adapter =
-                SSTableRowIteratorAdapter::open(path, run_index, schema, udt_registry.clone())?;
+            let adapter = SSTableRowIteratorAdapter::open(
+                path,
+                run_index,
+                schema,
+                udt_registry.clone(),
+                scan_cancel.clone(),
+            )?;
             runs.push(RunReader::new(Box::new(adapter)));
         }
 
