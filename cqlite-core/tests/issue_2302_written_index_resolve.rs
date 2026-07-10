@@ -23,7 +23,9 @@ use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::read_work_counters;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::sstable::writer::SSTableWriter;
-use cqlite_core::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
+use cqlite_core::storage::write_engine::mutation::{
+    CellOperation, Mutation, PartitionKey, TableId,
+};
 use cqlite_core::types::Value;
 use cqlite_core::{Config, Platform};
 use std::collections::HashMap;
@@ -232,10 +234,14 @@ async fn index_path_matches_sequential_scan_row_set() {
     );
     let scan_rows = scan_reader.iterate_all_partitions().await.unwrap();
 
-    let mut index_keys: Vec<Vec<u8>> =
-        index_rows.iter().map(|(k, _)| k.as_bytes().to_vec()).collect();
-    let mut scan_keys: Vec<Vec<u8>> =
-        scan_rows.iter().map(|(k, _)| k.as_bytes().to_vec()).collect();
+    let mut index_keys: Vec<Vec<u8>> = index_rows
+        .iter()
+        .map(|(k, _)| k.as_bytes().to_vec())
+        .collect();
+    let mut scan_keys: Vec<Vec<u8>> = scan_rows
+        .iter()
+        .map(|(k, _)| k.as_bytes().to_vec())
+        .collect();
     index_keys.sort();
     scan_keys.sort();
 

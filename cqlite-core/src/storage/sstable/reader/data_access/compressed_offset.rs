@@ -26,7 +26,7 @@ impl SSTableReader {
     /// authoritative CRC trailer is checked, never inferred.
     ///
     /// [`read_compressed_chunk_at`]: super::super::block_io::read_compressed_chunk_at
-    pub(in crate::storage::sstable::reader) async fn read_compressed_offset_window(
+    pub(super) async fn read_compressed_offset_window(
         &self,
         comp_info: &crate::storage::sstable::compression_info::CompressionInfo,
         block_offset: u64,

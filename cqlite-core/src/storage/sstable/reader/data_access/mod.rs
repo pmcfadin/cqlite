@@ -47,9 +47,9 @@ mod compaction_cancel_tests;
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
 mod compaction;
-// CRC-validated compressed offset-read window (issue #1773): keeps the
-// `read_compressed_offset_window` helper out of this already-large entry-point file.
+// CRC-validated compressed offset-read window (issue #1773).
 mod compressed_offset;
+mod full_index_scan; // Full-Index.db partition enumeration (issue #2302)
 mod model;
 // Opt-in presence-oracle false-negative verification method (issue #2163), kept
 // out of this already-large entry-point file (campsite rule, epic #1116).
@@ -69,11 +69,6 @@ pub use model::ClusteringSlice;
 // (issue #1567). `model` is a private submodule, so the raw path is not reachable
 // from `reader::scan_stream_windowed`; this widens the path exactly enough.
 pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
-
-// Token-order sort reused by the issue #2302 full-index partition enumeration in
-// the sibling `partition_lookup` module (outside `data_access`), so the ordering
-// guarantee matches `sequential_scan`. Same visibility-widening pattern as above.
-pub(in crate::storage::sstable::reader) use model::sort_by_token_order;
 
 use super::source::ScanCursor;
 use super::SSTableReader;
@@ -449,7 +444,7 @@ impl SSTableReader {
     /// compaction read path (which reconciles tombstones itself across generations).
     ///
     /// [`V5CompressedLegacyParser`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser
-    pub(in crate::storage::sstable::reader) fn build_v5_parser(
+    pub(super) fn build_v5_parser(
         &self,
         read_shadowing: bool,
     ) -> crate::storage::sstable::reader::parsing::V5CompressedLegacyParser {
