@@ -259,6 +259,100 @@ where
     out
 }
 
+/// Locate a sibling component file by suffix (e.g. `-CRC.db`) next to Data.db.
+fn find_component(dir: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        if e.file_name().to_string_lossy().ends_with(suffix) {
+            return e.path();
+        }
+    }
+    panic!(
+        "fixture must have a {suffix} component in {}",
+        dir.display()
+    );
+}
+
+/// Every `data_offset` from a CQLite-written BIG `Index.db`, in on-disk (token)
+/// order — mirrors [`entry_start_offsets`] but returns the VInt-decoded offset
+/// value instead of the entry's byte position, so a test can locate a specific
+/// partition's byte range in `Data.db` without re-implementing the reader's own
+/// parser. Entry layout: `[key_len u16 BE][raw key][data_offset uvint][promoted_len
+/// uvint]`; a Cassandra unsigned-vint's total length is `1 + leading_ones(byte0)`,
+/// and its value is the low `8 - leading_ones` bits of byte0 followed by the
+/// continuation bytes, big-endian.
+fn entry_data_offsets(bytes: &[u8]) -> Vec<u64> {
+    let mut offsets = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let key_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        pos += 2 + key_len;
+        let first = bytes[pos];
+        let extra = first.leading_ones() as usize;
+        let mut val: u64 = if extra >= 8 {
+            0
+        } else {
+            (first as u64) & ((1u64 << (8 - extra)) - 1)
+        };
+        for k in 0..extra {
+            val = (val << 8) | bytes[pos + 1 + k] as u64;
+        }
+        offsets.push(val);
+        pos += 1 + extra;
+        assert_eq!(
+            bytes[pos], 0x00,
+            "fixture Index.db entries must carry promoted_len == 0"
+        );
+        pos += 1;
+    }
+    offsets
+}
+
+/// Corrupt ONE partition's ROW BODY (not its header) in an otherwise-healthy
+/// written fixture, re-checksumming `CRC.db` so the corruption is NOT caught by
+/// CRC verification before the parser ever sees it (issue #2302, roborev job
+/// 1609 HIGH: this is the specific "header parses, body doesn't" shape).
+///
+/// Every fixture partition here has a FIXED 18-byte header (`flags(1) +
+/// key_len(1) + key(4, int PK) + nb DeletionTime(12)`), so the first ROW byte
+/// (the row's own flags byte) sits at `data_offset(target) + 18`. Overwriting it
+/// with `0xFF` sets an implausible combination of row-flag bits (far more than
+/// the ~9 remaining body bytes of a one-column single-row partition can satisfy),
+/// which reliably breaks structural row framing rather than merely corrupting a
+/// cell's content. `CRC.db` covers the whole (single, well under 64 KiB)
+/// uncompressed chunk, so the ONE new chunk CRC32 (`crc32fast`, matching
+/// `java.util.zip.CRC32`) is written back over the stored value.
+fn corrupt_one_partition_row_body(dir: &std::path::Path, target_entry: usize) {
+    let index_bytes = std::fs::read(find_component(dir, "-Index.db")).unwrap();
+    let offsets = entry_data_offsets(&index_bytes);
+    assert!(
+        target_entry < offsets.len(),
+        "target entry {target_entry} out of range ({} entries)",
+        offsets.len()
+    );
+    let corrupt_at = offsets[target_entry] as usize + 18;
+
+    let data_path = find_component(dir, "-Data.db");
+    let mut data_bytes = std::fs::read(&data_path).unwrap();
+    assert!(
+        corrupt_at < data_bytes.len(),
+        "corruption offset {corrupt_at} out of range (Data.db is {} bytes)",
+        data_bytes.len()
+    );
+    data_bytes[corrupt_at] = 0xFF;
+    std::fs::write(&data_path, &data_bytes).unwrap();
+
+    let crc_path = find_component(dir, "-CRC.db");
+    let mut crc_bytes = std::fs::read(&crc_path).unwrap();
+    assert_eq!(
+        crc_bytes.len(),
+        8,
+        "fixture Data.db must fit in exactly ONE 64 KiB CRC.db chunk (header(4) + one CRC32(4))"
+    );
+    let new_crc = crc32fast::hash(&data_bytes);
+    crc_bytes[4..8].copy_from_slice(&new_crc.to_be_bytes());
+    std::fs::write(&crc_path, &crc_bytes).unwrap();
+}
+
 /// The pinned regression: iterating a CQLite-WRITTEN Summary/Index pair must
 /// probe the Index.db (probes == partition count), not silently full-scan.
 ///
@@ -682,6 +776,133 @@ fn absent_index_does_not_warn_present_but_unloadable() {
     assert!(
         !spurious,
         "an absent Index.db must NOT trigger the present-but-unloadable WARN. \
+         Captured: {events:?}"
+    );
+}
+
+/// FINDING (issue #2302, roborev job 1609 HIGH): `parser.parse_block` SWALLOWS a
+/// row-parse failure internally (it logs and moves on) and exposes no
+/// consumed-vs-available signal, so a partition whose HEADER parses but whose
+/// BODY does not was silently accepted as "legitimately zero rows" by the
+/// pre-job-1609 header-only recheck — never warning, never falling back. This
+/// fixture corrupts ONE partition's row body (not its header) with a CRC.db
+/// re-checksummed to match, so the corruption reaches the parser instead of being
+/// rejected earlier by CRC verification.
+///
+/// RED before the fix: the enumeration silently accepted the corrupted partition
+/// as empty and returned `n - 1` rows with **no WARN at all** (verified by
+/// reverting `full_index_scan.rs` to the job-1606 state and re-running this exact
+/// fixture: `iterate_all_partitions` returned 49/50 rows and emitted zero #2302
+/// WARN events).
+///
+/// GREEN: the physical single-partition consumed-vs-available check
+/// (`partition_slice_fully_consumed`) proves the corrupted slice was NOT fully
+/// structurally consumed, so the walk bails with a loud WARN and falls back to
+/// `sequential_scan` — the caller never accepts a guess.
+///
+/// Consistency note (explicitly requested by roborev job 1609): `sequential_scan`
+/// itself is NOT lossless on this corruption. Its shared row/partition decoder
+/// (`parse_block_emit_windowed`) ALSO swallows the same row-parse failure — but
+/// WORSE, its byte-pattern partition-header resync (issue #164/#258's "try-parse,
+/// no heuristics" recovery) can drift for SEVERAL bytes before it happens to
+/// resynchronize with a real partition boundary, silently losing MULTIPLE
+/// partitions' rows (not just the one corrupted partition) in the process. This
+/// is a PRE-EXISTING, separate defect in the shared shadowed-decode swallow/resync
+/// path — out of scope for #2302 (which is about index-resolution ROUTING, not
+/// the underlying row decoder) — but it means this test does NOT assert "the
+/// fallback recovers every partition" (that would be false). Instead it proves
+/// the ROUTING decision itself introduces no NEW inconsistency: the auto-routed
+/// reader (index → detects corruption → WARNs → falls back) returns the EXACT
+/// SAME row set as an independently-opened reader whose Index.db/Summary.db were
+/// stripped from the identical corrupted files (forcing `sequential_scan`
+/// directly, no auto-routing at all) — the two paths agree, and the WARN fired.
+#[test]
+#[serial_test::serial]
+fn corrupt_partition_body_refused_not_silently_emptied() {
+    let mut rows_len = 0usize;
+    let mut oracle_len = 0usize;
+    let events = capture_events(|| async {
+        let temp = TempDir::new().unwrap();
+        let n = 50i32;
+        let data_path = write_fixture(&temp, n).await;
+        let dir = data_path.parent().unwrap().to_path_buf();
+
+        // Corrupt a MIDDLE entry's row body (not the first or last, to prove this
+        // isn't special-cased to the boundary-check sites from jobs 1606).
+        corrupt_one_partition_row_body(&dir, 5);
+
+        // Oracle: an INDEPENDENT reader over the SAME corrupted Data.db/CRC.db but
+        // with Index.db/Summary.db/Filter.db stripped, forcing `sequential_scan`
+        // directly (no auto-routing through the full-index path at all).
+        let oracle_dir = temp.path().join("oracle");
+        std::fs::create_dir_all(&oracle_dir).unwrap();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with("-Summary.db")
+                || name_str.ends_with("-Index.db")
+                || name_str.ends_with("-Filter.db")
+            {
+                continue;
+            }
+            std::fs::copy(entry.path(), oracle_dir.join(&name)).unwrap();
+        }
+        let oracle_data_path = oracle_dir.join(data_path.file_name().unwrap());
+        let oracle_reader = open_reader(&oracle_data_path).await;
+        assert!(
+            !oracle_reader.has_partition_index(),
+            "oracle fixture must force sequential_scan directly (no index components)"
+        );
+        let oracle_rows = oracle_reader.iterate_all_partitions().await.unwrap();
+        oracle_len = oracle_rows.len();
+
+        // Auto-routed reader: full component set, corruption detected mid-walk.
+        let reader = open_reader(&data_path).await;
+        assert!(
+            reader.has_partition_index(),
+            "corrupted-but-index-present fixture must still expose the index path"
+        );
+        let rows = reader.iterate_all_partitions().await.unwrap();
+        rows_len = rows.len();
+
+        let mut auto_pairs: Vec<(Vec<u8>, ScanRow)> = rows
+            .iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.clone()))
+            .collect();
+        let mut oracle_pairs: Vec<(Vec<u8>, ScanRow)> = oracle_rows
+            .iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.clone()))
+            .collect();
+        auto_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        oracle_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            auto_pairs, oracle_pairs,
+            "the auto-routed fallback must return the SAME row set as an \
+             independently-forced sequential_scan over the identical corrupted \
+             bytes — the routing decision introduces no NEW divergence"
+        );
+
+        // The corruption DID cost data (documented pre-existing sequential_scan
+        // resync gap, see doc comment) — never MORE rows than the healthy n, and
+        // strictly fewer than n since a body genuinely failed to decode.
+        assert!(
+            rows.len() < n as usize,
+            "corrupted body must cost at least the corrupted partition's row \
+             (got {} of {n})",
+            rows.len()
+        );
+    });
+
+    let warned = events.iter().any(|e| {
+        e.level == Level::WARN
+            && e.message.contains("Index.db is present")
+            && e.message.contains("#2302")
+    });
+    assert!(
+        warned,
+        "a partition whose header parses but whose body is corrupt must be \
+         REFUSED with a loud WARN (issue #2302 job 1609), never silently treated \
+         as an empty partition. rows={rows_len} oracle_rows={oracle_len}. \
          Captured: {events:?}"
     );
 }
