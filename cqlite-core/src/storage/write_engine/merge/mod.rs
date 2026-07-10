@@ -371,9 +371,20 @@ pub(crate) use async_bridge::block_on_async;
 ///
 /// ## Issue #587 safety (async-from-sync bridge)
 ///
-/// The producer thread creates its own `tokio::runtime::Runtime` (never
-/// `Handle::block_on`), so it cannot panic even when called from within an
-/// existing Tokio runtime. This is the same strategy as [`block_on_async`].
+/// The producer thread creates its own Tokio runtime (never `Handle::block_on`),
+/// so it cannot panic even when called from within an existing Tokio runtime.
+/// This is the same strategy as [`block_on_async`].
+///
+/// ## Issue #2316 thread budget (O(M), no per-producer worker pool)
+///
+/// That per-producer runtime is a **`current_thread`** runtime
+/// (`Builder::new_current_thread()`), NOT a multi-threaded `Runtime::new()`. It
+/// drives the producer's single sequential scan on the producer thread itself and
+/// starts ZERO extra worker threads, so a merge over `M` input SSTables costs
+/// `O(M)` OS threads instead of `M + M·num_cpus`. The scan has no internal
+/// `tokio::spawn`, so a multi-core worker pool was never exercised — it was pure
+/// overhead that amplified into a context-switch storm under concurrent Flight
+/// `do_get` load.
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
     /// Receiving end of the bounded channel fed by the producer thread.
@@ -451,8 +462,9 @@ impl SSTableRowIteratorAdapter {
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
-        // Spawn the producer thread. It owns a fresh Tokio runtime so it never
-        // collides with any runtime on the calling thread (Issue #587).
+        // Spawn the producer thread. It owns a fresh single-threaded (current_thread)
+        // Tokio runtime so it never collides with any runtime on the calling thread
+        // (Issue #587) and adds no worker threads beyond itself (Issue #2316).
         let producer = std::thread::spawn(move || {
             Self::producer_thread(
                 path_buf,
@@ -493,7 +505,8 @@ impl SSTableRowIteratorAdapter {
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
         // producer owns its single-purpose runtime, so the blocking
         // `SyncSender::send` inside the emit callback never stalls a shared
-        // runtime, and there is no nested `block_on` / `Handle::current`.
+        // runtime, and there is no nested `block_on` / `Handle::current`. The
+        // runtime is `current_thread` (Issue #2316), so it adds no worker threads.
         // Buffered I/O (Issue #591): the file must not be memory-mapped OR read
         // via direct I/O because finalize_merge_async may delete it after the
         // merge completes. The default disk-access mode is `Auto`, which would
@@ -516,12 +529,24 @@ impl SSTableRowIteratorAdapter {
             // `schema` stays available for build_merge_entry below.
             let schema_for_reader = schema.clone();
 
-            let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                Error::Storage(format!(
-                    "streaming producer: failed to create runtime: {}",
-                    e
-                ))
-            })?;
+            // Issue #2316: drive the producer's sequential async scan on a
+            // `current_thread` runtime — it runs futures ON this producer thread
+            // and starts ZERO extra worker threads. A default multi-threaded
+            // `Runtime::new()` would eagerly spin up `num_cpus` worker threads per
+            // producer, so a merge over M inputs cost ~M + M*num_cpus OS threads
+            // (a context-switch storm under concurrent Flight `do_get` load). The
+            // scan below is a single sequential `.await` with no internal
+            // `tokio::spawn`, so those workers were pure overhead; the
+            // current_thread runtime bounds the per-merge thread cost to O(M).
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    Error::Storage(format!(
+                        "streaming producer: failed to create runtime: {}",
+                        e
+                    ))
+                })?;
 
             rt.block_on(async move {
                 let platform = Arc::new(Platform::new(&config).await?);

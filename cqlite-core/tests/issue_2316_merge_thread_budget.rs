@@ -47,10 +47,16 @@ const ROWS_PER_INPUT: i32 = 400;
 /// Number of input SSTables (`M`) merged in one pass.
 const NUM_INPUTS: usize = 4;
 
-/// Slack over the `O(M)` bound to absorb incidental threads (driver/settle loop).
-/// Kept strictly below `M·num_cpus_min` (= `M·2`) so the pre-change amplification
-/// still trips the bound on a 2-core host.
-const THREAD_SLACK: usize = 4;
+/// Max OS threads a single fixed (`current_thread`-runtime) producer contributes
+/// at its peak: the producer thread itself plus the bounded `spawn_blocking`
+/// parse/feed threads the compaction scan uses (a small constant, INDEPENDENT of
+/// `num_cpus`). The pre-change multi-threaded runtime instead added `num_cpus`
+/// worker threads PER producer on top of this, so the pre-change peak scales with
+/// `num_cpus` and this `O(M)` bound (coefficient fixed at `PER_INPUT`) rejects it.
+const PER_INPUT: usize = 3;
+
+/// Fixed slack over the `PER_INPUT · M` bound for incidental/settle threads.
+const THREAD_SLACK: usize = 3;
 
 // ── Direct, no-heuristics OS thread-count observation ───────────────────────
 
@@ -269,7 +275,7 @@ fn merge_bounds_producer_threads_to_o_m() {
     // Sample the peak while the producers are blocked (a wide, stable window).
     let peak = sample_peak_threads(Duration::from_millis(1200)).expect("peak thread count");
     let delta = peak.saturating_sub(baseline);
-    let bound = m + THREAD_SLACK;
+    let bound = PER_INPUT * m + THREAD_SLACK;
 
     eprintln!(
         "[issue-2316] cpus={cpus} M={m} baseline={baseline} peak={peak} delta={delta} bound={bound}"
@@ -299,8 +305,8 @@ fn merge_bounds_producer_threads_to_o_m() {
     assert!(
         delta <= bound,
         "merge over M={m} inputs added {delta} OS threads over baseline \
-         (peak={peak}, baseline={baseline}); O(M) bound is {bound} (= M + {THREAD_SLACK}). \
-         A delta near M·num_cpus (num_cpus={cpus}) means a producer built a \
+         (peak={peak}, baseline={baseline}); O(M) bound is {bound} (= {PER_INPUT}·M + {THREAD_SLACK}). \
+         A delta scaling with num_cpus (num_cpus={cpus}) means a producer built a \
          multi-threaded runtime — issue #2316 amplification."
     );
 }
