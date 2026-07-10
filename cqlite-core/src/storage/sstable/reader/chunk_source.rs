@@ -149,6 +149,40 @@ impl<'a> ChunkSource<'a> {
         Ok(self.cache.insert(key, decompressed))
     }
 
+    /// Decompress a CRC-validated COMPRESSIBLE chunk from a BORROWED slice, cache
+    /// it, and return the resident [`Bytes`] — leaving the compressed input buffer
+    /// owned by the caller so it can be RECYCLED as a per-loop scratch (issue #1940,
+    /// D2). This is the windowed-scan IO half's decode entry: unlike
+    /// [`decode_and_cache`](Self::decode_and_cache) (which takes the compressed `Vec`
+    /// by value and drops it), this borrows `&compressed`, so the caller keeps the
+    /// compressed buffer and reuses it for the next chunk read — the compressed-read
+    /// side then performs no per-chunk allocation, and the ONE surviving copy-chain
+    /// allocation is the decompress output (recorded here). Callers handle the
+    /// incompressible-raw and no-compressor cases directly (they move the buffer);
+    /// this method is only for the decompress path (`self.compression` is `Some`).
+    /// A `None` compressor is treated as a raw passthrough of a COPY (rare/never on
+    /// the windowed path, where compression is always resolved).
+    pub(crate) fn decode_borrowed(&self, key: ChunkKey, compressed: &[u8]) -> Result<Bytes> {
+        let decompressed = if let Some(compression) = self.compression {
+            let d = compression.decompress(compressed).map_err(|e| {
+                Error::corruption(format!(
+                    "ChunkSource: failed to decompress chunk (key={:?}): {}",
+                    key, e
+                ))
+            })?;
+            DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
+            // CHUNK_PATH_ALLOCS (consumer E3/#1940): the decompress OUTPUT buffer is
+            // the ONE surviving per-chunk copy-chain allocation after D2 — it flows
+            // zero-copy into the B1 cache as `Bytes` (no `Arc::from` re-copy) and is
+            // the refcounted substrate the window borrows. No-op in release.
+            crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
+            d
+        } else {
+            compressed.to_vec()
+        };
+        Ok(self.cache.insert(key, decompressed))
+    }
+
     /// Decompress-only helper for the BIG reverse path: decompress without caching.
     ///
     /// Preserves the current uncached behavior of `pull_reverse_chunk` — no B1 cache

@@ -147,6 +147,11 @@ use tokio::sync::mpsc;
 mod guard;
 use guard::FeedFailureGuard;
 
+// IO-half chunk decode (`decode_scan_chunk`, issue #1940 / D2) — sibling file
+// (campsite rule, epic #1116); an `impl SSTableReader` block.
+#[path = "scan_stream_windowed_decode.rs"]
+mod decode;
+
 // Blocking-pool admission control for windowed scans (issue #1594, Epic F/F4).
 // Always compiled (production `admit()` gates every scan's blocking offload); its
 // test-only limit-override + in-flight probe surface is `pub` ONLY under the
@@ -424,11 +429,22 @@ impl SSTableReader {
                 .map(|ci| ci.max_compressed_length as usize)
                 .unwrap_or(usize::MAX),
         };
+        // Capture the incompressible-raw threshold for the IO-half decode BEFORE
+        // `ctx` is moved into the parse task below (issue #1940, D2).
+        let max_compressed_length = ctx.max_compressed_length;
 
-        // Raw-chunk pipe: I/O half -> blocking parse half (bounded for heap +
-        // backpressure). Output backpressure rides on the batch channel inside
-        // the task.
-        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(RAW_CHUNK_CHANNEL_CAP);
+        // Decompressed-chunk pipe: I/O half -> blocking parse half (bounded for heap
+        // + backpressure). Issue #1940 (D2): the IO half now DECODES each chunk
+        // (CRC-verify → cache-lookup-or-decompress) and ships the refcounted
+        // decompressed `Bytes` substrate, NOT the raw compressed `Vec<u8>`. This lets
+        // the IO half reuse ONE per-loop compressed-read scratch (no per-chunk
+        // compressed-buffer allocation) and lets the parse half's window borrow a
+        // refcounted view of the chunk (the ≤1-alloc/chunk substrate). CRC is still
+        // verified BEFORE decompression, in the same order as before (inside the
+        // read+decode path), and decompression stays in the single decode plane
+        // (`chunk_source`). Backpressure/bounded-heap semantics are unchanged: the
+        // channel is still bounded and a full channel still parks the IO half.
+        let (raw_tx, raw_rx) = mpsc::channel::<bytes::Bytes>(RAW_CHUNK_CHANNEL_CAP);
         // Batched-row pipe: blocking parse half -> async forwarder task. The
         // parse half buffers up to `BATCH_EMIT_ROWS` surviving entries per item so
         // the expensive blocking→async wake happens once per batch instead of once
@@ -494,9 +510,17 @@ impl SSTableReader {
         let faulting_backend = cursor.file.lock().await.faults_synchronously();
 
         let io_err: Option<Error> = if faulting_backend {
-            Self::feed_raw_chunks_blocking(Arc::clone(&self), cursor, raw_tx, &io_failed).await
+            Self::feed_raw_chunks_blocking(
+                Arc::clone(&self),
+                cursor,
+                raw_tx,
+                &io_failed,
+                max_compressed_length,
+            )
+            .await
         } else {
-            self.feed_raw_chunks_async(cursor, raw_tx, &io_failed).await
+            self.feed_raw_chunks_async(cursor, raw_tx, &io_failed, max_compressed_length)
+                .await
         };
 
         // Join the parse task; its Result is the scan's Result. An I/O error
@@ -582,30 +606,49 @@ impl SSTableReader {
         })
     }
 
+
     /// I/O feed loop for a genuinely-async (buffered) backend: read the next
-    /// compressed chunk on the async runtime and forward it over the bounded
-    /// `raw_tx`. `tokio::fs` reads are reactor-driven and non-blocking, so this
-    /// belongs inline on the worker (issue #1593, F3). Returns the terminal read
-    /// error, if any; consumes `raw_tx` so it drops on return, signalling EOF to
-    /// the parse half (only when `io_failed` stayed false — see the parse half).
+    /// compressed chunk on the async runtime, DECODE it (issue #1940, D2), and
+    /// forward the decompressed refcounted `Bytes` over the bounded `raw_tx`.
+    /// `tokio::fs` reads are reactor-driven and non-blocking, so this belongs inline
+    /// on the worker (issue #1593, F3). Returns the terminal read/decode error, if
+    /// any; consumes `raw_tx` so it drops on return, signalling EOF to the parse
+    /// half (only when `io_failed` stayed false — see the parse half).
     async fn feed_raw_chunks_async(
         &self,
         cursor: &ScanCursor,
-        raw_tx: mpsc::Sender<Vec<u8>>,
+        raw_tx: mpsc::Sender<bytes::Bytes>,
         io_failed: &Arc<AtomicBool>,
+        max_compressed_length: usize,
     ) -> Option<Error> {
         // Flip `io_failed` on any unwind so a panic in `read_next_block` cannot
         // masquerade as a clean EOF and make the parse half emit a truncated
         // trailing partition (roborev finding, issue #1593). Disarmed on the
         // clean-EOF / consumer-ended exit below so the happy path is unchanged.
         let mut panic_guard = FeedFailureGuard::armed(io_failed);
+        // Reused compressed-read scratch (issue #1940, D2): read fills it, decode
+        // borrows it, recycle for the next read — no per-chunk compressed alloc.
+        let mut scratch: Vec<u8> = Vec::new();
+        let mut chunk_index = 0usize;
         loop {
-            match self.read_next_block(cursor).await {
-                Ok(Some(chunk)) => {
-                    if raw_tx.send(chunk).await.is_err() {
-                        // Parse task ended early (consumer dropped or parse error).
-                        // Stop reading; the task's result is canonical.
-                        break;
+            match self
+                .read_next_block_parts(&cursor.file, &cursor.chunk_index, &mut scratch)
+                .await
+            {
+                Ok(Some(compressed)) => {
+                    let (decoded, recycled) = match self
+                        .decode_scan_chunk(chunk_index, max_compressed_length, compressed)
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            io_failed.store(true, Ordering::SeqCst);
+                            return Some(e);
+                        }
+                    };
+                    scratch = recycled;
+                    chunk_index += 1;
+                    if raw_tx.send(decoded).await.is_err() {
+                        break; // parse task ended early (consumer dropped / parse error)
                     }
                 }
                 Ok(None) => break, // EOF
@@ -637,8 +680,9 @@ impl SSTableReader {
     async fn feed_raw_chunks_blocking(
         reader: Arc<Self>,
         cursor: &ScanCursor,
-        raw_tx: mpsc::Sender<Vec<u8>>,
+        raw_tx: mpsc::Sender<bytes::Bytes>,
         io_failed: &Arc<AtomicBool>,
+        max_compressed_length: usize,
     ) -> Option<Error> {
         let io_file = Arc::clone(&cursor.file);
         let io_chunk_index = Arc::clone(&cursor.chunk_index);
@@ -662,6 +706,9 @@ impl SSTableReader {
             // Compiled only under the non-default `scan-offload-probe` feature.
             #[cfg(feature = "scan-offload-probe")]
             probe::record_io_read_thread();
+            // Reused compressed-read scratch (issue #1940, D2) — see the async loop.
+            let mut scratch: Vec<u8> = Vec::new();
+            let mut chunk_index = 0usize;
             loop {
                 // SOUNDNESS (issue #1593): driving the async read under
                 // `futures::executor::block_on` on this blocking thread is sound
@@ -675,12 +722,28 @@ impl SSTableReader {
                 // buffered backend (which needs the reactor). A nested tokio
                 // runtime or `block_in_place` would panic on a `spawn_blocking`
                 // thread; `futures::executor::block_on` is a plain thread-parking
-                // executor with no tokio involvement, so it does not.
-                match futures::executor::block_on(
-                    reader.read_next_block_parts(&io_file, &io_chunk_index),
-                ) {
-                    Ok(Some(chunk)) => {
-                        if raw_tx.blocking_send(chunk).is_err() {
+                // executor with no tokio involvement, so it does not. Decompression
+                // (in `decode_scan_chunk`) is a pure CPU op — also reactor-free.
+                match futures::executor::block_on(reader.read_next_block_parts(
+                    &io_file,
+                    &io_chunk_index,
+                    &mut scratch,
+                )) {
+                    Ok(Some(compressed)) => {
+                        let (decoded, recycled) = match reader.decode_scan_chunk(
+                            chunk_index,
+                            max_compressed_length,
+                            compressed,
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                io_failed_feed.store(true, Ordering::SeqCst);
+                                return Some(e);
+                            }
+                        };
+                        scratch = recycled;
+                        chunk_index += 1;
+                        if raw_tx.blocking_send(decoded).is_err() {
                             break; // consumer/parse ended early
                         }
                     }
@@ -711,10 +774,10 @@ impl SSTableReader {
     /// Blocking parse half of the windowed streaming scan (issue #1143).
     ///
     /// Runs entirely on a `spawn_blocking` thread — NEVER on an async worker.
-    /// Owns the sliding `window` (a [`WindowCursor`], issue #1589); for each raw chunk pulled from
-    /// `raw_rx` it applies the incompressible-raw fallback or decompresses,
-    /// appends to the window, and drains every confirmed partition via
-    /// [`drain_scan_window`]. On a CLEAN `raw_rx` close (I/O EOF) it runs a final
+    /// Owns the sliding `window` (a [`WindowCursor`], issue #1589); for each
+    /// already-decoded `Bytes` chunk pulled from `raw_rx` (the IO half decodes now,
+    /// issue #1940) it appends to the window and drains every confirmed partition
+    /// via [`drain_scan_window`]. On a CLEAN `raw_rx` close (I/O EOF) it runs a final
     /// drain with `at_final_chunk = true`; on a close caused by a mid-stream read
     /// error (`io_failed` set by the I/O half before it dropped the sender) it
     /// SKIPS that terminal drain so a truncated window cannot emit a spurious
@@ -732,12 +795,10 @@ impl SSTableReader {
     fn drain_scan_window_blocking(
         &self,
         ctx: WindowParseCtx,
-        mut raw_rx: mpsc::Receiver<Vec<u8>>,
+        mut raw_rx: mpsc::Receiver<bytes::Bytes>,
         tx: mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
         io_failed: Arc<AtomicBool>,
     ) -> Result<()> {
-        use crate::storage::sstable::compression::Compression;
-
         // Issue #1741: single-gen full-scan read path applies SELECT-semantic
         // read shadowing (partition/range tombstone + TTL), so build the parser
         // with read_shadowing = true.
@@ -772,57 +833,11 @@ impl SSTableReader {
         // finding, issue #1143). Run the fallible work in a closure and flush
         // `batch` before propagating any error it returns.
         let drained: Result<()> = (|| {
-            // Single decode plane (issue #1598, G2): the windowed-scan blocking half
-            // receives compressed bytes over the channel (already read by the async I/O
-            // half), so it routes through `decode_and_cache` directly (no self-read).
-            // Build a minimal CompressionInfo for max_compressed_length (the only field
-            // the decode path needs); Compression is built once outside the loop.
-            let compression_opt = self
-                .compression_reader
-                .as_ref()
-                .map(|cr| Compression::new(*cr.algorithm()))
-                .transpose()?;
-            let comp_info_dummy = crate::storage::sstable::compression_info::CompressionInfo {
-                algorithm: String::new(),
-                option_pairs: vec![],
-                chunk_length: 0,
-                max_compressed_length: ctx.max_compressed_length as u32,
-                data_length: 0,
-                chunk_offsets: vec![],
-            };
-            let chunk_source = super::chunk_source::ChunkSource::new(
-                self.point_source.as_ref(), // unused by decode_and_cache
-                &comp_info_dummy,
-                compression_opt.as_ref(),
-                &self.chunk_cache,
-                0, // unused
-                0, // unused
-                super::data_access::NS_WINDOWED_CHUNK,
-                self.chunk_cache_id,
-            );
-
-            while let Some(compressed_chunk) = raw_rx.blocking_recv() {
-                // Windowed scan: incompressible-raw chunks skip the cache (documented
-                // D-choice, task 4.4). The key is ABSOLUTE chunk index (I/O half feeds
-                // from data-section start in order).
-                let incompressible = compressed_chunk.len() >= ctx.max_compressed_length;
-                let chunk: bytes::Bytes = if incompressible {
-                    // Raw passthrough: no cache, no decompress (zero-copy Vec->Bytes)
-                    bytes::Bytes::from(compressed_chunk)
-                } else {
-                    let key = crate::storage::cache::ChunkKey::new(
-                        self.chunk_cache_id ^ super::data_access::NS_WINDOWED_CHUNK,
-                        chunk_count as u64,
-                    );
-                    // Check cache BEFORE decode_and_cache (issue #1598 roborev Medium):
-                    // warm scans must take the hit, not re-decompress and overwrite.
-                    // Mirror what chunk()/range() do: hit → Arc clone, miss → decode.
-                    if let Some(hit) = self.chunk_cache.get(&key) {
-                        hit
-                    } else {
-                        chunk_source.decode_and_cache(key, compressed_chunk, false)?
-                    }
-                };
+            // Issue #1940 (D2): the IO half already DECODED each chunk (CRC-verify →
+            // cache-lookup-or-decompress, single decode plane) and shipped the
+            // decompressed refcounted `Bytes` substrate; the parse half just refills
+            // the window from it — no decode here.
+            while let Some(chunk) = raw_rx.blocking_recv() {
                 window.refill(&chunk);
                 chunk_count += 1;
 

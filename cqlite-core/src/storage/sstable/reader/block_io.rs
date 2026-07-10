@@ -41,7 +41,15 @@ use crate::{Error, Result};
 /// (`piecewise = false`), exactly as before the #827 change.
 const UNCOMPRESSED_READ_PIECE_BYTES: usize = 64 * 1024;
 
-/// Read next block with enhanced error handling and streaming support
+/// Read next block with enhanced error handling and streaming support.
+///
+/// `scratch` is a REUSABLE `payload+CRC` buffer for the compressed NB-chunk read
+/// path (issue #1940, D2): the windowed-scan IO half passes ONE per-loop buffer so
+/// a steady-state scan performs no per-chunk allocation on the compressed-read
+/// side. Callers that do not care pass a fresh `&mut Vec::new()` (the historical
+/// one-alloc-per-chunk behaviour). It is filled fresh (clear + resize) on every
+/// call and only ever holds a single chunk's compressed bytes, so reuse across
+/// chunks never leaks data. Ignored by the non-compressed-NB branches.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_next_block(
     file: &Arc<Mutex<BlockSource>>,
@@ -51,9 +59,28 @@ pub(crate) async fn read_next_block(
     crc_reader: Option<&CrcDb>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     header_offset: u64,
+    scratch: &mut Vec<u8>,
 ) -> Result<Option<Vec<u8>>> {
-    retry_transient_once(file, || {
-        read_next_block_impl(
+    // Transient-retry inlined (not via `retry_transient_once`) because the reusable
+    // `scratch` (issue #1940) is a `&mut` re-borrowed on each attempt, which a
+    // `Fn`-closure cannot capture. Identical contract: capture the offset up front,
+    // retry ONCE only on a transient fault after re-seeking; deterministic errors
+    // fail fast (issue #1588). `attempt` in 0..=1: attempt 1 runs only after a
+    // transient attempt-0 fault + re-seek.
+    let original_pos = {
+        let mut guard = file.lock().await;
+        guard.stream_position().await.map_err(Error::Io)?
+    };
+    let mut attempt = 0;
+    loop {
+        if attempt == 1 {
+            let mut guard = file.lock().await;
+            guard
+                .seek(std::io::SeekFrom::Start(original_pos))
+                .await
+                .map_err(Error::Io)?;
+        }
+        let r = read_next_block_impl(
             file,
             cassandra_version,
             config,
@@ -61,9 +88,19 @@ pub(crate) async fn read_next_block(
             crc_reader,
             current_chunk_index,
             header_offset,
+            scratch,
         )
-    })
-    .await
+        .await;
+        match r {
+            Err(e) if attempt == 0 && is_transient_io(&e) => {
+                tracing::warn!(
+                    "transient I/O fault ({e}); re-seeking to offset {original_pos} and retrying once"
+                );
+                attempt = 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Classify an error as a TRANSIENT I/O fault (EINTR-class) that a single
@@ -93,9 +130,10 @@ fn is_transient_io(e: &Error) -> bool {
 /// discarding its [`ErrorKind`](std::io::ErrorKind).
 ///
 /// Preserving the source kind is load-bearing for [`is_transient_io`] (issue
-/// #1588). Every read/seek in this file is retried at most once through
-/// [`retry_transient_once`], and that retry fires ONLY when the classifier sees a
-/// truthful transient kind (EINTR / EAGAIN / timeout). The block-data and
+/// #1588). Every read/seek in this file is retried at most once (the inlined
+/// transient-retry in [`read_next_block`]), and that retry fires ONLY when the
+/// classifier sees a truthful transient kind (EINTR / EAGAIN / timeout). The
+/// block-data and
 /// uncompressed-piece read paths used to wrap their source error with
 /// `std::io::Error::other(..)`, which relabels the kind as `Other` — so a REAL
 /// transient fault surfacing through those paths was silently NOT retried
@@ -105,52 +143,6 @@ fn is_transient_io(e: &Error) -> bool {
 fn io_error_with_context(context: impl std::fmt::Display, source: std::io::Error) -> Error {
     let kind = source.kind();
     Error::Io(std::io::Error::new(kind, format!("{context}: {source}")))
-}
-
-/// Run `attempt`, retrying it EXACTLY once — and only on a transient I/O fault —
-/// after re-seeking the source back to the ORIGINAL offset (issue #1588).
-///
-/// Two defects this closes:
-/// 1. **Moved-position re-read.** A sequential read (e.g. the legacy block-header
-///    path, or the uncompressed piecewise read) advances the stream position past
-///    a partially-read block before a mid-read fault. Retrying WITHOUT re-seeking
-///    re-enters the reader at the MOVED position and reads DIFFERENT bytes (a
-///    silent wrong-block read). Capturing the position up front and seeking back
-///    makes the retry re-read the SAME bytes.
-/// 2. **Sleeping / retrying deterministic errors.** The old loop slept 10/20ms and
-///    re-read up to 3 times even for deterministic corruption (CRC/format), which
-///    can never heal. Deterministic errors now fail fast: no sleep, no retry, the
-///    typed error is returned immediately.
-async fn retry_transient_once<F, Fut, T>(file: &Arc<Mutex<BlockSource>>, attempt: F) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
-{
-    // Capture the original offset BEFORE the first attempt so a transient retry
-    // re-reads exactly the same bytes.
-    let original_pos = {
-        let mut guard = file.lock().await;
-        guard.stream_position().await.map_err(Error::Io)?
-    };
-
-    match attempt().await {
-        Ok(v) => Ok(v),
-        Err(e) if is_transient_io(&e) => {
-            tracing::warn!(
-                "transient I/O fault ({e}); re-seeking to offset {original_pos} and retrying once"
-            );
-            {
-                let mut guard = file.lock().await;
-                guard
-                    .seek(std::io::SeekFrom::Start(original_pos))
-                    .await
-                    .map_err(Error::Io)?;
-            }
-            attempt().await
-        }
-        // Deterministic corruption/format and non-transient I/O: fail fast, no sleep.
-        Err(e) => Err(e),
-    }
 }
 
 /// Internal block reading implementation
@@ -163,6 +155,7 @@ async fn read_next_block_impl(
     crc_reader: Option<&CrcDb>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     _header_offset: u64, // Unused for NB format; kept for potential future BTI/Legacy use
+    scratch: &mut Vec<u8>,
 ) -> Result<Option<Vec<u8>>> {
     tracing::debug!("block_io::read_next_block_impl: Starting block read");
     tracing::debug!(
@@ -231,6 +224,7 @@ async fn read_next_block_impl(
             current_chunk_index,
             file_size,
             0, // NB format: chunk offsets are relative to file start
+            scratch,
         )
         .await;
     }
@@ -338,6 +332,7 @@ async fn read_nb_format_chunk_data(
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     file_size: u64,
     header_offset: u64,
+    scratch: &mut Vec<u8>,
 ) -> Result<Option<Vec<u8>>> {
     tracing::debug!("read_nb_format_chunk_data: Starting chunk read");
 
@@ -498,14 +493,17 @@ async fn read_nb_format_chunk_data(
         // A5 read-work counter (READ_CALLS; consumer E3): exactly one logical
         // chunk read. No-op in release (design.md Decision 1/2).
         crate::storage::sstable::read_work_counters::record_read();
-        // A single `payload+CRC` heap buffer is allocated per chunk here.
-        // CHUNK_PATH_ALLOCS records THIS allocation — the one instrumented
-        // copy-chain alloc site today. Recycling this buffer per-scan (so a
-        // steady-state windowed scan allocates nothing here) is the A4
-        // ≤1-alloc/chunk work deferred to issue #1940; until then every call
-        // allocates and records exactly one.
-        crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
-        let mut chunk_data = vec![0u8; total_chunk_size as usize];
+        // A single `payload+CRC` heap buffer per chunk. `scratch` is the caller's
+        // REUSED buffer (issue #1940, D2): `clear()`+`resize` reuses its existing
+        // backing store when large enough, so a steady-state windowed scan performs
+        // NO per-chunk allocation here — the surviving copy-chain allocation is the
+        // decompress OUTPUT alone (instrumented in `chunk_source`, ≤1/chunk). A
+        // fresh `&mut Vec::new()` caller keeps the historical one-alloc-per-chunk
+        // behaviour. The `payload+CRC` bytes are consumed (decompressed / passed on)
+        // within this call, so reuse across chunks never leaks a prior chunk.
+        let mut chunk_data = std::mem::take(scratch);
+        chunk_data.clear();
+        chunk_data.resize(total_chunk_size as usize, 0u8);
         file_guard.read_exact(&mut chunk_data).await.map_err(|e| {
             Error::Io(std::io::Error::new(
                 e.kind(),
@@ -2050,6 +2048,7 @@ mod tests {
             None,  // no CRC.db in this unit test
             &chunk_index,
             0,
+            &mut Vec::new(),
         )
         .await
         .expect("read_next_block should succeed")
@@ -2076,6 +2075,7 @@ mod tests {
             None,
             &chunk_index,
             0,
+            &mut Vec::new(),
         )
         .await
         .expect("read_next_block should succeed");
@@ -2164,8 +2164,9 @@ mod tests {
 
 // Retry-policy guards (issue #1588) live in a sibling file to keep this source
 // file under the campsite-rule size limit (issue #1135). `use super::*` in the
-// included module resolves to this module's private items
-// (`retry_transient_once`, `is_transient_io`).
+// included module resolves to this module's private items (`is_transient_io`,
+// `BlockSource`, …); the guards also host the test-only `retry_transient_once`
+// reference combinator (issue #1940 moved it there — see that file's module doc).
 #[cfg(test)]
 #[path = "block_io_retry_tests.rs"]
 mod retry_tests;

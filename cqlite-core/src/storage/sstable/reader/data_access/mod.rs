@@ -834,7 +834,11 @@ impl SSTableReader {
         &self,
         cursor: &ScanCursor,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_next_block_parts(&cursor.file, &cursor.chunk_index)
+        // Callers that do not recycle a scratch (compaction, sequential fallback,
+        // tests) pass a throwaway buffer — one allocation per chunk, unchanged. The
+        // windowed scan's IO half calls `read_next_block_parts` directly with a
+        // REUSED per-loop scratch (issue #1940, D2).
+        self.read_next_block_parts(&cursor.file, &cursor.chunk_index, &mut Vec::new())
             .await
     }
 
@@ -849,6 +853,7 @@ impl SSTableReader {
         &self,
         file: &std::sync::Arc<tokio::sync::Mutex<super::source::BlockSource>>,
         chunk_index: &std::sync::atomic::AtomicUsize,
+        scratch: &mut Vec<u8>,
     ) -> Result<Option<Vec<u8>>> {
         use super::block_io;
         block_io::read_next_block(
@@ -859,6 +864,7 @@ impl SSTableReader {
             self.crc_reader.as_deref(),
             chunk_index,
             self.actual_header_size as u64,
+            scratch,
         )
         .await
     }
