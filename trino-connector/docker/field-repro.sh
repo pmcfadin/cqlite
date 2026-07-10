@@ -408,12 +408,26 @@ if [[ -n "$INJECT_FAILURE" ]]; then
     echo "❌ CAPTURE-ON-FAIL BROKEN: $latest is missing: ${missing[*]}"
     exit 1
   fi
-  pkts="?"
-  if command -v tcpdump >/dev/null 2>&1 && [[ -f "$latest/flight-8815.pcap" ]]; then
-    pkts="$(tcpdump -r "$latest/flight-8815.pcap" 2>/dev/null | wc -l | tr -d ' ')"
+  # Count packets via the SAME containerized tcpdump image the capture itself
+  # used (`$TCPDUMP_IMAGE`), never a host-installed `tcpdump` binary (issue
+  # #2289 roborev finding, job 1592: relying on `command -v tcpdump` meant a
+  # host WITHOUT the binary silently left `pkts="?"` and the check passed
+  # regardless of actual content — a genuinely empty/broken 0-packet pcap was
+  # indistinguishable from "couldn't check"). When `LAST_CAPTURE_STARTED`
+  # is 1, a capture container ran and produced a pcap file, so pkts>0 is now
+  # REQUIRED: 0 packets means the capture path ran but recorded nothing
+  # useful, which is exactly the false-pass this self-test exists to prevent.
+  pkts="n/a (no capture attempted this run)"
+  if [[ "$LAST_CAPTURE_STARTED" -eq 1 && -f "$latest/flight-8815.pcap" ]]; then
+    pkts="$(docker run --rm -v "$latest":/cap:ro "$TCPDUMP_IMAGE" tcpdump -r /cap/flight-8815.pcap 2>/dev/null | wc -l | tr -d ' ')"
+    pkts="${pkts:-0}"
+    if [[ "$pkts" -eq 0 ]]; then
+      echo "❌ CAPTURE-ON-FAIL BROKEN: $latest/flight-8815.pcap has 0 packets even though the capture container started — a zero-packet pcap is not evidence the capture path actually recorded Flight traffic"
+      exit 1
+    fi
   fi
   echo "✅ CAPTURE-ON-FAIL PROVEN: forced failure produced $latest"
-  echo "   (cqlite-flight-debug.log + flight-8815.pcap [~${pkts} pkts] + trino-recent-queries.json)"
+  echo "   (cqlite-flight-debug.log + flight-8815.pcap [${pkts} pkts] + trino-recent-queries.json)"
   exit 0
 fi
 
