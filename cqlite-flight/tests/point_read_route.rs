@@ -288,6 +288,127 @@ fn full_pk_in_list_over_cap_falls_back_to_scan() {
     );
 }
 
+/// Finding 1 (roborev, issue #2207): a single-component full-PK `IN` nested
+/// UNDER an `And` alongside a non-PK residual still routes as N point reads — the
+/// `v = 3` conjunct stays a residual filter, exactly like the single-equality
+/// residual path. Previously demoted to Scan because `IN` was only recognized at
+/// the filter-tree root.
+#[test]
+fn pk_in_list_under_and_with_residual_is_multi_point_route() {
+    let schema = single_pk_schema();
+    // `a IN (1, 2) AND v = 3`
+    let filter = FilterExpr::And(vec![in_list("a", &[1, 2]), eq("v", 3)]);
+    assert_eq!(
+        detect_route(Some(&filter), &schema),
+        PointReadRoute::MultiPartitionPointRead(vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]),
+        "IN under And routes; the non-PK conjunct is a residual, not a blocker"
+    );
+}
+
+/// Finding 1: an `Or` of full-PK equalities nested UNDER an `And` alongside a
+/// residual routes as N point reads. Previously demoted to Scan because `Or` was
+/// only recognized at the root.
+#[test]
+fn or_of_pk_equalities_under_and_with_residual_is_multi_point_route() {
+    let schema = single_pk_schema();
+    // `(a = 1 OR a = 2) AND v = 3`
+    let filter = FilterExpr::And(vec![
+        FilterExpr::Or(vec![eq("a", 1), eq("a", 2)]),
+        eq("v", 3),
+    ]);
+    assert_eq!(
+        detect_route(Some(&filter), &schema),
+        PointReadRoute::MultiPartitionPointRead(vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]),
+        "Or-of-full-PK-equalities under And routes; the residual does not block it"
+    );
+}
+
+/// Finding 1: a composite-PK `Or` disjunction under an `And` with a residual.
+#[test]
+fn composite_or_under_and_with_residual_is_multi_point_route() {
+    let schema = composite_pk_schema();
+    // `((a=1 AND b=2) OR (a=3 AND b=4)) AND v = 9`
+    let filter = FilterExpr::And(vec![
+        FilterExpr::Or(vec![
+            FilterExpr::And(vec![eq("a", 1), eq("b", 2)]),
+            FilterExpr::And(vec![eq("a", 3), eq("b", 4)]),
+        ]),
+        eq("v", 9),
+    ]);
+    assert_eq!(
+        detect_route(Some(&filter), &schema),
+        PointReadRoute::MultiPartitionPointRead(vec![
+            vec![Value::Integer(1), Value::Integer(2)],
+            vec![Value::Integer(3), Value::Integer(4)],
+        ])
+    );
+}
+
+/// Finding 1 (conservative choice): two DIFFERENT full-PK key-groups under one
+/// `And` (`a IN (1,2) AND a IN (3,4)`) fall back to Scan rather than intersect
+/// them — always a correct answer via the scan path, never a wrong one.
+#[test]
+fn two_conflicting_key_groups_under_and_fall_back_to_scan() {
+    let schema = single_pk_schema();
+    let filter = FilterExpr::And(vec![in_list("a", &[1, 2]), in_list("a", &[3, 4])]);
+    assert_eq!(
+        detect_route(Some(&filter), &schema),
+        PointReadRoute::Scan,
+        "two distinct key-groups under one And → conservative Scan fallback"
+    );
+}
+
+/// Finding 1 (conservative choice): a full-PK `IN` group AND a full-PK equality
+/// binding under the same `And` are two key-groups → conservative Scan.
+#[test]
+fn in_group_plus_equality_binding_under_and_falls_back_to_scan() {
+    let schema = single_pk_schema();
+    // `a IN (1, 2) AND a = 1`
+    let filter = FilterExpr::And(vec![in_list("a", &[1, 2]), eq("a", 1)]);
+    assert_eq!(detect_route(Some(&filter), &schema), PointReadRoute::Scan);
+}
+
+/// Finding 2 (roborev, issue #2207): a duplicate-heavy `IN` list whose DISTINCT
+/// key count is within the cap must route (not over-fall-back to Scan) — dedup
+/// happens BEFORE the cap. 100 keys, all duplicates of 3 distinct values.
+#[test]
+fn duplicate_heavy_in_list_dedups_before_cap() {
+    let schema = single_pk_schema();
+    // 100 raw values cycling over {1, 2, 3} → 3 distinct, well under the 64 cap.
+    let raw: Vec<i32> = (0..100).map(|i| (i % 3) + 1).collect();
+    let route = detect_route(Some(&in_list("a", &raw)), &schema);
+    assert_eq!(
+        route,
+        PointReadRoute::MultiPartitionPointRead(vec![
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+            vec![Value::Integer(3)],
+        ]),
+        "100 duplicate keys deduping to 3 uniques must route, not fall back to Scan"
+    );
+}
+
+/// Finding 2: dedup preserves first-seen order and the cap still enforces on the
+/// DISTINCT count — 65 distinct values (even if repeated) fall back to Scan.
+#[test]
+fn over_cap_distinct_in_list_still_falls_back_to_scan() {
+    let schema = single_pk_schema();
+    // 65 distinct values, each duplicated once → 130 raw, 65 distinct > 64 cap.
+    let mut raw: Vec<i32> = (0..65).collect();
+    raw.extend(0..65);
+    assert_eq!(
+        detect_route(Some(&in_list("a", &raw)), &schema),
+        PointReadRoute::Scan,
+        "65 DISTINCT keys exceed the cap even after dedup"
+    );
+}
+
 #[test]
 fn token_predicate_on_pk_keeps_scan() {
     let schema = single_pk_schema();

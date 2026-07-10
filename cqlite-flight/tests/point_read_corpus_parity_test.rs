@@ -136,6 +136,23 @@ fn assert_dual_path_parity(schema: &TableSchema, table_dir: &std::path::Path, fi
     );
 }
 
+/// Count the rows the SCAN path returns for `filter` over `table_dir` — a
+/// residual-independent oracle used to prove a residual predicate is non-vacuous
+/// (fewer rows with the residual than the bare key-group alone).
+fn scan_row_count(schema: &TableSchema, table_dir: &std::path::Path, filter: FilterExpr) -> usize {
+    let spec = ScanSpec {
+        token: None,
+        filter: Some(filter),
+        projection: None,
+        limit: None,
+    };
+    let producer = MergeProducer::with_spec(schema.clone(), 64, spec).unwrap();
+    let batches = producer
+        .produce_from_paths(DirSource::new(table_dir).data_paths().unwrap())
+        .unwrap();
+    batches.iter().map(|b| b.num_rows()).sum()
+}
+
 /// Run ONLY the point path for `filter` over `table_dir` and return the number
 /// of chunks `pull_chunk_window` decompressed (`work_counters::reset()`
 /// immediately before, `chunks_decompressed()` immediately after — the caller
@@ -246,6 +263,112 @@ fn dual_path_parity_compressed_corpus_large_single_pk_table() {
         "a targeted seek of the LAST partition must decompress FEWER than the \
          file's total 4 chunks (got {chunks}) — a full-file scan would need all 4"
     );
+}
+
+/// Finding 1 (roborev, issue #2207): a single-component full-PK `IN` nested
+/// UNDER an `And` alongside a NON-VACUOUS residual clustering predicate, over the
+/// real compressed `large_blob_table` corpus. Two real `file_id`s are probed via
+/// `IN`; the `chunk_id = 32` residual keeps ONLY the first partition's row
+/// (`chunk_id 32`) and drops the second (`chunk_id 36`) — proving the residual
+/// actually filters. The point path (which extracts the `IN` key-group and
+/// re-applies the FULL filter per row) must return rows byte-identical to the
+/// scan+filter oracle. Before the finding-1 fix this filter demoted to Scan, so
+/// both paths were the scan path and the parity was vacuous; now the point path
+/// genuinely routes the `IN`-under-`And` shape.
+#[test]
+fn dual_path_parity_in_under_and_with_residual_large_single_pk_table() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+    let Some(root) = std::env::var_os("CQLITE_DATASETS_ROOT") else {
+        eprintln!("CQLITE_DATASETS_ROOT unset — skipping real-corpus IN-under-And parity");
+        return;
+    };
+    let table_dir = PathBuf::from(&root)
+        .join("sstables")
+        .join("test_wide_rows")
+        .join("large_blob_table-6d81d000a25111f0a3fef1a551383fb9");
+    let data_db = table_dir.join("nb-1-big-Data.db");
+    if !data_db.is_file() {
+        eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
+        return;
+    }
+    assert!(
+        table_dir.join("nb-1-big-CompressionInfo.db").is_file(),
+        "large_blob_table must be a genuinely compressed nb fixture for this test to be meaningful"
+    );
+
+    let schema = TableSchema {
+        keyspace: "test_wide_rows".into(),
+        table: "large_blob_table".into(),
+        partition_keys: vec![KeyColumn {
+            name: "file_id".into(),
+            data_type: "uuid".into(),
+            position: 0,
+        }],
+        clustering_keys: vec![cqlite_core::schema::ClusteringColumn {
+            name: "chunk_id".into(),
+            data_type: "int".into(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: vec![
+            col("file_id", "uuid", false),
+            col("chunk_id", "int", false),
+            col("file_name", "text", true),
+            col("mime_type", "text", true),
+            col("chunk_data", "blob", true),
+            col("chunk_size", "int", true),
+            col("total_chunks", "int", true),
+            col("checksum", "text", true),
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    };
+
+    // Two real partition keys from the corpus JSONL. Partition A has clustering
+    // `chunk_id = 32`; partition B has `chunk_id = 36`.
+    let key_a = uuid_bytes("4018112c-1160-448a-9c96-6d3b67874852");
+    let key_b = uuid_bytes("48855cee-0276-42d3-8da6-5e72cbf62986");
+    // `file_id IN (A, B) AND chunk_id = 32` — the `IN` probes BOTH partitions;
+    // the residual keeps only A's row, dropping B's (non-vacuous filtering).
+    let filter = FilterExpr::And(vec![
+        FilterExpr::Leaf(SSTablePredicate {
+            column: "file_id".into(),
+            operation: SSTableFilterOp::In,
+            values: vec![Value::Uuid(key_a), Value::Uuid(key_b)],
+            token_columns: None,
+        }),
+        FilterExpr::Leaf(SSTablePredicate {
+            column: "chunk_id".into(),
+            operation: SSTableFilterOp::Equal,
+            values: vec![Value::Integer(32)],
+            token_columns: None,
+        }),
+    ]);
+
+    // Prove the residual is NON-VACUOUS: the bare `IN (A, B)` matches both
+    // partitions (2 rows); adding `AND chunk_id = 32` drops B (chunk_id 36),
+    // leaving exactly 1. A vacuous residual would leave both counts equal.
+    let in_only = FilterExpr::Leaf(SSTablePredicate {
+        column: "file_id".into(),
+        operation: SSTableFilterOp::In,
+        values: vec![Value::Uuid(key_a), Value::Uuid(key_b)],
+        token_columns: None,
+    });
+    assert_eq!(
+        scan_row_count(&schema, &table_dir, in_only),
+        2,
+        "the bare IN (A, B) must match both target partitions"
+    );
+    assert_eq!(
+        scan_row_count(&schema, &table_dir, filter.clone()),
+        1,
+        "the chunk_id = 32 residual must drop partition B — non-vacuous filtering"
+    );
+
+    // The dual-path parity asserts scan_rows > 0 and point == scan: the point
+    // path routes the IN-under-And key-group and re-applies the full filter.
+    assert_dual_path_parity(&schema, &table_dir, filter);
 }
 
 /// `test_timeseries.app_metrics` — a genuinely COMPOSITE partition key

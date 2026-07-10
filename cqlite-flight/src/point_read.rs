@@ -51,6 +51,19 @@ pub enum PointReadRoute {
 /// full-PK equality (or an `IN`/`Or` list of them). Non-partition-key conjuncts
 /// (e.g. `AND col = ?`) do NOT block a point route — they remain a residual
 /// per-row filter that narrows, never widens, the result.
+///
+/// The analyzer recurses through `And` conjuncts: a point-read *key-group* (a
+/// full-PK equality, a single-component full-PK `IN`, or an `Or` of full-PK
+/// equalities) is extracted from AMONG the conjuncts, and the REMAINING
+/// conjuncts stay a residual per-row filter — the whole original filter is
+/// re-evaluated per row on the point path ([`drive_merge`]'s `filter.keeps`), so
+/// an extracted key-group need only be a SUPERSET of the matching partitions.
+/// At most ONE key-group is extracted: if two different PK key-groups appear
+/// under one `And` (e.g. `pk IN (1,2) AND pk IN (3,4)`), the route conservatively
+/// falls back to [`PointReadRoute::Scan`] rather than intersect them — always a
+/// correct answer via the scan path, never a wrong one.
+///
+/// [`drive_merge`]: crate::producer::MergeProducer::drive_merge
 pub fn detect_route(filter: Option<&FilterExpr>, schema: &TableSchema) -> PointReadRoute {
     let pk_cols: Vec<&str> = schema
         .partition_keys
@@ -64,28 +77,132 @@ pub fn detect_route(filter: Option<&FilterExpr>, schema: &TableSchema) -> PointR
         return PointReadRoute::Scan;
     };
 
-    // 1. A conjunction (or single leaf) that binds every PK component by equality.
-    if let Some(values) = full_pk_equality(filter, &pk_cols) {
-        return PointReadRoute::PartitionPointRead(values);
+    let mut acc = RouteAcc::new(pk_cols.len());
+    if !collect_route(filter, &pk_cols, &mut acc) {
+        return PointReadRoute::Scan;
     }
 
-    // 2. `IN` over a single-component partition key → N single-key lookups.
-    //    (A composite-PK `IN` is a cartesian expansion we deliberately do not
-    //    take here; it falls through to Scan.)
+    match acc.multi_group {
+        // A multi-key group (`IN` / `Or`) fully specifies the PK by itself. Any
+        // additional PK equality binding is a SECOND, different key-group under
+        // the same `And` — conservatively fall back to the (always-correct) scan
+        // path rather than intersect the two groups.
+        Some(keys) => {
+            if acc.bindings.iter().any(Option::is_some) {
+                return PointReadRoute::Scan;
+            }
+            // Dedup the candidate keys BEFORE applying the cap (issue #2207): a
+            // duplicate-heavy `IN` list must not over-fall-back to Scan when its
+            // distinct-key count is within the cap (the merger dedups too).
+            capped_multi_point_read(dedup_keys(keys))
+        }
+        // No multi-group: a plain full-PK equality routes; a partial (or empty)
+        // PK binding cannot point-read.
+        None => match acc.bindings.into_iter().collect::<Option<Vec<Value>>>() {
+            Some(values) => PointReadRoute::PartitionPointRead(values),
+            None => PointReadRoute::Scan,
+        },
+    }
+}
+
+/// Accumulator threaded through the conjunct walk: PK equality bindings (in
+/// schema order) plus at most one extracted multi-key group.
+struct RouteAcc {
+    /// One slot per PK component; `Some` once bound by an `=` conjunct.
+    bindings: Vec<Option<Value>>,
+    /// The single extracted `IN`/`Or` key-group, if any.
+    multi_group: Option<Vec<Vec<Value>>>,
+    /// How many multi-key groups have been seen (>1 disqualifies the route).
+    multi_group_count: usize,
+}
+
+impl RouteAcc {
+    fn new(pk_len: usize) -> Self {
+        RouteAcc {
+            bindings: vec![None; pk_len],
+            multi_group: None,
+            multi_group_count: 0,
+        }
+    }
+
+    /// Record an `=` binding for PK component `idx`. Returns `false` (disqualify)
+    /// on a conflicting second value for the same component.
+    fn bind(&mut self, idx: usize, value: Value) -> bool {
+        match &self.bindings[idx] {
+            Some(existing) if existing != &value => false,
+            _ => {
+                self.bindings[idx] = Some(value);
+                true
+            }
+        }
+    }
+
+    /// Record an extracted multi-key group. Returns `false` (disqualify) if a
+    /// second, different key-group is seen under the same `And`.
+    fn add_multi_group(&mut self, keys: Vec<Vec<Value>>) -> bool {
+        self.multi_group_count += 1;
+        if self.multi_group_count > 1 {
+            return false;
+        }
+        self.multi_group = Some(keys);
+        true
+    }
+}
+
+/// Walk the (possibly nested) conjunction, filling `acc`. Returns `false`
+/// (disqualifying the point route) if ANY partition-key column is constrained by
+/// a shape that is not a single `=` binding or an extractable key-group (a
+/// range, a conflicting binding, a second key-group, an `IsNull`/`Not` on a PK
+/// column, or an `Or` over PK columns that is not a clean full-PK disjunction).
+///
+/// Non-partition-key nodes are ignored for routing — they remain a residual
+/// per-row filter — so `pk = ? AND col > ?` and `pk IN (?) AND col > ?` route.
+fn collect_route(expr: &FilterExpr, pk_cols: &[&str], acc: &mut RouteAcc) -> bool {
+    match expr {
+        FilterExpr::And(children) => children.iter().all(|c| collect_route(c, pk_cols, acc)),
+        FilterExpr::Leaf(pred) => classify_leaf(pred, pk_cols, acc),
+        // An `Or` over PK columns is only routable as a full-PK disjunction key
+        // group; one purely over non-PK columns is an ignorable residual.
+        FilterExpr::Or(disjuncts) => {
+            if !mentions_pk_expr(expr, pk_cols) {
+                return true;
+            }
+            match or_of_full_pk_equalities(disjuncts, pk_cols) {
+                Some(keys) => acc.add_multi_group(keys),
+                None => false,
+            }
+        }
+        // A `Not`/`IsNull` touching a PK column disqualifies; over non-PK columns
+        // it is an ignorable residual.
+        FilterExpr::Not(inner) => !mentions_pk_expr(inner, pk_cols),
+        FilterExpr::IsNull(column) => !pk_cols.contains(&column.as_str()),
+    }
+}
+
+/// Classify a single leaf conjunct into `acc`. A single-component full-PK `IN`
+/// becomes a multi-key group; a PK-column `=` becomes a binding; a non-PK leaf
+/// is an ignorable residual; anything else on a PK column disqualifies.
+fn classify_leaf(pred: &SSTablePredicate, pk_cols: &[&str], acc: &mut RouteAcc) -> bool {
+    // A single-component partition key bound by `IN` → N single-key lookups.
+    // (A composite-PK `IN` is a cartesian expansion we deliberately do not take;
+    // it falls through to the PK-column check below and disqualifies.)
     if pk_cols.len() == 1 {
-        if let Some(keys) = single_pk_in_list(filter, pk_cols[0]) {
-            return capped_multi_point_read(keys);
+        if let Some(keys) = sole_pk_in_leaf(pred, pk_cols[0]) {
+            return acc.add_multi_group(keys);
         }
     }
-
-    // 3. An `Or` whose every disjunct is itself a full-PK equality.
-    if let FilterExpr::Or(disjuncts) = filter {
-        if let Some(keys) = or_of_full_pk_equalities(disjuncts, &pk_cols) {
-            return capped_multi_point_read(keys);
+    match pk_component_index(pred, pk_cols) {
+        // A leaf on a non-PK column is an ignorable residual — unless it is a
+        // token predicate that references a PK column, which disqualifies.
+        None => !mentions_pk_predicate(pred, pk_cols),
+        Some(idx) => {
+            // A PK-column leaf must be a plain single-value equality.
+            if !is_single_equality(pred) {
+                return false;
+            }
+            acc.bind(idx, pred.values[0].clone())
         }
     }
-
-    PointReadRoute::Scan
 }
 
 /// Route `keys` as [`PointReadRoute::MultiPartitionPointRead`], or fall back to
@@ -98,70 +215,39 @@ fn capped_multi_point_read(keys: Vec<Vec<Value>>) -> PointReadRoute {
     PointReadRoute::MultiPartitionPointRead(keys)
 }
 
+/// Order-preserving dedup of candidate keys. `Value` is only `PartialEq` (it may
+/// hold floats), so a hash-set is unavailable; the list is bounded by the cap
+/// check that follows, so the linear scan is cheap.
+fn dedup_keys(keys: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(keys.len());
+    for k in keys {
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
+}
+
 /// Return the PK component values (in schema order) iff `filter` is a
 /// conjunction of leaves that bind EVERY partition-key column by a single
 /// equality, with no other (dis-qualifying) constraint on any PK column.
 fn full_pk_equality(filter: &FilterExpr, pk_cols: &[&str]) -> Option<Vec<Value>> {
-    let mut bindings: Vec<Option<Value>> = vec![None; pk_cols.len()];
-    if !collect_pk_equalities(filter, pk_cols, &mut bindings) {
+    let mut acc = RouteAcc::new(pk_cols.len());
+    if !collect_route(filter, pk_cols, &mut acc) {
         return None;
     }
-    // Every component must be bound exactly once.
-    bindings.into_iter().collect::<Option<Vec<Value>>>()
-}
-
-/// Walk a conjunction, recording PK-column equality bindings. Returns `false`
-/// (disqualifying the point route) if ANY partition-key column is constrained by
-/// something other than a single top-level `=` conjunct (a range/`IN`, an
-/// `IsNull`, an appearance under `Or`/`Not`, or a conflicting second binding).
-///
-/// Non-partition-key nodes are ignored for routing (they remain a residual
-/// per-row filter), so `pk = ? AND col > ?` still routes on the PK equality.
-fn collect_pk_equalities(
-    expr: &FilterExpr,
-    pk_cols: &[&str],
-    bindings: &mut [Option<Value>],
-) -> bool {
-    match expr {
-        FilterExpr::And(children) => children
-            .iter()
-            .all(|c| collect_pk_equalities(c, pk_cols, bindings)),
-        FilterExpr::Leaf(pred) => {
-            match pk_component_index(pred, pk_cols) {
-                // A leaf on a non-PK column is an ignorable residual.
-                None => !mentions_pk_predicate(pred, pk_cols),
-                Some(idx) => {
-                    // A PK-column leaf must be a plain single-value equality.
-                    if !is_single_equality(pred) {
-                        return false;
-                    }
-                    let value = pred.values[0].clone();
-                    match &bindings[idx] {
-                        // Conflicting second binding for the same component.
-                        Some(existing) if existing != &value => false,
-                        _ => {
-                            bindings[idx] = Some(value);
-                            true
-                        }
-                    }
-                }
-            }
-        }
-        // Any Or/Not/IsNull that touches a PK column disqualifies the point route;
-        // one that is purely over non-PK columns is an ignorable residual.
-        FilterExpr::Or(_) | FilterExpr::Not(_) | FilterExpr::IsNull(_) => {
-            !mentions_pk_expr(expr, pk_cols)
-        }
-    }
-}
-
-/// Return the bound-value lists for `pk IN (v1, v2, ...)` iff `filter` is exactly
-/// that single-column `IN` leaf on the sole partition-key column (with no other
-/// constraint). Each returned key is a one-element `Vec<Value>`.
-fn single_pk_in_list(filter: &FilterExpr, pk_col: &str) -> Option<Vec<Vec<Value>>> {
-    let FilterExpr::Leaf(pred) = filter else {
+    // A disjunct is a full-PK equality only when it is exactly that: every
+    // component bound by `=`, no extracted sub-group.
+    if acc.multi_group.is_some() {
         return None;
-    };
+    }
+    acc.bindings.into_iter().collect::<Option<Vec<Value>>>()
+}
+
+/// Return the bound-value lists for `pk IN (v1, v2, ...)` iff `pred` is that
+/// single-column `IN` leaf on the sole partition-key column. Each returned key
+/// is a one-element `Vec<Value>`.
+fn sole_pk_in_leaf(pred: &SSTablePredicate, pk_col: &str) -> Option<Vec<Vec<Value>>> {
     if pred.token_columns.is_some()
         || pred.column != pk_col
         || !matches!(pred.operation, SSTableFilterOp::In)
