@@ -262,6 +262,32 @@ fn duplicate_consistent_pk_equality_is_point_route() {
     );
 }
 
+/// The design's fixed named cap (`MAX_MULTI_PARTITION_POINT_READ_KEYS = 64` in
+/// `point_read.rs`, design.md open question 2): an `IN` list AT the cap still
+/// routes as N point reads.
+#[test]
+fn full_pk_in_list_at_cap_is_still_multi_point_route() {
+    let schema = single_pk_schema();
+    let values: Vec<i32> = (0..64).collect();
+    let route = detect_route(Some(&in_list("a", &values)), &schema);
+    match route {
+        PointReadRoute::MultiPartitionPointRead(keys) => assert_eq!(keys.len(), 64),
+        other => panic!("expected MultiPartitionPointRead at the cap, got {other:?}"),
+    }
+}
+
+/// An `IN` list ONE OVER the cap falls back to `Scan` — never a wrong answer,
+/// just the faster path for a very large list.
+#[test]
+fn full_pk_in_list_over_cap_falls_back_to_scan() {
+    let schema = single_pk_schema();
+    let values: Vec<i32> = (0..65).collect();
+    assert_eq!(
+        detect_route(Some(&in_list("a", &values)), &schema),
+        PointReadRoute::Scan
+    );
+}
+
 #[test]
 fn token_predicate_on_pk_keeps_scan() {
     let schema = single_pk_schema();

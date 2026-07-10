@@ -15,8 +15,9 @@ use crate::producer::{DirSource, MergeProducer, ProducerError, SstableSource};
 use crate::testutil::{
     build_sstables, clustering_schema, delete_row, simple_schema, write_clustered, write_row,
 };
-use crate::ticket::{FlightTicket, Predicate, PredicateOp};
+use crate::ticket::{FlightTicket, Predicate, PredicateExpr, PredicateOp};
 
+use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::write_engine::merge::MergeStep;
 use cqlite_core::storage::write_engine::{build_single_partition_merger, KWayMerger, PartitionKey};
@@ -155,6 +156,132 @@ fn full_pk_in_list_is_bounded_by_the_listed_keys() {
         .unwrap()
         .expect("some present");
     assert_eq!(count_partitions(merger), 3, "bounded by the 3 listed keys");
+}
+
+/// SUGGESTION (roborev, issue #2207): `pk IN (5, 5)` must not double-seek the
+/// same partition — a duplicate key in the requested set is deduped BEFORE
+/// probing, so the merge sees exactly ONE `MergeEntry` for that partition per
+/// candidate SSTable, never two. Note: `merge_partition_rows`'s per-cluster
+/// reconciliation already absorbs a redundant same-run duplicate for THIS
+/// fixture shape without a wrong final answer (this test also passes without
+/// the dedup canonicalization) — so this is a no-op-safety + work-avoidance
+/// regression guard (the SUGGESTION's actual "double-seek" concern), not a
+/// red-then-green correctness proof.
+#[test]
+fn duplicate_in_list_key_does_not_double_seek_the_partition() {
+    let schema = clustering_schema();
+    let (_t, _d, dir) = build_sstables(&schema, vec![vec![write_clustered(3, "a", 1, 100)]]);
+    let paths = DirSource::new(&dir).data_paths().unwrap();
+
+    let key = int_pk_bytes(&schema, "pk", 3);
+    // The exact same key requested twice.
+    let merger =
+        build_single_partition_merger(paths, &[key.clone(), key], &schema, ScanCancel::default())
+            .unwrap()
+            .expect("the partition is present");
+
+    let mut steps = 0;
+    let mut row_count = 0;
+    let mut m = merger;
+    while let MergeStep::Partition { rows, .. } = m.step().unwrap() {
+        steps += 1;
+        row_count += rows.len();
+    }
+    assert_eq!(steps, 1, "a duplicated key must still yield ONE partition");
+    assert_eq!(
+        row_count, 1,
+        "a duplicated key must not duplicate the partition's single clustering row"
+    );
+}
+
+/// The Murmur3 token for `column = v` under `schema`, via the same public
+/// `PartitionKey::to_decorated_key` the routing/merge machinery uses.
+fn token_of(schema: &TableSchema, column: &str, v: i32) -> i64 {
+    PartitionKey::single(column, Value::Integer(v))
+        .to_decorated_key(schema)
+        .expect("decorate key")
+        .token
+}
+
+/// **BLOCKER regression** (roborev on f75dccc2): a multi-key point read (`IN` /
+/// `Or`) combines each candidate SSTable's seeked rows in REQUESTED-KEY order,
+/// not token order. `KWayMerger::step`/`refill_heap` require every run to yield
+/// entries in ascending `MergeEntry` order (token, key, clustering) —
+/// `refill_heap` buffers only ONE entry per run at a time and relies on that
+/// invariant. An out-of-order run causes `step()` to split one run's
+/// contribution across two heap pops: partitions can duplicate, and a newer
+/// generation's overwrite/tombstone can stop shadowing the older generation
+/// (split reconciliation).
+///
+/// This fixture requests 3 keys in the EXACT REVERSE of their natural ascending
+/// token order (computed, not guessed) — the worst-case mismatch — with one key
+/// overwritten and one row-tombstoned in a newer generation, and asserts the
+/// point path is byte-identical to the scan path (and matches the expected
+/// post-reconciliation rows directly).
+#[test]
+fn point_path_in_list_out_of_token_order_matches_scan_across_generations() {
+    let schema = simple_schema();
+    let ids = [5, 9, 13];
+
+    // gen1: all three present.
+    let gen1 = vec![
+        write_row(ids[0], "a1", 1, 100),
+        write_row(ids[1], "b1", 1, 100),
+        write_row(ids[2], "c1", 1, 100),
+    ];
+    // gen2: ids[1] overwritten (newer ts); ids[2] row-tombstoned (newer ts).
+    let gen2 = vec![write_row(ids[1], "b2", 2, 200), delete_row(ids[2], 300)];
+    let (_t, _d, dir) = build_sstables(&schema, vec![gen1, gen2]);
+
+    // Natural ascending token order for the 3 distinct ids, then request them in
+    // the EXACT REVERSE — deliberately mismatched (never "happens to align").
+    let mut by_token: Vec<i32> = ids.to_vec();
+    by_token.sort_by_key(|&v| token_of(&schema, "id", v));
+    let request_order: Vec<i32> = by_token.iter().rev().copied().collect();
+    assert_ne!(
+        request_order, by_token,
+        "3 distinct ids' reverse token order must differ from ascending order (test setup)"
+    );
+
+    let ticket = FlightTicket {
+        keyspace: "flight_ks".into(),
+        table: "items".into(),
+        filter: Some(PredicateExpr::In {
+            column: "id".into(),
+            values: request_order.iter().map(|v| json!(v)).collect(),
+        }),
+        ..Default::default()
+    };
+    let spec = ScanSpec::from_ticket(&ticket, &schema).unwrap();
+
+    let scan_producer = MergeProducer::with_spec(schema.clone(), 4, spec.clone()).unwrap();
+    let scan_batches = scan_producer
+        .produce_from_paths(DirSource::new(&dir).data_paths().unwrap())
+        .unwrap();
+
+    let point_producer = MergeProducer::with_spec(schema.clone(), 4, spec).unwrap();
+    let paths = point_producer.resolve_paths(&DirSource::new(&dir)).unwrap();
+    let point_batches = point_producer
+        .produce_streaming_to_vec(paths, &CancelFlag::new())
+        .unwrap();
+
+    assert_eq!(
+        simple_rows(&point_batches),
+        simple_rows(&scan_batches),
+        "an out-of-token-order IN-list point read must be byte-identical to the scan path"
+    );
+    // Concretely: ids[0] is untouched (gen1 live), ids[1] is the gen2 overwrite,
+    // ids[2] is tombstoned (absent from the result).
+    let expected = vec![
+        (ids[0], Some("a1".to_string()), Some(1)),
+        (ids[1], Some("b2".to_string()), Some(2)),
+    ];
+    assert_eq!(
+        simple_rows(&point_batches),
+        expected,
+        "reconciliation must survive the out-of-token-order combine: ids[1] shows the \
+         gen2 overwrite (b2/2), ids[2] is shadowed by its gen2 tombstone"
+    );
 }
 
 // ---- Stage 3.1/3.2: dual-path byte-parity over a tombstoned multi-gen corpus ----

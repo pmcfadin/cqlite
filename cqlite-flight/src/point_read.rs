@@ -17,6 +17,18 @@ use cqlite_core::query::{SSTableFilterOp, SSTablePredicate};
 use cqlite_core::schema::TableSchema;
 use cqlite_core::types::Value;
 
+/// Maximum number of keys a full-PK `IN` list / `Or`-of-equalities may route as
+/// [`PointReadRoute::MultiPartitionPointRead`] (design.md open question 2, fixed
+/// named cap per the design's recommendation). Above this bound, N separate
+/// per-SSTable seeks (each paying its own presence-oracle + index-descent cost)
+/// stop being cheaper than one full k-way scan with a per-row `IN` filter, so
+/// the route falls back to [`PointReadRoute::Scan`] instead — never a wrong
+/// answer, just the faster path for a very large list. Chosen generously (a
+/// typical pushed `IN` list is single/low-double-digit; Cassandra's own CQL
+/// driver default page/batch sizes sit well under this) so ordinary `IN`
+/// pushdowns are unaffected.
+const MAX_MULTI_PARTITION_POINT_READ_KEYS: usize = 64;
+
 /// The routing decision computed from a ticket's lowered filter + schema.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PointReadRoute {
@@ -62,18 +74,28 @@ pub fn detect_route(filter: Option<&FilterExpr>, schema: &TableSchema) -> PointR
     //    take here; it falls through to Scan.)
     if pk_cols.len() == 1 {
         if let Some(keys) = single_pk_in_list(filter, pk_cols[0]) {
-            return PointReadRoute::MultiPartitionPointRead(keys);
+            return capped_multi_point_read(keys);
         }
     }
 
     // 3. An `Or` whose every disjunct is itself a full-PK equality.
     if let FilterExpr::Or(disjuncts) = filter {
         if let Some(keys) = or_of_full_pk_equalities(disjuncts, &pk_cols) {
-            return PointReadRoute::MultiPartitionPointRead(keys);
+            return capped_multi_point_read(keys);
         }
     }
 
     PointReadRoute::Scan
+}
+
+/// Route `keys` as [`PointReadRoute::MultiPartitionPointRead`], or fall back to
+/// [`PointReadRoute::Scan`] when the list exceeds
+/// [`MAX_MULTI_PARTITION_POINT_READ_KEYS`] (design.md open question 2).
+fn capped_multi_point_read(keys: Vec<Vec<Value>>) -> PointReadRoute {
+    if keys.len() > MAX_MULTI_PARTITION_POINT_READ_KEYS {
+        return PointReadRoute::Scan;
+    }
+    PointReadRoute::MultiPartitionPointRead(keys)
 }
 
 /// Return the PK component values (in schema order) iff `filter` is a

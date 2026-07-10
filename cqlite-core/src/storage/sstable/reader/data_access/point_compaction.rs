@@ -25,6 +25,26 @@ use crate::Result;
 use std::ops::ControlFlow;
 
 /// Outcome of a single-partition candidate probe against one SSTable.
+///
+/// **The three-way absence-vs-failure invariant** (roborev, issue #2207 — state
+/// this here, not just in prose elsewhere, since it is the correctness spine
+/// every caller relies on):
+///
+/// - [`DefinitelyAbsent`](Self::DefinitelyAbsent) is returned **ONLY** on an
+///   exact presence-oracle negative (a bloom `might_contain == false`, or a BTI
+///   trie miss) — the ONE case that may prune a candidate SSTable from the read.
+/// - [`IndexUnavailable`](Self::IndexUnavailable) is returned for **EVERY OTHER
+///   kind of resolution/read anomaly**: no random-access index at all, an
+///   inconclusive BIG Index.db miss (#1572), an unreadable/corrupt index (a BTI
+///   trie parse error or an Index.db read error — roborev IMPORTANT-1), an
+///   un-boundable last partition, or a resolved offset the materialized window
+///   never reached (a bad end bound / truncated-SSTable shape — roborev MEDIUM).
+///   None of these may EVER collapse to `DefinitelyAbsent` or an empty `Rows` —
+///   only a genuine, fully-materialized decode may report absence.
+/// - [`Rows`](Self::Rows) is returned only once a seek has been FULLY EXECUTED
+///   (the window reached and covered the target partition's bytes end-to-end)
+///   — an empty `Vec` here means a confirmed prefix-collision candidate for an
+///   absent key, decoded and verified, not "we could not tell."
 #[derive(Debug)]
 pub enum SinglePartitionCompaction {
     /// The presence oracle proved the key is definitively absent from this
@@ -34,10 +54,10 @@ pub enum SinglePartitionCompaction {
     /// missing.
     DefinitelyAbsent,
     /// The key MIGHT be present but this SSTable has no usable random-access index
-    /// (Summary/Index absent, a #1572-style inconclusive index miss, or a last
-    /// partition whose extent cannot be bounded authoritatively). The caller MUST
-    /// read this SSTable — scanning its partitions and filtering to the key —
-    /// never skip it. The missing index degrades speed, never correctness (#2295).
+    /// (Summary/Index absent, a #1572-style inconclusive index miss, an
+    /// unreadable/corrupt index, or a resolved offset the window never reached).
+    /// The caller MUST read this SSTable — scanning its partitions and filtering
+    /// to the key — never skip it. Degrades speed, never correctness (#2295).
     IndexUnavailable,
     /// The partition was seeked and decoded. `rows` are its compaction rows
     /// (tombstones preserved), byte-identical to the full-scan stream restricted
@@ -87,27 +107,58 @@ impl SSTableReader {
         }
 
         // 3. Resolve the target partition's UNCOMPRESSED Data.db start offset.
+        //
+        //    Fail-safe (roborev IMPORTANT-1, #2207 spec): an unreadable/corrupt
+        //    index (BTI trie parse error, Index.db read error) degrades to
+        //    `IndexUnavailable` — this SSTable is scanned in full and filtered,
+        //    never a hard-failed query. The scan path never consults this index
+        //    at all, so a broken index here must not turn a query the scan path
+        //    would still answer into an `Err`.
         let is_bti = self.is_bti();
         let offset = if is_bti {
-            match self.lookup_partition_via_bti_trie(partition_key)? {
-                Some(off) => off,
+            match self.lookup_partition_via_bti_trie(partition_key) {
+                Ok(Some(off)) => off,
                 // A BTI trie miss is AUTHORITATIVE absence (the oracle above should
                 // have pruned already; this is a defensive authoritative-empty).
-                None => return Ok(SinglePartitionCompaction::Rows(Vec::new())),
+                Ok(None) => return Ok(SinglePartitionCompaction::Rows(Vec::new())),
+                Err(e) => {
+                    tracing::debug!(
+                        "BTI Partitions.db trie lookup failed during point read; \
+                         falling back to a full scan of this SSTable (#2207 fail-safe): {e}"
+                    );
+                    return Ok(SinglePartitionCompaction::IndexUnavailable);
+                }
             }
         } else {
-            match self.lookup_partition_with_index(partition_key).await? {
-                Some((off, _size)) => off,
+            match self.lookup_partition_with_index(partition_key).await {
+                Ok(Some((off, _size))) => off,
                 // A BIG Index.db miss is NOT a definitive absent (#1572): a
                 // truncated/partial map can drop an entry for a present partition.
                 // Degrade to a full scan of this SSTable, never a wrong empty.
-                None => return Ok(SinglePartitionCompaction::IndexUnavailable),
+                Ok(None) => return Ok(SinglePartitionCompaction::IndexUnavailable),
+                Err(e) => {
+                    tracing::debug!(
+                        "Index.db lookup failed during point read; falling back to a \
+                         full scan of this SSTable (#2207 fail-safe): {e}"
+                    );
+                    return Ok(SinglePartitionCompaction::IndexUnavailable);
+                }
             }
         };
 
         // 4. Authoritative exclusive end of the target partition: the successor
         //    partition's start (next trie/index entry), or `None` for the last.
-        let end_bound = self.successor_partition_offset(offset)?;
+        //    Same fail-safe class as step 3 — it reads the same index/trie.
+        let end_bound = match self.successor_partition_offset(offset) {
+            Ok(bound) => bound,
+            Err(e) => {
+                tracing::debug!(
+                    "successor-partition resolution failed during point read; falling \
+                     back to a full scan of this SSTable (#2207 fail-safe): {e}"
+                );
+                return Ok(SinglePartitionCompaction::IndexUnavailable);
+            }
+        };
 
         // 5. Materialize `[offset, end)` decompressed and parse the one partition.
         match self
@@ -181,8 +232,18 @@ impl SSTableReader {
         };
 
         if within >= window.len() {
-            // Nothing decodable at the resolved offset — treat as absent here.
-            return Ok(Some(Vec::new()));
+            // MEDIUM fix (roborev, issue #2207): the materialized window did NOT
+            // reach the resolved offset — e.g. `pull_chunk_window` hit EOF before
+            // `end`, or a bad/stale end bound, on a truncated or corrupt SSTable.
+            // This is NOT the same signal as a genuine prefix-collision absence
+            // (below): there we decoded the FULL partition and confirmed it is a
+            // different key; here we could not even reach the target bytes to
+            // check. Treating this as "found nothing" would be a false-negative
+            // prune — the SAME wrong-rows class the presence-oracle spine forbids
+            // (spec: only an exact bloom negative may prune). Signal `None` so the
+            // caller degrades to `IndexUnavailable` (scan this SSTable), never a
+            // silent empty.
+            return Ok(None);
         }
 
         // Parse the FIRST partition at `window[within..]`. Collect every row whose

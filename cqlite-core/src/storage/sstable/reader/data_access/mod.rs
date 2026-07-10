@@ -57,6 +57,11 @@ mod model;
 // primitives it composes (`successor_partition_offset`, `point_read_whole_section`).
 #[cfg(not(feature = "tombstones"))]
 mod point_compaction;
+// Fail-safe proof (issue #2207, roborev IMPORTANT-1): a corrupt/unreadable BTI
+// Partitions.db must degrade the point-read primitive to a scan-fallback signal,
+// never a hard `Err`. Needs `write-support` to synthesize a BTI fixture.
+#[cfg(all(test, not(feature = "tombstones"), feature = "write-support"))]
+mod point_compaction_fail_safe_tests;
 // Opt-in presence-oracle false-negative verification method (issue #2163), kept
 // out of this already-large entry-point file (campsite rule, epic #1116).
 mod presence_verify;

@@ -162,6 +162,19 @@ pub fn build_single_partition_merger(
     if keys.is_empty() {
         return Ok(None);
     }
+
+    // Canonicalize the requested key set (roborev suggestion, issue #2207):
+    // dedup identical raw keys — a `pk IN (5, 5)` ticket must not double-seek the
+    // same partition — and sort by Murmur3 token, the natural probing order
+    // (matches the ascending order `MergeEntry::Ord` requires each run to
+    // yield). Correctness does not depend on this order (each candidate's
+    // combined entries are sorted again below before wrapping in `VecRun`), but
+    // canonicalizing up front avoids redundant work and reads more naturally.
+    let mut canonical: Vec<Vec<u8>> = keys.to_vec();
+    canonical.sort_by_key(|k| crate::util::cassandra_murmur3::cassandra_murmur3_token(k));
+    canonical.dedup();
+    let keys: &[Vec<u8>] = &canonical;
+
     let key_set: std::collections::HashSet<Vec<u8>> = keys.iter().cloned().collect();
 
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
@@ -178,13 +191,26 @@ pub fn build_single_partition_merger(
                 if rows.is_empty() {
                     continue;
                 }
-                let mut entries = VecDeque::with_capacity(rows.len());
+                let mut entries: Vec<MergeEntry> = Vec::with_capacity(rows.len());
                 for row in rows {
-                    entries.push_back(SSTableRowIteratorAdapter::build_merge_entry(
+                    entries.push(SSTableRowIteratorAdapter::build_merge_entry(
                         run_index, row, schema,
                     )?);
                 }
-                runs.push(Box::new(VecRun { entries }));
+                // BLOCKER fix (roborev, issue #2207): `rows` was accumulated in
+                // REQUESTED-KEY order (IN-list / Or order), not token order. Every
+                // `SSTableRowIterator` MUST yield entries in ascending `MergeEntry`
+                // order (token, key, clustering) — `refill_heap` buffers only ONE
+                // entry per run at a time and relies on that invariant (mod.rs
+                // `step`/`refill_heap`). An out-of-order run causes `step()` to
+                // silently split one run's contribution across two heap pops,
+                // duplicating rows and breaking cross-generation reconciliation
+                // (a newer generation's overwrite/tombstone no longer shadows the
+                // older one). Sort once, here, before wrapping in `VecRun`.
+                entries.sort();
+                runs.push(Box::new(VecRun {
+                    entries: entries.into(),
+                }));
             }
             PathProbe::NeedsScan => {
                 // Fail-safe: scan this ONE SSTable, forwarding only the target
