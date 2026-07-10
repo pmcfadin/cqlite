@@ -917,6 +917,71 @@ fn corrupt_partition_body_refused_not_silently_emptied() {
     );
 }
 
+/// FINDING (issue #2302, roborev job 1612): the degraded-state WARN must key on
+/// Index.db availability, NOT Summary.db presence. When Summary.db is PRESENT but
+/// Index.db is genuinely ABSENT, the reader still cannot use the full-index
+/// random-read path (a present Summary.db only samples ~1-in-128 partitions and
+/// never gates that path) and drops into `sequential_scan` — the exact silent
+/// full-scan perf cliff this issue kills. It must WARN loud, not fall through
+/// quietly just because Summary.db happened to load.
+///
+/// RED before the fix (verified): the old branch chain only warned when
+/// `summary_reader.is_none()`, so a present-Summary/absent-Index pair emitted NO
+/// #2302 WARN — this test's WARN assertion fails on the pre-fix code.
+///
+/// GREEN: the WARN branch now fires whenever the BIG reader has no usable
+/// `index_reader` (Index.db unusable) regardless of Summary.db, and the sequential
+/// fallback still returns every partition.
+#[test]
+#[serial_test::serial]
+fn summary_present_index_absent_warns_and_falls_back() {
+    let mut n_rows = 0usize;
+    let events = capture_events(|| async {
+        let temp = TempDir::new().unwrap();
+        let n = 200i32;
+        let data_path = write_fixture(&temp, n).await;
+
+        // Remove ONLY the Index.db (genuinely absent, not present-but-unloadable);
+        // Summary.db stays intact so `summary_reader` loads.
+        let dir = data_path.parent().unwrap();
+        let index_path = find_index_db(dir);
+        std::fs::remove_file(&index_path).unwrap();
+
+        let reader = open_reader(&data_path).await;
+        // Summary.db still loaded → has_partition_index() reports true, yet the
+        // full-index path is unavailable (Index.db gone): the degraded case.
+        assert!(
+            reader.has_partition_index(),
+            "Summary.db must still load (present-Summary / absent-Index path)"
+        );
+        let rows = reader.iterate_all_partitions().await.unwrap();
+        n_rows = rows.len();
+
+        // Correctness preserved: the sequential fallback recovers every partition
+        // from the intact Data.db.
+        assert_eq!(
+            rows.len(),
+            n as usize,
+            "the loud fallback must recover every partition from an intact Data.db"
+        );
+    });
+
+    // The degraded state was NOT silent: the "no usable random-access partition
+    // index" WARN naming issue #2302 fired even though Summary.db was present.
+    let warned = events.iter().any(|e| {
+        e.level == Level::WARN
+            && e.message
+                .contains("no usable random-access partition index")
+            && e.message.contains("#2302")
+    });
+    assert!(
+        warned,
+        "a present-Summary / absent-Index BIG SSTable must emit a loud degraded-state \
+         WARN (issue #2302, roborev job 1612), never a silent sequential_scan fallback. \
+         Rows: {n_rows}. Captured: {events:?}"
+    );
+}
+
 /// FINDING 2 (issue #2302, roborev job 1610): `parse_one_partition_for_compaction`'s
 /// `at_final_chunk = true` leniency collapses "consumed every byte but never saw
 /// an explicit END_OF_PARTITION marker" into the SAME `Emitted(consumed)` as a

@@ -600,46 +600,49 @@ impl SSTableReader {
                     );
                 }
             }
-        } else if self.index_present_but_unloadable && self.bti_partitions_db.is_none() {
-            // FINDING 2 (issue #2302, roborev job 1606): the sibling Index.db EXISTS
-            // on disk but failed to open/parse (so `index_reader` is None for a
-            // present-but-unusable reason, distinct from a genuinely absent file).
-            // Combined with a loaded Summary.db this is the exact silent-degradation
-            // class this issue exists to kill — the read still works (sequential
-            // scan below) but at the full-scan perf cliff, so name it LOUD rather
-            // than falling back silently. An absent Index.db stays quiet (expected
-            // for some shapes) and is handled by the next branch / not at all.
-            tracing::warn!(
-                "SSTable Index.db is present on disk but failed to open/parse \
-                 (Summary.db loaded); iterate_all_partitions cannot use the \
-                 index-random-read path and falls back to a full sequential scan of \
-                 Data.db (a per-read perf cliff, issue #2302). The Index.db component \
-                 may be malformed or truncated — regenerate the SSTable or restore an \
-                 intact Index.db."
-            );
-        } else if self.summary_reader.is_none() && self.bti_partitions_db.is_none() {
-            // No Summary.db was loaded AND this is not a BTI SSTable (which
-            // legitimately carries its index in Partitions.db, not Summary.db).
-            // That means a BIG-format SSTable is missing the random-access index
-            // components, so every partition iteration must fully materialize and
-            // sort Data.db via `sequential_scan` — a real per-read perf cliff
-            // (issue #2295). This is the field symptom of a snapshot directory
-            // served with only Data.db: name the absent components and the
-            // consequence so an operator can spot an incomplete snapshot instead
-            // of silently paying the full-scan cost on every read.
-            let missing = if self.index_reader.is_none() {
-                "Index.db and Summary.db"
+        } else if self.bti_partitions_db.is_none() {
+            // BIG SSTable with NO usable `index_reader` (this branch is only reached
+            // when `index_reader.is_none()`): the full-index random-read path cannot
+            // run, so every iteration falls into the sequential Data.db scan below — a
+            // real per-read perf cliff. The WARN trigger keys on Index.db availability,
+            // NOT Summary.db presence (roborev job 1612): a present Summary.db only
+            // samples ~1-in-128 partitions and never gates the full-index path, so a
+            // present-Summary/missing-Index pair is the SAME silent degradation this
+            // issue exists to kill and must be named LOUD, never dropped silently into
+            // `sequential_scan`. The sub-cause (failed-to-open vs genuinely absent)
+            // only shapes the message.
+            if self.index_present_but_unloadable {
+                // The sibling Index.db EXISTS on disk but failed to open/parse
+                // (issue #2302, roborev job 1606): distinct from a genuinely absent
+                // file — the component is malformed/truncated.
+                tracing::warn!(
+                    "SSTable Index.db is present on disk but failed to open/parse \
+                     (iterate_all_partitions cannot use the index-random-read path) \
+                     and falls back to a full sequential scan of Data.db (a per-read \
+                     perf cliff, issue #2302). The Index.db component may be malformed \
+                     or truncated — regenerate the SSTable or restore an intact Index.db."
+                );
             } else {
-                "Summary.db"
-            };
-            tracing::warn!(
-                "SSTable has no random-access partition index ({missing} absent): \
-                 iterate_all_partitions falls back to a full sequential scan of \
-                 Data.db, materializing and sorting every partition on each read \
-                 (a per-read perf cliff, issue #2295). For snapshot reads, ensure \
-                 the snapshot directory holds the full SSTable component set \
-                 (Index.db + Summary.db), not just Data.db."
-            );
+                // Index.db genuinely absent. Whether or not Summary.db loaded, the
+                // full-index path is unavailable, so this is still the degraded
+                // full-scan cliff (issues #2295/#2302). Name the absent components so
+                // an operator can spot an incomplete snapshot directory served with
+                // only Data.db (or Data.db + Summary.db) instead of silently paying
+                // the full-scan cost on every read.
+                let missing = if self.summary_reader.is_none() {
+                    "Index.db and Summary.db"
+                } else {
+                    "Index.db"
+                };
+                tracing::warn!(
+                    "SSTable has no usable random-access partition index ({missing} \
+                     absent): iterate_all_partitions falls back to a full sequential \
+                     scan of Data.db, materializing and sorting every partition on \
+                     each read (a per-read perf cliff, issues #2295/#2302). For \
+                     snapshot reads, ensure the snapshot directory holds the full \
+                     SSTable component set (Index.db + Summary.db), not just Data.db."
+                );
+            }
         }
 
         // Fallback path: sequential walk of Data.db.
