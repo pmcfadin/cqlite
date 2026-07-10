@@ -204,6 +204,18 @@ load_big_keyvalue_table() {
     set -e
   fi
 
+  # Issue #2289 roborev finding (job 1601): `record_loader_provenance` for the
+  # SUCCESS case is deferred to a local variable here and only actually
+  # WRITTEN after the partition-estimate validation below passes — a prior
+  # revision wrote success provenance immediately after each loader path
+  # completed, BEFORE that validation ran, so a failed/vacuous estimate check
+  # (exit 1) still left an artifact claiming the loader had successfully
+  # produced loadtest.keyvalue. Applies to BOTH loader paths (cassandra-easy-
+  # stress incl. the local-cache case, and cqlsh-fallback); each loader's own
+  # FAILURE provenance (batch failure, fallback failure) is UNCHANGED — those
+  # already correctly record an explicit FAILED state before their own
+  # `exit 1`, so only the eventual SUCCESS claim needed to move.
+  local loader_provenance=""
   if [[ "$pull_rc" -eq 0 ]]; then
     [[ -n "$pull_outfile" ]] && rm -f "$pull_outfile"
     for batch in $(seq 1 "$BIG_TABLE_BATCHES"); do
@@ -231,9 +243,9 @@ load_big_keyvalue_table() {
       run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra nodetool flush loadtest
     done
     if [[ -n "$local_image_digest" ]]; then
-      record_loader_provenance "cassandra-easy-stress (local cached image $stress_image, $local_image_digest, no registry pull; $BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
+      loader_provenance="cassandra-easy-stress (local cached image $stress_image, $local_image_digest, no registry pull; $BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
     else
-      record_loader_provenance "cassandra-easy-stress ($BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
+      loader_provenance="cassandra-easy-stress ($BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
     fi
   else
     local pull_class
@@ -259,7 +271,7 @@ load_big_keyvalue_table() {
         record_loader_provenance "cqlsh-fallback FAILED (rc=$fallback_rc, image confirmed not-found: $not_found_evidence) — loadtest.keyvalue may be empty/partial/absent; no loader completed successfully this run"
         exit 1
       fi
-      record_loader_provenance "cqlsh-fallback (cassandra-easy-stress image confirmed not-found: $not_found_evidence; $((BIG_TABLE_PARTITIONS_PER_BATCH * BIG_TABLE_BATCHES)) rows inserted + flushed)"
+      loader_provenance="cqlsh-fallback (cassandra-easy-stress image confirmed not-found: $not_found_evidence; $((BIG_TABLE_PARTITIONS_PER_BATCH * BIG_TABLE_BATCHES)) rows inserted + flushed)"
     else
       # Any other pull failure (timeout rc=124, daemon-unreachable, auth, or
       # anything not on the not-found allowlist) is a REAL environment
@@ -288,8 +300,10 @@ load_big_keyvalue_table() {
   log "loadtest.keyvalue partition estimate (nodetool tablestats): ${estimate:-unknown}"
   if [[ -z "$estimate" ]] || (( estimate < 100000 )); then
     echo "FATAL: loadtest.keyvalue has fewer than 100k partitions (estimate: ${estimate:-unknown}) — the #2264 check would be vacuous" >&2
+    record_loader_provenance "${loader_provenance} — BUT partition-count validation FAILED (estimate: ${estimate:-unknown}, need >=100000): the #2264 check would be vacuous on this data; treat loadtest.keyvalue as NOT successfully produced this run"
     exit 1
   fi
+  record_loader_provenance "$loader_provenance"
 }
 
 # Bound for the cqlsh fallback's bulk INSERT batch (up to
