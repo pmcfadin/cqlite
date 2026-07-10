@@ -737,7 +737,7 @@ pub(crate) fn build_typed_value_array(
             Ok(Arc::new(Time64NanosecondArray::from(arr)))
         }
         CqlType::Decimal => {
-            let mut builder = arrow::array::Decimal128Builder::new()
+            let mut builder = arrow::array::Decimal128Builder::with_capacity(values.len())
                 .with_precision_and_scale(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)?;
             for opt in values {
                 let v = unwrap_frozen_value(*opt);
@@ -759,7 +759,7 @@ pub(crate) fn build_typed_value_array(
         }
         CqlType::Varint => {
             use num_bigint::BigInt;
-            let mut builder = arrow::array::Decimal128Builder::new()
+            let mut builder = arrow::array::Decimal128Builder::with_capacity(values.len())
                 .with_precision_and_scale(DECIMAL_MAX_PRECISION, 0)?;
             for opt in values {
                 let v = unwrap_frozen_value(*opt);
@@ -815,7 +815,7 @@ pub(crate) fn build_typed_value_array(
             Ok(Arc::new(StringArray::from(arr)))
         }
         CqlType::Uuid | CqlType::TimeUuid => {
-            let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
+            let mut builder = arrow::array::FixedSizeBinaryBuilder::with_capacity(values.len(), 16);
             for opt in values {
                 let v = unwrap_frozen_value(*opt);
                 match v {
@@ -837,9 +837,9 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Inet(bytes) => Ok(Some(ValueFormatter::format_value(&Value::Inet(
-                            bytes.clone(),
-                        )))),
+                        // `v` is already `&Value::Inet(_)`; format it in place —
+                        // no per-cell clone of the address bytes (issue #1496).
+                        inet @ Value::Inet(_) => Ok(Some(ValueFormatter::format_value(inet))),
                         Value::Null => Ok(None),
                         other => Err(ArrowConvertError::InvalidValue(format!(
                             "expected Inet value in element, got {:?}",
@@ -1609,24 +1609,19 @@ fn build_timestamp_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, Arr
 }
 
 fn build_uuid_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, ArrowConvertError> {
-    let values: Vec<Option<[u8; 16]>> = cells
-        .iter()
-        .map(|cell| match unwrap_frozen_value(*cell) {
-            None => Ok(None),
-            Some(Value::Uuid(uuid)) => Ok(Some(*uuid)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Uuid value, got {:?}",
-                col.name, other
-            ))),
-        })
-        .collect::<Result<Vec<Option<[u8; 16]>>, ArrowConvertError>>()?;
-
-    let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
-    for opt in values {
-        match opt {
-            Some(uuid) => builder.append_value(uuid)?,
-            None => builder.append_null(),
+    // Append UUID bytes straight into a capacity-hinted builder — no intermediate
+    // `Vec<Option<[u8; 16]>>` and no reallocating growth (issue #1496).
+    let mut builder = arrow::array::FixedSizeBinaryBuilder::with_capacity(cells.len(), 16);
+    for cell in cells {
+        match unwrap_frozen_value(*cell) {
+            None | Some(Value::Null) => builder.append_null(),
+            Some(Value::Uuid(uuid)) => builder.append_value(uuid)?,
+            Some(other) => {
+                return Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Uuid value, got {:?}",
+                    col.name, other
+                )));
+            }
         }
     }
     Ok(Arc::new(builder.finish()))
@@ -1673,7 +1668,7 @@ fn build_time64_ns_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, Arr
 /// Build an Arrow `Decimal128(38, DECIMAL_FIXED_SCALE)` array from
 /// `Value::Decimal { scale, unscaled }`.
 fn build_decimal128_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, ArrowConvertError> {
-    let mut builder = arrow::array::Decimal128Builder::new()
+    let mut builder = arrow::array::Decimal128Builder::with_capacity(cells.len())
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)?;
 
     for cell in cells {
@@ -1705,7 +1700,7 @@ fn build_varint_as_decimal128_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     use num_bigint::BigInt;
 
-    let mut builder = arrow::array::Decimal128Builder::new()
+    let mut builder = arrow::array::Decimal128Builder::with_capacity(cells.len())
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, 0)?;
 
     for cell in cells {
@@ -1776,7 +1771,7 @@ fn build_uuid_fixed_binary_array(
     col: &ColumnInfo,
     cells: Cells,
 ) -> Result<ArrayRef, ArrowConvertError> {
-    let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
+    let mut builder = arrow::array::FixedSizeBinaryBuilder::with_capacity(cells.len(), 16);
     for cell in cells {
         match unwrap_frozen_value(*cell) {
             Some(Value::Uuid(bytes)) => builder.append_value(bytes)?,
@@ -1798,9 +1793,9 @@ fn build_inet_utf8_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, Arr
         .iter()
         .map(|cell| match unwrap_frozen_value(*cell) {
             None => Ok(None),
-            Some(Value::Inet(bytes)) => Ok(Some(ValueFormatter::format_value(&Value::Inet(
-                bytes.clone(),
-            )))),
+            // Format the borrowed `&Value::Inet` in place — no per-cell clone of
+            // the address bytes (issue #1496).
+            Some(inet @ Value::Inet(_)) => Ok(Some(ValueFormatter::format_value(inet))),
             Some(Value::Null) => Ok(None),
             Some(other) => Err(ArrowConvertError::InvalidValue(format!(
                 "column '{}': expected Inet value, got {:?}",
