@@ -44,6 +44,8 @@ pub mod unit {
     pub const BYTES: &str = "By";
     /// Seconds (OTel prefers base-unit seconds for durations).
     pub const SECONDS: &str = "s";
+    /// A count of OS threads (UCUM annotation).
+    pub const THREADS: &str = "{thread}";
 }
 
 /// Bounded attribute keys for catalog metrics.
@@ -437,6 +439,20 @@ pub const COMPACTION_BUDGET_REQUESTED: &str = "cqlite.compaction.budget.requeste
 /// attributes.
 pub const COMPACTION_BUDGET_CONSUMED: &str = "cqlite.compaction.budget.consumed";
 
+/// `cqlite.merge.producer_threads` — gauge `{thread}` (issue #2316).
+///
+/// Live count of OS producer threads the k-way merge currently has open — one per
+/// input SSTable being scanned. The merge (shared by the write-engine
+/// compaction/maintenance path and the Flight `do_get` streaming egress) opens one
+/// producer thread per input; this gauge makes the previously-invisible per-merge
+/// thread cost observable, so the O(M) bound (issue #2316, replacing the old
+/// `M·num_cpus` amplification) is assertable on a loaded node. It RISES as a merge
+/// spawns its producers (bounded by `O(M)`) and RETURNS to its baseline once those
+/// producers are joined/dropped at merge completion. The metric name is coordinated
+/// with epic #2313 WS2 (the thread/blocking-pool metrics surface) to avoid a
+/// naming collision. No high-cardinality attributes.
+pub const MERGE_PRODUCER_THREADS: &str = "cqlite.merge.producer_threads";
+
 /// `cqlite.errors.total` — counter `{error}`.
 ///
 /// Total errors observed, the canonical error-rate signal (issue #1038).
@@ -548,6 +564,7 @@ pub const ALL_METRICS: &[&str] = &[
     COMPACTION_FINALIZE_DURATION,
     COMPACTION_BUDGET_REQUESTED,
     COMPACTION_BUDGET_CONSUMED,
+    MERGE_PRODUCER_THREADS,
     // Arrow Flight gRPC service (#1041)
     RPC_REQUESTS,
     RPC_DURATION,
@@ -603,5 +620,16 @@ mod tests {
         assert!(ALL_METRICS.contains(&RPC_PHASE_DURATION));
         assert!(RPC_PHASE_DURATION.starts_with("cqlite."));
         assert!(attr::RPC_PHASE.starts_with("cqlite."));
+    }
+
+    #[test]
+    fn merge_producer_threads_gauge_is_registered_and_documented() {
+        // Issue #2316: the merge producer-thread gauge must be part of the
+        // canonical catalog (so the registration/uniqueness checks cover it), be
+        // rooted under `cqlite.`, and carry the `{thread}` unit agreed with #2313 WS2.
+        assert!(ALL_METRICS.contains(&MERGE_PRODUCER_THREADS));
+        assert_eq!(MERGE_PRODUCER_THREADS, "cqlite.merge.producer_threads");
+        assert!(MERGE_PRODUCER_THREADS.starts_with("cqlite."));
+        assert_eq!(unit::THREADS, "{thread}");
     }
 }

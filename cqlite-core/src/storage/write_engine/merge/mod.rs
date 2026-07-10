@@ -371,9 +371,17 @@ pub(crate) use async_bridge::block_on_async;
 ///
 /// ## Issue #587 safety (async-from-sync bridge)
 ///
-/// The producer thread creates its own `tokio::runtime::Runtime` (never
-/// `Handle::block_on`), so it cannot panic even when called from within an
-/// existing Tokio runtime. This is the same strategy as [`block_on_async`].
+/// The producer thread creates its own Tokio runtime (never `Handle::block_on`),
+/// so it cannot panic even when called from within an existing Tokio runtime.
+/// This is the same strategy as [`block_on_async`].
+///
+/// ## Issue #2316 thread budget (O(M), no per-producer worker pool)
+///
+/// That per-producer runtime is a **`current_thread`** runtime, NOT a
+/// multi-threaded `Runtime::new()`: it drives the producer's single sequential
+/// scan (no internal `tokio::spawn`) on the producer thread itself, adding ZERO
+/// worker threads. A merge over `M` inputs therefore costs `O(M)` OS threads, not
+/// `M + M·num_cpus` — killing the context-switch storm under concurrent `do_get`.
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
     /// Receiving end of the bounded channel fed by the producer thread.
@@ -421,6 +429,11 @@ impl From<Error> for MergeProducerError {
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
+// Producer-thread gauge (issue #2316): live-count + RAII guard backing
+// `cqlite.merge.producer_threads`. Kept in a sibling module to bound this file.
+#[cfg(feature = "write-support")]
+mod producer_gauge;
+
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
     /// Open an SSTable and start a streaming producer thread.
@@ -451,9 +464,25 @@ impl SSTableRowIteratorAdapter {
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
-        // Spawn the producer thread. It owns a fresh Tokio runtime so it never
-        // collides with any runtime on the calling thread (Issue #587).
-        let producer = std::thread::spawn(move || {
+        // Issue #2316: account this producer on the `cqlite.merge.producer_threads`
+        // gauge BEFORE spawning, so the increment happens-before any possible
+        // decrement. The decrementing `ProducerThreadGuard` is created first thing
+        // inside the child thread (see `producer_thread`); a fast-exiting producer
+        // (e.g. a reader-open error) could otherwise race its own guard's drop
+        // against a post-spawn increment on the parent, transiently underflowing
+        // the live count. Incrementing here first makes the pairing
+        // correct-by-construction — no ordering race is possible.
+        producer_gauge::spawned();
+
+        // Spawn the producer thread via `Builder::spawn` (rather than the
+        // panic-on-failure `std::thread::spawn`) so an OS thread-creation failure
+        // is a recoverable `Err`, not a process abort: the gauge increment above
+        // must never leak for a thread that never actually started, so roll it
+        // back on this path via `producer_gauge::rollback`. The thread owns a
+        // fresh single-threaded (current_thread) Tokio runtime so it never
+        // collides with any runtime on the calling thread (Issue #587) and adds no
+        // worker threads beyond itself (Issue #2316).
+        let producer = match std::thread::Builder::new().spawn(move || {
             Self::producer_thread(
                 path_buf,
                 run_index,
@@ -462,7 +491,16 @@ impl SSTableRowIteratorAdapter {
                 scan_cancel,
                 sender,
             );
-        });
+        }) {
+            Ok(handle) => handle,
+            Err(e) => {
+                producer_gauge::rollback();
+                return Err(Error::Storage(format!(
+                    "streaming producer: failed to spawn thread: {}",
+                    e
+                )));
+            }
+        };
 
         Ok(Self {
             receiver,
@@ -490,10 +528,16 @@ impl SSTableRowIteratorAdapter {
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
     ) {
+        // Issue #2316: decrement the live producer-thread gauge when this thread
+        // exits (even on panic). Created FIRST so the spawn-time increment in
+        // `open` is always balanced exactly once.
+        let _thread_guard = producer_gauge::ProducerThreadGuard;
+
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
         // producer owns its single-purpose runtime, so the blocking
         // `SyncSender::send` inside the emit callback never stalls a shared
-        // runtime, and there is no nested `block_on` / `Handle::current`.
+        // runtime, and there is no nested `block_on` / `Handle::current`. The
+        // runtime is `current_thread` (Issue #2316), so it adds no worker threads.
         // Buffered I/O (Issue #591): the file must not be memory-mapped OR read
         // via direct I/O because finalize_merge_async may delete it after the
         // merge completes. The default disk-access mode is `Auto`, which would
@@ -516,12 +560,20 @@ impl SSTableRowIteratorAdapter {
             // `schema` stays available for build_merge_entry below.
             let schema_for_reader = schema.clone();
 
-            let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                Error::Storage(format!(
-                    "streaming producer: failed to create runtime: {}",
-                    e
-                ))
-            })?;
+            // Issue #2316: a `current_thread` runtime drives the scan ON this
+            // producer thread with ZERO extra workers. A multi-threaded
+            // `Runtime::new()` would spin up `num_cpus` workers per producer
+            // (~M·num_cpus threads/merge) that the single sequential scan never
+            // uses — pure overhead. This bounds the per-merge thread cost to O(M).
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    Error::Storage(format!(
+                        "streaming producer: failed to create runtime: {}",
+                        e
+                    ))
+                })?;
 
             rt.block_on(async move {
                 let platform = Arc::new(Platform::new(&config).await?);
