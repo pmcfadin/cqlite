@@ -32,7 +32,14 @@ observe_snapshot_listing() {
   local -a compose=("$@")
   log "Sidecar snapshot API: PUT loadtest.keyvalue snapshot '$SNAPSHOT_NAME' (same route as SidecarClient.createSnapshot)"
   local cassandra_cid
-  cassandra_cid="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" "${compose[@]}" ps -q cassandra)"
+  # `|| true` (issue #2289 roborev finding, job 1598 class sweep): mirrors
+  # field-repro.sh's `resolve_cassandra_cid()`, which already guards the
+  # identical lookup this way. Without it, a genuine compose/daemon error
+  # here (not just "cassandra isn't up yet", which the `-z` check below
+  # already handles gracefully) would abort the whole script RAW under
+  # `set -e`, instead of falling through to the intended graceful
+  # "could not resolve ... skipping" WARNING path.
+  cassandra_cid="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" "${compose[@]}" ps -q cassandra 2>/dev/null)" || true
   if [[ -z "$cassandra_cid" ]]; then
     echo "WARNING: could not resolve the cassandra container id — skipping snapshot-listing observation" >&2
     return 0

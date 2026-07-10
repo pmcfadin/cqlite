@@ -57,8 +57,14 @@ check_2264_limit5_midstream_cancel() {
 
   if [[ $rc -eq 0 ]]; then
     # Same CSV-quoting caveat as the #2193 check: count non-empty lines, not a
-    # digit-anchored pattern.
-    rows="$(echo "$out" | grep -c '.')"
+    # digit-anchored pattern. `grep -c` prints the count ("0" included) but
+    # EXITS 1 on zero matches — with errexit re-enabled by this function's
+    # own `set -e` above (issue #2289 roborev finding, job 1598 class sweep:
+    # a genuinely-empty `$out`, e.g. rc=0 with a zero-row result, would abort
+    # the whole script RAW here instead of reaching the "FAIL: wrong row
+    # count" message a few lines down). `|| true` neutralizes the exit code
+    # without affecting the captured count text.
+    rows="$(echo "$out" | grep -c '.' || true)"
     log "LIMIT 5 returned ${rows} row(s) in ${elapsed}s: $out"
     if [[ "$rows" -eq 5 ]]; then
       log "#2264: does NOT reproduce on this run (query returned correct row count promptly)"
