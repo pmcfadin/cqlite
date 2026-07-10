@@ -312,6 +312,7 @@ struct Instruments {
     memtable_rows: Gauge<i64>,
     compaction_lag: Gauge<i64>,
     rpc_in_flight: Gauge<i64>,
+    merge_producer_threads: Gauge<i64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -570,6 +571,11 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::DIMENSIONLESS)
                 .with_description("Arrow Flight RPCs currently being handled.")
                 .build(),
+            merge_producer_threads: m
+                .i64_gauge(catalog::MERGE_PRODUCER_THREADS)
+                .with_unit(catalog::unit::THREADS)
+                .with_description("Live k-way merge producer threads (#2316).")
+                .build(),
         }
     })
 }
@@ -658,6 +664,7 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
         catalog::MEMTABLE_ROWS => &i.memtable_rows,
         catalog::COMPACTION_LAG => &i.compaction_lag,
         catalog::RPC_IN_FLIGHT => &i.rpc_in_flight,
+        catalog::MERGE_PRODUCER_THREADS => &i.merge_producer_threads,
         _ => {
             meter().i64_gauge(name).build().record(value, attributes);
             return;

@@ -432,6 +432,42 @@ impl From<Error> for MergeProducerError {
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
+/// Live count of k-way-merge producer OS threads (issue #2316), backing the
+/// [`crate::observability::catalog::MERGE_PRODUCER_THREADS`] gauge. Incremented
+/// when a producer thread is spawned (in [`SSTableRowIteratorAdapter::open`]) and
+/// decremented when it exits (via [`ProducerThreadGuard`]); the gauge is
+/// re-recorded on each change, so it RISES as a merge spawns its `O(M)` producers
+/// and RETURNS to its baseline once the producers are joined/dropped.
+#[cfg(feature = "write-support")]
+static MERGE_PRODUCER_THREADS_LIVE: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Re-record the producer-thread gauge with the current live count.
+#[cfg(feature = "write-support")]
+fn record_producer_threads_gauge(live: i64) {
+    crate::observability::record_gauge(
+        crate::observability::catalog::MERGE_PRODUCER_THREADS,
+        live,
+        &[],
+    );
+}
+
+/// RAII guard that decrements the live producer-thread count (and re-records the
+/// gauge) when a producer thread exits — even on panic (issue #2316). Created as
+/// the first act of [`SSTableRowIteratorAdapter::producer_thread`], so every
+/// spawned producer that was counted at spawn is decremented exactly once at exit.
+#[cfg(feature = "write-support")]
+struct ProducerThreadGuard;
+
+#[cfg(feature = "write-support")]
+impl Drop for ProducerThreadGuard {
+    fn drop(&mut self) {
+        let live =
+            MERGE_PRODUCER_THREADS_LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1;
+        record_producer_threads_gauge(live);
+    }
+}
+
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
     /// Open an SSTable and start a streaming producer thread.
@@ -476,6 +512,14 @@ impl SSTableRowIteratorAdapter {
             );
         });
 
+        // Issue #2316: account the just-spawned producer thread on the
+        // `cqlite.merge.producer_threads` gauge. Decremented via
+        // `ProducerThreadGuard` when the producer thread exits, so the gauge rises
+        // to `O(M)` during the merge and returns to baseline once it completes.
+        let live =
+            MERGE_PRODUCER_THREADS_LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        record_producer_threads_gauge(live);
+
         Ok(Self {
             receiver,
             _producer: producer,
@@ -502,6 +546,11 @@ impl SSTableRowIteratorAdapter {
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
     ) {
+        // Issue #2316: decrement the live producer-thread gauge when this thread
+        // exits (even on panic). Created FIRST so the spawn-time increment in
+        // `open` is always balanced exactly once.
+        let _thread_guard = ProducerThreadGuard;
+
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
         // producer owns its single-purpose runtime, so the blocking
         // `SyncSender::send` inside the emit callback never stalls a shared
