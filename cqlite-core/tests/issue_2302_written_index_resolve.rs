@@ -201,6 +201,64 @@ async fn open_reader(data_path: &std::path::Path) -> SSTableReader {
         .unwrap()
 }
 
+/// Locate the `-Index.db` sibling next to a written `Data.db`.
+fn find_index_db(dir: &std::path::Path) -> std::path::PathBuf {
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        if e.file_name().to_string_lossy().ends_with("-Index.db") {
+            return e.path();
+        }
+    }
+    panic!("written fixture must have an Index.db in {}", dir.display());
+}
+
+/// Byte offset where every entry of a CQLite-written BIG `Index.db` begins.
+///
+/// Entry layout: `[key_len u16 BE][raw key][data_offset uvint][promoted_len uvint]`.
+/// The fixtures here write single-row partitions (no wide partitions), so every
+/// `promoted_len` is 0 (a single 0x00 byte) — asserted, to keep the truncation
+/// boundary math honest. Cassandra unsigned-vint length = 1 + (leading 1-bits of
+/// byte 0). Entries start at byte 0 (nb Index.db is headerless).
+fn entry_start_offsets(bytes: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        starts.push(pos);
+        let key_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        pos += 2 + key_len;
+        let off_len = 1 + bytes[pos].leading_ones() as usize;
+        pos += off_len;
+        assert_eq!(
+            bytes[pos], 0x00,
+            "fixture Index.db entries must carry promoted_len == 0"
+        );
+        pos += 1; // promoted_len == 0 -> single byte, no payload
+    }
+    starts
+}
+
+/// Run an async body under a `tracing` capture subscriber and return every event
+/// it emitted. Mirrors the inline pattern in
+/// `present_but_unresolvable_index_warns_and_falls_back`.
+fn capture_events<F, Fut>(body: F) -> Vec<CapturedEvent>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let events = Arc::new(Mutex::new(Vec::<CapturedEvent>::new()));
+    let subscriber = Registry::default().with(CaptureLayer {
+        events: Arc::clone(&events),
+    });
+    with_default(subscriber, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(body());
+    });
+    let out = events.lock().unwrap().clone();
+    out
+}
+
 /// The pinned regression: iterating a CQLite-WRITTEN Summary/Index pair must
 /// probe the Index.db (probes == partition count), not silently full-scan.
 ///
@@ -441,5 +499,189 @@ fn present_but_unresolvable_index_warns_and_falls_back() {
         warned,
         "a present-but-unresolvable Index.db must emit a loud WARN (issue #2302), \
          never a silent sequential_scan fallback. Captured: {captured:?}"
+    );
+}
+
+/// FINDING 1 (issue #2302, roborev job 1606): `IndexReader::open` accepts a
+/// truncated Index.db whose whole trailing entries were dropped at an EXACT entry
+/// boundary as a clean parsed PREFIX (no leftover bytes). The full-index walk must
+/// NOT treat that prefix as a COMPLETE enumeration — it must detect that the final
+/// entry's slice (bounded by the data-section end) spans MORE than one partition
+/// (the dropped tail) and bail to the LOUD sequential-scan fallback.
+///
+/// RED before the fix: the truncated index was silently accepted (no WARN). The
+/// last surviving entry's data-section-end backstop happened to still sweep up the
+/// dropped tail so the row set stayed complete, but the reader relied on an index
+/// it could not prove complete and emitted NO warning — this test's WARN assertion
+/// fails on the pre-fix code. GREEN after: the final-partition coverage check
+/// refuses the prefix, WARNs, and the sequential fallback returns every partition.
+#[test]
+#[serial_test::serial]
+fn boundary_truncated_index_refused_and_warns() {
+    let mut n_rows = 0usize;
+    let events = capture_events(|| async {
+        let temp = TempDir::new().unwrap();
+        let n = 200i32;
+        let data_path = write_fixture(&temp, n).await;
+
+        // Drop the LAST whole entry at its exact start offset: the surviving prefix
+        // is n-1 complete entries that parse cleanly to EOF (so `is_fully_parsed()`
+        // stays true — only the final-partition coverage check can catch this).
+        let dir = data_path.parent().unwrap();
+        let index_path = find_index_db(dir);
+        let bytes = std::fs::read(&index_path).unwrap();
+        let starts = entry_start_offsets(&bytes);
+        assert_eq!(
+            starts.len(),
+            n as usize,
+            "fixture Index.db must hold one entry per partition"
+        );
+        let last_start = *starts.last().unwrap();
+        std::fs::write(&index_path, &bytes[..last_start]).unwrap();
+
+        let reader = open_reader(&data_path).await;
+        let rows = reader.iterate_all_partitions().await.unwrap();
+        n_rows = rows.len();
+
+        // Correctness preserved: the sequential fallback still recovers every
+        // partition (the Data.db was untouched).
+        assert_eq!(
+            rows.len(),
+            n as usize,
+            "the loud fallback must recover every partition from an intact Data.db"
+        );
+    });
+
+    let warned = events.iter().any(|e| {
+        e.level == Level::WARN
+            && e.message.contains("Index.db is present")
+            && e.message.contains("#2302")
+    });
+    assert!(
+        warned,
+        "a boundary-truncated (incomplete) Index.db must be REFUSED with a loud WARN \
+         (issue #2302), never silently accepted as a complete enumeration. Rows \
+         recovered: {n_rows}. Captured: {events:?}"
+    );
+}
+
+/// FINDING 1 companion (Signal A): an Index.db cut MID-ENTRY leaves unparsed
+/// trailing bytes, so `IndexReader::open` returns a prefix with `is_fully_parsed()
+/// == false`. The walk must refuse it (WARN + sequential fallback), never accept a
+/// mid-entry-truncated prefix as complete. RED before the fix (no WARN).
+#[test]
+#[serial_test::serial]
+fn mid_entry_truncated_index_refused_and_warns() {
+    let mut n_rows = 0usize;
+    let events = capture_events(|| async {
+        let temp = TempDir::new().unwrap();
+        let n = 200i32;
+        let data_path = write_fixture(&temp, n).await;
+
+        // Cut the final byte (the last entry's promoted_len marker): the last entry
+        // no longer parses, so the parser stops with a NON-EMPTY remainder (the
+        // partial last entry) — `is_fully_parsed()` is false.
+        let dir = data_path.parent().unwrap();
+        let index_path = find_index_db(dir);
+        let bytes = std::fs::read(&index_path).unwrap();
+        std::fs::write(&index_path, &bytes[..bytes.len() - 1]).unwrap();
+
+        let reader = open_reader(&data_path).await;
+        let rows = reader.iterate_all_partitions().await.unwrap();
+        n_rows = rows.len();
+        assert_eq!(
+            rows.len(),
+            n as usize,
+            "the loud fallback must recover every partition from an intact Data.db"
+        );
+    });
+
+    let warned = events.iter().any(|e| {
+        e.level == Level::WARN
+            && e.message.contains("Index.db is present")
+            && e.message.contains("#2302")
+    });
+    assert!(
+        warned,
+        "a mid-entry-truncated Index.db must be REFUSED with a loud WARN (issue \
+         #2302). Rows recovered: {n_rows}. Captured: {events:?}"
+    );
+}
+
+/// FINDING 2 (issue #2302, roborev job 1606): when Summary.db loads but Index.db
+/// is PRESENT-but-unusable (open/parse fails), the reader must WARN loud — the
+/// exact silent-degradation this issue kills — distinct from a genuinely ABSENT
+/// Index.db (quiet, expected). Here the Index.db is truncated to zero bytes, so
+/// `IndexReader::open` fails with a corruption error (file exists, not NotFound).
+#[test]
+#[serial_test::serial]
+fn present_but_unloadable_index_warns_with_summary() {
+    let mut n_rows = 0usize;
+    let events = capture_events(|| async {
+        let temp = TempDir::new().unwrap();
+        let n = 200i32;
+        let data_path = write_fixture(&temp, n).await;
+
+        // Zero-length the Index.db: it EXISTS on disk but `IndexReader::open`
+        // errors (Corruption, not NotFound). Summary.db stays intact.
+        let dir = data_path.parent().unwrap();
+        let index_path = find_index_db(dir);
+        std::fs::write(&index_path, []).unwrap();
+
+        let reader = open_reader(&data_path).await;
+        assert!(
+            reader.has_partition_index(),
+            "Summary.db must still load (present-but-unusable Index.db path)"
+        );
+        let rows = reader.iterate_all_partitions().await.unwrap();
+        n_rows = rows.len();
+        assert_eq!(
+            rows.len(),
+            n as usize,
+            "the loud fallback must recover every partition from an intact Data.db"
+        );
+    });
+
+    let warned = events.iter().any(|e| {
+        e.level == Level::WARN
+            && e.message.contains("failed to open/parse")
+            && e.message.contains("#2302")
+    });
+    assert!(
+        warned,
+        "a present-but-unloadable Index.db (Summary.db loaded) must WARN loud \
+         (issue #2302), never silently full-scan. Rows: {n_rows}. Captured: {events:?}"
+    );
+}
+
+/// FINDING 2 negative control: a genuinely ABSENT Index.db (Summary.db present)
+/// must NOT emit the present-but-unloadable WARN — absence is quiet & expected.
+#[test]
+#[serial_test::serial]
+fn absent_index_does_not_warn_present_but_unloadable() {
+    let events = capture_events(|| async {
+        let temp = TempDir::new().unwrap();
+        let n = 200i32;
+        let data_path = write_fixture(&temp, n).await;
+
+        // Remove the Index.db entirely (genuinely absent); keep Summary.db.
+        let dir = data_path.parent().unwrap();
+        let index_path = find_index_db(dir);
+        std::fs::remove_file(&index_path).unwrap();
+
+        let reader = open_reader(&data_path).await;
+        let rows = reader.iterate_all_partitions().await.unwrap();
+        assert_eq!(rows.len(), n as usize, "fallback recovers every partition");
+    });
+
+    let spurious = events.iter().any(|e| {
+        e.level == Level::WARN
+            && e.message.contains("failed to open/parse")
+            && e.message.contains("#2302")
+    });
+    assert!(
+        !spurious,
+        "an absent Index.db must NOT trigger the present-but-unloadable WARN. \
+         Captured: {events:?}"
     );
 }

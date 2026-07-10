@@ -600,6 +600,23 @@ impl SSTableReader {
                     );
                 }
             }
+        } else if self.index_present_but_unloadable && self.bti_partitions_db.is_none() {
+            // FINDING 2 (issue #2302, roborev job 1606): the sibling Index.db EXISTS
+            // on disk but failed to open/parse (so `index_reader` is None for a
+            // present-but-unusable reason, distinct from a genuinely absent file).
+            // Combined with a loaded Summary.db this is the exact silent-degradation
+            // class this issue exists to kill — the read still works (sequential
+            // scan below) but at the full-scan perf cliff, so name it LOUD rather
+            // than falling back silently. An absent Index.db stays quiet (expected
+            // for some shapes) and is handled by the next branch / not at all.
+            tracing::warn!(
+                "SSTable Index.db is present on disk but failed to open/parse \
+                 (Summary.db loaded); iterate_all_partitions cannot use the \
+                 index-random-read path and falls back to a full sequential scan of \
+                 Data.db (a per-read perf cliff, issue #2302). The Index.db component \
+                 may be malformed or truncated — regenerate the SSTable or restore an \
+                 intact Index.db."
+            );
         } else if self.summary_reader.is_none() && self.bti_partitions_db.is_none() {
             // No Summary.db was loaded AND this is not a BTI SSTable (which
             // legitimately carries its index in Partitions.db, not Summary.db).

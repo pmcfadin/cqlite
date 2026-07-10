@@ -16,6 +16,8 @@
 
 use super::super::SSTableReader;
 use super::model::sort_by_token_order;
+use crate::schema::TableSchema;
+use crate::storage::sstable::reader::parsing::{ParseStep, V5CompressedLegacyParser};
 use crate::types::ScanRow;
 use crate::{Result, RowKey};
 
@@ -59,6 +61,18 @@ impl SSTableReader {
         };
         let entries = index_reader.get_partition_entries();
         if entries.is_empty() {
+            return Ok(None);
+        }
+
+        // Completeness Signal A (issue #2302, roborev job 1606): `IndexReader::open`
+        // accepts a truncated/partially-corrupt Index.db as a parsed PREFIX (it
+        // `break`s on the first unparseable entry). An index cut MID-ENTRY leaves
+        // unparsed trailing bytes, so `is_fully_parsed()` is false — the entry set is
+        // NOT a complete enumeration. Bail to the loud sequential-scan fallback
+        // rather than silently returning an under-enumerated "complete" set.
+        // (Boundary-aligned whole-entry drops leave no trailing bytes; those are
+        // caught below by the final-partition coverage check.)
+        if !index_reader.is_fully_parsed() {
             return Ok(None);
         }
 
@@ -137,6 +151,22 @@ impl SSTableReader {
                 self.read_uncompressed_verified(&self.file, absolute_offset, size as usize)
                     .await?
             };
+
+            // Completeness Signal B (issue #2302, roborev job 1606): the FINAL entry
+            // is bounded by `data_section_end` rather than a successor offset, so a
+            // boundary-aligned trailing-truncated Index.db (whole entries dropped —
+            // `is_fully_parsed()` still true, Signal A above cannot see it) would make
+            // this last slice silently span the DROPPED partitions. Authoritative
+            // invariant: every index entry bounds EXACTLY ONE partition, so the final
+            // slice must be exactly one partition. If a following partition header
+            // begins in the leftover bytes, the index is missing ≥1 trailing entry —
+            // not provably complete → bail to the loud sequential-scan fallback.
+            if i + 1 == entries.len()
+                && !self.last_index_partition_covers_slice(&parser, &raw, schema)?
+            {
+                return Ok(None);
+            }
+
             let parsed = parser.parse_block(&raw, schema, self)?;
             if parsed.is_empty() {
                 // An empty result is AMBIGUOUS. It is either (a) a partition that
@@ -172,5 +202,51 @@ impl SSTableReader {
         // this is effectively a no-op, but keep the ordering guarantee explicit).
         sort_by_token_order(&mut results);
         Ok(Some(results))
+    }
+
+    /// Authoritative coverage check for the FINAL index entry's Data.db slice
+    /// (issue #2302, roborev job 1606).
+    ///
+    /// Every BIG `Index.db` entry bounds EXACTLY ONE partition. Non-final entries
+    /// are bounded by their successor's offset (exactly one partition by
+    /// construction); the FINAL entry is bounded by the authoritative data-section
+    /// end, so a trailing-truncated index (whole entries dropped at an exact entry
+    /// boundary, which `IndexReader::open` accepts as a clean prefix) would make
+    /// this last slice silently span the DROPPED partitions too.
+    ///
+    /// Returns `Ok(true)` iff `raw` decodes to exactly one partition: parse ONE
+    /// physical partition from offset 0, then confirm the leftover bytes (if any)
+    /// do NOT begin a second partition header. A following header ⇒ the index
+    /// dropped ≥1 trailing entry ⇒ `Ok(false)` (caller bails to the loud
+    /// sequential-scan fallback). Leftover bytes that are NOT a header are benign
+    /// trailing framing, so one partition legitimately fills the slice. Structural,
+    /// schema-driven — no heuristics (issue #28).
+    fn last_index_partition_covers_slice(
+        &self,
+        parser: &V5CompressedLegacyParser,
+        raw: &[u8],
+        schema: Option<&TableSchema>,
+    ) -> Result<bool> {
+        // Physical single-partition parse: byte extent is independent of read
+        // shadowing, so the enumeration's `read_shadowing=true` parser is reused.
+        // `at_final_chunk=true`: `raw` is the whole final slice, never a mid-chunk
+        // fragment, so a complete partition reports `Emitted(consumed)`.
+        let mut noop = |_row| Ok(std::ops::ControlFlow::Continue(()));
+        let consumed =
+            match parser.parse_one_partition_for_compaction(raw, schema, self, true, &mut noop)? {
+                ParseStep::Emitted(consumed) if consumed > 0 => consumed,
+                // Could not structurally decode even one partition from the final
+                // slice: not provably complete — reject (caller falls back loud).
+                _ => return Ok(false),
+            };
+        if consumed >= raw.len() {
+            // One partition filled the slice exactly: complete coverage.
+            return Ok(true);
+        }
+        // Bytes remain after the first partition. If they begin ANOTHER valid
+        // partition header, the index is missing the entry that would have bounded
+        // it ⇒ incomplete. A parse error here means no header follows (benign
+        // trailing framing) ⇒ the single partition covers the slice.
+        Ok(parser.parse_partition_header_full(raw, consumed).is_err())
     }
 }

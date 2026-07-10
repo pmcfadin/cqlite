@@ -17,6 +17,19 @@ use tokio::io::{AsyncSeekExt, BufReader};
 
 use super::source::BlockSource;
 
+/// Outcome of loading a sibling `Index.db` (issue #2302): distinguishes a
+/// genuinely ABSENT file (quiet, expected) from a PRESENT-but-unloadable one
+/// (open/parse failure — a silent-degradation signal to surface loud, not fold
+/// into a bare `None`). Boxed reader keeps the enum small (large-variant lint).
+pub(super) enum IndexLoadOutcome {
+    /// Index.db opened and parsed.
+    Loaded(Box<IndexReader>),
+    /// No Index.db on disk (or the path/base-name could not be derived).
+    Absent,
+    /// Index.db exists on disk but `open` returned a non-`NotFound` error.
+    PresentButUnloadable,
+}
+
 impl SSTableReader {
     /// Load index from integrated or component-based format
     pub(super) async fn load_index(
@@ -180,18 +193,37 @@ impl SSTableReader {
     pub(super) async fn load_index_reader(
         path: &Path,
         platform: &Arc<Platform>,
-    ) -> Option<IndexReader> {
-        let base_name = extract_sstable_base_name(path)?;
-        let index_path = path.parent()?.join(format!("{}-Index.db", base_name));
+    ) -> IndexLoadOutcome {
+        let Some(base_name) = extract_sstable_base_name(path) else {
+            return IndexLoadOutcome::Absent;
+        };
+        let Some(parent) = path.parent() else {
+            return IndexLoadOutcome::Absent;
+        };
+        let index_path = parent.join(format!("{}-Index.db", base_name));
 
         match IndexReader::open(&index_path, platform.clone()).await {
             Ok(reader) => {
                 tracing::debug!("Loaded Index.db reader for {}", index_path.display());
-                Some(reader)
+                IndexLoadOutcome::Loaded(Box::new(reader))
+            }
+            // A genuinely absent Index.db (some shapes legitimately ship without one)
+            // is quiet & expected. A PRESENT-but-unloadable Index.db (open/parse
+            // errored) is the silent-degradation class issue #2302 exists to kill:
+            // surface it so `iterate_all_partitions` can WARN loud rather than
+            // silently full-scan. `IndexReader::open` returns `NotFound` iff the file
+            // is absent, so the error kind is the authoritative discriminator.
+            Err(Error::NotFound(_)) => {
+                tracing::debug!("No Index.db present at {}", index_path.display());
+                IndexLoadOutcome::Absent
             }
             Err(e) => {
-                tracing::debug!("Failed to load Index.db reader: {}", e);
-                None
+                tracing::debug!(
+                    "Index.db present at {} but failed to load: {}",
+                    index_path.display(),
+                    e
+                );
+                IndexLoadOutcome::PresentButUnloadable
             }
         }
     }

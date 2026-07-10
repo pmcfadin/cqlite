@@ -659,12 +659,20 @@ impl SSTableReader {
             .instrument(tracing::debug_span!("sstable.reader.open.load_bloom"))
             .await?;
 
-        // Load spec readers for enhanced metadata and lookups
-        let index_reader = Self::load_index_reader(path, &platform)
-            .instrument(tracing::debug_span!(
-                "sstable.reader.open.load_index_reader"
-            ))
-            .await;
+        // Load spec readers for enhanced metadata and lookups. Distinguish an absent
+        // Index.db from a present-but-unloadable one (issue #2302) so the full
+        // enumeration can WARN loud on the latter instead of silently full-scanning.
+        let (index_reader, index_present_but_unloadable) =
+            match Self::load_index_reader(path, &platform)
+                .instrument(tracing::debug_span!(
+                    "sstable.reader.open.load_index_reader"
+                ))
+                .await
+            {
+                component_loading::IndexLoadOutcome::Loaded(reader) => (Some(*reader), false),
+                component_loading::IndexLoadOutcome::Absent => (None, false),
+                component_loading::IndexLoadOutcome::PresentButUnloadable => (None, true),
+            };
         let summary_reader = Self::load_summary_reader(path, &platform)
             .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))
             .await;
@@ -815,6 +823,7 @@ impl SSTableReader {
             generation,
             actual_header_size: header_size,
             index_reader,
+            index_present_but_unloadable,
             summary_reader,
             endpoint_tokens,
             statistics_reader,
