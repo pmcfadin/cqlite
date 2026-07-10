@@ -2,7 +2,7 @@
 
 ## ADDED Requirements
 
-### Requirement: A pushed full-PK-equality predicate routes do_get to a partition point-read path
+### Requirement: A pushed full-PK-equality predicate SHALL route do_get to a partition point-read path
 
 When the predicate pushed into a Flight `do_get` ticket binds **every** partition-key component to
 a single value (a full-PK equality — or an `IN`/`Or` list of such full-PK equalities), the server
