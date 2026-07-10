@@ -16,9 +16,24 @@
 //! throughput under mixed load.
 //!
 //! On `origin/main` (pre-D2) decompression ran in the parse half under
-//! `spawn_blocking` for BOTH backends. The fix restructures the buffered feed loop
-//! to run its read+decode on a blocking context (mirroring the faulting backend),
-//! so the decode CPU never lands on the reactor for any backend.
+//! `spawn_blocking` for BOTH backends. The fix runs the feed loop on a
+//! `spawn_blocking` thread, so the decode CPU never lands on the reactor.
+//!
+//! ## Follow-on restructure (issue #1940): synchronous read, no nested async
+//!
+//! The feed initially still drove the read with
+//! `futures::executor::block_on(read_next_block_parts(..))` on the blocking thread.
+//! For the buffered backend that `tokio::fs` read RE-DISPATCHED the actual `read(2)`
+//! to a SECOND tokio blocking-pool thread (~3 blocking threads per scan). rust-
+//! reviewer proved it bounded (ncpu cap ≪ 512), but roborev flagged a latent hang
+//! under a small custom `max_blocking_threads`. Owner decision: REMOVE the hazard
+//! class — the feed now reads SYNCHRONOUSLY via the reader's positional
+//! `point_source` (`pread` on a dedicated `std::fs::File` for buffered; a resident
+//! slice for mmap; an aligned pread for `O_DIRECT`). No `tokio::fs`, no `block_on`,
+//! ZERO blocking-pool amplification. The read AND the decode now co-locate on ONE
+//! `spawn_blocking` thread. This guard therefore ALSO asserts that co-location: the
+//! recorded read thread equals the recorded decode thread, proving nothing dispatched
+//! the read (or decode) onto another thread mid-feed.
 //!
 //! ## Why a thread-identity guard (not a wall-clock p99)
 //!
@@ -207,6 +222,7 @@ async fn buffered_scan_decode_runs_off_async_worker_pool() {
     scan_offload_probe::arm();
     let rows = drain_one_scan(&db, &sql).await;
     let decode_thread = scan_offload_probe::recorded_decode_thread();
+    let io_read_thread = scan_offload_probe::recorded_io_read_thread();
     scan_offload_probe::disarm();
 
     // Non-vacuous: a present fixture must return rows AND must have routed through
@@ -237,5 +253,30 @@ async fn buffered_scan_decode_runs_off_async_worker_pool() {
          buffered backend that loop ran inline on the reactor, putting full-scan decode CPU back \
          on the async worker pool (the Epic F regression). Restructure the buffered feed to run \
          its read+decode on a blocking context (mirroring the faulting backend)."
+    );
+
+    // No-nesting guard (issue #1940 restructure): the synchronous positional read
+    // and the decode now co-locate on ONE spawn_blocking thread. The read thread
+    // must ALSO be off the async worker pool, and — because no `block_on`/`tokio::fs`
+    // dispatches the read (or decode) elsewhere mid-feed — it must be the SAME thread
+    // the decode ran on. If a future change reintroduced a nested async read (e.g.
+    // `block_on(tokio::fs read)`), the read would run on a DIFFERENT blocking-pool
+    // thread than this feed thread, breaking this equality.
+    let io_read_thread = io_read_thread.expect(
+        "Issue #1940: scan_offload_probe recorded no IO-read thread — the windowed feed did not \
+         run, so the no-nesting guard would be vacuous.",
+    );
+    assert!(
+        !workers.contains(&io_read_thread),
+        "Issue #1940 REGRESSION: the buffered-backend windowed scan's chunk READ ran on async \
+         worker thread {io_read_thread:?} (one of {workers:?}) instead of a spawn_blocking thread."
+    );
+    assert_eq!(
+        io_read_thread, decode_thread,
+        "Issue #1940 REGRESSION: the windowed feed's synchronous read ({io_read_thread:?}) and its \
+         decode ({decode_thread:?}) ran on DIFFERENT threads — something dispatched the read (or \
+         decode) off the feed thread mid-loop (a reintroduced `block_on`/`tokio::fs` nesting, the \
+         exact blocking-pool amplification the #1940 restructure removed). The synchronous \
+         positional read + decode must co-locate on ONE spawn_blocking thread."
     );
 }

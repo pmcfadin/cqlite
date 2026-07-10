@@ -716,8 +716,9 @@ impl SSTableReader {
     /// in-buffer slice, which is what lets the whole-section fallback read its bytes
     /// exactly once. This is the single place the chunk geometry, mismatch error,
     /// and memoization live — the two public verify entry points differ ONLY in how
-    /// they source each chunk's bytes.
-    fn verify_covering_chunks(
+    /// they source each chunk's bytes. Module-visible so the windowed scan's
+    /// synchronous uncompressed piece reader shares the same memoized path (#1940).
+    pub(in crate::storage::sstable::reader) fn verify_covering_chunks(
         &self,
         crc: &super::crc::CrcDb,
         start: u64,
