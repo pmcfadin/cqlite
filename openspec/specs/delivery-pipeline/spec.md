@@ -80,16 +80,25 @@ SHALL NOT introduce a weaker done bar.
 
 ### Requirement: Delivery telemetry ledger
 The workflow SHALL maintain an append-only telemetry ledger at
-`docs/reports/delivery-telemetry.jsonl` (one JSON record per line, one record per completed
-issue) governed by a versioned JSON Schema at `docs/reports/delivery-telemetry.schema.json`.
-A telemetry tool (`scripts/delivery-telemetry.py`) SHALL provide a `record` subcommand that
-builds a schema-valid record and appends exactly one line, and a `lint` (alias `validate`)
-subcommand that schema-validates every line and exits non-zero naming any malformed line.
+`docs/reports/delivery-telemetry.jsonl` (one JSON record per line, one record per delivery
+cycle — the (issue, pr) pair) governed by a versioned JSON Schema at
+`docs/reports/delivery-telemetry.schema.json`. A reopened issue that ships more than once
+legitimately produces one record per shipped PR; retro aggregation by issue treats such
+multi-cycle issues as multiple deliveries, not one (issue #2314). A telemetry tool
+(`scripts/delivery-telemetry.py`) SHALL provide a `record` subcommand that builds a
+schema-valid record and appends exactly one line, and a `lint` (alias `validate`)
+subcommand that schema-validates every line — including rejecting a duplicate (issue, pr)
+pair — and exits non-zero naming any malformed line.
 
 #### Scenario: Record subcommand appends one schema-valid line
-- **WHEN** `delivery-telemetry.py record` is run for a completed issue (GitHub-derived fields supplied via `--from-json` in tests, or pulled live from `gh`) with the required run counters
+- **WHEN** `delivery-telemetry.py record` is run for a completed delivery cycle (GitHub-derived fields supplied via `--from-json` in tests, or pulled live from `gh`) with the required run counters
 - **THEN** it appends exactly one JSON line to the ledger that validates against `delivery-telemetry.schema.json`
 - **AND** the record carries the issue/PR numbers, routing, priority, the GitHub timestamps, the durations computed from those timestamps, and the supplied counters
+
+#### Scenario: Reopened issue shipping again is a new delivery cycle, not a duplicate
+- **WHEN** an issue already has a ledger record and is later reopened and ships again under a different PR
+- **THEN** `delivery-telemetry.py record` appends the new record without requiring `--allow-duplicate`
+- **AND** `lint`/`validate` accepts both records as distinct delivery cycles, keyed on (issue, pr)
 
 #### Scenario: Lint rejects a malformed record
 - **WHEN** `delivery-telemetry.py lint` runs against a ledger containing a line that violates the schema
@@ -108,13 +117,14 @@ are permitted; a counter that was not observed SHALL NOT be defaulted to a fabri
 - **AND** every numeric field in a written record traces to a supplied counter or to arithmetic over GitHub-sourced timestamps
 
 ### Requirement: Finalize stamps the ledger
-`flow-finalize` SHALL, as a step on a merged issue, write the issue's telemetry record by
-invoking the `record` subcommand, so that every issue completed through the pipeline produces
-exactly one ledger record.
+`flow-finalize` SHALL, as a step on a merged PR, write that delivery cycle's telemetry record
+by invoking the `record` subcommand, so that every (issue, pr) delivery cycle completed
+through the pipeline produces exactly one ledger record. An issue merged more than once (a
+reopen cycle) produces one record per merged PR, not one total.
 
-#### Scenario: Finalize produces one record per completed issue
-- **WHEN** `flow-finalize` completes for a merged issue
-- **THEN** the ledger gains exactly one new record for that issue
+#### Scenario: Finalize produces one record per delivery cycle
+- **WHEN** `flow-finalize` completes for a merged PR
+- **THEN** the ledger gains exactly one new record for that (issue, pr) delivery cycle
 - **AND** that record passes `lint`
 
 ### Requirement: Recurring retro ranks failures and files a deduped improvement issue

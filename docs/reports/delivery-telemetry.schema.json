@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/pmcfadin/cqlite/docs/reports/delivery-telemetry.schema.json",
   "title": "Delivery telemetry ledger record (v1)",
-  "description": "One record per completed delivery-pipeline issue. Authoritative data only: every field is an observed event (GitHub timestamp/label or a supplied run counter) or arithmetic over authoritative timestamps. No value is inferred, estimated, or guessed.",
+  "description": "One record per delivery cycle (issue, pr). A reopened issue that ships more than once legitimately produces one record per shipped PR — retro aggregation by issue treats such multi-cycle issues as multiple deliveries. Authoritative data only: every field is an observed event (GitHub timestamp/label or a supplied run counter) or arithmetic over authoritative timestamps. No value is inferred, estimated, or guessed.",
   "type": "object",
   "additionalProperties": false,
   "required": [
