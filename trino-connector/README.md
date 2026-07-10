@@ -331,10 +331,12 @@ It connects over the shared bridge to Cassandra (`172.42.0.2:9042`, datacenter `
 ~5-row tables — it has never caught a field-only defect. `docker/field-repro.sh`
 is a SEPARATE, slower script (never invoked by `e2e-test.sh`, and vice versa)
 that loads field-shaped data (a `>=100k`-partition `loadtest.keyvalue` table
-across multiple SSTable generations, plus the exact 3-row/1-flush/`nb-1-big`/LZ4
-`tiny` shape), snapshots via the real Sidecar API, and runs the two pinned
-repro checks for #2264 (`LIMIT 5` mid-stream cancel / `do_get` channel
-saturation) and #2193 (tiny-table arrow-java decode):
+across multiple SSTable generations, plus a second `cassandra_easy_stress.keyvalue`
+table — the EXACT `key text PRIMARY KEY, value text`/3-row/1-flush/`nb-1-big`/LZ4
+shape pinned by the `keyvalue.flightdata` Flight-level decode golden above, not
+a lookalike), snapshots via the real Sidecar API, and runs the two pinned repro
+checks for #2264 (`LIMIT 5` mid-stream cancel / `do_get` channel saturation) and
+#2193 (`cassandra_easy_stress.keyvalue` arrow-java decode, same shape as the golden):
 
 ```bash
 docker/field-repro.sh                            # native platform

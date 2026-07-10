@@ -192,12 +192,27 @@ capture_artifacts() {
 
 # Wraps a check function with tcpdump-during + capture-on-fail-after. `$1` is
 # a label used for both the pcap filename and the artifacts subdir.
+#
+# `LAST_CAPTURE_STARTED` (global, issue #2289 roborev finding, 2026-07-10):
+# whether THIS invocation's capture container actually started, not merely
+# whether a Cassandra container id was resolvable. `CASSANDRA_CID` being
+# non-empty only means a capture COULD be attempted — the capture container
+# itself can still fail to start (image pull failure on an air-gapped host,
+# arch mismatch, docker run error), and the old check-on-`CASSANDRA_CID`
+# would then wrongly demand a pcap that was never possible. The final
+# `--inject-failure` verdict reads this flag instead.
+LAST_CAPTURE_STARTED=0
 run_check() {
   local name="$1"; shift
   local pcap="/tmp/field-repro-${name}.pcap"
   rm -f "$pcap" 2>/dev/null || true
   local tcpdump_handle=""
   tcpdump_handle="$(start_tcpdump "$name")"
+  if [[ -n "$tcpdump_handle" ]]; then
+    LAST_CAPTURE_STARTED=1
+  else
+    LAST_CAPTURE_STARTED=0
+  fi
   set +e
   "$@"
   local rc=$?
@@ -296,8 +311,8 @@ source "$DOCKER_DIR/field-repro-load.sh"
 load_tiny_table "$ROOT" "${COMPOSE[@]}"
 load_big_keyvalue_table "${COMPOSE[@]}"
 
-log "wait for the connector to resolve fieldrepro.tiny via Sidecar"
-wait_for_resolve "fieldrepro.tiny" "SELECT * FROM cqlite.fieldrepro.tiny LIMIT 1" || exit 1
+log "wait for the connector to resolve cassandra_easy_stress.keyvalue via Sidecar"
+wait_for_resolve "cassandra_easy_stress.keyvalue" "SELECT * FROM cqlite.cassandra_easy_stress.keyvalue LIMIT 1" || exit 1
 
 log "wait for the connector to resolve loadtest.keyvalue"
 wait_for_resolve "loadtest.keyvalue" "SELECT key FROM cqlite.loadtest.keyvalue LIMIT 1" || exit 1
@@ -338,10 +353,13 @@ if [[ -n "$INJECT_FAILURE" ]]; then
   fi
   missing=()
   [[ -f "$latest/cqlite-flight-debug.log" ]] || missing+=("cqlite-flight-debug.log")
-  # The pcap is required only when a capture container could run (CASSANDRA_CID
-  # resolved); an air-gapped host without the tcpdump image legitimately has no
-  # pcap and must not fail the self-test on that alone.
-  if [[ -n "$CASSANDRA_CID" ]]; then
+  # The pcap is required only when THIS check's capture container actually
+  # started (`LAST_CAPTURE_STARTED`, set by `run_check`) — not merely when a
+  # Cassandra container id was resolvable. `CASSANDRA_CID` non-empty does not
+  # guarantee the capture container itself started (image pull failure,
+  # air-gapped host, arch mismatch); demanding a pcap on that weaker signal
+  # would false-FAIL a legitimately capture-less self-test run.
+  if [[ "$LAST_CAPTURE_STARTED" -eq 1 ]]; then
     [[ -f "$latest/flight-8815.pcap" ]] || missing+=("flight-8815.pcap")
   fi
   if [[ ${#missing[@]} -ne 0 ]]; then
