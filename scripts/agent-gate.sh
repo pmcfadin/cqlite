@@ -82,17 +82,19 @@
 #                      in DATASET_COMPONENTS). Fails CLOSED on a vacuous 0-run:
 #                      asserts the reported test count is > 0 so a renamed/removed
 #                      target can't read as PASS.
-#   memory-budget      cargo test -p cqlite-core --features cli-helpers,dhat-heap
-#                      --test memory_budget -- --test-threads=1 (issue #1565, Epic
-#                      A/A4). dhat allocation/peak-heap regression net over the real
-#                      read path: pins today's measured full-scan total-bytes
-#                      (~209 MB, ceiling 252 MB) and materializing peak-heap
-#                      (~4.9 MB, ceiling 6 MB, also asserted < 128 MiB) as Epic-E
-#                      ratchet targets. Requires the dhat-heap feature (installs the
-#                      dhat global allocator, confined to this one test binary) and
-#                      --test-threads=1 (dhat::Profiler is a process-global
-#                      singleton). Dataset-dependent: fails closed on empty (each
-#                      test asserts >=1 row before reading dhat stats).
+#   memory-budget      dhat allocation/peak-heap regression nets (dhat-heap;
+#                      --test-threads=1 since dhat::Profiler is a process-global
+#                      singleton). Three lanes: (a) read path — memory_budget.rs
+#                      (issue #1565, Epic A/A4), pinning full-scan total-bytes
+#                      (~209 MB, ceiling 252 MB) + materializing peak (~4.9 MB,
+#                      ceiling 6 MB, also < 128 MiB); (b) export converter —
+#                      issue_1494_converter_alloc_budget.rs (issue #1494, AD5;
+#                      needs `arrow`), per-row CQL→Arrow alloc count; (c) Flight
+#                      producer — cqlite-flight issue_1494_producer_mem_budget.rs
+#                      (#1494), producer total/peak bytes. dhat counts are
+#                      machine-independent, so this is the hard, load-deterministic
+#                      export/Flight signal. Dataset-dependent lanes fail closed on
+#                      empty (assert >=1 row before reading dhat stats).
 #   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
 #                      (--no-run, whole package) then run the seven CI-enforced ones
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
@@ -3183,9 +3185,26 @@ dispatch_component() {
       --test issue_1578_streaming_aggregate_multigen_parity \
       --test issue_2069_global_aggregate_empty_table ;;
     arrow-parity-guard) run_component arrow-parity-guard run_arrow_parity_guard_cmd ;;
-    memory-budget) run_component memory-budget cargo test --package cqlite-core \
-      --features cli-helpers,dhat-heap \
-      --test memory_budget -- --test-threads=1 ;;
+    memory-budget) run_component memory-budget bash -c '
+  # Read-path dhat budgets (issue #1565) + the export/Flight dhat budgets
+  # (issue #1494, AD5): the converter per-row allocation guard (needs `arrow`)
+  # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap).
+  # dhat allocation counts are machine-independent, so these are the hard,
+  # load-deterministic per-gate signal for the export/Flight path.
+  #
+  # Run all three dhat lanes UNCONDITIONALLY and aggregate (issue #1494 roborev):
+  # `&&`-chaining short-circuits on the first failure and HIDES the others, costing
+  # an extra triage round. Each lane reports its own result to the log; the
+  # component FAILs if ANY lane failed (rc sticks at 1). --test-threads=1 is
+  # mandatory on every lane (the dhat profiler is a process-global allocator).
+  rc=0
+  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+    --test memory_budget -- --test-threads=1 || rc=1
+  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+    --test issue_1494_converter_alloc_budget -- --test-threads=1 || rc=1
+  cargo test --package cqlite-flight --features dhat-heap \
+    --test issue_1494_producer_mem_budget -- --test-threads=1 || rc=1
+  exit $rc' ;;
     integration-tests) run_component integration-tests bash -c '
   cargo test --package cqlite-integration-tests --no-run &&
   cargo test --package cqlite-integration-tests \

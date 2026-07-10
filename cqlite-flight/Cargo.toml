@@ -71,9 +71,21 @@ observability-testing = ["cqlite-core/observability-testing"]
 # --examples` build the lib with `test-util` on), following the same
 # feature-declaration convention as `observability-testing`.
 test-util = []
+# Test-only: install the dhat global allocator in the `issue_1494_producer_mem_budget`
+# test binary (issue #1494, AD5) so it can observe the Flight producer's total/peak
+# allocation. Never in defaults — it stays confined to that one gated test binary.
+dhat-heap = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Criterion for the end-to-end `flight_do_get` throughput bench (issue #1494,
+# AD5). ADVISORY perf-gate entry — its wall time is Tokio-runtime + tonic-
+# transport dominated (the `write/ingest_wal_on` precedent), so it is reported
+# but never fails CI; the hard signal for the producer path is the dhat budget.
+criterion = { workspace = true }
+# dhat allocator for the Flight-producer peak-memory budget test (issue #1494),
+# installed only under the `dhat-heap` feature in that one test binary.
+dhat = "0.3"
 # Self-referential dev-dependency enabling the `test-util` feature, so the
 # `examples/emit_arrow_golden.rs` example and the `tests/*` integration targets
 # can reach `cqlite_flight::test_fixtures` (the shared `keyvalue` byte-pin
@@ -87,6 +99,21 @@ cqlite-flight = { path = ".", features = ["test-util"] }
 # same committed golden to cross-check it against the live wire bytes; pinned
 # to the same prost line arrow-flight 53 uses so the `Message` impl unifies.
 prost = "0.13"
+
+# End-to-end Flight `do_get` throughput bench (issue #1494, AD5). Drives the
+# PUBLIC tonic `FlightService::do_get` RPC over a real loopback transport
+# (reusing the `tests/do_get_transport_test.rs` harness pattern) — wiring
+# evidence for the RPC path. ADVISORY perf-gate entry (`flight/do_get`).
+[[bench]]
+name = "flight_do_get"
+harness = false
+
+# Flight-producer allocation/peak-memory budget guard (issue #1494, AD5). dhat
+# global allocator in its OWN test binary; only built with `dhat-heap`. The
+# `memory-budget` gate component runs it.
+[[test]]
+name = "issue_1494_producer_mem_budget"
+required-features = ["dhat-heap"]
 
 [lints]
 workspace = true

@@ -3,7 +3,8 @@
   "default_threshold_pct": 10,
   "advisory_benches": [
     "write/ingest_wal_on",
-    "compaction/wide"
+    "compaction/wide",
+    "flight/do_get"
   ],
   "benches": [
     {
@@ -76,6 +77,36 @@
     {
       "id": "compaction/tombstone_heavy",
       "threshold_pct": 10
+    },
+    {
+      "id": "export/rows_to_record_batch",
+      "threshold_pct": 10,
+      "_note": "issue #1494 (AD5) — CQL→Arrow conversion, the per-cell data plane shared by Flight + Parquet; STRICT. Skip-registers when the canonical dataset is absent on the baseline."
+    },
+    {
+      "id": "export/json",
+      "threshold_pct": 10,
+      "_note": "issue #1494 (AD5) — QueryResult::to_json serialization to bytes; STRICT."
+    },
+    {
+      "id": "export/csv",
+      "threshold_pct": 10,
+      "_note": "issue #1494 (AD5) — CSVWriter::write (cqlite_cli::output::CSVWriter, the real public CSV export writer) over a pinned fixture; STRICT. Hosted in cqlite-cli (core has no csv dep); run by perf-regression.yml via `cargo bench -p cqlite-cli --features cli-helpers --bench export_csv`. Skip-registers when the canonical dataset is absent on the baseline."
+    },
+    {
+      "id": "export/parquet",
+      "threshold_pct": 10,
+      "_note": "issue #1494 (AD5) — ParquetWriter::write over a pinned fixture; STRICT (feature parquet)."
+    },
+    {
+      "id": "export/delta",
+      "threshold_pct": 10,
+      "_note": "issue #1494 (AD5) — write_delta_records_to_bytes over synthetic upserts; STRICT (features delta-scan + parquet)."
+    },
+    {
+      "id": "flight/do_get",
+      "threshold_pct": 25,
+      "_note": "issue #1494 (AD5) — advisory: end-to-end Flight do_get is Tokio-runtime + tonic-transport dominated (write/ingest_wal_on precedent); reported but never fails CI. Its hard signal is the dhat producer budget (cqlite-flight tests/issue_1494_producer_mem_budget.rs)."
     }
   ],
   "scaling_floors": [

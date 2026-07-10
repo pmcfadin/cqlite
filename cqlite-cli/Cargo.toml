@@ -182,6 +182,17 @@ name = "issue_1581_query_stream_memory"
 path = "tests/issue_1581_query_stream_memory.rs"
 required-features = ["dhat-heap"]
 
+# Issue #1494 (AD5): CSV export-writer throughput bench. Hosted here (not in
+# cqlite-core) because the real public writer is cqlite_cli::output::CSVWriter;
+# core carries no csv dependency. Registered STRICT (id export/csv) in
+# cqlite-core/benches/perf-gate.json and run by perf-regression.yml against the
+# cqlite-cli package. Needs cli-helpers (queryable Database + CSVWriter).
+[[bench]]
+name = "export_csv"
+path = "benches/export_csv.rs"
+harness = false
+required-features = ["cli-helpers"]
+
 [features]
 # M2+ production defaults: Interactive REPL with query engine
 default = ["interactive", "tui", "cli-helpers"]

@@ -41,7 +41,12 @@ env:
   # Database), write-support for the write suite (WriteEngine).
   # bench-internals adds the decode_value_for_bench shim the `decode` bench needs
   # (issue #1615); it changes no other bench and no production default build.
-  BENCH_FEATURES: "cli-helpers,write-support,bench-internals"
+  # arrow gates the export/rows_to_record_batch + export/json arms; parquet +
+  # delta-scan gate the export/parquet + export/delta arms (issue #1494). arrow
+  # is named EXPLICITLY (not left to parquet's transitive parquet->arrow enable)
+  # so the STRICT arrow-gated entries can never silently drop if parquet is ever
+  # removed. All exist on main, so they are safe to pass to the base build too.
+  BENCH_FEATURES: "cli-helpers,write-support,bench-internals,arrow,parquet,delta-scan"
   # Criterion run config — kept small for CI. Tune here if the gate is too noisy
   # (more samples → stabler medians, slower job).
   BENCH_ARGS: "--sample-size 20 --warm-up-time 1 --measurement-time 3"
@@ -111,7 +116,20 @@ jobs:
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
           fi
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction --bench decode \
+            --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction --bench decode --bench export_throughput \
+            -- --save-baseline pr "${BENCH_ARGV[@]}"
+          # CSV export writer (issue #1494): the real public writer is
+          # cqlite_cli::output::CSVWriter, so its bench (id export/csv) is hosted
+          # in cqlite-cli, not cqlite-core. STRICT — its median regression gates
+          # like the other export/* writers. cli-helpers gives it a queryable
+          # Database + the CSVWriter surface. Its criterion output merges into the
+          # shared target/criterion tree the compare script reads.
+          cargo bench -p cqlite-cli --features cli-helpers --bench export_csv \
+            -- --save-baseline pr "${BENCH_ARGV[@]}"
+          # Tier-2 (issue #1494): the end-to-end Flight do_get throughput bench
+          # lives in cqlite-flight (its own criterion output merges into
+          # target/criterion). ADVISORY — reported, never fails CI.
+          cargo bench -p cqlite-flight --bench flight_do_get \
             -- --save-baseline pr "${BENCH_ARGV[@]}"
 
       - name: Benchmark main → baseline 'base'
@@ -140,6 +158,12 @@ jobs:
           if [[ -f cqlite-core/benches/decode_bench.rs ]]; then
             BENCH_TARGETS+=(--bench decode)
           fi
+          # The `export_throughput` bench (issue #1494) may not exist on `main`
+          # yet; include it only when present. The compare script SKIPs any bench
+          # missing from the baseline, so a first-PR baseline stays green.
+          if [[ -f cqlite-core/benches/export_throughput.rs ]]; then
+            BENCH_TARGETS+=(--bench export_throughput)
+          fi
           # `bench-internals` (issue #1615) is defined by the PR but may not exist
           # on `main` yet. Passing it to `cargo bench` on a checkout that does not
           # define it fails feature resolution BEFORE the guarded --bench decode is
@@ -149,8 +173,38 @@ jobs:
           if grep -q '^bench-internals' cqlite-core/Cargo.toml; then
             BASE_FEATURES="$BASE_FEATURES,bench-internals"
           fi
+          # arrow + parquet + delta-scan drive the export_throughput arms (issue
+          # #1494), but they ALSO gate conditionally-compiled code paths inside
+          # cqlite-core, so the feature set MUST be IDENTICAL between the PR arm
+          # (BENCH_FEATURES, above) and this base arm for every SHARED bench
+          # (read/write/concurrent_scan/read_while_write/compaction/decode) — or
+          # the pr-vs-base median ratio compares two differently-codegen'd
+          # cqlite-core libraries (apples-to-oranges: false regressions or masked
+          # real ones). All three predate #1494 (arrow, parquet #682, delta-scan
+          # #696) and exist on every in-scope `main`, so append them
+          # UNCONDITIONALLY — exactly as the PR arm does (arrow is named
+          # EXPLICITLY, not left to parquet's transitive enable, so the STRICT
+          # arrow-gated arms never silently drop). A base checkout without
+          # export_throughput.rs simply won't run that bench (its --bench target is
+          # guarded above); check_perf_regression.py then reports it SKIP (no data
+          # in 'base'), never a hard fail — a legitimately-new bench stays green.
+          BASE_FEATURES="$BASE_FEATURES,arrow,parquet,delta-scan"
           cargo bench -p cqlite-core --features "$BASE_FEATURES" \
             "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
+          # CSV export writer (issue #1494) — hosted in cqlite-cli. Include only
+          # when the bench file exists on this checkout so an older `main`
+          # (pre-#1494) still resolves cleanly; the compare script SKIPs any bench
+          # missing from the baseline, so the first landing stays green.
+          if [[ -f cqlite-cli/benches/export_csv.rs ]]; then
+            cargo bench -p cqlite-cli --features cli-helpers --bench export_csv \
+              -- --save-baseline base "${BENCH_ARGV[@]}"
+          fi
+          # Tier-2 Flight do_get (issue #1494) — include only when the bench file
+          # exists on `main` (the PR that adds it SKIPs green until main has it).
+          if [[ -f cqlite-flight/benches/flight_do_get.rs ]]; then
+            cargo bench -p cqlite-flight --bench flight_do_get \
+              -- --save-baseline base "${BENCH_ARGV[@]}"
+          fi
 
       - name: Restore PR ref (for the gate script + policy)
         run: git checkout --force --detach ${{ steps.refs.outputs.pr_ref }}

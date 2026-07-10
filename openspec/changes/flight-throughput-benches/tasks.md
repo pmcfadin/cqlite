@@ -1,0 +1,78 @@
+# Tasks — flight-throughput-benches (AD5, #1494)
+
+> No export/Flight production-code changes. Additive bench + budget-test + gate-wiring + docs only.
+> Reuse the epic-H dhat machinery and the existing perf-gate mechanism — do not duplicate either.
+
+## 1. Baseline capture (measurement first)
+- [x] 1.1 With `CQLITE_DATASETS_ROOT` set to fetched canonical datasets, measure current-`main`
+      figures for CQL→Arrow conversion, json/csv/parquet + delta export, Flight `do_get` throughput,
+      and producer/converter dhat allocation counts+bytes. Record them for the README baseline table.
+- [x] 1.2 Note explicitly that these figures already include the merged #1495 (PR #2312) arrow-convert
+      win — this is the post-#1495 `main` floor, the reference #1496 / AB / AE measure against.
+
+## 2. Export + conversion micro-benches (STRICT, cqlite-core)
+- [x] 2.1 Add a Criterion bench for `export::arrow_convert::rows_to_record_batch` over a wide-row /
+      type-heavy pinned fixture (per-cell conversion throughput). Assert at setup ≥ 1 row (panic on 0).
+- [x] 2.2 Add Criterion benches for json/parquet export writers and delta export over pinned
+      fixtures (feature-gated: `parquet`, `delta-scan`). Setup asserts the public export entry ran and
+      produced output. csv hosted in cqlite-cli (real public CSVWriter surface); lead resolution,
+      flagged for C audit. The CSV export writer's real surface is `cqlite_cli::output::CSVWriter`
+      (core has no `csv` dep), so its bench lives in `cqlite-cli/benches/export_csv.rs` (id
+      `export/csv`, STRICT) and is run by `perf-regression.yml` via `cargo bench -p cqlite-cli
+      --features cli-helpers --bench export_csv` — same fixture (500-row `test_collections`), same
+      10% ratio threshold, criterion output merges into the shared `target/criterion` tree. json,
+      parquet, and delta stay in `cqlite-core/benches/export_throughput.rs`.
+- [x] 2.3 Register the `[[bench]]` targets in `cqlite-core/Cargo.toml` (`harness = false`).
+
+## 3. End-to-end Flight do_get throughput bench (ADVISORY, cqlite-flight)
+- [x] 3.1 Add `criterion` as a dev-dependency + a `[[bench]]` target `flight_do_get` to
+      `cqlite-flight/Cargo.toml` (`publish = false`).
+- [x] 3.2 Implement the bench driving the **public** tonic `FlightService::do_get` over the in-process
+      transport (reuse the `cqlite-flight/tests/do_get_transport_test.rs` harness). Setup asserts the
+      stream yields ≥ 1 record batch (panic on 0) — wiring evidence for the public RPC surface.
+
+## 4. Allocation / peak-memory budget guards (dhat, reuse epic-H infra)
+- [x] 4.1 Add a converter allocation-budget test (dhat `#[global_allocator]`, own test binary, epic-H
+      pattern) asserting per-cell alloc count/bytes for `rows_to_record_batch` within the documented
+      current-main bound. Non-vacuous: fail on 0 rows AND on 0 observed allocations. **Wired under the
+      `memory-budget` component (the dhat lane), NOT `work-counters-guard`/`byte-budget-guard`:** those
+      two components do not enable the `dhat-heap` feature, and *observing* an allocation count requires
+      the dhat global allocator. The `memory-budget` component is the correct dhat home (it already
+      runs `--features cli-helpers,dhat-heap`); this change adds `arrow` + the new test to it.
+- [x] 4.2 Add a Flight-producer peak-memory budget test (dhat-heap) asserting the producer's peak/total
+      within bound; non-vacuous (fail on empty/zero). Wire under the `memory-budget` component feature.
+- [x] 4.3 Confirm both land **passing** as baseline locks (current-main figures + headroom). The
+      aggressive AB/AE target bounds are the consumer issues' tests, not this change.
+
+## 5. Perf-gate wiring
+- [x] 5.1 `cqlite-core/benches/perf-gate.json`: add STRICT entries (`threshold_pct >= 10`) for the
+      conversion + export micro-benches, each with a `_note` citing #1494/AD5.
+- [x] 5.2 `perf-gate.json`: add the Flight `do_get` throughput bench id to `advisory_benches` (reported,
+      never fails — runtime/transport dominated, `write/ingest_wal_on` precedent).
+- [x] 5.3 `.github/workflows/perf-regression.yml`: add the new core `--bench` targets to BOTH the PR and
+      `main` `cargo bench` invocations, each guarded by the "target may not exist on `main` yet"
+      conditional so the first landing SKIPs green. Add a `cargo bench -p cqlite-flight --bench
+      flight_do_get` arm (same guard) so the advisory Flight data is present.
+
+## 6. Baseline artifact + docs
+- [x] 6.1 `cqlite-core/benches/README.md`: add an "export/Flight perf" subsection with the current-main
+      baseline table (from 1.1), the #1495-provenance note (from 1.2), STRICT vs ADVISORY classification,
+      and the drift-free refresh procedure (base re-measured each run; retune = edit json + README).
+- [x] 6.2 Keep CLAUDE.md / website doctrine untouched unless a workflow-visible change requires it
+      (this change adds no user-facing behavior).
+
+## 7. Validation
+- [x] 7.1 All new benches compile + run against fetched datasets (`CQLITE_DATASETS_ROOT`); paste the
+      baseline numbers in the PR.
+- [x] 7.2 Budget guards green under their gate-component features (all three memory-budget lanes pass).
+      Non-vacuity is asserted in-code (≥1 row AND >0 allocs/bytes before the bound check); red-run 7.4
+      demonstrates the bite.
+- [x] 7.3 Red-run 1 (STRICT gate bites): synthetic same-runner criterion dir with `export/*` slower in
+      `pr` than `base` → `check_perf_regression.py` exits non-zero naming the conversion bench.
+- [x] 7.4 Red-run 2 (budget bites): tightening a ceiling below the measured figure makes the dhat guard
+      FAIL loudly (proves non-vacuity + that the guard bites); reverted.
+- [ ] 7.5 `scripts/agent-gate.sh` PASS — **owned by the lead / flow-closer** (the ONE full gate of
+      record). This implementer verifies each round with `--lite` + the targeted memory-budget /
+      export-bench runs; the full `AGENT-GATE SUMMARY` is captured by the closer.
+- [x] 7.6 `RUSTFLAGS="-D warnings"` clean; no `unwrap()`/`expect()` in library code (bench/test code
+      keeps the existing dhat-test style).

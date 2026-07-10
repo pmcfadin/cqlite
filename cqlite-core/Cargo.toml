@@ -218,6 +218,16 @@ harness = false
 name = "read"
 harness = false
 
+# Export / conversion throughput micro-benches (issue #1494, AD5). STRICT
+# perf-gate entries (`export/rows_to_record_batch`, `export/json`,
+# `export/parquet`, `export/delta`). Needs `cli-helpers` + `arrow` for the
+# fixture-backed conversion/JSON benches, `parquet` for the Parquet arm, and
+# `delta-scan` for the delta writer arm; under fewer features the missing arms
+# compile out and the binary still runs an empty, valid criterion main.
+[[bench]]
+name = "export_throughput"
+harness = false
+
 # Per-CQL-type + wide-row/text-heavy decode benches (issue #1615, Epic H).
 # `harness = false` criterion target. Needs `cli-helpers` (real fixture reader for
 # the `&self` decode context) AND `bench-internals` (the decode_value_for_bench
