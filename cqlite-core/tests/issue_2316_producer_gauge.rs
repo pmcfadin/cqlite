@@ -177,6 +177,17 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
         "gauge must carry the {{thread}} unit"
     );
 
+    // Reset HERE — BEFORE the drain starts — so the fresh delta window opens
+    // strictly before any producer thread can exit and decrement. The producer
+    // threads that back the M live count are DETACHED (a `JoinHandle` drop does
+    // not join), so some or all of the M decrements below can complete on their
+    // own OS threads before this test thread even reaches the polling loop;
+    // resetting AFTER the drain (as an earlier version of this test did) risks
+    // clearing that evidence away before it is ever observed. Establishing the
+    // window here, then NEVER resetting again before inspecting the accumulated
+    // evidence below, is what makes the transition-to-0 observable at all.
+    capture.reset();
+
     // Drain the merge; its producers exit and decrement the gauge on the way out.
     let mut writer =
         SSTableWriter::new(out.path().to_path_buf(), 1, &schema).expect("SSTableWriter::new");
@@ -194,28 +205,51 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
     );
 
     // AFTER: the merge's producers have exited (each guard decremented the live
-    // count on the way out). The gauge returns to its baseline (0). Poll with a
-    // per-iteration `reset` so each reading is an ISOLATED delta window (a single
-    // `flush_and_collect` would otherwise SUM the still-buffered mid-merge `M`
-    // snapshot). Under DELTA temporality a steady gauge with no new record in the
-    // window reports absent (== 0.0). This is NON-vacuous: the mid assertion above
-    // already proved the same gauge recorded the live count `M` during the merge,
-    // so a settled 0 here is a genuine return-to-baseline, not a never-recorded
-    // metric. Bounded → deterministic, never a wall-clock race.
+    // count on the way out) — the gauge should have recorded a genuine transition
+    // down to 0 WITHIN the window opened by the `reset()` above (before the
+    // drain). Under DELTA temporality a window with NO new `record_gauge` call
+    // reports the metric as ABSENT — `CapturedMetrics::counter_sum` then defaults
+    // an absent metric to `0.0`. Treating THAT default as "returned to baseline"
+    // is VACUOUS: it would pass identically whether the decrement path fired or
+    // is entirely broken. So this loop requires POSITIVE evidence: an actual
+    // collected data point equal to `0.0`, never inferred from absence.
+    //
+    // Deliberately NO `reset()` inside this loop: the producer threads are
+    // DETACHED (`JoinHandle` drop does not join), so the decrement(s) may have
+    // already completed before this loop's first iteration — resetting again
+    // here would risk clearing that very evidence before it is ever read.
+    // Instead each poll calls `flush_and_collect` (which force-flushes any
+    // pending record into the exporter's buffer WITHOUT clearing it) and scans
+    // ALL accumulated matching entries/points for the given metric — not just
+    // `find`'s first match, which would return only the earliest post-reset
+    // batch and could get stuck on a stale intermediate (non-zero) reading while
+    // later batches already show the settled 0. Bounded → deterministic, never a
+    // wall-clock race; a broken decrement path (or a leaked increment) exhausts
+    // the deadline and FAILS explicitly rather than passing vacuously.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut final_val = f64::NAN;
+    let mut observed_zero_record = false;
+    let mut last_seen: Option<f64> = None;
     while Instant::now() < deadline {
-        capture.reset();
         std::thread::sleep(Duration::from_millis(20));
-        final_val = capture
-            .flush_and_collect()
-            .counter_sum(catalog::MERGE_PRODUCER_THREADS);
-        if final_val == 0.0 {
+        let snap = capture.flush_and_collect();
+        let matches: Vec<f64> = snap
+            .entries()
+            .iter()
+            .filter(|e| e.name == catalog::MERGE_PRODUCER_THREADS)
+            .flat_map(|e| e.points.iter().map(|p| p.value))
+            .collect();
+        if let Some(&v) = matches.last() {
+            last_seen = Some(v);
+        }
+        if matches.iter().any(|&v| v == 0.0) {
+            observed_zero_record = true;
             break;
         }
     }
-    assert_eq!(
-        final_val, 0.0,
-        "gauge must return to its baseline (0) after the merge's producers are joined/dropped"
+    assert!(
+        observed_zero_record,
+        "gauge must POSITIVELY record a value of 0 after the merge's producers exit \
+         (never inferred from an absent/un-updated window); last observed value: {:?}",
+        last_seen
     );
 }

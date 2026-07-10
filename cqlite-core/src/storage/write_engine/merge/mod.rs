@@ -464,10 +464,25 @@ impl SSTableRowIteratorAdapter {
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
-        // Spawn the producer thread. It owns a fresh single-threaded (current_thread)
-        // Tokio runtime so it never collides with any runtime on the calling thread
-        // (Issue #587) and adds no worker threads beyond itself (Issue #2316).
-        let producer = std::thread::spawn(move || {
+        // Issue #2316: account this producer on the `cqlite.merge.producer_threads`
+        // gauge BEFORE spawning, so the increment happens-before any possible
+        // decrement. The decrementing `ProducerThreadGuard` is created first thing
+        // inside the child thread (see `producer_thread`); a fast-exiting producer
+        // (e.g. a reader-open error) could otherwise race its own guard's drop
+        // against a post-spawn increment on the parent, transiently underflowing
+        // the live count. Incrementing here first makes the pairing
+        // correct-by-construction — no ordering race is possible.
+        producer_gauge::spawned();
+
+        // Spawn the producer thread via `Builder::spawn` (rather than the
+        // panic-on-failure `std::thread::spawn`) so an OS thread-creation failure
+        // is a recoverable `Err`, not a process abort: the gauge increment above
+        // must never leak for a thread that never actually started, so roll it
+        // back on this path via `producer_gauge::rollback`. The thread owns a
+        // fresh single-threaded (current_thread) Tokio runtime so it never
+        // collides with any runtime on the calling thread (Issue #587) and adds no
+        // worker threads beyond itself (Issue #2316).
+        let producer = match std::thread::Builder::new().spawn(move || {
             Self::producer_thread(
                 path_buf,
                 run_index,
@@ -476,11 +491,16 @@ impl SSTableRowIteratorAdapter {
                 scan_cancel,
                 sender,
             );
-        });
-
-        // Issue #2316: account the just-spawned producer thread on the
-        // `cqlite.merge.producer_threads` gauge (decremented by `ProducerThreadGuard`).
-        producer_gauge::spawned();
+        }) {
+            Ok(handle) => handle,
+            Err(e) => {
+                producer_gauge::rollback();
+                return Err(Error::Storage(format!(
+                    "streaming producer: failed to spawn thread: {}",
+                    e
+                )));
+            }
+        };
 
         Ok(Self {
             receiver,

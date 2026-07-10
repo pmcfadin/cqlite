@@ -22,6 +22,24 @@
 //! `num_cpus >= 2`. Where the amplification collapses (`num_cpus < 2`) or the
 //! platform exposes no direct thread-count API, the test guards deterministically
 //! rather than flake.
+//!
+//! ## Process-isolation requirement
+//!
+//! The peak-thread observation is a WHOLE-PROCESS count, not a count scoped to
+//! this test's own threads — so it is only meaningful if this test runs ALONE in
+//! its process. The gate's default runner is `nextest` (see `accelerators:` in
+//! every `AGENT-GATE`/`AGENT-GATE LITE` summary), which isolates every `#[test]`
+//! in its OWN process, so this holds unconditionally under the gate. Under plain
+//! `cargo test` (no nextest), cargo instead runs every `#[test]` fn WITHIN one
+//! compiled test binary CONCURRENTLY, as sibling threads sharing ONE process —
+//! any sibling test's threads (its own producer threads, tokio workers, etc.)
+//! would inflate the peak sampled here and could false-fail (never false-PASS,
+//! since extra threads only push the observed delta up) or otherwise make the
+//! bound assertion meaningless. This file is therefore kept to EXACTLY this one
+//! `#[test]` function so plain `cargo test --test issue_2316_merge_thread_budget`
+//! stays isolated too (one file = one binary = one process; no siblings to race
+//! against) — do not add a second `#[test]` fn to this file; add a sibling test
+//! FILE instead if another scenario is needed.
 
 #![cfg(feature = "write-support")]
 
