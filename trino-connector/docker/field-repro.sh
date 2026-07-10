@@ -438,8 +438,49 @@ if [[ -n "$INJECT_FAILURE" ]]; then
   fi
   missing=()
   [[ -f "$latest/cqlite-flight-debug.log" ]] || missing+=("cqlite-flight-debug.log")
+  [[ -f "$latest/trino-recent-queries.json" ]] || missing+=("trino-recent-queries.json")
   if [[ ${#missing[@]} -ne 0 ]]; then
     echo "❌ CAPTURE-ON-FAIL BROKEN: $latest is missing: ${missing[*]}"
+    exit 1
+  fi
+  # Issue #2289 roborev finding (job 1597): this verdict verified the debug
+  # log + pcap but NEVER checked `trino-recent-queries.json` — `capture_artifacts`
+  # can silently fall back to a TIMEOUT/ERROR PLACEHOLDER note (job 1590's
+  # never-fatal fallback, written when the bounded post-failure Trino metadata
+  # query itself times out or errors) and this self-test would still exit 0
+  # claiming full proof despite that one artifact never having been genuinely
+  # captured. Every artifact this self-test advertises as proof (the
+  # 'debug-log + pcap + trino-recent-queries.json' line below) must be
+  # POSITIVELY verified as real content, not merely present-on-disk.
+  trino_json="$latest/trino-recent-queries.json"
+  if grep -qF "trino-recent-queries.json unavailable" "$trino_json"; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: $trino_json is the TIMEOUT/ERROR FALLBACK PLACEHOLDER (Trino did not answer within \${CAPTURE_METADATA_TIMEOUT_SECS}s this run) — not a real capture. This self-test requires genuine Trino query-metadata evidence, never a placeholder note."
+    exit 1
+  fi
+  if [[ ! -s "$trino_json" ]]; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: $trino_json is empty"
+    exit 1
+  fi
+  # Trino's `--output-format JSON` emits JSON LINES (one object per row), not
+  # a single top-level document — validate every non-empty line parses.
+  # python3 gives a real parse; without it, fall back to a structural
+  # heuristic rather than silently skipping the check on hosts without
+  # python3 (still a POSITIVE check, just a weaker one).
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    lines = [l for l in f if l.strip()]
+if not lines:
+    sys.exit(1)
+for line in lines:
+    json.loads(line)
+' "$trino_json" 2>/dev/null; then
+      echo "❌ CAPTURE-ON-FAIL BROKEN: $trino_json is not valid JSON Lines (truncated/garbage — not a genuine Trino query-metadata capture)"
+      exit 1
+    fi
+  elif ! awk 'NF{ if ($0 !~ /^\{.*\}$/) { exit 1 } } END { exit 0 }' "$trino_json"; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: $trino_json does not look like well-formed JSON Lines (no python3 available on this host for a stricter parse check)"
     exit 1
   fi
   # Issue #2289 roborev finding (job 1595): when THIS check's capture
