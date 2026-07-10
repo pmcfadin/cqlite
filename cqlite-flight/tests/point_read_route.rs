@@ -126,19 +126,28 @@ fn composite_pk_order_follows_schema_not_predicate_order() {
 fn partial_composite_pk_keeps_scan() {
     let schema = composite_pk_schema();
     // Only `a` bound; `b` unconstrained → cannot point-read.
-    assert_eq!(detect_route(Some(&eq("a", 1)), &schema), PointReadRoute::Scan);
+    assert_eq!(
+        detect_route(Some(&eq("a", 1)), &schema),
+        PointReadRoute::Scan
+    );
 }
 
 #[test]
 fn clustering_only_equality_keeps_scan() {
     let schema = single_pk_schema();
-    assert_eq!(detect_route(Some(&eq("ck", 3)), &schema), PointReadRoute::Scan);
+    assert_eq!(
+        detect_route(Some(&eq("ck", 3)), &schema),
+        PointReadRoute::Scan
+    );
 }
 
 #[test]
 fn range_on_pk_keeps_scan() {
     let schema = single_pk_schema();
-    assert_eq!(detect_route(Some(&gt("a", 3)), &schema), PointReadRoute::Scan);
+    assert_eq!(
+        detect_route(Some(&gt("a", 3)), &schema),
+        PointReadRoute::Scan
+    );
 }
 
 #[test]

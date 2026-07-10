@@ -43,9 +43,9 @@ pub mod wal;
 pub use export::{ExportOptions, ExportReport};
 #[cfg(feature = "write-support")]
 pub use memtable::Memtable;
+pub use merge::build_single_partition_merger;
 #[cfg(feature = "write-support")]
 pub use merge::KWayMerger;
-pub use merge::build_single_partition_merger;
 #[cfg(feature = "write-support")]
 pub use merge_policy::STCSPolicy;
 #[cfg(feature = "write-support")]

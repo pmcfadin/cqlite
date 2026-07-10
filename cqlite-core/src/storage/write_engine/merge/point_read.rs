@@ -18,21 +18,75 @@
 //! `paths` list, identical to the full-scan merger, so reconciliation ties break
 //! the same way.
 
-use super::{block_on_async, KWayMerger, MergeEntry, SSTableRowIterator, SSTableRowIteratorAdapter};
-use crate::config::DiskAccessMode;
-use crate::platform::Platform;
+use super::{KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter};
 use crate::schema::TableSchema;
-use crate::storage::sstable::reader::{
-    CompactionRow, SSTableReader, SinglePartitionCompaction,
-};
 use crate::storage::scan_cancel::ScanCancel;
-use crate::{Config, Result};
-use std::collections::VecDeque;
+use crate::storage::sstable::reader::CompactionRow;
+use crate::{Error, Result};
+use std::collections::{BinaryHeap, VecDeque};
 use std::path::{Path, PathBuf};
+
+// Seek-only imports (the point-read primitive is `not(tombstones)` gated, like the
+// underlying single-partition seek machinery it composes).
+#[cfg(not(feature = "tombstones"))]
+use super::block_on_async;
+#[cfg(not(feature = "tombstones"))]
+use crate::config::DiskAccessMode;
+#[cfg(not(feature = "tombstones"))]
+use crate::platform::Platform;
+#[cfg(not(feature = "tombstones"))]
+use crate::storage::sstable::reader::{SSTableReader, SinglePartitionCompaction};
+#[cfg(not(feature = "tombstones"))]
+use crate::Config;
+#[cfg(not(feature = "tombstones"))]
 use std::sync::Arc;
+
+impl KWayMerger {
+    /// Build a k-way merger from pre-constructed run iterators (issue #2207).
+    ///
+    /// Unlike [`KWayMerger::new`], which opens each input SSTable and streams its
+    /// WHOLE compaction scan, this accepts runs the caller has already scoped —
+    /// the single-partition point-read path hands one run per candidate SSTable,
+    /// each yielding ONLY the target partition's entries (a seeked `Vec` or a
+    /// key-filtered stream). The reconciliation, heap, and per-partition merge are
+    /// IDENTICAL to the full-scan path — only the inputs are narrower — so the
+    /// point path reconciles byte-identically to the scan.
+    ///
+    /// `runs` must be non-empty and ordered newest-to-oldest (run index = LWW
+    /// tie-break rank), exactly as [`KWayMerger::new`]'s `input_paths` are.
+    pub fn from_row_iterators(
+        runs: Vec<Box<dyn SSTableRowIterator>>,
+        schema: &TableSchema,
+    ) -> Result<Self> {
+        if runs.is_empty() {
+            return Err(Error::InvalidInput(
+                "K-way merge requires at least one input run".to_string(),
+            ));
+        }
+        schema.validate_dropped_columns()?;
+        // Child modules see the parent's private fields; build the merger in the
+        // same shape as `new_with_gc_and_registry_cancellable` (no purge params —
+        // the point path never compacts).
+        let runs = runs.into_iter().map(RunReader::new).collect();
+        Ok(Self {
+            runs,
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema: schema.clone(),
+            gc_before_secs: None,
+            now_secs: None,
+            purge_safe: false,
+            max_purgeable_timestamp: None,
+        })
+    }
+}
 
 /// A run backed by a pre-built `Vec` of merge entries — the seeked single
 /// partition. Yields each entry once, in order, then reports exhaustion.
+///
+/// Only the default `not(tombstones)` build seeks (the alternate build always
+/// scan-falls-back), so this is dead there.
+#[cfg_attr(feature = "tombstones", allow(dead_code))]
 struct VecRun {
     entries: VecDeque<MergeEntry>,
 }
@@ -70,7 +124,10 @@ impl SSTableRowIterator for SinglePartitionFilterRun {
     }
 }
 
-/// Per-candidate probe outcome across ALL requested keys.
+/// Per-candidate probe outcome across ALL requested keys. `Seeked`/`Empty` are
+/// produced only by the default `not(tombstones)` seek path (the alternate build
+/// always returns `NeedsScan`), so they are dead under `tombstones`.
+#[cfg_attr(feature = "tombstones", allow(dead_code))]
 enum PathProbe {
     /// No requested key is present in this SSTable (all definite-absent / empty).
     Empty,
@@ -154,7 +211,7 @@ pub fn build_single_partition_merger(
 }
 
 /// Open `path` ONCE and probe it for every requested key via the core seek
-/// primitive, combining the outcome.
+/// primitive, combining the outcome (default `not(tombstones)` build).
 ///
 /// A single SSTable's index availability is a property of the SSTable (not the
 /// key), so the FIRST `IndexUnavailable` short-circuits to [`PathProbe::NeedsScan`]
@@ -164,6 +221,7 @@ pub fn build_single_partition_merger(
 /// Runs the async open + seek on the shared bridge runtime. The reader is opened
 /// with buffered I/O (never mmap/direct — the file may be deleted after the read)
 /// and the cooperative cancel token wired in, matching the full-scan producer.
+#[cfg(not(feature = "tombstones"))]
 fn probe_path(
     path: &Path,
     keys: &[Vec<u8>],
@@ -202,4 +260,19 @@ fn probe_path(
             Ok(PathProbe::Seeked(rows))
         }
     })
+}
+
+/// Tombstones-build fallback: the single-partition SEEK machinery
+/// (`successor_partition_offset`, `point_read_whole_section`, …) is
+/// `not(tombstones)` only, so under the alternate `tombstones` feature every
+/// candidate degrades to a full scan filtered to the key set — correct, just
+/// without the seek speedup. Keeps the public builder API identical across builds.
+#[cfg(feature = "tombstones")]
+fn probe_path(
+    _path: &Path,
+    _keys: &[Vec<u8>],
+    _schema: &TableSchema,
+    _scan_cancel: ScanCancel,
+) -> Result<PathProbe> {
+    Ok(PathProbe::NeedsScan)
 }

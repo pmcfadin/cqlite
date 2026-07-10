@@ -152,10 +152,7 @@ fn single_pk_in_list(filter: &FilterExpr, pk_col: &str) -> Option<Vec<Vec<Value>
 
 /// Return one full-PK key per disjunct iff EVERY disjunct of an `Or` is itself a
 /// full-PK equality (e.g. `(a=1 AND b=2) OR (a=3 AND b=4)`).
-fn or_of_full_pk_equalities(
-    disjuncts: &[FilterExpr],
-    pk_cols: &[&str],
-) -> Option<Vec<Vec<Value>>> {
+fn or_of_full_pk_equalities(disjuncts: &[FilterExpr], pk_cols: &[&str]) -> Option<Vec<Vec<Value>>> {
     if disjuncts.is_empty() {
         return None;
     }

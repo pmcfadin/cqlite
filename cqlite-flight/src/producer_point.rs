@@ -11,16 +11,37 @@
 
 use std::path::PathBuf;
 
+use arrow::record_batch::RecordBatch;
 use cqlite_core::query::AccessPath;
 use cqlite_core::storage::write_engine::{build_single_partition_merger, PartitionKey};
 use cqlite_core::types::Value;
 
 use crate::cancel::CancelFlag;
 use crate::point_read::{detect_route, PointReadRoute};
-use crate::producer::{BatchSink, MergeProducer, ProducerError};
+use crate::producer::{BatchSink, CollectSink, MergeProducer, ProducerError};
 use crate::scan_progress::ScanProgress;
 
 impl MergeProducer {
+    /// Run the streaming merge over already-resolved `paths` and collect the
+    /// batches into a `Vec` (issue #2207 wiring evidence + dual-path parity).
+    ///
+    /// This is the SAME path `do_get` streams — including the point-read route
+    /// selection — so a test can drive the point path end-to-end and compare its
+    /// batches byte-for-byte against the full-scan collect path
+    /// ([`MergeProducer::produce_from_paths`]). `paths` MUST be token-pruned /
+    /// resolved (as [`MergeProducer::resolve_paths`] returns).
+    pub fn produce_streaming_to_vec(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
+        let mut batches = Vec::new();
+        {
+            let mut sink = CollectSink(&mut batches);
+            self.produce_streaming(paths, cancel, &mut sink, &ScanProgress::default(), || {})?;
+        }
+        Ok(batches)
+    }
     /// Resolve the point-read route into concrete raw partition keys, or `None`
     /// when the pushed predicate is not a full-PK equality (the scan path).
     ///

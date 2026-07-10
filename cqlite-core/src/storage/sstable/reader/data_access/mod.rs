@@ -53,7 +53,9 @@ mod compressed_offset;
 mod model;
 // Single-partition compaction seek (issue #2207): the public point-read primitive
 // composing the presence oracle + BTI/BIG offset resolution into a byte-identical
-// compaction-row seek for one partition. Kept out of this entry-point file.
+// compaction-row seek for one partition. Gated `not(tombstones)` like the seek
+// primitives it composes (`successor_partition_offset`, `point_read_whole_section`).
+#[cfg(not(feature = "tombstones"))]
 mod point_compaction;
 // Opt-in presence-oracle false-negative verification method (issue #2163), kept
 // out of this already-large entry-point file (campsite rule, epic #1116).
@@ -67,6 +69,7 @@ mod sequential;
 // Public surface re-export (unchanged: `reader::mod` re-exports
 // `data_access::ClusteringSlice`).
 pub use model::ClusteringSlice;
+#[cfg(not(feature = "tombstones"))]
 pub use point_compaction::SinglePartitionCompaction;
 
 // Re-export the decompress-work counter so the sibling `scan_stream_windowed`

@@ -18,10 +18,8 @@ use crate::testutil::{
 use crate::ticket::{FlightTicket, Predicate, PredicateOp};
 
 use cqlite_core::storage::scan_cancel::ScanCancel;
-use cqlite_core::storage::write_engine::{
-    build_single_partition_merger, KWayMerger, PartitionKey,
-};
 use cqlite_core::storage::write_engine::merge::MergeStep;
+use cqlite_core::storage::write_engine::{build_single_partition_merger, KWayMerger, PartitionKey};
 use cqlite_core::types::Value;
 use serde_json::json;
 
@@ -56,7 +54,9 @@ fn count_partitions(mut merger: KWayMerger) -> usize {
 }
 
 /// The rows a `simple_schema` producer emits, as `(id, name, score)` sorted.
-fn simple_rows(batches: &[arrow::record_batch::RecordBatch]) -> Vec<(i32, Option<String>, Option<i32>)> {
+fn simple_rows(
+    batches: &[arrow::record_batch::RecordBatch],
+) -> Vec<(i32, Option<String>, Option<i32>)> {
     use arrow::array::{Array, Int32Array, StringArray};
     let mut out = Vec::new();
     for b in batches {
@@ -134,7 +134,8 @@ fn point_merger_for_absent_key_is_none() {
 
     // id=999 is not present → no runs → None (the caller streams zero rows).
     let key = int_pk_bytes(&schema, "id", 999);
-    let built = build_single_partition_merger(paths, &[key], &schema, ScanCancel::default()).unwrap();
+    let built =
+        build_single_partition_merger(paths, &[key], &schema, ScanCancel::default()).unwrap();
     assert!(built.is_none(), "absent key yields no merger");
 }
 
@@ -161,8 +162,11 @@ fn full_pk_in_list_is_bounded_by_the_listed_keys() {
 /// Build a 2-generation `simple_schema` corpus with an overwrite and a tombstone:
 /// - gen1: id3=(a,1), id4=(x,1), id7=(z,1)
 /// - gen2: id3=(a2,2) overwrite (newer ts), id7 row-tombstoned (newer ts)
-fn tombstoned_corpus() -> (tempfile::TempDir, std::path::PathBuf, cqlite_core::schema::TableSchema)
-{
+fn tombstoned_corpus() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    cqlite_core::schema::TableSchema,
+) {
     let schema = simple_schema();
     let gen1 = vec![
         write_row(3, "a", 1, 100),
@@ -174,7 +178,12 @@ fn tombstoned_corpus() -> (tempfile::TempDir, std::path::PathBuf, cqlite_core::s
     (temp, dir, schema)
 }
 
-fn assert_point_equals_scan(schema: &cqlite_core::schema::TableSchema, dir: &std::path::Path, key_col: &str, key_val: i32) {
+fn assert_point_equals_scan(
+    schema: &cqlite_core::schema::TableSchema,
+    dir: &std::path::Path,
+    key_col: &str,
+    key_val: i32,
+) {
     let ticket = eq_ticket(key_col, key_val);
     let spec = ScanSpec::from_ticket(&ticket, schema).unwrap();
 
@@ -208,7 +217,11 @@ fn point_path_matches_scan_on_overwritten_key() {
     let spec = ScanSpec::from_ticket(&ticket, &schema).unwrap();
     let producer = MergeProducer::with_spec(schema.clone(), 4, spec).unwrap();
     let paths = producer.resolve_paths(&DirSource::new(&dir)).unwrap();
-    let rows = simple_rows(&producer.produce_streaming_to_vec(paths, &CancelFlag::new()).unwrap());
+    let rows = simple_rows(
+        &producer
+            .produce_streaming_to_vec(paths, &CancelFlag::new())
+            .unwrap(),
+    );
     assert_eq!(rows, vec![(3, Some("a2".to_string()), Some(2))]);
 }
 
@@ -221,8 +234,15 @@ fn point_path_matches_scan_on_tombstoned_key() {
     let spec = ScanSpec::from_ticket(&ticket, &schema).unwrap();
     let producer = MergeProducer::with_spec(schema.clone(), 4, spec).unwrap();
     let paths = producer.resolve_paths(&DirSource::new(&dir)).unwrap();
-    let rows = simple_rows(&producer.produce_streaming_to_vec(paths, &CancelFlag::new()).unwrap());
-    assert!(rows.is_empty(), "a tombstoned partition yields no rows on the point path");
+    let rows = simple_rows(
+        &producer
+            .produce_streaming_to_vec(paths, &CancelFlag::new())
+            .unwrap(),
+    );
+    assert!(
+        rows.is_empty(),
+        "a tombstoned partition yields no rows on the point path"
+    );
 }
 
 #[test]
@@ -254,7 +274,11 @@ fn index_less_candidate_is_read_never_skipped() {
     let spec = ScanSpec::from_ticket(&ticket, &schema).unwrap();
     let producer = MergeProducer::with_spec(schema.clone(), 4, spec).unwrap();
     let paths = producer.resolve_paths(&DirSource::new(&dir)).unwrap();
-    let rows = simple_rows(&producer.produce_streaming_to_vec(paths, &CancelFlag::new()).unwrap());
+    let rows = simple_rows(
+        &producer
+            .produce_streaming_to_vec(paths, &CancelFlag::new())
+            .unwrap(),
+    );
 
     // The key lives ONLY in the index-less SSTable: it MUST still be returned. The
     // inverted "skip on missing index" behaviour would drop it and fail here.

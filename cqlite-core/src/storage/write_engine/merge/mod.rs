@@ -2279,41 +2279,6 @@ impl KWayMerger {
         })
     }
 
-    /// Build a k-way merger from pre-constructed run iterators (issue #2207).
-    ///
-    /// Unlike [`Self::new`], which opens each input SSTable and streams its WHOLE
-    /// compaction scan, this accepts runs the caller has already scoped — e.g. the
-    /// single-partition point-read path (`merge::point_read`) hands one run per
-    /// candidate SSTable, each yielding ONLY the target partition's entries (a
-    /// seeked `Vec` or a key-filtered stream). The reconciliation, heap, and
-    /// per-partition merge are IDENTICAL to the full-scan path — only the inputs
-    /// are narrower — so the point path reconciles byte-identically to the scan.
-    ///
-    /// `runs` must be non-empty and ordered newest-to-oldest (run index = LWW
-    /// tie-break rank), exactly as [`Self::new`]'s `input_paths` are.
-    pub fn from_row_iterators(
-        runs: Vec<Box<dyn SSTableRowIterator>>,
-        schema: &TableSchema,
-    ) -> Result<Self> {
-        if runs.is_empty() {
-            return Err(Error::InvalidInput(
-                "K-way merge requires at least one input run".to_string(),
-            ));
-        }
-        schema.validate_dropped_columns()?;
-        let runs = runs.into_iter().map(RunReader::new).collect();
-        Ok(Self {
-            runs,
-            heap: BinaryHeap::new(),
-            current_partition: None,
-            schema: schema.clone(),
-            gc_before_secs: None,
-            now_secs: None,
-            purge_safe: false,
-            max_purgeable_timestamp: None,
-        })
-    }
-
     /// Mark this merge as overlap-safe for tombstone purging (#921 finding 1).
     ///
     /// Set `true` ONLY when the compaction inputs provably span EVERY SSTable

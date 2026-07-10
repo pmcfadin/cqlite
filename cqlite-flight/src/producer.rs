@@ -566,27 +566,6 @@ impl MergeProducer {
         self.agg.is_some()
     }
 
-    /// Run the streaming merge over already-resolved `paths` and collect the
-    /// batches into a `Vec` (issue #2207 wiring evidence + dual-path parity).
-    ///
-    /// This is the SAME path `do_get` streams — including the point-read route
-    /// selection — so a test can drive the point path end-to-end and compare its
-    /// batches byte-for-byte against the full-scan collect path
-    /// ([`Self::produce_from_paths`]). `paths` MUST be token-pruned/resolved (as
-    /// [`Self::resolve_paths`] returns).
-    pub fn produce_streaming_to_vec(
-        &self,
-        paths: Vec<PathBuf>,
-        cancel: &CancelFlag,
-    ) -> Result<Vec<RecordBatch>, ProducerError> {
-        let mut batches = Vec::new();
-        {
-            let mut sink = CollectSink(&mut batches);
-            self.produce_streaming(paths, cancel, &mut sink, &ScanProgress::default(), || {})?;
-        }
-        Ok(batches)
-    }
-
     /// Stream the row-merge of already-resolved `paths` into `sink` (issue #1476),
     /// one batch at a time, instead of collecting into a `Vec`. `paths` MUST come
     /// from [`Self::resolve_paths`] (already token-pruned). The merge stops when

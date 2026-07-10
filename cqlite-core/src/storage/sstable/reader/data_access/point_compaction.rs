@@ -173,7 +173,9 @@ impl SSTableReader {
                         None => return Ok(None),
                     },
                 };
-                let window = self.pull_chunk_window(target_chunk, window_base, end).await?;
+                let window = self
+                    .pull_chunk_window(target_chunk, window_base, end)
+                    .await?;
                 (window, within)
             }
         };
