@@ -317,10 +317,21 @@ assert_eq "partial-predicate LIMIT 5 applies residual (3 rows)" '"3"' \
   "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 5)')"
 
 # Proof it reads SSTables (not live CQL): an unflushed row must be invisible.
-log "assert SSTable semantics (memtable invisible until flush)"
+#
+# On-disk-only is a `live`-mode contract, not `snapshot` mode (issue #2305):
+# `snapshot` mode's per-query Sidecar snapshot flushes the memtable as a side
+# effect by design (apache/cassandra-sidecar's create-snapshot HTTP API has no
+# skipFlush parameter — see trino-connector/README.md#read-mode-snapshot-vs-live),
+# so a snapshot-mode query can legitimately see this row before any explicit
+# `nodetool flush`. That operational cost is tracked separately (issue #2306).
+# The strict on-disk-only assertion therefore runs against the `cqlite_live`
+# catalog (read-mode is catalog-scoped config — no per-query/session override
+# exists); the post-flush assertion stays on the default `cqlite`
+# (snapshot-mode) catalog, unchanged from before.
+log "assert SSTable semantics (memtable invisible until flush, live mode)"
 "${COMPOSE[@]}" exec -T cassandra cqlsh 172.42.0.2 \
   -e "INSERT INTO analytics.events (id,name,score,active) VALUES (99,'ghost',1,true);"
-assert_eq "unflushed row invisible" '"5"'                                   "$(trino 'SELECT count(*) FROM cqlite.analytics.events')"
+assert_eq "unflushed row invisible (live mode)" '"5"'                       "$(trino 'SELECT count(*) FROM cqlite_live.analytics.events')"
 "${COMPOSE[@]}" exec -T cassandra nodetool flush analytics
 assert_eq "row visible after flush" '"6"'                                   "$(trino 'SELECT count(*) FROM cqlite.analytics.events')"
 

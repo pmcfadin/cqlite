@@ -235,8 +235,19 @@ file set a scan sees:
 | `snapshot` (default) | A **Cassandra Sidecar snapshot** — a hard-linked, immutable copy of the SSTable set taken at planning time. | **Stable file set, bounded staleness.** Every split of the query reads the same immutable files; data is "as of" snapshot time. No mid-scan file churn. | You want a consistent, repeatable read (the safe default). |
 | `live` | The node's current data directory. | **Most current, but races compaction.** A long scan can have files compacted/removed under it. | You are stress-hunting the read path, or want the absolute latest flushed data and accept the race. |
 
-Both modes only ever see **flushed** SSTables — memtable rows are invisible until a
-`nodetool flush` (a property of the SSTable-based server, not of read mode).
+**Memtable visibility differs by mode (issue #2305).** `snapshot` mode is a per-query,
+point-in-time read that **includes durable memtable state**: Cassandra's snapshot creation
+flushes the memtable as a side effect by design, and the Sidecar's `PUT .../snapshots/{name}`
+HTTP API has no `skipFlush` parameter to opt out of it (`CreateSnapshotHandler` only accepts
+`?ttl=`; `SnapshotRequestParam` carries no skip-flush field, in any released
+`apache/cassandra-sidecar` version — verified against the pinned image's compiled classes). So
+a very recent write can become visible through a `snapshot`-mode query even without an explicit
+`nodetool flush`. The operational cost of that implicit per-query flush is tracked separately
+(issue #2306).
+
+`live` mode is the strict **on-disk-SSTables-only** contract: it reads the current data
+directory directly, with no snapshot and no flush side effect, so memtable rows stay invisible
+until an explicit `nodetool flush`.
 
 ### Snapshot lifecycle (per-query, `cqlite-<queryId>`)
 
