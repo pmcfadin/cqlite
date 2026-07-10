@@ -237,6 +237,14 @@ describe('TypeScript Definitions (Issue #312)', () => {
       expect(dtsContent).toMatch(/type\s+ErrorCode[\s\S]*?\|\s*['"]PARSE['"]/);
     });
 
+    test('should include CANCELLED error code (issue #2264)', () => {
+      expect(dtsContent).toMatch(/type\s+ErrorCode[\s\S]*?\|\s*['"]CANCELLED['"]/);
+    });
+
+    test('should include Cancelled error category (issue #2264)', () => {
+      expect(dtsContent).toMatch(/type\s+ErrorCategory[\s\S]*?\|\s*['"]Cancelled['"]/);
+    });
+
     test('CqliteError should extend Error', () => {
       expect(dtsContent).toMatch(/interface\s+CqliteError\s+extends\s+Error\b/);
     });
