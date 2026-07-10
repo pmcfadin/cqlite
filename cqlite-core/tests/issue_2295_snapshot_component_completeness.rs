@@ -48,25 +48,17 @@ const INDEXLESS_KEEP_SUFFIXES: &[&str] = &[
 /// or `None` when the binary dataset is absent (test then skips).
 fn simple_table_dir() -> Option<PathBuf> {
     let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
-    let base = PathBuf::from(root)
-        .join("sstables")
-        .join("test_basic");
+    let base = PathBuf::from(root).join("sstables").join("test_basic");
     let dir = std::fs::read_dir(&base)
         .ok()?
         .flatten()
-        .find(|e| {
-            e.path().is_dir()
-                && e.file_name()
-                    .to_string_lossy()
-                    .starts_with("simple_table-")
-        })
+        .find(|e| e.path().is_dir() && e.file_name().to_string_lossy().starts_with("simple_table-"))
         .map(|e| e.path())?;
     // Require the full component set — otherwise the "complete" arm is vacuous.
-    let has_summary = std::fs::read_dir(&dir).ok()?.flatten().any(|e| {
-        e.file_name()
-            .to_string_lossy()
-            .ends_with("-Summary.db")
-    });
+    let has_summary = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with("-Summary.db"));
     if !has_summary {
         eprintln!("SKIP: simple_table Summary.db absent; run fetch-datasets.sh");
         return None;
@@ -87,7 +79,10 @@ fn stage_fixture(src_dir: &Path, dest_root: &Path, keep_suffixes: Option<&[&str]
     std::fs::create_dir_all(&staged_dir).expect("create staged table dir");
 
     let mut data_db = None;
-    for entry in std::fs::read_dir(src_dir).expect("read fixture dir").flatten() {
+    for entry in std::fs::read_dir(src_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         // Never copy the JSONL/txt sidecar goldens into the SSTable dir.
@@ -95,9 +90,11 @@ fn stage_fixture(src_dir: &Path, dest_root: &Path, keep_suffixes: Option<&[&str]
             continue;
         }
         let keep = match keep_suffixes {
-            None => name_str.ends_with(".db")
-                || name_str.ends_with(".txt")
-                || name_str.ends_with(".crc32"),
+            None => {
+                name_str.ends_with(".db")
+                    || name_str.ends_with(".txt")
+                    || name_str.ends_with(".crc32")
+            }
             Some(suffixes) => suffixes.iter().any(|s| name_str.ends_with(s)),
         };
         if !keep {
