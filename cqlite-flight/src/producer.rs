@@ -713,13 +713,19 @@ impl MergeProducer {
             return Ok(());
         }
 
+        // Map a cooperative cancellation to the distinct `Cancelled` variant, never
+        // masking a real I/O/corruption error as a clean cancel (issue #2264,
+        // mirroring `drive_merge`).
         let built = cqlite_core::storage::write_engine::build_single_partition_merger(
             _paths,
             &key_bytes,
             &self.schema,
             cancel.scan_cancel(),
         )
-        .map_err(ProducerError::Merge)?;
+        .map_err(|e| match e {
+            cqlite_core::Error::Cancelled => ProducerError::Cancelled,
+            other => ProducerError::Merge(other),
+        })?;
 
         on_merger_built();
         let label = AccessPath::StreamingPartitionLookup.label();
@@ -1369,6 +1375,7 @@ mod tests {
                     &cancelled,
                     &mut sink,
                     &ScanProgress::default(),
+                    AccessPath::FullScan.label(),
                 )
                 .expect_err("pre-cancelled merge aborts")
         };
