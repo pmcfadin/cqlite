@@ -17,16 +17,22 @@
 //! 2. The index path returns the SAME row set as an explicit `sequential_scan`
 //!    over the same fixture (no data loss, no reordering).
 
-#![cfg(feature = "work-counters")]
+// Requires BOTH `work-counters` (the `read_work_counters` probe gauge asserted
+// below) AND `write-support` (the `SSTableWriter` + `write_engine::mutation` API
+// that synthesizes the CQLite-written fixtures). The full agent gate runs this via
+// the `work-counters-guard` component, whose feature set
+// (`write-support,cli-helpers,state_machine,work-counters`) enables both — it is
+// this test's ONLY automated executor (issue #2302).
+#![cfg(all(feature = "work-counters", feature = "write-support"))]
 
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::read_work_counters;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::sstable::writer::SSTableWriter;
 use cqlite_core::storage::write_engine::mutation::{
-    CellOperation, Mutation, PartitionKey, TableId,
+    CellOperation, Mutation, PartitionKey, PartitionTombstone, TableId,
 };
-use cqlite_core::types::Value;
+use cqlite_core::types::{ScanRow, Value};
 use cqlite_core::{Config, Platform};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -139,6 +145,54 @@ async fn write_fixture(temp: &TempDir, n: i32) -> std::path::PathBuf {
     info.data_path
 }
 
+/// A mutation whose ONLY effect is a partition-level tombstone (no live cells)
+/// on `id` — the entire partition is shadowed and decodes to zero live rows.
+fn partition_delete_mutation(id: i32) -> Mutation {
+    let deletion_micros = 2_000_000 + id as i64;
+    let mut m = Mutation::new(
+        TableId::new("test_ks", "test_table"),
+        PartitionKey::single("id", Value::Integer(id)),
+        None,
+        vec![],
+        deletion_micros,
+        None,
+    );
+    m.partition_tombstone = Some(PartitionTombstone {
+        deletion_time: deletion_micros,
+        local_deletion_time: 2,
+    });
+    m
+}
+
+/// Write `n` live single-row partitions PLUS one PURE partition-delete partition
+/// (id `shadow_id`, a partition tombstone with no live cells), keeping every
+/// emitted component. Returns `(Data.db path, total partition count)`.
+async fn write_fixture_with_shadowed(
+    temp: &TempDir,
+    n: i32,
+    shadow_id: i32,
+) -> (std::path::PathBuf, usize) {
+    let schema = schema();
+    let mut writer = SSTableWriter::new(temp.path().to_path_buf(), 1, &schema).unwrap();
+    let mut keyed: Vec<_> = (1..=n)
+        .map(|id| {
+            let m = mutation(id);
+            let key = m.decorated_key(&schema).unwrap();
+            (key, m)
+        })
+        .collect();
+    let del = partition_delete_mutation(shadow_id);
+    let del_key = del.decorated_key(&schema).unwrap();
+    keyed.push((del_key, del));
+    keyed.sort_by_key(|(k, _)| k.token);
+    let total = keyed.len();
+    for (key, m) in keyed {
+        writer.write_partition(key, vec![m]).unwrap();
+    }
+    let info = writer.finish().await.unwrap();
+    (info.data_path, total)
+}
+
 async fn open_reader(data_path: &std::path::Path) -> SSTableReader {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
@@ -192,6 +246,62 @@ async fn written_summary_index_pair_resolves_via_index_probes() {
     );
 }
 
+/// FIX B (issue #2302): a partition that decodes SUCCESSFULLY to zero LIVE rows
+/// (here a pure partition-delete tombstone) must NOT demote the whole walk to a
+/// sequential scan. The index path stays taken (probes == partition count,
+/// covering the shadowed partition too) and contributes zero rows for it — never
+/// a silent fallback just because one healthy partition happens to be fully
+/// shadowed.
+///
+/// `#[serial]`: reads the process-global `read_work_counters` probe gauge.
+#[tokio::test]
+#[serial_test::serial]
+async fn fully_shadowed_partition_keeps_index_path() {
+    let temp = TempDir::new().unwrap();
+    let n = 300i32; // > min_index_interval so Summary.db is genuinely sparse
+    let shadow_id = 500i32; // deleted (no live cells); OUTSIDE the 1..=n live range
+    let (data_path, total) = write_fixture_with_shadowed(&temp, n, shadow_id).await;
+    let reader = open_reader(&data_path).await;
+
+    assert!(
+        reader.has_partition_index(),
+        "written fixture must load Summary.db (has_partition_index)"
+    );
+
+    read_work_counters::reset();
+    let rows = reader.iterate_all_partitions().await.unwrap();
+    let probes = read_work_counters::index_probes();
+
+    // The index path was NOT demoted: every partition (INCLUDING the fully
+    // shadowed one) is resolved through a real Index.db probe.
+    assert_eq!(
+        probes, total as u64,
+        "a fully-shadowed partition must NOT demote the walk to sequential_scan — \
+         every partition (shadowed included) is probed via Index.db (issue #2302 FIX B)"
+    );
+    assert!(
+        probes > 0,
+        "index path must probe Index.db (silent fallback records zero probes)"
+    );
+
+    // The shadowed partition contributes zero LIVE rows; the other n survive.
+    assert_eq!(
+        rows.len(),
+        n as usize,
+        "the fully-shadowed partition contributes zero live rows; all other \
+         partitions survive (no data loss, no spurious rows)"
+    );
+    let shadow_key = PartitionKey::single("id", Value::Integer(shadow_id))
+        .to_decorated_key(&schema())
+        .unwrap()
+        .key;
+    assert!(
+        rows.iter()
+            .all(|(k, _)| k.as_bytes() != shadow_key.as_slice()),
+        "the shadowed partition's key must not surface as a live row"
+    );
+}
+
 /// Correctness parity: the index-random-read enumeration returns exactly the same
 /// row set (keys) as an explicit full `sequential_scan` over the same fixture.
 ///
@@ -234,21 +344,27 @@ async fn index_path_matches_sequential_scan_row_set() {
     );
     let scan_rows = scan_reader.iterate_all_partitions().await.unwrap();
 
-    let mut index_keys: Vec<Vec<u8>> = index_rows
+    // Compare the full (key, decoded-value) pairs, not just keys: a future decoder
+    // divergence between the index path and sequential_scan (same key set, different
+    // cell values) must be caught. `ScanRow` derives `PartialEq`, so the pair vectors
+    // compare structurally. Sort by key bytes only (keys are unique — one row per
+    // partition — so this is a total, deterministic order without needing `Ord` on
+    // `ScanRow`).
+    let mut index_pairs: Vec<(Vec<u8>, ScanRow)> = index_rows
         .iter()
-        .map(|(k, _)| k.as_bytes().to_vec())
+        .map(|(k, v)| (k.as_bytes().to_vec(), v.clone()))
         .collect();
-    let mut scan_keys: Vec<Vec<u8>> = scan_rows
+    let mut scan_pairs: Vec<(Vec<u8>, ScanRow)> = scan_rows
         .iter()
-        .map(|(k, _)| k.as_bytes().to_vec())
+        .map(|(k, v)| (k.as_bytes().to_vec(), v.clone()))
         .collect();
-    index_keys.sort();
-    scan_keys.sort();
+    index_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    scan_pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
     assert_eq!(
-        index_keys, scan_keys,
-        "index-random-read path must return the SAME partition key set as a full \
-         sequential_scan (no data loss / no spurious rows)"
+        index_pairs, scan_pairs,
+        "index-random-read path must return the SAME (key, decoded-value) pairs as a \
+         full sequential_scan (no data loss / no spurious rows / no decoder divergence)"
     );
 }
 

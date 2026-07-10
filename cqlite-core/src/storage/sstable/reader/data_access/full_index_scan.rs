@@ -36,13 +36,21 @@ impl SSTableReader {
     /// compression chunk(s) and decompresses them
     /// ([`read_compressed_offset_window`](SSTableReader::read_compressed_offset_window)).
     ///
+    /// A partition that decodes SUCCESSFULLY to zero live rows (legitimately
+    /// all-shadowed / all-TTL-expired / all-tombstoned, or a pure partition-delete)
+    /// contributes zero rows and the walk CONTINUES — it is NOT a decode failure, so
+    /// one fully-shadowed partition in an otherwise-healthy SSTable never demotes the
+    /// whole read to a sequential scan.
+    ///
     /// Returns:
-    /// - `Ok(Some(rows))` — every index entry resolved to a decodable partition; the
-    ///   rows are token-ordered + tombstone-filtered, matching `sequential_scan`.
+    /// - `Ok(Some(rows))` — every index entry resolved to a structurally decodable
+    ///   partition; the rows are token-ordered + tombstone-filtered, matching
+    ///   `sequential_scan`.
     /// - `Ok(None)` — the index carried no entries, offsets were not monotonically
-    ///   ascending, the data-section length is unknown, or a partition failed to
-    ///   decode. The caller then emits a loud WARN and falls back to
-    ///   `sequential_scan` (never a silent fallback).
+    ///   ascending, the data-section length is unknown, or a partition's bytes could
+    ///   not be structurally interpreted (its partition header failed to parse). The
+    ///   caller then emits a loud WARN and falls back to `sequential_scan` (never a
+    ///   silent fallback).
     pub(in crate::storage::sstable::reader) async fn iterate_all_partitions_via_full_index(
         &self,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
@@ -131,10 +139,27 @@ impl SSTableReader {
             };
             let parsed = parser.parse_block(&raw, schema, self)?;
             if parsed.is_empty() {
-                // A non-empty on-disk slice that decodes to nothing means the parser
-                // could not interpret it — bail to the authoritative full scan rather
-                // than silently drop the partition.
-                return Ok(None);
+                // An empty result is AMBIGUOUS. It is either (a) a partition that
+                // decoded SUCCESSFULLY to zero LIVE rows — a legitimately
+                // all-shadowed / all-TTL-expired / all-tombstoned partition, whose
+                // rows the read-shadowing filter correctly hides (or a pure
+                // partition-delete with no cells) — or (b) a slice the parser could
+                // NOT structurally interpret. Only (b) is a real failure; demoting
+                // the WHOLE walk to a sequential scan on (a) would re-introduce the
+                // exact per-read perf cliff #2302 exists to kill whenever one healthy
+                // partition happens to be fully shadowed.
+                //
+                // Distinguish them authoritatively (no heuristics, issue #28) by
+                // re-parsing just the partition header at offset 0: `raw` is a single
+                // partition's slice (`span > 0`, guarded above), so a structurally
+                // valid partition MUST begin with a parseable header. A parseable
+                // header ⇒ case (a): contribute zero rows and KEEP enumerating. A
+                // header that fails to parse ⇒ case (b): bail to the authoritative
+                // full scan (the caller WARNs — never a silent fallback).
+                if parser.parse_partition_header_full(&raw, 0).is_err() {
+                    return Ok(None);
+                }
+                continue;
             }
             for (_table_id, row_key, value) in parsed {
                 if self.filter_tombstone(&value) {
