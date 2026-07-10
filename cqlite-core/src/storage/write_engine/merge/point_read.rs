@@ -73,6 +73,11 @@ impl KWayMerger {
             heap: BinaryHeap::new(),
             current_partition: None,
             schema: schema.clone(),
+            // Issue #1668, stage 5c-i: `Arc`-wrapped clone of `schema`, used
+            // only by the heap's schema-aware comparator (see the field doc).
+            // (Semantic-merge fix: #1668 landed on main between #2207's branch
+            // point and its merge; this constructor predates the field.)
+            schema_arc: std::sync::Arc::new(schema.clone()),
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
