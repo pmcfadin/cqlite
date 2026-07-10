@@ -315,7 +315,11 @@ if [[ -n "$INJECT_FAILURE" ]]; then
   run_check "inject-failure-$INJECT_FAILURE" check_inject_failure
 else
   run_check "2264-limit5-midstream-cancel" check_2264_limit5_midstream_cancel
-  run_check "2193-tiny-decode-native" check_2193_tiny_decode
+  # Label carries the flight platform so the #2193 arch-sensitivity data point
+  # (native arm64 vs FLIGHT_PLATFORM=linux/amd64) is unambiguous in any
+  # capture-on-fail artifacts dir — not always "native" (issue #2289 amd64 run,
+  # 2026-07-10: the old hardcoded "-native" suffix mislabeled the emulated run).
+  run_check "2193-tiny-decode-${FLIGHT_PLATFORM//\//-}" check_2193_tiny_decode
 fi
 
 echo
