@@ -18,11 +18,18 @@
 #       included).
 #   1 = a check failed / capture-on-fail was demonstrably broken.
 #   2 = usage error (unknown argument).
-#   3 = --inject-failure ONLY: SKIPPED — the debug-log/Trino-JSON half of
-#       capture-on-fail fired, but no tcpdump capture container could be
-#       started on this host this run, so the pcap half was never exercised.
-#       This is DISTINCT from both PASS(0) and FAIL(1) — never conflate a
-#       host that couldn't prove the mechanism with a host that proved it.
+#   3 = --inject-failure ONLY: SKIPPED — no tcpdump capture container could
+#       be started on this host this run (image pull failure, air-gapped
+#       host, arch mismatch), so the pcap half of capture-on-fail was never
+#       exercised. capture_artifacts still writes a debug log and a
+#       trino-recent-queries.json file on this path, but their CONTENT is
+#       deliberately NOT strictly vetted here (issue #2289 roborev finding,
+#       job 1600: the strict content checks apply only on the PROVEN path —
+#       gating them behind the capture-started check keeps exit 3 reachable
+#       even when the Trino metadata query ALSO timed out on a stalled
+#       host). This is DISTINCT from both PASS(0) and FAIL(1) — never
+#       conflate a host that couldn't prove the mechanism with a host that
+#       proved it.
 #
 
 # ── Tiering (read before escalating off a laptop) ───────────────────────────
@@ -484,16 +491,45 @@ if [[ -n "$INJECT_FAILURE" ]]; then
     echo "❌ CAPTURE-ON-FAIL BROKEN: $latest is missing: ${missing[*]}"
     exit 1
   fi
-  # Issue #2289 roborev finding (job 1597): this verdict verified the debug
-  # log + pcap but NEVER checked `trino-recent-queries.json` — `capture_artifacts`
-  # can silently fall back to a TIMEOUT/ERROR PLACEHOLDER note (job 1590's
-  # never-fatal fallback, written when the bounded post-failure Trino metadata
-  # query itself times out or errors) and this self-test would still exit 0
-  # claiming full proof despite that one artifact never having been genuinely
-  # captured. Every artifact this self-test advertises as proof (the
-  # 'debug-log + pcap + trino-recent-queries.json' line below) must be
-  # POSITIVELY verified as real content, not merely present-on-disk.
   trino_json="$latest/trino-recent-queries.json"
+  # Issue #2289 roborev finding (job 1600): the STRICT trino_json content
+  # validation (placeholder/empty/JSON-Lines-parse, added job 1597) used to
+  # run BEFORE this capture-started gate. When tcpdump never started AND the
+  # bounded post-failure Trino metadata query ALSO timed out (a genuinely
+  # stalled/degraded host — exactly the scenario the SKIP(3) exit code exists
+  # to describe honestly), trino_json would be the TIMEOUT/ERROR PLACEHOLDER,
+  # so the strict check fired FIRST and hard-FAILed (exit 1) — the
+  # documented exit 3 SKIP path was UNREACHABLE on a stalled host, silently
+  # breaking the exit-code contract in the file header. The strict
+  # content-of-proof checks apply ONLY on the PROVEN path (capture started);
+  # gate them behind `LAST_CAPTURE_STARTED` so the no-capture path still
+  # reaches exit 3 regardless of whether the JSON half also failed.
+  #
+  # Issue #2289 roborev finding (job 1595): when THIS check's capture
+  # container never started (`LAST_CAPTURE_STARTED=0` — image pull failure,
+  # air-gapped host, arch mismatch), the pcap requirement below was
+  # correctly SKIPPED (job 1592's fix), but execution then fell straight
+  # through to the "✅ CAPTURE-ON-FAIL PROVEN" banner regardless — an
+  # air-gapped/first-run host would "pass" this self-test without the pcap
+  # half of capture-on-fail ever being exercised. A capture-less run is a
+  # DISTINCT, non-PROVEN outcome: print an explicit SKIP verdict and exit
+  # with a DEDICATED non-zero code (3 — never 0/PASS, never 1/FAIL, so a
+  # caller can tell "the mechanism could not be exercised on this host" apart
+  # from both "it works" and "it's broken").
+  if [[ "$LAST_CAPTURE_STARTED" -ne 1 ]]; then
+    echo "⚠️  CAPTURE-ON-FAIL SKIPPED: no tcpdump capture container could be started on this host this run (see the capture-start warning earlier in this run's output) — cqlite-flight-debug.log and a trino-recent-queries.json file were both written ($latest), but neither the pcap half NOR the strict trino-recent-queries.json content check were exercised on this run (the latter is intentionally skipped here too — full artifact proof only applies on the PROVEN path), so this is not proof the capture path works end-to-end. Re-run with a working \$TCPDUMP_IMAGE / network access to actually prove it." >&2
+    exit 3
+  fi
+  # Issue #2289 roborev finding (job 1597): PROVEN-path-only from here on —
+  # this verdict verified the debug log + pcap but NEVER checked
+  # `trino-recent-queries.json` — `capture_artifacts` can silently fall back
+  # to a TIMEOUT/ERROR PLACEHOLDER note (job 1590's never-fatal fallback,
+  # written when the bounded post-failure Trino metadata query itself times
+  # out or errors) and this self-test would still exit 0 claiming full proof
+  # despite that one artifact never having been genuinely captured. Every
+  # artifact this self-test advertises as proof (the 'debug-log + pcap +
+  # trino-recent-queries.json' line below) must be POSITIVELY verified as
+  # real content, not merely present-on-disk.
   if grep -qF "trino-recent-queries.json unavailable" "$trino_json"; then
     echo "❌ CAPTURE-ON-FAIL BROKEN: $trino_json is the TIMEOUT/ERROR FALLBACK PLACEHOLDER (Trino did not answer within \${CAPTURE_METADATA_TIMEOUT_SECS}s this run) — not a real capture. This self-test requires genuine Trino query-metadata evidence, never a placeholder note."
     exit 1
@@ -523,21 +559,6 @@ for line in lines:
   elif ! awk 'NF{ if ($0 !~ /^\{.*\}$/) { exit 1 } } END { exit 0 }' "$trino_json"; then
     echo "❌ CAPTURE-ON-FAIL BROKEN: $trino_json does not look like well-formed JSON Lines (no python3 available on this host for a stricter parse check)"
     exit 1
-  fi
-  # Issue #2289 roborev finding (job 1595): when THIS check's capture
-  # container never started (`LAST_CAPTURE_STARTED=0` — image pull failure,
-  # air-gapped host, arch mismatch), the pcap requirement below was
-  # correctly SKIPPED (job 1592's fix), but execution then fell straight
-  # through to the "✅ CAPTURE-ON-FAIL PROVEN" banner regardless — an
-  # air-gapped/first-run host would "pass" this self-test without the pcap
-  # half of capture-on-fail ever being exercised. A capture-less run is a
-  # DISTINCT, non-PROVEN outcome: print an explicit SKIP verdict and exit
-  # with a DEDICATED non-zero code (3 — never 0/PASS, never 1/FAIL, so a
-  # caller can tell "the mechanism could not be exercised on this host" apart
-  # from both "it works" and "it's broken").
-  if [[ "$LAST_CAPTURE_STARTED" -ne 1 ]]; then
-    echo "⚠️  CAPTURE-ON-FAIL SKIPPED: no tcpdump capture container could be started on this host this run (see the capture-start warning earlier in this run's output) — the debug-log/Trino-JSON half of capture-on-fail DID fire ($latest), but the pcap half was NEVER EXERCISED, so this is not proof the capture path works end-to-end. Re-run with a working \$TCPDUMP_IMAGE / network access to actually prove it." >&2
-    exit 3
   fi
   [[ -f "$latest/flight-8815.pcap" ]] || missing+=("flight-8815.pcap")
   if [[ ${#missing[@]} -ne 0 ]]; then
