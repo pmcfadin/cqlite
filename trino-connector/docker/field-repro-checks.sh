@@ -48,7 +48,9 @@ check_2264_limit5_midstream_cancel() {
   # live in_flight gauge): the crate's debug-level phase/prune lines.
   local evidence="$ARTIFACTS_ROOT/2264-proxy-evidence.log"
   mkdir -p "$ARTIFACTS_ROOT"
-  "${COMPOSE[@]}" logs cqlite-flight --no-color 2>&1 \
+  # Issue #2289 roborev finding (job 1595 class sweep): this was the one
+  # remaining unbounded `docker compose logs` call in the checks file.
+  run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" "${COMPOSE[@]}" logs cqlite-flight --no-color 2>&1 \
     | grep -E "do_get phase completed|token-range SSTable prune" > "$evidence" || true
   log "proxy evidence (do_get phase timings / SSTable prune counts): $evidence"
   tail -20 "$evidence" >&2 || true
