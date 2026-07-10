@@ -6,6 +6,11 @@ target/
 **/node_modules/
 **/build/
 **/.gradle/
+# field-repro.sh (issue #2289) writes fresh diagnostics here every run; if it
+# stayed in the build context, `COPY . .` in cqlite-flight/Dockerfile would
+# cache-bust on every run and force a full Rust recompile (brutal under amd64
+# QEMU emulation — the FLIGHT_PLATFORM=linux/amd64 path).
+trino-connector/docker/field-repro-artifacts/
 test-data/datasets/
 docs/
 *.zip

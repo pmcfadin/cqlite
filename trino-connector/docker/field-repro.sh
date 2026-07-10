@@ -319,6 +319,40 @@ else
 fi
 
 echo
+# `--inject-failure` is a SELF-TEST of the capture-on-fail mechanism, so its
+# verdict is inverted from a normal run: the forced check failure is EXPECTED,
+# and success means the capture path produced a usable artifacts dir (debug
+# logs + a Flight pcap). This makes the documented "exit 0 = capture fired as
+# expected" contract at the top of this file actually hold (issue #2289 arm64
+# run, 2026-07-10: the old path exited 1 on --inject-failure, contradicting
+# that contract and making the self-test's own exit code meaningless).
+if [[ -n "$INJECT_FAILURE" ]]; then
+  latest="$(ls -dt "$ARTIFACTS_ROOT"/*-inject-failure-* 2>/dev/null | head -1)"
+  if [[ -z "$latest" ]]; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: no inject-failure artifacts dir was produced"
+    exit 1
+  fi
+  missing=()
+  [[ -f "$latest/cqlite-flight-debug.log" ]] || missing+=("cqlite-flight-debug.log")
+  # The pcap is required only when a capture container could run (CASSANDRA_CID
+  # resolved); an air-gapped host without the tcpdump image legitimately has no
+  # pcap and must not fail the self-test on that alone.
+  if [[ -n "$CASSANDRA_CID" ]]; then
+    [[ -f "$latest/flight-8815.pcap" ]] || missing+=("flight-8815.pcap")
+  fi
+  if [[ ${#missing[@]} -ne 0 ]]; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: $latest is missing: ${missing[*]}"
+    exit 1
+  fi
+  pkts="?"
+  if command -v tcpdump >/dev/null 2>&1 && [[ -f "$latest/flight-8815.pcap" ]]; then
+    pkts="$(tcpdump -r "$latest/flight-8815.pcap" 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  echo "✅ CAPTURE-ON-FAIL PROVEN: forced failure produced $latest"
+  echo "   (cqlite-flight-debug.log + flight-8815.pcap [~${pkts} pkts] + trino-recent-queries.json)"
+  exit 0
+fi
+
 if [[ $FAILURES -eq 0 ]]; then
   echo "✅ FIELD-REPRO PASSED"
 else

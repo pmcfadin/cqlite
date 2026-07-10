@@ -106,12 +106,22 @@ check_2193_tiny_decode() {
   return 1
 }
 
-# `--inject-failure` self-test: deliberately queries a nonexistent table so
-# `run_check`'s capture-on-fail path can be proven to actually fire (pcap +
-# debug logs + Trino query JSON land in field-repro-artifacts/), independent
-# of whether the real #2264/#2193 bugs happen to reproduce on this run.
+# `--inject-failure` self-test: proves `run_check`'s capture-on-fail path fires
+# and yields USEFUL artifacts (a NON-EMPTY pcap + debug logs + Trino query JSON
+# in field-repro-artifacts/), independent of whether the real #2264/#2193 bugs
+# reproduce on this run. Two deliberate steps, in order:
+#   1. a REAL `SELECT * FROM fieldrepro.tiny` — this drives genuine Flight
+#      do_get traffic on :8815 WHILE the tcpdump capture container is running,
+#      so the copied-out pcap actually contains Flight packets (issue #2289
+#      arm64 run, 2026-07-10: a bare nonexistent-table query short-circuits in
+#      Trino's planner before any do_get, producing a valid-but-EMPTY pcap that
+#      is weak evidence the capture works).
+#   2. then a nonexistent-table query to force the non-zero return that trips
+#      capture-on-fail.
 check_inject_failure() {
-  log "--inject-failure: querying a nonexistent table to deliberately force a failure"
+  log "--inject-failure step 1/2: real SELECT * FROM fieldrepro.tiny (drives genuine :8815 Flight traffic for the pcap)"
+  "${COMPOSE[@]}" exec -T trino trino --execute 'SELECT * FROM cqlite.fieldrepro.tiny' 2>&1 || true
+  log "--inject-failure step 2/2: querying a nonexistent table to deliberately force a failure"
   "${COMPOSE[@]}" exec -T trino trino --execute 'SELECT * FROM cqlite.fieldrepro.does_not_exist' 2>&1 || true
   return 1
 }
