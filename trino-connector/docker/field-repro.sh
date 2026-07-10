@@ -115,37 +115,59 @@ trino_query() {
 
 # ── artifact capture-on-fail (issue #2289 deliverable 3) ────────────────────
 ARTIFACTS_ROOT="$DOCKER_DIR/field-repro-artifacts"
-BRIDGE_IF=""
-resolve_bridge_if() {
-  local net_id
-  net_id="$(docker network inspect scylla_rust_driver_public -f '{{.Id}}' 2>/dev/null | cut -c1-12)" || true
-  if [[ -n "$net_id" ]]; then
-    BRIDGE_IF="br-$net_id"
-  fi
+# Flight's :8815 traffic is captured by a throwaway tcpdump CONTAINER joined to
+# Cassandra's network namespace (cqlite-flight runs `network_mode:
+# service:cassandra`, so it listens on 0.0.0.0:8815 IN that namespace). This is
+# deliberately container-based rather than a host-side `tcpdump -i br-<id>`
+# (issue #2289 arm64/macOS run, 2026-07-09): on Docker Desktop for Mac the
+# compose bridge lives inside the LinuxKit VM, so NO `br-*` interface exists on
+# the host and a host tcpdump silently captures nothing. Capturing from inside
+# the shared netns (exactly the issue's "tcpdump ... inside/alongside the
+# flight container" wording) works identically on Linux and macOS and needs no
+# `sudo`. The image is overridable for air-gapped hosts; if it cannot be run
+# the run continues WITHOUT a pcap (never aborts).
+TCPDUMP_IMAGE="${FIELD_REPRO_TCPDUMP_IMAGE:-nicolaka/netshoot:latest}"
+CASSANDRA_CID=""
+resolve_cassandra_cid() {
+  CASSANDRA_CID="$("${COMPOSE[@]}" ps -q cassandra 2>/dev/null | head -1)" || true
 }
 
-# Starts a tcpdump capture of Flight traffic (port 8815) on the compose
-# bridge, if resolvable, writing to $1. Prints the tcpdump PID on stdout (or
-# nothing if tcpdump could not be started — a missing bridge interface must
-# not abort the run).
+# Starts a tcpdump capture of Flight traffic (port 8815) in a container sharing
+# Cassandra's network namespace, writing to /cap.pcap inside that container.
+# Prints the capture container's name (the handle stop_tcpdump/capture use) on
+# stdout, or nothing if it could not be started — a capture failure must never
+# abort the run.
 start_tcpdump() {
-  local pcap="$1"
-  if [[ -z "$BRIDGE_IF" ]]; then
+  local name="$1"
+  [[ -z "$CASSANDRA_CID" ]] && return 0
+  local cname="field-repro-tcpdump-${name}"
+  docker rm -f "$cname" >/dev/null 2>&1 || true
+  if ! docker run -d --name "$cname" --network "container:$CASSANDRA_CID" \
+      "$TCPDUMP_IMAGE" tcpdump -i any -U -w /cap.pcap port 8815 \
+      >/tmp/field-repro-tcpdump.log 2>&1; then
+    docker rm -f "$cname" >/dev/null 2>&1 || true
     return 0
   fi
-  sudo -n tcpdump -i "$BRIDGE_IF" -w "$pcap" port 8815 >/tmp/field-repro-tcpdump.log 2>&1 &
-  local pid=$!
-  sleep 0.3
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "$pid"
+  sleep 0.5
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" == "true" ]]; then
+    echo "$cname"
+  else
+    docker rm -f "$cname" >/dev/null 2>&1 || true
   fi
 }
 
+# Stops the capture container, copies /cap.pcap out to the host path $2 (if a
+# handle was given), and removes the container. No sudo — the copied file is
+# owned by the invoking user.
 stop_tcpdump() {
-  local pid="$1"
-  [[ -z "$pid" ]] && return 0
-  sudo -n kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  local cname="$1" pcap="${2:-}"
+  [[ -z "$cname" ]] && return 0
+  docker kill -s INT "$cname" >/dev/null 2>&1 || true
+  sleep 0.5
+  if [[ -n "$pcap" ]]; then
+    docker cp "$cname:/cap.pcap" "$pcap" >/dev/null 2>&1 || true
+  fi
+  docker rm -f "$cname" >/dev/null 2>&1 || true
 }
 
 # Saves diagnostics for one failing check into a timestamped artifacts dir:
@@ -157,7 +179,8 @@ capture_artifacts() {
   mkdir -p "$artdir"
   "${COMPOSE[@]}" logs cqlite-flight --no-color > "$artdir/cqlite-flight-debug.log" 2>&1 || true
   if [[ -n "$pcap" && -f "$pcap" ]]; then
-    sudo -n chown "$(id -u)":"$(id -g)" "$pcap" 2>/dev/null || true
+    # The pcap was copied out of the capture container by `docker cp` and is
+    # already owned by us — no `sudo chown` needed (issue #2289 arm64/macOS).
     cp "$pcap" "$artdir/flight-8815.pcap" 2>/dev/null || true
   fi
   "${COMPOSE[@]}" exec -T trino trino --output-format JSON \
@@ -172,26 +195,23 @@ capture_artifacts() {
 run_check() {
   local name="$1"; shift
   local pcap="/tmp/field-repro-${name}.pcap"
-  local tcpdump_pid=""
-  tcpdump_pid="$(start_tcpdump "$pcap")"
+  rm -f "$pcap" 2>/dev/null || true
+  local tcpdump_handle=""
+  tcpdump_handle="$(start_tcpdump "$name")"
   set +e
   "$@"
   local rc=$?
   set -e
-  stop_tcpdump "$tcpdump_pid"
+  stop_tcpdump "$tcpdump_handle" "$pcap"
   if [[ $rc -ne 0 ]]; then
     echo "FAIL: $name"
     FAILURES=$((FAILURES + 1))
     capture_artifacts "$name" "$pcap"
   else
     echo "PASS: $name"
-    # `$pcap`, if it exists, is root-owned (written by `sudo -n tcpdump`, issue
-    # #2289 dry run 2026-07-10: an unprivileged `rm -f` on it failed with
-    # "Operation not permitted" and, under `set -e`, silently aborted the
-    # WHOLE script — the #2193 check and final summary never ran even though
-    # this check had genuinely passed). Match the privilege level it was
-    # created under.
-    sudo -n rm -f "$pcap" 2>/dev/null || rm -f "$pcap" 2>/dev/null || true
+    # The pcap (if any) was `docker cp`'d out and is owned by us — a plain
+    # `rm -f` suffices (no privileged deletion / set -e abort footgun).
+    rm -f "$pcap" 2>/dev/null || true
   fi
   return 0
 }
@@ -223,11 +243,11 @@ ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1 || { echo "plugin build failed: no jar in
 log "bring up stack (builds cqlite-flight image; waits for healthy deps)"
 "${COMPOSE[@]}" up -d --build
 
-resolve_bridge_if
-if [[ -n "$BRIDGE_IF" ]]; then
-  log "resolved compose bridge interface for tcpdump: $BRIDGE_IF"
+resolve_cassandra_cid
+if [[ -n "$CASSANDRA_CID" ]]; then
+  log "resolved cassandra container ($CASSANDRA_CID) — tcpdump capture container will share its netns"
 else
-  log "WARNING: could not resolve the compose bridge interface — capture-on-fail will skip the pcap"
+  log "WARNING: could not resolve the cassandra container id — capture-on-fail will skip the pcap"
 fi
 
 # ── bounded resolve-wait polling (issue #2233 discipline applied to a RETRY
