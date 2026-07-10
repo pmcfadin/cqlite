@@ -150,20 +150,62 @@ record_loader_provenance() {
   log "loadtest.keyvalue loader: $loader"
 }
 
+# Resolves the `cassandra-easy-stress` service's PINNED image reference from
+# THIS run's actual compose config — never hardcoded (would drift silently if
+# `docker-compose.yml`'s tag ever changes). The service sits behind the
+# `loadtest` profile, so `--profile loadtest` must precede `config` or the
+# service is simply absent from the config output. python3 gives an exact
+# JSON-field read; a grep/awk fallback (never a silent skip) covers hosts
+# without python3 — uses the POSIX `[[:space:]]` class, NOT `\s` (verified
+# empirically, issue #2289: macOS's default `/usr/bin/awk` — BWK/one-true-awk
+# — does NOT support the GNU-only `\s` shorthand and silently matches
+# nothing; `[[:space:]]` is portable across awk implementations).
+resolve_stress_image_ref() {
+  local -a compose=("$@")
+  local ref=""
+  if command -v python3 >/dev/null 2>&1; then
+    ref="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" "${compose[@]}" --profile loadtest config --format json 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["cassandra-easy-stress"]["image"])' 2>/dev/null)" || true
+  fi
+  if [[ -z "$ref" ]]; then
+    ref="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" "${compose[@]}" --profile loadtest config 2>/dev/null \
+      | awk '/^  cassandra-easy-stress:/{f=1; next} f && /^[[:space:]]*image:/{print $2; exit}')" || true
+  fi
+  echo "$ref"
+}
+
 load_big_keyvalue_table() {
   local -a compose=("$@")
   log "load field-shaped big table: loadtest.keyvalue, target >=$((BIG_TABLE_PARTITIONS_PER_BATCH * BIG_TABLE_BATCHES)) partitions across $BIG_TABLE_BATCHES flushes"
 
-  log "probing cassandra-easy-stress image availability (docker compose pull, bound ${NETWORK_PULL_TIMEOUT_SECS}s, no workload run yet)"
-  local pull_outfile pull_rc
-  pull_outfile="$(mktemp)"
-  set +e
-  run_with_timeout "$NETWORK_PULL_TIMEOUT_SECS" "${compose[@]}" --profile loadtest pull cassandra-easy-stress >"$pull_outfile" 2>&1
-  pull_rc=$?
-  set -e
+  # Issue #2289 roborev finding (job 1600): check the LOCAL image cache
+  # FIRST — a prior revision hard-required a successful `docker compose
+  # pull` before ANY workload attempt, so an OFFLINE dev box (a core LOCAL
+  # testbed use case) with the image already cached would fail even though
+  # `docker compose run` would work fine off the cache. Only attempt (and
+  # classify-on-failure, per job 1596's semantics below) a registry pull when
+  # the image is NOT already present locally.
+  local stress_image local_image_digest
+  stress_image="$(resolve_stress_image_ref "${compose[@]}")"
+  local_image_digest=""
+  if [[ -n "$stress_image" ]] && run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker image inspect "$stress_image" >/dev/null 2>&1; then
+    local_image_digest="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker image inspect --format '{{.Id}}' "$stress_image" 2>/dev/null)" || true
+    local_image_digest="${local_image_digest:-present, digest unknown}"
+    log "cassandra-easy-stress image already cached locally ($stress_image, $local_image_digest) — skipping the registry pull entirely (offline-dev-box friendly)"
+  fi
+
+  local pull_outfile="" pull_rc=0
+  if [[ -z "$local_image_digest" ]]; then
+    log "probing cassandra-easy-stress image availability (docker compose pull, bound ${NETWORK_PULL_TIMEOUT_SECS}s, no workload run yet)"
+    pull_outfile="$(mktemp)"
+    set +e
+    run_with_timeout "$NETWORK_PULL_TIMEOUT_SECS" "${compose[@]}" --profile loadtest pull cassandra-easy-stress >"$pull_outfile" 2>&1
+    pull_rc=$?
+    set -e
+  fi
 
   if [[ "$pull_rc" -eq 0 ]]; then
-    rm -f "$pull_outfile"
+    [[ -n "$pull_outfile" ]] && rm -f "$pull_outfile"
     for batch in $(seq 1 "$BIG_TABLE_BATCHES"); do
       local id
       id="$(printf 'fr%02d' "$batch")"
@@ -181,14 +223,18 @@ load_big_keyvalue_table() {
       batch_rc=$?
       set -e
       if [[ $batch_rc -ne 0 ]]; then
-        echo "FATAL: cassandra-easy-stress batch $batch failed or timed out (rc=$batch_rc, bound ${LOAD_BATCH_TIMEOUT_SECS}s). The image WAS pullable, so this is a real workload/config error or a genuine hang — NOT falling back (a fallback here could silently mix a partially-written stress batch with fallback-loader rows in the SAME table)." >&2
+        echo "FATAL: cassandra-easy-stress batch $batch failed or timed out (rc=$batch_rc, bound ${LOAD_BATCH_TIMEOUT_SECS}s). The image WAS available (${local_image_digest:+local cache, }pullable), so this is a real workload/config error or a genuine hang — NOT falling back (a fallback here could silently mix a partially-written stress batch with fallback-loader rows in the SAME table)." >&2
         cleanup_stress_containers "${compose[@]}"
         record_loader_provenance "cassandra-easy-stress (FAILED at batch $batch/$BIG_TABLE_BATCHES, rc=$batch_rc — loadtest.keyvalue may contain partial/mixed data from batch(es) 1..$((batch - 1)) only)"
         exit 1
       fi
       run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra nodetool flush loadtest
     done
-    record_loader_provenance "cassandra-easy-stress ($BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
+    if [[ -n "$local_image_digest" ]]; then
+      record_loader_provenance "cassandra-easy-stress (local cached image $stress_image, $local_image_digest, no registry pull; $BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
+    else
+      record_loader_provenance "cassandra-easy-stress ($BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
+    fi
   else
     local pull_class
     pull_class="$(classify_pull_failure "$pull_rc" "$pull_outfile")"
