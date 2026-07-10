@@ -177,6 +177,28 @@ docker compose exec trino trino
 trino> SELECT * FROM cqlite.<keyspace>.<table> LIMIT 10;
 ```
 
+## Required JVM configuration (Arrow off-heap, JDK 17+)
+
+The connector uses Apache Arrow (`flight-core`) for off-heap columnar buffers. On JDK 17+
+arrow-java's `MemoryUtil` initializer needs the `java.nio` module opened to it, via this **exact**
+flag in Trino's `jvm.config`:
+
+```
+--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED
+```
+
+Trino 481's stock `jvm.config` does **not** include it. Without the flag, the first Arrow off-heap
+touch throws `ExceptionInInitializerError` in `MemoryUtil.<clinit>`, and every `do_get` on the
+Flight read path then fails far downstream with a cryptic `Failed to read message`.
+
+**Fail-fast:** the connector probes Arrow memory initialization once at catalog load
+(`ArrowMemoryPreflight`, before any query). If the flag is missing it raises a Trino
+`CONFIGURATION_INVALID` error naming this exact flag and the `jvm.config` remedy — instead of the
+opaque read-time failure. Add the flag to **every** coordinator and worker and restart.
+
+The bundled docker stack sets this in [`docker/trino/jvm.config`](docker/trino/jvm.config), and the
+k8s `trino-cqlite` kit injects it into both the coordinator and worker deployments automatically.
+
 ## Catalog configuration
 
 Catalog properties (`etc/catalog/cqlite.properties`):
