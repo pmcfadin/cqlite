@@ -222,6 +222,13 @@ async fn steady_state_windowed_scan_allocs_at_most_one_per_chunk() {
     );
 
     // E3/A5 invariant not regressed: exactly one read per decompressed chunk.
+    // NOTE: `reads == decompresses` assumes this fixture has NO incompressible
+    // chunk — an incompressible-raw chunk (stored uncompressed by Cassandra) is
+    // still READ but is passed through WITHOUT a decompress, so it would record a
+    // read with no matching decompress and make `reads > decompresses`. The
+    // `test_timeseries/sensor_data` fixture is fully compressible, so the equality
+    // holds; a future fixture swap that introduces an incompressible chunk must
+    // relax this to `reads >= decompresses`.
     assert_eq!(
         reads, decompresses,
         "#1940: the substrate change must not regress the E3 one-read-per-chunk \

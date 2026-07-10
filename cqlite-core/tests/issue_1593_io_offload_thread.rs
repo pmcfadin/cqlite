@@ -239,22 +239,20 @@ async fn mmap_scan_io_read_runs_off_async_worker_pool() {
     );
 }
 
-/// Companion to the mmap guard: the `Direct` (`O_DIRECT` / `F_NOCACHE`) backend is
-/// the OTHER `faults_synchronously()` backend that shares the identical
-/// `feed_raw_chunks_blocking` `spawn_blocking` feed path (coverage gap, roborev
-/// finding, issue #1593). It must likewise run its raw chunk read OFF the async
-/// worker pool.
+/// Companion to the mmap guard: the `Direct` (`O_DIRECT` / `F_NOCACHE`) backend
+/// shares the identical `feed_raw_chunks_blocking` `spawn_blocking` feed path
+/// (coverage gap, roborev finding, issue #1593). It must likewise run its raw
+/// chunk read OFF the async worker pool.
 ///
 /// UNIX-gated (there is no `O_DIRECT`/`F_NOCACHE` on non-unix). Direct I/O is NOT
 /// reliably provisionable in every test filesystem (tmpfs / overlayfs refuse
 /// `O_DIRECT`), and the reader degrades GRACEFULLY to buffered at open when it is
-/// refused. On that fallback the buffered feed runs inline on the async runtime by
-/// design (it is genuinely async and does NOT fault synchronously), and never
-/// records an I/O-read thread — so a recorded thread of `None` means "Direct was
-/// refused; buffered fallback in effect" and we SKIP (documented, not a silent
-/// omission) rather than asserting on a backend the environment could not provide.
-/// When Direct IS provisioned, the recorded read thread must be OFF the worker set,
-/// exactly like the mmap guard.
+/// refused. Since issue #1940 unified BOTH backends onto the one `spawn_blocking`
+/// feed loop (so buffered decode never lands on the reactor either), even the
+/// buffered fallback now records an I/O-read thread OFF the worker set — so the
+/// off-worker assertion below holds whether Direct was provisioned or refused.
+/// (A recorded thread of `None` would instead mean the windowed chunk-stitching
+/// path did not run at all — a genuine skip; documented, not a silent omission.)
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)] // keep == WORKER_THREADS
 async fn direct_scan_io_read_runs_off_async_worker_pool() {
@@ -289,17 +287,18 @@ async fn direct_scan_io_read_runs_off_async_worker_pool() {
          guard would be vacuous"
     );
 
-    // No recorded I/O-read thread => the faulting-backend (spawn_blocking) feed
-    // path did not run: Direct was refused and the reader fell back to buffered
-    // (inline-on-async by design). Document and skip rather than fail — Direct is
-    // not reliably provisionable in every CI filesystem.
+    // No recorded I/O-read thread => the windowed chunk-stitching feed path did
+    // not run at all (e.g. the fixture was not the `nb` chunk-compressed format).
+    // Since #1940 unified buffered + faulting backends onto the one spawn_blocking
+    // feed, a buffered fallback for a refused Direct still records a thread here, so
+    // `None` no longer means "buffered fallback" — it means "windowed path absent".
+    // Document and skip rather than fail on a fixture that could not exercise it.
     let Some(io_read_thread) = io_read_thread else {
         eprintln!(
-            "Skipping Direct-backend offload assertion for {KEYSPACE}.{TABLE}: O_DIRECT/F_NOCACHE \
-             was refused here, so the reader degraded to the buffered (inline-on-async) backend \
-             (no I/O-read thread recorded). The Direct backend shares the identical \
-             feed_raw_chunks_blocking spawn_blocking path proven by the mmap guard \
-             (covered-by-construction); this environment could not exercise it directly."
+            "Skipping Direct-backend offload assertion for {KEYSPACE}.{TABLE}: no I/O-read thread \
+             recorded — the windowed (chunk-stitching) feed path did not run (fixture may not be \
+             the `nb` chunk-compressed format). The spawn_blocking feed path itself is proven by \
+             the mmap guard and the buffered #1940 decode guard."
         );
         return;
     };

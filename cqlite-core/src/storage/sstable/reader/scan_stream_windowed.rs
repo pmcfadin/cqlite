@@ -20,15 +20,19 @@
 //! Both are achievable together. This driver splits the work across THREE stages
 //! of one bounded pipeline (issue #1143 contention fix):
 //!
-//!   - **Async I/O half** (`run_scan_stream_windowed`): the only thing that must
-//!     touch the async runtime is the chunk read (`read_next_block().await`
-//!     awaits the per-scan cursor's async file lock). It does ONLY I/O: read the
-//!     next raw compressed chunk and hand it to the parse half over a small
-//!     bounded channel (`raw` channel, capacity [`RAW_CHUNK_CHANNEL_CAP`] = 8 so
-//!     the I/O half can read ahead instead of ping-ponging on every chunk).
+//!   - **Blocking I/O + decode half** (`feed_raw_chunks_blocking`): a single
+//!     `spawn_blocking` task, for EVERY backend (issues #1593, #1940). It reads the
+//!     next raw compressed chunk, DECODES it (CRC-verify in the read →
+//!     cache-lookup-or-decompress, D2), and hands the decompressed refcounted
+//!     `Bytes` to the parse half over a small bounded channel (`raw` channel,
+//!     capacity [`RAW_CHUNK_CHANNEL_CAP`] = 8 so the feed can read ahead instead of
+//!     ping-ponging on every chunk). Running this off the async worker pool keeps
+//!     BOTH the (possibly synchronously-faulting) read AND the decompression CPU
+//!     off the reactor — a decode on the reactor is the same Epic F starvation the
+//!     parse offload prevents.
 //!   - **Blocking parse half** (`drain_scan_window_blocking`): a single
 //!     `spawn_blocking` task owns the parser, the schema, and the sliding
-//!     window. It pulls raw chunks with `blocking_recv`, decompresses, appends to
+//!     window. It pulls ALREADY-DECODED chunks with `blocking_recv`, appends to
 //!     the window, drains every confirmed partition, and accumulates surviving
 //!     `(RowKey, ScanRow)` entries into a BATCH of up to [`BATCH_EMIT_ROWS`], which
 //!     it hands across the blocking→async seam via `tx.blocking_send` as ONE
@@ -495,33 +499,37 @@ impl SSTableReader {
         // next `blocking_send` then fails so it terminates (`*broke = true`).
         let forwarder = Self::spawn_windowed_forwarder(out, batch_rx);
 
-        // Feed raw compressed chunks to the parse task. The bounded `raw_tx`
-        // applies backpressure all the way back to disk reads when the consumer
-        // (and thus the parse task) falls behind.
+        // Feed raw compressed chunks to the parse task, DECODING each on the way
+        // (issue #1940, D2). The bounded `raw_tx` applies backpressure all the way
+        // back to disk reads when the consumer (and thus the parse task) falls
+        // behind.
         //
-        // Determine the ACTUAL scan backend once (the per-scan cursor mutex is
-        // uncontended, so this lock is effectively free). A synchronously-faulting
-        // backend (mmap page fault / `O_DIRECT` `pread`) does its disk I/O
-        // *inside* `poll_read`, so reading it on an async worker blocks — and K
-        // concurrent cold scans pin the whole pool, stalling every warm point read
-        // (issue #1593, F3). Route such a backend's read loop off the async
-        // workers; the buffered backend is genuinely async (`tokio::fs`, reactor-
-        // driven) and stays inline on the runtime.
-        let faulting_backend = cursor.file.lock().await.faults_synchronously();
-
-        let io_err: Option<Error> = if faulting_backend {
-            Self::feed_raw_chunks_blocking(
-                Arc::clone(&self),
-                cursor,
-                raw_tx,
-                &io_failed,
-                max_compressed_length,
-            )
-            .await
-        } else {
-            self.feed_raw_chunks_async(cursor, raw_tx, &io_failed, max_compressed_length)
-                .await
-        };
+        // The feed loop runs on ONE `spawn_blocking` thread for EVERY backend
+        // (issue #1940 runtime placement). Two CPU-bound steps live here now: the
+        // raw chunk read AND its decompression (`decode_scan_chunk`). Neither may
+        // run on the small async worker pool — decode CPU on the reactor is the
+        // Epic F starvation the parse-offload (#1143) and IO-offload (#1593) fixes
+        // exist to prevent. For the faulting backends (mmap page fault / `O_DIRECT`
+        // `pread`) the read ALSO blocks inside `poll_read` (#1593). Both concerns
+        // are satisfied by running the whole read+decode loop under `spawn_blocking`
+        // regardless of backend:
+        //   - buffered (`tokio::fs`): reads are serviced by tokio's blocking pool
+        //     via the runtime `Handle` (present on a `spawn_blocking` thread), so
+        //     `futures::executor::block_on` of the async read completes without the
+        //     reactor — and the decode after it stays off the worker pool;
+        //   - mmap/`O_DIRECT`: the synchronous fault/`pread` inside `poll_read`
+        //     runs on the blocking thread, exactly as #1593 requires.
+        // Unifying the two former feed loops onto this one blocking path keeps the
+        // decode off the reactor for the buffered backend while preserving the
+        // faulting-backend behavior byte-for-byte.
+        let io_err: Option<Error> = Self::feed_raw_chunks_blocking(
+            Arc::clone(&self),
+            cursor,
+            raw_tx,
+            &io_failed,
+            max_compressed_length,
+        )
+        .await;
 
         // Join the parse task; its Result is the scan's Result. An I/O error
         // takes precedence (the task only saw a truncated stream). The parse task
@@ -606,78 +614,25 @@ impl SSTableReader {
         })
     }
 
-    /// I/O feed loop for a genuinely-async (buffered) backend: read the next
-    /// compressed chunk on the async runtime, DECODE it (issue #1940, D2), and
-    /// forward the decompressed refcounted `Bytes` over the bounded `raw_tx`.
-    /// `tokio::fs` reads are reactor-driven and non-blocking, so this belongs inline
-    /// on the worker (issue #1593, F3). Returns the terminal read/decode error, if
-    /// any; consumes `raw_tx` so it drops on return, signalling EOF to the parse
-    /// half (only when `io_failed` stayed false — see the parse half).
-    async fn feed_raw_chunks_async(
-        &self,
-        cursor: &ScanCursor,
-        raw_tx: mpsc::Sender<bytes::Bytes>,
-        io_failed: &Arc<AtomicBool>,
-        max_compressed_length: usize,
-    ) -> Option<Error> {
-        // Flip `io_failed` on any unwind so a panic in `read_next_block` cannot
-        // masquerade as a clean EOF and make the parse half emit a truncated
-        // trailing partition (roborev finding, issue #1593). Disarmed on the
-        // clean-EOF / consumer-ended exit below so the happy path is unchanged.
-        let mut panic_guard = FeedFailureGuard::armed(io_failed);
-        // Reused compressed-read scratch (issue #1940, D2): read fills it, decode
-        // borrows it, recycle for the next read — no per-chunk compressed alloc.
-        let mut scratch: Vec<u8> = Vec::new();
-        let mut chunk_index = 0usize;
-        loop {
-            match self
-                .read_next_block_parts(&cursor.file, &cursor.chunk_index, &mut scratch)
-                .await
-            {
-                Ok(Some(compressed)) => {
-                    let (decoded, recycled) = match self.decode_scan_chunk(
-                        chunk_index,
-                        max_compressed_length,
-                        compressed,
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            io_failed.store(true, Ordering::SeqCst);
-                            return Some(e);
-                        }
-                    };
-                    scratch = recycled;
-                    chunk_index += 1;
-                    if raw_tx.send(decoded).await.is_err() {
-                        break; // parse task ended early (consumer dropped / parse error)
-                    }
-                }
-                Ok(None) => break, // EOF
-                Err(e) => {
-                    // Tell the parse half to SKIP the terminal final drain: the
-                    // stream is truncated, so the trailing window is partial and
-                    // must not be emitted. The store is sequenced before the
-                    // `drop(raw_tx)` (on return) the parse half synchronizes on.
-                    io_failed.store(true, Ordering::SeqCst);
-                    return Some(e);
-                }
-            }
-        }
-        // Clean EOF (or consumer ended early): leave `io_failed` false so the
-        // parse half runs its terminal drain exactly as before.
-        panic_guard.disarm();
-        None
-        // `raw_tx` drops here on return, signalling clean EOF to the parse half.
-    }
-
-    /// I/O feed loop for a synchronously-faulting backend (mmap page fault /
-    /// `O_DIRECT` `pread`): run the WHOLE per-scan read loop on ONE
-    /// `spawn_blocking` thread so the blocking disk I/O never pins an async worker
-    /// (issue #1593, F3). One offload per scan (mirroring the parse half — never
-    /// per chunk, which would over-spawn; per-scan admission is F4's scope). Feeds
-    /// the same bounded `raw_tx` via `blocking_send` (backpressure preserved: a
+    /// I/O + decode feed loop for the windowed scan — runs on ONE `spawn_blocking`
+    /// thread for EVERY backend (issue #1593 F3 for the read; issue #1940 for the
+    /// decode).
+    ///
+    /// Two CPU-bound steps run here: the raw chunk read AND its decompression
+    /// (`decode_scan_chunk`, D2). Neither may run on the async worker pool — a
+    /// decode on the reactor is the Epic F starvation the offload fixes prevent —
+    /// so the whole loop runs off the async runtime under one `spawn_blocking`
+    /// (mirroring the parse half — one offload per scan, never per chunk, which
+    /// would over-spawn; per-scan admission is F4's scope). For a synchronously-
+    /// faulting backend (mmap page fault / `O_DIRECT` `pread`) the read blocks
+    /// inside `poll_read`; for the buffered backend the `tokio::fs` read is
+    /// serviced by tokio's blocking pool via the runtime `Handle` (present on this
+    /// `spawn_blocking` thread), so `futures::executor::block_on` of the async read
+    /// completes without needing the reactor — see the SOUNDNESS note in the loop.
+    /// Feeds the bounded `raw_tx` via `blocking_send` (backpressure preserved: a
     /// full channel parks this thread). Consumes `raw_tx` (moved into the task) so
-    /// it drops when the task returns, signalling EOF exactly as the async loop.
+    /// it drops when the task returns, signalling EOF to the parse half (only when
+    /// `io_failed` stayed false — see the parse half).
     async fn feed_raw_chunks_blocking(
         reader: Arc<Self>,
         cursor: &ScanCursor,
@@ -707,24 +662,49 @@ impl SSTableReader {
             // Compiled only under the non-default `scan-offload-probe` feature.
             #[cfg(feature = "scan-offload-probe")]
             probe::record_io_read_thread();
-            // Reused compressed-read scratch (issue #1940, D2) — see the async loop.
+            // Reused compressed-read scratch (issue #1940, D2): read fills it, decode
+            // borrows it, recycle for the next read — no per-chunk compressed alloc.
+            // Pre-reserve it ONCE to the max stored compressed-chunk record size from
+            // authoritative CompressionInfo metadata (`chunk_length + 4`: a stored
+            // record — even an incompressible-raw chunk kept at its uncompressed size
+            // — never exceeds the uncompressed chunk length plus the trailing 4-byte
+            // CRC), so the per-chunk `clear()`+`resize` in the read path never has to
+            // grow the backing store in steady state. Without this the fresh per-scan
+            // scratch would reallocate a few times as it warms to its high-water mark,
+            // which the ≤1-alloc/chunk guard (now counting scratch regrowth too, D2)
+            // would attribute as extra copy-chain allocations. Metadata-driven, no
+            // heuristic; a `None` compression_info (uncompressed NB) reserves nothing
+            // and the historical grow-on-demand behaviour applies.
             let mut scratch: Vec<u8> = Vec::new();
+            if let Some(ci) = reader.compression_info.as_ref() {
+                scratch.reserve((ci.chunk_length as usize).saturating_add(4));
+            }
             let mut chunk_index = 0usize;
             loop {
-                // SOUNDNESS (issue #1593): driving the async read under
+                // SOUNDNESS (issues #1593, #1940): driving the async read under
                 // `futures::executor::block_on` on this blocking thread is sound
-                // ONLY because the mmap/`O_DIRECT` per-chunk read path touches no
-                // tokio reactor/timer primitive — the per-scan cursor `Mutex` is
-                // executor-agnostic (semaphore + wakers, no reactor);
-                // `MmapCursor`/`DirectCursor` `poll_*` are pure synchronous
-                // memory/`pread` ops; the CRC digest is preloaded in memory at
-                // open (no per-chunk `tokio::fs`); and the transient-retry re-seek
-                // uses no `tokio::time`. This branch is NEVER taken for the
-                // buffered backend (which needs the reactor). A nested tokio
+                // for EVERY backend the windowed scan uses:
+                //   - mmap/`O_DIRECT`: `MmapCursor`/`DirectCursor` `poll_*` are pure
+                //     synchronous memory/`pread` ops — they touch no tokio
+                //     reactor/timer primitive, so the plain thread-parking
+                //     `block_on` drives them to completion directly;
+                //   - buffered (`tokio::fs`): its `poll_read` offloads the actual
+                //     `read(2)` to tokio's BLOCKING pool via the runtime `Handle`
+                //     (which IS present on a `spawn_blocking` thread) and wakes the
+                //     task through a oneshot — NOT via the mio I/O reactor. So the
+                //     future makes progress under a non-tokio `block_on`: the
+                //     blocking-pool op completes and re-polls the parked future.
+                //     (`tokio::fs` explicitly does not require the I/O driver;
+                //     only true socket/timer sources do.)
+                // In all cases the per-scan cursor `Mutex` is executor-agnostic
+                // (semaphore + wakers, no reactor), the CRC digest is preloaded in
+                // memory at open (no per-chunk metadata `tokio::fs`), and the
+                // transient-retry re-seek uses no `tokio::time`. A nested tokio
                 // runtime or `block_in_place` would panic on a `spawn_blocking`
                 // thread; `futures::executor::block_on` is a plain thread-parking
                 // executor with no tokio involvement, so it does not. Decompression
-                // (in `decode_scan_chunk`) is a pure CPU op — also reactor-free.
+                // (in `decode_scan_chunk`) is a pure CPU op — also reactor-free, and
+                // now runs HERE (D2) rather than on the async worker.
                 match futures::executor::block_on(reader.read_next_block_parts(
                     &io_file,
                     &io_chunk_index,

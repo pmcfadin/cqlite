@@ -502,7 +502,17 @@ async fn read_nb_format_chunk_data(
         // this call, so reuse across chunks never leaks a prior chunk.
         let mut chunk_data = std::mem::take(scratch);
         chunk_data.clear();
+        // Record compressed-read scratch REGROWTH as a copy-chain alloc (issue #1940):
+        // the reused scratch reallocates when a chunk exceeds its retained capacity, so
+        // without this a scratch that keeps regrowing would slip past the ≤1-alloc/chunk
+        // guard (which else counts only the decompress output). After warmup the scratch
+        // sits at its high-water mark and records ZERO here; a reuse regression grows
+        // every chunk and trips the guard. No-op in release.
+        let cap_before = chunk_data.capacity();
         chunk_data.resize(total_chunk_size as usize, 0u8);
+        if chunk_data.capacity() > cap_before {
+            crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
+        }
         file_guard.read_exact(&mut chunk_data).await.map_err(|e| {
             Error::Io(std::io::Error::new(
                 e.kind(),

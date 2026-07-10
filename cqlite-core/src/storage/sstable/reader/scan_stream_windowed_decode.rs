@@ -31,6 +31,14 @@ impl SSTableReader {
     ) -> Result<(bytes::Bytes, Vec<u8>)> {
         use crate::storage::sstable::compression::Compression;
 
+        // Runtime-placement guard (issue #1940): record the thread this decode
+        // (decompress) actually runs on so a guard test can prove it is a
+        // spawn_blocking thread, NOT an async worker — the D2 substrate moved
+        // decompression into the IO-half feed loop, which must stay off the
+        // reactor for EVERY backend. Compiled only under `scan-offload-probe`.
+        #[cfg(feature = "scan-offload-probe")]
+        super::probe::record_decode_thread();
+
         // Incompressible-raw chunks (stored uncompressed by Cassandra) skip the
         // cache and are passed through zero-copy; the buffer is consumed.
         if compressed.len() >= max_compressed_length {
