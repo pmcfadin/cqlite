@@ -277,7 +277,7 @@ async fn written_summary_index_pair_resolves_via_index_probes() {
     // non-vacuous test.
     assert!(
         reader.has_partition_index(),
-        "written fixture must load Summary.db (has_partition_index)"
+        "written fixture must expose a random-access index (has_partition_index)"
     );
 
     read_work_counters::reset();
@@ -323,7 +323,7 @@ async fn fully_shadowed_partition_keeps_index_path() {
 
     assert!(
         reader.has_partition_index(),
-        "written fixture must load Summary.db (has_partition_index)"
+        "written fixture must expose a random-access index (has_partition_index)"
     );
 
     read_work_counters::reset();
