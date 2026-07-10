@@ -83,7 +83,11 @@ fn collect_inputs(dir: &std::path::Path, out: &mut Vec<(u64, PathBuf)>, depth: u
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if name.starts_with("nb-") && name.ends_with("-big-Data.db") {
             let base = name.trim_end_matches("-Data.db");
             if !path.with_file_name(format!("{base}-TOC.txt")).exists() {
@@ -119,10 +123,16 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
         let base = input as i32 * ROWS_PER_INPUT;
         for r in 0..ROWS_PER_INPUT {
             engine
-                .write(write_row(base + r, &format!("v-{input}-{r}"), 100 + input as i64))
+                .write(write_row(
+                    base + r,
+                    &format!("v-{input}-{r}"),
+                    100 + input as i64,
+                ))
                 .expect("write row");
         }
-        rt.block_on(engine.flush()).expect("flush").expect("flush info");
+        rt.block_on(engine.flush())
+            .expect("flush")
+            .expect("flush info");
     }
     rt.block_on(engine.close()).expect("close engine");
 
@@ -197,7 +207,9 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
     while Instant::now() < deadline {
         capture.reset();
         std::thread::sleep(Duration::from_millis(20));
-        final_val = capture.flush_and_collect().counter_sum(catalog::MERGE_PRODUCER_THREADS);
+        final_val = capture
+            .flush_and_collect()
+            .counter_sum(catalog::MERGE_PRODUCER_THREADS);
         if final_val == 0.0 {
             break;
         }

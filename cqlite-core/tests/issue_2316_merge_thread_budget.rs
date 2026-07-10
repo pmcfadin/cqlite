@@ -178,7 +178,11 @@ fn collect_inputs(dir: &std::path::Path, out: &mut Vec<(u64, PathBuf)>, depth: u
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if name.starts_with("nb-") && name.ends_with("-big-Data.db") {
             let base = name.trim_end_matches("-Data.db");
             if !path.with_file_name(format!("{base}-TOC.txt")).exists() {
@@ -282,8 +286,8 @@ fn merge_bounds_producer_threads_to_o_m() {
     );
 
     // Drain the merge so producers exit cleanly (no leaked threads / temp files).
-    let mut writer = SSTableWriter::new(out.path().to_path_buf(), 1, &schema)
-        .expect("SSTableWriter::new");
+    let mut writer =
+        SSTableWriter::new(out.path().to_path_buf(), 1, &schema).expect("SSTableWriter::new");
     writer.pre_seed_encoding_baselines(baseline_ts, baseline_ldt, baseline_ttl);
     let stats = merger.merge(&mut writer).expect("merge into writer");
     let finish_rt = tokio::runtime::Builder::new_current_thread()

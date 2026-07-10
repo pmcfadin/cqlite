@@ -377,14 +377,11 @@ pub(crate) use async_bridge::block_on_async;
 ///
 /// ## Issue #2316 thread budget (O(M), no per-producer worker pool)
 ///
-/// That per-producer runtime is a **`current_thread`** runtime
-/// (`Builder::new_current_thread()`), NOT a multi-threaded `Runtime::new()`. It
-/// drives the producer's single sequential scan on the producer thread itself and
-/// starts ZERO extra worker threads, so a merge over `M` input SSTables costs
-/// `O(M)` OS threads instead of `M + M·num_cpus`. The scan has no internal
-/// `tokio::spawn`, so a multi-core worker pool was never exercised — it was pure
-/// overhead that amplified into a context-switch storm under concurrent Flight
-/// `do_get` load.
+/// That per-producer runtime is a **`current_thread`** runtime, NOT a
+/// multi-threaded `Runtime::new()`: it drives the producer's single sequential
+/// scan (no internal `tokio::spawn`) on the producer thread itself, adding ZERO
+/// worker threads. A merge over `M` inputs therefore costs `O(M)` OS threads, not
+/// `M + M·num_cpus` — killing the context-switch storm under concurrent `do_get`.
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
     /// Receiving end of the bounded channel fed by the producer thread.
@@ -432,41 +429,10 @@ impl From<Error> for MergeProducerError {
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
-/// Live count of k-way-merge producer OS threads (issue #2316), backing the
-/// [`crate::observability::catalog::MERGE_PRODUCER_THREADS`] gauge. Incremented
-/// when a producer thread is spawned (in [`SSTableRowIteratorAdapter::open`]) and
-/// decremented when it exits (via [`ProducerThreadGuard`]); the gauge is
-/// re-recorded on each change, so it RISES as a merge spawns its `O(M)` producers
-/// and RETURNS to its baseline once the producers are joined/dropped.
+// Producer-thread gauge (issue #2316): live-count + RAII guard backing
+// `cqlite.merge.producer_threads`. Kept in a sibling module to bound this file.
 #[cfg(feature = "write-support")]
-static MERGE_PRODUCER_THREADS_LIVE: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(0);
-
-/// Re-record the producer-thread gauge with the current live count.
-#[cfg(feature = "write-support")]
-fn record_producer_threads_gauge(live: i64) {
-    crate::observability::record_gauge(
-        crate::observability::catalog::MERGE_PRODUCER_THREADS,
-        live,
-        &[],
-    );
-}
-
-/// RAII guard that decrements the live producer-thread count (and re-records the
-/// gauge) when a producer thread exits — even on panic (issue #2316). Created as
-/// the first act of [`SSTableRowIteratorAdapter::producer_thread`], so every
-/// spawned producer that was counted at spawn is decremented exactly once at exit.
-#[cfg(feature = "write-support")]
-struct ProducerThreadGuard;
-
-#[cfg(feature = "write-support")]
-impl Drop for ProducerThreadGuard {
-    fn drop(&mut self) {
-        let live =
-            MERGE_PRODUCER_THREADS_LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1;
-        record_producer_threads_gauge(live);
-    }
-}
+mod producer_gauge;
 
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
@@ -513,12 +479,8 @@ impl SSTableRowIteratorAdapter {
         });
 
         // Issue #2316: account the just-spawned producer thread on the
-        // `cqlite.merge.producer_threads` gauge. Decremented via
-        // `ProducerThreadGuard` when the producer thread exits, so the gauge rises
-        // to `O(M)` during the merge and returns to baseline once it completes.
-        let live =
-            MERGE_PRODUCER_THREADS_LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        record_producer_threads_gauge(live);
+        // `cqlite.merge.producer_threads` gauge (decremented by `ProducerThreadGuard`).
+        producer_gauge::spawned();
 
         Ok(Self {
             receiver,
@@ -549,7 +511,7 @@ impl SSTableRowIteratorAdapter {
         // Issue #2316: decrement the live producer-thread gauge when this thread
         // exits (even on panic). Created FIRST so the spawn-time increment in
         // `open` is always balanced exactly once.
-        let _thread_guard = ProducerThreadGuard;
+        let _thread_guard = producer_gauge::ProducerThreadGuard;
 
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
         // producer owns its single-purpose runtime, so the blocking
@@ -578,15 +540,11 @@ impl SSTableRowIteratorAdapter {
             // `schema` stays available for build_merge_entry below.
             let schema_for_reader = schema.clone();
 
-            // Issue #2316: drive the producer's sequential async scan on a
-            // `current_thread` runtime — it runs futures ON this producer thread
-            // and starts ZERO extra worker threads. A default multi-threaded
-            // `Runtime::new()` would eagerly spin up `num_cpus` worker threads per
-            // producer, so a merge over M inputs cost ~M + M*num_cpus OS threads
-            // (a context-switch storm under concurrent Flight `do_get` load). The
-            // scan below is a single sequential `.await` with no internal
-            // `tokio::spawn`, so those workers were pure overhead; the
-            // current_thread runtime bounds the per-merge thread cost to O(M).
+            // Issue #2316: a `current_thread` runtime drives the scan ON this
+            // producer thread with ZERO extra workers. A multi-threaded
+            // `Runtime::new()` would spin up `num_cpus` workers per producer
+            // (~M·num_cpus threads/merge) that the single sequential scan never
+            // uses — pure overhead. This bounds the per-merge thread cost to O(M).
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

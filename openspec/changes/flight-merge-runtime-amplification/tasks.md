@@ -1,49 +1,46 @@
 # Tasks — flight-merge-runtime-amplification
 
 ## 1. Pin the defect with a failing regression test (TDD first)
-- [ ] Add a regression test that drives a **real** multi-SSTable merge (real SSTable inputs;
-      `CQLITE_DATASETS_ROOT` corpus — never an empty dataset) and observes the process's peak OS
-      thread count via `/proc/self/task` entry count.
-      **Surface:** `KwayMerge::new_with_gc_and_registry_cancellable`
-      (`cqlite-core/src/storage/write_engine/merge/mod.rs`) driven end-to-end; new test file under
-      `cqlite-core/tests/`.
-- [ ] Assert the peak thread delta over baseline is within `O(M)` (`M + small_constant`); guard on
-      `num_cpus >= 2` so it FAILS on the pre-change code (multi-threaded per-producer runtime) and is
-      deterministic on single-core hosts. Confirm it FAILS on `main` before implementing the fix.
+- [x] Add a regression test that drives a **real** multi-SSTable merge (real SSTable inputs — never an
+      empty dataset) and observes the process's peak OS thread count via `/proc/self/task` (Linux) /
+      `proc_pidinfo(PROC_PIDTASKINFO)` (macOS).
+      Done: `cqlite-core/tests/issue_2316_merge_thread_budget.rs` builds 4 real `nb` inputs
+      (WriteEngine flush, 400 live rows each) and drives `KWayMerger::new(...).merge(...)` end-to-end.
+- [x] Assert the peak thread delta over baseline is within `O(M)` (`PER_INPUT·M + slack`, coefficient
+      independent of `num_cpus`); guard on `num_cpus >= 2` + platforms without a direct thread-count
+      API. Confirmed FAILS on pre-change (delta=48 on a 10-core box, bound=15) and PASSES after the fix
+      (delta 9–10).
 
 ## 2. Replace the per-producer multi-core runtime (recommended design (b))
-- [ ] In `producer_thread` (`.../write_engine/merge/mod.rs` ~line 519) replace
-      `tokio::runtime::Runtime::new()` with
-      `tokio::runtime::Builder::new_current_thread().enable_all().build()` (zero extra worker
-      threads).
-      **Surface:** `SSTableRowIteratorAdapter::producer_thread`; the scan, emit callback,
-      `SyncSender` backpressure, k-way heap, and `ScanCancel` wiring are untouched.
-- [ ] Update the surrounding doc comments (the `Issue #587` / "owns a fresh Tokio runtime" notes at
-      ~lines 374/454/493) to state the O(M) bound and the current_thread rationale, referencing
-      #2316.
-- [ ] Confirm the regression test from step 1 now PASSES.
+- [x] In `producer_thread` replace `tokio::runtime::Runtime::new()` with
+      `tokio::runtime::Builder::new_current_thread().enable_all().build()` (zero extra worker threads).
+      Scan, emit callback, `SyncSender` backpressure, k-way heap, and `ScanCancel` wiring untouched.
+- [x] Update the surrounding doc comments (`Issue #587` / "owns a fresh Tokio runtime" notes) to state
+      the O(M) bound and the current_thread rationale, referencing #2316.
+- [x] Confirmed the regression test from step 1 now PASSES (delta 9–10 ≤ bound 15).
 
 ## 3. Land the producer-thread gauge (coordinates with #2313 WS2)
-- [ ] Add the gauge to the observability catalog.
-      **Surface:** `cqlite-core/src/observability/catalog.rs` (proposed
-      `cqlite.merge.producer_threads`, unit `{thread}`) + the counter increment/decrement at producer
-      spawn (`SSTableRowIteratorAdapter::open`) and join/drop.
-- [ ] Confirm the metric name with epic #2313 WS2 before finalizing (naming-collision guard); note
-      the agreed name in the change.
-- [ ] Extend the regression test (or add a sibling) to corroborate the bound via the gauge, not only
-      `/proc/self/task`.
+- [x] Add the gauge to the observability catalog + otel instrument registry:
+      `cqlite.merge.producer_threads`, unit `{thread}`. Live count incremented at producer spawn
+      (`SSTableRowIteratorAdapter::open`) and decremented via `ProducerThreadGuard` at producer-thread
+      exit; gauge re-recorded on each change.
+- [x] Metric name `cqlite.merge.producer_threads` = the #2313 WS2-coordinated name from design.md
+      (WS2 = the thread/blocking-pool metrics surface); recorded in catalog doc + this change.
+- [x] Added a sibling gauge test `cqlite-core/tests/issue_2316_producer_gauge.rs` (under
+      `observability-testing`) corroborating the bound via the gauge (reads `M` mid-merge with the
+      `{thread}` unit, returns to baseline after drain), plus a catalog registration/unit unit-test.
 
 ## 4. Byte-parity + cancellation verification
-- [ ] Run the compaction-byte-parity harness + sstabledump JSONL golden comparison over the present
-      real corpus; confirm merged output is byte-identical to pre-change.
-      **Surface:** existing parity harness / `test-validator`.
-- [ ] Exercise the #2264 cancellation path (Flight `do_get` drop mid-merge over an index-less input)
-      and confirm prompt abandonment + `Cancelled`-vs-error distinction unchanged.
+- [x] Ran the compaction byte-parity tests over the present real corpus (issue_819 differential 7/7,
+      issue_1020 UDT-frozen 3/3, issue_1021 repaired-metadata 6/6, issue_1234 frozen-UDT 3/3) — all
+      green, merged output byte-identical (the builder swap does not touch merge/reconcile/write).
+- [x] Ran the #2264 cancellation tests (`compaction_cancel_tests` 5/5) — prompt abandonment +
+      `Cancelled`-vs-error distinction unchanged (the `ScanCancel` wiring is untouched).
 
 ## 5. Benches (#1494) — no wall-clock regression
-- [ ] If the #1494 merge bench suite has landed, run it and confirm no wall-clock regression on merge
-      throughput. If not yet landed, record a manual before/after timing of a representative
-      multi-SSTable merge in the PR and note the #1494 dependency.
+- [ ] The #1494 merge bench suite has NOT landed yet. The change is a runtime-flavor swap with no
+      change to the sequential scan/emit path, so no throughput regression is expected; a
+      representative before/after timing to be recorded in the PR, noting the #1494 dependency.
 
 ## 6. Review + gate + close
 - [ ] `scripts/agent-gate.sh --lite` green on each fix round (summary-file redirect).
