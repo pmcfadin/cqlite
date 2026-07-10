@@ -4,13 +4,17 @@
 
 ### Requirement: The windowed scan carries chunk bytes as a refcounted substrate
 
-The streaming windowed scan SHALL make decompressed chunk bytes available to the parse half as a
-refcounted, borrowable substrate (`bytes::Bytes` / the existing B1 `Arc<[u8]>`) rather than only as
-bytes copied into an owned `Vec<u8>` window. This applies to `WindowCursor`
-(`reader/window_cursor.rs`) and the `scan_stream_windowed.rs` fill path. Decompression SHALL occur such that the window can hand out a refcounted subslice
-view of a chunk (a `Bytes` slice) without an intervening full copy on the borrow path. The B1
-`DecompressedChunkCache` `Arc<[u8]>` contract SHALL be preserved (the window fill site aligns with the
-cached `Arc`; a cache hit remains a refcount bump, never a memcpy).
+The streaming windowed scan SHALL carry decompressed chunk bytes through the IO→parse channel as a
+refcounted substrate (`bytes::Bytes` / the existing B1 `Arc<[u8]>`) rather than an owned `Vec<u8>` per
+chunk, so steady-state chunk handling costs at most one allocation per chunk. This applies to the
+`scan_stream_windowed.rs` feed/fill path. The B1 `DecompressedChunkCache` `Arc<[u8]>` contract SHALL be
+preserved (a cache hit remains a refcount bump, never a memcpy).
+
+> **Note (scope):** the parse half obtaining a *borrowed* refcounted `Bytes` subslice of the chunk
+> (a zero-copy view into the window, replacing the copy into the owned window buffer) is deferred to
+> the zero-copy value-extraction stage (K5, issue #1644), where it has an actual consumer. Adding the
+> borrow API in this stage would be an unwired public surface (wiring-evidence). #1940 delivers the
+> refcounted substrate + the ≤1-alloc/chunk win; #1644 adds the borrowing decode path on top.
 
 #### Scenario: Steady-state scan allocates at most one buffer per chunk
 
@@ -20,12 +24,6 @@ cached `Arc`; a cache hit remains a refcount bump, never a memcpy).
 - **THEN** the allocation count attributable to chunk handling is ≤ 1 per chunk (on `main` it is ≥ 2)
 - **AND** the read-op work-counter remains exactly 1 read per chunk (the E3/A5 invariant is not
   regressed).
-
-#### Scenario: The window can hand out a borrowed chunk subslice
-
-- **WHEN** the parse half needs the bytes for a value that lies within the current window
-- **THEN** it can obtain a refcounted `Bytes` subslice of the chunk substrate (a view), not only a copy
-  into the owned window buffer.
 
 ### Requirement: CRC ordering, bounded memory, and byte-parity are preserved
 
