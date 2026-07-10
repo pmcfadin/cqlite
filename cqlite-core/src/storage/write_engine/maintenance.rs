@@ -7,82 +7,84 @@
 //! fields are reachable here because this is a sibling module in the same crate.
 
 use super::merge;
-use super::mutation::{DecoratedKey, PartitionTombstone, RangeTombstone};
-// `Mutation` itself is no longer named directly outside tests (issue #1668
-// stage 5c-iv part 3 removed the `Vec<Mutation>` accumulator this file used
-// to build) — only `mod tests` (`use super::*`) still constructs one
-// directly, so this import is test-only to avoid an unused-import error in
-// the non-test build.
-#[cfg(test)]
-use super::mutation::Mutation;
+// `Mutation` is named in production again (issue #1383 fix): a partition's
+// surviving clustering rows are BUFFERED as `Vec<Mutation>` in
+// `PartitionStreamState` and written in one session at partition end, once
+// the full range-tombstone set is known — see that type's doc.
+use super::mutation::{DecoratedKey, Mutation, PartitionTombstone, RangeTombstone};
 use super::{CompactionStats, KWayMerger, MergePolicy, WriteEngine};
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
-use crate::storage::sstable::writer::data_writer::{StaticOpsTracker, StreamingPartitionSession};
+use crate::storage::sstable::writer::data_writer::StaticOpsTracker;
 use crate::storage::sstable::writer::stats_fold;
 use crate::storage::sstable::writer::StatisticsMetadata;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Per-partition streaming state (issue #1668, stage 5c-iv part 3) — mirrors
-/// `KWayMerger::merge()`'s per-partition state machine (stage 5c-iv part 2):
-/// a bounded `clustering_key: None` prefix (partition/range-tombstone
-/// carriers, static-row carrier) resolves first; a
-/// [`StreamingPartitionSession`] opens only once the first `Some(ck)` row (or
-/// an unclustered table's sole row) arrives, since only then do we have
-/// everything `begin_streaming_partition` needs upfront (the partition
-/// tombstone and range-tombstone list). Because `StreamingPartitionSession`
-/// owns everything it needs (no lifetime — issue #1668 stage 5c-iv part 3's
-/// whole reason for existing over `IncrementalPartitionWriter`), EITHER
-/// variant can be stashed on [`ActiveMerge::pending_partition`] and survive
-/// returning to the maintenance scheduler between `maintenance_step_inner`
-/// calls: resuming is just "keep calling methods on it," never a
-/// capture/reconstitute conversion.
-pub(crate) enum PartitionStreamState {
-    /// Still resolving the bounded prefix — no on-disk partition exists yet
-    /// (no header has been written), so there is nothing to pause beyond
-    /// these plain owned accumulators.
-    Prefix {
-        partition_tombstone: Option<PartitionTombstone>,
-        range_tombstones: Vec<RangeTombstone>,
-        static_tracker: StaticOpsTracker,
-        static_first_ts: i64,
-        saw_carrier_or_static: bool,
-        /// This partition's stats fold accumulated so far — see the
-        /// `Streaming` variant's field of the same name for why this is
-        /// threaded through the state rather than folded straight into the
-        /// writer's own `stats`.
-        partition_stats: StatisticsMetadata,
-        /// Mirrors `KWayMerger::merge()`'s loop-local `row_count`: one static
-        /// carrier mutation increments this by 1 EACH time (not once per
-        /// merged output row — issue #1668 stage 5c-iv part 2's row-count
-        /// parity finding), carried forward into `Streaming::row_count` once
-        /// the first `Some(ck)` row opens the session.
-        row_count: u64,
-    },
-    /// A real on-disk partition is open (header + any rows fed so far are
-    /// already in the writer's buffer) and must be finished — via
-    /// `finish_streaming_partition` + `complete_partition_incremental` —
-    /// before anything else can happen to this partition.
-    Streaming {
-        session: StreamingPartitionSession,
-        /// This partition's stats fold accumulated so far (mirrors
-        /// `KWayMerger::merge()`'s `partition_stats` — the writer's `stats`
-        /// field cannot be folded into directly while a session that
-        /// borrows `self.data_writer` per-call is open across calls, so it
-        /// is threaded alongside the session instead).
-        partition_stats: StatisticsMetadata,
-        row_count: u64,
-        partition_tombstone: Option<PartitionTombstone>,
-    },
+/// Per-partition streaming state (issue #1668, stage 5c-iv part 3; buffering
+/// reworked for the issue #1383 range-tombstone-boundary fix) — mirrors
+/// `KWayMerger::merge()`'s per-partition loop state exactly.
+///
+/// A bounded `clustering_key: None` prefix (partition/range-tombstone
+/// carriers, static-row carrier) is accumulated as it arrives; every
+/// surviving `Some(ck)` clustering row is BUFFERED into `buffered_rows`
+/// rather than fed to a writer session as it arrives. The
+/// [`StreamingPartitionSession`] is opened only at `StreamingStep::PartitionEnd`
+/// — once the partition's COMPLETE, coalesced range-tombstone set is known —
+/// and every buffered row is fed through it in one pass, then finished.
+///
+/// This is required for correctness (issue #1383): a range tombstone's
+/// coalesced marker is only surfaced by `StreamingMerger` once its CLOSE
+/// bound is parsed, which — for a range covering rows in a different (e.g.
+/// newer) generation — is strictly AFTER those rows have already streamed
+/// (issue #1668 stage 5d's "range tombstones can arrive AFTER the rows they
+/// cover" finding). Opening the session on the first `Some(ck)` row therefore
+/// fixed an often-EMPTY range-tombstone set, and every late range-only marker
+/// mutation was then dropped as a `feed_streaming_row` no-op — silently
+/// losing the shadowing/boundary. Buffering until the full set is known lets
+/// `feed_streaming_row` shadow every covered row and interleave the markers
+/// correctly, exactly as `KWayMerger::merge()`'s `buffered_rows` does for the
+/// direct-call path.
+///
+/// The whole struct (including `buffered_rows`) owns everything it needs, so
+/// it can be stashed on [`ActiveMerge::pending_partition`] and survive a
+/// mid-partition budget pause between `maintenance_step_inner` calls: the
+/// budget check still fires between cluster groups (each iteration buffers one
+/// group cheaply, then may pause), so a fat partition still yields control —
+/// only the WRITE is deferred to partition end. The buffer is
+/// whole-partition-width for range-tombstone-bearing partitions (a genuinely
+/// bounded-memory streaming write there needs the out-of-scope two-pass
+/// reader; the reader already materializes the decompressed section anyway),
+/// while `StreamingMerger`'s own reconciliation stays row-streamed — the
+/// memory bound the dhat proof actually exercises.
+pub(crate) struct PartitionStreamState {
+    partition_tombstone: Option<PartitionTombstone>,
+    range_tombstones: Vec<RangeTombstone>,
+    static_tracker: StaticOpsTracker,
+    static_first_ts: i64,
+    saw_carrier_or_static: bool,
+    /// This partition's stats fold accumulated so far. Threaded through the
+    /// state rather than folded straight into the writer's own `stats`
+    /// because the writer is borrowed per-call only at partition end.
+    partition_stats: StatisticsMetadata,
+    /// Mirrors `KWayMerger::merge()`'s loop-local `row_count`: incremented
+    /// once per buffered clustering row AND once per static-row carrier (not
+    /// for pure partition/range-tombstone carriers — issue #1668 stage 5c-iv
+    /// part 2's row-count parity finding), so it equals the number of
+    /// emittable rows regardless of pauses.
+    row_count: u64,
+    /// Surviving `Some(ck)` clustering-row mutations, buffered in arrival
+    /// (clustering) order and written in one session at partition end (see
+    /// the type doc for why buffering is required).
+    buffered_rows: Vec<Mutation>,
 }
 
 impl PartitionStreamState {
-    /// A fresh, empty prefix accumulator — the starting state for any new
-    /// partition (never resumed from a pause).
+    /// A fresh, empty accumulator — the starting state for any new partition
+    /// (never resumed from a pause).
     fn fresh() -> Self {
-        PartitionStreamState::Prefix {
+        PartitionStreamState {
             partition_tombstone: None,
             range_tombstones: Vec::new(),
             static_tracker: StaticOpsTracker::new(),
@@ -90,23 +92,16 @@ impl PartitionStreamState {
             saw_carrier_or_static: false,
             partition_stats: StatisticsMetadata::new(),
             row_count: 0,
+            buffered_rows: Vec::new(),
         }
     }
 
-    /// This partition's stats-fold accumulator, regardless of which variant
-    /// is currently active — every mutation (carrier, static, or clustering
-    /// row) folds through the SAME chokepoint before classification, mirroring
-    /// `KWayMerger::merge()`'s single fold point (issue #1668 stage 5c-iv
-    /// part 2).
+    /// This partition's stats-fold accumulator — every mutation (carrier,
+    /// static, or clustering row) folds through the SAME chokepoint before
+    /// classification, mirroring `KWayMerger::merge()`'s single fold point
+    /// (issue #1668 stage 5c-iv part 2).
     fn partition_stats_mut(&mut self) -> &mut StatisticsMetadata {
-        match self {
-            PartitionStreamState::Prefix {
-                partition_stats, ..
-            } => partition_stats,
-            PartitionStreamState::Streaming {
-                partition_stats, ..
-            } => partition_stats,
-        }
+        &mut self.partition_stats
     }
 }
 
@@ -114,24 +109,16 @@ impl PartitionStreamState {
 // (the former holds a non-`Debug` cell-value map; the latter is a plain
 // bookkeeping struct never printed in production), so `ActiveMerge`'s
 // `#[derive(Debug)]` (used only incidentally — no code actually formats an
-// `ActiveMerge`, confirmed by grep) needs a hand-written `Debug` for this
-// enum rather than pulling `Debug` onto either of those types just to
-// satisfy a derive nothing exercises.
+// `ActiveMerge`, confirmed by grep) needs a hand-written `Debug` here rather
+// than pulling `Debug` onto `StaticOpsTracker` just to satisfy a derive
+// nothing exercises.
 impl std::fmt::Debug for PartitionStreamState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PartitionStreamState::Prefix {
-                saw_carrier_or_static,
-                ..
-            } => f
-                .debug_struct("PartitionStreamState::Prefix")
-                .field("saw_carrier_or_static", saw_carrier_or_static)
-                .finish_non_exhaustive(),
-            PartitionStreamState::Streaming { row_count, .. } => f
-                .debug_struct("PartitionStreamState::Streaming")
-                .field("row_count", row_count)
-                .finish_non_exhaustive(),
-        }
+        f.debug_struct("PartitionStreamState")
+            .field("saw_carrier_or_static", &self.saw_carrier_or_static)
+            .field("row_count", &self.row_count)
+            .field("buffered_rows", &self.buffered_rows.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -221,16 +208,17 @@ pub(crate) struct ActiveMerge {
     ///   resumed call, and nothing is lost. Held OPAQUELY: this file never
     ///   inspects a field of it.
     /// - `.2` this partition's [`PartitionStreamState`] (issue #1668, stage
-    ///   5c-iv part 3): either still resolving the bounded carrier/static
-    ///   prefix, or an already-open `StreamingPartitionSession` with rows
-    ///   fed so far. Fed incrementally as cluster groups arrive — the
-    ///   writer no longer waits for the whole partition to accumulate as a
-    ///   `Vec<Mutation>` before writing anything (that was stage 5c-iv part
-    ///   2's change for `KWayMerger::merge`; this is the same change for the
-    ///   background maintenance loop). Resuming a paused partition is just
-    ///   "keep feeding this same value" — no re-computation, no lost rows,
-    ///   and (unlike the pre-stage-5c-iv-part-3 `Vec<Mutation>` design) no
-    ///   growing in-memory buffer for a wide partition either.
+    ///   5c-iv part 3; buffering reworked for the issue #1383 fix): the
+    ///   accumulated partition tombstone / range-tombstone set / static row
+    ///   plus the buffered surviving clustering rows seen so far. The writer
+    ///   session is opened only at `PartitionEnd` (once the full
+    ///   range-tombstone set is known — see [`PartitionStreamState`]'s doc),
+    ///   so a paused partition stashes plain owned accumulators here.
+    ///   Resuming is just "keep buffering into this same value" — no
+    ///   re-computation, no lost rows. The buffer is whole-partition-width
+    ///   only for range-tombstone-bearing partitions (the documented
+    ///   residual); the budget pause still fires between cluster groups, so a
+    ///   fat partition still yields control mid-drain.
     pub(crate) pending_partition: Option<(
         DecoratedKey,
         merge::PartitionReconcileCheckpoint,
@@ -488,30 +476,32 @@ impl WriteEngine {
         // Process active merge within budget.
         //
         // Stage 4 (#1668, the "Q4 unlock"): the budget is checked BETWEEN
-        // CLUSTER GROUPS, not only between whole partitions. Stage 5c-iv part
-        // 3 changed WHAT gets stashed when a partition is too fat to finish
-        // within one call's remaining budget: instead of accumulating a
-        // growing `Vec<Mutation>` (the whole-partition buffering this issue
-        // exists to eliminate), each cluster group now streams straight into
-        // a `StreamingPartitionSession` as it arrives (mirroring
-        // `KWayMerger::merge`'s stage 5c-iv part 2 change), and the SESSION
-        // ITSELF — which owns everything it needs, no lifetime — is what
-        // gets stashed on `ActiveMerge.pending_partition` and resumed
-        // unchanged on the NEXT `maintenance_step` call. Nothing is
-        // re-computed, nothing is lost, and the writer still receives one
-        // partition as one on-disk unit (opened once, finished once), so
-        // output stays byte-identical (see `#921`). The minimum-progress
-        // guarantee remains "at least one cluster group per call."
+        // CLUSTER GROUPS, not only between whole partitions. When a partition
+        // is too fat to finish within one call's remaining budget, the
+        // accumulated `PartitionStreamState` (carrier/static prefix + the
+        // buffered surviving clustering rows so far) is stashed on
+        // `ActiveMerge.pending_partition` and resumed unchanged on the NEXT
+        // `maintenance_step` call. The writer session is opened only at
+        // `PartitionEnd`, once the partition's FULL range-tombstone set is
+        // known (issue #1383 — see `PartitionStreamState`'s doc for why a late
+        // range tombstone would otherwise drop a boundary), so the writer
+        // still receives one partition as one on-disk unit (opened once,
+        // finished once) and output stays byte-identical (see `#921`).
+        // Nothing is re-computed across a pause, nothing is lost. The
+        // minimum-progress guarantee remains "at least one cluster group per
+        // call"; the budget still fires between cluster groups, so a fat
+        // partition yields control mid-drain even though its WRITE is
+        // deferred to the end.
         let budget_tolerance = budget.mul_f32(1.1); // 10% tolerance
         let mut partitions_processed = 0u64;
 
         /// Outcome of draining one partition's cluster groups, bounded by
         /// the mid-partition budget check.
         enum DrainOutcome {
-            /// The partition fully drained; finalize whatever
-            /// `PartitionStreamState` it ended in. Boxed: `Streaming` embeds
-            /// a `StreamingPartitionSession` (clippy::large_enum_variant) —
-            /// boxing keeps `DrainOutcome` itself cheap to move regardless.
+            /// The partition fully drained; write the buffered
+            /// `PartitionStreamState` now (open session, feed static + rows,
+            /// finish). Boxed to keep `DrainOutcome` cheap to move regardless
+            /// of `PartitionStreamState`'s size (clippy::large_enum_variant).
             Ready(DecoratedKey, Box<PartitionStreamState>),
             /// Budget exceeded mid-drain; progress was stashed on
             /// `ActiveMerge.pending_partition` for the next call.
@@ -526,9 +516,9 @@ impl WriteEngine {
             // `StreamingMerger`'s own raw-entry reconciliation checkpoint
             // (issue #1668 stage 5d); `stream_state` is this partition's
             // `PartitionStreamState` from EARLIER in this same partition
-            // (this or a prior call) — possibly still resolving the
-            // carrier/static prefix, or an already-open session with rows
-            // fed so far.
+            // (this or a prior call) — the carrier/static prefix plus the
+            // clustering rows buffered so far (no session is open yet; it
+            // opens only at PartitionEnd, see that type's doc).
             let (resume_state, mut stream_state): (
                 Option<(DecoratedKey, merge::PartitionReconcileCheckpoint)>,
                 PartitionStreamState,
@@ -569,7 +559,7 @@ impl WriteEngine {
                     break DrainOutcome::Paused;
                 }
                 match stream.step_streaming()? {
-                    merge::StreamingStep::ClusterGroup { key, row } => {
+                    merge::StreamingStep::ClusterGroup { key: _, row } => {
                         progressed_this_call = true;
                         // Skip metadata-only entries (#886/#899 branch-review):
                         // they carry complex/range deletion metadata through
@@ -589,16 +579,13 @@ impl WriteEngine {
                             &mutation,
                         );
 
-                        if let PartitionStreamState::Streaming {
-                            session, row_count, ..
-                        } = &mut stream_state
-                        {
-                            merge.writer.feed_streaming_row(session, &mutation)?;
-                            *row_count += 1;
-                            continue;
-                        }
-
-                        // Still in the (bounded) None-keyed prefix.
+                        // Classify the (None-keyed) carriers and the static
+                        // row; everything else is a real clustering row that
+                        // is BUFFERED (see `PartitionStreamState`'s doc). No
+                        // writer session is opened here — a range tombstone
+                        // can still arrive AFTER some rows are buffered (issue
+                        // #1383), so the session opens only at PartitionEnd,
+                        // once the full range-tombstone set is resolved.
                         let is_partition_only = mutation.operations.is_empty()
                             && mutation.partition_tombstone.is_some()
                             && mutation.row_tombstone.is_none()
@@ -616,108 +603,40 @@ impl WriteEngine {
                         let is_static_carrier =
                             mutation.clustering_key.is_none() && schema_has_static;
 
-                        // Roborev blocker #2 (issue #1668): `row_count` must
-                        // ONLY be incremented for the resolved static-row
-                        // carrier, exactly mirroring `KWayMerger::merge`'s
-                        // reference implementation (`merge/mod.rs`, ~lines
-                        // 2329-2367) — a pure partition- or range-tombstone
-                        // carrier emits a marker/header deletion, not a row,
-                        // so it must NOT inflate `row_count` (which flows
-                        // into `merge.rows_merged`/`report.rows_merged`/the
-                        // `COMPACTION_ROWS_MERGED` counter).
-                        if is_partition_only || is_range_only || is_static_carrier {
-                            if let PartitionStreamState::Prefix {
-                                partition_tombstone,
-                                range_tombstones,
-                                static_tracker,
-                                static_first_ts,
-                                saw_carrier_or_static,
-                                row_count,
-                                ..
-                            } = &mut stream_state
-                            {
-                                if is_partition_only {
-                                    *partition_tombstone = mutation.partition_tombstone;
-                                } else if is_range_only {
-                                    range_tombstones
-                                        .extend(mutation.range_tombstones.iter().cloned());
-                                } else {
-                                    if !*saw_carrier_or_static {
-                                        *static_first_ts = mutation.timestamp_micros;
-                                    }
-                                    static_tracker.feed(&mutation, &write_schema, None);
-                                    *row_count += 1;
-                                }
-                                *saw_carrier_or_static = true;
+                        if is_partition_only {
+                            stream_state.partition_tombstone = mutation.partition_tombstone;
+                            stream_state.saw_carrier_or_static = true;
+                            continue;
+                        }
+                        if is_range_only {
+                            stream_state
+                                .range_tombstones
+                                .extend(mutation.range_tombstones.iter().cloned());
+                            stream_state.saw_carrier_or_static = true;
+                            continue;
+                        }
+                        if is_static_carrier {
+                            // Roborev blocker #2 (issue #1668): only the
+                            // resolved static-row carrier increments
+                            // `row_count` — a pure partition/range-tombstone
+                            // carrier emits a marker/header deletion, not a
+                            // row.
+                            if !stream_state.saw_carrier_or_static {
+                                stream_state.static_first_ts = mutation.timestamp_micros;
                             }
+                            stream_state
+                                .static_tracker
+                                .feed(&mutation, &write_schema, None);
+                            stream_state.saw_carrier_or_static = true;
+                            stream_state.row_count += 1;
                             continue;
                         }
 
-                        // First Some(ck) row (or, for an unclustered table,
-                        // its sole `clustering_key: None` row): the prefix
-                        // is now COMPLETE. Take `stream_state` by value to
-                        // open the session and transition to `Streaming`.
-                        let prev =
-                            std::mem::replace(&mut stream_state, PartitionStreamState::fresh());
-                        let (
-                            partition_tombstone,
-                            range_tombstones,
-                            static_tracker,
-                            static_first_ts,
-                            partition_stats,
-                            mut row_count,
-                        ) = match prev {
-                            PartitionStreamState::Prefix {
-                                partition_tombstone,
-                                range_tombstones,
-                                static_tracker,
-                                static_first_ts,
-                                partition_stats,
-                                row_count,
-                                ..
-                            } => (
-                                partition_tombstone,
-                                range_tombstones,
-                                static_tracker,
-                                static_first_ts,
-                                partition_stats,
-                                row_count,
-                            ),
-                            // Provably unreachable — the `if let
-                            // PartitionStreamState::Streaming` guard above
-                            // already `continue`d whenever `stream_state` was
-                            // `Streaming`. Handled without panicking (no
-                            // unwrap/expect/unreachable!() in library code):
-                            // just restore it and skip this cluster group
-                            // rather than assert something the compiler
-                            // cannot itself prove impossible here.
-                            already_streaming @ PartitionStreamState::Streaming { .. } => {
-                                stream_state = already_streaming;
-                                continue;
-                            }
-                        };
-
-                        let mut session = merge.writer.begin_streaming_partition(
-                            &key,
-                            partition_tombstone.as_ref(),
-                            &range_tombstones,
-                        )?;
-                        if schema_has_static {
-                            let merged = static_tracker.finish();
-                            merge.writer.feed_streaming_static_row(
-                                &mut session,
-                                &merged,
-                                static_first_ts,
-                            )?;
-                        }
-                        merge.writer.feed_streaming_row(&mut session, &mutation)?;
-                        row_count += 1;
-                        stream_state = PartitionStreamState::Streaming {
-                            session,
-                            partition_stats,
-                            row_count,
-                            partition_tombstone,
-                        };
+                        // A real clustering row (or an unclustered table's
+                        // sole `clustering_key: None` row): buffer it for the
+                        // single PartitionEnd write.
+                        stream_state.buffered_rows.push(mutation);
+                        stream_state.row_count += 1;
                     }
                     merge::StreamingStep::PartitionEnd { key } => {
                         break DrainOutcome::Ready(
@@ -735,78 +654,51 @@ impl WriteEngine {
             match outcome {
                 DrainOutcome::Ready(key, state) => {
                     partitions_processed += 1;
+                    let state = *state;
 
-                    match *state {
-                        PartitionStreamState::Streaming {
-                            session,
-                            partition_stats,
-                            row_count,
-                            partition_tombstone,
-                        } => {
-                            if let Some(merge) = &mut self.active_merge {
-                                let (offset, blocks, emit) =
-                                    merge.writer.finish_streaming_partition(session)?;
-                                merge.writer.complete_partition_incremental(
-                                    &key,
-                                    partition_tombstone.as_ref(),
-                                    offset,
-                                    &blocks,
-                                    emit,
-                                    &partition_stats,
+                    // Truly empty partition (every entry was
+                    // metadata-only-no-op, and no carrier/static survived) —
+                    // skip entirely, matching `KWayMerger::merge`'s
+                    // `buffered_rows.is_empty() && !saw_carrier_or_static`
+                    // skip. A partition with only carriers/statics but no
+                    // `Some(ck)` row is still emittable (#933/#1072).
+                    if !state.buffered_rows.is_empty() || state.saw_carrier_or_static {
+                        // Open the session NOW, with the partition tombstone,
+                        // the COMPLETE coalesced range-tombstone set, the
+                        // static row, and every buffered clustering row all
+                        // known (issue #1383): `feed_streaming_row` shadows
+                        // every covered row and interleaves the markers in
+                        // clustering order.
+                        if let Some(merge) = &mut self.active_merge {
+                            let mut session = merge.writer.begin_streaming_partition(
+                                &key,
+                                state.partition_tombstone.as_ref(),
+                                &state.range_tombstones,
+                            )?;
+                            if schema_has_static {
+                                let merged = state.static_tracker.finish();
+                                merge.writer.feed_streaming_static_row(
+                                    &mut session,
+                                    &merged,
+                                    state.static_first_ts,
                                 )?;
-                                merge.rows_merged += row_count;
                             }
-                            report.rows_merged += row_count;
+                            for mutation in &state.buffered_rows {
+                                merge.writer.feed_streaming_row(&mut session, mutation)?;
+                            }
+                            let (offset, blocks, emit) =
+                                merge.writer.finish_streaming_partition(session)?;
+                            merge.writer.complete_partition_incremental(
+                                &key,
+                                state.partition_tombstone.as_ref(),
+                                offset,
+                                &blocks,
+                                emit,
+                                &state.partition_stats,
+                            )?;
+                            merge.rows_merged += state.row_count;
                         }
-                        PartitionStreamState::Prefix {
-                            partition_tombstone,
-                            range_tombstones,
-                            static_tracker,
-                            static_first_ts,
-                            saw_carrier_or_static,
-                            partition_stats,
-                            row_count,
-                        } => {
-                            // Truly empty partition (every entry was
-                            // metadata-only-no-op) — skip entirely, matching
-                            // the original `mutations.is_empty()` skip
-                            // (#886 branch-review).
-                            if !saw_carrier_or_static {
-                                continue;
-                            }
-                            // No `Some(ck)` row ever arrived, but a
-                            // range/partition tombstone or a static value
-                            // survived — still emittable (#933/#1072),
-                            // matching `KWayMerger::merge`'s `None if
-                            // saw_carrier_or_static` branch exactly.
-                            if let Some(merge) = &mut self.active_merge {
-                                let mut session = merge.writer.begin_streaming_partition(
-                                    &key,
-                                    partition_tombstone.as_ref(),
-                                    &range_tombstones,
-                                )?;
-                                if schema_has_static {
-                                    let merged = static_tracker.finish();
-                                    merge.writer.feed_streaming_static_row(
-                                        &mut session,
-                                        &merged,
-                                        static_first_ts,
-                                    )?;
-                                }
-                                let (offset, blocks, emit) =
-                                    merge.writer.finish_streaming_partition(session)?;
-                                merge.writer.complete_partition_incremental(
-                                    &key,
-                                    partition_tombstone.as_ref(),
-                                    offset,
-                                    &blocks,
-                                    emit,
-                                    &partition_stats,
-                                )?;
-                                merge.rows_merged += row_count;
-                            }
-                            report.rows_merged += row_count;
-                        }
+                        report.rows_merged += state.row_count;
                     }
                 }
                 DrainOutcome::Paused => {
@@ -1965,17 +1857,16 @@ mod tests {
     }
 
     /// Byte-identity proof (issue #1668, stage 5c-iv part 3): pausing and
-    /// resuming a partition's drain mid-stream — via
-    /// `StreamingPartitionSession` stashed on
-    /// `ActiveMerge::pending_partition` across many `maintenance_step`
-    /// calls, instead of the pre-stage-5c-iv-part-3 growing `Vec<Mutation>`
-    /// — must produce EXACTLY the same Data.db bytes as a single unbroken
-    /// drain. Same rigor as every `IncrementalPartitionWriter`/
-    /// `StreamingPartitionSession` byte-identity test in `data_writer/tests/`,
-    /// but exercised through the REAL production entry point
-    /// (`WriteEngine::maintenance_step`) rather than the session type
-    /// directly — proving the INTEGRATION (budget checks,
-    /// `PartitionStreamState` transitions, resume plumbing) introduces no
+    /// resuming a partition's drain mid-stream — via the
+    /// `PartitionStreamState` (carrier/static prefix + buffered clustering
+    /// rows) stashed on `ActiveMerge::pending_partition` across many
+    /// `maintenance_step` calls — must produce EXACTLY the same Data.db bytes
+    /// as a single unbroken drain. Same rigor as every
+    /// `IncrementalPartitionWriter`/`StreamingPartitionSession` byte-identity
+    /// test in `data_writer/tests/`, but exercised through the REAL
+    /// production entry point (`WriteEngine::maintenance_step`) rather than
+    /// the session type directly — proving the INTEGRATION (budget checks,
+    /// buffering/resume plumbing, the single PartitionEnd write) introduces no
     /// divergence of its own.
     #[test]
     fn test_maintenance_paused_and_unpaused_compaction_produce_byte_identical_output() {
