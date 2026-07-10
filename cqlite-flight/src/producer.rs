@@ -320,10 +320,13 @@ fn sstable_token_span(data_path: &Path, rt: &PruneRuntime) -> Option<(i64, i64)>
 
 /// Produces Arrow record batches from a compaction merge of a table's SSTables.
 pub struct MergeProducer {
-    schema: TableSchema,
+    // `schema` + `spec` are `pub(crate)` so the point-read routing (issue #2207)
+    // can live in the sibling `producer_point` module (campsite rule: producer.rs
+    // is over the file-size threshold, epic #1116).
+    pub(crate) schema: TableSchema,
     columns: Vec<ColumnInfo>,
     batch_size: usize,
-    spec: ScanSpec,
+    pub(crate) spec: ScanSpec,
     /// Aggregation pushdown plan (issue #841). When `Some`, the producer emits
     /// PARTIAL aggregate rows under [`Self::partial_columns`] instead of full
     /// rows; when `None` the row path is unchanged.
@@ -338,7 +341,7 @@ pub struct MergeProducer {
 /// polled BEFORE each `step()`) can be proven by a test double that counts
 /// `step()` calls — a pre-cancel must yield ZERO steps, i.e. no partition is
 /// collected/reconciled before cancellation is observed.
-trait PartitionStepper {
+pub(crate) trait PartitionStepper {
     /// Advance the merge by one partition (or report completion).
     fn step(&mut self) -> Result<MergeStep, cqlite_core::Error>;
 }
@@ -636,107 +639,6 @@ impl MergeProducer {
         )
     }
 
-    /// Resolve the point-read route into concrete raw partition keys, or `None`
-    /// when the pushed predicate is not a full-PK equality (the scan path).
-    ///
-    /// Each returned key is `(raw_key_bytes, token)`, in the route's order. Keys
-    /// whose Murmur3 token falls OUTSIDE the split's token range are dropped here
-    /// (before any seek) — the point read stays within the split's range exactly
-    /// as the scan path's per-partition token guard does. A key whose typed values
-    /// cannot be serialized to partition-key bytes (should not happen for a
-    /// schema-typed predicate) drops the whole route to the scan path (returns
-    /// `None`) rather than risk a wrong answer.
-    fn point_read_keys(&self) -> Option<Vec<(Vec<u8>, i64)>> {
-        use cqlite_core::storage::write_engine::PartitionKey;
-        use crate::point_read::{detect_route, PointReadRoute};
-
-        let component_keys: Vec<Vec<Value>> =
-            match detect_route(self.spec.filter.as_ref(), &self.schema) {
-                PointReadRoute::Scan => return None,
-                PointReadRoute::PartitionPointRead(values) => vec![values],
-                PointReadRoute::MultiPartitionPointRead(keys) => keys,
-            };
-
-        let pk_names: Vec<&str> = self
-            .schema
-            .partition_keys
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
-
-        let mut out: Vec<(Vec<u8>, i64)> = Vec::with_capacity(component_keys.len());
-        for values in component_keys {
-            if values.len() != pk_names.len() {
-                return None;
-            }
-            let columns: Vec<(String, Value)> = pk_names
-                .iter()
-                .zip(values.into_iter())
-                .map(|(name, v)| ((*name).to_string(), v))
-                .collect();
-            let decorated = match PartitionKey::new(columns).to_decorated_key(&self.schema) {
-                Ok(d) => d,
-                // A predicate that cannot serialize to key bytes is not a route we
-                // can honour safely — fall back to the scan path.
-                Err(_) => return None,
-            };
-            // Token-range exclusion BEFORE any seek: drop keys outside the split.
-            if let Some(token) = &self.spec.token {
-                if !token.contains(decorated.token) {
-                    continue;
-                }
-            }
-            out.push((decorated.key, decorated.token));
-        }
-        Some(out)
-    }
-
-    /// Drive the partition point-read path (issue #2207): build a k-way merger over
-    /// ONLY the target partition(s) across the candidate SSTables (seek where the
-    /// index resolves, scan-fallback where it does not, prune on a definite bloom
-    /// negative), then reconcile + stream through the SAME [`Self::drive_merge`]
-    /// loop the scan path uses — reporting `streaming_partition_lookup`.
-    fn produce_point(
-        &self,
-        keys: Vec<(Vec<u8>, i64)>,
-        _paths: Vec<PathBuf>,
-        cancel: &CancelFlag,
-        sink: &mut dyn BatchSink,
-        progress: &ScanProgress,
-        on_merger_built: impl FnOnce(),
-    ) -> Result<(), ProducerError> {
-        // Every key was token-excluded → nothing to read. Still fire the phase
-        // boundary so the caller's `merge_setup → stream` accounting stays honest.
-        let key_bytes: Vec<Vec<u8>> = keys.into_iter().map(|(k, _)| k).collect();
-        if key_bytes.is_empty() {
-            on_merger_built();
-            return Ok(());
-        }
-
-        // Map a cooperative cancellation to the distinct `Cancelled` variant, never
-        // masking a real I/O/corruption error as a clean cancel (issue #2264,
-        // mirroring `drive_merge`).
-        let built = cqlite_core::storage::write_engine::build_single_partition_merger(
-            _paths,
-            &key_bytes,
-            &self.schema,
-            cancel.scan_cancel(),
-        )
-        .map_err(|e| match e {
-            cqlite_core::Error::Cancelled => ProducerError::Cancelled,
-            other => ProducerError::Merge(other),
-        })?;
-
-        on_merger_built();
-        let label = AccessPath::StreamingPartitionLookup.label();
-        match built {
-            // No candidate SSTable holds any target key → zero rows examined, so
-            // nothing to stream (and no rows-scanned emission either — no work).
-            None => Ok(()),
-            Some(mut merger) => self.drive_merge(&mut merger, cancel, sink, progress, label),
-        }
-    }
-
     /// Prune `paths` to those whose token span overlaps the spec's token range.
     ///
     /// Returns `paths` unchanged when there is no token filter. A path is kept
@@ -861,7 +763,7 @@ impl MergeProducer {
     /// rows as exist up to `limit`, never fewer. `limit == Some(0)` emits nothing
     /// without stepping the merge at all. The cap applies per split; the connector
     /// sets `limitGuaranteed = false` so Trino keeps a global `Limit` above.
-    fn drive_merge(
+    pub(crate) fn drive_merge(
         &self,
         merger: &mut dyn PartitionStepper,
         cancel: &CancelFlag,

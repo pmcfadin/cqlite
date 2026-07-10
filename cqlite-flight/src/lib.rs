@@ -15,6 +15,7 @@ pub mod obs;
 pub mod pathsafe;
 pub mod point_read;
 pub mod producer;
+mod producer_point;
 pub mod scan_progress;
 pub mod service;
 pub mod shutdown;
