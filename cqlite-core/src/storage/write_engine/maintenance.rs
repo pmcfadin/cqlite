@@ -703,11 +703,13 @@ impl WriteEngine {
                 }
                 DrainOutcome::Paused => {
                     // Stash progress for the NEXT maintenance_step call
-                    // (issue #1668, stage 4). `into_paused_state` is `Some`
-                    // whenever ANY row was popped for the in-progress
-                    // partition — guaranteed here because `progressed_this_call`
-                    // (or a non-empty `resume_state`, which also seeds
-                    // `stream`'s partition key) must be true to reach `Paused`.
+                    // (issue #1668, stage 4). `into_paused_state` returns
+                    // `None` when no partition is currently in progress (the
+                    // pause landed between partitions, e.g. on the very first
+                    // inner-loop iteration for a NEW partition with
+                    // `partitions_processed > 0` carried over from an earlier
+                    // one in this same call) — there is nothing to resume in
+                    // that case, so skipping the stash below is correct.
                     if let Some((key, checkpoint)) = stream.into_paused_state() {
                         if let Some(merge) = &mut self.active_merge {
                             merge.pending_partition = Some((key, checkpoint, stream_state));
