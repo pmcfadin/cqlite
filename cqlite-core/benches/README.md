@@ -188,6 +188,77 @@ To mark a bench advisory, add its ID to the `advisory_benches` list in
 controls what is highlighted in the output (the "elevated delta" warning level);
 it never triggers a failure.
 
+### Export / Flight perf net (Issue #1494, AD5)
+
+The export/Flight lane (epic #1469) is measured by a **tiered** suite plus
+**dhat budget guards**. This is the measurement net the AB/AE optimization
+children (AB1/AB3/AB7 Flight memory + streaming, AE1–AE5 per-cell conversion)
+assert their wins against — "benches FIRST, baseline before wins."
+
+**Tier 1 — STRICT conversion + export micro-benches** (`export_throughput` in
+`cqlite-core/benches`, ids `export/*`): CPU-bound and stable, so they gate as
+same-runner PR-vs-`main` median ratios like the read/write benches.
+
+**Tier 2 — ADVISORY end-to-end Flight `do_get`** (`flight_do_get` in
+`cqlite-flight/benches`, id `flight/do_get`): drives the **public tonic
+`FlightService::do_get` RPC over a real loopback transport** (wiring evidence for
+the RPC path). Its wall time is Tokio-runtime + tonic-transport + I/O dominated
+(the `write/ingest_wal_on` precedent), so it is **reported but never fails CI**.
+
+**Hard signal — dhat budget guards** (run in the mandatory `agent-gate.sh`
+`memory-budget` component, not the CI perf lane): allocation **counts/bytes** are
+machine-independent, so they are the load-deterministic per-gate signal for this
+path. The converter guard
+(`cqlite-core/tests/issue_1494_converter_alloc_budget.rs`) pins per-row CQL→Arrow
+allocations; the producer guard
+(`cqlite-flight/tests/issue_1494_producer_mem_budget.rs`) pins the Flight
+producer's total + peak bytes. Both are **non-vacuous** (fail on 0 rows / 0
+allocations) and land **passing** as baseline locks; AB/AE own tightening them.
+
+#### Current-`main` baseline (post-#1495)
+
+> **Provenance:** these figures already include the merged **#1495** (PR #2312)
+> arrow-convert accessor-once win — they are the **post-#1495 `main` floor**, the
+> reference #1496 and the AB/AE children measure ratios against, **not** a
+> pre-optimization number. The wall-clock rows below are **local reference
+> figures** (macOS, `--sample-size 20`), recorded for orientation only — the gate
+> compares same-runner ratios and commits **no** absolute-time baseline. The dhat
+> figures ARE machine-independent (deterministic allocation counts/bytes).
+
+| Bench | Class | Fixture | Median (local ref) | Throughput |
+|-------|-------|---------|--------------------|------------|
+| `export/rows_to_record_batch` | STRICT | `test_collections.collection_table` (500 rows × 7 cols) | 0.51 ms | 0.98 Melem/s |
+| `export/json` | STRICT | same | 4.32 ms | 0.12 Melem/s |
+| `export/parquet` | STRICT | same | 2.52 ms | 0.20 Melem/s |
+| `export/delta` | STRICT | 5,000 synthetic upserts | 2.98 ms | 1.68 Melem/s |
+| `flight/do_get` | ADVISORY | 2,000-row `keyvalue` (self-contained flush) | 6.15 ms | 0.33 Melem/s |
+
+| dhat budget guard | Measured (post-#1495) | Committed ceiling |
+|-------------------|-----------------------|-------------------|
+| converter allocs/row (`issue_1494_converter_alloc_budget`) | 0.91 allocs/row (453 / 500 rows) | 3.0 allocs/row |
+| producer total bytes (`issue_1494_producer_mem_budget`) | 20,908,845 B (~20.9 MB, 2,000 rows) | 32 MiB |
+| producer peak bytes | 3,149,012 B (~3.1 MB) | 8 MiB |
+
+Reproduce (from the repo root, datasets fetched):
+
+```bash
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo bench -p cqlite-core --features cli-helpers,write-support,parquet,delta-scan \
+  --bench export_throughput
+cargo bench -p cqlite-flight --bench flight_do_get
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test -p cqlite-core --features cli-helpers,dhat-heap,arrow \
+  --test issue_1494_converter_alloc_budget -- --test-threads=1 --nocapture
+cargo test -p cqlite-flight --features dhat-heap \
+  --test issue_1494_producer_mem_budget -- --test-threads=1 --nocapture
+```
+
+**Refresh procedure (drift-free):** the wall-clock `base` is re-measured on
+`main` every CI run — there is no committed absolute-time number to drift. To
+retune, edit `perf-gate.json` (thresholds / advisory list) **and** update the
+numbers in this table in the same PR. To ratchet a dhat ceiling down (an AB/AE
+child), edit the `const` in the guard test and update its row here.
+
 ### Concurrency scaling floor (Issue #1564)
 
 `concurrent_scan` is gated by a **machine-independent scaling floor**, not an
