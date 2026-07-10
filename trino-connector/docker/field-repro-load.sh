@@ -3,14 +3,17 @@
 # Sourced by field-repro.sh; expects `log()` already defined by the caller.
 set -euo pipefail
 
-# `fieldrepro.tiny`: 3 rows, exactly ONE flush -> ONE `nb-1-big` SSTable, LZ4 —
-# the precise shape #2193's arrow-java decode check needs.
+# `cassandra_easy_stress.keyvalue`: 3 rows, exactly ONE flush -> ONE
+# `nb-1-big` SSTable, LZ4 — the EXACT shape pinned by the committed Flight
+# decode oracle (`cqlite-flight/src/test_fixtures.rs`'s
+# `KEYVALUE_DDL`/`KEYVALUE_ROWS`), not a hand-made lookalike (issue #2289
+# roborev finding, 2026-07-10 — see field-repro-data.cql's header comment).
 load_tiny_table() {
   local root="$1"; shift
   local -a compose=("$@")
-  log "load tiny fixture (3 rows, single flush -> one nb-1-big SSTable, LZ4)"
+  log "load tiny fixture (3 rows, single flush -> one nb-1-big SSTable, LZ4, cassandra_easy_stress.keyvalue oracle shape)"
   "${compose[@]}" exec -T cassandra cqlsh 172.42.0.2 < "$root/trino-connector/docker/field-repro-data.cql"
-  "${compose[@]}" exec -T cassandra nodetool flush fieldrepro
+  "${compose[@]}" exec -T cassandra nodetool flush cassandra_easy_stress
 }
 
 # `loadtest.keyvalue`: >=100k partitions across >=2 SSTable generations, via
@@ -70,9 +73,16 @@ load_big_keyvalue_table() {
     load_big_keyvalue_table_fallback "${compose[@]}"
   fi
 
+  # `nodetool tablestats` can comma-format the estimate (e.g. "121,940") — issue
+  # #2289 roborev finding: `grep -oE '[0-9]+'` on a comma-formatted number
+  # splits it into separate digit-group tokens ("121", "940"), and `tail -1`
+  # silently picks the LAST group ("940"), not the real value, which would
+  # false-FATAL a genuinely >=100k-partition table. Strip commas from the whole
+  # line BEFORE extracting digits so a comma-formatted estimate parses as one
+  # number.
   local estimate
   estimate="$("${compose[@]}" exec -T cassandra nodetool tablestats loadtest.keyvalue 2>&1 \
-    | grep -i "Number of partitions" | grep -oE '[0-9]+' | tail -1 || true)"
+    | grep -i "Number of partitions" | tr -d ',' | grep -oE '[0-9]+' | tail -1 || true)"
   log "loadtest.keyvalue partition estimate (nodetool tablestats): ${estimate:-unknown}"
   if [[ -z "$estimate" ]] || (( estimate < 100000 )); then
     echo "FATAL: loadtest.keyvalue has fewer than 100k partitions (estimate: ${estimate:-unknown}) — the #2264 check would be vacuous" >&2

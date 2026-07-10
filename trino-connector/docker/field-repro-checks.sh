@@ -28,11 +28,17 @@ DRAIN_BOUND_SECS=30
 # still recorded as a FAIL below so the reproduction is visible, not hidden).
 check_2264_limit5_midstream_cancel() {
   log "#2264 check: SELECT * FROM loadtest.keyvalue LIMIT 5 (bound ${LIMIT5_TIMEOUT_SECS}s)"
-  local start end elapsed out rc
+  local start end elapsed out rc rows
   start="$(date +%s)"
   set +e
+  # Issue #2289 roborev finding: wrapping the query as
+  # `SELECT count(*) FROM (SELECT * FROM ... LIMIT 5)` strips the TOP-LEVEL
+  # over-satisfied LIMIT that actually triggers Trino's mid-stream cancel — the
+  # inner LIMIT 5 is satisfied inside a subquery Trino can plan/execute without
+  # ever issuing the split-cancel this check exists to exercise. Run the exact
+  # repro query verbatim; row count is read from its own CSV output.
   out="$(run_with_timeout "$LIMIT5_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --output-format CSV \
-    --execute 'SELECT count(*) FROM (SELECT * FROM cqlite.loadtest.keyvalue LIMIT 5)' 2>&1)"
+    --execute 'SELECT * FROM cqlite.loadtest.keyvalue LIMIT 5' 2>&1)"
   rc=$?
   set -e
   end="$(date +%s)"
@@ -48,12 +54,15 @@ check_2264_limit5_midstream_cancel() {
   tail -20 "$evidence" >&2 || true
 
   if [[ $rc -eq 0 ]]; then
-    log "LIMIT 5 returned in ${elapsed}s: $out"
-    if [[ "$out" == '"5"' ]]; then
+    # Same CSV-quoting caveat as the #2193 check: count non-empty lines, not a
+    # digit-anchored pattern.
+    rows="$(echo "$out" | grep -c '.')"
+    log "LIMIT 5 returned ${rows} row(s) in ${elapsed}s: $out"
+    if [[ "$rows" -eq 5 ]]; then
       log "#2264: does NOT reproduce on this run (query returned correct row count promptly)"
       return 0
     fi
-    echo "FAIL: LIMIT 5 returned wrong row count: $out" >&2
+    echo "FAIL: LIMIT 5 returned wrong row count: $rows (expected 5). Output: $out" >&2
     return 1
   fi
 
@@ -72,28 +81,34 @@ check_2264_limit5_midstream_cancel() {
   return 1
 }
 
-# #2193 pinned check: `SELECT * FROM tiny` decodes through arrow-java and
-# returns exactly 3 rows (the real bug surface was a full-row decode
-# failure — `Failed to read message` — not merely a wrong count, so this
-# reads every column of every row, not just `count(*)`).
+# #2193 pinned check: `SELECT * FROM cassandra_easy_stress.keyvalue` decodes
+# through arrow-java and returns exactly 3 rows. This is the EXACT canonical
+# shape (`key text PRIMARY KEY, value text`, 1 pk, 0 ck — see
+# field-repro-data.cql's header comment) pinned by the committed
+# `keyvalue.flightdata` Flight-level decode golden, not a lookalike (issue
+# #2289 roborev finding, 2026-07-10: an earlier `id int, val text` shape could
+# pass this check while the real #2193 TEXT-column decode regression was still
+# present). The real bug surface was a full-row decode failure — `Failed to
+# read message` — not merely a wrong count, so this reads every column of
+# every row, not just `count(*)`.
 check_2193_tiny_decode() {
-  log "#2193 check: SELECT * FROM fieldrepro.tiny (full arrow-java decode, expect 3 rows)"
+  log "#2193 check: SELECT * FROM cassandra_easy_stress.keyvalue (full arrow-java decode, expect 3 rows, oracle shape)"
   local out rc rows
   set +e
   out="$(run_with_timeout "$QUERY_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --output-format CSV \
-    --execute 'SELECT * FROM cqlite.fieldrepro.tiny' 2>&1)"
+    --execute 'SELECT * FROM cqlite.cassandra_easy_stress.keyvalue' 2>&1)"
   rc=$?
   set -e
   if [[ $rc -eq 124 ]]; then
-    echo "FAIL: SELECT * FROM tiny timed out after ${QUERY_TIMEOUT_SECS}s" >&2
+    echo "FAIL: SELECT * FROM cassandra_easy_stress.keyvalue timed out after ${QUERY_TIMEOUT_SECS}s" >&2
     return 1
   fi
   if [[ $rc -ne 0 ]]; then
-    echo "FAIL: SELECT * FROM tiny errored (rc=$rc): $out" >&2
+    echo "FAIL: SELECT * FROM cassandra_easy_stress.keyvalue errored (rc=$rc): $out" >&2
     return 1
   fi
-  # Trino's CSV output quotes every field regardless of type (verified live:
-  # `"1","a"` for an `int` id column) — count non-empty lines, not a
+  # Trino's CSV output quotes every field regardless of type (e.g. `"k1","1"`
+  # for the text/text keyvalue shape) — count non-empty lines, not a
   # digit-anchored pattern (which would silently match zero rows and produce
   # a false FAIL).
   rows="$(echo "$out" | grep -c '.')"
@@ -110,17 +125,17 @@ check_2193_tiny_decode() {
 # and yields USEFUL artifacts (a NON-EMPTY pcap + debug logs + Trino query JSON
 # in field-repro-artifacts/), independent of whether the real #2264/#2193 bugs
 # reproduce on this run. Two deliberate steps, in order:
-#   1. a REAL `SELECT * FROM fieldrepro.tiny` — this drives genuine Flight
-#      do_get traffic on :8815 WHILE the tcpdump capture container is running,
-#      so the copied-out pcap actually contains Flight packets (issue #2289
-#      arm64 run, 2026-07-10: a bare nonexistent-table query short-circuits in
-#      Trino's planner before any do_get, producing a valid-but-EMPTY pcap that
-#      is weak evidence the capture works).
+#   1. a REAL `SELECT * FROM cassandra_easy_stress.keyvalue` — this drives
+#      genuine Flight do_get traffic on :8815 WHILE the tcpdump capture
+#      container is running, so the copied-out pcap actually contains Flight
+#      packets (issue #2289 arm64 run, 2026-07-10: a bare nonexistent-table
+#      query short-circuits in Trino's planner before any do_get, producing a
+#      valid-but-EMPTY pcap that is weak evidence the capture works).
 #   2. then a nonexistent-table query to force the non-zero return that trips
 #      capture-on-fail.
 check_inject_failure() {
-  log "--inject-failure step 1/2: real SELECT * FROM fieldrepro.tiny (drives genuine :8815 Flight traffic for the pcap)"
-  "${COMPOSE[@]}" exec -T trino trino --execute 'SELECT * FROM cqlite.fieldrepro.tiny' 2>&1 || true
+  log "--inject-failure step 1/2: real SELECT * FROM cassandra_easy_stress.keyvalue (drives genuine :8815 Flight traffic for the pcap)"
+  "${COMPOSE[@]}" exec -T trino trino --execute 'SELECT * FROM cqlite.cassandra_easy_stress.keyvalue' 2>&1 || true
   log "--inject-failure step 2/2: querying a nonexistent table to deliberately force a failure"
   "${COMPOSE[@]}" exec -T trino trino --execute 'SELECT * FROM cqlite.fieldrepro.does_not_exist' 2>&1 || true
   return 1
