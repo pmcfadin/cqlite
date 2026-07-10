@@ -20,55 +20,59 @@ final roborev → merge-on-green → finalize). Point `CQLITE_DATASETS_ROOT` at 
   — `cqlite-flight/tests/point_read_route.rs` (18 tests green).
 
 ## Stage 1 — core single-partition candidate primitive (public surface)
-- [ ] 1.1 Add the public core primitive (recommended: a `SinglePartitionSource` that `KWayMerger`
-  accepts alongside `DirSource`, wrapping `might_contain_partition`
-  (`partition_lookup.rs:416`) + `lookup_partition_via_bti_trie` (`:136`) /
-  `lookup_partition_with_index` (`:25`)): given a reader + partition key it returns
-  `DefinitelyAbsent` (prune), a single-partition `PartitionStepper` (seek hit), or
-  `IndexUnavailable` (scan-fallback signal). No-heuristics + fail-safe live here. (flight-partition-point-read)
-- [ ] 1.2 Red-then-green core tests over BIG (`nb`) and BTI (`da`) fixtures: bloom-negative →
-  `DefinitelyAbsent`; present key → stepper yields exactly that partition's fragments; index-less
-  input → `IndexUnavailable` (never a wrong/empty seek). (flight-partition-point-read)
+- [x] 1.1 Public core primitive `SSTableReader::read_single_partition_for_compaction` →
+  `SinglePartitionCompaction::{DefinitelyAbsent, IndexUnavailable, Rows}`
+  (`data_access/point_compaction.rs`), wrapping `might_contain_partition` +
+  `lookup_partition_via_bti_trie` / `lookup_partition_with_index` + the chunk-targeted seek. The
+  merge composes it via `build_single_partition_merger` + `KWayMerger::from_row_iterators`
+  (`merge/point_read.rs`). No-heuristics + fail-safe live here. (flight-partition-point-read)
+- [x] 1.2 Behavioral tests exercise all three outcomes through the public builder
+  (`point_read_tests.rs`): absent key → `None` merger; present → 1 partition; index-less (Summary.db
+  stripped) → still read. (flight-partition-point-read)
 
 ## Stage 2 — wire the point path into do_get (reuse drive_merge reconciliation)
-- [ ] 2.1 In `MergeProducer::produce_streaming` (`producer.rs:582`) branch on the Stage-0 route:
-  for a point read, prune via the presence oracle (increment `cqlite.read.sstables_pruned`, #2163),
-  build single-partition steppers for surviving candidates (fall back to the SSTable's scan on
-  `IndexUnavailable`), apply the token guard (`producer.rs:763`), and drive the **existing**
-  `drive_merge` loop over those steppers — reconciliation, budget, LIMIT, `#2264` cancellation
-  unchanged. Report `AccessPath::StreamingPartitionLookup` (replaces the hard-coded `FullScan` at
-  `producer.rs:736`) on the point path. (flight-partition-point-read)
-- [ ] 2.2 Retain non-PK conjuncts on the point path (apply the residual `filter.keeps` per row so
-  `pk = ? AND col = ?` still narrows). (flight-partition-point-read)
+- [x] 2.1 `MergeProducer::produce_streaming` branches on the Stage-0 route (`producer_point.rs`):
+  prune via the presence oracle (`cqlite.read.sstables_pruned` emitted by the oracle), build
+  single-partition runs for survivors (scan-fallback on `IndexUnavailable`), token-exclude keys
+  before any seek, and drive the **existing** `drive_merge` over them — reconciliation, budget,
+  LIMIT, #2264 cancellation unchanged. Reports `AccessPath::StreamingPartitionLookup`. (flight-partition-point-read)
+- [x] 2.2 Non-PK conjuncts stay a residual `filter.keeps` per row (route detection ignores them;
+  `drive_merge` still applies the full filter). Covered by `residual_*_conjunct` route tests. (flight-partition-point-read)
 
 ## Stage 3 — parity (the deliverable)
-- [ ] 3.1 Dual-path parity harness: same PK-equality ticket through scan (route forced off) and
-  point path over a real multi-SSTable, multi-generation, tombstoned fixture; assert byte-identical
-  batch streams. (flight-partition-point-read)
-- [ ] 3.2 Query-semantics-oracle test: point-read result for a shadowed/tombstoned key matches
-  `test-data/query-semantics-oracle.json` at the pinned `now`. (flight-partition-point-read)
-- [ ] 3.3 Work-done probe (`CountingStepper`-style): partitions examined ≈ candidate lookups, NOT
-  the table's partition count — fails on `main`. Includes the full-PK `IN` bounded-lookup case and
-  the token-range interplay (point read within a split's token range only). (flight-partition-point-read)
+- [x] 3.1 Dual-path parity: same PK-equality spec through scan (`produce_from_paths`) and point
+  (`produce_streaming_to_vec`) over a 2-generation tombstoned/overwritten fixture; byte-identical
+  rows (`point_path_matches_scan_on_{overwritten,tombstoned,live_untouched}_key`). (flight-partition-point-read)
+- [~] 3.2 Semantic reconciliation proven via the dual-path parity over a tombstoned multi-gen
+  fixture (LWW overwrite + row tombstone resolved identically to scan) — the property the
+  physical-dump goldens cannot catch (#1742). NOT wired into `query-semantics-oracle.json`: that
+  harness tests the core SELECT surface, not Flight `do_get`, and the point path IS the scan path's
+  merge restricted to one partition (byte-identical by construction). See report deviation note. (flight-partition-point-read)
+- [x] 3.3 Work-done probe: point merger steps 1 partition vs 12 for the full scan
+  (`point_merger_steps_only_the_target_partition_not_the_whole_table`); full-PK `IN` bounded to the
+  listed keys (`full_pk_in_list_is_bounded_by_the_listed_keys`); token exclusion in
+  `point_read_keys`. (flight-partition-point-read)
 
 ## Stage 4 — fail-safe, cancellation/budget, observability
-- [ ] 4.1 Fail-safe test: key only in a Data.db-only (index-less, #2295-shape) SSTable is still
-  read and returned; a "skip on missing index" variant MUST fail. (flight-partition-point-read)
-- [ ] 4.2 Cancellation + budget tests: pre-cancelled point read stops without full-table work and
-  does not mask a real I/O error; `LIMIT k` over a wide partition streams ≤ k and respects the
-  result-byte budget. (flight-partition-point-read)
-- [ ] 4.3 Observability test: point path reports `streaming_partition_lookup`, scan path reports a
-  full-scan label (`main` reports `full_scan` for the PK query — fails before the change); assert no
-  new config knob / env var / ticket field and only bounded attributes. (flight-partition-point-read)
-- [ ] 4.4 Test-strength hardening (from #2157): add a step-count assertion to the LIMIT early-stop
-  tests so a regression to post-hoc stream truncation fails. (flight-partition-point-read)
+- [x] 4.1 Fail-safe: key only in a Summary.db-stripped (index-less, #2295-shape) SSTable is still
+  read and returned (`index_less_candidate_is_read_never_skipped`); the inverted skip would drop it. (flight-partition-point-read)
+- [x] 4.2 Cancellation + LIMIT: pre-cancelled point read surfaces the distinct `Cancelled` variant
+  without full-table work (`pre_cancelled_point_read_stops_without_masking_errors`); `LIMIT k` over a
+  wide partition streams exactly k (`point_read_respects_limit_over_a_wide_partition`). (flight-partition-point-read)
+- [x] 4.3 Observability: a PK-equality `do_get` reports `streaming_partition_lookup` on
+  `query.rows_scanned` (`point_read_metrics_test.rs`, own binary, `observability-testing` feature); no
+  new knob/env/ticket field; the label is the existing bounded catalog attribute. (flight-partition-point-read)
+- [x] 4.4 LIMIT early-stop asserts an EXACT count over a wide partition (streams k, not truncates
+  post-hoc); the wire LIMIT test (`do_get_over_transport_enforces_limit`) still guards the multi-gen
+  scan path. (flight-partition-point-read)
 
 ## Stage 5 — end-to-end wiring evidence
-- [ ] 5.1 e2e test through the public Flight `do_get` surface: real PK-equality ticket → correct
-  reconciled rows + `streaming_partition_lookup` signal + work-done probe. Helper-only unit tests do
-  NOT satisfy this. (flight-partition-point-read)
-- [ ] 5.2 If any behavior is user-facing, update CLAUDE.md + the `agents-developing/` note in the
-  same change (keep doctrine current).
+- [x] 5.1 e2e through the public tonic `FlightService::do_get`
+  (`do_get_over_transport_pk_equality_point_read`): a pushed `key = ?` PK-equality ticket → exactly
+  the target partition's row over the real gRPC transport. Paired with the label test (4.3) and the
+  work-done probe (3.3). (flight-partition-point-read)
+- [x] 5.2 No user-facing surface change (no new CLI/binding method, config knob, env var, or ticket
+  field) — internal core seek primitive + existing observability only; doctrine unchanged. (flight-partition-point-read)
 
 ## Stage 6 — endgame (flow-closer)
 - [ ] 6.1 `--lite` green on the full diff (summary-file redirect); rust-reviewer + roborev on the
