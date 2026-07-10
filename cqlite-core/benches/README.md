@@ -197,7 +197,14 @@ assert their wins against — "benches FIRST, baseline before wins."
 
 **Tier 1 — STRICT conversion + export micro-benches** (`export_throughput` in
 `cqlite-core/benches`, ids `export/*`): CPU-bound and stable, so they gate as
-same-runner PR-vs-`main` median ratios like the read/write benches.
+same-runner PR-vs-`main` median ratios like the read/write benches. **The
+`export/csv` entry is the exception on crate-host:** the real public CSV writer
+is `cqlite_cli::output::CSVWriter` (`cqlite-core` has no `csv` dependency), so its
+bench lives in `cqlite-cli/benches/export_csv.rs` and is run by
+`perf-regression.yml` via `cargo bench -p cqlite-cli --features cli-helpers
+--bench export_csv`. Its criterion output merges into the shared
+`target/criterion` tree the compare script reads, so the STRICT `export/csv`
+policy entry gates identically — same fixture, same 10% ratio threshold.
 
 **Tier 2 — ADVISORY end-to-end Flight `do_get`** (`flight_do_get` in
 `cqlite-flight/benches`, id `flight/do_get`): drives the **public tonic
@@ -229,6 +236,7 @@ allocations) and land **passing** as baseline locks; AB/AE own tightening them.
 |-------|-------|---------|--------------------|------------|
 | `export/rows_to_record_batch` | STRICT | `test_collections.collection_table` (500 rows × 7 cols) | 0.51 ms | 0.98 Melem/s |
 | `export/json` | STRICT | same | 4.32 ms | 0.12 Melem/s |
+| `export/csv` | STRICT | same (via `cqlite_cli::output::CSVWriter`, hosted in cqlite-cli) | 8.35 ms | 0.06 Melem/s |
 | `export/parquet` | STRICT | same | 2.52 ms | 0.20 Melem/s |
 | `export/delta` | STRICT | 5,000 synthetic upserts | 2.98 ms | 1.68 Melem/s |
 | `flight/do_get` | ADVISORY | 2,000-row `keyvalue` (self-contained flush) | 6.15 ms | 0.33 Melem/s |
@@ -245,6 +253,8 @@ Reproduce (from the repo root, datasets fetched):
 env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
   cargo bench -p cqlite-core --features cli-helpers,write-support,parquet,delta-scan \
   --bench export_throughput
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo bench -p cqlite-cli --features cli-helpers --bench export_csv
 cargo bench -p cqlite-flight --bench flight_do_get
 env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
   cargo test -p cqlite-core --features cli-helpers,dhat-heap,arrow \

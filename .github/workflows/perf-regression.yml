@@ -115,6 +115,14 @@ jobs:
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
             --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction --bench decode --bench export_throughput \
             -- --save-baseline pr "${BENCH_ARGV[@]}"
+          # CSV export writer (issue #1494): the real public writer is
+          # cqlite_cli::output::CSVWriter, so its bench (id export/csv) is hosted
+          # in cqlite-cli, not cqlite-core. STRICT — its median regression gates
+          # like the other export/* writers. cli-helpers gives it a queryable
+          # Database + the CSVWriter surface. Its criterion output merges into the
+          # shared target/criterion tree the compare script reads.
+          cargo bench -p cqlite-cli --features cli-helpers --bench export_csv \
+            -- --save-baseline pr "${BENCH_ARGV[@]}"
           # Tier-2 (issue #1494): the end-to-end Flight do_get throughput bench
           # lives in cqlite-flight (its own criterion output merges into
           # target/criterion). ADVISORY — reported, never fails CI.
@@ -171,6 +179,14 @@ jobs:
           fi
           cargo bench -p cqlite-core --features "$BASE_FEATURES" \
             "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
+          # CSV export writer (issue #1494) — hosted in cqlite-cli. Include only
+          # when the bench file exists on this checkout so an older `main`
+          # (pre-#1494) still resolves cleanly; the compare script SKIPs any bench
+          # missing from the baseline, so the first landing stays green.
+          if [[ -f cqlite-cli/benches/export_csv.rs ]]; then
+            cargo bench -p cqlite-cli --features cli-helpers --bench export_csv \
+              -- --save-baseline base "${BENCH_ARGV[@]}"
+          fi
           # Tier-2 Flight do_get (issue #1494) — include only when the bench file
           # exists on `main` (the PR that adds it SKIPs green until main has it).
           if [[ -f cqlite-flight/benches/flight_do_get.rs ]]; then

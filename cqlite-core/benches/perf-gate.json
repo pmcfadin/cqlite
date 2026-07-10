@@ -89,6 +89,11 @@
       "_note": "issue #1494 (AD5) — QueryResult::to_json serialization to bytes; STRICT."
     },
     {
+      "id": "export/csv",
+      "threshold_pct": 10,
+      "_note": "issue #1494 (AD5) — CSVWriter::write (cqlite_cli::output::CSVWriter, the real public CSV export writer) over a pinned fixture; STRICT. Hosted in cqlite-cli (core has no csv dep); run by perf-regression.yml via `cargo bench -p cqlite-cli --features cli-helpers --bench export_csv`. Skip-registers when the canonical dataset is absent on the baseline."
+    },
+    {
       "id": "export/parquet",
       "threshold_pct": 10,
       "_note": "issue #1494 (AD5) — ParquetWriter::write over a pinned fixture; STRICT (feature parquet)."

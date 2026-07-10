@@ -13,15 +13,15 @@
 ## 2. Export + conversion micro-benches (STRICT, cqlite-core)
 - [x] 2.1 Add a Criterion bench for `export::arrow_convert::rows_to_record_batch` over a wide-row /
       type-heavy pinned fixture (per-cell conversion throughput). Assert at setup ≥ 1 row (panic on 0).
-- [~] 2.2 Add Criterion benches for json/parquet export writers and delta export over pinned
+- [x] 2.2 Add Criterion benches for json/parquet export writers and delta export over pinned
       fixtures (feature-gated: `parquet`, `delta-scan`). Setup asserts the public export entry ran and
-      produced output. **DEVIATION (csv):** the CSV export writer (`cqlite_cli::output::CSVWriter`)
-      lives in `cqlite-cli`, not `cqlite-core`, so it is not reachable from the `-p cqlite-core
-      --bench export_throughput` command the spec's Scenario pins; `cqlite-core` has no `csv`
-      dependency and reimplementing CSV in the bench would be a fake (non-public) surface. json (the
-      other row-serialization writer), parquet, and delta ARE implemented in core. csv is reported as
-      a spec conflict for owner/lead resolution (a `cqlite-cli`-hosted csv writer bench, or accept
-      json as the representative row-serialization writer).
+      produced output. csv hosted in cqlite-cli (real public CSVWriter surface); lead resolution,
+      flagged for C audit. The CSV export writer's real surface is `cqlite_cli::output::CSVWriter`
+      (core has no `csv` dep), so its bench lives in `cqlite-cli/benches/export_csv.rs` (id
+      `export/csv`, STRICT) and is run by `perf-regression.yml` via `cargo bench -p cqlite-cli
+      --features cli-helpers --bench export_csv` — same fixture (500-row `test_collections`), same
+      10% ratio threshold, criterion output merges into the shared `target/criterion` tree. json,
+      parquet, and delta stay in `cqlite-core/benches/export_throughput.rs`.
 - [x] 2.3 Register the `[[bench]]` targets in `cqlite-core/Cargo.toml` (`harness = false`).
 
 ## 3. End-to-end Flight do_get throughput bench (ADVISORY, cqlite-flight)
