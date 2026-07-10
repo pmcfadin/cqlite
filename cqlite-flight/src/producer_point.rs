@@ -2,8 +2,8 @@
 //!
 //! Extends [`MergeProducer`] with the `do_get` point path: detect a full-PK
 //! equality route, resolve concrete partition keys (token-excluded before any
-//! seek), build a k-way merger over ONLY the target partition(s), and reconcile
-//! + stream through the SAME [`MergeProducer::drive_merge`] loop the scan path
+//! seek), build a k-way merger over ONLY the target partition(s), then reconcile
+//! and stream through the SAME [`MergeProducer::drive_merge`] loop the scan path
 //! uses — reporting `streaming_partition_lookup`.
 //!
 //! Lives in its own module (not `producer.rs`) because that file is over the
