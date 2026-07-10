@@ -18,11 +18,16 @@ impl SSTableReader {
     /// channel — while HANDING BACK the compressed buffer (`compressed`) so the feed
     /// loop can RECYCLE it as the next read's scratch (no per-chunk compressed-buffer
     /// allocation). The single decode plane (`chunk_source`) still owns the one
-    /// decompress call; incompressible-raw chunks skip the cache and decompress
-    /// (documented D-choice) and consume the buffer (zero-copy `Vec`→`Bytes`), so the
-    /// returned scratch is empty in that case (a fresh buffer is minted next read —
-    /// rare on real fixtures). `chunk_index` is the ABSOLUTE chunk index (the feed
-    /// reads from data-section start in order), matching the prior parse-half keying.
+    /// decompress call. Two cases consume the buffer instead of handing it back
+    /// (returning an empty scratch, so a fresh buffer is minted next read): an
+    /// incompressible-raw chunk (stored uncompressed by Cassandra, compressed len
+    /// ≥ `max_compressed_length`) is passed through zero-copy `Vec`→`Bytes`; and the
+    /// no-compressor case (raw/uncompressed NB scan with no `CompressionInfo` — the
+    /// read buffer already holds finished bytes) is MOVED into the B1 cache zero-copy
+    /// via `Bytes::from(Vec)`, never `to_vec()`-copied (issue #1940 BLOCKER-1;
+    /// uncompressed is CQLite's own write-surface format, a first-class path).
+    /// `chunk_index` is the ABSOLUTE chunk index (the feed reads from data-section
+    /// start in order), matching the prior parse-half keying.
     pub(super) fn decode_scan_chunk(
         &self,
         chunk_index: usize,
@@ -30,14 +35,6 @@ impl SSTableReader {
         compressed: Vec<u8>,
     ) -> Result<(bytes::Bytes, Vec<u8>)> {
         use crate::storage::sstable::compression::Compression;
-
-        // Runtime-placement guard (issue #1940): record the thread this decode
-        // (decompress) actually runs on so a guard test can prove it is a
-        // spawn_blocking thread, NOT an async worker — the D2 substrate moved
-        // decompression into the IO-half feed loop, which must stay off the
-        // reactor for EVERY backend. Compiled only under `scan-offload-probe`.
-        #[cfg(feature = "scan-offload-probe")]
-        super::probe::record_decode_thread();
 
         // Incompressible-raw chunks (stored uncompressed by Cassandra) skip the
         // cache and are passed through zero-copy; the buffer is consumed.
@@ -54,6 +51,18 @@ impl SSTableReader {
         if let Some(hit) = self.chunk_cache.get(&key) {
             return Ok((hit, compressed));
         }
+        // No compressor (raw/uncompressed NB scan, no CompressionInfo): the read
+        // buffer already holds the finished, uncompressed chunk bytes. MOVE it into
+        // the B1 cache as zero-copy `Bytes` (`Bytes::from(Vec)` reuses the read
+        // buffer's heap allocation) rather than `to_vec()`-copying it — this is
+        // CQLite's own uncompressed write-surface format, a first-class path (issue
+        // #1940 BLOCKER-1). Nothing to recycle on the raw path (the buffer became
+        // the cached substrate), so the returned scratch is empty; a fresh read
+        // buffer is minted for the next chunk. No decompress here, so the
+        // decode-thread probe does NOT fire (it pins where decompression runs).
+        if self.compression_reader.is_none() {
+            return Ok((self.chunk_cache.insert(key, compressed), Vec::new()));
+        }
         // Miss → decompress from the BORROWED slice (so we keep `compressed` to
         // recycle) into the single decode plane, cache the resident `Bytes`.
         let compression = self
@@ -61,6 +70,15 @@ impl SSTableReader {
             .as_ref()
             .map(|cr| Compression::new(*cr.algorithm()))
             .transpose()?;
+        // Runtime-placement guard (issue #1940): record the thread this decode
+        // actually decompresses on — placed at the REAL decompress site (past the
+        // cache-hit / incompressible-raw / no-compressor early exits, none of which
+        // decompress) so a guard test can prove decompression runs on a
+        // spawn_blocking thread, NOT an async worker (the D2 substrate moved
+        // decompression into the IO-half feed loop, which must stay off the reactor
+        // for EVERY backend). Compiled only under `scan-offload-probe`.
+        #[cfg(feature = "scan-offload-probe")]
+        super::probe::record_decode_thread();
         let comp_info_dummy = crate::storage::sstable::compression_info::CompressionInfo {
             algorithm: String::new(),
             option_pairs: vec![],

@@ -664,20 +664,19 @@ impl SSTableReader {
             probe::record_io_read_thread();
             // Reused compressed-read scratch (issue #1940, D2): read fills it, decode
             // borrows it, recycle for the next read — no per-chunk compressed alloc.
-            // Pre-reserve it ONCE to the max stored compressed-chunk record size from
-            // authoritative CompressionInfo metadata (`chunk_length + 4`: a stored
-            // record — even an incompressible-raw chunk kept at its uncompressed size
-            // — never exceeds the uncompressed chunk length plus the trailing 4-byte
-            // CRC), so the per-chunk `clear()`+`resize` in the read path never has to
-            // grow the backing store in steady state. Without this the fresh per-scan
-            // scratch would reallocate a few times as it warms to its high-water mark,
-            // which the ≤1-alloc/chunk guard (now counting scratch regrowth too, D2)
-            // would attribute as extra copy-chain allocations. Metadata-driven, no
-            // heuristic; a `None` compression_info (uncompressed NB) reserves nothing
-            // and the historical grow-on-demand behaviour applies.
+            // Pre-reserve ONCE to the max stored compressed-chunk RECORD size from
+            // authoritative CompressionInfo metadata: `max_compressed_length + 4`
+            // (largest compressed payload any chunk can occupy + trailing 4-byte CRC).
+            // The read path `resize`s the scratch to each chunk's ACTUAL record size,
+            // up to `max_compressed_length + 4`; reserving to `chunk_length + 4` (the
+            // OLD value) was too small — a chunk whose record exceeded `chunk_length`
+            // would reallocate + record a spurious scratch-regrowth alloc, so the
+            // ≤1-alloc/chunk guard could FAIL. The true high-water mark means the
+            // per-chunk `clear()`+`resize` never grows in steady state. Metadata-driven,
+            // no heuristic; a `None` compression_info (uncompressed NB) reserves nothing.
             let mut scratch: Vec<u8> = Vec::new();
             if let Some(ci) = reader.compression_info.as_ref() {
-                scratch.reserve((ci.chunk_length as usize).saturating_add(4));
+                scratch.reserve((ci.max_compressed_length as usize).saturating_add(4));
             }
             let mut chunk_index = 0usize;
             loop {
@@ -696,6 +695,11 @@ impl SSTableReader {
                 //     blocking-pool op completes and re-polls the parked future.
                 //     (`tokio::fs` explicitly does not require the I/O driver;
                 //     only true socket/timer sources do.)
+                // BLOCKING-POOL FOOTPRINT (issue #1940 CONFIRM): this backend uses ~3
+                // blocking threads per in-flight scan (feed + its `tokio::fs` offload
+                // under `block_on` + parse half); F4 caps scan OPERATIONS at
+                // `scan_admission::default_limit()` = `ncpu`, so `~3 × ncpu` stays well
+                // under tokio's 512-thread default pool — a parked read can't starve it.
                 // In all cases the per-scan cursor `Mutex` is executor-agnostic
                 // (semaphore + wakers, no reactor), the CRC digest is preloaded in
                 // memory at open (no per-chunk metadata `tokio::fs`), and the
