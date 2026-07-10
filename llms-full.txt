@@ -13715,7 +13715,7 @@ The **`cqlite.read-mode`** property picks which file set a scan sees, since Cass
 
 In `snapshot` mode the connector creates a per-query snapshot (`cqlite-<queryId>`) at planning time, names it in every ticket, and best-effort deletes it when the query finishes; a TTL backstop (`cqlite.snapshot-ttl`, default `6h`) ensures a coordinator crash can’t leak it. Snapshot creation is **fail-closed** — if it fails, the query fails rather than silently falling back to a live read.
 
-Both modes only ever see **flushed** SSTables — memtable rows are invisible until a `nodetool flush`.
+**Memtable visibility differs by mode (issue #2305).** `snapshot` mode is a per-query, point-in-time read that **includes durable memtable state**: Cassandra’s snapshot creation flushes the memtable as a side effect by design, and the Sidecar’s create-snapshot HTTP API has no `skipFlush` parameter to opt out of it. So a very recent write can become visible through a `snapshot`-mode query even without an explicit `nodetool flush`. `live` mode is the strict **on-disk-SSTables-only** contract: it reads the current data directory directly, with no snapshot and no flush side effect, so memtable rows stay invisible until an explicit `nodetool flush`. See the [connector README](https://github.com/pmcfadin/cqlite/blob/main/trino-connector/README.md#read-mode-snapshot-vs-live) for the full mechanism.
 
 See the [connector README](https://github.com/pmcfadin/cqlite/blob/main/trino-connector/README.md#catalog-configuration) for the complete property reference, the docker-compose end-to-end topology, LIMIT / aggregation pushdown behavior, and version-skew notes.
 
