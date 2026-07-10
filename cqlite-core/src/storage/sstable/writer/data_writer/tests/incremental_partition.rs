@@ -392,10 +392,7 @@ fn incremental_matches_whole_slice_for_adjacent_range_tombstones_forming_a_bound
     assert_eq!(old_offset, new_offset);
     assert!(blocks_eq(&old_blocks, &new_blocks));
     assert_eq!(old_emit, new_emit);
-    assert_eq!(
-        old_emit.rows, 1,
-        "only ck=7 survives both tombstone ranges"
-    );
+    assert_eq!(old_emit.rows, 1, "only ck=7 survives both tombstone ranges");
 }
 
 /// Combined fixture: static row + range tombstone + partition tombstone +
