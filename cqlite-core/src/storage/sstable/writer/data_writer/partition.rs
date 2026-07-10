@@ -55,7 +55,7 @@ fn sort_partition_items(items: &mut [PartitionItem], schema: &TableSchema) {
 /// with COMPLEMENTARY inclusivity (exactly one of them inclusive) — otherwise the
 /// ranges either overlap (both inclusive) or leave a gap (both exclusive) and stay
 /// separate bounds. Returns the boundary kind ordinal plus the shared clustering.
-fn boundary_kind_for<'a>(
+pub(super) fn boundary_kind_for<'a>(
     close: &'a ClusteringBound,
     open: &'a ClusteringBound,
     schema: &TableSchema,

@@ -616,6 +616,15 @@ impl WriteEngine {
                         let is_static_carrier =
                             mutation.clustering_key.is_none() && schema_has_static;
 
+                        // Roborev blocker #2 (issue #1668): `row_count` must
+                        // ONLY be incremented for the resolved static-row
+                        // carrier, exactly mirroring `KWayMerger::merge`'s
+                        // reference implementation (`merge/mod.rs`, ~lines
+                        // 2329-2367) — a pure partition- or range-tombstone
+                        // carrier emits a marker/header deletion, not a row,
+                        // so it must NOT inflate `row_count` (which flows
+                        // into `merge.rows_merged`/`report.rows_merged`/the
+                        // `COMPACTION_ROWS_MERGED` counter).
                         if is_partition_only || is_range_only || is_static_carrier {
                             if let PartitionStreamState::Prefix {
                                 partition_tombstone,
@@ -637,9 +646,9 @@ impl WriteEngine {
                                         *static_first_ts = mutation.timestamp_micros;
                                     }
                                     static_tracker.feed(&mutation, &write_schema, None);
+                                    *row_count += 1;
                                 }
                                 *saw_carrier_or_static = true;
-                                *row_count += 1;
                             }
                             continue;
                         }
@@ -1062,6 +1071,158 @@ mod tests {
         assert_eq!(report.completed_merges.len(), 0);
         assert!(!report.pending_compaction);
         assert!(report.time_spent < Duration::from_millis(50));
+    }
+
+    /// Roborev blocker #2 (issue #1668): `PartitionStreamState::Prefix`'s
+    /// carrier-classification block must NOT count a pure partition-
+    /// tombstone carrier toward `row_count` — mirroring
+    /// `KWayMerger::merge`'s reference implementation exactly (only the
+    /// resolved static-row carrier increments it). Before the fix, EVERY
+    /// carrier classification (partition-only, range-only, static)
+    /// incremented `row_count`, inflating `report.rows_merged` (and the
+    /// `COMPACTION_ROWS_MERGED` observability counter) whenever a
+    /// partition's carrier prefix included a pure tombstone.
+    ///
+    /// Fixture: one partition (`id = 1`) with a CLUSTERED schema (so a
+    /// `clustering_key: None` carrier always sorts strictly before every
+    /// `Some(ck)` row — `SchemaOrderedEntry`'s `(None, Some(_)) =>
+    /// Ordering::Less`, unconditional on `run_index` — unlike an unclustered
+    /// table where a real row ALSO carries `clustering_key: None` and could
+    /// race the carrier on a `run_index` tie-break). Source 1 carries the
+    /// partition tombstone alongside one real row (`ck=0`, postdating the
+    /// tombstone, so it is NOT itself shadowed — this keeps source 1 non-
+    /// empty, avoiding any confound from a truly zero-row source); source 2
+    /// carries a second real row (`ck=1`, also postdating the tombstone).
+    /// Compacting the two must merge to exactly 2 counted rows — the
+    /// re-emitted tombstone carrier is a marker/header deletion, not a row.
+    #[test]
+    fn test_maintenance_step_does_not_count_partition_tombstone_carrier_as_a_row() {
+        use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn};
+        use crate::storage::write_engine::mutation::{
+            CellOperation, ClusteringKey, PartitionKey, PartitionTombstone, TableId,
+        };
+        use crate::types::Value;
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
+        };
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema.clone(),
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let table_id = TableId::new(&schema.keyspace, &schema.table);
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let row_mutation = |ck: i32, ts: i64| {
+            Mutation::new(
+                table_id.clone(),
+                pk.clone(),
+                Some(ClusteringKey::single("ck", Value::Integer(ck))),
+                vec![CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text(format!("row-{ck}")),
+                }],
+                ts,
+                None,
+            )
+        };
+
+        // `local_deletion_time` must be a REALISTIC (near-"now") GC-clock
+        // timestamp, not a tiny literal — otherwise this full/overlap-safe
+        // 2-source compaction correctly gc-grace-purges the tombstone
+        // outright (it would be`local_deletion_time < gc_before`, decades
+        // expired), never reaching the row-count classification this test
+        // targets at all.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i32;
+
+        // Source 1: the partition tombstone (deletion_time=100) alongside
+        // ck=0 (ts=5_000, postdates the tombstone — survives).
+        let mut ck0_with_tombstone = row_mutation(0, 5_000);
+        ck0_with_tombstone.partition_tombstone = Some(PartitionTombstone {
+            deletion_time: 100,
+            local_deletion_time: now_secs,
+        });
+        engine.write(ck0_with_tombstone).unwrap();
+        rt.block_on(engine.flush()).unwrap().unwrap();
+
+        // Source 2: ck=1 (ts=6_000, also postdates the tombstone — survives).
+        engine.write(row_mutation(1, 6_000)).unwrap();
+        rt.block_on(engine.flush()).unwrap().unwrap();
+
+        // `min_sstable_size` large enough that both tiny files count as
+        // "small" and bucket together regardless of their size ratio.
+        let policy =
+            crate::storage::write_engine::STCSPolicy::new(2, 32, 0.5, 1.5, 1024 * 1024).unwrap();
+        engine.set_merge_policy(Box::new(policy)).unwrap();
+
+        // `MaintenanceReport::rows_merged` is per-CALL, not cumulative
+        // (`test_maintenance_paused_and_unpaused_compaction_produce_byte_identical_output`'s
+        // `total_rows_merged` pattern above) — a merge can finish its own
+        // work in one call yet still report `pending_compaction: true` for
+        // an unrelated reason, so sum across every call rather than trusting
+        // only the last one.
+        let mut report = engine.maintenance_step(Duration::from_secs(60)).unwrap();
+        let mut total_rows_merged = report.rows_merged;
+        let mut calls = 1u32;
+        while report.pending_compaction {
+            report = engine.maintenance_step(Duration::from_secs(60)).unwrap();
+            total_rows_merged += report.rows_merged;
+            calls += 1;
+            assert!(calls < 100_000, "compaction never completed");
+        }
+
+        assert_eq!(
+            total_rows_merged, 2,
+            "only the 2 real surviving rows (ck=0, ck=1) must be counted — \
+             the re-emitted partition-tombstone carrier is a marker, not a row"
+        );
     }
 
     #[test]

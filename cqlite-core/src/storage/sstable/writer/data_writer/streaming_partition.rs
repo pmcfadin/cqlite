@@ -199,8 +199,7 @@ impl StreamingPartitionSession {
             {
                 break;
             }
-            self.marker_cursor += 1;
-            self.emit_item(writer, marker.as_partition_item(), schema)?;
+            self.emit_next_marker_or_boundary(writer, marker, schema)?;
         }
 
         if let Some(row) = DataWriter::merge_row_group(&[mutation], schema, false, shadow_floor) {
@@ -220,8 +219,7 @@ impl StreamingPartitionSession {
     ) -> Result<(u64, Vec<PromotedIndexBlock>, PartitionEmitCounts)> {
         while self.marker_cursor < self.sorted_markers.len() {
             let marker = self.sorted_markers[self.marker_cursor].clone();
-            self.marker_cursor += 1;
-            self.emit_item(writer, marker.as_partition_item(), schema)?;
+            self.emit_next_marker_or_boundary(writer, marker, schema)?;
         }
 
         writer.buffer.push(END_OF_PARTITION);
@@ -246,6 +244,46 @@ impl StreamingPartitionSession {
 
         writer.flush_partition()?;
         Ok((self.partition_offset, self.blocks, self.emit))
+    }
+
+    /// Emit `marker` (the item at `self.marker_cursor`), coalescing it with
+    /// its immediately-following pair into a single `PartitionItem::Boundary`
+    /// when they form one — see
+    /// [`super::incremental_partition::IncrementalPartitionWriter::emit_next_marker_or_boundary`]
+    /// for the full contract (identical here, minus the borrowed `writer`
+    /// field becoming a per-call parameter and `OwnedSortableMarker` needing
+    /// `.clone()` instead of `Copy`).
+    fn emit_next_marker_or_boundary(
+        &mut self,
+        writer: &mut DataWriter,
+        marker: OwnedSortableMarker,
+        schema: &TableSchema,
+    ) -> Result<()> {
+        if !marker.is_open {
+            if let Some(next) = self.sorted_markers.get(self.marker_cursor + 1).cloned() {
+                if next.is_open {
+                    if let Some((kind, clustering)) =
+                        partition::boundary_kind_for(&marker.bound, &next.bound, schema)
+                    {
+                        self.marker_cursor += 2;
+                        return self.emit_item(
+                            writer,
+                            PartitionItem::Boundary {
+                                kind,
+                                clustering,
+                                end_deletion_time: marker.deletion_time,
+                                end_local_deletion_time: marker.local_deletion_time,
+                                start_deletion_time: next.deletion_time,
+                                start_local_deletion_time: next.local_deletion_time,
+                            },
+                            schema,
+                        );
+                    }
+                }
+            }
+        }
+        self.marker_cursor += 1;
+        self.emit_item(writer, marker.as_partition_item(), schema)
     }
 
     /// Write one item (row or marker) and update promoted-index-block

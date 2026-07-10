@@ -256,6 +256,73 @@ fn streaming_matches_whole_slice_for_range_tombstone_interleaved_with_rows() {
     assert_eq!(old_emit, new_emit);
 }
 
+/// Roborev blocker #1 (issue #1668): two ADJACENT range tombstones with
+/// DIFFERENT deletion times (so an upstream `coalesce_range_tombstones` pass
+/// would never fold them first) must coalesce into ONE `Boundary` marker in
+/// `StreamingPartitionSession` too, exactly matching the whole-slice path —
+/// see `incremental_partition.rs`'s identical test for the full rationale.
+/// Exercised BOTH unbroken and split mid-partition (right at the boundary's
+/// own clustering point) to prove the fix survives a
+/// `maintenance_step_inner` budget pause landing exactly there.
+#[test]
+fn streaming_matches_whole_slice_for_adjacent_range_tombstones_forming_a_boundary() {
+    let schema = clustering_test_schema();
+    let key = key(1, vec![0, 0, 0, 1]);
+    let mutations: Vec<Mutation> = (0..8)
+        .map(|ck| row_mutation(&schema, ck, &format!("row-{ck}"), 100))
+        .collect();
+    let range_tombstones = vec![
+        RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(0))),
+            end: ClusteringBound::Exclusive(ClusteringKey::single("ck", Value::Integer(3))),
+            deletion_time: 500,
+            local_deletion_time: 50,
+        },
+        RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(3))),
+            end: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(6))),
+            deletion_time: 800,
+            local_deletion_time: 80,
+        },
+    ];
+
+    let (old_bytes, old_offset, old_blocks, old_emit) =
+        run_whole_slice(&schema, &key, &mutations, None, &range_tombstones);
+    let (unbroken_bytes, unbroken_offset, unbroken_blocks, unbroken_emit) =
+        run_streaming(&schema, &key, &mutations, &[], 0, None, &range_tombstones);
+
+    assert_eq!(
+        old_bytes, unbroken_bytes,
+        "adjacent range tombstones must coalesce into an IDENTICAL single \
+         boundary marker in the streaming path"
+    );
+    assert_eq!(old_offset, unbroken_offset);
+    assert!(blocks_eq(&old_blocks, &unbroken_blocks));
+    assert_eq!(old_emit, unbroken_emit);
+    assert_eq!(old_emit.rows, 1, "only ck=7 survives both tombstone ranges");
+
+    // Split mid-partition right at the shared boundary point (after ck=2,
+    // before ck=3) — the pause lands exactly where the two markers coalesce.
+    let (split_bytes, split_offset, split_blocks, split_emit) = run_streaming_split(
+        &schema,
+        &key,
+        &mutations,
+        3,
+        &[],
+        0,
+        None,
+        &range_tombstones,
+    );
+    assert_eq!(
+        old_bytes, split_bytes,
+        "splitting the batch right at the boundary's own clustering point \
+         must still coalesce identically"
+    );
+    assert_eq!(old_offset, split_offset);
+    assert!(blocks_eq(&old_blocks, &split_blocks));
+    assert_eq!(old_emit, split_emit);
+}
+
 #[test]
 fn streaming_matches_whole_slice_for_partition_tombstone() {
     let schema = clustering_test_schema();

@@ -247,14 +247,62 @@ impl<'w, 'r> IncrementalPartitionWriter<'w, 'r> {
             {
                 break;
             }
-            self.marker_cursor += 1;
-            self.emit_item(marker.as_partition_item(), schema)?;
+            self.emit_next_marker_or_boundary(marker, schema)?;
         }
 
         if let Some(row) = DataWriter::merge_row_group(&[mutation], schema, false, shadow_floor) {
             self.emit_item(PartitionItem::Row(row), schema)?;
         }
         Ok(())
+    }
+
+    /// Emit `marker` (the item at `self.marker_cursor`), coalescing it with
+    /// its immediately-following pair into a single `PartitionItem::Boundary`
+    /// when they form one (issue #1220 / roborev blocker #1 on #1668):
+    /// `write_partition`/`write_partition_with_index_blocks` run every
+    /// emitted marker through `coalesce_boundaries`, but draining
+    /// `sorted_markers` one at a time (instead of coalescing the whole
+    /// pre-sorted `Vec` up front) skipped that step entirely — two adjacent
+    /// range tombstones with different deletion times would otherwise be
+    /// persisted as two separate bound markers instead of Cassandra's single
+    /// boundary marker.
+    ///
+    /// Safe to decide using ONLY `marker`'s own already-known sort position
+    /// (the caller's row-test in [`Self::feed_row`], or unconditionally in
+    /// [`Self::finish`]): a coalescible close+open pair always shares the
+    /// EXACT SAME clustering point with EQUAL sort weight (see
+    /// `marker_merge::sort_class`), so both bounds always compare identically
+    /// against any given row — advancing past both here can never skip past
+    /// a row that should have been emitted first.
+    fn emit_next_marker_or_boundary(
+        &mut self,
+        marker: SortableMarker<'r>,
+        schema: &TableSchema,
+    ) -> Result<()> {
+        if !marker.is_open {
+            if let Some(next) = self.sorted_markers.get(self.marker_cursor + 1).copied() {
+                if next.is_open {
+                    if let Some((kind, clustering)) =
+                        partition::boundary_kind_for(marker.bound, next.bound, schema)
+                    {
+                        self.marker_cursor += 2;
+                        return self.emit_item(
+                            PartitionItem::Boundary {
+                                kind,
+                                clustering,
+                                end_deletion_time: marker.deletion_time,
+                                end_local_deletion_time: marker.local_deletion_time,
+                                start_deletion_time: next.deletion_time,
+                                start_local_deletion_time: next.local_deletion_time,
+                            },
+                            schema,
+                        );
+                    }
+                }
+            }
+        }
+        self.marker_cursor += 1;
+        self.emit_item(marker.as_partition_item(), schema)
     }
 
     /// Finalize the partition: emit any remaining markers, `END_OF_PARTITION`,
@@ -265,8 +313,7 @@ impl<'w, 'r> IncrementalPartitionWriter<'w, 'r> {
     ) -> Result<(u64, Vec<PromotedIndexBlock>, PartitionEmitCounts)> {
         while self.marker_cursor < self.sorted_markers.len() {
             let marker = self.sorted_markers[self.marker_cursor];
-            self.marker_cursor += 1;
-            self.emit_item(marker.as_partition_item(), schema)?;
+            self.emit_next_marker_or_boundary(marker, schema)?;
         }
 
         self.writer.buffer.push(END_OF_PARTITION);

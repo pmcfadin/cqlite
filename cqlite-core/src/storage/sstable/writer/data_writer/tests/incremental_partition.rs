@@ -343,6 +343,61 @@ fn incremental_matches_whole_slice_for_wide_partition_with_promoted_index_blocks
     assert_eq!(old_emit, new_emit);
 }
 
+/// Roborev blocker #1 (issue #1668): two ADJACENT range tombstones —
+/// `[0, 3)` (deletion_time 500) then `[3, 6]` (deletion_time 800, a
+/// DIFFERENT deletion time so `coalesce_range_tombstones` upstream in the
+/// merge layer would never fold them into one range first) — whose close
+/// bound (`Exclusive(3)`) and the next range's open bound (`Inclusive(3)`)
+/// meet at the SAME clustering value with complementary inclusivity. The
+/// whole-slice path (`write_partition_with_index_blocks`) always runs
+/// `coalesce_boundaries` and persists this as ONE `PartitionItem::Boundary`
+/// (Cassandra's own on-disk `RangeTombstoneBoundaryMarker` shape); before
+/// this fix, `IncrementalPartitionWriter` drained its pre-sorted marker list
+/// one at a time and never coalesced, persisting two separate bound markers
+/// instead — a byte-format parity regression this test pins.
+#[test]
+fn incremental_matches_whole_slice_for_adjacent_range_tombstones_forming_a_boundary() {
+    let schema = clustering_test_schema();
+    let key = key(1, vec![0, 0, 0, 1]);
+    // Every row predates BOTH tombstones except ck=7, which sits outside
+    // both ranges and must survive in both paths.
+    let mutations: Vec<Mutation> = (0..8)
+        .map(|ck| row_mutation(&schema, ck, &format!("row-{ck}"), 100))
+        .collect();
+    let range_tombstones = vec![
+        RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(0))),
+            end: ClusteringBound::Exclusive(ClusteringKey::single("ck", Value::Integer(3))),
+            deletion_time: 500,
+            local_deletion_time: 50,
+        },
+        RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(3))),
+            end: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(6))),
+            deletion_time: 800,
+            local_deletion_time: 80,
+        },
+    ];
+
+    let (old_bytes, old_offset, old_blocks, old_emit) =
+        run_whole_slice(&schema, &key, &mutations, None, &range_tombstones);
+    let (new_bytes, new_offset, new_blocks, new_emit) =
+        run_incremental(&schema, &key, &mutations, &[], 0, None, &range_tombstones);
+
+    assert_eq!(
+        old_bytes, new_bytes,
+        "adjacent range tombstones must coalesce into an IDENTICAL single \
+         boundary marker in both the whole-slice and incremental paths"
+    );
+    assert_eq!(old_offset, new_offset);
+    assert!(blocks_eq(&old_blocks, &new_blocks));
+    assert_eq!(old_emit, new_emit);
+    assert_eq!(
+        old_emit.rows, 1,
+        "only ck=7 survives both tombstone ranges"
+    );
+}
+
 /// Combined fixture: static row + range tombstone + partition tombstone +
 /// several regular rows, some shadowed — the full feature combination.
 #[test]
