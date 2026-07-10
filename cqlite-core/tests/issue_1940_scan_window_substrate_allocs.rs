@@ -37,6 +37,18 @@
 //!
 //! The counters are a shared process-global, so this test serializes on the
 //! `serial_test` mutex (the counter-test convention).
+//!
+//! ## Companion coverage (D2 invariants, spec `scan-window-substrate`)
+//! - CRC-before-decompress ordering, unchanged: `block_io` unit
+//!   `read_compressed_chunk_at_verifies_crc_before_returning` + the cursor path's
+//!   in-read CRC check (`read_nb_format_chunk_data`). Since D2, the windowed IO half
+//!   verifies CRC in the read and only THEN decodes, so corrupt bytes never reach
+//!   the parse half — proven end-to-end by
+//!   `issue_1581_streaming_channel_error_propagation` (a full streaming scan over
+//!   `corruption/.../data_db_bit_flip` surfaces the CRC `Err` mid-iteration) and the
+//!   windowed corrupt-chunk unit `mid_stream_error_still_delivers_confirmed_pending_rows`.
+//! - 33-table byte-parity across LZ4/Snappy/Deflate/Zstd:
+//!   `test-data/scripts/smoke-test-all-tables.sh` + `sstabledump_parity_data`.
 
 #![cfg(all(
     feature = "state_machine",
