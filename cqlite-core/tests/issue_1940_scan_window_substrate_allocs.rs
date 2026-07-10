@@ -197,7 +197,11 @@ async fn steady_state_windowed_scan_allocs_at_most_one_per_chunk() {
 
     // Measured scan.
     rwc::reset();
-    assert_eq!(rwc::chunk_path_allocs(), 0, "reset must zero CHUNK_PATH_ALLOCS");
+    assert_eq!(
+        rwc::chunk_path_allocs(),
+        0,
+        "reset must zero CHUNK_PATH_ALLOCS"
+    );
     let rows = drain_scan(&db, &sql).await;
     assert_eq!(rows, warm, "steady-state scan must return the same rows");
 

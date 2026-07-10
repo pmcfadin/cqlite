@@ -493,14 +493,13 @@ async fn read_nb_format_chunk_data(
         // A5 read-work counter (READ_CALLS; consumer E3): exactly one logical
         // chunk read. No-op in release (design.md Decision 1/2).
         crate::storage::sstable::read_work_counters::record_read();
-        // A single `payload+CRC` heap buffer per chunk. `scratch` is the caller's
-        // REUSED buffer (issue #1940, D2): `clear()`+`resize` reuses its existing
-        // backing store when large enough, so a steady-state windowed scan performs
-        // NO per-chunk allocation here — the surviving copy-chain allocation is the
-        // decompress OUTPUT alone (instrumented in `chunk_source`, ≤1/chunk). A
-        // fresh `&mut Vec::new()` caller keeps the historical one-alloc-per-chunk
-        // behaviour. The `payload+CRC` bytes are consumed (decompressed / passed on)
-        // within this call, so reuse across chunks never leaks a prior chunk.
+        // One `payload+CRC` buffer per chunk. `scratch` is the caller's REUSED buffer
+        // (issue #1940, D2): `clear()`+`resize` reuses its backing store when large
+        // enough, so a steady-state windowed scan does NO per-chunk allocation here —
+        // the surviving copy-chain alloc is the decompress OUTPUT alone (instrumented
+        // in `chunk_source`, ≤1/chunk). A fresh `&mut Vec::new()` caller keeps the
+        // historical one-alloc-per-chunk behaviour. The bytes are consumed within
+        // this call, so reuse across chunks never leaks a prior chunk.
         let mut chunk_data = std::mem::take(scratch);
         chunk_data.clear();
         chunk_data.resize(total_chunk_size as usize, 0u8);

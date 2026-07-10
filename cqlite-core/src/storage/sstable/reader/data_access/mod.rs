@@ -834,10 +834,9 @@ impl SSTableReader {
         &self,
         cursor: &ScanCursor,
     ) -> Result<Option<Vec<u8>>> {
-        // Callers that do not recycle a scratch (compaction, sequential fallback,
-        // tests) pass a throwaway buffer — one allocation per chunk, unchanged. The
-        // windowed scan's IO half calls `read_next_block_parts` directly with a
-        // REUSED per-loop scratch (issue #1940, D2).
+        // Non-recycling callers (compaction, sequential fallback, tests) pass a
+        // throwaway scratch — one alloc/chunk, unchanged; the windowed IO half calls
+        // `read_next_block_parts` with a REUSED per-loop scratch (issue #1940, D2).
         self.read_next_block_parts(&cursor.file, &cursor.chunk_index, &mut Vec::new())
             .await
     }

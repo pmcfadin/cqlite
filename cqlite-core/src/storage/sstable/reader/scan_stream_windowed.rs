@@ -606,7 +606,6 @@ impl SSTableReader {
         })
     }
 
-
     /// I/O feed loop for a genuinely-async (buffered) backend: read the next
     /// compressed chunk on the async runtime, DECODE it (issue #1940, D2), and
     /// forward the decompressed refcounted `Bytes` over the bounded `raw_tx`.
@@ -636,9 +635,11 @@ impl SSTableReader {
                 .await
             {
                 Ok(Some(compressed)) => {
-                    let (decoded, recycled) = match self
-                        .decode_scan_chunk(chunk_index, max_compressed_length, compressed)
-                    {
+                    let (decoded, recycled) = match self.decode_scan_chunk(
+                        chunk_index,
+                        max_compressed_length,
+                        compressed,
+                    ) {
                         Ok(v) => v,
                         Err(e) => {
                             io_failed.store(true, Ordering::SeqCst);
