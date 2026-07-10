@@ -29,6 +29,15 @@
 mod bti_state;
 #[cfg(feature = "write-support")]
 mod finish;
+/// `SSTableWriter`-level incremental partition-write wiring (issue #1668,
+/// stage 5c-iv part 2). See [`SSTableWriter::begin_partition_incremental`].
+#[cfg(feature = "write-support")]
+mod incremental;
+/// Shared per-mutation statistics fold (issue #1668, stage 5c-iv part 2),
+/// called by both `write_partition` and the incremental streaming path so
+/// they can never drift. See [`stats_fold::fold_mutation_stats`].
+#[cfg(feature = "write-support")]
+pub(crate) mod stats_fold;
 
 #[cfg(feature = "write-support")]
 pub mod compressed_data_writer;
@@ -629,209 +638,23 @@ impl SSTableWriter {
                 .unwrap_or_else(|_| ck_a.cmp(ck_b)),
         });
 
-        // Update statistics from mutations
+        // Update statistics from mutations. Issue #1668 stage 5c-iv part 2:
+        // extracted into `stats_fold::fold_mutation_stats` so the incremental
+        // streaming path folds the exact same logic per mutation and the two
+        // paths can never drift.
+        //
+        // Issue #851: row_count (totalRows) and column_count
+        // (totalColumnsSet) are NOT re-derived per-mutation here. The two
+        // previous attempts re-grouped rows in this loop and kept diverging
+        // from `DataWriter::merge_row_group`, which is what actually emits
+        // rows/cells to Data.db (e.g. it drops partition/clustering-key
+        // columns from cells, and merges static ops from ALL mutations into
+        // a single static prelude that is a SEPARATE row from the clustering
+        // row). Instead, the emitter returns `PartitionEmitCounts` and we add
+        // them below (see the `write_partition_with_index_blocks` call) so
+        // the stats can never drift from what was physically written.
         for mutation in &mutations {
-            self.stats.update_timestamp(mutation.timestamp_micros);
-            // Issue #1018: simple `Write`/`WriteWithTtl`/`Delete` cells may carry
-            // their OWN (lower) per-cell timestamps in
-            // `Mutation::cell_write_timestamps` (a live cell's writetime OR a cell
-            // tombstone's markedForDeleteAt) and are emitted with an explicit
-            // `min_timestamp` delta. On the non-preseeded (incremental) write path,
-            // fold every per-cell timestamp into the stats BEFORE emitting cells so
-            // `min_timestamp` can never exceed an emitted cell's actual timestamp
-            // (which would underflow the unsigned-VInt delta). Mirrors the pre-pass
-            // fold in `compute_mutations_baseline_stats`.
-            if let Some(cell_ts) = &mutation.cell_write_timestamps {
-                for ts in cell_ts.values() {
-                    self.stats.update_timestamp(*ts);
-                }
-            }
-            if let Some(ttl) = mutation.ttl_seconds {
-                self.stats.update_ttl(ttl as i32);
-                let now_seconds = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i32)
-                    .unwrap_or(0);
-                let local_deletion_time = now_seconds.saturating_add(ttl as i32);
-                self.stats.update_local_deletion_time(local_deletion_time);
-            }
-            // Track local deletion times for tombstones and TTL cells.
-            // Issue #764: row/cell tombstones use the caller-supplied
-            // `local_deletion_time` when present, else the timestamp-derived
-            // value (`effective_local_deletion_time`).
-            for op in &mutation.operations {
-                match op {
-                    crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                        ttl_seconds,
-                        local_deletion_time,
-                        ..
-                    } => {
-                        // Track TTL
-                        self.stats.update_ttl(*ttl_seconds as i32);
-                        // CRITICAL: TTL cells need local_deletion_time tracked so the
-                        // per-cell LDT delta (`ldt - min_local_deletion_time`) written
-                        // by `write_cell_with_ttl` never underflows.
-                        //
-                        // Issue #1538: honor the authoritative per-cell LDT VERBATIM
-                        // when present (a surviving expiring cell preserved through
-                        // compaction), exactly as `write_cell_with_ttl` will stamp it,
-                        // so the seeded baseline and the emitted bytes agree. A per-cell
-                        // LDT below the wall-clock-derived value would otherwise
-                        // underflow the unsigned delta. `None` keeps the historical
-                        // `now + ttl` derivation.
-                        let local_deletion_time = match local_deletion_time {
-                            Some(ldt) => *ldt,
-                            None => {
-                                let now_seconds = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs() as i32)
-                                    .unwrap_or(0);
-                                now_seconds.saturating_add(*ttl_seconds as i32)
-                            }
-                        };
-                        self.stats.update_local_deletion_time(local_deletion_time);
-                    }
-                    op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
-                        // Issue #764 / #921 finding 2: record the EXACT LDT the
-                        // tombstone is emitted with. A `Delete` carrying a per-cell
-                        // `local_deletion_time: Some(L)` is stamped with `L`
-                        // verbatim by DataWriter; everything else derives the LDT
-                        // from the mutation. Reuse `op_cell_local_deletion_time`
-                        // (the emit path's helper) so stats and the bytes written
-                        // to Data.db agree exactly — a per-cell `L` below the
-                        // mutation-derived value would otherwise underflow the
-                        // delta, and one above it would leave min/max wrong.
-                        let local_deletion_time =
-                            crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
-                                op, mutation,
-                            );
-                        self.stats.update_local_deletion_time(local_deletion_time);
-                    }
-                    // Issue #887: a `ComplexDeletion` marker is physically written
-                    // with its OWN `marked_for_delete_at` / `local_deletion_time`
-                    // (DataWriter delta-encodes both against `min_timestamp` /
-                    // `min_local_deletion_time`). The mutation's row timestamp does
-                    // NOT cover the marker — for a tombstone-only row whose marker
-                    // strictly supersedes the row tombstone, `marked_for_delete_at`
-                    // can lie ABOVE the row timestamp and the marker LDT below the
-                    // row's LDT. Fold both into the stats so `max_timestamp` /
-                    // `min_local_deletion_time` reflect what was actually emitted to
-                    // Data.db (LIVE sentinels are filtered inside the `update_*`
-                    // chokepoints, issue #851).
-                    crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
-                        marked_for_delete_at,
-                        local_deletion_time,
-                        ..
-                    } => {
-                        self.stats.update_timestamp(*marked_for_delete_at);
-                        self.stats.update_local_deletion_time(*local_deletion_time);
-                    }
-                    // Issue #887: a per-element complex cell carries its OWN explicit
-                    // timestamp/ttl/local_deletion_time (DataWriter delta-encodes each
-                    // against the SSTable baselines). The element timestamp can differ
-                    // from the row liveness timestamp, and a deleted/expiring element
-                    // supplies an LDT/TTL the row-level accumulation never sees. Fold
-                    // them all in so the baselines cover every byte emitted by
-                    // `write_complex_element_cell`.
-                    crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
-                        timestamp_micros,
-                        ttl_seconds,
-                        local_deletion_time,
-                        is_deleted,
-                        ..
-                    } => {
-                        self.stats.update_timestamp(*timestamp_micros);
-                        if let Some(ttl) = ttl_seconds {
-                            self.stats.update_ttl(*ttl as i32);
-                        }
-                        if let Some(ldt) = local_deletion_time {
-                            self.stats.update_local_deletion_time(*ldt);
-                        }
-                        // Issue #1728 (roborev finding 2): a LIVE complex element
-                        // (not deleted, not expiring, no explicit LDT) carries
-                        // Cassandra's `NO_DELETION_TIME` sentinel just like a simple
-                        // live `Write`, so it must lift `maxLocalDeletionTime` to the
-                        // sentinel in a mixed SSTable. Authoritative liveness comes
-                        // from the verbatim `is_deleted` flag (never re-derived from
-                        // `value`, per the no-heuristics mandate / roborev #885).
-                        if !*is_deleted && ttl_seconds.is_none() && local_deletion_time.is_none() {
-                            self.stats.note_live_local_deletion_time();
-                        }
-                    }
-                    // Issue #1728: a live, non-TTL `Write` cell carries Cassandra's
-                    // `Cell.NO_DELETION_TIME` (`Integer.MAX_VALUE`) as its
-                    // localDeletionTime. Cassandra's MetadataCollector folds that
-                    // sentinel into `maxLocalDeletionTime`, so any SSTable holding a
-                    // live non-TTL cell finalizes `maxLocalDeletionTime` == the live
-                    // sentinel — including a MIXED SSTable that also carries older
-                    // tombstones with a smaller real LDT. The dedicated chokepoint
-                    // raises the max ALONE (never poisoning minLocalDeletionTime or
-                    // the tombstone drop-time histogram, issue #851).
-                    //
-                    // Two cases must NOT fold the live sentinel (roborev #1728):
-                    //   * `mutation.ttl_seconds.is_some()` — a plain `Write` under a
-                    //     row-level TTL is emitted as an EXPIRING cell with a real
-                    //     `now + ttl` LDT (data_writer::rows), which the mutation-TTL
-                    //     block above (`if let Some(ttl) = mutation.ttl_seconds`)
-                    //     already folded; overwriting max with the sentinel would
-                    //     clobber that real expiring LDT.
-                    //   * `value == Null` — a null `Write` is skipped by
-                    //     `write_merged_cells` (no cell is emitted), so it confers no
-                    //     LDT at all.
-                    crate::storage::write_engine::mutation::CellOperation::Write { value, .. } => {
-                        if mutation.ttl_seconds.is_none()
-                            && !matches!(value, crate::types::Value::Null)
-                        {
-                            self.stats.note_live_local_deletion_time();
-                        }
-                    }
-                }
-            }
-            // Track stats for partition tombstones
-            if let Some(pt) = &mutation.partition_tombstone {
-                self.stats.update_timestamp(pt.deletion_time);
-                self.stats
-                    .update_local_deletion_time(pt.local_deletion_time);
-                // Record the partition-level deletion marker for the `da`-format
-                // StatsMetadata.hasPartitionLevelDeletions field. Authoritative:
-                // the mutation explicitly carries a partition tombstone.
-                self.stats.mark_partition_level_deletion();
-            }
-
-            // Track stats for range tombstones
-            for rt in &mutation.range_tombstones {
-                self.stats.update_timestamp(rt.deletion_time);
-                self.stats
-                    .update_local_deletion_time(rt.local_deletion_time);
-            }
-
-            // Issue #1721: a decoupled row tombstone (#932
-            // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted
-            // by DataWriter as a `HAS_DELETION` row stamped with its OWN
-            // `(deletion_time, ldt)` — DECOUPLED from `timestamp_micros`, so the
-            // per-cell/mutation folds above never see it. Fold both through the
-            // same `update_*` chokepoints as `partition_tombstone` so
-            // `min_local_deletion_time` covers the tombstone's `ldt`; otherwise
-            // the below-baseline guard in data_writer/rows.rs (static sibling
-            // static_rows.rs) rejects the row when `ldt` sits below the
-            // incremental baseline. LIVE sentinels are filtered inside the
-            // chokepoints (#851), so route the raw values straight through.
-            if let Some((deletion_time, ldt)) = mutation.row_tombstone {
-                self.stats.update_timestamp(deletion_time);
-                self.stats.update_local_deletion_time(ldt);
-            }
-
-            // Issue #851: row_count (totalRows) and column_count
-            // (totalColumnsSet) are NOT re-derived per-mutation here. The two
-            // previous attempts re-grouped rows in this loop and kept diverging
-            // from `DataWriter::merge_row_group`, which is what actually emits
-            // rows/cells to Data.db (e.g. it drops partition/clustering-key
-            // columns from cells, and merges static ops from ALL mutations into
-            // a single static prelude that is a SEPARATE row from the clustering
-            // row). Instead, the emitter returns `PartitionEmitCounts` and we add
-            // them below (see the `write_partition_with_index_blocks` call) so
-            // the stats can never drift from what was physically written.
+            stats_fold::fold_mutation_stats(&mut self.stats, mutation);
         }
 
         // Update DataWriter's stats before writing, unless baselines were

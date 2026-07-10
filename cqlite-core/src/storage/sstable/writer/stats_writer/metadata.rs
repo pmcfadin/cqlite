@@ -670,4 +670,121 @@ mod tests {
         assert_eq!(pt0, 1_700_000_000.0f64);
         assert_eq!(v0, 2);
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #1668 stage 5a: prove the per-mutation stats fold is associative /
+    // order-independent, so `write_partition`'s baseline computation does NOT
+    // require the whole partition's `Vec<Mutation>` at once once baselines are
+    // pre-seeded (issue #729) — it can be fed incrementally, one row at a
+    // time, across any grouping or ordering of the SAME underlying values.
+    // -----------------------------------------------------------------------
+
+    /// `update_timestamp`/`update_local_deletion_time`/`update_ttl` are pure
+    /// min/max folds (see their doc comments): feeding the SAME set of values
+    /// in a DIFFERENT order (or split across many separate "calls" instead of
+    /// one batch) must produce an IDENTICAL final `min_timestamp` /
+    /// `max_timestamp` / `min_local_deletion_time` / `max_local_deletion_time`
+    /// / `min_ttl` / `max_ttl`. This is the concrete proof (not just a code
+    /// read) that a caller can stream rows into these folds one at a time
+    /// instead of pre-collecting a whole `Vec<Mutation>` first.
+    #[test]
+    fn stats_fold_is_order_independent_issue_1668_stage_5a() {
+        // A representative fixture: several distinct timestamps, local
+        // deletion times, and TTLs, INCLUDING the LIVE sentinels that must be
+        // filtered identically regardless of order (issue #851).
+        let timestamps = [
+            500_000i64,
+            2_000_000,
+            1_000_000,
+            i64::MIN,
+            i64::MAX,
+            750_000,
+        ];
+        let ldts = [1_700_000_000i32, 1_650_000_000, 1_690_000_000, i32::MAX];
+        let ttls = [3600i32, 60, 86400, 0, -1];
+
+        // Batch order A: as declared above (mirrors `write_partition`'s
+        // single forward `for mutation in &mutations` pass).
+        let mut batch_a = StatisticsMetadata::new();
+        for &ts in &timestamps {
+            batch_a.update_timestamp(ts);
+        }
+        for &ldt in &ldts {
+            batch_a.update_local_deletion_time(ldt);
+        }
+        for &ttl in &ttls {
+            batch_a.update_ttl(ttl);
+        }
+
+        // Batch order B: REVERSED and INTERLEAVED — simulates rows arriving
+        // one cluster group at a time, in a different relative order, across
+        // (hypothetically) multiple incremental calls.
+        let mut batch_b = StatisticsMetadata::new();
+        for &ttl in ttls.iter().rev() {
+            batch_b.update_ttl(ttl);
+        }
+        for &ts in timestamps.iter().rev() {
+            batch_b.update_timestamp(ts);
+        }
+        for &ldt in ldts.iter().rev() {
+            batch_b.update_local_deletion_time(ldt);
+        }
+
+        // Batch order C: fully interleaved, one value of EACH kind per
+        // "cluster group" — the closest analogue to a genuine per-row stream.
+        let mut batch_c = StatisticsMetadata::new();
+        let n = timestamps.len().max(ldts.len()).max(ttls.len());
+        for i in 0..n {
+            if let Some(&ts) = timestamps.get(i) {
+                batch_c.update_timestamp(ts);
+            }
+            if let Some(&ldt) = ldts.get(i) {
+                batch_c.update_local_deletion_time(ldt);
+            }
+            if let Some(&ttl) = ttls.get(i) {
+                batch_c.update_ttl(ttl);
+            }
+        }
+
+        for (name, batch) in [("B (reversed)", &batch_b), ("C (interleaved)", &batch_c)] {
+            assert_eq!(
+                batch.min_timestamp, batch_a.min_timestamp,
+                "min_timestamp diverged for order {name}"
+            );
+            assert_eq!(
+                batch.max_timestamp, batch_a.max_timestamp,
+                "max_timestamp diverged for order {name}"
+            );
+            assert_eq!(
+                batch.min_local_deletion_time, batch_a.min_local_deletion_time,
+                "min_local_deletion_time diverged for order {name}"
+            );
+            assert_eq!(
+                batch.max_local_deletion_time, batch_a.max_local_deletion_time,
+                "max_local_deletion_time diverged for order {name}"
+            );
+            assert_eq!(
+                batch.min_ttl, batch_a.min_ttl,
+                "min_ttl diverged for order {name}"
+            );
+            assert_eq!(
+                batch.max_ttl, batch_a.max_ttl,
+                "max_ttl diverged for order {name}"
+            );
+            assert_eq!(
+                batch.tombstone_histogram.size(),
+                batch_a.tombstone_histogram.size(),
+                "tombstone_histogram bin count diverged for order {name}"
+            );
+        }
+
+        // Sanity: the LIVE sentinels were actually exercised and correctly
+        // excluded (issue #851) — the real values, not the sentinels, won.
+        assert_eq!(batch_a.min_timestamp, 500_000);
+        assert_eq!(batch_a.max_timestamp, 2_000_000);
+        assert_eq!(batch_a.min_local_deletion_time, 1_650_000_000);
+        assert_eq!(batch_a.max_local_deletion_time, 1_700_000_000);
+        assert_eq!(batch_a.min_ttl, 60);
+        assert_eq!(batch_a.max_ttl, 86_400);
+    }
 }

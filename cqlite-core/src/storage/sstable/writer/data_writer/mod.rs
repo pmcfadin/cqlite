@@ -209,11 +209,25 @@ mod cells;
 mod collection_order;
 mod complex;
 mod encoding;
+/// Incremental partition-write entry point (issue #1668, stage 5c-iv, part
+/// 1 — build + prove, not yet wired). See
+/// [`incremental_partition::IncrementalPartitionWriter`].
+mod incremental_partition;
 mod index_prefix;
+/// Incremental rows+markers interleave (issue #1668, stage 5c-iii). See
+/// [`marker_merge::merge_rows_and_markers`].
+mod marker_merge;
 mod partition;
 mod rows;
 mod schema_helpers;
+/// Incremental static-column last-write-wins tracker (issue #1668, stage
+/// 5c-ii). See [`static_ops::StaticOpsTracker`].
+mod static_ops;
 mod static_rows;
+/// Cross-call resumable incremental partition-write session (issue #1668,
+/// stage 5c-iv part 3). See
+/// [`streaming_partition::StreamingPartitionSession`].
+mod streaming_partition;
 mod types;
 mod udt_canon;
 
@@ -233,8 +247,12 @@ pub use types::PartitionEmitCounts;
 // this `mod.rs` and reach the submodules as ancestor privates.
 pub(crate) use collection_order::compare_collection_elements;
 pub(crate) use encoding::*;
+pub(crate) use incremental_partition::IncrementalPartitionWriter;
 pub(crate) use index_prefix::*;
+pub(crate) use partition::PartitionItem;
 pub(crate) use schema_helpers::*;
+pub(crate) use static_ops::StaticOpsTracker;
+pub(crate) use streaming_partition::StreamingPartitionSession;
 pub(crate) use types::*;
 pub(crate) use udt_canon::{canonicalize_static_value, canonicalize_udt_value};
 
