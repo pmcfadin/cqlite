@@ -235,6 +235,27 @@ tasks.register<Sync>("assemblePlugin") {
 flight-core + jackson + transitive deps). `trino-spi` is intentionally **not** a
 runtime dependency — Trino supplies it from the engine classpath.
 
+### Required JVM configuration (Arrow off-heap, JDK 17+)
+
+The connector reads Flight batches into off-heap Apache Arrow buffers. On JDK 17+
+arrow-java's `MemoryUtil` initializer needs the `java.nio` module opened to it, so
+Trino's `jvm.config` **must** contain this exact line:
+
+```
+--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED
+```
+
+Trino 481's stock `jvm.config` does not include it. Without the flag the first
+Arrow off-heap touch fails in `MemoryUtil.<clinit>`, and every `do_get` then dies
+downstream with an opaque `Failed to read message`. Add the flag to **every**
+coordinator and worker, then restart.
+
+The connector fails fast to make this actionable: it probes Arrow memory
+initialization once at catalog load and, if the flag is missing, raises a Trino
+`CONFIGURATION_INVALID` error naming this exact flag and the `jvm.config` remedy —
+rather than surfacing the cryptic read-time error. The bundled docker stack and
+the k8s `trino-cqlite` kit both configure the flag for you.
+
 ### Catalog configuration and read mode
 
 Configure a catalog in `etc/catalog/cqlite.properties`. The first line must select
