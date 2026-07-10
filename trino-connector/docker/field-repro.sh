@@ -170,6 +170,21 @@ stop_tcpdump() {
   docker rm -f "$cname" >/dev/null 2>&1 || true
 }
 
+# Bound for the post-failure Trino metadata query below — deliberately SHORT
+# (well under QUERY_TIMEOUT_SECS): when the FAILING check IS a hang/server
+# stall (the exact #2264 scenario this harness exists to catch), an unbounded
+# diagnostics query would itself hang, so "capture diagnostics on failure"
+# would silently become "hang a second time instead of capturing anything"
+# (issue #2289 roborev finding, job 1590).
+CAPTURE_METADATA_TIMEOUT_SECS=20
+
+# Set by `capture_artifacts` to the EXACT artifacts dir it just created — the
+# `--inject-failure` self-test verifies THIS path, not a glob of the newest
+# `*-inject-failure-*` dir (issue #2289 roborev finding, job 1590: a glob can
+# be satisfied by a stale dir left over from a PRIOR run even if the current
+# run produced nothing new).
+LAST_ARTIFACT_DIR=""
+
 # Saves diagnostics for one failing check into a timestamped artifacts dir:
 # cqlite-flight debug logs, the port-8815 pcap (if captured), and the most
 # recent Trino query's JSON record (issue #2289 deliverable 3 / #2286 parity).
@@ -177,15 +192,26 @@ capture_artifacts() {
   local check_name="$1" pcap="$2"
   local artdir="$ARTIFACTS_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${check_name}"
   mkdir -p "$artdir"
+  LAST_ARTIFACT_DIR="$artdir"
   "${COMPOSE[@]}" logs cqlite-flight --no-color > "$artdir/cqlite-flight-debug.log" 2>&1 || true
   if [[ -n "$pcap" && -f "$pcap" ]]; then
     # The pcap was copied out of the capture container by `docker cp` and is
     # already owned by us — no `sudo chown` needed (issue #2289 arm64/macOS).
     cp "$pcap" "$artdir/flight-8815.pcap" 2>/dev/null || true
   fi
-  "${COMPOSE[@]}" exec -T trino trino --output-format JSON \
-    --execute "SELECT query_id, state, query FROM system.runtime.queries ORDER BY created DESC LIMIT 5" \
-    > "$artdir/trino-recent-queries.json" 2>&1 || true
+  # Bounded + never fatal: on timeout/error, write a short fallback note
+  # instead of leaving an empty/truncated JSON file, and keep going — the
+  # debug log + pcap are still real diagnostics even if Trino itself can't
+  # answer right now.
+  if run_with_timeout "$CAPTURE_METADATA_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --output-format JSON \
+      --execute "SELECT query_id, state, query FROM system.runtime.queries ORDER BY created DESC LIMIT 5" \
+      > "$artdir/trino-recent-queries.json" 2>&1; then
+    :
+  else
+    local trino_meta_rc=$?
+    echo "trino-recent-queries.json unavailable (rc=${trino_meta_rc}, bound ${CAPTURE_METADATA_TIMEOUT_SECS}s) — Trino itself may be stalled by the same failure being captured; see cqlite-flight-debug.log instead" \
+      > "$artdir/trino-recent-queries.json"
+  fi
   echo "captured failure artifacts: $artdir" >&2
   ls -la "$artdir" >&2
 }
@@ -240,6 +266,15 @@ trap cleanup EXIT
 log "clean slate (reproducible run)"
 "${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
 mkdir -p "$ARTIFACTS_ROOT"
+
+# Belt-and-suspenders alongside `LAST_ARTIFACT_DIR` (issue #2289 roborev
+# finding, job 1590): clear any stale `*-inject-failure-*` dirs from a PRIOR
+# `--inject-failure` run before this one starts, so nothing left over on disk
+# could ever be mistaken for THIS run's evidence even by future code that
+# re-introduces a glob.
+if [[ -n "$INJECT_FAILURE" ]]; then
+  rm -rf "$ARTIFACTS_ROOT"/*-inject-failure-* 2>/dev/null || true
+fi
 
 log "build connector plugin (shared with e2e-test.sh's build step)"
 PLUGIN_DIR="$ROOT/trino-connector/build/plugin/cqlite_flight"
@@ -346,9 +381,16 @@ echo
 # run, 2026-07-10: the old path exited 1 on --inject-failure, contradicting
 # that contract and making the self-test's own exit code meaningless).
 if [[ -n "$INJECT_FAILURE" ]]; then
-  latest="$(ls -dt "$ARTIFACTS_ROOT"/*-inject-failure-* 2>/dev/null | head -1)"
-  if [[ -z "$latest" ]]; then
-    echo "❌ CAPTURE-ON-FAIL BROKEN: no inject-failure artifacts dir was produced"
+  # Verify the EXACT dir `capture_artifacts` created for THIS invocation
+  # (`LAST_ARTIFACT_DIR`, set inside `capture_artifacts`), not a glob of the
+  # newest `*-inject-failure-*` dir — a glob can be satisfied by a stale dir
+  # left over from a prior run even when this run produced nothing new
+  # (issue #2289 roborev finding, job 1590). `check_inject_failure` always
+  # returns 1 by design, so `run_check` always calls `capture_artifacts` and
+  # `LAST_ARTIFACT_DIR` is always set for a genuinely-completed self-test run.
+  latest="$LAST_ARTIFACT_DIR"
+  if [[ -z "$latest" || ! -d "$latest" ]]; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: no artifacts dir was recorded for this run (LAST_ARTIFACT_DIR unset — capture_artifacts did not run as expected)"
     exit 1
   fi
   missing=()
