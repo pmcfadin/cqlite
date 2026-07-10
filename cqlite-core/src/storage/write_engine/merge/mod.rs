@@ -76,6 +76,15 @@ mod model;
 #[cfg(feature = "write-support")]
 pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, RowData};
 
+/// Single-partition point-read merge builder (issue #2207): assembles a
+/// [`KWayMerger`] from per-candidate single-partition runs (seeked or key-filtered)
+/// for the Flight `do_get` point-read path. Byte-identical reconciliation to the
+/// full-scan merge; only the inputs are narrower.
+#[cfg(feature = "write-support")]
+mod point_read;
+#[cfg(feature = "write-support")]
+pub use point_read::build_single_partition_merger;
+
 /// Fully-expired SSTable drop classification (issue #1388): the metadata-only
 /// `fully_expired_sstables` drop-set used by both compaction surfaces to skip
 /// reading SSTables that are entirely past `gcBefore` and overlap-safe.
@@ -2266,6 +2275,41 @@ impl KWayMerger {
             // No overlap bound by default (#935): a partial compaction stays
             // conservative (no purging) until a caller supplies the min outside
             // timestamp via `with_max_purgeable_timestamp`.
+            max_purgeable_timestamp: None,
+        })
+    }
+
+    /// Build a k-way merger from pre-constructed run iterators (issue #2207).
+    ///
+    /// Unlike [`Self::new`], which opens each input SSTable and streams its WHOLE
+    /// compaction scan, this accepts runs the caller has already scoped — e.g. the
+    /// single-partition point-read path (`merge::point_read`) hands one run per
+    /// candidate SSTable, each yielding ONLY the target partition's entries (a
+    /// seeked `Vec` or a key-filtered stream). The reconciliation, heap, and
+    /// per-partition merge are IDENTICAL to the full-scan path — only the inputs
+    /// are narrower — so the point path reconciles byte-identically to the scan.
+    ///
+    /// `runs` must be non-empty and ordered newest-to-oldest (run index = LWW
+    /// tie-break rank), exactly as [`Self::new`]'s `input_paths` are.
+    pub fn from_row_iterators(
+        runs: Vec<Box<dyn SSTableRowIterator>>,
+        schema: &TableSchema,
+    ) -> Result<Self> {
+        if runs.is_empty() {
+            return Err(Error::InvalidInput(
+                "K-way merge requires at least one input run".to_string(),
+            ));
+        }
+        schema.validate_dropped_columns()?;
+        let runs = runs.into_iter().map(RunReader::new).collect();
+        Ok(Self {
+            runs,
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema: schema.clone(),
+            gc_before_secs: None,
+            now_secs: None,
+            purge_safe: false,
             max_purgeable_timestamp: None,
         })
     }
