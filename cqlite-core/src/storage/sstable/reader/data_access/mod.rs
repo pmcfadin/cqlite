@@ -47,9 +47,9 @@ mod compaction_cancel_tests;
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
 mod compaction;
-// CRC-validated compressed offset-read window (issue #1773): keeps the
-// `read_compressed_offset_window` helper out of this already-large entry-point file.
+// CRC-validated compressed offset-read window (issue #1773).
 mod compressed_offset;
+mod full_index_scan; // Full-Index.db partition enumeration (issue #2302)
 mod model;
 // Opt-in presence-oracle false-negative verification method (issue #2163), kept
 // out of this already-large entry-point file (campsite rule, epic #1116).

@@ -186,6 +186,18 @@ mach2 = "0.4"
 name = "issue_1495_arrow_accessor_parity"
 required-features = ["arrow"]
 
+# Full-Index.db partition-enumeration regression (issue #2302). It is
+# `#![cfg(all(feature = "work-counters", feature = "write-support"))]` — the
+# `read_work_counters` probe gauge AND the `SSTableWriter`/mutation write API — so
+# it only compiles+runs when BOTH features are on. Its ONLY automated executor is
+# the `work-counters-guard` gate component (scripts/agent-gate.sh:
+# `cargo test -p cqlite-core --features write-support,cli-helpers,state_machine,work-counters
+# --test issue_2302_written_index_resolve`), which enables both features and fails
+# closed on a vacuous 0-run.
+[[test]]
+name = "issue_2302_written_index_resolve"
+required-features = ["work-counters", "write-support"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false

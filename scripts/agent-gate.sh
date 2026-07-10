@@ -3173,7 +3173,8 @@ dispatch_component() {
       --test issue_1578_aggregate_o1_memory \
       --test issue_1647_rows_floor_walk \
       --test issue_1577_limit_decode_stop \
-      --test issue_1599_locate_parity ;;
+      --test issue_1599_locate_parity \
+      --test issue_2302_written_index_resolve ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
       --test issue_1582_byte_bounded_result_budget \

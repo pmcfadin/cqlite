@@ -570,104 +570,79 @@ impl SSTableReader {
     /// directly. For V5CompressedLegacy NB SSTables (the format the writer emits),
     /// `sequential_scan` uses the chunk-stitching path and returns every partition.
     pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, ScanRow)>> {
-        if let Some(summary_reader) = &self.summary_reader {
-            let entries = summary_reader.get_entries();
-            let mut results = Vec::new();
-
-            for entry in entries.iter() {
-                // Cooperative cancellation (issue #2264, roborev round 3): with
-                // Summary.db PRESENT, this per-entry index-random-read loop is the
-                // O(partitions) work a Flight `do_get` spends its time in — the
-                // outer poll in `stream_all_partitions_for_compaction`'s
-                // non-stitching branch fires only ONCE, AFTER this whole loop (and
-                // the whole `Vec`) has already been materialised. Poll EVERY
-                // entry (not the 256-cadence used for raw in-memory partition
-                // loops elsewhere): Summary.db already samples ~1-in-128 raw
-                // partitions, and each entry here costs a real Index.db lookup +
-                // Data.db decompress/parse — orders of magnitude more expensive
-                // per iteration than a byte-parse step, so checking every entry
-                // adds negligible overhead while keeping the observed latency
-                // bound proportionate to that per-entry cost.
-                self.scan_cancel.check()?;
-                // Use Summary.db entry to find the corresponding Index.db entry
-                if let Some(_index_reader) = &self.index_reader {
-                    // The summary entry provides a position in Index.db
-                    // We need to read the partition data from Data.db
-
-                    // For now, use the partition key from the summary entry
-                    let partition_key_bytes = &entry.partition_key;
-
-                    // Look up the partition in Index.db to get the actual data offset
-                    if let Some((data_offset, data_size)) = self
-                        .lookup_partition_with_index(partition_key_bytes)
-                        .await?
-                    {
-                        // Convert Index.db relative offset to absolute file offset
-                        // Index.db offsets are relative to data section start (after compression header)
-                        let absolute_offset = data_offset + self.actual_header_size as u64;
-
-                        // Read and parse the actual partition data from Data.db
-                        match self
-                            .parse_partition_at_offset(absolute_offset, data_size)
-                            .await?
-                        {
-                            Some(partition_entries) => {
-                                for (row_key, value) in partition_entries {
-                                    results.push((row_key, value));
-                                }
-                            }
-                            None => {
-                                debug!("Failed to parse partition at offset {}", absolute_offset);
-                            }
-                        }
-                    }
-                } else {
-                    tracing::error!("Index reader not available for partition iteration");
-                    return Err(Error::corruption(
-                        "Index reader required for partition iteration - synthetic data not allowed for Issue #35",
-                    ));
+        // Index-random-read path (issue #2302): when a `Index.db` is present on a
+        // BIG SSTable, enumerate EVERY partition via the full Index.db
+        // partition-offset table instead of the sparse `Summary.db` samples.
+        //
+        // The historical loop walked `Summary.db` (only ~1-in-128 partitions) AND
+        // passed `data_size = 0` to `parse_partition_at_offset` (Index.db never
+        // stores partition size), so it read zero bytes per entry, resolved zero
+        // partitions, and SILENTLY fell back to a full `sequential_scan` on EVERY
+        // read — even with complete, valid components. Each partition's span is
+        // bounded instead by the successor entry's offset (the last by the
+        // data-section end), authoritative on-disk structure rather than a size
+        // guess (issue #28). Index.db offsets are in the UNCOMPRESSED data-section
+        // domain: for an uncompressed reader that equals the raw file domain; for a
+        // compressed reader the per-partition slice is mapped to its covering
+        // compression chunk(s) and decompressed (`read_compressed_offset_window`).
+        if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
+            match self.iterate_all_partitions_via_full_index().await? {
+                Some(results) => return Ok(results),
+                None => {
+                    // Present components that did NOT fully resolve: never silent.
+                    tracing::warn!(
+                        "SSTable Index.db is present but iterate_all_partitions could not \
+                         resolve every partition through the index-random-read path; \
+                         falling back to a full sequential scan of Data.db (issue #2302). \
+                         This should not happen for a well-formed BIG SSTable — the emitted \
+                         Index.db/Summary.db may be malformed or the data-section length is \
+                         inconsistent with the index offsets."
+                    );
                 }
             }
-
-            // Only trust the index-based path when EVERY summary entry was resolved.
-            // Partial resolution silently drops the unresolved entries; defaulting to
-            // `sequential_scan` in that case is strictly safer and still correct on
-            // real Cassandra SSTables (sequential_scan returns the same partitions
-            // when the index resolves them all).
-            if results.len() == entries.len() && !entries.is_empty() {
-                debug!("Partition iteration found {} entries", results.len());
-                return Ok(results);
-            }
-
-            debug!(
-                "Index.db lookup resolved {}/{} summary entries; \
-                 falling back to sequential_scan (Issue #500)",
-                results.len(),
-                entries.len()
-            );
         } else if self.bti_partitions_db.is_none() {
-            // No Summary.db was loaded AND this is not a BTI SSTable (which
-            // legitimately carries its index in Partitions.db, not Summary.db).
-            // That means a BIG-format SSTable is missing the random-access index
-            // components, so every partition iteration must fully materialize and
-            // sort Data.db via `sequential_scan` — a real per-read perf cliff
-            // (issue #2295). This is the field symptom of a snapshot directory
-            // served with only Data.db: name the absent components and the
-            // consequence so an operator can spot an incomplete snapshot instead
-            // of silently paying the full-scan cost on every read.
-            let missing = if self.index_reader.is_none() {
-                "Index.db and Summary.db"
+            // BIG SSTable with NO usable `index_reader` (this branch is only reached
+            // when `index_reader.is_none()`): the full-index random-read path cannot
+            // run, so every iteration falls into the sequential Data.db scan below — a
+            // real per-read perf cliff. The WARN trigger keys on Index.db availability,
+            // NOT Summary.db presence (roborev job 1612): a present Summary.db only
+            // samples ~1-in-128 partitions and never gates the full-index path, so a
+            // present-Summary/missing-Index pair is the SAME silent degradation this
+            // issue exists to kill and must be named LOUD, never dropped silently into
+            // `sequential_scan`. The sub-cause (failed-to-open vs genuinely absent)
+            // only shapes the message.
+            if self.index_present_but_unloadable {
+                // The sibling Index.db EXISTS on disk but failed to open/parse
+                // (issue #2302, roborev job 1606): distinct from a genuinely absent
+                // file — the component is malformed/truncated.
+                tracing::warn!(
+                    "SSTable Index.db is present on disk but failed to open/parse \
+                     (iterate_all_partitions cannot use the index-random-read path) \
+                     and falls back to a full sequential scan of Data.db (a per-read \
+                     perf cliff, issue #2302). The Index.db component may be malformed \
+                     or truncated — regenerate the SSTable or restore an intact Index.db."
+                );
             } else {
-                "Summary.db"
-            };
-            tracing::warn!(
-                "SSTable has no random-access partition index ({missing} absent): \
-                 iterate_all_partitions falls back to a full sequential scan of \
-                 Data.db, materializing and sorting every partition on each read \
-                 (a per-read perf cliff, issue #2295). For snapshot reads, ensure \
-                 the snapshot directory holds the full SSTable component set \
-                 (Index.db + Summary.db), not just Data.db."
-            );
+                // Index.db genuinely absent. Whether or not Summary.db loaded, the
+                // full-index path is unavailable, so this is still the degraded
+                // full-scan cliff (issues #2295/#2302). Name the absent components so
+                // an operator can spot an incomplete snapshot directory served with
+                // only Data.db (or Data.db + Summary.db) instead of silently paying
+                // the full-scan cost on every read.
+                let missing = if self.summary_reader.is_none() {
+                    "Index.db and Summary.db"
+                } else {
+                    "Index.db"
+                };
+                tracing::warn!(
+                    "SSTable has no usable random-access partition index ({missing} \
+                     absent): iterate_all_partitions falls back to a full sequential \
+                     scan of Data.db, materializing and sorting every partition on \
+                     each read (a per-read perf cliff, issues #2295/#2302). For \
+                     snapshot reads, ensure the snapshot directory holds the full \
+                     SSTable component set (Index.db + Summary.db), not just Data.db."
+                );
+            }
         }
 
         // Fallback path: sequential walk of Data.db.
@@ -680,19 +655,34 @@ impl SSTableReader {
             .await
     }
 
-    /// Whether this reader has a random-access partition index — a `Summary.db`
-    /// (BIG format) or a `Partitions.db` trie (BTI format) — that lets
+    /// Whether this reader has a **usable random-access partition index** — a
+    /// loaded `Index.db` (BIG format; issue #2302 resolves CQLite-written Index.db
+    /// too) or a `Partitions.db` trie (BTI format) — that lets
     /// [`iterate_all_partitions`](Self::iterate_all_partitions) and point lookups
     /// avoid a full sequential Data.db scan.
     ///
-    /// Snapshot-completeness probe (issue #2295): a snapshot directory served with
-    /// only `Data.db` (its `Index.db`/`Summary.db` siblings absent) still opens,
-    /// but reports `false` here — meaning every read pays the sequential-scan perf
-    /// cliff. A directory holding the full component set reports `true`. This is
-    /// the observable used to prove that a complete snapshot uses the index path
-    /// rather than a full materialization.
+    /// This is a **capability probe**: it must report `true` only for the exact
+    /// states that route to the non-sequential path. Both point lookups
+    /// (`index_reader.lookup_partition` / the BTI trie) and `iterate_all_partitions`
+    /// (the full-`Index.db` walk / BTI) gate on `index_reader`/`bti_partitions_db`
+    /// — never on `summary_reader`.
+    ///
+    /// Issue #2302 (roborev job 1613): `summary_reader` is DELIBERATELY excluded. A
+    /// `Summary.db` only samples ~1-in-128 partitions and never gates the
+    /// random-access route, so a present-Summary / absent-Index BIG reader is
+    /// degraded — every read falls into `sequential_scan` and WARNs. Including
+    /// `summary_reader` here made the probe report "fast path available" for that
+    /// degraded reader (a fidelity lie). Narrowing to the truly-supporting state
+    /// keeps the probe honest.
+    ///
+    /// Snapshot-completeness probe (issue #2295): a directory served with only
+    /// `Data.db` (its index siblings absent) still opens but reports `false`; a
+    /// complete component set loads `Index.db` (→ `index_reader`) and reports
+    /// `true`. All current callers (this module's own tests + the #2295 snapshot
+    /// test) use this probe to mean "does the fast/index path apply," so a single
+    /// narrowed predicate covers every caller without a split API.
     pub fn has_partition_index(&self) -> bool {
-        self.summary_reader.is_some() || self.bti_partitions_db.is_some()
+        self.index_reader.is_some() || self.bti_partitions_db.is_some()
     }
 
     /// Build the TableId used for fallback `sequential_scan` from header metadata.

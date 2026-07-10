@@ -277,6 +277,14 @@ pub struct SSTableReader {
     pub(crate) actual_header_size: usize,
     /// Index.db reader for partition lookup and promoted index handling
     pub(crate) index_reader: Option<IndexReader>,
+    /// `true` iff a sibling `Index.db` file EXISTS on disk but failed to
+    /// open/parse (issue #2302, roborev job 1606), i.e. `index_reader` is `None`
+    /// for a present-but-unusable reason rather than a genuinely absent file. The
+    /// full enumeration uses this to emit a LOUD warning (present-but-unusable
+    /// index + Summary.db loaded is the exact silent-degradation class #2302 kills)
+    /// instead of silently falling back to a sequential scan. A genuinely absent
+    /// Index.db leaves this `false`.
+    pub(crate) index_present_but_unloadable: bool,
     /// Summary.db reader for token-range iteration and sampling
     pub(crate) summary_reader: Option<SummaryReader>,
     /// Cached Cassandra Murmur3 tokens of this SSTable's authoritative

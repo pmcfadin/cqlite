@@ -143,6 +143,14 @@ pub struct IndexReader {
     index_data: IndexData,
     /// Platform abstraction for file operations
     platform: Arc<Platform>,
+    /// Whether the entry parse consumed the ENTIRE Index.db file (issue #2302).
+    /// The parser `break`s on the first unparseable entry and returns the parsed
+    /// PREFIX, so a mid-entry-truncated file opens with leftover bytes. `true` ⟺
+    /// no bytes remained — the authoritative signal the stream was not cut
+    /// mid-entry (WHOLE trailing entries dropped at an exact boundary are caught
+    /// separately at the enumeration site). Only the completeness-sensitive full
+    /// enumeration consults it; point-lookup callers tolerate a partial prefix.
+    fully_parsed: bool,
 }
 
 impl IndexReader {
@@ -179,20 +187,18 @@ impl IndexReader {
 
         // Parse the index data with optional Summary.db correlation.
         //
-        // NOTE (issue #1572): `parse_all_partition_keys_with_summary` `break`s on
-        // the first unparseable entry and returns the parsed prefix, so a
-        // truncated / partially-corrupt Index.db opens successfully with a PARTIAL
-        // map. The leftover `remaining` being empty ONLY proves the surviving
-        // bytes parsed cleanly to EOF — it CANNOT detect truncation aligned to an
-        // exact entry boundary (whole trailing entries dropped ⇒ the prefix parses
-        // cleanly, `remaining` is empty, yet partitions are missing). There is no
-        // cleanly-available authoritative partition count at this layer to close
-        // that gap, so completeness is NOT tracked here; instead the BIG
-        // point-lookup miss branch always falls back to a whole-file scan rather
-        // than treating an index miss as a definitive absent (see
-        // `big_get_with_resolution`). No heuristics (issue #28).
-        let index_data = match parse_index_data_with_summary(&buffer, summary_reader) {
-            Ok((_remaining, data)) => data,
+        // NOTE (issue #1572 / #2302): `parse_all_partition_keys_with_summary`
+        // `break`s on the first unparseable entry and returns the parsed prefix, so
+        // a truncated Index.db opens with a PARTIAL map — `open` intentionally still
+        // returns `Ok` (BIG point-lookup callers tolerate a partial prefix +
+        // whole-file miss fallback via `big_get_with_resolution`; failing here would
+        // regress them). Whether the whole file was consumed is RECORDED below as
+        // `fully_parsed` (exposed via `is_fully_parsed()`) so the completeness-
+        // sensitive FULL enumeration can reject a mid-entry-truncated index; the
+        // residual boundary-aligned-drop gap is closed at the enumeration site by
+        // the last-partition coverage check. No heuristics (issue #28).
+        let (remaining, index_data) = match parse_index_data_with_summary(&buffer, summary_reader) {
+            Ok((remaining, data)) => (remaining, data),
             Err(e) => {
                 return Err(Error::corruption(format!(
                     "Failed to parse Index.db: {:?}",
@@ -201,16 +207,30 @@ impl IndexReader {
             }
         };
 
+        // A well-formed Index.db is a sequence of WHOLE entries running exactly to
+        // EOF (the `rest.is_empty()` parity asserts in this module's tests). Leftover
+        // bytes ⇒ the stream was cut mid-entry ⇒ the entry set is not provably
+        // complete. Structural, no heuristics (issue #28).
+        let fully_parsed = remaining.is_empty();
+
         Ok(Self {
             file_path: path.to_path_buf(),
             index_data,
             platform,
+            fully_parsed,
         })
     }
 
     /// Get all partition entries
     pub fn get_partition_entries(&self) -> &[PartitionIndexEntry] {
         &self.index_data.partition_entries
+    }
+
+    /// Whether the entry parse consumed the ENTIRE Index.db file (issue #2302).
+    /// `false` ⟺ the file was truncated mid-entry, so the parsed entry set is a
+    /// partial prefix and MUST NOT be treated as a complete partition enumeration.
+    pub fn is_fully_parsed(&self) -> bool {
+        self.fully_parsed
     }
 
     /// Look up a partition by key digest
