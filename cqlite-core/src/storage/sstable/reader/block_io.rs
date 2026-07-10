@@ -114,7 +114,7 @@ pub(crate) async fn read_next_block(
 /// [`Error::is_recoverable`], which classes ALL `Io` as recoverable; a
 /// deterministic re-read of the same bytes cannot fix a permanent failure and
 /// only wastes work.
-fn is_transient_io(e: &Error) -> bool {
+pub(super) fn is_transient_io(e: &Error) -> bool {
     match e {
         Error::Io(io) => matches!(
             io.kind(),

@@ -62,7 +62,68 @@ use crate::{Error, Result};
 /// boundaries independently of this piece size.
 const UNCOMPRESSED_READ_PIECE_BYTES: usize = 64 * 1024;
 
+/// Wrap a positional-read failure with human-readable `context` WITHOUT
+/// discarding its [`ErrorKind`](std::io::ErrorKind) (issue #1940 BLOCKER-2).
+///
+/// The synchronous positional read path used to relabel every read failure as
+/// `std::io::Error::other(..)` (kind `Other`), which erased the source kind — so
+/// a genuine transient fault (`Interrupted`/`WouldBlock`/`TimedOut`) surfacing
+/// through the feed could no longer be recognised by [`is_transient_io`] and was
+/// silently NOT retried. Rebuilding the wrapper with the SAME kind keeps the
+/// classifier honest and lets callers up the stack still see the true io kind,
+/// mirroring `block_io::io_error_with_context`. Non-`Io` variants
+/// (corruption/format) are already typed and pass through unchanged.
+fn io_error_with_context(context: impl std::fmt::Display, source: Error) -> Error {
+    match source {
+        Error::Io(io) => {
+            let kind = io.kind();
+            Error::Io(std::io::Error::new(kind, format!("{context}: {io}")))
+        }
+        other => other,
+    }
+}
+
 impl SSTableReader {
+    /// Positional `read_exact_at` that applies the SAME one-shot transient-I/O
+    /// retry the former async feed path had (issue #1588 / #1940 BLOCKER-2), and
+    /// records the read thread at the REAL read site (issue #1940 guard
+    /// integrity).
+    ///
+    /// A transient kernel fault (`Interrupted` EINTR / `WouldBlock` EAGAIN /
+    /// `TimedOut`) is retried EXACTLY once by re-reading at the SAME captured
+    /// `offset` (a positional read carries its offset as a parameter, so the retry
+    /// needs no re-seek); every other error — deterministic corruption/format, or
+    /// a non-transient io kind — fails fast. The returned error is the backend's
+    /// `Error::Io`, so its `ErrorKind` is PRESERVED for the caller to annotate via
+    /// [`io_error_with_context`] (never collapsed to `Error::other`).
+    ///
+    /// The `record_io_read_thread` probe fires HERE, at the actual
+    /// `point_source.read_exact_at` call site (not at the top of the feed closure),
+    /// so the #1940 no-nesting guard records the thread that performs the real read
+    /// — making its `io_read_thread == decode_thread` equality a true detector of a
+    /// read dispatched off the feed thread. Compiled only under `scan-offload-probe`.
+    fn positional_read_exact_retry_once(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        #[cfg(feature = "scan-offload-probe")]
+        super::probe::record_io_read_thread();
+        let mut attempt = 0u8;
+        loop {
+            match self.point_source.read_exact_at(offset, buf) {
+                Ok(()) => return Ok(()),
+                Err(e)
+                    if attempt == 0
+                        && crate::storage::sstable::reader::block_io::is_transient_io(&e) =>
+                {
+                    tracing::warn!(
+                        "transient I/O fault ({e}) on positional read at offset 0x{offset:x}; \
+                         re-reading once"
+                    );
+                    attempt = 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Read compressed chunk `chunk_index` SYNCHRONOUSLY via `point_source`,
     /// verifying its trailing CRC32 before returning the compressed payload (issue
     /// #1940). Returns `Ok(None)` at EOF (past the last chunk, or the degenerate
@@ -136,25 +197,47 @@ impl SSTableReader {
         rwc::record_read();
 
         // ONE positioned read for payload + trailing CRC into the REUSED scratch
-        // (D2). `clear()`+`resize` reuses the backing store when large enough, so a
-        // steady-state scan performs no per-chunk compressed-side allocation; a
-        // regrowth is recorded as a copy-chain alloc so the ≤1-alloc/chunk guard
-        // stays honest (mirrors `read_nb_format_chunk_data`).
+        // (D2). Grow-on-demand to the CHECKED `total_chunk_size` for THIS chunk —
+        // never a giant upfront reserve to the metadata `max_compressed_length`
+        // (which Cassandra commonly stamps as `i32::MAX`, an OOM/DoS on ordinary
+        // files, issue #1940 BLOCKER-1). `try_reserve_exact` returns a typed error
+        // on allocation failure instead of panicking/aborting. After the first few
+        // chunks the scratch has reached the working-set high-water mark, so
+        // subsequent chunks hit neither the reserve nor the resize regrowth —
+        // preserving the ≤1-alloc/chunk STEADY STATE (the `record_chunk_path_alloc`
+        // regrowth counter proves it). `clear()`+`resize` reuses the backing store
+        // when large enough (mirrors `read_nb_format_chunk_data`).
         let mut buf = std::mem::take(scratch);
         buf.clear();
         let cap_before = buf.capacity();
-        buf.resize(total_chunk_size as usize, 0u8);
+        let need = total_chunk_size as usize;
+        if need > buf.capacity() {
+            if let Err(e) = buf.try_reserve_exact(need) {
+                // Return the scratch to the caller so a retry could reuse it.
+                *scratch = buf;
+                return Err(Error::memory(format!(
+                    "failed to reserve {need} bytes for chunk {chunk_index} \
+                     (data+CRC at offset 0x{chunk_offset:x}): {e}"
+                )));
+            }
+        }
+        buf.resize(need, 0u8);
         if buf.capacity() > cap_before {
             rwc::record_chunk_path_alloc();
         }
-        if let Err(e) = self.point_source.read_exact_at(chunk_offset, &mut buf) {
+        if let Err(e) = self.positional_read_exact_retry_once(chunk_offset, &mut buf) {
             // Return the scratch's capacity to the caller so the next read reuses it.
             buf.clear();
             *scratch = buf;
-            return Err(Error::Io(std::io::Error::other(format!(
-                "Failed to read chunk {chunk_index} data+CRC ({total_chunk_size} bytes at \
-                 offset 0x{chunk_offset:x}): {e}"
-            ))));
+            // Preserve the source io kind (issue #1940 BLOCKER-2) — never collapse
+            // a transient fault to `Error::other`.
+            return Err(io_error_with_context(
+                format!(
+                    "Failed to read chunk {chunk_index} data+CRC ({total_chunk_size} bytes at \
+                     offset 0x{chunk_offset:x})"
+                ),
+                e,
+            ));
         }
 
         // Split the trailing 4-byte big-endian CRC32 off the payload and verify it
@@ -193,12 +276,15 @@ impl SSTableReader {
         }
         let to_read = remaining.min(UNCOMPRESSED_READ_PIECE_BYTES as u64) as usize;
         let mut buf = vec![0u8; to_read];
-        self.point_source
-            .read_exact_at(pos, &mut buf)
+        // Same one-shot transient-retry + kind-preserving wrap as the compressed
+        // path (issue #1940 BLOCKER-2): a transient fault is re-read once, and the
+        // source io kind is preserved (never collapsed to `Error::other`).
+        self.positional_read_exact_retry_once(pos, &mut buf)
             .map_err(|e| {
-                Error::Io(std::io::Error::other(format!(
-                    "Failed to read uncompressed piece ({to_read} bytes at 0x{pos:x}): {e}"
-                )))
+                io_error_with_context(
+                    format!("Failed to read uncompressed piece ({to_read} bytes at 0x{pos:x})"),
+                    e,
+                )
             })?;
         let end = pos + to_read as u64;
 
@@ -243,16 +329,41 @@ impl SSTableReader {
     ) -> Result<()> {
         // Reused compressed-read scratch (issue #1940, D2): read fills it, decode
         // borrows it, recycle for the next read — no per-chunk compressed alloc.
-        // Pre-reserve ONCE to the max stored compressed-chunk RECORD size from
-        // authoritative CompressionInfo metadata: `max_compressed_length + 4`
-        // (largest compressed payload any chunk can occupy + trailing 4-byte CRC).
-        // The read path `resize`s the scratch to each chunk's ACTUAL record size, up
-        // to that bound; the true high-water mark means the per-chunk
-        // `clear()`+`resize` never grows in steady state, keeping the ≤1-alloc/chunk
-        // guard green. Metadata-driven, no heuristic.
+        //
+        // Reserve ONCE to the ACTUAL working-set high-water mark — the largest
+        // real compressed-chunk RECORD size, computed from the authoritative
+        // `chunk_offsets` deltas (issue #1940 BLOCKER-1). This is NOT the metadata
+        // `max_compressed_length`: Cassandra COMMONLY stamps that field as
+        // `i32::MAX` (it equals `i32::MAX` whenever `minCompressRatio == 0`, the
+        // DEFAULT — CompressionParams.java:186-189), so a `max_compressed_length`-
+        // driven reserve would attempt a multi-GB allocation on opening an ORDINARY
+        // compressed scan (an OOM/DoS before any real chunk size is known). The
+        // offset-delta high-water mark is bounded by the real per-chunk record size
+        // (a small multiple of `chunk_length`, e.g. 16 KiB), never the file size or
+        // the i32::MAX bound. Reserving to it once means the per-chunk
+        // `clear()`+`resize` never regrows in steady state — preserving the
+        // ≤1-alloc/chunk property the `issue_1940_scan_window_substrate_allocs`
+        // guard measures (the read path's per-chunk `try_reserve_exact` remains a
+        // bounds-checked safety net that records a regrowth only if a chunk ever
+        // exceeds this mark). `try_reserve_exact` returns a typed error on
+        // allocation failure instead of aborting; a corrupt oversized delta surfaces
+        // as `Error::memory`, never a panic. Authoritative metadata, no heuristic.
         let mut scratch: Vec<u8> = Vec::new();
         if let Some(ci) = reader.compression_info.as_ref() {
-            scratch.reserve((ci.max_compressed_length as usize).saturating_add(4));
+            let file_size = reader.point_source.len();
+            let max_record = (0..ci.chunk_offsets.len())
+                .filter_map(|i| ci.compressed_chunk_size(i, file_size))
+                .max()
+                .unwrap_or(0);
+            let want = usize::try_from(max_record).unwrap_or(usize::MAX);
+            if want > 0 {
+                scratch.try_reserve_exact(want).map_err(|e| {
+                    Error::memory(format!(
+                        "failed to reserve {want} bytes for the windowed compressed-read scratch \
+                         (largest actual chunk record): {e}"
+                    ))
+                })?;
+            }
         }
         let mut chunk_index = 0usize;
         loop {

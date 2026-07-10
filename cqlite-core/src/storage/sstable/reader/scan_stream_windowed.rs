@@ -671,12 +671,14 @@ impl SSTableReader {
             // Disarmed on the clean-EOF / consumer-ended exit so the happy path is
             // byte-identical.
             let mut panic_guard = FeedFailureGuard::armed(&io_failed_feed);
-            // Record the thread this scan's raw reads run on so a guard test can
-            // prove it is a spawn_blocking thread, NOT an async worker (F3).
-            // Compiled only under the non-default `scan-offload-probe` feature.
-            #[cfg(feature = "scan-offload-probe")]
-            probe::record_io_read_thread();
-
+            // The raw-read thread is recorded at the ACTUAL positional read syscall
+            // (`positional_read_exact_retry_once`, issue #1940 guard integrity), NOT
+            // here at the top of the feed closure: recording at the syscall pins the
+            // thread that performs the real read, so if a future change dispatched
+            // the read off this feed thread (a reintroduced `block_on`/`tokio::fs`
+            // nesting) the recorded read thread would differ from the decode thread
+            // and the no-nesting equality guard would catch it. Compiled only under
+            // the non-default `scan-offload-probe` feature.
             let feed_result = if reader.compression_info.is_some() {
                 Self::feed_compressed_chunks(&reader, &raw_tx, max_compressed_length)
             } else {
