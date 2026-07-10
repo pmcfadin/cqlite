@@ -129,12 +129,14 @@ roborev round-trips):
 ## Self-improvement loop (telemetry + retro)
 
 The pipeline measures itself so improvement is data-driven, not anecdotal:
-- **Sense** — at finalize, the worker stamps one record per completed issue into the append-only ledger
-  `docs/reports/delivery-telemetry.jsonl` (schema: `docs/reports/delivery-telemetry.schema.json`) via
-  `scripts/delivery-telemetry.py record`. Records hold authoritative data only — GitHub-derived
-  timestamps (cycle time + coarse phase durations) plus run-observed counters (claim collisions, rebase
-  events, agent-gate pass/fail + run count, roborev findings, rework). A counter that was not observed is
-  an error, never a fabricated `0`.
+- **Sense** — at finalize, the worker stamps one record per delivery cycle (issue, pr) into the
+  append-only ledger `docs/reports/delivery-telemetry.jsonl` (schema:
+  `docs/reports/delivery-telemetry.schema.json`) via `scripts/delivery-telemetry.py record`. A
+  reopened issue that ships more than once legitimately gets one record per shipped PR (issue #2314)
+  — retro aggregation by issue treats such multi-cycle issues as multiple deliveries, not one. Records
+  hold authoritative data only — GitHub-derived timestamps (cycle time + coarse phase durations) plus
+  run-observed counters (claim collisions, rebase events, agent-gate pass/fail + run count, roborev
+  findings, rework). A counter that was not observed is an error, never a fabricated `0`.
 - **Diagnose** — on a cadence (per-epic or weekly) the **manager** runs `delivery-telemetry.py retro`,
   which ranks the recorded failure categories by a documented weighted tally (deterministic, not an
   inferred model) and reports the single highest-cost recurring failure. `--file` files a `flow-meta`

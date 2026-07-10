@@ -105,7 +105,7 @@ class RecordTests(unittest.TestCase):
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
 
-    def test_record_refuses_duplicate_issue(self):
+    def test_record_refuses_duplicate_cycle(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             ledger = tmp / "ledger.jsonl"
@@ -118,11 +118,32 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(dt.main(base), 0)
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                self.assertEqual(dt.main(base), 1)         # second stamp refused
-            self.assertIn("already has a ledger record", err.getvalue())
+                self.assertEqual(dt.main(base), 1)         # same (issue, pr) re-stamp refused
+            self.assertIn("issue #42 / pr #7 already has a ledger record", err.getvalue())
             self.assertEqual(dt.main(base + ["--allow-duplicate"]), 0)  # explicit override
             lines = [l for l in ledger.read_text().splitlines() if l.strip()]
             self.assertEqual(len(lines), 2)
+
+    def test_record_accepts_reopen_cycle_without_allow_duplicate(self):
+        # issue #2314: same issue, a NEW pr (a reopened issue shipping again) must append
+        # WITHOUT --allow-duplicate — it is a distinct delivery cycle, not a re-stamp.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            first = ["record", "--ledger", str(ledger),
+                     "--issue", "2264", "--pr", "2282", "--slug", "x",
+                     "--gate", "pass", "--gate-runs", "1",
+                     "--claim-collisions", "0", "--rebase-events", "0",
+                     "--roborev-findings", "0", "--rework", "0",
+                     "--from-json", _from_json_file(tmp)]
+            self.assertEqual(dt.main(first), 0)
+            second = list(first)
+            second[second.index("2282")] = "2301"     # same issue, second shipped PR
+            self.assertEqual(dt.main(second), 0)       # no --allow-duplicate needed
+            lines = [l for l in ledger.read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 2)
+            # and the resulting two-cycle ledger lints clean
+            self.assertEqual(dt.main(["lint", "--ledger", str(ledger)]), 0)
 
     def test_routing_required_when_not_determinable(self):
         with tempfile.TemporaryDirectory() as d:
@@ -355,16 +376,31 @@ class LintTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("unknown field 'reworkk'", err.getvalue())
 
-    def test_duplicate_issue_is_flagged(self):
+    def test_duplicate_cycle_is_flagged(self):
+        # same (issue, pr) twice is a genuine duplicate cycle -> error naming both.
         with tempfile.TemporaryDirectory() as d:
             ledger = Path(d) / "ledger.jsonl"
             line = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0]
-            ledger.write_text(line + "\n" + line + "\n")   # same issue twice
+            ledger.write_text(line + "\n" + line + "\n")   # same (issue, pr) twice
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 rc = dt.main(["lint", "--ledger", str(ledger)])
             self.assertEqual(rc, 1)
-            self.assertIn("duplicate record for issue", err.getvalue())
+            msg = err.getvalue()
+            self.assertIn("duplicate record for issue #1001 / pr #2001", msg)
+            self.assertIn("first seen line 1", msg)
+
+    def test_reopen_cycle_same_issue_different_pr_is_valid(self):
+        # issue #2314: a reopened issue that ships twice (same issue, DIFFERENT pr) is a
+        # legitimate per-cycle record, NOT a duplicate — lint must PASS.
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            first = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            second = dict(first)
+            second["pr"] = first["pr"] + 1     # same issue, a new shipped PR
+            ledger.write_text(json.dumps(first) + "\n" + json.dumps(second) + "\n")
+            rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 0)
 
     def test_non_object_line_is_clean_error_not_crash(self):
         with tempfile.TemporaryDirectory() as d:

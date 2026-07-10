@@ -330,9 +330,11 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `spec-auditor` re-reads them from `openspec/changes/<slug>/`. Durable lessons → `MEMORY.md` /
   `process_improvements.md`, never the live window.
 - Spawn subagents with an explicit accessible model (e.g. opus).
-- **Telemetry**: `flow-finalize` stamps one record per issue into
+- **Telemetry**: `flow-finalize` stamps one record per delivery cycle (issue, pr) into
   `docs/reports/delivery-telemetry.jsonl` (schema `docs/reports/delivery-telemetry.schema.json`)
-  via `scripts/delivery-telemetry.py record` — authoritative
+  via `scripts/delivery-telemetry.py record` — a reopened issue that ships more than once
+  legitimately gets one record per shipped PR, so retro aggregation by issue treats such
+  multi-cycle issues as multiple deliveries, not one (issue #2314). Records hold authoritative
   data only (a counter not observed is an error, never a fabricated 0). On a cadence the manager
   runs `retro` and files a deduped `flow-meta` issue. The SKIP-aware `delivery-telemetry` gate
   component covers the tool. Doctrine: `docs/development/pm-operating-loop.md`.
