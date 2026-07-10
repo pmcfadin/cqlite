@@ -397,14 +397,24 @@ fn datasets_root() -> Option<std::path::PathBuf> {
 /// `test_basic.multi_partition_table`: a real fixture with Summary.db +
 /// Index.db present and at least one Summary.db entry (confirmed during
 /// investigation for this test).
+///
+/// Only returns a candidate whose Summary.db AND Index.db sidecars both exist —
+/// they are what let `SSTableReader::open` populate `summary_reader`/
+/// `index_reader`, the precondition for `iterate_all_partitions` to take the
+/// index-backed branch this test exercises. A Data.db-only snapshot is skipped
+/// (returns `None`) rather than driving the test down the sequential-scan
+/// fallback, where the poll under test never runs.
 fn real_index_backed_fixture() -> Option<std::path::PathBuf> {
     let base = datasets_root()?.join("sstables/test_basic");
     for entry in std::fs::read_dir(&base).ok()?.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("multi_partition_table-") {
-            let candidate = entry.path().join("nb-1-big-Data.db");
-            if candidate.is_file() {
+            let dir = entry.path();
+            let candidate = dir.join("nb-1-big-Data.db");
+            let summary = dir.join("nb-1-big-Summary.db");
+            let index = dir.join("nb-1-big-Index.db");
+            if candidate.is_file() && summary.is_file() && index.is_file() {
                 return Some(candidate);
             }
         }
@@ -427,8 +437,14 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
     };
     let mut reader = open_reader(&data_path).await;
 
-    // Non-vacuity: the loop body must actually run at least once, or disabling
-    // the poll would trivially leave `index_probes()` at 0 regardless.
+    // ------------------------------------------------------------------
+    // Guard 1 (structural): the reader must actually hold BOTH an
+    // `index_reader` and a non-empty `summary_reader`, or the index-backed
+    // `if let Some(summary_reader)` loop in `iterate_all_partitions` is never
+    // entered and the whole call falls through to `sequential_scan` — a path
+    // with its OWN (pre-existing, unrelated) poll. Without this, the fixture
+    // could satisfy the test vacuously via the fallback, recording zero probes
+    // whether or not THIS poll exists.
     let entry_count = reader
         .summary_reader
         .as_ref()
@@ -438,7 +454,40 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
         entry_count > 0,
         "fixture must have at least one Summary.db entry for this test to be non-vacuous"
     );
+    assert!(
+        reader.index_reader.is_some(),
+        "fixture must load an Index.db reader — otherwise iterate_all_partitions \
+         cannot take the index-backed branch this test targets (issue #2264)"
+    );
 
+    // ------------------------------------------------------------------
+    // Guard 2 (behavioural, the real fail-if-vacuous check): an UNCANCELLED
+    // pass over this exact fixture must record index probes > 0. Each iteration
+    // of the index-backed loop calls `lookup_partition_with_index`, which
+    // records exactly one probe per real Index.db lookup. A nonzero count here
+    // proves the per-entry loop body — the one guarded by the poll under test —
+    // is genuinely executed for this fixture (it does not silently resolve via
+    // the sequential-scan fallback with zero probes). If a future fixture/refactor
+    // stopped exercising the index-backed branch, THIS assertion fails, so the
+    // pre-cancelled assertion below can never pass vacuously.
+    crate::storage::sstable::read_work_counters::reset();
+    let uncancelled = open_reader(&data_path).await;
+    let uncancelled_result = uncancelled.iterate_all_partitions().await;
+    assert!(
+        uncancelled_result.is_ok(),
+        "the uncancelled index-backed scan must succeed: {uncancelled_result:?}"
+    );
+    let uncancelled_probes = crate::storage::sstable::read_work_counters::index_probes();
+    assert!(
+        uncancelled_probes > 0,
+        "the index-backed branch must be exercised — an uncancelled scan over this \
+         fixture recorded zero Index.db probes, meaning the loop this test targets is \
+         never entered (the test would pass vacuously). Got {uncancelled_probes}"
+    );
+
+    // ------------------------------------------------------------------
+    // The actual assertion: a pre-cancelled scan must record ZERO probes —
+    // the poll aborts BEFORE the loop attempts even the first Index.db lookup.
     crate::storage::sstable::read_work_counters::reset();
     let cancel = ScanCancel::new();
     cancel.cancel();
