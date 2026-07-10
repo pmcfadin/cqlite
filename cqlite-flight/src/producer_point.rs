@@ -4,7 +4,9 @@
 //! equality route, resolve concrete partition keys (token-excluded before any
 //! seek), build a k-way merger over ONLY the target partition(s), then reconcile
 //! and stream through the SAME [`MergeProducer::drive_merge`] loop the scan path
-//! uses — reporting `streaming_partition_lookup`.
+//! uses — reporting the access-path label of the ROUTE VARIANT the router chose
+//! (`streaming_partition_lookup` for a single-PK route, `multi_partition_lookup`
+//! for an `IN`/`Or` list, independent of the surviving-key count).
 //!
 //! Lives in its own module (not `producer.rs`) because that file is over the
 //! campsite file-size threshold (epic #1116).
@@ -20,6 +22,20 @@ use crate::cancel::CancelFlag;
 use crate::point_read::{detect_route, PointReadRoute};
 use crate::producer::{BatchSink, CollectSink, MergeProducer, ProducerError};
 use crate::scan_progress::ScanProgress;
+
+/// A resolved partition point-read plan: the access-path label fixed by the
+/// router's ROUTE VARIANT, plus the token-pruned target keys to seek.
+///
+/// `access_path` is decided by [`detect_route`]'s variant BEFORE any
+/// dedup/token-pruning, so it never flip-flops on the surviving-key count
+/// (roborev job 1623): a `MultiPartitionPointRead` route stays
+/// `multi_partition_lookup` even when its keys prune to one survivor.
+pub(crate) struct PointReadPlan {
+    /// Label = router's decision (route variant), NOT surviving key count.
+    pub(crate) access_path: AccessPath,
+    /// `(raw_key_bytes, token)` per surviving target key, in the route's order.
+    pub(crate) keys: Vec<(Vec<u8>, i64)>,
+}
 
 impl MergeProducer {
     /// Run the streaming merge over already-resolved `paths` and collect the
@@ -45,6 +61,15 @@ impl MergeProducer {
     /// Resolve the point-read route into concrete raw partition keys, or `None`
     /// when the pushed predicate is not a full-PK equality (the scan path).
     ///
+    /// Returns the access-path label the read will report ALONGSIDE the keys. The
+    /// label reflects the ROUTE VARIANT `detect_route` decided — independent of
+    /// how many keys survive later dedup/token pruning: a `MultiPartitionPointRead`
+    /// (a full-PK `IN`/`Or` list, even one that prunes to a single surviving key)
+    /// stays `multi_partition_lookup`; a plain `PartitionPointRead` is
+    /// `streaming_partition_lookup`. This keeps the field-run evidence label stable
+    /// per the router's decision (roborev job 1623) instead of flip-flopping on the
+    /// surviving-key count.
+    ///
     /// Each returned key is `(raw_key_bytes, token)`, in the route's order. Keys
     /// whose Murmur3 token falls OUTSIDE the split's token range are dropped here
     /// (before any seek) — the point read stays within the split's range exactly
@@ -52,12 +77,18 @@ impl MergeProducer {
     /// cannot be serialized to partition-key bytes (should not happen for a
     /// schema-typed predicate) drops the whole route to the scan path (returns
     /// `None`) rather than risk a wrong answer.
-    pub(crate) fn point_read_keys(&self) -> Option<Vec<(Vec<u8>, i64)>> {
-        let component_keys: Vec<Vec<Value>> =
+    pub(crate) fn point_read_keys(&self) -> Option<PointReadPlan> {
+        // Label = router's decision (route variant), NOT surviving key count —
+        // single-element IN is still a multi-partition ROUTE (roborev job 1623).
+        let (access_path, component_keys): (AccessPath, Vec<Vec<Value>>) =
             match detect_route(self.spec.filter.as_ref(), &self.schema) {
                 PointReadRoute::Scan => return None,
-                PointReadRoute::PartitionPointRead(values) => vec![values],
-                PointReadRoute::MultiPartitionPointRead(keys) => keys,
+                PointReadRoute::PartitionPointRead(values) => {
+                    (AccessPath::StreamingPartitionLookup, vec![values])
+                }
+                PointReadRoute::MultiPartitionPointRead(keys) => {
+                    (AccessPath::MultiPartitionLookup, keys)
+                }
             };
 
         let pk_names: Vec<&str> = self
@@ -101,24 +132,29 @@ impl MergeProducer {
             }
             out.push((decorated.key, decorated.token));
         }
-        Some(out)
+        Some(PointReadPlan {
+            access_path,
+            keys: out,
+        })
     }
 
     /// Drive the partition point-read path (issue #2207): build a k-way merger over
     /// ONLY the target partition(s) across the candidate SSTables (seek where the
     /// index resolves, scan-fallback where it does not, prune on a definite bloom
     /// negative), then reconcile + stream through the SAME
-    /// [`MergeProducer::drive_merge`] loop the scan path uses — reporting
-    /// `streaming_partition_lookup`.
+    /// [`MergeProducer::drive_merge`] loop the scan path uses — reporting the
+    /// `access_path` label the router already fixed (route variant, not the
+    /// surviving-key count; roborev job 1623).
     pub(crate) fn produce_point(
         &self,
-        keys: Vec<(Vec<u8>, i64)>,
+        plan: PointReadPlan,
         paths: Vec<PathBuf>,
         cancel: &CancelFlag,
         sink: &mut dyn BatchSink,
         progress: &ScanProgress,
         on_merger_built: impl FnOnce(),
     ) -> Result<(), ProducerError> {
+        let PointReadPlan { access_path, keys } = plan;
         // Every key was token-excluded → nothing to read. Still fire the phase
         // boundary so the caller's `merge_setup → stream` accounting stays honest.
         let key_bytes: Vec<Vec<u8>> = keys.into_iter().map(|(k, _)| k).collect();
@@ -138,16 +174,13 @@ impl MergeProducer {
                 })?;
 
         on_merger_built();
-        // Label from the route SHAPE, not a fixed constant (roborev job 1616): a
-        // multi-key point read that survived token filtering with >1 key is a
-        // `multi_partition_lookup`; a single surviving key is the streaming
-        // single-partition analogue. This is the field-run evidence label, so it
-        // must reflect what the read actually did.
-        let access_path = if key_bytes.len() > 1 {
-            AccessPath::MultiPartitionLookup
-        } else {
-            AccessPath::StreamingPartitionLookup
-        };
+        // Label = router's decision (route variant), NOT surviving key count —
+        // single-element IN is still a multi-partition ROUTE (roborev job 1623).
+        // `access_path` is fixed by `detect_route`'s variant in `point_read_keys`
+        // BEFORE any dedup/token pruning, so a `MultiPartitionPointRead` that prunes
+        // to one surviving key still reports `multi_partition_lookup` (never
+        // flip-flopping to `streaming_partition_lookup` on the survivor count). This
+        // is the field-run evidence that pushdown engaged on the routed shape.
         let label = access_path.label();
         match built {
             // No candidate SSTable holds any target key → zero rows examined, so

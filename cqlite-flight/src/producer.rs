@@ -598,8 +598,8 @@ impl MergeProducer {
         // point-read path — resolve candidate SSTables and seek only the target
         // partition(s), instead of a full k-way scan with a per-row filter. Any
         // other shape keeps the unchanged scan path below.
-        if let Some(keys) = self.point_read_keys() {
-            return self.produce_point(keys, paths, cancel, sink, progress, on_merger_built);
+        if let Some(plan) = self.point_read_keys() {
+            return self.produce_point(plan, paths, cancel, sink, progress, on_merger_built);
         }
 
         // Issue #2264: wire the shared synchronous cancel token into the merge so
