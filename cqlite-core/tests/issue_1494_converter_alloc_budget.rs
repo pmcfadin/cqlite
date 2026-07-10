@@ -25,11 +25,7 @@
 //!   --test issue_1494_converter_alloc_budget -- --test-threads=1
 //! ```
 
-#![cfg(all(
-    feature = "dhat-heap",
-    feature = "cli-helpers",
-    feature = "arrow"
-))]
+#![cfg(all(feature = "dhat-heap", feature = "cli-helpers", feature = "arrow"))]
 
 use cqlite_core::export::rows_to_record_batch;
 
@@ -39,12 +35,16 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 #[path = "../benches/fixtures/mod.rs"]
 mod fixtures;
 
-/// Per-row allocation ceiling for converting a TYPE_HEAVY scan result to an
-/// Arrow `RecordBatch`. Measured on post-#1495 `main` at ~<MEASURED> allocs/row
-/// (see `benches/README.md`); the ceiling is that figure plus headroom for
-/// allocator/toolchain variance. AE1–AE5 ratchet this DOWN as per-cell
-/// conversion work is eliminated — tighten this constant when they land.
-const MAX_ALLOCS_PER_ROW_TYPE_HEAVY: f64 = 60.0;
+/// Per-row allocation ceiling for converting a TYPE_HEAVY scan result
+/// (`test_collections.collection_table`, 500 rows × 7 columns) to an Arrow
+/// `RecordBatch`. Measured on post-#1495 (PR #2312) `main` at **~0.91 allocs/row**
+/// (453 allocations / 500 rows; the accessor-once win landed the per-cell lookup
+/// at zero — see `benches/README.md`). dhat allocation counts are deterministic
+/// and machine-independent, so the ceiling can sit tight at 3.0/row: ~3.3× the
+/// measured figure (small legitimate decode churn absorbed) while any per-cell
+/// lookup/clone reintroduction — which would add ~1 alloc per column per row
+/// (~7/row here) — fails closed. AE1–AE5 ratchet this DOWN; tighten when they land.
+const MAX_ALLOCS_PER_ROW_TYPE_HEAVY: f64 = 3.0;
 
 /// Measure the dhat `total_blocks` delta across ONE `rows_to_record_batch`
 /// conversion of the given columns/rows (a warmed second call excludes one-time
@@ -69,8 +69,14 @@ fn converter_alloc_count(
     (rows.len(), after.saturating_sub(before))
 }
 
-#[tokio::test]
-async fn converter_per_row_allocations_within_budget() {
+// NOTE: a plain `#[test]` (NOT `#[tokio::test]`). `open_read_db` builds its own
+// tokio runtime for the one-shot ingest, and the SELECT below uses a separate
+// runtime — nesting a `block_on` inside `#[tokio::test]`'s runtime panics
+// ("Cannot start a runtime from within a runtime"). `#[serial]` keeps the
+// process-global dhat profiler exclusive if a sibling dhat test is ever added.
+#[test]
+#[serial_test::serial]
+fn converter_per_row_allocations_within_budget() {
     let fx = fixtures::ReadFixture::TYPE_HEAVY;
     if !fixtures::fixture_present(&fx) {
         eprintln!(
@@ -81,18 +87,18 @@ async fn converter_per_row_allocations_within_budget() {
         return;
     }
 
-    // Start the profiler before the workload so all allocation is attributed.
-    let _profiler = dhat::Profiler::builder().testing().build();
-
     // Fail-closed once fixtures are present: any setup/scan failure must FAIL,
-    // never let the budget pass vacuously.
+    // never let the budget pass vacuously. Open + scan BEFORE the profiler so
+    // ingest/open allocation is not attributed to the converter budget.
     let loaded = fixtures::open_read_db(&fx);
     let sql = format!("SELECT * FROM {}", fx.qualified());
-    let result = loaded
-        .db
-        .execute(&sql)
-        .await
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = rt
+        .block_on(loaded.db.execute(&sql))
         .expect("fixture scan must succeed when Data.db is present");
+
+    // Start the profiler only around the conversion workload.
+    let _profiler = dhat::Profiler::builder().testing().build();
 
     assert!(
         !result.rows.is_empty(),

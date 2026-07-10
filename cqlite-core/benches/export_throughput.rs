@@ -47,8 +47,8 @@ mod profiling;
 /// serialization cost from read-path cost.
 #[cfg(all(feature = "cli-helpers", feature = "arrow"))]
 fn bench_fixture_export(c: &mut Criterion) {
-    use criterion::{black_box, Throughput};
     use cqlite_core::export::rows_to_record_batch;
+    use criterion::{black_box, Throughput};
 
     // TYPE_HEAVY exercises the per-cell conversion path across many CQL types
     // (the cost AE1–AE5 tighten). Skip-register (no group) when absent.
@@ -134,9 +134,7 @@ fn bench_delta_export(c: &mut Criterion) {
     use std::collections::HashMap;
 
     use cqlite_core::export::{write_delta_records_to_bytes, DeltaParquetOptions};
-    use cqlite_core::schema::{
-        ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema,
-    };
+    use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
     use cqlite_core::storage::sstable::reader::delta_scan::{CellDelta, DeltaRecord, RowKeys};
     use cqlite_core::types::{ColumnId, Value};
 

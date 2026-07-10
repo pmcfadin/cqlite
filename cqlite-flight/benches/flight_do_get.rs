@@ -124,8 +124,14 @@ async fn serve_and_connect(
 
 /// Run ONE `do_get` over the real transport with `client` and return the decoded
 /// batches (the throughput unit is total rows decoded).
-async fn do_get_batches(client: &mut FlightServiceClient<Channel>, ticket: Vec<u8>) -> Vec<RecordBatch> {
-    let resp = client.do_get(Ticket::new(ticket)).await.expect("do_get rpc");
+async fn do_get_batches(
+    client: &mut FlightServiceClient<Channel>,
+    ticket: Vec<u8>,
+) -> Vec<RecordBatch> {
+    let resp = client
+        .do_get(Ticket::new(ticket))
+        .await
+        .expect("do_get rpc");
     let stream = resp.into_inner().map(|r| r.map_err(FlightError::Tonic));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
     let mut batches = Vec::new();
@@ -150,7 +156,10 @@ fn bench_flight_do_get(c: &mut Criterion) {
          to record a vacuous measurement (the public FlightService::do_get path \
          did not stream the fixture)"
     );
-    eprintln!("flight_do_get: do_get decoded {rows} rows across {} batch(es)", warm.len());
+    eprintln!(
+        "flight_do_get: do_get decoded {rows} rows across {} batch(es)",
+        warm.len()
+    );
 
     let mut group = c.benchmark_group("flight");
     group.throughput(Throughput::Elements(rows as u64));
