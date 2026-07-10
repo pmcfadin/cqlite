@@ -3,7 +3,45 @@
 # Sourced by field-repro.sh; expects `log()`/`ARTIFACTS_ROOT` already defined.
 set -euo pipefail
 
-SNAPSHOT_NAME="fieldrepro-manual-check"
+# Issue #2289 roborev finding (job 1601): a FIXED snapshot name was never
+# cleared before use — an interrupted prior run (crashed harness, killed
+# host, etc.) could leave STALE contents at this exact name, and a run whose
+# own PUT then failed (or raced) would still scan and report on that stale
+# data as if it were fresh, producing a FALSE observation. Run-unique via a
+# PID + wall-clock-seconds suffix (a throwaway diagnostic snapshot name
+# inside a shell script — no wall-clock-race objection applies the way it
+# would for a pinned test assertion) so no two runs, even overlapping ones,
+# can ever collide; using the SAME unique name consistently for create/scan/
+# delete below also means the scanned snapshot is INHERENTLY the one this
+# run created (nothing else on disk could match). See
+# `cleanup_stale_leftover_snapshots` for the complementary best-effort
+# disk-hygiene sweep of OLDER runs' abandoned snapshots.
+SNAPSHOT_NAME="fieldrepro-manual-check-$$-$(date +%s)"
+STALE_SNAPSHOT_PREFIX="fieldrepro-manual-check"
+
+# Best-effort cleanup of any snapshot(s) left behind by a PRIOR interrupted
+# run under the shared `fieldrepro-manual-check*` prefix (this run's OWN
+# `$SNAPSHOT_NAME` is unique and can never match anything already on disk, so
+# this sweep only ever touches leftovers from EARLIER runs). Discovers stale
+# tag names via the same on-disk `find` pattern already used for the real
+# listing scan below, then clears each via `nodetool clearsnapshot` (more
+# direct/reliable than round-tripping through the Sidecar HTTP DELETE route
+# for an unknown number of possibly-orphaned tags). Never fatal — a failure
+# here is disk hygiene, not correctness.
+cleanup_stale_leftover_snapshots() {
+  local -a compose=("$@")
+  local stale_names
+  stale_names="$(run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra \
+    find /var/lib/cassandra/data/loadtest -maxdepth 3 -type d -name "${STALE_SNAPSHOT_PREFIX}*" 2>/dev/null \
+    | xargs -n1 -r basename 2>/dev/null | sort -u)" || true
+  if [[ -n "$stale_names" ]]; then
+    log "clearing stale ${STALE_SNAPSHOT_PREFIX}* snapshot leftover(s) from a prior interrupted run: $(echo "$stale_names" | tr '\n' ' ')"
+    while IFS= read -r name; do
+      [[ -n "$name" ]] || continue
+      run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra nodetool clearsnapshot -t "$name" loadtest >/dev/null 2>&1 || true
+    done <<< "$stale_names"
+  fi
+}
 
 # Creates a Sidecar snapshot of `loadtest.keyvalue` via the EXACT same
 # HTTP route the connector's own `SidecarClient` uses in `snapshot` read mode
@@ -44,6 +82,8 @@ observe_snapshot_listing() {
     echo "WARNING: could not resolve the cassandra container id — skipping snapshot-listing observation" >&2
     return 0
   fi
+
+  cleanup_stale_leftover_snapshots "${compose[@]}"
 
   local put_status
   put_status="$(run_with_timeout "$NETWORK_PULL_TIMEOUT_SECS" docker run --rm --network "container:$cassandra_cid" curlimages/curl:latest \
