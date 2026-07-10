@@ -55,10 +55,45 @@ val jacksonVersion = "2.18.2"
 // real Trino runtime, which supplies netty 4.1.x.
 val nettyVersion = "4.1.130.Final"
 
+// The exact netty core modules flight-core:19.0.0 (+ grpc-netty:1.79.0) drag onto
+// the runtime classpath. Several are requested transitively at 4.2.9.Final and are
+// only forced down to the arrow-19-tested 4.1.130.Final by the enforced BOM below.
+// Declaring each one EXPLICITLY (issue #2300) is what makes the pin survive into the
+// published Maven POM's <dependencies> — see the note on the BOM import below.
+// Keep this list in lockstep with the resolved graph (verified by the
+// `verifyPublishedPomNettyPin` task and by ArrowJavaVersionPinTest). tcnative is
+// intentionally excluded: its native-binding train (2.0.74.Final) is versioned
+// independently of netty's 4.x line and is not part of the 4.1.x allocator pin.
+val nettyCoreModules = listOf(
+    "netty-buffer",
+    "netty-codec",
+    "netty-codec-http",
+    "netty-codec-http2",
+    "netty-codec-socks",
+    "netty-common",
+    "netty-handler",
+    "netty-handler-proxy",
+    "netty-resolver",
+    "netty-transport",
+    "netty-transport-native-unix-common",
+)
+
 dependencies {
     compileOnly("io.trino:trino-spi:$trinoVersion")
 
+    // The enforced BOM constrains THIS build's resolution and reaches downstream
+    // GRADLE consumers via the published `.module` metadata — but a Maven/Central
+    // consumer assembling the plugin reads only the POM. A BOM `import` lands in the
+    // POM's <dependencyManagement>, and Maven dependencyManagement is NOT transitive
+    // to downstream consumers, so it would NOT stop a Maven assembly from resolving
+    // flight-core's transitive netty at 4.2.x (re-exposing the arrow-19 allocator
+    // break; issue #2300). The explicit per-module declarations below land in the
+    // POM's <dependencies> with pinned versions, so a downstream Maven build resolves
+    // them at 4.1.130.Final by nearest-wins. Keep the BOM too: it keeps the in-build
+    // stack (and any future un-enumerated netty module) aligned and covers Gradle
+    // consumers.
     implementation(enforcedPlatform("io.netty:netty-bom:$nettyVersion"))
+    nettyCoreModules.forEach { implementation("io.netty:$it:$nettyVersion") }
     implementation("org.apache.arrow:flight-core:$arrowVersion")
     implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonVersion")
 
@@ -95,6 +130,76 @@ tasks.register<Sync>("installPlugin") {
 tasks.withType<Test>().configureEach {
     jvmArgs("--add-opens=java.base/java.nio=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")
 }
+
+// --- Published-POM netty-pin oracle (issue #2300) ----------------------------
+// Assert the CONSUMER-FACING artifact: every netty core module appears in the
+// generated POM's <dependencies> at the pinned nettyVersion. This is the property
+// a downstream Maven assembly actually reads (the enforced BOM alone lands only in
+// <dependencyManagement>, which is not transitive to consumers). Reads the real
+// generated pom-default.xml — not build.gradle.kts — so it cannot pass vacuously.
+val verifyPublishedPomNettyPin by tasks.registering {
+    description = "Assert every netty core module is version-pinned in the published POM <dependencies> (#2300)."
+    group = "verification"
+    dependsOn("generatePomFileForMavenPublication")
+    val pomFile = layout.buildDirectory.file("publications/maven/pom-default.xml")
+    val expectedNettyVersion = nettyVersion
+    val expectedModules = nettyCoreModules
+    inputs.file(pomFile)
+    doLast {
+        val pom = pomFile.get().asFile
+        require(pom.isFile) { "generated POM not found at $pom" }
+        val doc = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+            .apply { isNamespaceAware = false }
+            .newDocumentBuilder()
+            .parse(pom)
+        // Only the top-level <project>/<dependencies> block (NOT <dependencyManagement>),
+        // since a downstream Maven consumer resolves versions from <dependencies>.
+        val depsNodes = (0 until doc.documentElement.childNodes.length)
+            .map { doc.documentElement.childNodes.item(it) }
+            .filter { it.nodeName == "dependencies" }
+        require(depsNodes.isNotEmpty()) { "published POM has no top-level <dependencies> block: $pom" }
+        val resolved = mutableMapOf<String, String>()
+        depsNodes.forEach { deps ->
+            val nodes = deps.childNodes
+            for (i in 0 until nodes.length) {
+                val dep = nodes.item(i)
+                if (dep.nodeName != "dependency") continue
+                var groupId: String? = null
+                var artifactId: String? = null
+                var version: String? = null
+                val fields = dep.childNodes
+                for (j in 0 until fields.length) {
+                    when (fields.item(j).nodeName) {
+                        "groupId" -> groupId = fields.item(j).textContent.trim()
+                        "artifactId" -> artifactId = fields.item(j).textContent.trim()
+                        "version" -> version = fields.item(j).textContent.trim()
+                    }
+                }
+                if (groupId != null && artifactId != null && version != null) {
+                    resolved["$groupId:$artifactId"] = version
+                }
+            }
+        }
+        val problems = expectedModules.mapNotNull { module ->
+            when (val v = resolved["io.netty:$module"]) {
+                null -> "missing io.netty:$module from published POM <dependencies>"
+                expectedNettyVersion -> null
+                else -> "io.netty:$module pinned to $v, expected $expectedNettyVersion"
+            }
+        }
+        require(problems.isEmpty()) {
+            "published POM netty pin drift (#2300):\n  " + problems.joinToString("\n  ")
+        }
+        logger.lifecycle(
+            "verifyPublishedPomNettyPin: ${expectedModules.size} netty modules pinned to " +
+                "$expectedNettyVersion in $pom",
+        )
+    }
+}
+
+// Run the POM oracle as part of `check` so `./gradlew check` (and any CI that runs
+// it) enforces the published pin. The connector PR lane runs it explicitly.
+tasks.named("check") { dependsOn(verifyPublishedPomNettyPin) }
 
 // --- Maven Central publication (Central Portal via vanniktech) ---------------
 // `publishToMavenLocal` / `publishToMavenCentral` produce main + sources +
