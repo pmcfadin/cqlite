@@ -18,8 +18,7 @@
 //!
 //! | Site | Condition | Classification | Loud/Quiet |
 //! |------|-----------|-----------------|------------|
-//! | entries empty + index fully parsed + data section empty | genuinely zero-partition SSTable | complete `Ok(Some(vec![]))` | quiet |
-//! | entries empty + (index NOT fully parsed OR data section non-empty) | index unusable/inconsistent | incomplete `Ok(None)` | loud (caller WARNs) |
+//! | entries empty | zero-entry Index.db — UNREACHABLE as a valid empty SSTable (`IndexReader::open` rejects a zero-byte file, and any non-empty buffer parsing to zero entries leaves unparsed trailing bytes ⇒ `is_fully_parsed()` false); reached only via a corrupt-from-byte-zero / structurally-unusable index (roborev job 1615, see the site) | incomplete `Ok(None)` | loud (caller WARNs) |
 //! | entries non-empty + data section empty | structurally inconsistent | incomplete `Ok(None)` | loud |
 //! | `!index_reader.is_fully_parsed()` | mid-entry-truncated Index.db (Signal A) | incomplete `Ok(None)` | loud |
 //! | `partition_key.is_empty()` | entry carries a present-but-zero-length key — legal Cassandra shape, but `key_len == 0` is unsafe to read back through the shared row/partition scanner on EITHER path (job 1610, see the call-site comment) | incomplete `Ok(None)` | loud |
@@ -89,22 +88,22 @@ impl SSTableReader {
         };
 
         if entries.is_empty() {
-            // Roborev job 1609 (LOW): a zero-entry Index.db is EITHER a genuinely
-            // empty BIG SSTable (the writer supports this — a valid, if
-            // degenerate, on-disk state) OR an unusable index (corrupt before even
-            // one entry, or structurally inconsistent with a non-empty data
-            // section). Authoritative, no heuristics (#28): BOTH must
-            // independently prove emptiness — the index carries no leftover bytes
-            // (`is_fully_parsed()`, so it isn't merely corrupt-from-byte-zero) AND
-            // the data section is itself empty. Either alone contradicts the
-            // other, so only BOTH together is a quiet, complete empty result;
-            // otherwise bail to the loud WARN fallback rather than fabricate a
-            // false "complete empty" answer on an unusable index.
-            return if index_reader.is_fully_parsed() && data_section_end == 0 {
-                Ok(Some(Vec::new()))
-            } else {
-                Ok(None)
-            };
+            // Roborev job 1615 (MEDIUM): a zero-entry Index.db is NEVER a reachable
+            // "genuinely empty SSTable" here. `IndexReader::open`
+            // (index_reader/mod.rs) rejects a zero-byte Index.db as corruption
+            // BEFORE constructing the reader, and any NON-empty buffer that parses
+            // to zero entries necessarily failed on its FIRST entry, leaving
+            // unparsed trailing bytes — so `is_fully_parsed()` would be false there
+            // too (parse.rs: the entry loop only stops early on a parse error, which
+            // leaves a non-empty remainder). Neither Cassandra nor CQLite's
+            // `SSTableWriter` emits a zero-partition SSTable at all (a flush/compaction
+            // with no partitions writes no SSTable), so the former quiet
+            // `is_fully_parsed() && data_section_end == 0 => Ok(Some(vec![]))` success
+            // branch was DEAD CODE and has been removed. `entries.is_empty()` here
+            // therefore only ever means a corrupt-from-byte-zero / structurally
+            // unusable index: bail to the caller's loud WARN + sequential fallback
+            // (fail-safe), never fabricate a "complete empty" answer. No heuristics (#28).
+            return Ok(None);
         }
         if data_section_end == 0 {
             // Entries present but the data section is empty: structurally
@@ -173,9 +172,14 @@ impl SSTableReader {
             // KEEP bailing here — never silently, always via the caller's loud WARN
             // + `sequential_scan` fallback — until the underlying `key_len == 0`
             // structural ambiguity in `scan_partition_header` is resolved (a
-            // deeper, format-level fix outside #2302's routing-layer scope; a
-            // follow-up issue is warranted for the empty-single-component-PK
-            // read-back gap itself).
+            // deeper, format-level fix outside #2302's routing-layer scope).
+            //
+            // ADJUDICATED (roborev job 1615, finding 1 — DECLINED, behavior
+            // unchanged): empty raw partition keys are rejected fail-safe because a
+            // write/read round-trip of an empty PK is corrupt via BOTH the index
+            // and scan paths (verified empirically, see above). The structural fix
+            // for the empty-PK write/read asymmetry is tracked in issue #2325. Do
+            // NOT route empty keys into the walker until #2325 lands.
             let partition_key = entries[i].raw_key.as_deref().unwrap_or(&[]);
             if partition_key.is_empty() {
                 return Ok(None);
