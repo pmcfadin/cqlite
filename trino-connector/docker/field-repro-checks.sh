@@ -82,18 +82,33 @@ check_2264_limit5_midstream_cancel() {
 }
 
 # #2193 pinned check: `SELECT * FROM cassandra_easy_stress.keyvalue` decodes
-# through arrow-java and returns exactly 3 rows. This is the EXACT canonical
-# shape (`key text PRIMARY KEY, value text`, 1 pk, 0 ck — see
+# through arrow-java and returns exactly the 3 pinned rows. This is the EXACT
+# canonical shape (`key text PRIMARY KEY, value text`, 1 pk, 0 ck — see
 # field-repro-data.cql's header comment) pinned by the committed
 # `keyvalue.flightdata` Flight-level decode golden, not a lookalike (issue
 # #2289 roborev finding, 2026-07-10: an earlier `id int, val text` shape could
 # pass this check while the real #2193 TEXT-column decode regression was still
 # present). The real bug surface was a full-row decode failure — `Failed to
 # read message` — not merely a wrong count, so this reads every column of
-# every row, not just `count(*)`.
+# every row.
+#
+# Issue #2289 roborev finding (job 1590): counting rows alone lets silent
+# decode CORRUPTION pass — e.g. a byte-swap, truncation, or column-shift that
+# still happens to emit 3 lines. Assert the DECODED VALUES match the pinned
+# oracle EXACTLY: the same `("k1","1"),("k2","2"),("k3","3")` rows
+# `cqlite-flight/src/test_fixtures.rs`'s `KEYVALUE_ROWS` pins — the identical
+# fixture the committed `keyvalue.flightdata` golden was generated from (this
+# bash check reads the values back through the FULL production stack: real
+# cqlite-flight Rust producer -> real Flight wire bytes -> real arrow-java
+# decode -> real Trino connector -> real Trino CLI, which the Java-only
+# `FlightDataGoldenDecodeTest` golden comparison does not exercise end-to-end;
+# comparing byte-for-byte against the golden itself would need a JVM decode
+# tool this bash harness does not have). Row order is the server's TOKEN
+# order, not insertion order (per that fixture's own comment), so compare as
+# a SORTED SET, not positionally.
 check_2193_tiny_decode() {
-  log "#2193 check: SELECT * FROM cassandra_easy_stress.keyvalue (full arrow-java decode, expect 3 rows, oracle shape)"
-  local out rc rows
+  log "#2193 check: SELECT * FROM cassandra_easy_stress.keyvalue (full arrow-java decode, expect the exact pinned k1/k2/k3 rows, oracle shape)"
+  local out rc expected actual
   set +e
   out="$(run_with_timeout "$QUERY_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --output-format CSV \
     --execute 'SELECT * FROM cqlite.cassandra_easy_stress.keyvalue' 2>&1)"
@@ -107,17 +122,19 @@ check_2193_tiny_decode() {
     echo "FAIL: SELECT * FROM cassandra_easy_stress.keyvalue errored (rc=$rc): $out" >&2
     return 1
   fi
-  # Trino's CSV output quotes every field regardless of type (e.g. `"k1","1"`
-  # for the text/text keyvalue shape) — count non-empty lines, not a
-  # digit-anchored pattern (which would silently match zero rows and produce
-  # a false FAIL).
-  rows="$(echo "$out" | grep -c '.')"
   log "decoded output:\n$out"
-  if [[ "$rows" -eq 3 ]]; then
-    log "#2193: does not reproduce on this run (3 rows decoded correctly)"
+  # Trino's CSV output quotes every field regardless of type (e.g. `"k1","1"`
+  # for the text/text keyvalue shape). `sort` makes the comparison
+  # order-independent (see the function doc comment above).
+  expected="$(printf '"k1","1"\n"k2","2"\n"k3","3"\n' | sort)"
+  actual="$(echo "$out" | sort)"
+  if [[ "$actual" == "$expected" ]]; then
+    log "#2193: does not reproduce on this run (decoded values match the pinned k1/k2/k3 oracle exactly)"
     return 0
   fi
-  echo "FAIL: expected 3 decoded rows, got $rows. Output: $out" >&2
+  echo "FAIL: decoded rows do not match the pinned oracle." >&2
+  echo "  expected (any order): $(echo "$expected" | tr '\n' ' ')" >&2
+  echo "  got:                  $(echo "$out" | tr '\n' ' ')" >&2
   return 1
 }
 
