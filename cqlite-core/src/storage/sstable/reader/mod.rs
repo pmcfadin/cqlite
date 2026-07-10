@@ -74,6 +74,10 @@ pub use types::{
 };
 // Re-export the within-partition clustering-slice push-down spec (Issue #954).
 pub use data_access::ClusteringSlice;
+// Single-partition compaction seek outcome (issue #2207). `not(tombstones)` like
+// the seek path it wraps.
+#[cfg(not(feature = "tombstones"))]
+pub use data_access::SinglePartitionCompaction;
 // Re-export the per-element compaction read contract (epic #899, Phase A).
 pub use compaction_row::{
     CompactionRow, CompactionRowData, ComplexColumn, ComplexElement, SimpleCell,

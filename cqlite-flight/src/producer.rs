@@ -320,10 +320,13 @@ fn sstable_token_span(data_path: &Path, rt: &PruneRuntime) -> Option<(i64, i64)>
 
 /// Produces Arrow record batches from a compaction merge of a table's SSTables.
 pub struct MergeProducer {
-    schema: TableSchema,
+    // `schema` + `spec` are `pub(crate)` so the point-read routing (issue #2207)
+    // can live in the sibling `producer_point` module (campsite rule: producer.rs
+    // is over the file-size threshold, epic #1116).
+    pub(crate) schema: TableSchema,
     columns: Vec<ColumnInfo>,
     batch_size: usize,
-    spec: ScanSpec,
+    pub(crate) spec: ScanSpec,
     /// Aggregation pushdown plan (issue #841). When `Some`, the producer emits
     /// PARTIAL aggregate rows under [`Self::partial_columns`] instead of full
     /// rows; when `None` the row path is unchanged.
@@ -338,7 +341,7 @@ pub struct MergeProducer {
 /// polled BEFORE each `step()`) can be proven by a test double that counts
 /// `step()` calls — a pre-cancel must yield ZERO steps, i.e. no partition is
 /// collected/reconciled before cancellation is observed.
-trait PartitionStepper {
+pub(crate) trait PartitionStepper {
     /// Advance the merge by one partition (or report completion).
     fn step(&mut self) -> Result<MergeStep, cqlite_core::Error>;
 }
@@ -590,6 +593,15 @@ impl MergeProducer {
         if self.agg.is_some() || paths.is_empty() {
             return Ok(());
         }
+
+        // Issue #2207: a pushed full-PK-equality predicate routes to the partition
+        // point-read path — resolve candidate SSTables and seek only the target
+        // partition(s), instead of a full k-way scan with a per-row filter. Any
+        // other shape keeps the unchanged scan path below.
+        if let Some(plan) = self.point_read_keys() {
+            return self.produce_point(plan, paths, cancel, sink, progress, on_merger_built);
+        }
+
         // Issue #2264: wire the shared synchronous cancel token into the merge so
         // each run's producer thread (which fully materialises an index-less
         // SSTable in one uninterruptible pass) abandons promptly on client
@@ -597,7 +609,13 @@ impl MergeProducer {
         let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
             .map_err(ProducerError::Merge)?;
         on_merger_built();
-        self.drive_merge(&mut merger, cancel, sink, progress)
+        self.drive_merge(
+            &mut merger,
+            cancel,
+            sink,
+            progress,
+            AccessPath::FullScan.label(),
+        )
     }
 
     /// Prune `paths` to those whose token span overlaps the spec's token range.
@@ -696,8 +714,16 @@ impl MergeProducer {
             .map_err(ProducerError::Merge)?;
         let mut sink = CollectSink(&mut batches);
         // Collect path (parity oracle): a private seam — no external observer, but
-        // the same incremental counter emission runs (issue #2162).
-        self.drive_merge(&mut merger, cancel, &mut sink, &ScanProgress::default())?;
+        // the same incremental counter emission runs (issue #2162). This is the
+        // full-scan oracle path (always `full_scan`); the point route lives only on
+        // the streaming path (issue #2207).
+        self.drive_merge(
+            &mut merger,
+            cancel,
+            &mut sink,
+            &ScanProgress::default(),
+            AccessPath::FullScan.label(),
+        )?;
         Ok(batches)
     }
 
@@ -716,12 +742,13 @@ impl MergeProducer {
     /// rows as exist up to `limit`, never fewer. `limit == Some(0)` emits nothing
     /// without stepping the merge at all. The cap applies per split; the connector
     /// sets `limitGuaranteed = false` so Trino keeps a global `Limit` above.
-    fn drive_merge(
+    pub(crate) fn drive_merge(
         &self,
         merger: &mut dyn PartitionStepper,
         cancel: &CancelFlag,
         sink: &mut dyn BatchSink,
         progress: &ScanProgress,
+        access_path: &'static str,
     ) -> Result<(), ProducerError> {
         let limit = self.spec.limit;
         // A zero cap produces no rows without touching the merge.
@@ -731,9 +758,9 @@ impl MergeProducer {
         // Incremental scan-progress meter (issue #2162): flushes rows_scanned /
         // read.rows / read.partitions deltas at the batch-scale threshold and, via
         // its `Drop`, the remainder on EVERY exit (completion, LIMIT break, cancel,
-        // error, panic). The Flight merge always full-scans its (pruned) inputs, so
-        // the bounded access-path label is `full_scan`.
-        let mut meter = ScanProgressMeter::new(progress, AccessPath::FullScan.label());
+        // error, panic). `access_path` is `full_scan` for the k-way scan and
+        // `streaming_partition_lookup` for the point-read path (issue #2207).
+        let mut meter = ScanProgressMeter::new(progress, access_path);
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
         // Issue #1817: one partition-key decode cache for the whole merge; each
@@ -1229,6 +1256,7 @@ mod tests {
                     &cancelled,
                     &mut sink,
                     &ScanProgress::default(),
+                    AccessPath::FullScan.label(),
                 )
                 .expect_err("pre-cancelled merge aborts")
         };

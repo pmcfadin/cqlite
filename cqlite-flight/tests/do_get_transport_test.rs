@@ -517,6 +517,43 @@ fn do_get_over_transport_applies_predicate_and_projection() {
     );
 }
 
+/// **Point-read pushdown over the wire (issue #2207).** A ticket carrying a full
+/// partition-key equality (`key = "k000003"`, the sole `text` PK) must route to
+/// the partition point-read path server-side and decode to EXACTLY that one
+/// partition's row through the real gRPC transport — the end-to-end wiring
+/// evidence that a pushed PK equality resolves + streams correctly (not just a
+/// helper unit test). The multi-SSTable fixture puts the target key in the second
+/// flush, so the server must resolve it across the candidate SSTables, not read
+/// only the first.
+#[test]
+fn do_get_over_transport_pk_equality_point_read() {
+    let (_temp, data_dir) = build_multi_sstable_fixture(20);
+    // `key` is the single `text` partition key → a full-PK equality (point route).
+    let ticket = serde_json::to_vec(&serde_json::json!({
+        "keyspace": fx::KEYVALUE_KS,
+        "table": fx::KEYVALUE_TBL,
+        "ddl": fx::KEYVALUE_DDL,
+        "filter": {"type": "Compare", "column": "key", "op": "Equal", "value": "k000003"},
+    }))
+    .unwrap();
+
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let batches = rt.block_on(do_get_batches_over_transport(svc, ticket));
+
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        rows, 1,
+        "pk = k000003 point read must decode to exactly its one partition over the wire"
+    );
+    let keys = keys_of(&batches, "key");
+    assert_eq!(
+        keys,
+        vec!["k000003".to_string()],
+        "the point read must return the target partition, not another"
+    );
+}
+
 /// **live-mode file-set resolution.** A null-snapshot ticket against a table dir
 /// that contains BOTH a `snapshots/<name>/` subdir AND live `Data.db` files must
 /// read the LIVE set, never the snapshot. We build the live set with two rows and

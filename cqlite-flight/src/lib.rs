@@ -13,7 +13,9 @@ pub mod cancel;
 pub mod filter;
 pub mod obs;
 pub mod pathsafe;
+pub mod point_read;
 pub mod producer;
+mod producer_point;
 pub mod scan_progress;
 pub mod service;
 pub mod shutdown;
@@ -37,6 +39,12 @@ pub mod ticket;
 
 #[cfg(test)]
 mod testutil;
+
+// Point-read behavioral tests (issue #2207): work-done probe, dual-path parity,
+// index-less fail-safe, cancellation, LIMIT. In-crate so they can use the
+// `testutil` fixture builders + the pub(crate) streaming seam.
+#[cfg(test)]
+mod point_read_tests;
 
 // Issue #2162 OTel-level assertions (phase histograms, bounded attributes,
 // rpc.rows presence via the shared `observability-testing` capture harness) live

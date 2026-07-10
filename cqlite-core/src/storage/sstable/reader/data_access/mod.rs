@@ -51,6 +51,17 @@ mod compaction;
 mod compressed_offset;
 mod full_index_scan; // Full-Index.db partition enumeration (issue #2302)
 mod model;
+// Single-partition compaction seek (issue #2207): the public point-read primitive
+// composing the presence oracle + BTI/BIG offset resolution into a byte-identical
+// compaction-row seek for one partition. Gated `not(tombstones)` like the seek
+// primitives it composes (`successor_partition_offset`, `point_read_whole_section`).
+#[cfg(not(feature = "tombstones"))]
+mod point_compaction;
+// Fail-safe proof (issue #2207, roborev IMPORTANT-1): a corrupt/unreadable BTI
+// Partitions.db must degrade the point-read primitive to a scan-fallback signal,
+// never a hard `Err`. Needs `write-support` to synthesize a BTI fixture.
+#[cfg(all(test, not(feature = "tombstones"), feature = "write-support"))]
+mod point_compaction_fail_safe_tests;
 // Opt-in presence-oracle false-negative verification method (issue #2163), kept
 // out of this already-large entry-point file (campsite rule, epic #1116).
 mod presence_verify;
@@ -63,6 +74,8 @@ mod sequential;
 // Public surface re-export (unchanged: `reader::mod` re-exports
 // `data_access::ClusteringSlice`).
 pub use model::ClusteringSlice;
+#[cfg(not(feature = "tombstones"))]
+pub use point_compaction::SinglePartitionCompaction;
 
 // Re-export the decompress-work counter so the sibling `scan_stream_windowed`
 // module (outside `data_access`) can increment it on the windowed-scan miss path

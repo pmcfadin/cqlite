@@ -78,6 +78,15 @@ mod model;
 #[cfg(feature = "write-support")]
 pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, RowData};
 
+/// Single-partition point-read merge builder (issue #2207): assembles a
+/// [`KWayMerger`] from per-candidate single-partition runs (seeked or key-filtered)
+/// for the Flight `do_get` point-read path. Byte-identical reconciliation to the
+/// full-scan merge; only the inputs are narrower.
+#[cfg(feature = "write-support")]
+mod point_read;
+#[cfg(feature = "write-support")]
+pub use point_read::build_single_partition_merger;
+
 /// Fully-expired SSTable drop classification (issue #1388): the metadata-only
 /// `fully_expired_sstables` drop-set used by both compaction surfaces to skip
 /// reading SSTables that are entirely past `gcBefore` and overlap-safe.

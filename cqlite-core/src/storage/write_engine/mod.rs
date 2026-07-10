@@ -44,6 +44,8 @@ pub use export::{ExportOptions, ExportReport};
 #[cfg(feature = "write-support")]
 pub use memtable::Memtable;
 #[cfg(feature = "write-support")]
+pub use merge::build_single_partition_merger;
+#[cfg(feature = "write-support")]
 pub use merge::KWayMerger;
 #[cfg(feature = "write-support")]
 pub use merge_policy::STCSPolicy;
