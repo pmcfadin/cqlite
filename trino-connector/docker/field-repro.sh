@@ -108,6 +108,7 @@ GRADLE_HOST_BUILD_TIMEOUT_SECS=600         # host-side ./gradlew installPlugin (
 GRADLE_CONTAINER_BUILD_TIMEOUT_SECS=900    # containerized JDK 25 fallback build (cold image pull + cold Gradle/deps download + build)
 PCAP_READ_TIMEOUT_SECS=60                  # reading back an already-captured pcap (image is guaranteed cached from this same run's earlier capture)
 TCPDUMP_EXIT_WAIT_TIMEOUT_SECS=15          # docker wait for the capture container to actually exit after SIGINT, before copying its pcap out (issue #2289 roborev finding, job 1599) — generous for tcpdump to flush+close a short-lived capture, bounded so a container that never exits can't hang teardown
+TCPDUMP_START_TIMEOUT_SECS=15              # bounded poll for the capture container to reach Running (or definitively exit/fail) after `docker run -d` (issue #2289 roborev finding, job 1602) — replaces a single fixed 0.5s sleep + one-shot check, which could false-negative a container that just hadn't started yet under host load
 
 # Runs a query and returns its output; returns 124 on timeout WITHOUT exiting
 # the script (unlike e2e-test.sh's `trino()`, which treats a timeout as fatal)
@@ -189,12 +190,39 @@ start_tcpdump() {
     run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
     return 0
   fi
-  sleep 0.5
-  if [[ "$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" == "true" ]]; then
-    echo "$cname"
-  else
-    run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
-  fi
+  # Bounded poll, NOT a single fixed 0.5s sleep + one-shot check (issue
+  # #2289 roborev finding, job 1602): a single check right after `docker run
+  # -d` returns could race a slow container start (image extraction, cgroup
+  # setup under host load) and wrongly classify a container that just hadn't
+  # reached Running YET as unavailable — a needless SKIP on a host that would
+  # have worked fine with a moment more patience. Poll `.State.Status` every
+  # 0.5s up to TCPDUMP_START_TIMEOUT_SECS: `running` -> confirmed success
+  # (return immediately, don't wait out the rest of the bound); `exited`/
+  # `dead`/inspect-failed(container gone) -> DEFINITIVELY not coming up,
+  # break immediately rather than polling a dead container until timeout;
+  # anything else (`created`, `restarting`, ...) -> still starting, keep
+  # polling. Guarded per the round-7/8 (job 1598/1599) `|| var=$?`-free
+  # pattern — `run_with_timeout`'s own return code is irrelevant here (we key
+  # off the printed status text, defaulting to empty on any failure), so a
+  # bare `|| state=""` suffices without needing a separate rc capture.
+  local max_iterations=$((TCPDUMP_START_TIMEOUT_SECS * 2)) i=0 state=""
+  while (( i < max_iterations )); do
+    state="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker inspect -f '{{.State.Status}}' "$cname" 2>/dev/null)" || state=""
+    case "$state" in
+      running)
+        echo "$cname"
+        return 0
+        ;;
+      exited | dead | "")
+        break
+        ;;
+      *)
+        sleep 0.5
+        i=$((i + 1))
+        ;;
+    esac
+  done
+  run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
 }
 
 # Stops the capture container, copies /cap.pcap out to the host path $2 (if a
@@ -269,23 +297,18 @@ capture_artifacts() {
   # debug log + pcap are still real diagnostics even if Trino itself can't
   # answer right now.
   #
-  # NO `ORDER BY` (issue #2289 roborev finding, job 1598): a version-specific
-  # sort column is a real fragility risk if `system.runtime.queries`'s column
-  # names ever change across a future Trino bump — an unresolvable column
-  # would make this whole query error, and (post-job-1596) the
-  # --inject-failure self-test can then NEVER pass. Verified empirically
-  # against the PINNED image (`trinodb/trino:481`, this compose stack's exact
-  # version — `docker run -d trinodb/trino:481` + `DESCRIBE
-  # system.runtime.queries` + the query below run standalone, 2026-07-10):
-  # the column IS `created` (`timestamp(3) with time zone`); `create_time`
-  # does not exist ("Column 'create_time' cannot be resolved"). So `ORDER BY
-  # created` was NOT broken for this pinned version — but dropping the sort
-  # entirely is still the more robust choice long-term (this is a best-effort
-  # diagnostic artifact, not correctness-critical evidence, so losing strict
-  # newest-first ordering is an acceptable tradeoff for never hard-failing on
-  # a future Trino column rename).
+  # `ORDER BY created DESC` restored (issue #2289 roborev finding, job 1602,
+  # overriding job 1598's no-sort choice): `created` is EMPIRICALLY VERIFIED
+  # correct for the PINNED image (`trinodb/trino:481`, this compose stack's
+  # exact version — `docker run -d trinodb/trino:481` + `DESCRIBE
+  # system.runtime.queries` + this exact query run standalone, 2026-07-10:
+  # the column IS `created`, `timestamp(3) with time zone`; `create_time`
+  # does not exist, "Column 'create_time' cannot be resolved"). Deterministic
+  # newest-first ordering is worth the (already-disproven) fragility concern
+  # for THIS pinned image — do not re-litigate either direction without new
+  # evidence against `trinodb/trino:481` specifically.
   if run_with_timeout "$CAPTURE_METADATA_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --output-format JSON \
-      --execute "SELECT query_id, state, query FROM system.runtime.queries LIMIT 5" \
+      --execute "SELECT query_id, state, query FROM system.runtime.queries ORDER BY created DESC LIMIT 5" \
       > "$artdir/trino-recent-queries.json" 2>&1; then
     :
   else
