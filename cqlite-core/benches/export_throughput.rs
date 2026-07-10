@@ -130,7 +130,7 @@ fn bench_fixture_export(c: &mut Criterion) {
 /// `DeltaRecord`s, so feeding it synthetic upserts drives the real writer.
 #[cfg(all(feature = "delta-scan", feature = "parquet"))]
 fn bench_delta_export(c: &mut Criterion) {
-    use criterion::{black_box, Throughput};
+    use criterion::{black_box, BatchSize, Throughput};
     use std::collections::HashMap;
 
     use cqlite_core::export::{write_delta_records_to_bytes, DeltaParquetOptions};
@@ -194,16 +194,24 @@ fn bench_delta_export(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("export");
     group.throughput(Throughput::Elements(N_RECORDS as u64));
+    // Clone the 5,000 owned-string records in the untimed setup closure so only
+    // write_delta_records_to_bytes is measured. The writer consumes its record
+    // iterator by value, so each sample needs its own owned batch; LargeInput
+    // keeps the per-batch setup cost off the timed path for this heavy input.
     group.bench_function("delta", |b| {
-        b.iter(|| {
-            let bytes = write_delta_records_to_bytes(
-                black_box(&records).iter().cloned(),
-                black_box(&schema),
-                DeltaParquetOptions::default(),
-            )
-            .expect("delta write");
-            black_box(bytes.len())
-        });
+        b.iter_batched(
+            || records.clone(),
+            |owned| {
+                let bytes = write_delta_records_to_bytes(
+                    black_box(owned.into_iter()),
+                    black_box(&schema),
+                    DeltaParquetOptions::default(),
+                )
+                .expect("delta write");
+                black_box(bytes.len())
+            },
+            BatchSize::LargeInput,
+        );
     });
     group.finish();
 }

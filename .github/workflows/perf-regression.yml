@@ -41,9 +41,12 @@ env:
   # Database), write-support for the write suite (WriteEngine).
   # bench-internals adds the decode_value_for_bench shim the `decode` bench needs
   # (issue #1615); it changes no other bench and no production default build.
-  # parquet + delta-scan enable the export_throughput writer arms (issue #1494);
-  # both features exist on main, so they are safe to pass to the base build too.
-  BENCH_FEATURES: "cli-helpers,write-support,bench-internals,parquet,delta-scan"
+  # arrow gates the export/rows_to_record_batch + export/json arms; parquet +
+  # delta-scan gate the export/parquet + export/delta arms (issue #1494). arrow
+  # is named EXPLICITLY (not left to parquet's transitive parquet->arrow enable)
+  # so the STRICT arrow-gated entries can never silently drop if parquet is ever
+  # removed. All exist on main, so they are safe to pass to the base build too.
+  BENCH_FEATURES: "cli-helpers,write-support,bench-internals,arrow,parquet,delta-scan"
   # Criterion run config — kept small for CI. Tune here if the gate is too noisy
   # (more samples → stabler medians, slower job).
   BENCH_ARGS: "--sample-size 20 --warm-up-time 1 --measurement-time 3"
@@ -170,20 +173,22 @@ jobs:
           if grep -q '^bench-internals' cqlite-core/Cargo.toml; then
             BASE_FEATURES="$BASE_FEATURES,bench-internals"
           fi
-          # parquet + delta-scan drive the export_throughput writer arms (issue
+          # arrow + parquet + delta-scan drive the export_throughput arms (issue
           # #1494), but they ALSO gate conditionally-compiled code paths inside
           # cqlite-core, so the feature set MUST be IDENTICAL between the PR arm
           # (BENCH_FEATURES, above) and this base arm for every SHARED bench
           # (read/write/concurrent_scan/read_while_write/compaction/decode) — or
           # the pr-vs-base median ratio compares two differently-codegen'd
           # cqlite-core libraries (apples-to-oranges: false regressions or masked
-          # real ones). Both features predate #1494 (parquet #682, delta-scan
+          # real ones). All three predate #1494 (arrow, parquet #682, delta-scan
           # #696) and exist on every in-scope `main`, so append them
-          # UNCONDITIONALLY — exactly as the PR arm does. A base checkout without
+          # UNCONDITIONALLY — exactly as the PR arm does (arrow is named
+          # EXPLICITLY, not left to parquet's transitive enable, so the STRICT
+          # arrow-gated arms never silently drop). A base checkout without
           # export_throughput.rs simply won't run that bench (its --bench target is
           # guarded above); check_perf_regression.py then reports it SKIP (no data
           # in 'base'), never a hard fail — a legitimately-new bench stays green.
-          BASE_FEATURES="$BASE_FEATURES,parquet,delta-scan"
+          BASE_FEATURES="$BASE_FEATURES,arrow,parquet,delta-scan"
           cargo bench -p cqlite-core --features "$BASE_FEATURES" \
             "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
           # CSV export writer (issue #1494) — hosted in cqlite-cli. Include only
