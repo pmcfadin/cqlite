@@ -1,0 +1,21 @@
+# Override applied ONLY by `field-repro.sh` (issue #2289) on top of
+# `docker-compose.yml` — `e2e-test.sh` never references this file and stays
+# byte-identical/untouched.
+#
+# 1. `RUST_LOG=info,cqlite_flight=debug` — the harness's #2264/#2193 checks rely
+#    on the crate's debug-level `tracing` lines (`do_get phase completed`,
+#    `token-range SSTable prune`) as the LOCAL proxy signal for backpressure/
+#    progress, because no scrapeable metrics endpoint (no OTel collector wired
+#    into this compose stack) is reachable from outside the container in this
+#    harness — see field-repro.sh's top-of-file doc block.
+# 2. `platform:` — `FLIGHT_PLATFORM` toggles the cqlite-flight image's build+run
+#    platform (default: the native platform `field-repro.sh` detects from the
+#    Docker daemon, i.e. a no-op override). Setting `FLIGHT_PLATFORM=linux/amd64`
+#    on a non-amd64 host cross-builds/runs cqlite-flight under emulation for a
+#    decode/framing check ONLY (#2193) — QEMU-emulated timing is not
+#    perf-meaningful, so no throughput/backpressure claim is ever made under it.
+services:
+  cqlite-flight:
+    platform: ${FLIGHT_PLATFORM}
+    environment:
+      RUST_LOG: info,cqlite_flight=debug

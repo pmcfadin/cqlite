@@ -324,3 +324,32 @@ docker compose exec trino trino --execute "SELECT count(*) FROM cqlite.loadtest.
 ```
 
 It connects over the shared bridge to Cassandra (`172.42.0.2:9042`, datacenter `dc1`).
+
+## Field reproduction harness (`field-repro.sh`, issue #2289)
+
+`docker/e2e-test.sh` (above) is a fast, 32-assertion smoke check on hand-made,
+~5-row tables — it has never caught a field-only defect. `docker/field-repro.sh`
+is a SEPARATE, slower script (never invoked by `e2e-test.sh`, and vice versa)
+that loads field-shaped data (a `>=100k`-partition `loadtest.keyvalue` table
+across multiple SSTable generations, plus the exact 3-row/1-flush/`nb-1-big`/LZ4
+`tiny` shape), snapshots via the real Sidecar API, and runs the two pinned
+repro checks for #2264 (`LIMIT 5` mid-stream cancel / `do_get` channel
+saturation) and #2193 (tiny-table arrow-java decode):
+
+```bash
+docker/field-repro.sh                            # native platform
+FLIGHT_PLATFORM=linux/amd64 docker/field-repro.sh # cross-build/run under amd64 (decode-only, not perf)
+docker/field-repro.sh --inject-failure=tiny       # prove the capture-on-fail artifacts path fires
+```
+
+**Tiering — do not skip a rung.**
+1. **Docker (`field-repro.sh`)** — fast local discovery/iteration on a single
+   node. Good for: does a bug reproduce at all, does a fix change the
+   observed behavior, decode/framing correctness.
+2. **A single x86_64 EC2 instance** running this same compose stack — reach
+   for this ONLY if Docker leaves an arch-sensitivity question open. Still
+   single-node.
+3. **The 3-node kit** (`easy-db-lab-kits/`, epic #2103) — the ONLY tier that
+   can adjudicate multi-node semantics (per-host snapshot placement #2227,
+   replica failover #2241) or serve as the final field verdict. Neither
+   Docker nor a single EC2 node can adjudicate those.
