@@ -15,13 +15,19 @@
 //!
 //! The producers block on the bounded streaming channel (`sync_channel`) once it
 //! fills, so once the merger is constructed — and BEFORE it is drained — every
-//! producer is alive at once. That gives a deterministic window in which to sample
-//! the peak: no concurrent-sampler timing race. The assertion FAILS on the
-//! pre-change code (each producer's multi-threaded runtime adds `num_cpus` workers)
-//! and PASSES after the `current_thread`-runtime fix, on any host where
-//! `num_cpus >= 2`. Where the amplification collapses (`num_cpus < 2`) or the
-//! platform exposes no direct thread-count API, the test guards deterministically
-//! rather than flake.
+//! producer is alive at once and STAYS alive (thread count cannot decrease) until
+//! this test starts draining. Rather than sampling over a fixed elapsed-time
+//! window (which can under-sample on a contended host where producer startup
+//! drifts outside the window — roborev job 1604 finding 1), the peak is captured
+//! by polling until the process's OS thread count STABILIZES — the same reading
+//! across several consecutive polls — synchronizing on the producer LIFECYCLE
+//! itself, never on elapsed time. A generous timeout bounds the poll and FAILS
+//! LOUDLY (a clear panic, never a silent under-sample) if the count never
+//! settles. The assertion FAILS on the pre-change code (each producer's
+//! multi-threaded runtime adds `num_cpus` workers) and PASSES after the
+//! `current_thread`-runtime fix, on any host where `num_cpus >= 2`. Where the
+//! amplification collapses (`num_cpus < 2`) or the platform exposes no direct
+//! thread-count API, the test guards deterministically rather than flake.
 //!
 //! ## Process-isolation requirement
 //!
@@ -118,20 +124,60 @@ fn os_thread_count() -> Option<usize> {
     None
 }
 
-/// Sample the peak OS thread count over a fixed window. The producers stay blocked
-/// on the bounded channel for the whole window (nothing is draining them), so the
-/// peak is stable; polling simply waits out the brief interval in which each
-/// producer builds its runtime and reaches the blocked state.
-fn sample_peak_threads(window: Duration) -> Option<usize> {
-    let deadline = Instant::now() + window;
-    let mut peak = os_thread_count()?;
+/// Number of consecutive identical readings required to treat the OS thread
+/// count as STABILIZED (issue #2316, roborev job 1604 finding 1).
+const STABLE_STREAK: usize = 8;
+
+/// Delay between polls while waiting for stabilization.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Poll the process's OS thread count until it STABILIZES — the same reading
+/// observed across [`STABLE_STREAK`] consecutive polls — synchronizing on the
+/// actual thread LIFECYCLE instead of a fixed elapsed-time window. Thread
+/// creation itself is a synchronous kernel operation (a new `/proc/self/task`
+/// entry — or macOS `pti_threadnum` increment — appears the instant the OS
+/// creates the thread, regardless of scheduling delay), so once every producer
+/// this test spawns has been created, the count settles quickly and reliably;
+/// this poll simply waits out that settling instead of assuming a fixed window
+/// covers it.
+///
+/// Returns `(peak, settled)`: `peak` is the highest reading observed at ANY
+/// point while polling (so a transient spike — e.g. the pre-fix defect's burst
+/// of per-producer runtime-worker threads — is captured even if the count later
+/// settles lower), while `settled` is the reading that satisfied the
+/// stabilization streak.
+///
+/// `timeout` is a fail-loud BOUND ONLY, never the synchronization mechanism: if
+/// the count never stabilizes within it, this panics with a clear diagnostic
+/// (producer startup may be stalled under extreme contention) rather than
+/// silently returning an under-sampled value.
+fn poll_until_stable(timeout: Duration) -> (usize, usize) {
+    let deadline = Instant::now() + timeout;
+    let mut peak = 0usize;
+    let mut last: Option<usize> = None;
+    let mut streak = 0usize;
     while Instant::now() < deadline {
-        if let Some(n) = os_thread_count() {
-            peak = peak.max(n);
+        let n = os_thread_count().expect(
+            "thread count observation must remain available (guard 2 already confirmed it)",
+        );
+        peak = peak.max(n);
+        if last == Some(n) {
+            streak += 1;
+            if streak >= STABLE_STREAK {
+                return (peak, n);
+            }
+        } else {
+            last = Some(n);
+            streak = 1;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(POLL_INTERVAL);
     }
-    Some(peak)
+    panic!(
+        "OS thread count never stabilized within {timeout:?} (last reading {last:?}, \
+         streak {streak}/{STABLE_STREAK} required, peak observed {peak}); this is a \
+         fail-loud BOUND, not a synchronization mechanism — producer startup may be \
+         stalled under extreme contention, or the lifecycle signal never settles"
+    );
 }
 
 // ── Real multi-SSTable input construction (never an empty dataset) ──────────
@@ -279,11 +325,14 @@ fn merge_bounds_producer_threads_to_o_m() {
     let m = inputs.len();
     let out = TempDir::new().expect("out tempdir");
 
-    // Settle the baseline: the input-build runtime has been dropped; wait for the
-    // process thread count to quiesce so the baseline is not inflated by threads
-    // still winding down.
-    std::thread::sleep(Duration::from_millis(50));
-    let baseline = os_thread_count().expect("baseline thread count");
+    // Settle the baseline via LIFECYCLE synchronization (issue #2316, roborev job
+    // 1604 finding 1): the input-build runtime has been dropped, but its
+    // teardown may still be in flight — poll until the process thread count
+    // STABILIZES (rather than sleeping a fixed, potentially-too-short duration
+    // under contention) so the baseline reflects the genuinely quiesced state.
+    // The settled reading (not the transient peak while winding down) is the
+    // correct baseline.
+    let (_settle_peak, baseline) = poll_until_stable(Duration::from_secs(10));
 
     // Construct the merger: this spawns all M producer threads. Each producer
     // opens its reader and streams into the bounded channel; with ROWS_PER_INPUT
@@ -294,8 +343,14 @@ fn merge_bounds_producer_threads_to_o_m() {
     let (baseline_ts, baseline_ldt, baseline_ttl) = compute_baseline_min(&inputs);
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
 
-    // Sample the peak while the producers are blocked (a wide, stable window).
-    let peak = sample_peak_threads(Duration::from_millis(1200)).expect("peak thread count");
+    // Wait for the producer threads to finish starting up and reach their
+    // steady (blocked-on-send) state via the SAME lifecycle synchronization
+    // (issue #2316, roborev job 1604 finding 1) — never a fixed sampling
+    // window, which could miss the true peak if producer startup drifts outside
+    // it on a contended host. `peak` also captures any transient spike seen
+    // while ramping up (the pre-fix defect: a burst of per-producer runtime
+    // worker threads), even if the count later settles slightly lower.
+    let (peak, _settled) = poll_until_stable(Duration::from_secs(15));
     let delta = peak.saturating_sub(baseline);
     let bound = PER_INPUT * m + THREAD_SLACK;
 

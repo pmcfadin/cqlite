@@ -164,15 +164,50 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
     // snapshot below. The gauge was incremented once per producer at spawn.
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
 
-    // MID-MERGE: the gauge must reflect the M live producer threads.
-    let mid = capture.flush_and_collect();
-    let mid_val = mid.counter_sum(catalog::MERGE_PRODUCER_THREADS);
-    assert_eq!(
-        mid_val, m as f64,
-        "gauge should read M={m} live producer threads mid-merge, got {mid_val}"
+    // MID-MERGE: poll until the gauge POSITIVELY records M — synchronizing on the
+    // producer LIFECYCLE rather than assuming a single immediate snapshot right
+    // after `KWayMerger::new` already reflects every increment (issue #2316,
+    // roborev job 1604 finding 2). Bounded + fail-loud: a broken or delayed
+    // increment path exhausts the deadline and FAILS explicitly rather than
+    // silently checking a possibly-incomplete snapshot. Scans ALL accumulated
+    // matching points (not `find`'s first-match) for the same reason as the
+    // teardown poll below: repeated `flush_and_collect` calls without an
+    // intervening `reset` accumulate one batch per call, and `find` would get
+    // stuck on the EARLIEST batch (e.g. "2" while producers 3 and 4 are still
+    // incrementing) rather than ever observing the LATEST value.
+    let mid_deadline = Instant::now() + Duration::from_secs(10);
+    let mut mid_reached = false;
+    let mut mid_last_seen: Option<f64> = None;
+    let mut mid_unit: Option<String> = None;
+    while Instant::now() < mid_deadline {
+        let snap = capture.flush_and_collect();
+        for entry in snap
+            .entries()
+            .iter()
+            .filter(|e| e.name == catalog::MERGE_PRODUCER_THREADS)
+        {
+            mid_unit = Some(entry.unit.clone());
+            for point in &entry.points {
+                mid_last_seen = Some(point.value);
+                if point.value == m as f64 {
+                    mid_reached = true;
+                }
+            }
+        }
+        if mid_reached {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        mid_reached,
+        "gauge should POSITIVELY record M={m} live producer threads mid-merge \
+         within the bound (never inferred from an absent/stale window); last \
+         observed value: {:?}",
+        mid_last_seen
     );
     assert_eq!(
-        mid.unit(catalog::MERGE_PRODUCER_THREADS),
+        mid_unit.as_deref(),
         Some(catalog::unit::THREADS),
         "gauge must carry the {{thread}} unit"
     );
@@ -204,15 +239,32 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
         stats.output_rows
     );
 
-    // AFTER: the merge's producers have exited (each guard decremented the live
-    // count on the way out) — the gauge should have recorded a genuine transition
-    // down to 0 WITHIN the window opened by the `reset()` above (before the
-    // drain). Under DELTA temporality a window with NO new `record_gauge` call
-    // reports the metric as ABSENT — `CapturedMetrics::counter_sum` then defaults
-    // an absent metric to `0.0`. Treating THAT default as "returned to baseline"
-    // is VACUOUS: it would pass identically whether the decrement path fired or
-    // is entirely broken. So this loop requires POSITIVE evidence: an actual
-    // collected data point equal to `0.0`, never inferred from absence.
+    // AFTER: driven from an explicit completion event — the merge has already
+    // been drained to completion (`merger.merge` + `writer.finish` above both
+    // returned) — NOT a fixed sleep (issue #2316, roborev job 1604 finding 2).
+    // Draining to completion guarantees every producer's channel closed (so its
+    // scan loop has finished), but the producer THREAD itself may still be
+    // mid-unwind: the channel closes when its `sync_channel` sender is dropped
+    // (inside the async scan closure), while the gauge-decrementing
+    // `ProducerThreadGuard` — declared FIRST in `producer_thread`, so it drops
+    // LAST per Rust's reverse-declaration-order local drop — only fires once
+    // that whole function body finishes unwinding and the OS thread actually
+    // exits. That gap is normally microseconds but has no hard bound under
+    // extreme scheduler contention, and the `JoinHandle` is never joined (by
+    // design — see `SSTableRowIteratorAdapter`'s doc), so there is no stronger
+    // "the thread is definitely gone" signal available from this test than
+    // polling the gauge itself. So: drain first (already done), THEN poll for
+    // the zero record — a generous, bounded, fail-loud timeout, never a fixed
+    // sleep standing in for synchronization.
+    //
+    // The gauge should have recorded a genuine transition down to 0 WITHIN the
+    // window opened by the `reset()` above (before the drain). Under DELTA
+    // temporality a window with NO new `record_gauge` call reports the metric as
+    // ABSENT — `CapturedMetrics::counter_sum` then defaults an absent metric to
+    // `0.0`. Treating THAT default as "returned to baseline" is VACUOUS: it
+    // would pass identically whether the decrement path fired or is entirely
+    // broken. So this loop requires POSITIVE evidence: an actual collected data
+    // point equal to `0.0`, never inferred from absence.
     //
     // Deliberately NO `reset()` inside this loop: the producer threads are
     // DETACHED (`JoinHandle` drop does not join), so the decrement(s) may have
@@ -226,7 +278,7 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
     // later batches already show the settled 0. Bounded → deterministic, never a
     // wall-clock race; a broken decrement path (or a leaked increment) exhausts
     // the deadline and FAILS explicitly rather than passing vacuously.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut observed_zero_record = false;
     let mut last_seen: Option<f64> = None;
     while Instant::now() < deadline {
