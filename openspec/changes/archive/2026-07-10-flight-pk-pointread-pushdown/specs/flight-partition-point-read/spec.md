@@ -4,10 +4,10 @@
 
 ### Requirement: A pushed full-PK-equality predicate SHALL route do_get to a partition point-read path
 
-When the predicate pushed into a Flight `do_get` ticket binds **every** partition-key component to
-a single value (a full-PK equality — or an `IN`/`Or` list of such full-PK equalities), the server
-SHALL route execution to a partition point-read path that resolves candidate SSTables and reads
-only the target partition(s), instead of the full k-way merge scan with a per-row predicate filter.
+The server SHALL route execution to a partition point-read path — resolving candidate SSTables and
+reading only the target partition(s) instead of the full k-way merge scan with a per-row predicate
+filter — when the predicate pushed into a Flight `do_get` ticket binds **every** partition-key
+component to a single value (a full-PK equality, or an `IN`/`Or` list of such full-PK equalities).
 Any other predicate shape — partial partition key, clustering-only, range, secondary-column,
 `IS NULL`, or no predicate — SHALL keep the unchanged full-scan path. The routing decision SHALL be
 derived from the typed predicate tree and the table schema's partition-key definition only; it
