@@ -2418,36 +2418,49 @@ impl KWayMerger {
         'partitions: loop {
             let mut partition_tombstone: Option<PartitionTombstone> = None;
             let mut range_tombstones: Vec<RangeTombstone> = Vec::new();
-            // Frozen once the prefix completes (see the `ClusterGroup` arm
-            // below) — declared HERE, at the SAME scope as `session`, so
-            // `session`'s borrow of it remains valid for the REST of this
-            // partition's inner-loop iterations (a version scoped only to
-            // the match arm that freezes it would be dropped before
-            // `session` is, a dangling-borrow error). The empty initializer
-            // is always overwritten via `std::mem::take` before any borrow
-            // of it occurs; only its DECLARATION needs to live at this
-            // scope, not this particular value.
-            #[allow(unused_assignments)]
-            let mut range_tombstones_frozen: Vec<RangeTombstone> = Vec::new();
             let mut static_tracker =
                 crate::storage::sstable::writer::data_writer::StaticOpsTracker::new();
             let mut static_first_ts: i64 = 0;
             let mut saw_carrier_or_static = false;
             let mut row_count: u64 = 0;
-            let mut session: Option<
-                crate::storage::sstable::writer::data_writer::IncrementalPartitionWriter<'_, '_>,
-            > = None;
-            // Issue #1668 stage 5c-iv part 2: this partition's stats fold,
-            // accumulated one mutation at a time (see the single fold point
-            // below) since `output_writer.stats` cannot be touched directly
-            // while `session` holds an exclusive borrow of `output_writer`.
-            // Merged into `output_writer.stats` at partition end via
-            // `complete_partition_incremental`, once that borrow has ended.
+            // Issue #1383 regression fix (crit2-4), issue #1668: buffer this
+            // partition's surviving `Some(ck)` row mutations rather than
+            // streaming each straight into the writer session as it arrives.
+            //
+            // The streaming writer session (`begin_partition_incremental`)
+            // needs the partition's COMPLETE range-tombstone set UPFRONT: it
+            // sorts the range bounds into on-disk markers and interleaves them
+            // with rows in clustering order as each row is fed (and uses them
+            // to compute each row's `shadow_floor`). But `StreamingMerger`
+            // only surfaces a range tombstone's coalesced marker once its
+            // CLOSE bound is parsed — which, for a range whose covered rows
+            // live in a different (e.g. newer) generation, is strictly AFTER
+            // those rows have already streamed past (issue #1668 stage 5d's
+            // "range tombstones can arrive AFTER the rows they cover"
+            // finding). Opening the session on the first `Some(ck)` row
+            // therefore fixed an EMPTY range-tombstone set, then fed every
+            // late marker mutation through `feed_row` — which silently dropped
+            // it (a range-only mutation has no row content) — so a synthesized
+            // boundary vanished from the compacted output entirely.
+            //
+            // Buffering the rows until PartitionEnd lets us open the session
+            // with the FULL, final range-tombstone set, so `feed_row` shadows
+            // every covered row correctly AND interleaves the markers in
+            // clustering order. A genuinely bounded-memory streaming WRITE for
+            // range-tombstone partitions would need the out-of-scope two-pass
+            // reader that surfaces a range's OPEN bound early; this buffer is
+            // whole-partition-width for such partitions (the reader already
+            // materializes the decompressed section anyway — see the
+            // streaming dhat test's module doc), while `StreamingMerger`'s
+            // own reconciliation stays row-streamed (the memory bound the
+            // dhat proof actually exercises).
+            let mut buffered_rows: Vec<crate::storage::write_engine::mutation::Mutation> =
+                Vec::new();
             let mut partition_stats = crate::storage::sstable::writer::StatisticsMetadata::new();
 
             loop {
                 match stream.step_streaming()? {
-                    StreamingStep::ClusterGroup { key, row } => {
+                    StreamingStep::ClusterGroup { key: _, row } => {
                         // Skip truly-empty phantom entries (#886/#899
                         // branch-review) — mirrors the original
                         // `.filter(|entry| !entry.is_metadata_only_no_op())`.
@@ -2466,14 +2479,12 @@ impl KWayMerger {
                             &mutation,
                         );
 
-                        if let Some(active) = session.as_mut() {
-                            // Already streaming this partition's Some(ck) tail.
-                            active.feed_row(&mutation, &write_schema)?;
-                            row_count += 1;
-                            continue;
-                        }
-
-                        // Still in the (bounded) None-keyed prefix.
+                        // Classify the (None-keyed) carriers and the static
+                        // row; everything else is a real clustering row that
+                        // is BUFFERED (see `buffered_rows`' doc) — range
+                        // tombstones can still arrive after some rows have
+                        // already been buffered, which is exactly why the
+                        // whole set must be resolved before the session opens.
                         let is_partition_only = mutation.operations.is_empty()
                             && mutation.partition_tombstone.is_some()
                             && mutation.row_tombstone.is_none()
@@ -2504,7 +2515,7 @@ impl KWayMerger {
                         // `schema_has_static` gate: without it, that
                         // table's sole per-partition row would be
                         // misrouted here and silently dropped instead of
-                        // streamed as a real row).
+                        // written as a real row).
                         if mutation.clustering_key.is_none() && schema_has_static {
                             // The resolved static-row carrier (issue #1668
                             // design verification: at most one, always
@@ -2523,82 +2534,47 @@ impl KWayMerger {
                             continue;
                         }
 
-                        // First Some(ck) row (or, for an unclustered table,
-                        // its sole `clustering_key: None` row): the prefix
-                        // is now COMPLETE. Move it into the iteration-
-                        // scoped `range_tombstones_frozen` (never mutated
-                        // again in this scope) before constructing the
-                        // session, so its borrow stays valid for the rest
-                        // of this partition's inner-loop iterations without
-                        // aliasing the (now-empty, and no longer touched)
-                        // `range_tombstones` accumulator.
-                        range_tombstones_frozen = std::mem::take(&mut range_tombstones);
-                        let mut new_session = output_writer.begin_partition_incremental(
-                            &key,
-                            partition_tombstone.as_ref(),
-                            &range_tombstones_frozen,
-                        )?;
-                        if schema_has_static {
-                            let merged = std::mem::take(&mut static_tracker).finish();
-                            new_session.feed_static_row(&merged, static_first_ts, &write_schema)?;
-                        }
-                        new_session.feed_row(&mutation, &write_schema)?;
+                        // A real clustering row (or an unclustered table's
+                        // sole `clustering_key: None` row): buffer it for the
+                        // single PartitionEnd write once the full
+                        // range-tombstone set is known.
+                        buffered_rows.push(mutation);
                         row_count += 1;
-                        stats.output_partitions += 1;
-                        session = Some(new_session);
                     }
                     StreamingStep::PartitionEnd { key } => {
-                        match session.take() {
-                            Some(active) => {
-                                let (offset, blocks, emit) = active.finish(&write_schema)?;
-                                output_writer.complete_partition_incremental(
-                                    &key,
-                                    partition_tombstone.as_ref(),
-                                    offset,
-                                    &blocks,
-                                    emit,
-                                    &partition_stats,
-                                )?;
-                                stats.output_rows += row_count;
+                        // Write the whole partition in ONE session now that
+                        // the partition tombstone, the COMPLETE coalesced
+                        // range-tombstone set, the static row, and every
+                        // surviving clustering row are all known. Skip a
+                        // truly empty partition (every entry was
+                        // metadata-only-no-op), matching the original
+                        // `mutations.is_empty()` skip. A partition with only
+                        // carriers/statics but no `Some(ck)` row is still
+                        // emittable (#933/#1072).
+                        if !buffered_rows.is_empty() || saw_carrier_or_static {
+                            let mut session = output_writer.begin_partition_incremental(
+                                &key,
+                                partition_tombstone.as_ref(),
+                                &range_tombstones,
+                            )?;
+                            if schema_has_static {
+                                let merged = std::mem::take(&mut static_tracker).finish();
+                                session.feed_static_row(&merged, static_first_ts, &write_schema)?;
                             }
-                            None if saw_carrier_or_static => {
-                                // No Some(ck) row ever arrived, but a
-                                // range/partition tombstone or a static
-                                // value survived — still emittable
-                                // (#933/#1072), matching the original `if
-                                // mutations.is_empty() { continue; }`
-                                // guard's negative case exactly.
-                                let mut new_session = output_writer.begin_partition_incremental(
-                                    &key,
-                                    partition_tombstone.as_ref(),
-                                    &range_tombstones,
-                                )?;
-                                if schema_has_static {
-                                    let merged = std::mem::take(&mut static_tracker).finish();
-                                    new_session.feed_static_row(
-                                        &merged,
-                                        static_first_ts,
-                                        &write_schema,
-                                    )?;
-                                }
-                                let (offset, blocks, emit) = new_session.finish(&write_schema)?;
-                                output_writer.complete_partition_incremental(
-                                    &key,
-                                    partition_tombstone.as_ref(),
-                                    offset,
-                                    &blocks,
-                                    emit,
-                                    &partition_stats,
-                                )?;
-                                stats.output_partitions += 1;
-                                stats.output_rows += row_count;
+                            for mutation in &buffered_rows {
+                                session.feed_row(mutation, &write_schema)?;
                             }
-                            None => {
-                                // Truly empty partition (every entry was
-                                // metadata-only-no-op) — skip entirely,
-                                // matching the original
-                                // `mutations.is_empty()` skip.
-                            }
+                            let (offset, blocks, emit) = session.finish(&write_schema)?;
+                            output_writer.complete_partition_incremental(
+                                &key,
+                                partition_tombstone.as_ref(),
+                                offset,
+                                &blocks,
+                                emit,
+                                &partition_stats,
+                            )?;
+                            stats.output_partitions += 1;
+                            stats.output_rows += row_count;
                         }
                         continue 'partitions;
                     }
