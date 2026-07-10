@@ -194,9 +194,26 @@ load_big_keyvalue_table() {
     pull_class="$(classify_pull_failure "$pull_rc" "$pull_outfile")"
     if [[ "$pull_class" == "not-found" ]]; then
       log "cassandra-easy-stress image confirmed NOT FOUND in the registry (unambiguous manifest/not-found error, rc=$pull_rc) — falling back to a cqlsh INSERT loop (SLOW, last resort)"
-      record_loader_provenance "cqlsh-fallback (cassandra-easy-stress image confirmed not-found: $(head -3 "$pull_outfile" | tr '\n' ' '))"
+      local not_found_evidence
+      not_found_evidence="$(head -3 "$pull_outfile" | tr '\n' ' ')"
       rm -f "$pull_outfile"
+      # Issue #2289 roborev finding (job 1597): provenance is written ONLY
+      # AFTER the fallback load + flush have actually completed successfully
+      # — a prior revision wrote the 'cqlsh-fallback' provenance BEFORE
+      # calling `load_big_keyvalue_table_fallback`, so a failed/timed-out
+      # fallback still left an artifact claiming the fallback produced the
+      # table.
+      local fallback_rc
+      set +e
       load_big_keyvalue_table_fallback "${compose[@]}"
+      fallback_rc=$?
+      set -e
+      if [[ $fallback_rc -ne 0 ]]; then
+        echo "FATAL: cqlsh fallback loader failed (rc=$fallback_rc) after the cassandra-easy-stress image was confirmed not-found — no loader produced loadtest.keyvalue this run." >&2
+        record_loader_provenance "cqlsh-fallback FAILED (rc=$fallback_rc, image confirmed not-found: $not_found_evidence) — loadtest.keyvalue may be empty/partial/absent; no loader completed successfully this run"
+        exit 1
+      fi
+      record_loader_provenance "cqlsh-fallback (cassandra-easy-stress image confirmed not-found: $not_found_evidence; $((BIG_TABLE_PARTITIONS_PER_BATCH * BIG_TABLE_BATCHES)) rows inserted + flushed)"
     else
       # Any other pull failure (timeout rc=124, daemon-unreachable, auth, or
       # anything not on the not-found allowlist) is a REAL environment
@@ -239,6 +256,13 @@ CQLSH_FALLBACK_LOAD_TIMEOUT_SECS=1800
 # Fallback loader: a plain cqlsh batch-INSERT loop. Deliberately simple
 # (correctness over speed) — this path only runs when the stress image itself
 # could not be pulled/run, which is already a degraded environment.
+#
+# Returns the REAL exit status of the load (0 = both the cqlsh batch AND the
+# flush succeeded) instead of letting a failure abort the whole script via
+# bare `set -e` propagation — issue #2289 roborev finding, job 1597: the
+# caller needs a real success/failure signal to decide what provenance to
+# write, since provenance may only be recorded AFTER this function's work
+# has genuinely completed.
 load_big_keyvalue_table_fallback() {
   local -a compose=("$@")
   local total=$((BIG_TABLE_PARTITIONS_PER_BATCH * BIG_TABLE_BATCHES))
@@ -251,7 +275,18 @@ load_big_keyvalue_table_fallback() {
       echo "INSERT INTO loadtest.keyvalue (key, value) VALUES ('fallback-$i', 'v');"
     done
   } > "$tmp_cql"
+  local rc
+  set +e
   run_with_timeout "$CQLSH_FALLBACK_LOAD_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra cqlsh 172.42.0.2 < "$tmp_cql"
+  rc=$?
+  set -e
   rm -f "$tmp_cql"
+  if [[ $rc -ne 0 ]]; then
+    return "$rc"
+  fi
+  set +e
   run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra nodetool flush loadtest
+  rc=$?
+  set -e
+  return "$rc"
 }
