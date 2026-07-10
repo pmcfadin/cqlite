@@ -171,12 +171,19 @@ jobs:
             BASE_FEATURES="$BASE_FEATURES,bench-internals"
           fi
           # parquet + delta-scan drive the export_throughput writer arms (issue
-          # #1494). Both exist on main, but append them only when the bench they
-          # feed is present on this checkout so an older `main` (pre-#1494) still
-          # resolves features cleanly.
-          if [[ -f cqlite-core/benches/export_throughput.rs ]]; then
-            BASE_FEATURES="$BASE_FEATURES,parquet,delta-scan"
-          fi
+          # #1494), but they ALSO gate conditionally-compiled code paths inside
+          # cqlite-core, so the feature set MUST be IDENTICAL between the PR arm
+          # (BENCH_FEATURES, above) and this base arm for every SHARED bench
+          # (read/write/concurrent_scan/read_while_write/compaction/decode) — or
+          # the pr-vs-base median ratio compares two differently-codegen'd
+          # cqlite-core libraries (apples-to-oranges: false regressions or masked
+          # real ones). Both features predate #1494 (parquet #682, delta-scan
+          # #696) and exist on every in-scope `main`, so append them
+          # UNCONDITIONALLY — exactly as the PR arm does. A base checkout without
+          # export_throughput.rs simply won't run that bench (its --bench target is
+          # guarded above); check_perf_regression.py then reports it SKIP (no data
+          # in 'base'), never a hard fail — a legitimately-new bench stays green.
+          BASE_FEATURES="$BASE_FEATURES,parquet,delta-scan"
           cargo bench -p cqlite-core --features "$BASE_FEATURES" \
             "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
           # CSV export writer (issue #1494) — hosted in cqlite-cli. Include only

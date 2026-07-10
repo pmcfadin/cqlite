@@ -146,9 +146,15 @@ fn bench_flight_do_get(c: &mut Criterion) {
     let (_temp, data_dir) = build_fixture();
     let (server, mut client) = rt.block_on(serve_and_connect(data_dir));
 
+    // Build the JSON ticket ONCE, outside the timed region (issue #1494 roborev):
+    // rebuilding it per iteration would fold serde_json serialization cost into the
+    // measured do_get wall time, polluting the throughput signal. Each iteration
+    // clones the precomputed bytes (do_get_batches consumes the Vec).
+    let ticket = ticket_bytes();
+
     // Non-vacuity / wiring evidence: a full do_get must decode ≥ 1 row over the
     // real transport before we record any measurement.
-    let warm = rt.block_on(do_get_batches(&mut client, ticket_bytes()));
+    let warm = rt.block_on(do_get_batches(&mut client, ticket.clone()));
     let rows: usize = warm.iter().map(|b| b.num_rows()).sum();
     assert!(
         rows >= 1,
@@ -165,7 +171,7 @@ fn bench_flight_do_get(c: &mut Criterion) {
     group.throughput(Throughput::Elements(rows as u64));
     group.bench_function("do_get", |b| {
         b.iter(|| {
-            let batches = rt.block_on(do_get_batches(&mut client, black_box(ticket_bytes())));
+            let batches = rt.block_on(do_get_batches(&mut client, black_box(ticket.clone())));
             let n: usize = batches.iter().map(|bb| bb.num_rows()).sum();
             black_box(n)
         });

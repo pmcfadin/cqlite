@@ -3190,10 +3190,20 @@ dispatch_component() {
   # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap).
   # dhat allocation counts are machine-independent, so these are the hard,
   # load-deterministic per-gate signal for the export/Flight path.
+  #
+  # Run all three dhat lanes UNCONDITIONALLY and aggregate (issue #1494 roborev):
+  # `&&`-chaining short-circuits on the first failure and HIDES the others, costing
+  # an extra triage round. Each lane reports its own result to the log; the
+  # component FAILs if ANY lane failed (rc sticks at 1). --test-threads=1 is
+  # mandatory on every lane (the dhat profiler is a process-global allocator).
+  rc=0
   cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
-    --test memory_budget --test issue_1494_converter_alloc_budget -- --test-threads=1 &&
+    --test memory_budget -- --test-threads=1 || rc=1
+  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+    --test issue_1494_converter_alloc_budget -- --test-threads=1 || rc=1
   cargo test --package cqlite-flight --features dhat-heap \
-    --test issue_1494_producer_mem_budget -- --test-threads=1' ;;
+    --test issue_1494_producer_mem_budget -- --test-threads=1 || rc=1
+  exit $rc' ;;
     integration-tests) run_component integration-tests bash -c '
   cargo test --package cqlite-integration-tests --no-run &&
   cargo test --package cqlite-integration-tests \
