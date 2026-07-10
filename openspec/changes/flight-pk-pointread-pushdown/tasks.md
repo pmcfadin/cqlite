@@ -9,13 +9,15 @@ final roborev → merge-on-green → finalize). Point `CQLITE_DATASETS_ROOT` at 
 `test-data/datasets`.
 
 ## Stage 0 — route detection (no behavior change yet; tests fail on main)
-- [ ] 0.1 Add a resolved routing decision to `ScanSpec` (or a sibling analyzer) computed once from
+- [x] 0.1 Add a resolved routing decision to `ScanSpec` (or a sibling analyzer) computed once from
   the lowered `FilterExpr` (`cqlite-flight/src/filter.rs:103`) + `TableSchema.partition_keys`:
   `PartitionPointRead(key)` / `MultiPartitionPointRead(keys)` / `Scan`. Total & schema-driven — any
   unprovable shape → `Scan`. No byte-pattern inference (#28). (flight-partition-point-read)
-- [ ] 0.2 Red-then-green unit tests: full single-PK equality → point route; composite PK fully
+  — `cqlite-flight/src/point_read.rs`: `PointReadRoute` + `detect_route`.
+- [x] 0.2 Red-then-green unit tests: full single-PK equality → point route; composite PK fully
   bound → point route; partial PK / clustering-only / range / no predicate / `IS NULL` → `Scan`;
   full-PK `IN` → multi-point route. (flight-partition-point-read)
+  — `cqlite-flight/tests/point_read_route.rs` (18 tests green).
 
 ## Stage 1 — core single-partition candidate primitive (public surface)
 - [ ] 1.1 Add the public core primitive (recommended: a `SinglePartitionSource` that `KWayMerger`

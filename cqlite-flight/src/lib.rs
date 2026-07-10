@@ -13,6 +13,7 @@ pub mod cancel;
 pub mod filter;
 pub mod obs;
 pub mod pathsafe;
+pub mod point_read;
 pub mod producer;
 pub mod scan_progress;
 pub mod service;
