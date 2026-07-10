@@ -54,6 +54,25 @@
 //! resolves an offset the real (complete, uncorrupted) file cannot satisfy,
 //! and the assembled point-read merger must still find the row via scan
 //! fallback.
+//!
+//! ## MEDIUM — a chunk window truncated BEFORE `end` must not parse as `Rows`
+//!
+//! [`truncated_chunk_window_degrades_to_scan_fallback_not_partial_rows`] proves
+//! the COMPRESSED counterpart (roborev job 1611, High): when
+//! `pull_chunk_window` hits EOF (its chunk source exhausted) BEFORE the window
+//! covers the full `[offset, end)`, the resulting partial buffer must NOT be
+//! parsed with `at_final_chunk = true` — the compaction parser FLUSHES a
+//! partially-decoded partition, so the code would surface short/wrong rows as
+//! authoritative `Rows(...)` and hide the corruption. The fix tracks whether
+//! the window reached `end`; an incomplete materialization degrades to
+//! `IndexUnavailable` (scan fallback), NEVER `Rows`. The fixture copies the real
+//! LZ4-compressed BTI `test_da/wide_table` (a head partition that spans ~38
+//! 16 KiB chunks), then drops the trailing chunk offsets from its
+//! `CompressionInfo.db` (reducing `chunk_count`) and truncates `Data.db` to the
+//! new last-kept-chunk boundary — so the kept chunks stay CRC-valid while the
+//! target partition's `[offset, end)` can no longer be fully materialized. With
+//! the fix reverted the primitive returns `Rows(<300)` (a partial decode); with
+//! it applied it returns `IndexUnavailable`.
 
 use crate::schema::{Column, KeyColumn, TableSchema};
 use crate::storage::scan_cancel::ScanCancel;
@@ -68,6 +87,7 @@ use crate::storage::write_engine::{
 use crate::types::Value;
 use crate::{Config, Platform};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -355,4 +375,214 @@ fn collect_partitions(mut merger: KWayMerger) -> Vec<usize> {
         out.push(rows.len());
     }
     out
+}
+
+// ---- MEDIUM: a chunk window truncated before `end` (compressed path) --------
+
+/// Schema for the real `test_da/wide_table` fixture
+/// (`pk int, ck int, payload text, PRIMARY KEY (pk, ck)`, LZ4). A valid schema
+/// lets the compaction parser decode partial rows — so a reverted fix produces
+/// `Rows(<300)` (the red proof), not a decode error.
+fn wide_table_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_da".to_string(),
+        table: "wide_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![crate::schema::ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: crate::schema::ClusteringOrder::default(),
+        }],
+        columns: vec![
+            Column {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "payload".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Locate the real `test_da/wide_table-*` SSTable directory (its `Data.db`)
+/// under `CQLITE_DATASETS_ROOT`. Returns `None` (skip, never fail) when the
+/// env var or the local fixture is absent — it is not in the published CI set.
+fn wide_table_data_path() -> Option<PathBuf> {
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)?;
+    let ks_dir = root.join("sstables").join("test_da");
+    for entry in std::fs::read_dir(&ks_dir).ok()?.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("wide_table-")
+        {
+            continue;
+        }
+        for f in std::fs::read_dir(entry.path()).ok()?.flatten() {
+            if f.file_name().to_string_lossy().ends_with("-Data.db") {
+                return Some(f.path());
+            }
+        }
+    }
+    None
+}
+
+/// Copy every component of the SSTable directory holding `data_path` into a
+/// fresh temp dir, returning the temp dir (keep alive) and the COPIED `Data.db`.
+fn copy_sstable_dir(data_path: &std::path::Path) -> (TempDir, PathBuf) {
+    let src_dir = data_path.parent().expect("Data.db has a parent dir");
+    let temp = TempDir::new().unwrap();
+    let mut copied_data = None;
+    for f in std::fs::read_dir(src_dir).unwrap().flatten() {
+        let name = f.file_name();
+        let dst = temp.path().join(&name);
+        std::fs::copy(f.path(), &dst).unwrap();
+        if name.to_string_lossy().ends_with("-Data.db") {
+            copied_data = Some(dst);
+        }
+    }
+    (temp, copied_data.expect("copied a -Data.db"))
+}
+
+/// Sibling `*-CompressionInfo.db` for a copied `Data.db`.
+fn sibling_compression_info(data_path: &std::path::Path) -> PathBuf {
+    let name = data_path.file_name().unwrap().to_string_lossy();
+    let base = name.strip_suffix("-Data.db").unwrap();
+    data_path
+        .parent()
+        .unwrap()
+        .join(format!("{base}-CompressionInfo.db"))
+}
+
+/// A COMPRESSED chunk window that cannot be fully materialized to `end` (EOF
+/// before `end`, a truncated/corrupt SSTable) must degrade to
+/// `IndexUnavailable` — NEVER a partial `Rows(...)` flushed by the compaction
+/// parser at `at_final_chunk = true` (roborev job 1611, High).
+///
+/// Red proof: with the `!reached_end` guard reverted the primitive returns
+/// `Rows(N)` with `N < 300` (a partial, wrong decode surfaced as authoritative);
+/// with it applied it returns `IndexUnavailable`.
+#[tokio::test]
+async fn truncated_chunk_window_degrades_to_scan_fallback_not_partial_rows() {
+    let Some(src_data) = wide_table_data_path() else {
+        eprintln!("Skipping (truncated compressed window): test_da/wide_table fixture absent");
+        return;
+    };
+    let (_temp, data_path) = copy_sstable_dir(&src_data);
+    let schema = wide_table_schema();
+
+    // Resolve the HEAD partition's offset + its authoritative `end` (the successor
+    // partition's start) from the INTACT copy, using the SAME index the primitive
+    // consults — so the truncation point is provably inside `[offset, end)`.
+    let key1 = WEPartitionKey::single("pk", Value::Integer(1))
+        .to_bytes(&schema)
+        .unwrap();
+    let (chunk_len, orig_count, target_off, end, ci_len, offsets) = {
+        let reader = open_reader(&data_path).await;
+        let ci = reader
+            .compression_info
+            .clone()
+            .expect("wide_table is LZ4-compressed and must carry CompressionInfo");
+        let target_off = reader
+            .lookup_partition_via_bti_trie(&key1)
+            .unwrap()
+            .expect("pk=1 must resolve via the intact BTI trie");
+        let end = reader
+            .successor_partition_offset(target_off)
+            .unwrap()
+            .expect("pk=1 is a head partition and must have a successor bound");
+        let ci_len = std::fs::metadata(sibling_compression_info(&data_path))
+            .unwrap()
+            .len() as usize;
+        (
+            ci.chunk_length as usize,
+            ci.chunk_offsets.len(),
+            target_off as usize,
+            end as usize,
+            ci_len,
+            ci.chunk_offsets.clone(),
+        )
+    };
+    assert_eq!(target_off, 0, "pk=1 must be the head partition (offset 0)");
+
+    // Keep only the FIRST half of the chunks the partition spans, so the window
+    // stops well before `end` (the tail chunks become unreachable → EOF).
+    let end_chunk = end.div_ceil(chunk_len);
+    let new_count = (end_chunk / 2).max(2);
+    assert!(new_count < orig_count, "must drop at least one chunk");
+    assert!(
+        new_count * chunk_len < end,
+        "the kept window ({} bytes) must stop strictly before end ({end})",
+        new_count * chunk_len
+    );
+
+    // Truncate Data.db to the new last-kept-chunk boundary (kept chunks stay
+    // CRC-valid) ...
+    let cut = offsets[new_count] as u64;
+    let data_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&data_path)
+        .unwrap();
+    data_file.set_len(cut).unwrap();
+
+    // ... and rewrite CompressionInfo.db to advertise only `new_count` chunks
+    // (drop the trailing 8-byte offset entries; `data_length` stays large). The
+    // offset array is the last `orig_count * 8` bytes; `chunk_count` is the u32 BE
+    // immediately before it.
+    let ci_path = sibling_compression_info(&data_path);
+    let ci_bytes = std::fs::read(&ci_path).unwrap();
+    assert_eq!(ci_bytes.len(), ci_len);
+    let offset_array_start = ci_bytes.len() - orig_count * 8;
+    let count_field_pos = offset_array_start - 4;
+    assert_eq!(
+        u32::from_be_bytes(
+            ci_bytes[count_field_pos..count_field_pos + 4]
+                .try_into()
+                .unwrap()
+        ) as usize,
+        orig_count,
+        "sanity: located chunk_count field must match the parsed offset count"
+    );
+    let mut new_ci = Vec::with_capacity(count_field_pos + 4 + new_count * 8);
+    new_ci.extend_from_slice(&ci_bytes[..count_field_pos]);
+    new_ci.extend_from_slice(&(new_count as u32).to_be_bytes());
+    new_ci.extend_from_slice(&ci_bytes[offset_array_start..offset_array_start + new_count * 8]);
+    std::fs::write(&ci_path, &new_ci).unwrap();
+
+    // Reopen on the truncated copy and probe: the window for `[0, end)` now hits
+    // EOF (chunk `new_count` is gone) before reaching `end`.
+    let reader = open_reader(&data_path).await;
+    let outcome = reader
+        .read_single_partition_for_compaction(&key1, Some(&schema))
+        .await
+        .expect("a truncated chunk window must degrade gracefully, never a hard Err");
+    assert!(
+        matches!(outcome, SinglePartitionCompaction::IndexUnavailable),
+        "a chunk window that hit EOF before end must report IndexUnavailable \
+         (scan-fallback), NEVER a partial Rows(...) flushed as authoritative, got {outcome:?}"
+    );
 }

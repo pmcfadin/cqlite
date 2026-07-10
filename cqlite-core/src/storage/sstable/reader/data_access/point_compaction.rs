@@ -201,10 +201,13 @@ impl SSTableReader {
             .map(|ci| ci.chunk_length as usize)
             .filter(|&len| len > 0);
 
-        let (window, within) = match chunk_length {
+        let (window, within, reached_end) = match chunk_length {
             None => {
                 let whole = self.point_read_whole_section().await?;
-                (whole, offset)
+                // The uncompressed whole-section read is authoritative for the
+                // partition's extent; an offset past the section is caught by the
+                // `within >= window.len()` guard below.
+                (whole, offset, true)
             }
             Some(len) => {
                 let target_chunk = offset / len;
@@ -224,25 +227,30 @@ impl SSTableReader {
                         None => return Ok(None),
                     },
                 };
-                let window = self
+                let (window, reached_end) = self
                     .pull_chunk_window(target_chunk, window_base, end)
                     .await?;
-                (window, within)
+                (window, within, reached_end)
             }
         };
 
-        if within >= window.len() {
+        if within >= window.len() || !reached_end {
             // MEDIUM fix (roborev, issue #2207): the materialized window did NOT
-            // reach the resolved offset — e.g. `pull_chunk_window` hit EOF before
-            // `end`, or a bad/stale end bound, on a truncated or corrupt SSTable.
-            // This is NOT the same signal as a genuine prefix-collision absence
-            // (below): there we decoded the FULL partition and confirmed it is a
-            // different key; here we could not even reach the target bytes to
-            // check. Treating this as "found nothing" would be a false-negative
-            // prune — the SAME wrong-rows class the presence-oracle spine forbids
-            // (spec: only an exact bloom negative may prune). Signal `None` so the
-            // caller degrades to `IndexUnavailable` (scan this SSTable), never a
-            // silent empty.
+            // cover the full resolved `[offset, end)`. Either it never reached the
+            // resolved offset (`within >= window.len()` — a bad/stale end bound),
+            // or `pull_chunk_window` hit EOF before `end` (`!reached_end`) on a
+            // truncated/corrupt SSTable, leaving only a prefix of the partition's
+            // bytes. Parsing that partial buffer with `at_final_chunk = true`
+            // FLUSHES a partially-decoded partition and would surface it as
+            // authoritative `Rows(...)` — hiding corruption and emitting
+            // wrong/short rows. This is NOT the same signal as a genuine
+            // prefix-collision absence (below): there we decoded the FULL
+            // partition and confirmed a different key; here we could not even
+            // materialize the target bytes to check. Treating either as an answer
+            // is a false-negative the presence-oracle spine forbids (spec: only an
+            // exact bloom negative may prune). Signal `None` so the caller degrades
+            // to `IndexUnavailable` (scan this SSTable), never a silent
+            // partial/empty answer.
             return Ok(None);
         }
 
@@ -274,17 +282,22 @@ impl SSTableReader {
     }
 
     /// Pull the decompressed chunks covering `[window_base, end)` starting at
-    /// `target_chunk`, returning the concatenated bytes. Never stitches to EOF: it
-    /// stops as soon as the window reaches `end` (the target partition's exclusive
-    /// end) or the SSTable is exhausted. Mirrors the bounded chunk fetch the
-    /// user-facing single-partition seek uses (issue #953), so a head-of-file
-    /// point read never decompresses the whole `Data.db`.
+    /// `target_chunk`, returning the concatenated bytes plus whether the window
+    /// actually reached `end`. Never stitches to EOF: it stops as soon as the
+    /// window reaches `end` (the target partition's exclusive end) or the SSTable
+    /// is exhausted. Mirrors the bounded chunk fetch the user-facing
+    /// single-partition seek uses (issue #953), so a head-of-file point read never
+    /// decompresses the whole `Data.db`.
+    ///
+    /// The returned `bool` is `false` when the chunks ran out (EOF) before the
+    /// window covered `end` — a truncated/corrupt SSTable whose partial buffer the
+    /// caller MUST NOT parse as authoritative (issue #2207 fail-safe spine).
     async fn pull_chunk_window(
         &self,
         target_chunk: usize,
         window_base: usize,
         end: usize,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, bool)> {
         use super::super::chunk_source::ChunkSource;
         use crate::storage::sstable::compression::Compression;
 
@@ -322,9 +335,14 @@ impl SSTableReader {
                     // chunk span, not the whole file (issue #2207 IMPORTANT-2).
                     super::super::super::work_counters::add_chunk_decompressed();
                 }
-                None => break, // EOF before `end`: parse what we have.
+                None => break, // EOF before `end`: the window is truncated.
             }
         }
-        Ok(window)
+        // Did the materialized window actually cover the full requested extent?
+        // `false` ⇒ the chunk source was exhausted before reaching `end` (a
+        // truncated/corrupt SSTable) — the caller degrades to a scan fallback
+        // rather than parse an incomplete partition (issue #2207 fail-safe).
+        let reached_end = window_base + window.len() >= end;
+        Ok((window, reached_end))
     }
 }
