@@ -69,6 +69,19 @@
 #                      guard has an executing regression net. Builds its own
 #                      WriteEngine fixtures -> needs NO datasets (not in
 #                      DATASET_COMPONENTS).
+#   arrow-parity-guard cargo test -p cqlite-core --features arrow
+#                      --test issue_1495_arrow_accessor_parity (issue #1495, AE1).
+#                      The Arrow accessor-hoist byte-identity parity net. This test
+#                      is `#![cfg(feature = "arrow")]` + Cargo required-features =
+#                      ["arrow"], so NO other gate/CI run compiles it: core-tests
+#                      runs only `--features cli-helpers` (arrow OFF -> skipped) and
+#                      pr-gate's `--lib --all-features` excludes tests/ integration
+#                      targets. Without this component the sole correctness proof of
+#                      the refactor never executes (the #1597/#1618 gate-wiring
+#                      class). Builds in-memory QueryRows -> needs NO datasets (not
+#                      in DATASET_COMPONENTS). Fails CLOSED on a vacuous 0-run:
+#                      asserts the reported test count is > 0 so a renamed/removed
+#                      target can't read as PASS.
 #   memory-budget      cargo test -p cqlite-core --features cli-helpers,dhat-heap
 #                      --test memory_budget -- --test-threads=1 (issue #1565, Epic
 #                      A/A4). dhat allocation/peak-heap regression net over the real
@@ -1024,7 +1037,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -3103,6 +3116,30 @@ run_scan_offload_guard_cmd() {
     -- scan_admission issue_1594_fanout_deadlock
 }
 
+# run_arrow_parity_guard_cmd: the arrow-parity-guard component's command (issue
+# #1495, AE1). Runs the Arrow accessor-hoist byte-identity parity test WITH the
+# `arrow` feature it requires. The test is `#![cfg(feature = "arrow")]` with Cargo
+# `required-features = ["arrow"]`, so it is compiled+run by NO other gate/CI lane
+# (core-tests is cli-helpers-only; pr-gate's --lib --all-features skips tests/).
+# Fails CLOSED on a vacuous 0-run: after the test binary runs we assert the cargo
+# "test result: ... N passed" line reports N > 0, so a renamed, removed, or
+# feature-skipped target reads as FAIL — never a hollow PASS. Builds in-memory
+# QueryRows, so it needs no datasets.
+run_arrow_parity_guard_cmd() {
+  local out
+  out=$(cargo test --package cqlite-core --features arrow \
+    --test issue_1495_arrow_accessor_parity 2>&1) || { echo "$out"; return 1; }
+  echo "$out"
+  # Require at least one test to have actually run (guard against a vacuous
+  # required-features skip that cargo reports as success with 0 tests).
+  local passed
+  passed=$(echo "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' | tail -1)
+  if [ -z "$passed" ] || [ "$passed" -lt 1 ]; then
+    echo "arrow-parity-guard: FAIL — 0 tests ran (target skipped/absent, not a real PASS)" >&2
+    return 1
+  fi
+}
+
 # _pool_selected <name>: honor the --only filter when building the launch list.
 _pool_selected() {
   [ -z "$ONLY" ] && return 0
@@ -3144,6 +3181,7 @@ dispatch_component() {
       --test issue_1578_limit_exempts_max_results \
       --test issue_1578_streaming_aggregate_multigen_parity \
       --test issue_2069_global_aggregate_empty_table ;;
+    arrow-parity-guard) run_component arrow-parity-guard run_arrow_parity_guard_cmd ;;
     memory-budget) run_component memory-budget cargo test --package cqlite-core \
       --features cli-helpers,dhat-heap \
       --test memory_budget -- --test-threads=1 ;;
