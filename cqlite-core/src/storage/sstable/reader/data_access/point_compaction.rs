@@ -316,6 +316,11 @@ impl SSTableReader {
                 Some(decompressed) => {
                     chunk_index += 1;
                     window.extend_from_slice(&decompressed);
+                    // Issue #953/#951 precedent (`bti_pull_decompressed_chunk`):
+                    // count every chunk this seek materializes, so a work-done test
+                    // can prove the window is bounded to the target partition's
+                    // chunk span, not the whole file (issue #2207 IMPORTANT-2).
+                    super::super::super::work_counters::add_chunk_decompressed();
                 }
                 None => break, // EOF before `end`: parse what we have.
             }
