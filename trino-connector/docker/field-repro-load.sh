@@ -38,18 +38,57 @@ load_tiny_table() {
 # partition count; a distinct `--id` per batch gives each its own
 # partition-key namespace, so two batches can never collide.
 #
-# Falls back to a cqlsh INSERT loop ONLY when the stress image itself is not
-# PULLABLE (network-restricted environment) — issue #2289 roborev finding
-# (job 1592): a prior revision fell back on ANY nonzero `docker compose run`
-# exit, which conflated a genuinely missing image with real workload/config
-# errors AND `LOAD_BATCH_TIMEOUT_SECS` kills, silently masking real defects
-# and risking a partially-written stress batch mixing with fallback-loader
-# rows in the SAME table. The image-availability check
-# (`docker compose pull <service>`) runs BEFORE any workload attempt and is
-# the ONLY trigger for the fallback; once the image is confirmed pullable, any
-# subsequent run failure is treated as a real error and FAILS FAST (no
-# fallback, no silent mixing) after cleaning up the in-flight container.
+# Falls back to a cqlsh INSERT loop ONLY when the stress image is CONFIRMED
+# genuinely nonexistent in the registry (`docker compose pull <service>`
+# fails with an unambiguous "manifest unknown" / "not found" / "no such
+# image" error) — issue #2289 roborev finding (job 1592, narrowed further by
+# job 1596): a prior revision fell back on ANY nonzero `docker compose run`
+# exit, then (job 1592) narrowed that to ANY nonzero `docker compose pull`
+# exit — but a pull can ALSO fail on a timeout, an unreachable daemon, an
+# auth/registry-access problem, or any other transient environment issue,
+# none of which mean "this image doesn't exist". Conflating those with the
+# genuinely-missing-image case would mask real regressions (daemon health,
+# network policy, credential drift) behind a silent, slower, shape-changing
+# fallback. `classify_pull_failure` (below) inspects BOTH the exit code
+# (124 = timeout is NEVER a fallback trigger) AND the captured pull output
+# against an ALLOWLIST of unambiguous "does not exist" error strings; only a
+# match falls back — everything else (including "pull access denied ...
+# repository does not exist or may require 'docker login'", Docker's single
+# ambiguous message for BOTH auth failures and missing images, deliberately
+# NOT allowlisted) FAILS the run loudly with the real error text. Once the
+# image is confirmed pullable, any subsequent run failure is treated as a
+# real error and FAILS FAST (no fallback, no silent mixing) after cleaning up
+# the in-flight container.
 #
+# Allowlist patterns (case-insensitive), each unambiguously meaning "this
+# exact image/tag does not exist in the registry" and nothing else — verified
+# against Docker's actual wording for this failure mode:
+#   "manifest unknown"                    — registry has no manifest for the tag
+#   "manifest for .* not found"           — `docker pull`'s own not-found phrasing
+#   "no such image"                       — local-reference-only variant
+# Deliberately EXCLUDED: "pull access denied" / "repository does not exist or
+# may require" (Docker's overloaded auth-OR-missing message — ambiguous, so
+# treated as a real error per the roborev finding's explicit "auth ...
+# ⇒ FAIL" guidance), any DNS/connection/daemon-unreachable text, and anything
+# unrecognized.
+PULL_NOT_FOUND_PATTERN='manifest unknown|manifest for .* not found|no such image'
+
+# Classifies a failed `docker compose pull`'s outcome. Args: $1 = exit code,
+# $2 = path to the captured pull output. Prints one of `not-found` (legitimate
+# fallback trigger) or `real-error` (must FAIL loudly, never fall back).
+classify_pull_failure() {
+  local rc="$1" outfile="$2"
+  if [[ "$rc" -eq 124 ]]; then
+    echo "real-error"
+    return 0
+  fi
+  if grep -Eiq "$PULL_NOT_FOUND_PATTERN" "$outfile" 2>/dev/null; then
+    echo "not-found"
+  else
+    echo "real-error"
+  fi
+}
+
 # Every invocation is wrapped in `run_with_timeout` (issue #2233 discipline
 # extended to data loading, not just queries — a stuck/misconfigured stress
 # run must fail loudly in minutes, not hang the whole harness): a batch that
@@ -116,11 +155,15 @@ load_big_keyvalue_table() {
   log "load field-shaped big table: loadtest.keyvalue, target >=$((BIG_TABLE_PARTITIONS_PER_BATCH * BIG_TABLE_BATCHES)) partitions across $BIG_TABLE_BATCHES flushes"
 
   log "probing cassandra-easy-stress image availability (docker compose pull, bound ${NETWORK_PULL_TIMEOUT_SECS}s, no workload run yet)"
-  if ! run_with_timeout "$NETWORK_PULL_TIMEOUT_SECS" "${compose[@]}" --profile loadtest pull cassandra-easy-stress >/dev/null 2>&1; then
-    log "WARNING: cassandra-easy-stress image is NOT pullable (network-restricted environment) — falling back to a cqlsh INSERT loop (SLOW, last resort)"
-    record_loader_provenance "cqlsh-fallback (cassandra-easy-stress image unavailable)"
-    load_big_keyvalue_table_fallback "${compose[@]}"
-  else
+  local pull_outfile pull_rc
+  pull_outfile="$(mktemp)"
+  set +e
+  run_with_timeout "$NETWORK_PULL_TIMEOUT_SECS" "${compose[@]}" --profile loadtest pull cassandra-easy-stress >"$pull_outfile" 2>&1
+  pull_rc=$?
+  set -e
+
+  if [[ "$pull_rc" -eq 0 ]]; then
+    rm -f "$pull_outfile"
     for batch in $(seq 1 "$BIG_TABLE_BATCHES"); do
       local id
       id="$(printf 'fr%02d' "$batch")"
@@ -146,6 +189,25 @@ load_big_keyvalue_table() {
       run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra nodetool flush loadtest
     done
     record_loader_provenance "cassandra-easy-stress ($BIG_TABLE_BATCHES batch(es), $BIG_TABLE_PARTITIONS_PER_BATCH ops each)"
+  else
+    local pull_class
+    pull_class="$(classify_pull_failure "$pull_rc" "$pull_outfile")"
+    if [[ "$pull_class" == "not-found" ]]; then
+      log "cassandra-easy-stress image confirmed NOT FOUND in the registry (unambiguous manifest/not-found error, rc=$pull_rc) — falling back to a cqlsh INSERT loop (SLOW, last resort)"
+      record_loader_provenance "cqlsh-fallback (cassandra-easy-stress image confirmed not-found: $(head -3 "$pull_outfile" | tr '\n' ' '))"
+      rm -f "$pull_outfile"
+      load_big_keyvalue_table_fallback "${compose[@]}"
+    else
+      # Any other pull failure (timeout rc=124, daemon-unreachable, auth, or
+      # anything not on the not-found allowlist) is a REAL environment
+      # problem — FAIL loudly with the actual error text, never silently
+      # fall back (issue #2289 roborev finding, job 1596).
+      echo "FATAL: cassandra-easy-stress image pull failed (rc=$pull_rc) with an error NOT recognized as 'image genuinely does not exist' — treating this as a real environment problem (daemon/network/auth/timeout), NOT falling back. Full pull output:" >&2
+      cat "$pull_outfile" >&2
+      record_loader_provenance "cassandra-easy-stress (PULL FAILED, unclassified error rc=$pull_rc — NOT falling back to avoid masking a real environment problem; see run log for the full pull output)"
+      rm -f "$pull_outfile"
+      exit 1
+    fi
   fi
 
   # `nodetool tablestats` can comma-format the estimate (e.g. "121,940") — issue
@@ -154,7 +216,9 @@ load_big_keyvalue_table() {
   # silently picks the LAST group ("940"), not the real value, which would
   # false-FATAL a genuinely >=100k-partition table. Strip commas from the whole
   # line BEFORE extracting digits so a comma-formatted estimate parses as one
-  # number.
+  # number. Common tail for BOTH the cassandra-easy-stress success path AND
+  # the not-found fallback path above (the real-error path already `exit 1`s
+  # and never reaches here).
   local estimate
   estimate="$(run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra nodetool tablestats loadtest.keyvalue 2>&1 \
     | grep -i "Number of partitions" | tr -d ',' | grep -oE '[0-9]+' | tail -1 || true)"
