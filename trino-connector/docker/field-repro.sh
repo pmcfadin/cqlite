@@ -12,9 +12,19 @@
 #   FLIGHT_PLATFORM=linux/amd64 trino-connector/docker/field-repro.sh
 #   trino-connector/docker/field-repro.sh --inject-failure=tiny   # see below
 #
-# Exit code 0 = both pinned checks passed (or, for --inject-failure, the
-# capture-on-fail mechanism fired as expected).
+# Exit codes:
+#   0 = both pinned checks passed (or, for --inject-failure, the capture-on-
+#       fail mechanism fired as expected AND was proven end-to-end, pcap
+#       included).
+#   1 = a check failed / capture-on-fail was demonstrably broken.
+#   2 = usage error (unknown argument).
+#   3 = --inject-failure ONLY: SKIPPED — the debug-log/Trino-JSON half of
+#       capture-on-fail fired, but no tcpdump capture container could be
+#       started on this host this run, so the pcap half was never exercised.
+#       This is DISTINCT from both PASS(0) and FAIL(1) — never conflate a
+#       host that couldn't prove the mechanism with a host that proved it.
 #
+
 # ── Tiering (read before escalating off a laptop) ───────────────────────────
 # 1. Docker (THIS script) — fast local discovery/iteration. Single node, single
 #    process per role. Good for: does the bug reproduce at all, does a fix
@@ -46,35 +56,12 @@ DOCKER_DIR="$ROOT/trino-connector/docker"
 COMPOSE=(docker compose -f "$DOCKER_DIR/docker-compose.yml" -f "$DOCKER_DIR/docker-compose.field-repro-override.yml")
 FAILURES=0
 
-# `FLIGHT_PLATFORM` toggle (deliverable 4): default to whatever the Docker
-# daemon's own OS/Arch is (a documented no-op override), so
-# `docker-compose.field-repro-override.yml`'s `platform: ${FLIGHT_PLATFORM}`
-# always has a value BEFORE any `${COMPOSE[@]}` call (even `down`, which still
-# parses the whole compose file). `FLIGHT_PLATFORM=linux/amd64` on a
-# non-amd64 host cross-builds cqlite-flight under QEMU emulation — a
-# decode/framing check only; NOT a throughput/backpressure-timing claim
-# (documented at file top).
-if [[ -z "${FLIGHT_PLATFORM:-}" ]]; then
-  native_os_arch="$(docker version -f '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null || echo linux/amd64)"
-  export FLIGHT_PLATFORM="$native_os_arch"
-fi
-echo "── FLIGHT_PLATFORM=$FLIGHT_PLATFORM (native unless overridden) ──"
-
-# `--inject-failure=<check>` deliberately makes ONE check fail (a query against
-# a table that does not exist) so the capture-on-fail path can be proven to
-# actually fire end-to-end, without depending on the real #2264/#2193 bugs
-# reproducing on this run (the field-vs-local shape gaps this issue documents
-# mean neither bug is guaranteed to reproduce locally every run). Not part of
-# a normal run.
-INJECT_FAILURE=""
-for arg in "$@"; do
-  case "$arg" in
-    --inject-failure=*) INJECT_FAILURE="${arg#--inject-failure=}" ;;
-    *) echo "unknown argument: $arg" >&2; exit 2 ;;
-  esac
-done
-
-# ── timeout discipline (issue #2233, same pattern as e2e-test.sh) ───────────
+# ── timeout discipline (issue #2233, same pattern as e2e-test.sh) — placed
+# FIRST, before anything else in this file, so `run_with_timeout` is
+# available to EVERY subsequent command including the `FLIGHT_PLATFORM`
+# auto-detect immediately below (issue #2289 roborev finding, job 1595: this
+# block used to sit further down, so the `docker version` autodetect call ran
+# unbounded before `run_with_timeout` even existed yet). ─────────────────────
 QUERY_TIMEOUT_SECS=180
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 run_with_timeout() {
@@ -99,6 +86,21 @@ run_with_timeout() {
 
 log() { echo "── $* ──"; }
 
+# ── shared timeout tiers (issue #2289 roborev finding, job 1595 CLASS SWEEP:
+# every external-network or potentially-blocking command in the five harness
+# files must run under SOME bound). Grouped into a small number of reused
+# tiers — see this round's commit message / the roborev-response report for
+# the full per-call-site inventory — rather than one bespoke constant per call
+# site, to keep this file's length manageable. ───────────────────────────────
+NETWORK_PULL_TIMEOUT_SECS=300              # docker compose pull; any `docker run` whose image may not be cached yet (tcpdump/curl/JDK-builder images)
+STACK_UP_TIMEOUT_SECS=900                  # docker compose up -d --build: may pull Cassandra/Sidecar/Trino AND build cqlite-flight; generous for a cold QEMU (amd64-emulated) build
+DOCKER_CTL_TIMEOUT_SECS=30                 # fast local docker/compose control-plane calls against an already-running daemon: ps, inspect, rm, kill, cp, logs
+CASSANDRA_CTL_TIMEOUT_SECS=60              # local `exec` calls against the Cassandra container that normally finish quickly (nodetool flush/tablestats, find) but could stall if Cassandra itself is unresponsive
+TEARDOWN_TIMEOUT_SECS=120                  # docker compose down
+GRADLE_HOST_BUILD_TIMEOUT_SECS=600         # host-side ./gradlew installPlugin (may cold-download Gradle/deps)
+GRADLE_CONTAINER_BUILD_TIMEOUT_SECS=900    # containerized JDK 25 fallback build (cold image pull + cold Gradle/deps download + build)
+PCAP_READ_TIMEOUT_SECS=60                  # reading back an already-captured pcap (image is guaranteed cached from this same run's earlier capture)
+
 # Runs a query and returns its output; returns 124 on timeout WITHOUT exiting
 # the script (unlike e2e-test.sh's `trino()`, which treats a timeout as fatal)
 # — a #2264-class hang timing out IS the expected/interesting outcome here,
@@ -112,6 +114,34 @@ trino_query() {
   echo "$out"
   return "$rc"
 }
+
+# `FLIGHT_PLATFORM` toggle (deliverable 4): default to whatever the Docker
+# daemon's own OS/Arch is (a documented no-op override), so
+# `docker-compose.field-repro-override.yml`'s `platform: ${FLIGHT_PLATFORM}`
+# always has a value BEFORE any `${COMPOSE[@]}` call (even `down`, which still
+# parses the whole compose file). `FLIGHT_PLATFORM=linux/amd64` on a
+# non-amd64 host cross-builds cqlite-flight under QEMU emulation — a
+# decode/framing check only; NOT a throughput/backpressure-timing claim
+# (documented at file top).
+if [[ -z "${FLIGHT_PLATFORM:-}" ]]; then
+  native_os_arch="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker version -f '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null || echo linux/amd64)"
+  export FLIGHT_PLATFORM="$native_os_arch"
+fi
+echo "── FLIGHT_PLATFORM=$FLIGHT_PLATFORM (native unless overridden) ──"
+
+# `--inject-failure=<check>` deliberately makes ONE check fail (a query against
+# a table that does not exist) so the capture-on-fail path can be proven to
+# actually fire end-to-end, without depending on the real #2264/#2193 bugs
+# reproducing on this run (the field-vs-local shape gaps this issue documents
+# mean neither bug is guaranteed to reproduce locally every run). Not part of
+# a normal run.
+INJECT_FAILURE=""
+for arg in "$@"; do
+  case "$arg" in
+    --inject-failure=*) INJECT_FAILURE="${arg#--inject-failure=}" ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 
 # ── artifact capture-on-fail (issue #2289 deliverable 3) ────────────────────
 ARTIFACTS_ROOT="$DOCKER_DIR/field-repro-artifacts"
@@ -129,7 +159,7 @@ ARTIFACTS_ROOT="$DOCKER_DIR/field-repro-artifacts"
 TCPDUMP_IMAGE="${FIELD_REPRO_TCPDUMP_IMAGE:-nicolaka/netshoot:latest}"
 CASSANDRA_CID=""
 resolve_cassandra_cid() {
-  CASSANDRA_CID="$("${COMPOSE[@]}" ps -q cassandra 2>/dev/null | head -1)" || true
+  CASSANDRA_CID="$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" "${COMPOSE[@]}" ps -q cassandra 2>/dev/null | head -1)" || true
 }
 
 # Starts a tcpdump capture of Flight traffic (port 8815) in a container sharing
@@ -141,18 +171,21 @@ start_tcpdump() {
   local name="$1"
   [[ -z "$CASSANDRA_CID" ]] && return 0
   local cname="field-repro-tcpdump-${name}"
-  docker rm -f "$cname" >/dev/null 2>&1 || true
-  if ! docker run -d --name "$cname" --network "container:$CASSANDRA_CID" \
+  run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
+  # `docker run` implicitly pulls `$TCPDUMP_IMAGE` if not already cached — a
+  # real network operation, bounded at the NETWORK_PULL tier (issue #2289
+  # roborev finding, job 1595 class sweep).
+  if ! run_with_timeout "$NETWORK_PULL_TIMEOUT_SECS" docker run -d --name "$cname" --network "container:$CASSANDRA_CID" \
       "$TCPDUMP_IMAGE" tcpdump -i any -U -w /cap.pcap port 8815 \
       >/tmp/field-repro-tcpdump.log 2>&1; then
-    docker rm -f "$cname" >/dev/null 2>&1 || true
+    run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
     return 0
   fi
   sleep 0.5
-  if [[ "$(docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" == "true" ]]; then
+  if [[ "$(run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null)" == "true" ]]; then
     echo "$cname"
   else
-    docker rm -f "$cname" >/dev/null 2>&1 || true
+    run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
   fi
 }
 
@@ -162,12 +195,12 @@ start_tcpdump() {
 stop_tcpdump() {
   local cname="$1" pcap="${2:-}"
   [[ -z "$cname" ]] && return 0
-  docker kill -s INT "$cname" >/dev/null 2>&1 || true
+  run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker kill -s INT "$cname" >/dev/null 2>&1 || true
   sleep 0.5
   if [[ -n "$pcap" ]]; then
-    docker cp "$cname:/cap.pcap" "$pcap" >/dev/null 2>&1 || true
+    run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker cp "$cname:/cap.pcap" "$pcap" >/dev/null 2>&1 || true
   fi
-  docker rm -f "$cname" >/dev/null 2>&1 || true
+  run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
 }
 
 # Bound for the post-failure Trino metadata query below — deliberately SHORT
@@ -193,7 +226,7 @@ capture_artifacts() {
   local artdir="$ARTIFACTS_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-${check_name}"
   mkdir -p "$artdir"
   LAST_ARTIFACT_DIR="$artdir"
-  "${COMPOSE[@]}" logs cqlite-flight --no-color > "$artdir/cqlite-flight-debug.log" 2>&1 || true
+  run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" "${COMPOSE[@]}" logs cqlite-flight --no-color > "$artdir/cqlite-flight-debug.log" 2>&1 || true
   if [[ -n "$pcap" && -f "$pcap" ]]; then
     # The pcap was copied out of the capture container by `docker cp` and is
     # already owned by us — no `sudo chown` needed (issue #2289 arm64/macOS).
@@ -259,12 +292,12 @@ run_check() {
 
 cleanup() {
   log "tearing down"
-  "${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
+  run_with_timeout "$TEARDOWN_TIMEOUT_SECS" "${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
 }
 trap cleanup EXIT
 
 log "clean slate (reproducible run)"
-"${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
+run_with_timeout "$TEARDOWN_TIMEOUT_SECS" "${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
 mkdir -p "$ARTIFACTS_ROOT"
 
 # Belt-and-suspenders alongside `LAST_ARTIFACT_DIR` (issue #2289 roborev
@@ -279,10 +312,17 @@ fi
 log "build connector plugin (shared with e2e-test.sh's build step)"
 PLUGIN_DIR="$ROOT/trino-connector/build/plugin/cqlite_flight"
 rm -rf "$PLUGIN_DIR"
-(cd "$ROOT/trino-connector" && ./gradlew --no-daemon installPlugin) || true
+# Host-side Gradle may cold-download Gradle itself + dependencies over the
+# network on a fresh checkout — bounded at the GRADLE_HOST_BUILD tier (issue
+# #2289 roborev finding, job 1595 class sweep). Run via `bash -c` so the `cd`
+# stays scoped to this one invocation without needing a real subshell (which
+# `run_with_timeout`'s positional-arg exec cannot wrap directly).
+run_with_timeout "$GRADLE_HOST_BUILD_TIMEOUT_SECS" bash -c "cd \"$ROOT/trino-connector\" && ./gradlew --no-daemon installPlugin" || true
 if ! ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1; then
   log "host Gradle produced no plugin; building in a JDK 25 container"
-  docker run --rm \
+  # Cold image pull + cold Gradle/deps download + build — the most
+  # network-exposed step in the whole harness, bounded generously.
+  run_with_timeout "$GRADLE_CONTAINER_BUILD_TIMEOUT_SECS" docker run --rm \
     -v "$ROOT/trino-connector":/work -w /work \
     -v cqlite-gradle-cache:/root/.gradle \
     eclipse-temurin:25-jdk \
@@ -291,7 +331,10 @@ fi
 ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1 || { echo "plugin build failed: no jar in $PLUGIN_DIR"; exit 1; }
 
 log "bring up stack (builds cqlite-flight image; waits for healthy deps)"
-"${COMPOSE[@]}" up -d --build
+# May pull Cassandra/Sidecar/Trino images AND build cqlite-flight (a genuine
+# Rust compile, slower still under FLIGHT_PLATFORM=linux/amd64 QEMU emulation)
+# — bounded generously at the STACK_UP tier rather than left unbounded.
+run_with_timeout "$STACK_UP_TIMEOUT_SECS" "${COMPOSE[@]}" up -d --build
 
 resolve_cassandra_cid
 if [[ -n "$CASSANDRA_CID" ]]; then
@@ -395,15 +438,26 @@ if [[ -n "$INJECT_FAILURE" ]]; then
   fi
   missing=()
   [[ -f "$latest/cqlite-flight-debug.log" ]] || missing+=("cqlite-flight-debug.log")
-  # The pcap is required only when THIS check's capture container actually
-  # started (`LAST_CAPTURE_STARTED`, set by `run_check`) — not merely when a
-  # Cassandra container id was resolvable. `CASSANDRA_CID` non-empty does not
-  # guarantee the capture container itself started (image pull failure,
-  # air-gapped host, arch mismatch); demanding a pcap on that weaker signal
-  # would false-FAIL a legitimately capture-less self-test run.
-  if [[ "$LAST_CAPTURE_STARTED" -eq 1 ]]; then
-    [[ -f "$latest/flight-8815.pcap" ]] || missing+=("flight-8815.pcap")
+  if [[ ${#missing[@]} -ne 0 ]]; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: $latest is missing: ${missing[*]}"
+    exit 1
   fi
+  # Issue #2289 roborev finding (job 1595): when THIS check's capture
+  # container never started (`LAST_CAPTURE_STARTED=0` — image pull failure,
+  # air-gapped host, arch mismatch), the pcap requirement below was
+  # correctly SKIPPED (job 1592's fix), but execution then fell straight
+  # through to the "✅ CAPTURE-ON-FAIL PROVEN" banner regardless — an
+  # air-gapped/first-run host would "pass" this self-test without the pcap
+  # half of capture-on-fail ever being exercised. A capture-less run is a
+  # DISTINCT, non-PROVEN outcome: print an explicit SKIP verdict and exit
+  # with a DEDICATED non-zero code (3 — never 0/PASS, never 1/FAIL, so a
+  # caller can tell "the mechanism could not be exercised on this host" apart
+  # from both "it works" and "it's broken").
+  if [[ "$LAST_CAPTURE_STARTED" -ne 1 ]]; then
+    echo "⚠️  CAPTURE-ON-FAIL SKIPPED: no tcpdump capture container could be started on this host this run (see the capture-start warning earlier in this run's output) — the debug-log/Trino-JSON half of capture-on-fail DID fire ($latest), but the pcap half was NEVER EXERCISED, so this is not proof the capture path works end-to-end. Re-run with a working \$TCPDUMP_IMAGE / network access to actually prove it." >&2
+    exit 3
+  fi
+  [[ -f "$latest/flight-8815.pcap" ]] || missing+=("flight-8815.pcap")
   if [[ ${#missing[@]} -ne 0 ]]; then
     echo "❌ CAPTURE-ON-FAIL BROKEN: $latest is missing: ${missing[*]}"
     exit 1
@@ -412,19 +466,16 @@ if [[ -n "$INJECT_FAILURE" ]]; then
   # used (`$TCPDUMP_IMAGE`), never a host-installed `tcpdump` binary (issue
   # #2289 roborev finding, job 1592: relying on `command -v tcpdump` meant a
   # host WITHOUT the binary silently left `pkts="?"` and the check passed
-  # regardless of actual content — a genuinely empty/broken 0-packet pcap was
-  # indistinguishable from "couldn't check"). When `LAST_CAPTURE_STARTED`
-  # is 1, a capture container ran and produced a pcap file, so pkts>0 is now
-  # REQUIRED: 0 packets means the capture path ran but recorded nothing
-  # useful, which is exactly the false-pass this self-test exists to prevent.
-  pkts="n/a (no capture attempted this run)"
-  if [[ "$LAST_CAPTURE_STARTED" -eq 1 && -f "$latest/flight-8815.pcap" ]]; then
-    pkts="$(docker run --rm -v "$latest":/cap:ro "$TCPDUMP_IMAGE" tcpdump -r /cap/flight-8815.pcap 2>/dev/null | wc -l | tr -d ' ')"
-    pkts="${pkts:-0}"
-    if [[ "$pkts" -eq 0 ]]; then
-      echo "❌ CAPTURE-ON-FAIL BROKEN: $latest/flight-8815.pcap has 0 packets even though the capture container started — a zero-packet pcap is not evidence the capture path actually recorded Flight traffic"
-      exit 1
-    fi
+  # regardless of actual content). 0 packets is a hard self-test FAILURE —
+  # the capture path ran but recorded nothing useful, which is exactly the
+  # false-pass this self-test exists to prevent. Bounded at PCAP_READ_TIMEOUT
+  # (the image is guaranteed cached from this same run's earlier capture, so
+  # this bound only needs to cover reading the file back, not a pull).
+  pkts="$(run_with_timeout "$PCAP_READ_TIMEOUT_SECS" docker run --rm -v "$latest":/cap:ro "$TCPDUMP_IMAGE" tcpdump -r /cap/flight-8815.pcap 2>/dev/null | wc -l | tr -d ' ')"
+  pkts="${pkts:-0}"
+  if [[ "$pkts" -eq 0 ]]; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: $latest/flight-8815.pcap has 0 packets even though the capture container started — a zero-packet pcap is not evidence the capture path actually recorded Flight traffic"
+    exit 1
   fi
   echo "✅ CAPTURE-ON-FAIL PROVEN: forced failure produced $latest"
   echo "   (cqlite-flight-debug.log + flight-8815.pcap [${pkts} pkts] + trino-recent-queries.json)"
