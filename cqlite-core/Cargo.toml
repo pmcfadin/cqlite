@@ -175,10 +175,13 @@ pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 mach2 = "0.4"
 
 # Arrow-conversion accessor-hoist parity guard (issue #1495, AE1). Declared with
-# required-features so the agent gate's blast-radius scoping compiles+RUNS it WITH
-# the `arrow` feature it needs — without this, `#![cfg(feature = "arrow")]` would
-# make it a vacuously-passing empty binary under the default `cli-helpers`-only
-# scoped-test invocation.
+# required-features = ["arrow"] because it is `#![cfg(feature = "arrow")]`, so it
+# only compiles+runs when the arrow feature is on. The full agent gate runs it via
+# the dedicated `arrow-parity-guard` component (scripts/agent-gate.sh:
+# `cargo test -p cqlite-core --features arrow --test issue_1495_arrow_accessor_parity`),
+# which is its ONLY automated executor and fails closed on a vacuous 0-run — the
+# default `cli-helpers`-only core-tests run and pr-gate's `--lib --all-features`
+# both skip this integration target.
 [[test]]
 name = "issue_1495_arrow_accessor_parity"
 required-features = ["arrow"]
