@@ -151,9 +151,31 @@ check_2193_tiny_decode() {
 #   2. then a nonexistent-table query to force the non-zero return that trips
 #      capture-on-fail.
 check_inject_failure() {
-  log "--inject-failure step 1/2: real SELECT * FROM cassandra_easy_stress.keyvalue (drives genuine :8815 Flight traffic for the pcap)"
-  "${COMPOSE[@]}" exec -T trino trino --execute 'SELECT * FROM cqlite.cassandra_easy_stress.keyvalue' 2>&1 || true
-  log "--inject-failure step 2/2: querying a nonexistent table to deliberately force a failure"
-  "${COMPOSE[@]}" exec -T trino trino --execute 'SELECT * FROM cqlite.fieldrepro.does_not_exist' 2>&1 || true
+  # Issue #2289 roborev finding (job 1592): both calls previously ran as bare
+  # `${COMPOSE[@]} exec -T trino trino --execute ...` with no timeout — an
+  # unbounded call here would hang the SELF-TEST that exists to validate the
+  # harness's own failure/hang handling (the exact bug class the harness
+  # exists to catch). Route both through `trino_query()`, the same bounded
+  # (`run_with_timeout "$QUERY_TIMEOUT_SECS" ...`, never-fatal-on-timeout)
+  # helper the pinned checks use; a timeout (rc=124) on either step is treated
+  # as its own failure signal but never blocks the function's guaranteed
+  # `return 1` below.
+  log "--inject-failure step 1/2: real SELECT * FROM cassandra_easy_stress.keyvalue (drives genuine :8815 Flight traffic for the pcap), bound ${QUERY_TIMEOUT_SECS}s"
+  local step1_out step1_rc
+  step1_out="$(trino_query 'SELECT * FROM cqlite.cassandra_easy_stress.keyvalue')"
+  step1_rc=$?
+  echo "$step1_out" >&2
+  if [[ $step1_rc -eq 124 ]]; then
+    echo "--inject-failure step 1/2 TIMED OUT after ${QUERY_TIMEOUT_SECS}s (unexpected for this normally-fast real query) — continuing to step 2 so capture-on-fail still gets a chance to fire" >&2
+  fi
+
+  log "--inject-failure step 2/2: querying a nonexistent table to deliberately force a failure, bound ${QUERY_TIMEOUT_SECS}s"
+  local step2_out step2_rc
+  step2_out="$(trino_query 'SELECT * FROM cqlite.fieldrepro.does_not_exist')"
+  step2_rc=$?
+  echo "$step2_out" >&2
+  if [[ $step2_rc -eq 124 ]]; then
+    echo "--inject-failure step 2/2 TIMED OUT after ${QUERY_TIMEOUT_SECS}s (also satisfies the forced-failure this self-test expects)" >&2
+  fi
   return 1
 }
