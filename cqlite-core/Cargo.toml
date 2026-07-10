@@ -174,6 +174,15 @@ pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 mach2 = "0.4"
 
+# Arrow-conversion accessor-hoist parity guard (issue #1495, AE1). Declared with
+# required-features so the agent gate's blast-radius scoping compiles+RUNS it WITH
+# the `arrow` feature it needs — without this, `#![cfg(feature = "arrow")]` would
+# make it a vacuously-passing empty binary under the default `cli-helpers`-only
+# scoped-test invocation.
+[[test]]
+name = "issue_1495_arrow_accessor_parity"
+required-features = ["arrow"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false

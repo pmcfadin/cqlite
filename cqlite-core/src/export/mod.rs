@@ -38,6 +38,12 @@
 #[cfg(feature = "arrow")]
 pub mod arrow_convert;
 
+// Per-column accessor resolution for Arrow conversion (issue #1495, AE1): resolves
+// each schema column once and transposes rows into per-column value slices,
+// killing the per-cell `values.get(name)` string-hash lookup (parser epic J1).
+#[cfg(feature = "arrow")]
+pub(crate) mod arrow_columnar;
+
 // CQL decimal rescaling for Arrow/Parquet export (split out of `arrow_convert`,
 // epic #1116; issue #1755 bounded/fail-closed fix).
 #[cfg(feature = "arrow")]
