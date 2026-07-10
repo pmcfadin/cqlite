@@ -100,6 +100,7 @@ TEARDOWN_TIMEOUT_SECS=120                  # docker compose down
 GRADLE_HOST_BUILD_TIMEOUT_SECS=600         # host-side ./gradlew installPlugin (may cold-download Gradle/deps)
 GRADLE_CONTAINER_BUILD_TIMEOUT_SECS=900    # containerized JDK 25 fallback build (cold image pull + cold Gradle/deps download + build)
 PCAP_READ_TIMEOUT_SECS=60                  # reading back an already-captured pcap (image is guaranteed cached from this same run's earlier capture)
+TCPDUMP_EXIT_WAIT_TIMEOUT_SECS=15          # docker wait for the capture container to actually exit after SIGINT, before copying its pcap out (issue #2289 roborev finding, job 1599) — generous for tcpdump to flush+close a short-lived capture, bounded so a container that never exits can't hang teardown
 
 # Runs a query and returns its output; returns 124 on timeout WITHOUT exiting
 # the script (unlike e2e-test.sh's `trino()`, which treats a timeout as fatal)
@@ -192,12 +193,36 @@ start_tcpdump() {
 # Stops the capture container, copies /cap.pcap out to the host path $2 (if a
 # handle was given), and removes the container. No sudo — the copied file is
 # owned by the invoking user.
+#
+# Waits for CONFIRMED container exit (`docker wait`) before copying, rather
+# than a fixed sleep (issue #2289 roborev finding, job 1599): a fixed 0.5s
+# sleep after SIGINT is not a completion signal — on a slow/loaded host
+# tcpdump may not have flushed + closed /cap.pcap yet, so the copied-out pcap
+# could be truncated/empty, producing flaky capture-on-fail proof and false
+# negatives in --inject-failure. `docker wait` blocks until the container has
+# actually exited (tcpdump received SIGINT, flushed its write buffer, and
+# terminated), bounded at TCPDUMP_EXIT_WAIT_TIMEOUT_SECS so a container that
+# never exits can't hang teardown. Guarded per the round-7 (job 1598)
+# set +e-free `|| rc=$?` pattern — this script runs under `set -euo
+# pipefail`, and a bare failing substitution here would abort the whole
+# script raw instead of reaching a deterministic message.
+#
+# On a timed-out/failed wait, the copy is SKIPPED entirely (never "copy a
+# maybe-truncated pcap and call it proof") — the pcap then simply does not
+# exist at the destination path, which the EXISTING downstream
+# "flight-8815.pcap missing" check (in the --inject-failure verdict and
+# capture_artifacts's normal-failure path) already turns into a correctly
+# FAILED/BROKEN verdict, so no separate hard-failure plumbing is needed here.
 stop_tcpdump() {
   local cname="$1" pcap="${2:-}"
   [[ -z "$cname" ]] && return 0
   run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker kill -s INT "$cname" >/dev/null 2>&1 || true
-  sleep 0.5
-  if [[ -n "$pcap" ]]; then
+  local wait_rc=0
+  local exit_code
+  exit_code="$(run_with_timeout "$TCPDUMP_EXIT_WAIT_TIMEOUT_SECS" docker wait "$cname" 2>/dev/null)" || wait_rc=$?
+  if [[ $wait_rc -ne 0 || -z "$exit_code" ]]; then
+    echo "WARNING: stop_tcpdump: '$cname' did not confirm exit within ${TCPDUMP_EXIT_WAIT_TIMEOUT_SECS}s after SIGINT (rc=$wait_rc) — the pcap may be truncated; SKIPPING the copy rather than presenting possibly-incomplete data as proof" >&2
+  elif [[ -n "$pcap" ]]; then
     run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker cp "$cname:/cap.pcap" "$pcap" >/dev/null 2>&1 || true
   fi
   run_with_timeout "$DOCKER_CTL_TIMEOUT_SECS" docker rm -f "$cname" >/dev/null 2>&1 || true
