@@ -733,9 +733,14 @@ fn present_but_unloadable_index_warns_with_summary() {
         std::fs::write(&index_path, []).unwrap();
 
         let reader = open_reader(&data_path).await;
+        // Index.db is present-but-unloadable (index_reader None), Summary.db loaded.
+        // The capability probe (issue #2302 job 1613) reports the HONEST degraded
+        // answer — NO usable random-access index — because Summary.db alone never
+        // gates the fast path; the reader WARNs and falls back to sequential_scan.
         assert!(
-            reader.has_partition_index(),
-            "Summary.db must still load (present-but-unusable Index.db path)"
+            !reader.has_partition_index(),
+            "present-but-unloadable Index.db (Summary loaded) must report NO usable \
+             random-access index (issue #2302, roborev job 1613)"
         );
         let rows = reader.iterate_all_partitions().await.unwrap();
         n_rows = rows.len();
@@ -948,11 +953,16 @@ fn summary_present_index_absent_warns_and_falls_back() {
         std::fs::remove_file(&index_path).unwrap();
 
         let reader = open_reader(&data_path).await;
-        // Summary.db still loaded → has_partition_index() reports true, yet the
-        // full-index path is unavailable (Index.db gone): the degraded case.
+        // Summary.db still loaded, but the full-index random-read path is
+        // unavailable (Index.db gone): the degraded case. The capability probe
+        // (issue #2302 job 1613) must NOT lie that a fast path exists — a present
+        // Summary.db never gates the random-access route, so the probe reports
+        // false and the reader will WARN + fall back to sequential_scan below.
         assert!(
-            reader.has_partition_index(),
-            "Summary.db must still load (present-Summary / absent-Index path)"
+            !reader.has_partition_index(),
+            "present-Summary / absent-Index BIG reader must report NO usable \
+             random-access index — Summary.db alone never gates the fast path \
+             (issue #2302, roborev job 1613)"
         );
         let rows = reader.iterate_all_partitions().await.unwrap();
         n_rows = rows.len();

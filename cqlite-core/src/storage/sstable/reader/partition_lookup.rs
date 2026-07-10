@@ -655,33 +655,34 @@ impl SSTableReader {
             .await
     }
 
-    /// Whether this reader has a random-access partition index — a `Summary.db`
-    /// (BIG format), a `Partitions.db` trie (BTI format), or (issue #2302) a
-    /// CQLite-written `Index.db` on its own — that lets
+    /// Whether this reader has a **usable random-access partition index** — a
+    /// loaded `Index.db` (BIG format; issue #2302 resolves CQLite-written Index.db
+    /// too) or a `Partitions.db` trie (BTI format) — that lets
     /// [`iterate_all_partitions`](Self::iterate_all_partitions) and point lookups
     /// avoid a full sequential Data.db scan.
     ///
-    /// Snapshot-completeness probe (issue #2295): a snapshot directory served with
-    /// only `Data.db` (its `Index.db`/`Summary.db` siblings absent) still opens,
-    /// but reports `false` here — meaning every read pays the sequential-scan perf
-    /// cliff. A directory holding the full component set reports `true`. This is
-    /// the observable used to prove that a complete snapshot uses the index path
-    /// rather than a full materialization.
+    /// This is a **capability probe**: it must report `true` only for the exact
+    /// states that route to the non-sequential path. Both point lookups
+    /// (`index_reader.lookup_partition` / the BTI trie) and `iterate_all_partitions`
+    /// (the full-`Index.db` walk / BTI) gate on `index_reader`/`bti_partitions_db`
+    /// — never on `summary_reader`.
     ///
-    /// Issue #2302 (roborev job 1607): `iterate_all_partitions` takes the
-    /// full-`Index.db` walk whenever `index_reader` is loaded, WITH OR WITHOUT
-    /// `Summary.db` (a CQLite-written SSTable's Summary.db is sparse and never the
-    /// gate for that path) — so `index_reader.is_some()` is included here too, or
-    /// this capability probe would under-report the reader's actual routing
-    /// (`false` while `iterate_all_partitions` still avoids the sequential scan).
-    /// All current callers (this module's own tests + the #2295 snapshot test) use
-    /// this probe to mean "does the fast/index path apply," never "is Summary.db or
-    /// BTI specifically loaded" — so a single widened predicate covers every caller
-    /// without a split API.
+    /// Issue #2302 (roborev job 1613): `summary_reader` is DELIBERATELY excluded. A
+    /// `Summary.db` only samples ~1-in-128 partitions and never gates the
+    /// random-access route, so a present-Summary / absent-Index BIG reader is
+    /// degraded — every read falls into `sequential_scan` and WARNs. Including
+    /// `summary_reader` here made the probe report "fast path available" for that
+    /// degraded reader (a fidelity lie). Narrowing to the truly-supporting state
+    /// keeps the probe honest.
+    ///
+    /// Snapshot-completeness probe (issue #2295): a directory served with only
+    /// `Data.db` (its index siblings absent) still opens but reports `false`; a
+    /// complete component set loads `Index.db` (→ `index_reader`) and reports
+    /// `true`. All current callers (this module's own tests + the #2295 snapshot
+    /// test) use this probe to mean "does the fast/index path apply," so a single
+    /// narrowed predicate covers every caller without a split API.
     pub fn has_partition_index(&self) -> bool {
-        self.summary_reader.is_some()
-            || self.bti_partitions_db.is_some()
-            || self.index_reader.is_some()
+        self.index_reader.is_some() || self.bti_partitions_db.is_some()
     }
 
     /// Build the TableId used for fallback `sequential_scan` from header metadata.
