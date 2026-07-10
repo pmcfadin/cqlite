@@ -340,7 +340,17 @@ fn corrupt_one_partition_row_body(dir: &std::path::Path, target_entry: usize) {
     );
     data_bytes[corrupt_at] = 0xFF;
     std::fs::write(&data_path, &data_bytes).unwrap();
+    rewrite_crc_db_for(dir, &data_bytes);
+}
 
+/// Re-checksum `CRC.db`'s single chunk to match `new_data_bytes` (issue #2302):
+/// every fixture here is well under the 64 KiB `CRC_CHUNK_SIZE`, so `CRC.db` is
+/// exactly `header(4) + one CRC32(4)` = 8 bytes covering the WHOLE `Data.db`.
+/// Used after any in-test `Data.db` mutation (corruption or truncation) so the
+/// mutated bytes reach the parser instead of being rejected by CRC verification
+/// first — the tests need the PARSER's completeness classification exercised,
+/// not the (separate, already-covered) CRC-mismatch fail-fast path.
+fn rewrite_crc_db_for(dir: &std::path::Path, new_data_bytes: &[u8]) {
     let crc_path = find_component(dir, "-CRC.db");
     let mut crc_bytes = std::fs::read(&crc_path).unwrap();
     assert_eq!(
@@ -348,7 +358,7 @@ fn corrupt_one_partition_row_body(dir: &std::path::Path, target_entry: usize) {
         8,
         "fixture Data.db must fit in exactly ONE 64 KiB CRC.db chunk (header(4) + one CRC32(4))"
     );
-    let new_crc = crc32fast::hash(&data_bytes);
+    let new_crc = crc32fast::hash(new_data_bytes);
     crc_bytes[4..8].copy_from_slice(&new_crc.to_be_bytes());
     std::fs::write(&crc_path, &crc_bytes).unwrap();
 }
@@ -904,5 +914,81 @@ fn corrupt_partition_body_refused_not_silently_emptied() {
          REFUSED with a loud WARN (issue #2302 job 1609), never silently treated \
          as an empty partition. rows={rows_len} oracle_rows={oracle_len}. \
          Captured: {events:?}"
+    );
+}
+
+/// FINDING 2 (issue #2302, roborev job 1610): `parse_one_partition_for_compaction`'s
+/// `at_final_chunk = true` leniency collapses "consumed every byte but never saw
+/// an explicit END_OF_PARTITION marker" into the SAME `Emitted(consumed)` as a
+/// confirmed, marker-terminated partition — so a slice truncated EXACTLY at a
+/// parseable row boundary (dropping only the trailing terminator byte, never a
+/// row/cell mid-decode) would still satisfy the job-1609 `consumed == raw.len()`
+/// check and be silently accepted as complete.
+///
+/// This fixture truncates the LAST partition's Data.db bytes by exactly ONE byte
+/// — precisely the trailing `END_OF_PARTITION` (0x01) marker CQLite's writer
+/// always appends (`data_writer/partition.rs`) — with `CRC.db` re-checksummed so
+/// the shortened file still passes CRC verification. `data_section_end` is
+/// derived from the (now one-byte-shorter) `Data.db` file length, so the LAST
+/// index entry's implied span shrinks by exactly one byte too: the row content
+/// itself is completely intact, only the terminator is missing.
+///
+/// RED before the fix (verified): reverted `partition_slice_fully_consumed` to
+/// `at_final_chunk = true` and re-ran this exact fixture — `iterate_all_partitions`
+/// silently returned 50/50 rows (all row CONTENT happened to survive, since only
+/// the harmless trailing marker was cut) with **zero** #2302 WARN events, proving
+/// the completeness check was accepting an UNCONFIRMED termination by coincidence,
+/// not by proof.
+///
+/// GREEN: driving with `at_final_chunk = false` makes the ambiguous "ran out of
+/// bytes" case report `ParseStep::NeedMore` (never `Emitted`), so the slice is
+/// correctly refused (loud WARN, `sequential_scan` fallback) even though this
+/// particular truncation happens to cost no rows once the fallback runs (the
+/// shared shadowed decoder has its OWN "reached buffer end = partition complete"
+/// leniency, so `sequential_scan` also recovers the row) — the fix's point is
+/// that the index path's completeness PROOF no longer relies on that same luck.
+#[test]
+#[serial_test::serial]
+fn boundary_truncation_before_terminator_refused_and_warns() {
+    let mut rows_len = 0usize;
+    let events = capture_events(|| async {
+        let temp = TempDir::new().unwrap();
+        let n = 50i32;
+        let data_path = write_fixture(&temp, n).await;
+        let dir = data_path.parent().unwrap();
+
+        let mut data_bytes = std::fs::read(&data_path).unwrap();
+        assert_eq!(
+            data_bytes[data_bytes.len() - 1],
+            0x01,
+            "the last written byte must be the END_OF_PARTITION marker (CQLite's \
+             writer always appends it)"
+        );
+        data_bytes.pop(); // drop EXACTLY the trailing terminator byte
+        std::fs::write(&data_path, &data_bytes).unwrap();
+        rewrite_crc_db_for(dir, &data_bytes);
+
+        let reader = open_reader(&data_path).await;
+        let rows = reader.iterate_all_partitions().await.unwrap();
+        rows_len = rows.len();
+        assert_eq!(
+            rows.len(),
+            n as usize,
+            "the loud fallback must still recover every partition's row content \
+             (only the trailing marker byte was dropped, not any row data)"
+        );
+    });
+
+    let warned = events.iter().any(|e| {
+        e.level == Level::WARN
+            && e.message.contains("Index.db is present")
+            && e.message.contains("#2302")
+    });
+    assert!(
+        warned,
+        "a slice truncated exactly at a row boundary with no CONFIRMED \
+         end-of-partition terminator must be REFUSED with a loud WARN (issue \
+         #2302 job 1610), never silently accepted via a bare 'ran out of bytes' \
+         collapse. rows={rows_len}. Captured: {events:?}"
     );
 }

@@ -14,7 +14,7 @@
 //! (`build_v5_parser`, `read_compressed_offset_window`, `sort_by_token_order`)
 //! without widening their visibility.
 //!
-//! ## Every `Ok(None)` / `Ok(Some(...))` exit, exhaustively (roborev job 1609)
+//! ## Every `Ok(None)` / `Ok(Some(...))` exit, exhaustively (roborev jobs 1609, 1610)
 //!
 //! | Site | Condition | Classification | Loud/Quiet |
 //! |------|-----------|-----------------|------------|
@@ -22,12 +22,12 @@
 //! | entries empty + (index NOT fully parsed OR data section non-empty) | index unusable/inconsistent | incomplete `Ok(None)` | loud (caller WARNs) |
 //! | entries non-empty + data section empty | structurally inconsistent | incomplete `Ok(None)` | loud |
 //! | `!index_reader.is_fully_parsed()` | mid-entry-truncated Index.db (Signal A) | incomplete `Ok(None)` | loud |
-//! | `partition_key.is_empty()` | entry carries no raw key | incomplete `Ok(None)` | loud |
+//! | `partition_key.is_empty()` | entry carries a present-but-zero-length key — legal Cassandra shape, but `key_len == 0` is unsafe to read back through the shared row/partition scanner on EITHER path (job 1610, see the call-site comment) | incomplete `Ok(None)` | loud |
 //! | `lookup_partition_with_index` misses | index/probe disagreement | incomplete `Ok(None)` | loud |
 //! | `next_offset <= data_offset` | non-ascending offsets | incomplete `Ok(None)` | loud |
 //! | `u32::try_from(span)` fails | partition span overflows `u32` | incomplete `Ok(None)` | loud |
-//! | `partition_slice_fully_consumed` false (Signal B) | dropped trailing entries OR a corrupt/truncated partition body (any entry, empty or non-empty result) | incomplete `Ok(None)` | loud |
-//! | loop completes for every entry | every partition proven structurally complete | complete `Ok(Some(rows))` | quiet |
+//! | `partition_slice_fully_consumed` false (Signal B) | dropped trailing entries, a corrupt/truncated partition body (any entry, empty or non-empty result), OR (job 1610) a slice truncated exactly at a parseable row boundary with no CONFIRMED end-of-partition terminator | incomplete `Ok(None)` | loud |
+//! | loop completes for every entry | every partition proven structurally complete (full byte coverage AND a confirmed terminator) | complete `Ok(Some(rows))` | quiet |
 
 use super::super::SSTableReader;
 use super::model::sort_by_token_order;
@@ -139,6 +139,43 @@ impl SSTableReader {
             // `do_get` abandons the walk promptly.
             self.scan_cancel.check()?;
 
+            // Roborev job 1610 (finding 1): `raw_key: None` never actually occurs
+            // in practice — `parse_big_index_entry` always sets `Some(raw_key)` —
+            // so this early bail is really about a PRESENT-but-ZERO-LENGTH key,
+            // which roborev correctly notes IS a legal Cassandra shape (a
+            // single-component TEXT/BLOB/etc. partition key whose value is the
+            // empty string serializes to zero bytes) — routing it into the normal
+            // index lookup, rather than bailing, was the suggested fix.
+            //
+            // Empirically verified (not assumed) before implementing that: the
+            // write surface does NOT reject an empty-string single-column TEXT
+            // partition key — `Mutation::decorated_key` succeeds (0-byte key,
+            // Murmur3 token computed over zero bytes), `SSTableWriter::write_partition`
+            // and `finish()` both succeed, and the resulting reader opens fine.
+            // BUT reading that partition back is unsafe on EITHER path: the shared
+            // structural row/partition scanner (`scan_partition_header`,
+            // `row_framing.rs`) explicitly rejects `key_len == 0` as "not a valid
+            // partition header" (issue #258 — needed to disambiguate a partition
+            // header's key-length byte from ordinary row-data bytes, since Data.db
+            // carries no other framing to tell them apart). A hand-built two-
+            // partition fixture (one empty-key, one normal) proved this is not a
+            // theoretical concern: `iterate_all_partitions` (bailing here to
+            // `sequential_scan`, since `sequential_scan` uses the SAME shared
+            // scanner) returned 3 corrupted rows for 2 written partitions —
+            // `sequential_scan` itself mis-parses this on-disk shape too, not just
+            // the index path.
+            //
+            // Given that, flowing an empty raw_key into `lookup_partition_with_index`
+            // + `partition_slice_fully_consumed` + `parser.parse_block` would risk
+            // the index path ALSO silently accepting corrupted bytes as a
+            // "complete" partition (worse than the current loud bail: a WRONG
+            // answer presented as success). The safe, evidence-based choice is to
+            // KEEP bailing here — never silently, always via the caller's loud WARN
+            // + `sequential_scan` fallback — until the underlying `key_len == 0`
+            // structural ambiguity in `scan_partition_header` is resolved (a
+            // deeper, format-level fix outside #2302's routing-layer scope; a
+            // follow-up issue is warranted for the empty-single-component-PK
+            // read-back gap itself).
             let partition_key = entries[i].raw_key.as_deref().unwrap_or(&[]);
             if partition_key.is_empty() {
                 return Ok(None);
@@ -239,16 +276,31 @@ impl SSTableReader {
     /// begins; for the final entry the authoritative data-section end does, but
     /// (unlike a successor offset) does not itself prove no trailing entries were
     /// dropped. Either way, a structurally sound, uncorrupted partition consumes
-    /// its ENTIRE bounded slice — no more, no less. `consumed < raw.len()` covers
-    /// every failure shape at once: a dropped trailing entry (extra bytes after
-    /// the real last partition), a truncated body, or a body that fails to decode
-    /// partway through (regardless of how many rows had already been produced
-    /// before the failure). `at_final_chunk=true`: `raw` is the whole bounded
-    /// slice, never a mid-chunk fragment, so a complete partition always reports
-    /// `Emitted(consumed)` (the sliding-window driver's `NeedMore`/`Done` cases are
-    /// unreachable here: `NeedMore` requires `!at_final_chunk`; `Done` requires an
-    /// empty `data`, but every entry's span is proven `> 0` by the caller).
-    /// Structural, schema-driven — no heuristics (issue #28).
+    /// its ENTIRE bounded slice — no more, no less, AND terminates via a CONFIRMED
+    /// end-of-partition marker, never a bare "ran out of bytes" collapse.
+    ///
+    /// Roborev job 1610 (finding 2): `parse_one_partition_for_compaction(...,
+    /// at_final_chunk=true, ...)` is LENIENT — on the final chunk it collapses
+    /// "consumed every byte but never saw an explicit END_OF_PARTITION marker"
+    /// (`drive_partition_sliding`'s EOF-without-terminator branch), a row-parse
+    /// failure, and a range-marker the policy can't represent ALL into the SAME
+    /// `Emitted(consumed)` as a confirmed, marker-terminated partition — so a slice
+    /// truncated at a parseable row/element boundary (dropping only the trailing
+    /// terminator byte) would still satisfy `consumed == raw.len()`. This method
+    /// therefore drives with **`at_final_chunk = false`** instead: EVERY one of
+    /// those ambiguous "ran out without a confirmed structural signal" cases then
+    /// reports `ParseStep::NeedMore` (never `Emitted`), so `Emitted(consumed)`
+    /// becomes reachable ONLY via the driver's UNCONDITIONAL
+    /// `is_end_of_partition` marker-consumption branch (fires regardless of
+    /// `at_final_chunk`) — i.e. `consumed == raw.len()` now PROVES the terminator
+    /// was structurally confirmed as the slice's very last byte. This is not a
+    /// "there's more data coming" claim (there is no next chunk to append; `raw`
+    /// is the whole bounded slice) — it deliberately repurposes the driver's
+    /// truncation-detection signal as the completeness oracle, authoritative and
+    /// no heuristics (issue #28): the end-of-partition marker is Cassandra's own
+    /// on-disk structural signal for partition completion (CQLite's writer always
+    /// appends it — `data_writer/partition.rs`'s `END_OF_PARTITION` push is
+    /// unconditional), not a guess.
     fn partition_slice_fully_consumed(
         &self,
         parser: &V5CompressedLegacyParser,
@@ -256,7 +308,8 @@ impl SSTableReader {
         schema: Option<&TableSchema>,
     ) -> Result<bool> {
         let mut noop = |_row| Ok(std::ops::ControlFlow::Continue(()));
-        let step = parser.parse_one_partition_for_compaction(raw, schema, self, true, &mut noop)?;
+        let step =
+            parser.parse_one_partition_for_compaction(raw, schema, self, false, &mut noop)?;
         Ok(matches!(step, ParseStep::Emitted(consumed) if consumed == raw.len()))
     }
 }
