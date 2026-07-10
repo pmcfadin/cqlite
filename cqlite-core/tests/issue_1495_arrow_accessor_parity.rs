@@ -322,14 +322,56 @@ fn column_reorder_produces_permuted_but_equal_arrays() {
 
     for (i, c) in reordered.iter().enumerate() {
         let orig_idx = columns.iter().position(|o| o.name == c.name).unwrap();
+        // Compare full array CONTENTS (values + null bitmap + type), not just
+        // null_count/len — a value-swap or mis-alignment bug must surface here.
         assert_eq!(
-            batch_rev.column(i).null_count(),
-            batch.column(orig_idx).null_count(),
-            "column '{}' must be identical regardless of schema position",
+            batch_rev.column(i).to_data(),
+            batch.column(orig_idx).to_data(),
+            "column '{}' must be byte-identical regardless of schema position",
             c.name
         );
-        assert_eq!(batch_rev.column(i).len(), batch.column(orig_idx).len(),);
     }
+}
+
+/// Duplicate result-column names (e.g. `SELECT a, a` or `SELECT a AS x, b AS x`)
+/// are a REACHABLE input — `QueryMetadata.columns` is built one-per-projection
+/// with no dedup. Main resolved each builder's `col.name` independently, so every
+/// same-named output column carried the same row value. The accessor hoist must
+/// preserve that: BOTH output arrays populated identically, not just the last.
+#[test]
+fn duplicate_named_columns_populate_all_identically() {
+    let columns = vec![
+        col("dup", DataType::Integer, None),
+        col("dup", DataType::Integer, None),
+    ];
+    let rows = vec![
+        row(&[("dup", Value::Integer(42))]),
+        row(&[("dup", Value::Null)]),
+        row(&[]), // absent → Arrow null
+    ];
+    let batch = rows_to_record_batch(&columns, &rows).expect("conversion");
+
+    assert_eq!(batch.num_columns(), 2);
+    assert_eq!(batch.num_rows(), 3);
+
+    // Both duplicate-named columns must be byte-identical (same values, same
+    // null bitmap) — the earlier duplicate must NOT be all-null.
+    assert_eq!(
+        batch.column(0).to_data(),
+        batch.column(1).to_data(),
+        "duplicate-named output columns must be populated identically",
+    );
+
+    use arrow::array::Int32Array;
+    let ints = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(ints.value(0), 42);
+    assert!(ints.is_null(1)); // explicit Null
+    assert!(ints.is_null(2)); // absent
+    assert_eq!(batch.column(0).null_count(), 2);
 }
 
 /// Type-mismatch fail-closed behaviour must survive the refactor: a wrong-variant

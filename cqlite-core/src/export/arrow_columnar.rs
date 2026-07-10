@@ -45,14 +45,17 @@ use crate::types::Value;
 /// - `None` when the column is absent from row `i` (the builders map both an
 ///   absent cell and a `Value::Null` to an Arrow null, exactly as before).
 ///
-/// Column names are hashed only `M` times to build the `name → index` map;
+/// Column names are hashed only `M` times to build the `name → indices` map;
 /// thereafter the per-row work iterates the row's own entries and does one lookup
 /// per PRESENT cell into that small map — the large per-row `values` maps are
 /// never probed by column name (issue #1495 / parser epic J1).
 ///
-/// Duplicate column names in `columns` are not expected (a result schema has
-/// distinct columns); if present, the last occurrence wins the index slot, which
-/// matches the old per-builder `get` (each builder resolved its own `col.name`).
+/// Duplicate column names in `columns` (e.g. `SELECT a, a` or `SELECT a AS x, b
+/// AS x`) are supported: a name maps to the list of ALL its output indices, and a
+/// present cell for that name is replicated into EVERY matching column slot. This
+/// reproduces the pre-refactor behaviour exactly — each builder independently did
+/// `row.values.get(&col.name)`, so every same-named output column resolved the
+/// same row value.
 pub(crate) fn transpose_columns<'a>(
     columns: &[ColumnInfo],
     rows: &'a [QueryRow],
@@ -60,10 +63,15 @@ pub(crate) fn transpose_columns<'a>(
     let n_rows = rows.len();
     let n_cols = columns.len();
 
-    // Resolve each column name to its output-slice index ONCE (M name hashes).
-    let mut name_to_idx: HashMap<&str, usize> = HashMap::with_capacity(n_cols);
+    // Resolve each column name to ALL of its output-slice indices ONCE (M name
+    // hashes). Duplicate names collect multiple indices so a present cell can be
+    // fanned out to every matching column, matching the old per-builder `get`.
+    let mut name_to_indices: HashMap<&str, Vec<usize>> = HashMap::with_capacity(n_cols);
     for (idx, col) in columns.iter().enumerate() {
-        name_to_idx.insert(col.name.as_str(), idx);
+        name_to_indices
+            .entry(col.name.as_str())
+            .or_default()
+            .push(idx);
     }
 
     // Column-major output, pre-sized so no slot re-allocates. Absent cells stay
@@ -72,12 +80,14 @@ pub(crate) fn transpose_columns<'a>(
         (0..n_cols).map(|_| vec![None; n_rows]).collect();
 
     // Single pass over rows. For each row we iterate its OWN entries and route
-    // each present cell to its column slot via the tiny name→index map. No
-    // `values.get(col.name)` probe against the large per-row map occurs.
+    // each present cell to ALL of its column slots via the tiny name→indices map.
+    // No `values.get(col.name)` probe against the large per-row map occurs.
     for (row_idx, row) in rows.iter().enumerate() {
         for (name, value) in &row.values {
-            if let Some(&col_idx) = name_to_idx.get(name.as_ref()) {
-                columnar[col_idx][row_idx] = Some(value);
+            if let Some(col_indices) = name_to_indices.get(name.as_ref()) {
+                for &col_idx in col_indices {
+                    columnar[col_idx][row_idx] = Some(value);
+                }
             }
             // A row entry whose name is not in the schema is ignored, matching
             // the old behaviour (no builder ever requested it).
@@ -156,6 +166,28 @@ mod tests {
         let cols = transpose_columns(&columns, &rows);
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0][0], Some(&Value::Integer(1)));
+    }
+
+    /// Duplicate column names: a present cell for that name must be replicated
+    /// into EVERY matching column slot (matching main's per-builder `get`), not
+    /// just the last occurrence.
+    #[test]
+    fn duplicate_column_names_replicate_to_all_slots() {
+        let columns = vec![col("a"), col("a")];
+        let rows = vec![
+            row(&[("a", Value::Integer(1))]),
+            row(&[("a", Value::Null)]),
+            row(&[]), // absent
+        ];
+        let cols = transpose_columns(&columns, &rows);
+        assert_eq!(cols.len(), 2);
+        // Both output columns must carry identical values.
+        assert_eq!(cols[0][0], Some(&Value::Integer(1)));
+        assert_eq!(cols[1][0], Some(&Value::Integer(1)));
+        assert_eq!(cols[0][1], Some(&Value::Null));
+        assert_eq!(cols[1][1], Some(&Value::Null));
+        assert_eq!(cols[0][2], None);
+        assert_eq!(cols[1][2], None);
     }
 
     /// Empty inputs: no columns / no rows produce well-formed empty output.
