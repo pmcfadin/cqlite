@@ -118,9 +118,20 @@ impl SSTableReader {
         let offset = if is_bti {
             match self.lookup_partition_via_bti_trie(partition_key) {
                 Ok(Some(off)) => off,
-                // A BTI trie miss is AUTHORITATIVE absence (the oracle above should
-                // have pruned already; this is a defensive authoritative-empty).
-                Ok(None) => return Ok(SinglePartitionCompaction::Rows(Vec::new())),
+                // A BTI trie `Ok(None)` is an AUTHORITATIVE-by-construction absence:
+                // `bti_trie_resolve` returns `Ok(None)` ONLY for a definitive trie
+                // MISS (a fully-descended trie with no matching entry), and routes
+                // EVERY degraded/unusable state — a parse error, an out-of-range
+                // root_offset, a missing Rows.db for a wide partition — through the
+                // `Err(_)` arm below (scan fallback), never through `Ok(None)`. The
+                // trie IS the presence oracle for a BTI SSTable, so this is the same
+                // signal `might_contain_partition` (step 1) already prunes on; this
+                // arm is the defensive equivalent. The correct three-exit answer is
+                // `DefinitelyAbsent` (an authoritative prune), NOT `Rows(Vec::new())`
+                // — an empty `Rows` is reserved for a FULLY-DECODED prefix-collision
+                // (nothing was decoded here), so emitting it would violate the enum
+                // contract (see `SinglePartitionCompaction`'s doc).
+                Ok(None) => return Ok(SinglePartitionCompaction::DefinitelyAbsent),
                 Err(e) => {
                     tracing::debug!(
                         "BTI Partitions.db trie lookup failed during point read; \
@@ -194,6 +205,16 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
         is_bti: bool,
     ) -> Result<Option<Vec<CompactionRow>>> {
+        // Cooperative cancellation (issue #2207, roborev job 1620 MEDIUM): the seek
+        // materializes a covering chunk window and parses one partition — the same
+        // heavy, previously-uninterruptible work the full-scan compaction stream
+        // polls `scan_cancel` inside (issue #2264). Mirror that here so a Flight
+        // `do_get` whose client has already disconnected abandons the seek instead
+        // of decompressing/parsing to completion. Poll ONCE before materializing
+        // (an already-cancelled read exits before any I/O), inside the chunk-window
+        // pull loop (`pull_chunk_window`), and once more just before parsing.
+        self.scan_cancel.check()?;
+
         let offset = offset as usize;
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
         let parser = self.build_v5_parser(false);
@@ -260,6 +281,11 @@ impl SSTableReader {
             // partial/empty answer.
             return Ok(None);
         }
+
+        // Cancellation poll just before the parse — the covering window is now
+        // materialized, so a cancel observed here skips the (potentially large)
+        // partition decode entirely (issue #2207 fail-safe cancellation).
+        self.scan_cancel.check()?;
 
         // Parse the FIRST partition at `window[within..]`. Collect every row whose
         // decoded key equals the queried key; a decoded DIFFERENT key means the
@@ -345,7 +371,16 @@ impl SSTableReader {
 
         let mut window: Vec<u8> = Vec::new();
         let mut chunk_index = target_chunk;
+        let mut pulled: usize = 0;
         while window_base + window.len() < end {
+            // Cooperative cancellation (issue #2207, roborev job 1620 MEDIUM): a very
+            // wide target partition can span hundreds of chunks; poll at a bounded
+            // interval so a cancel is honoured mid-window, mirroring the full-scan
+            // stream's `chunk_count & 0xFF == 0` poll (compaction.rs, issue #2264).
+            if pulled & 0xFF == 0 {
+                self.scan_cancel.check()?;
+            }
+            pulled += 1;
             match chunk_source.chunk(chunk_index)? {
                 Some(decompressed) => {
                     chunk_index += 1;

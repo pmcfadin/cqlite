@@ -727,3 +727,101 @@ async fn truncated_chunk_window_degrades_to_scan_fallback_not_partial_rows() {
          (scan-fallback), NEVER a partial Rows(...) flushed as authoritative, got {outcome:?}"
     );
 }
+
+// ---- Finding 2 (job 1620, MEDIUM): mid-seek cancellation ------------------
+// ---- Finding 3 (job 1620, LOW): BTI miss is an authoritative prune --------
+
+/// Write a clean 2-partition BTI (`da`) SSTable with an INTACT trie (companion
+/// to `corrupt_bti_fixture`), returning the temp dir (keep alive) and the
+/// `Data.db` path. A present key resolves its offset and reaches the seek; an
+/// absent key is a genuine trie miss.
+async fn valid_bti_fixture() -> (TempDir, std::path::PathBuf) {
+    let schema = schema();
+    let temp = TempDir::new().unwrap();
+    let mut writer = SSTableWriter::with_format(
+        temp.path().to_path_buf(),
+        1,
+        &schema,
+        16,
+        SSTableFormat::Bti,
+    )
+    .unwrap();
+
+    let mut keyed: Vec<_> = [(1, "one"), (2, "two")]
+        .into_iter()
+        .map(|(pk, v)| {
+            let m = mutation(pk, v);
+            let key = m.decorated_key(&schema).unwrap();
+            (key, m)
+        })
+        .collect();
+    keyed.sort_by_key(|(k, _)| k.token);
+    for (key, m) in keyed {
+        writer.write_partition(key, vec![m]).unwrap();
+    }
+    let info = writer.finish().await.unwrap();
+    (temp, info.data_path)
+}
+
+/// A `scan_cancel` flag tripped BEFORE the seek runs aborts it with
+/// `Error::Cancelled` for a PRESENT key — the primitive resolves the offset
+/// (steps 1–4) then `seek_partition_compaction_rows`'s entry poll fires, so NO
+/// partition is decoded and NO `Rows`/`IndexUnavailable`/`DefinitelyAbsent`
+/// outcome is produced. FAILS on pre-fix code (Finding 2): without the seek-path
+/// `scan_cancel` poll the seek ignores the token and returns `Ok(...)`.
+#[tokio::test]
+async fn pre_cancelled_seek_aborts_with_cancelled_not_rows() {
+    let (_temp, data_path) = valid_bti_fixture().await;
+    let mut reader = open_reader(&data_path).await;
+
+    let cancel = ScanCancel::new();
+    cancel.cancel();
+    reader.set_scan_cancel(cancel);
+
+    let schema = schema();
+    let key_bytes = WEPartitionKey::single("pk", Value::Integer(1))
+        .to_bytes(&schema)
+        .unwrap();
+
+    let result = reader
+        .read_single_partition_for_compaction(&key_bytes, Some(&schema))
+        .await;
+    assert!(
+        matches!(result, Err(crate::Error::Cancelled)),
+        "a pre-cancelled seek of a PRESENT key must abort with Error::Cancelled \
+         (decode no rows), got {result:?}"
+    );
+}
+
+/// A genuinely ABSENT key in a BTI SSTable classifies as `DefinitelyAbsent` —
+/// the authoritative-by-construction trie-miss outcome — NEVER
+/// `Rows(Vec::new())` (which the enum reserves for a FULLY-DECODED
+/// prefix-collision) and never `IndexUnavailable`. Pins Finding 3's three-exit
+/// invariant for the BTI-miss path: `bti_trie_resolve` returns `Ok(None)` ONLY
+/// for a definitive miss (every degraded/unusable trie state returns `Err` →
+/// `IndexUnavailable`), so a miss is a prune, not an empty decode. The reachable
+/// path is step 1's presence-oracle prune (`might_contain_partition` funnels
+/// through the SAME trie); the corrected step-3 `Ok(None)` arm is its defensive
+/// equivalent and now returns the same `DefinitelyAbsent`, so both agree with
+/// the contract this test pins.
+#[tokio::test]
+async fn bti_absent_key_is_definitely_absent_not_empty_rows() {
+    let (_temp, data_path) = valid_bti_fixture().await;
+    let reader = open_reader(&data_path).await;
+
+    let schema = schema();
+    // pk=999 was never written — a genuine trie miss.
+    let key_bytes = WEPartitionKey::single("pk", Value::Integer(999))
+        .to_bytes(&schema)
+        .unwrap();
+
+    let outcome = reader
+        .read_single_partition_for_compaction(&key_bytes, Some(&schema))
+        .await
+        .expect("an absent-key probe must not error");
+    assert!(
+        matches!(outcome, SinglePartitionCompaction::DefinitelyAbsent),
+        "an absent BTI key must classify as DefinitelyAbsent (authoritative prune), \
+         never Rows(empty) or IndexUnavailable, got {outcome:?}"
+    );
+}
