@@ -96,6 +96,16 @@ jobs:
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Pre-publish oracle (issue #2300): assert the netty pin survives into the
+      # published POM's <dependencies> BEFORE any publish path runs, so a drifted
+      # or BOM-only pin (which a downstream Maven consumer would resolve at netty
+      # 4.2.x, re-breaking arrow-19's allocator) can never reach Central.
+      - name: Verify published POM netty pin
+        working-directory: trino-connector
+        env:
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+        run: ./gradlew --no-daemon verifyPublishedPomNettyPin -Pversion="$PUBLISH_VERSION"
+
       # Dry run (manual workflow_dispatch with dry_run=true): publish only to the
       # local Maven repo. No Central upload and no signing/Central secrets needed,
       # so this path is independent of the guard step above.

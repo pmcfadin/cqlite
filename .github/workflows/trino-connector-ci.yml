@@ -51,7 +51,9 @@ jobs:
 
       - name: Test
         working-directory: trino-connector
-        run: ./gradlew --no-daemon test
+        # verifyPublishedPomNettyPin asserts the netty pin survives into the
+        # published POM's <dependencies> for downstream Maven consumers (issue #2300).
+        run: ./gradlew --no-daemon test verifyPublishedPomNettyPin
 
       - name: Assemble plugin
         if: env.RUN_FULL == 'true'
