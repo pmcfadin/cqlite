@@ -363,7 +363,9 @@ pub(super) fn bti_lookup_step(
 /// physical order (spec §5, Appendix B §313) and the write engine's `DecoratedKey::cmp`.
 ///
 /// Computes each key's token once to avoid O(n log n) recomputation inside the comparator.
-pub(super) fn sort_by_token_order(results: &mut Vec<(RowKey, ScanRow)>) {
+pub(in crate::storage::sstable::reader) fn sort_by_token_order(
+    results: &mut Vec<(RowKey, ScanRow)>,
+) {
     // Map to (token, RowKey, ScanRow), sort, then reassemble.
     let mut tagged: Vec<(i64, RowKey, ScanRow)> = results
         .drain(..)

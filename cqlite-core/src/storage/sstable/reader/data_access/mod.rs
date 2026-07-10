@@ -70,6 +70,11 @@ pub use model::ClusteringSlice;
 // from `reader::scan_stream_windowed`; this widens the path exactly enough.
 pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
 
+// Token-order sort reused by the issue #2302 full-index partition enumeration in
+// the sibling `partition_lookup` module (outside `data_access`), so the ordering
+// guarantee matches `sequential_scan`. Same visibility-widening pattern as above.
+pub(in crate::storage::sstable::reader) use model::sort_by_token_order;
+
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
@@ -444,7 +449,7 @@ impl SSTableReader {
     /// compaction read path (which reconciles tombstones itself across generations).
     ///
     /// [`V5CompressedLegacyParser`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser
-    pub(super) fn build_v5_parser(
+    pub(in crate::storage::sstable::reader) fn build_v5_parser(
         &self,
         read_shadowing: bool,
     ) -> crate::storage::sstable::reader::parsing::V5CompressedLegacyParser {

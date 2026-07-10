@@ -570,82 +570,37 @@ impl SSTableReader {
     /// directly. For V5CompressedLegacy NB SSTables (the format the writer emits),
     /// `sequential_scan` uses the chunk-stitching path and returns every partition.
     pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, ScanRow)>> {
-        if let Some(summary_reader) = &self.summary_reader {
-            let entries = summary_reader.get_entries();
-            let mut results = Vec::new();
-
-            for entry in entries.iter() {
-                // Cooperative cancellation (issue #2264, roborev round 3): with
-                // Summary.db PRESENT, this per-entry index-random-read loop is the
-                // O(partitions) work a Flight `do_get` spends its time in — the
-                // outer poll in `stream_all_partitions_for_compaction`'s
-                // non-stitching branch fires only ONCE, AFTER this whole loop (and
-                // the whole `Vec`) has already been materialised. Poll EVERY
-                // entry (not the 256-cadence used for raw in-memory partition
-                // loops elsewhere): Summary.db already samples ~1-in-128 raw
-                // partitions, and each entry here costs a real Index.db lookup +
-                // Data.db decompress/parse — orders of magnitude more expensive
-                // per iteration than a byte-parse step, so checking every entry
-                // adds negligible overhead while keeping the observed latency
-                // bound proportionate to that per-entry cost.
-                self.scan_cancel.check()?;
-                // Use Summary.db entry to find the corresponding Index.db entry
-                if let Some(_index_reader) = &self.index_reader {
-                    // The summary entry provides a position in Index.db
-                    // We need to read the partition data from Data.db
-
-                    // For now, use the partition key from the summary entry
-                    let partition_key_bytes = &entry.partition_key;
-
-                    // Look up the partition in Index.db to get the actual data offset
-                    if let Some((data_offset, data_size)) = self
-                        .lookup_partition_with_index(partition_key_bytes)
-                        .await?
-                    {
-                        // Convert Index.db relative offset to absolute file offset
-                        // Index.db offsets are relative to data section start (after compression header)
-                        let absolute_offset = data_offset + self.actual_header_size as u64;
-
-                        // Read and parse the actual partition data from Data.db
-                        match self
-                            .parse_partition_at_offset(absolute_offset, data_size)
-                            .await?
-                        {
-                            Some(partition_entries) => {
-                                for (row_key, value) in partition_entries {
-                                    results.push((row_key, value));
-                                }
-                            }
-                            None => {
-                                debug!("Failed to parse partition at offset {}", absolute_offset);
-                            }
-                        }
-                    }
-                } else {
-                    tracing::error!("Index reader not available for partition iteration");
-                    return Err(Error::corruption(
-                        "Index reader required for partition iteration - synthetic data not allowed for Issue #35",
-                    ));
+        // Index-random-read path (issue #2302): when a `Index.db` is present on a
+        // BIG SSTable, enumerate EVERY partition via the full Index.db
+        // partition-offset table instead of the sparse `Summary.db` samples.
+        //
+        // The historical loop walked `Summary.db` (only ~1-in-128 partitions) AND
+        // passed `data_size = 0` to `parse_partition_at_offset` (Index.db never
+        // stores partition size), so it read zero bytes per entry, resolved zero
+        // partitions, and SILENTLY fell back to a full `sequential_scan` on EVERY
+        // read — even with complete, valid components. Each partition's span is
+        // bounded instead by the successor entry's offset (the last by the
+        // data-section end), authoritative on-disk structure rather than a size
+        // guess (issue #28). Index.db offsets are in the UNCOMPRESSED data-section
+        // domain: for an uncompressed reader that equals the raw file domain; for a
+        // compressed reader the per-partition slice is mapped to its covering
+        // compression chunk(s) and decompressed (`read_compressed_offset_window`).
+        if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
+            match self.iterate_all_partitions_via_full_index().await? {
+                Some(results) => return Ok(results),
+                None => {
+                    // Present components that did NOT fully resolve: never silent.
+                    tracing::warn!(
+                        "SSTable Index.db is present but iterate_all_partitions could not \
+                         resolve every partition through the index-random-read path; \
+                         falling back to a full sequential scan of Data.db (issue #2302). \
+                         This should not happen for a well-formed BIG SSTable — the emitted \
+                         Index.db/Summary.db may be malformed or the data-section length is \
+                         inconsistent with the index offsets."
+                    );
                 }
             }
-
-            // Only trust the index-based path when EVERY summary entry was resolved.
-            // Partial resolution silently drops the unresolved entries; defaulting to
-            // `sequential_scan` in that case is strictly safer and still correct on
-            // real Cassandra SSTables (sequential_scan returns the same partitions
-            // when the index resolves them all).
-            if results.len() == entries.len() && !entries.is_empty() {
-                debug!("Partition iteration found {} entries", results.len());
-                return Ok(results);
-            }
-
-            debug!(
-                "Index.db lookup resolved {}/{} summary entries; \
-                 falling back to sequential_scan (Issue #500)",
-                results.len(),
-                entries.len()
-            );
-        } else if self.bti_partitions_db.is_none() {
+        } else if self.summary_reader.is_none() && self.bti_partitions_db.is_none() {
             // No Summary.db was loaded AND this is not a BTI SSTable (which
             // legitimately carries its index in Partitions.db, not Summary.db).
             // That means a BIG-format SSTable is missing the random-access index
@@ -678,6 +633,135 @@ impl SSTableReader {
         let schema = self.schema.as_deref();
         self.sequential_scan(&table_id, None, None, None, schema)
             .await
+    }
+
+    /// Enumerate every partition of a BIG SSTable through the FULL `Index.db`
+    /// partition-offset table (issue #2302), one index-random-read per partition.
+    ///
+    /// Each `Index.db` entry stores a partition's start offset (relative to the data
+    /// section) but NOT its byte size. The exclusive end of partition `i` is the
+    /// start of partition `i+1` (entries are token-ordered, matching Data.db physical
+    /// order); the LAST partition ends at the data-section end. This is authoritative
+    /// on-disk structure — no size guessing (issue #28). Every real probe increments
+    /// `INDEX_PROBES` via
+    /// [`lookup_partition_with_index`](Self::lookup_partition_with_index).
+    ///
+    /// Both compression modes are handled: the offsets are in the uncompressed
+    /// data-section domain, so an uncompressed reader reads the raw file slice
+    /// (CRC-verified) while a compressed reader maps the slice to its covering
+    /// compression chunk(s) and decompresses them
+    /// ([`read_compressed_offset_window`](Self::read_compressed_offset_window)).
+    ///
+    /// Returns:
+    /// - `Ok(Some(rows))` — every index entry resolved to a decodable partition; the
+    ///   rows are token-ordered + tombstone-filtered, matching `sequential_scan`.
+    /// - `Ok(None)` — the index carried no entries, offsets were not monotonically
+    ///   ascending, the data-section length is unknown, or a partition failed to
+    ///   decode. The caller then emits a loud WARN and falls back to
+    ///   `sequential_scan` (never a silent fallback).
+    async fn iterate_all_partitions_via_full_index(
+        &self,
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
+        use super::data_access::sort_by_token_order;
+
+        let Some(index_reader) = &self.index_reader else {
+            return Ok(None);
+        };
+        let entries = index_reader.get_partition_entries();
+        if entries.is_empty() {
+            return Ok(None);
+        }
+
+        // Exclusive end of the last partition = the UNCOMPRESSED data-section length.
+        // Compressed reader: the authoritative `CompressionInfo.data_length`.
+        // Uncompressed reader: the raw Data.db file length minus the header (the raw
+        // and uncompressed domains coincide). A zero/unknown length is unusable, so
+        // bail to the safe full scan.
+        let data_section_end = match self.compression_info.as_deref() {
+            Some(ci) => ci.data_length,
+            None => self.stats.file_size.saturating_sub(self.actual_header_size as u64),
+        };
+        if data_section_end == 0 {
+            return Ok(None);
+        }
+
+        // V5 parser over ALREADY-DECOMPRESSED partition bytes (never decompresses
+        // internally, unlike `parse_block_entries_with_schema`), so a compressed
+        // reader's decompressed slice is not double-decompressed. `read_shadowing =
+        // true` applies the same partition/range-tombstone shadowing + TTL expiry a
+        // user-facing SELECT scan uses (matching `sequential_scan`).
+        let parser = self.build_v5_parser(true);
+        let reader_schema = self.get_table_schema(None);
+        let schema = reader_schema.as_ref();
+        let mut results = Vec::new();
+        for i in 0..entries.len() {
+            // Cooperative cancellation (issue #2264): one real index-random-read +
+            // Data.db parse per partition — poll every entry so a cancelled Flight
+            // `do_get` abandons the walk promptly.
+            self.scan_cancel.check()?;
+
+            let partition_key = entries[i].raw_key.as_deref().unwrap_or(&[]);
+            if partition_key.is_empty() {
+                return Ok(None);
+            }
+
+            // Resolve through the shared probe so INDEX_PROBES / the B4 key cache /
+            // the observability counters all fire exactly as a point read's would.
+            let Some((data_offset, _size)) =
+                self.lookup_partition_with_index(partition_key).await?
+            else {
+                return Ok(None);
+            };
+
+            // Bound the partition: successor entry's offset, else the data-section
+            // end for the final partition. Offsets must ascend (Data.db physical
+            // order); a non-ascending pair means the index is inconsistent with the
+            // data section, so bail to the safe full scan.
+            let next_offset = if i + 1 < entries.len() {
+                entries[i + 1].data_offset
+            } else {
+                data_section_end
+            };
+            if next_offset <= data_offset {
+                return Ok(None);
+            }
+            let span = next_offset - data_offset;
+            let Ok(size) = u32::try_from(span) else {
+                return Ok(None);
+            };
+
+            // Read the partition's Data.db slice into the UNCOMPRESSED byte domain,
+            // then parse it with the NB-aware block-entries parser — the same
+            // producer `sequential_scan` uses.
+            let raw = if let Some(ci) = self.compression_info.as_deref() {
+                // Compressed: `data_offset` is an uncompressed-domain offset; map it
+                // to the covering compression chunk(s) and decompress.
+                self.read_compressed_offset_window(ci, data_offset, size)
+                    .await?
+            } else {
+                // Uncompressed: raw file offset = data_offset + header (0 for `nb`).
+                let absolute_offset = data_offset + self.actual_header_size as u64;
+                self.read_uncompressed_verified(&self.file, absolute_offset, size as usize)
+                    .await?
+            };
+            let parsed = parser.parse_block(&raw, schema, self)?;
+            if parsed.is_empty() {
+                // A non-empty on-disk slice that decodes to nothing means the parser
+                // could not interpret it — bail to the authoritative full scan rather
+                // than silently drop the partition.
+                return Ok(None);
+            }
+            for (_table_id, row_key, value) in parsed {
+                if self.filter_tombstone(&value) {
+                    results.push((row_key, value));
+                }
+            }
+        }
+
+        // Token order matches `sequential_scan` (Data.db is already token-ordered, so
+        // this is effectively a no-op, but keep the ordering guarantee explicit).
+        sort_by_token_order(&mut results);
+        Ok(Some(results))
     }
 
     /// Whether this reader has a random-access partition index — a `Summary.db`
