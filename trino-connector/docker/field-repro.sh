@@ -236,8 +236,24 @@ capture_artifacts() {
   # instead of leaving an empty/truncated JSON file, and keep going — the
   # debug log + pcap are still real diagnostics even if Trino itself can't
   # answer right now.
+  #
+  # NO `ORDER BY` (issue #2289 roborev finding, job 1598): a version-specific
+  # sort column is a real fragility risk if `system.runtime.queries`'s column
+  # names ever change across a future Trino bump — an unresolvable column
+  # would make this whole query error, and (post-job-1596) the
+  # --inject-failure self-test can then NEVER pass. Verified empirically
+  # against the PINNED image (`trinodb/trino:481`, this compose stack's exact
+  # version — `docker run -d trinodb/trino:481` + `DESCRIBE
+  # system.runtime.queries` + the query below run standalone, 2026-07-10):
+  # the column IS `created` (`timestamp(3) with time zone`); `create_time`
+  # does not exist ("Column 'create_time' cannot be resolved"). So `ORDER BY
+  # created` was NOT broken for this pinned version — but dropping the sort
+  # entirely is still the more robust choice long-term (this is a best-effort
+  # diagnostic artifact, not correctness-critical evidence, so losing strict
+  # newest-first ordering is an acceptable tradeoff for never hard-failing on
+  # a future Trino column rename).
   if run_with_timeout "$CAPTURE_METADATA_TIMEOUT_SECS" "${COMPOSE[@]}" exec -T trino trino --output-format JSON \
-      --execute "SELECT query_id, state, query FROM system.runtime.queries ORDER BY created DESC LIMIT 5" \
+      --execute "SELECT query_id, state, query FROM system.runtime.queries LIMIT 5" \
       > "$artdir/trino-recent-queries.json" 2>&1; then
     :
   else
@@ -512,7 +528,22 @@ for line in lines:
   # false-pass this self-test exists to prevent. Bounded at PCAP_READ_TIMEOUT
   # (the image is guaranteed cached from this same run's earlier capture, so
   # this bound only needs to cover reading the file back, not a pull).
-  pkts="$(run_with_timeout "$PCAP_READ_TIMEOUT_SECS" docker run --rm -v "$latest":/cap:ro "$TCPDUMP_IMAGE" tcpdump -r /cap/flight-8815.pcap 2>/dev/null | wc -l | tr -d ' ')"
+  #
+  # Guarded with explicit set +e/set -e (issue #2289 roborev finding, job
+  # 1598): this script runs under `set -euo pipefail`, and `wc -l`/`tr -d ' '`
+  # virtually always exit 0 regardless of what came before them in the pipe —
+  # but `pipefail` still propagates an UPSTREAM failure (`run_with_timeout`
+  # timing out, or `tcpdump` erroring on a truncated/unreadable pcap) as the
+  # pipeline's overall exit status. On a bare top-level assignment, that
+  # would trigger `errexit` and abort the whole script RAW, before ever
+  # reaching the deterministic `pkts == 0` failure message below. Capture the
+  # real exit code explicitly instead.
+  pkts_rc=0
+  pkts="$(run_with_timeout "$PCAP_READ_TIMEOUT_SECS" docker run --rm -v "$latest":/cap:ro "$TCPDUMP_IMAGE" tcpdump -r /cap/flight-8815.pcap 2>/dev/null | wc -l | tr -d ' ')" || pkts_rc=$?
+  if [[ "$pkts_rc" -ne 0 ]]; then
+    echo "❌ CAPTURE-ON-FAIL BROKEN: reading back $latest/flight-8815.pcap failed (rc=$pkts_rc, bound ${PCAP_READ_TIMEOUT_SECS}s) — the pcap may be truncated, corrupted, or unreadable, which is not evidence the capture path actually recorded Flight traffic"
+    exit 1
+  fi
   pkts="${pkts:-0}"
   if [[ "$pkts" -eq 0 ]]; then
     echo "❌ CAPTURE-ON-FAIL BROKEN: $latest/flight-8815.pcap has 0 packets even though the capture container started — a zero-packet pcap is not evidence the capture path actually recorded Flight traffic"
