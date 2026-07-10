@@ -96,11 +96,17 @@ pub fn detect_route(filter: Option<&FilterExpr>, schema: &TableSchema) -> PointR
             // distinct-key count is within the cap (the merger dedups too).
             capped_multi_point_read(dedup_keys(keys))
         }
-        // No multi-group: a plain full-PK equality routes; a partial (or empty)
-        // PK binding cannot point-read.
+        // No multi-group: route a plain full-PK equality ONLY when EVERY
+        // partition-key component was actually bound by an `=` conjunct. A
+        // residual-only filter (or any shape that binds no PK column) leaves slots
+        // `None`; the `collect` short-circuits to `None` → Scan. The explicit
+        // `!values.is_empty()` guard is belt-and-suspenders for the routing-API
+        // contract (roborev job 1616): `detect_route` must NEVER hand the producer
+        // an empty/partial `PartitionPointRead` it has to paper over — a
+        // no-real-binding filter always routes Scan.
         None => match acc.bindings.into_iter().collect::<Option<Vec<Value>>>() {
-            Some(values) => PointReadRoute::PartitionPointRead(values),
-            None => PointReadRoute::Scan,
+            Some(values) if !values.is_empty() => PointReadRoute::PartitionPointRead(values),
+            _ => PointReadRoute::Scan,
         },
     }
 }

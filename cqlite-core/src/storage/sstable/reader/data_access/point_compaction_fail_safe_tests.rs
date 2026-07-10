@@ -368,6 +368,147 @@ async fn stale_index_offset_degrades_to_scan_fallback_and_finds_the_row() {
     assert_eq!(rows[0], 1, "pk=2's single live row must be present");
 }
 
+// ---- HIGH (job 1616): BIG foreign-partition offset must not read as absence --
+
+/// Write a 2-partition BIG (`nb`) SSTable, then redirect Index.db's on-disk
+/// `data_offset` VInt for `pk=2` to point at `pk=1`'s (real, valid, DIFFERENT)
+/// partition offset — a stale/corrupt exact-offset entry aimed at another
+/// EXISTING partition, while pk=2's own row bytes stay intact and
+/// scan-recoverable. Returns the temp dir (keep alive), the `Data.db` path, and
+/// pk=2's raw key bytes.
+///
+/// Unlike the "implausibly large offset" fixture, the redirect lands on a
+/// perfectly well-formed OTHER partition, so the seek DECODES SUCCESSFULLY and
+/// finds only a FOREIGN key — the exact shape a naive authoritative-empty would
+/// mistake for absence.
+async fn foreign_partition_offset_fixture() -> (TempDir, std::path::PathBuf, Vec<u8>) {
+    let schema = schema();
+    let temp = TempDir::new().unwrap();
+    let mut writer = SSTableWriter::new(temp.path().to_path_buf(), 1, &schema).unwrap();
+
+    let mut keyed: Vec<_> = [(1, "one"), (2, "two")]
+        .into_iter()
+        .map(|(pk, v)| {
+            let m = mutation(pk, v);
+            let key = m.decorated_key(&schema).unwrap();
+            (key, m)
+        })
+        .collect();
+    keyed.sort_by_key(|(k, _)| k.token);
+    for (key, m) in keyed {
+        writer.write_partition(key, vec![m]).unwrap();
+    }
+    let info = writer.finish().await.unwrap();
+    let data_path = info.data_path.clone();
+    let index_path = info
+        .index_path
+        .clone()
+        .expect("writer must emit a sibling Index.db for the BIG format");
+
+    let key1 = WEPartitionKey::single("pk", Value::Integer(1))
+        .to_bytes(&schema)
+        .unwrap();
+    let key2 = WEPartitionKey::single("pk", Value::Integer(2))
+        .to_bytes(&schema)
+        .unwrap();
+
+    // Resolve BOTH partitions' real offsets from the INTACT index; pk=2's entry
+    // will be redirected to pk=1's (valid, different) offset.
+    let (off1, off2) = {
+        let reader = open_reader(&data_path).await;
+        let off1 = reader
+            .lookup_partition_with_index(&key1)
+            .await
+            .unwrap()
+            .expect("pk=1 must resolve via the intact Index.db")
+            .0;
+        let off2 = reader
+            .lookup_partition_with_index(&key2)
+            .await
+            .unwrap()
+            .expect("pk=2 must resolve via the intact Index.db")
+            .0;
+        (off1, off2)
+    };
+    assert_ne!(
+        off1, off2,
+        "the two partitions must sit at distinct offsets for a foreign redirect"
+    );
+
+    // Splice pk=2's `data_offset` VInt to encode pk=1's offset instead. pk=2 has
+    // the higher token (written last) so no entry follows it — a length-changing
+    // splice is safe.
+    let mut index_bytes = std::fs::read(&index_path).unwrap();
+    let mut prefix = (key2.len() as u16).to_be_bytes().to_vec();
+    prefix.extend_from_slice(&key2);
+    let prefix_start = index_bytes
+        .windows(prefix.len())
+        .position(|w| w == prefix.as_slice())
+        .expect("pk=2's Index.db entry prefix must be found");
+    let vint_start = prefix_start + prefix.len();
+
+    let mut old_vint = Vec::new();
+    encode_unsigned(off2, &mut old_vint);
+    assert_eq!(
+        &index_bytes[vint_start..vint_start + old_vint.len()],
+        old_vint.as_slice(),
+        "sanity: the located VInt must match pk=2's real offset"
+    );
+    let mut new_vint = Vec::new();
+    encode_unsigned(off1, &mut new_vint);
+    index_bytes.splice(
+        vint_start..vint_start + old_vint.len(),
+        new_vint.iter().copied(),
+    );
+    std::fs::write(&index_path, &index_bytes).unwrap();
+
+    (temp, data_path, key2)
+}
+
+/// A BIG exact-offset lookup whose Index.db entry resolves a DIFFERENT valid
+/// partition (stale/corrupt entry) must degrade to a scan fallback — the decode
+/// lands on a FOREIGN key, and treating an empty match-set there as authoritative
+/// absence would SILENTLY DROP the target key (roborev job 1616, High: fail-safe
+/// violation). The BTI prefix-collision authoritative-empty rule does NOT apply
+/// to a BIG exact offset. Proven at both layers: the primitive reports
+/// `IndexUnavailable`, and the assembled point-read merger still finds pk=2's row
+/// via scan fallback.
+///
+/// RED PROOF: with the src fix reverted the `saw_foreign_key && rows.is_empty()`
+/// branch returns `Rows(Vec::new())` (a silent drop) and this test FAILS on the
+/// `IndexUnavailable` assertion.
+#[tokio::test]
+async fn big_foreign_partition_offset_degrades_to_scan_fallback_not_empty_rows() {
+    let (_temp, data_path, key2) = foreign_partition_offset_fixture().await;
+    let schema = schema();
+
+    // Layer 1: the primitive itself.
+    let reader = open_reader(&data_path).await;
+    let outcome = reader
+        .read_single_partition_for_compaction(&key2, Some(&schema))
+        .await
+        .expect("a foreign-partition offset must degrade gracefully, never a hard Err");
+    assert!(
+        matches!(outcome, SinglePartitionCompaction::IndexUnavailable),
+        "a BIG Index.db offset resolving a DIFFERENT valid partition must report \
+         IndexUnavailable (scan-fallback), NEVER Rows(empty) (a silent drop of the \
+         target key), got {outcome:?}"
+    );
+
+    // Layer 2: the assembled point-read merger still finds pk=2's intact row.
+    let built =
+        build_single_partition_merger(vec![data_path], &[key2], &schema, ScanCancel::default())
+            .unwrap()
+            .expect("pk=2's row is intact in Data.db and must be found via scan fallback");
+    let rows = collect_partitions(built);
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly pk=2's partition must be returned, with its row intact"
+    );
+    assert_eq!(rows[0], 1, "pk=2's single live row must be present");
+}
+
 /// Drain a merger to completion, returning every partition's row count.
 fn collect_partitions(mut merger: KWayMerger) -> Vec<usize> {
     let mut out = Vec::new();

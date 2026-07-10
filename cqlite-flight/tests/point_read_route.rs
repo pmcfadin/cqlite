@@ -409,6 +409,40 @@ fn over_cap_distinct_in_list_still_falls_back_to_scan() {
     );
 }
 
+/// Finding 2 (roborev job 1616, routing-API contract): a residual-only filter
+/// that binds NO partition-key column must route `Scan` — never an empty/partial
+/// `PartitionPointRead` the producer has to paper over. Asserts the enum VARIANT
+/// (not a row count), so it fails if `detect_route` ever emits
+/// `PartitionPointRead([])` for a no-PK-binding filter.
+#[test]
+fn residual_only_filter_binds_no_pk_keeps_scan() {
+    let schema = single_pk_schema();
+    // `v = 3`: `v` is a regular column, no PK component bound.
+    let route = detect_route(Some(&eq("v", 3)), &schema);
+    assert_eq!(
+        route,
+        PointReadRoute::Scan,
+        "a filter binding no PK column must route Scan, never PartitionPointRead(empty)"
+    );
+    assert!(
+        !matches!(route, PointReadRoute::PartitionPointRead(_)),
+        "no-PK-binding filter must NEVER be a PartitionPointRead route"
+    );
+}
+
+/// Finding 2: a conjunction of ONLY non-PK residuals (`v = 3 AND ck > 1`, neither
+/// touching the PK) likewise routes `Scan`.
+#[test]
+fn all_residual_conjunction_keeps_scan() {
+    let schema = single_pk_schema();
+    let filter = FilterExpr::And(vec![eq("v", 3), gt("ck", 1)]);
+    assert_eq!(
+        detect_route(Some(&filter), &schema),
+        PointReadRoute::Scan,
+        "no PK component bound anywhere → Scan"
+    );
+}
+
 #[test]
 fn token_predicate_on_pk_keeps_scan() {
     let schema = single_pk_schema();

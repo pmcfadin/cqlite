@@ -161,8 +161,14 @@ impl SSTableReader {
         };
 
         // 5. Materialize `[offset, end)` decompressed and parse the one partition.
+        //    `is_bti` decides how a FOREIGN-key decode is interpreted (step below):
+        //    a BTI trie resolves by PREFIX (a decoded different key is a genuine
+        //    prefix-collision → authoritative empty), whereas a BIG Index.db entry
+        //    is an EXACT partition offset (a decoded different key means the entry
+        //    is stale/corrupt and pointed at another valid partition → scan
+        //    fallback, never a silent drop).
         match self
-            .seek_partition_compaction_rows(offset, end_bound, partition_key, schema)
+            .seek_partition_compaction_rows(offset, end_bound, partition_key, schema, is_bti)
             .await?
         {
             Some(rows) => Ok(SinglePartitionCompaction::Rows(rows)),
@@ -186,6 +192,7 @@ impl SSTableReader {
         end_bound: Option<u64>,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
+        is_bti: bool,
     ) -> Result<Option<Vec<CompactionRow>>> {
         let offset = offset as usize;
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
@@ -275,8 +282,22 @@ impl SSTableReader {
         )?;
 
         if saw_foreign_key && rows.is_empty() {
-            // Prefix-collision candidate for an absent key: authoritative empty.
-            return Ok(Some(Vec::new()));
+            if is_bti {
+                // BTI (`da`): the trie resolves by PREFIX, so a fully-decoded
+                // DIFFERENT key at the resolved offset is a genuine prefix-collision
+                // for an absent key — authoritative empty (do NOT fall back).
+                return Ok(Some(Vec::new()));
+            }
+            // BIG (`nb`): Index.db entries are EXACT partition offsets, so a decoded
+            // FOREIGN key means the entry was stale/corrupt and pointed at a
+            // DIFFERENT valid partition. Treating that as authoritative absence
+            // would SILENTLY DROP the target key (roborev job 1616, High:
+            // fail-safe violation). Degrade to `IndexUnavailable` → the caller
+            // scans this SSTable and filters, never a false-empty. (Three-exit
+            // invariant: DefinitelyAbsent = exact bloom negative only; Rows = a
+            // complete seek of the CORRECT partition; anything anomalous here is a
+            // scan fallback.)
+            return Ok(None);
         }
         Ok(Some(rows))
     }

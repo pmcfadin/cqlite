@@ -69,7 +69,17 @@ impl MergeProducer {
 
         let mut out: Vec<(Vec<u8>, i64)> = Vec::with_capacity(component_keys.len());
         for values in component_keys {
+            // Defensive guard: `detect_route` now guarantees every routed key binds
+            // EVERY partition-key component (a no-/partial-binding filter routes
+            // Scan, roborev job 1616), so this length mismatch should be
+            // unreachable. Keep it as a fail-safe — a wrong-arity key would be a
+            // routing logic bug, and dropping to the scan path is always correct.
             if values.len() != pk_names.len() {
+                debug_assert_eq!(
+                    values.len(),
+                    pk_names.len(),
+                    "detect_route must only yield full-arity partition keys"
+                );
                 return None;
             }
             let columns: Vec<(String, Value)> = pk_names
@@ -128,7 +138,17 @@ impl MergeProducer {
                 })?;
 
         on_merger_built();
-        let label = AccessPath::StreamingPartitionLookup.label();
+        // Label from the route SHAPE, not a fixed constant (roborev job 1616): a
+        // multi-key point read that survived token filtering with >1 key is a
+        // `multi_partition_lookup`; a single surviving key is the streaming
+        // single-partition analogue. This is the field-run evidence label, so it
+        // must reflect what the read actually did.
+        let access_path = if key_bytes.len() > 1 {
+            AccessPath::MultiPartitionLookup
+        } else {
+            AccessPath::StreamingPartitionLookup
+        };
+        let label = access_path.label();
         match built {
             // No candidate SSTable holds any target key → zero rows examined, so
             // nothing to stream (and no rows-scanned emission either — no work).
