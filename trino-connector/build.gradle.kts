@@ -59,11 +59,14 @@ val nettyVersion = "4.1.130.Final"
 // the runtime classpath. Several are requested transitively at 4.2.9.Final and are
 // only forced down to the arrow-19-tested 4.1.130.Final by the enforced BOM below.
 // Declaring each one EXPLICITLY (issue #2300) is what makes the pin survive into the
-// published Maven POM's <dependencies> — see the note on the BOM import below.
-// Keep this list in lockstep with the resolved graph (verified by the
-// `verifyPublishedPomNettyPin` task and by ArrowJavaVersionPinTest). tcnative is
-// intentionally excluded: its native-binding train (2.0.74.Final) is versioned
-// independently of netty's 4.x line and is not part of the 4.1.x allocator pin.
+// published Maven POM's <dependencies> — see the note on the BOM import below. This
+// list is the DECLARATION site only: `verifyPublishedPomNettyPin` derives the
+// EXPECTED set from the RESOLVED runtime graph (not this list), so if flight-core /
+// grpc later drags an ADDITIONAL io.netty core module in via the BOM without a
+// matching entry here, that task FAILS CLOSED naming the un-declared module (it
+// would otherwise be silently omitted from the POM). tcnative is intentionally
+// excluded: its native-binding train (2.0.74.Final) is versioned independently of
+// netty's 4.x line and is not part of the 4.1.x allocator pin.
 val nettyCoreModules = listOf(
     "netty-buffer",
     "netty-codec",
@@ -132,33 +135,68 @@ tasks.withType<Test>().configureEach {
 }
 
 // --- Published-POM netty-pin oracle (issue #2300) ----------------------------
-// Assert the CONSUMER-FACING artifact: every netty core module appears in the
-// generated POM's <dependencies> at the pinned nettyVersion. This is the property
-// a downstream Maven assembly actually reads (the enforced BOM alone lands only in
-// <dependencyManagement>, which is not transitive to consumers). Reads the real
-// generated pom-default.xml — not build.gradle.kts — so it cannot pass vacuously.
+// Assert the CONSUMER-FACING artifact: every netty core module that ACTUALLY
+// RESOLVES onto the runtime classpath appears in the generated POM's <dependencies>
+// at the pinned nettyVersion. This is the property a downstream Maven assembly reads
+// (the enforced BOM alone lands only in <dependencyManagement>, which is not
+// transitive to consumers).
+//
+// The EXPECTED netty set is DERIVED FROM THE RESOLVED runtimeClasspath GRAPH, not
+// from the hand-maintained `nettyCoreModules` list — so this check cannot degrade to
+// a list-echo. If flight-core / grpc later drags an ADDITIONAL io.netty core module
+// in via the BOM without a matching explicit declaration, that module resolves onto
+// the classpath but is OMITTED from the POM, and this task FAILS CLOSED naming it.
+// The netty-tcnative-* native-binding train is versioned independently
+// (nettyTcnativeVersion) and is intentionally NOT declared in the POM, so it is
+// checked against its own expected version but not required in <dependencies>.
+// Reads the real generated pom-default.xml — not build.gradle.kts — so it cannot
+// pass vacuously.
+val nettyTcnativeVersion = "2.0.74.Final"
 val verifyPublishedPomNettyPin by tasks.registering {
-    description = "Assert every netty core module is version-pinned in the published POM <dependencies> (#2300)."
+    description =
+        "Assert every RESOLVED netty core module is version-pinned in the published POM <dependencies> (#2300)."
     group = "verification"
     dependsOn("generatePomFileForMavenPublication")
     val pomFile = layout.buildDirectory.file("publications/maven/pom-default.xml")
     val expectedNettyVersion = nettyVersion
-    val expectedModules = nettyCoreModules
+    val expectedTcnativeVersion = nettyTcnativeVersion
+    // Captured lazily at configuration time; the artifact set resolves at execution.
+    val runtimeArtifacts = configurations.runtimeClasspath.get().incoming.artifacts
     inputs.file(pomFile)
+    inputs.files(configurations.runtimeClasspath)
     doLast {
+        // 1. Derive the resolved io.netty artifact set (name -> version) from the
+        //    runtime dependency graph — the authoritative source of truth.
+        val resolvedNetty = runtimeArtifacts.artifacts.mapNotNull { art ->
+            val id = art.id.componentIdentifier
+            if (id is org.gradle.api.artifacts.component.ModuleComponentIdentifier && id.group == "io.netty") {
+                id.moduleIdentifier.name to id.version
+            } else {
+                null
+            }
+        }.toMap()
+        require(resolvedNetty.isNotEmpty()) {
+            "no io.netty artifacts resolved on runtimeClasspath — graph-derivation is broken (#2300)"
+        }
+        // The tcnative native-binding train is independently versioned and
+        // intentionally excluded from the POM pin; every other io.netty artifact is a
+        // core module that MUST land in the published POM.
+        val (tcnative, core) = resolvedNetty.entries.partition { it.key.startsWith("netty-tcnative") }
+
+        // 2. Parse the generated POM's top-level <dependencies> (NOT
+        //    <dependencyManagement> — a downstream Maven consumer resolves versions
+        //    from <dependencies>).
         val pom = pomFile.get().asFile
         require(pom.isFile) { "generated POM not found at $pom" }
         val doc = javax.xml.parsers.DocumentBuilderFactory.newInstance()
             .apply { isNamespaceAware = false }
             .newDocumentBuilder()
             .parse(pom)
-        // Only the top-level <project>/<dependencies> block (NOT <dependencyManagement>),
-        // since a downstream Maven consumer resolves versions from <dependencies>.
         val depsNodes = (0 until doc.documentElement.childNodes.length)
             .map { doc.documentElement.childNodes.item(it) }
             .filter { it.nodeName == "dependencies" }
         require(depsNodes.isNotEmpty()) { "published POM has no top-level <dependencies> block: $pom" }
-        val resolved = mutableMapOf<String, String>()
+        val pomDeps = mutableMapOf<String, String>()
         depsNodes.forEach { deps ->
             val nodes = deps.childNodes
             for (i in 0 until nodes.length) {
@@ -176,23 +214,50 @@ val verifyPublishedPomNettyPin by tasks.registering {
                     }
                 }
                 if (groupId != null && artifactId != null && version != null) {
-                    resolved["$groupId:$artifactId"] = version
+                    pomDeps["$groupId:$artifactId"] = version
                 }
             }
         }
-        val problems = expectedModules.mapNotNull { module ->
-            when (val v = resolved["io.netty:$module"]) {
-                null -> "missing io.netty:$module from published POM <dependencies>"
-                expectedNettyVersion -> null
-                else -> "io.netty:$module pinned to $v, expected $expectedNettyVersion"
+
+        val problems = mutableListOf<String>()
+        // 3a. Every RESOLVED core netty module must be declared in the POM at the pin.
+        //     An un-declared resolved module is the exact fail-closed case (#2300).
+        core.forEach { (module, resolvedVersion) ->
+            if (resolvedVersion != expectedNettyVersion) {
+                problems +=
+                    "resolved io.netty:$module at $resolvedVersion on runtimeClasspath, expected $expectedNettyVersion"
+            }
+            when (val pomVersion = pomDeps["io.netty:$module"]) {
+                null -> problems +=
+                    "resolved io.netty:$module is NOT declared in the published POM <dependencies> — it would be " +
+                        "omitted from downstream Maven resolution; add it to nettyCoreModules"
+                expectedNettyVersion -> {}
+                else -> problems += "io.netty:$module declared at $pomVersion in POM, expected $expectedNettyVersion"
+            }
+        }
+        // 3b. tcnative train: pinned to its own independent version, POM-excluded by design.
+        tcnative.forEach { (module, resolvedVersion) ->
+            if (resolvedVersion != expectedTcnativeVersion) {
+                problems +=
+                    "resolved io.netty:$module at $resolvedVersion, expected tcnative train $expectedTcnativeVersion"
+            }
+        }
+        // 3c. Reject a stale hand-list: any netty dep declared in the POM that no
+        //     longer resolves would ship a dead <dependency> to consumers.
+        pomDeps.keys.filter { it.startsWith("io.netty:") }.forEach { key ->
+            val module = key.removePrefix("io.netty:")
+            if (!resolvedNetty.containsKey(module)) {
+                problems +=
+                    "$key is declared in the POM but no longer resolves on runtimeClasspath (stale nettyCoreModules entry)"
             }
         }
         require(problems.isEmpty()) {
             "published POM netty pin drift (#2300):\n  " + problems.joinToString("\n  ")
         }
         logger.lifecycle(
-            "verifyPublishedPomNettyPin: ${expectedModules.size} netty modules pinned to " +
-                "$expectedNettyVersion in $pom",
+            "verifyPublishedPomNettyPin: ${core.size} resolved netty core modules pinned to " +
+                "$expectedNettyVersion in POM <dependencies>; ${tcnative.size} tcnative artifacts at " +
+                "$expectedTcnativeVersion (#2300)",
         )
     }
 }
