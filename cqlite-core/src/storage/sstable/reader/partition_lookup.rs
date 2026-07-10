@@ -645,6 +645,29 @@ impl SSTableReader {
                 results.len(),
                 entries.len()
             );
+        } else if self.bti_partitions_db.is_none() {
+            // No Summary.db was loaded AND this is not a BTI SSTable (which
+            // legitimately carries its index in Partitions.db, not Summary.db).
+            // That means a BIG-format SSTable is missing the random-access index
+            // components, so every partition iteration must fully materialize and
+            // sort Data.db via `sequential_scan` — a real per-read perf cliff
+            // (issue #2295). This is the field symptom of a snapshot directory
+            // served with only Data.db: name the absent components and the
+            // consequence so an operator can spot an incomplete snapshot instead
+            // of silently paying the full-scan cost on every read.
+            let missing = if self.index_reader.is_none() {
+                "Index.db and Summary.db"
+            } else {
+                "Summary.db"
+            };
+            tracing::warn!(
+                "SSTable has no random-access partition index ({missing} absent): \
+                 iterate_all_partitions falls back to a full sequential scan of \
+                 Data.db, materializing and sorting every partition on each read \
+                 (a per-read perf cliff, issue #2295). For snapshot reads, ensure \
+                 the snapshot directory holds the full SSTable component set \
+                 (Index.db + Summary.db), not just Data.db."
+            );
         }
 
         // Fallback path: sequential walk of Data.db.
@@ -655,6 +678,21 @@ impl SSTableReader {
         let schema = self.schema.as_deref();
         self.sequential_scan(&table_id, None, None, None, schema)
             .await
+    }
+
+    /// Whether this reader has a random-access partition index — a `Summary.db`
+    /// (BIG format) or a `Partitions.db` trie (BTI format) — that lets
+    /// [`iterate_all_partitions`](Self::iterate_all_partitions) and point lookups
+    /// avoid a full sequential Data.db scan.
+    ///
+    /// Snapshot-completeness probe (issue #2295): a snapshot directory served with
+    /// only `Data.db` (its `Index.db`/`Summary.db` siblings absent) still opens,
+    /// but reports `false` here — meaning every read pays the sequential-scan perf
+    /// cliff. A directory holding the full component set reports `true`. This is
+    /// the observable used to prove that a complete snapshot uses the index path
+    /// rather than a full materialization.
+    pub fn has_partition_index(&self) -> bool {
+        self.summary_reader.is_some() || self.bti_partitions_db.is_some()
     }
 
     /// Build the TableId used for fallback `sequential_scan` from header metadata.
