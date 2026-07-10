@@ -47,6 +47,27 @@ observe_snapshot_listing() {
   local artdir="$ARTIFACTS_ROOT/snapshot-listing"
   mkdir -p "$artdir"
   local listing_file="$artdir/keyvalue-snapshot-listing.txt"
+
+  # Issue #2289 roborev finding (job 1596): the PUT's HTTP status was logged
+  # but never CHECKED — a failed PUT (Sidecar down, auth, 5xx, curl itself
+  # erroring/timing out) still fell through to scanning the filesystem and
+  # could report a "missing components" divergence finding for a snapshot
+  # that was NEVER CREATED this run (or stale leftovers from a PRIOR run),
+  # poisoning the #2295 evidence with a fabricated result. Require an
+  # unambiguous 2xx before treating the listing as meaningful; on anything
+  # else, record an explicit SKIPPED/FAILED artifact and return WITHOUT
+  # scanning the filesystem or emitting any divergence finding.
+  if [[ ! "$put_status" =~ ^2[0-9][0-9]$ ]]; then
+    echo "SIDECAR SNAPSHOT PUT FAILED (HTTP $put_status, expected 2xx) — SKIPPING the snapshot-listing observation entirely: with no confirmed-created snapshot, scanning the filesystem now could only surface stale data from a PRIOR run or nothing at all, either of which would be a FABRICATED divergence finding, not real evidence." >&2
+    echo "SKIPPED: Sidecar snapshot PUT returned HTTP $put_status (expected 2xx) — no listing scanned, no divergence finding emitted this run" > "$listing_file"
+    # Best-effort cleanup even on a failed/ambiguous PUT — idempotent no-op
+    # if nothing was actually created.
+    run_with_timeout "$NETWORK_PULL_TIMEOUT_SECS" docker run --rm --network "container:$cassandra_cid" curlimages/curl:latest \
+      -s -o /dev/null -X DELETE \
+      "http://172.42.0.2:9043/api/v1/keyspaces/loadtest/tables/keyvalue/snapshots/$SNAPSHOT_NAME" || true
+    return 0
+  fi
+
   run_with_timeout "$CASSANDRA_CTL_TIMEOUT_SECS" "${compose[@]}" exec -T cassandra \
     find /var/lib/cassandra/data/loadtest -path "*/snapshots/$SNAPSHOT_NAME/*" -type f \
     > "$listing_file" 2>&1 || true
