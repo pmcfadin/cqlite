@@ -41,7 +41,9 @@ env:
   # Database), write-support for the write suite (WriteEngine).
   # bench-internals adds the decode_value_for_bench shim the `decode` bench needs
   # (issue #1615); it changes no other bench and no production default build.
-  BENCH_FEATURES: "cli-helpers,write-support,bench-internals"
+  # parquet + delta-scan enable the export_throughput writer arms (issue #1494);
+  # both features exist on main, so they are safe to pass to the base build too.
+  BENCH_FEATURES: "cli-helpers,write-support,bench-internals,parquet,delta-scan"
   # Criterion run config — kept small for CI. Tune here if the gate is too noisy
   # (more samples → stabler medians, slower job).
   BENCH_ARGS: "--sample-size 20 --warm-up-time 1 --measurement-time 3"
@@ -111,7 +113,12 @@ jobs:
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
           fi
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction --bench decode \
+            --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction --bench decode --bench export_throughput \
+            -- --save-baseline pr "${BENCH_ARGV[@]}"
+          # Tier-2 (issue #1494): the end-to-end Flight do_get throughput bench
+          # lives in cqlite-flight (its own criterion output merges into
+          # target/criterion). ADVISORY — reported, never fails CI.
+          cargo bench -p cqlite-flight --bench flight_do_get \
             -- --save-baseline pr "${BENCH_ARGV[@]}"
 
       - name: Benchmark main → baseline 'base'
@@ -140,6 +147,12 @@ jobs:
           if [[ -f cqlite-core/benches/decode_bench.rs ]]; then
             BENCH_TARGETS+=(--bench decode)
           fi
+          # The `export_throughput` bench (issue #1494) may not exist on `main`
+          # yet; include it only when present. The compare script SKIPs any bench
+          # missing from the baseline, so a first-PR baseline stays green.
+          if [[ -f cqlite-core/benches/export_throughput.rs ]]; then
+            BENCH_TARGETS+=(--bench export_throughput)
+          fi
           # `bench-internals` (issue #1615) is defined by the PR but may not exist
           # on `main` yet. Passing it to `cargo bench` on a checkout that does not
           # define it fails feature resolution BEFORE the guarded --bench decode is
@@ -149,8 +162,21 @@ jobs:
           if grep -q '^bench-internals' cqlite-core/Cargo.toml; then
             BASE_FEATURES="$BASE_FEATURES,bench-internals"
           fi
+          # parquet + delta-scan drive the export_throughput writer arms (issue
+          # #1494). Both exist on main, but append them only when the bench they
+          # feed is present on this checkout so an older `main` (pre-#1494) still
+          # resolves features cleanly.
+          if [[ -f cqlite-core/benches/export_throughput.rs ]]; then
+            BASE_FEATURES="$BASE_FEATURES,parquet,delta-scan"
+          fi
           cargo bench -p cqlite-core --features "$BASE_FEATURES" \
             "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
+          # Tier-2 Flight do_get (issue #1494) — include only when the bench file
+          # exists on `main` (the PR that adds it SKIPs green until main has it).
+          if [[ -f cqlite-flight/benches/flight_do_get.rs ]]; then
+            cargo bench -p cqlite-flight --bench flight_do_get \
+              -- --save-baseline base "${BENCH_ARGV[@]}"
+          fi
 
       - name: Restore PR ref (for the gate script + policy)
         run: git checkout --force --detach ${{ steps.refs.outputs.pr_ref }}
