@@ -273,9 +273,12 @@ The lead **pipelines** near-independent issues rather than serializing on long w
 
 The pipeline measures itself so improvement is data-driven, not anecdotal — **sense → diagnose → improve**:
 
-- **Sense.** `flow-finalize` stamps one record per completed issue into the append-only ledger
-  `docs/reports/delivery-telemetry.jsonl` (governed by `docs/reports/delivery-telemetry.schema.json`)
-  using `scripts/delivery-telemetry.py record`. Records carry **authoritative data only**: GitHub-derived
+- **Sense.** `flow-finalize` stamps one record per delivery cycle (issue, pr) into the append-only
+  ledger `docs/reports/delivery-telemetry.jsonl` (governed by
+  `docs/reports/delivery-telemetry.schema.json`) using `scripts/delivery-telemetry.py record`. A
+  reopened issue that ships more than once legitimately gets one record per shipped PR — retro
+  aggregation by issue treats such multi-cycle issues as multiple deliveries, not one (issue #2314).
+  Records carry **authoritative data only**: GitHub-derived
   timestamps (issue/PR open + merge + close → cycle time and coarse phase durations) plus run-observed
   counters — claim collisions, rebase/conflict events, agent-gate pass/fail + run count, roborev findings,
   and rework. A counter that was not observed is an **error**, never a fabricated `0` (no-heuristics
