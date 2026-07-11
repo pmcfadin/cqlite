@@ -9,6 +9,7 @@
 use super::super::source::ScanCursor;
 use super::super::window_cursor::WindowCursor;
 use super::super::SSTableReader;
+use crate::storage::scan_cancel::ScanCancel;
 use crate::{Error, Result};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
@@ -544,9 +545,21 @@ impl SSTableReader {
     /// Returning `ControlFlow::Break` from `emit` stops the scan early
     /// (consumer dropped). Tombstone / timestamp semantics are byte-identical to
     /// the Vec variant (Issue #505/#533).
+    ///
+    /// `scan_cancel` is an explicit PER-CALL cancellation token (issue #2346),
+    /// not the reader's own [`SSTableReader::scan_cancel`] field: a cached/shared
+    /// `Arc<SSTableReader>` (a future warm-handle registry) may drive two
+    /// concurrent calls to this method with two INDEPENDENT tokens, so
+    /// cancellation cannot live as mutable per-reader state (`set_scan_cancel`
+    /// requires `&mut self`, uncallable through a shared `Arc`). Callers that
+    /// want the reader's own field's semantics (the pre-#2346 default) pass
+    /// `&self.scan_cancel` explicitly — see
+    /// [`SSTableReader::iterate_all_partitions_cancellable`] for the analogous
+    /// non-compaction seam.
     pub async fn stream_all_partitions_for_compaction<F>(
         &self,
         schema: Option<&crate::schema::TableSchema>,
+        scan_cancel: &ScanCancel,
         mut emit: F,
     ) -> Result<()>
     where
@@ -565,14 +578,18 @@ impl SSTableReader {
         // materialising iterator with ts=0 (matches the Vec-variant fallback).
         if !self.requires_chunk_stitching() {
             // The heavy, previously-uninterruptible work is inside
-            // `iterate_all_partitions` (→ `sequential_scan` → the block parser),
-            // which now polls `scan_cancel` per partition (issue #2264). Poll again
-            // per emitted row so a cancel that lands during the drain of the
-            // already-materialised Vec is also honoured promptly.
-            let entries = self.iterate_all_partitions().await?;
+            // `iterate_all_partitions_cancellable` (→ `sequential_scan` → the
+            // block parser), which now polls `scan_cancel` per partition (issue
+            // #2264). Poll again per emitted row so a cancel that lands during the
+            // drain of the already-materialised Vec is also honoured promptly.
+            // Issue #2346: route through the PER-CALL-token sibling (not the
+            // public `iterate_all_partitions`, which always uses the reader's own
+            // field) so this method's caller-supplied `scan_cancel` governs the
+            // whole non-stitching fallback too.
+            let entries = self.iterate_all_partitions_cancellable(scan_cancel).await?;
             for (i, (key, value)) in entries.into_iter().enumerate() {
                 if i & 0xFF == 0 {
-                    self.scan_cancel.check()?;
+                    scan_cancel.check()?;
                 }
                 let row =
                     super::super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
@@ -617,7 +634,7 @@ impl SSTableReader {
             // hundreds of chunks without ever completing (so the drain loop's
             // counter never advances).
             if chunk_count & 0xFF == 0 {
-                self.scan_cancel.check()?;
+                scan_cancel.check()?;
             }
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
@@ -653,6 +670,7 @@ impl SSTableReader {
                 false,
                 &mut emit,
                 &mut broke,
+                scan_cancel,
             )?;
             if broke {
                 return Ok(());
@@ -669,6 +687,7 @@ impl SSTableReader {
                 true,
                 &mut emit,
                 &mut broke,
+                scan_cancel,
             )?;
         }
 
@@ -694,6 +713,7 @@ impl SSTableReader {
         at_final_chunk: bool,
         emit: &mut F,
         broke: &mut bool,
+        scan_cancel: &ScanCancel,
     ) -> Result<()>
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
@@ -706,11 +726,12 @@ impl SSTableReader {
             }
             // Cooperative cancellation (issue #2264): for a chunk-stitched ('nb')
             // SSTable this is the per-partition hot loop the compaction stream (and
-            // thus a Flight `do_get`) spends its time in. Poll the reader's cancel
-            // token at a bounded interval so a disconnected client abandons the
-            // walk within milliseconds instead of the coarse ~1–2 min backstop.
+            // thus a Flight `do_get`) spends its time in. Poll the PER-CALL cancel
+            // token (issue #2346) at a bounded interval so a disconnected client
+            // abandons the walk within milliseconds instead of the coarse ~1–2 min
+            // backstop.
             if drained & 0xFF == 0 {
-                self.scan_cancel.check()?;
+                scan_cancel.check()?;
             }
             drained += 1;
             let mut local_break = false;

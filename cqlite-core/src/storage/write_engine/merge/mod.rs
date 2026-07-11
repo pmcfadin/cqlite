@@ -3,6 +3,13 @@
 //! Implements efficient k-way merge using a binary heap for producing
 //! compacted SSTables from multiple runs.
 //!
+//! File-size note (campsite rule, epic #1116): this file was already ~12.9k
+//! lines (far over the ~800-line source threshold) before issue #2346, which
+//! nudges it slightly further (a `producer_thread` refactor + new submodule
+//! declaration) — new code for #2346 lives in the sibling `from_readers`
+//! module instead of growing this file further. Splitting this file is out of
+//! #2346's scope; tracked under #1116.
+//!
 //! ## Architecture
 //!
 //! The K-way merger uses a min-heap to efficiently merge k sorted SSTable
@@ -92,7 +99,21 @@ pub use read_assembly::assemble_read_cells;
 #[cfg(feature = "write-support")]
 mod point_read;
 #[cfg(feature = "write-support")]
-pub use point_read::build_single_partition_merger;
+pub use point_read::{build_single_partition_merger, build_single_partition_merger_from_readers};
+
+/// Warm/shared-reader k-way merge construction (issue #2346): builds a merger
+/// directly from already-open `Arc<SSTableReader>`s instead of paths, so a
+/// future cached-reader caller (e.g. a Flight warm-handle registry) can drive a
+/// merge without re-opening/re-parsing Index/Summary/Statistics/bloom state per
+/// request. Reached as `KWayMerger::new_from_readers` (an inherent method added
+/// via `impl KWayMerger` in this submodule, mirroring `point_read`'s
+/// `from_row_iterators` — no re-export needed). Also hosts
+/// `drive_compaction_stream`, the streaming-emit helper shared by BOTH the
+/// path-based producer thread (this file's `SSTableRowIteratorAdapter::
+/// producer_thread`) and the new shared-reader producer thread, so the two
+/// never drift.
+#[cfg(feature = "write-support")]
+mod from_readers;
 
 /// Fully-expired SSTable drop classification (issue #1388): the metadata-only
 /// `fully_expired_sstables` drop-set used by both compaction surfaces to skip
@@ -598,9 +619,6 @@ impl SSTableRowIteratorAdapter {
             let mut config = Config::default();
             config.storage.use_mmap = false;
             config.storage.disk_access_mode = DiskAccessMode::Buffered;
-            // Cloned so the async block can take it by move while the outer
-            // `schema` stays available for build_merge_entry below.
-            let schema_for_reader = schema.clone();
 
             // Issue #2316: a `current_thread` runtime drives the scan ON this
             // producer thread with ZERO extra workers. A multi-threaded
@@ -629,37 +647,38 @@ impl SSTableRowIteratorAdapter {
                 // value structurally. Without it the value decode errors
                 // (`UDT not found in registry`), the row reconciles to empty, and
                 // the partition is dropped — silent data loss during compaction.
+                // This mutation requires `&mut self`, so it can only happen HERE
+                // — before the reader is ever shared — not on the shared-reader
+                // producer path (issue #2346, see `from_readers::open_from_reader`'s
+                // doc comment for that seam's UDT-registry contract).
                 if let Some(registry) = udt_registry {
                     reader.set_udt_registry(registry);
                 }
 
-                // Issue #2264: wire the cooperative-cancellation token so the
-                // (uninterruptible, fully-materialising for index-less inputs)
-                // compaction scan below abandons promptly when the Flight
-                // `do_get` driving this merge is cancelled. Default (never-cancel)
-                // for callers that pass `ScanCancel::default()`.
-                reader.set_scan_cancel(scan_cancel);
-
+                // Issue #2264/#2346: the cooperative-cancellation token is now a
+                // PER-CALL parameter to `stream_all_partitions_for_compaction`
+                // rather than mutated onto the reader (`set_scan_cancel` needed
+                // `&mut self`, which a SHARED reader cannot offer — see
+                // `from_readers::drive_compaction_stream`). This path-based
+                // producer still owns its freshly-opened `reader` exclusively, so
+                // passing `scan_cancel` by reference here is behaviourally
+                // identical to the old `set_scan_cancel` + field-read.
+                //
                 // Pass the schema so the parser uses the real clustering column
                 // names; the header-inferred fallback uses generic names like
                 // "clustering_key", which would defeat extract_clustering_key.
-                //
-                // The emit callback converts and forwards one entry at a time.
-                // A blocking `send` applies backpressure; an `Err` from `send`
-                // means the consumer was dropped → stop the scan (Break).
-                reader
-                    .stream_all_partitions_for_compaction(
-                        Some(&schema_for_reader),
-                        |compaction_row| {
-                            let msg = Self::build_merge_entry(run_index, compaction_row, &schema)
-                                .map_err(MergeProducerError::from);
-                            match sender.send(msg) {
-                                Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
-                                Err(_) => Ok(std::ops::ControlFlow::Break(())),
-                            }
-                        },
-                    )
-                    .await
+                // `drive_compaction_stream` is the SAME streaming helper the
+                // shared-reader producer thread uses (issue #2346) — the
+                // conversion/backpressure/cancellation-by-variant semantics are
+                // defined in exactly one place.
+                from_readers::drive_compaction_stream(
+                    &reader,
+                    run_index,
+                    &schema,
+                    &scan_cancel,
+                    &sender,
+                )
+                .await
             })
         })();
 

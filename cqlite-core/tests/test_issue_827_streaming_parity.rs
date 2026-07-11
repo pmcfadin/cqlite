@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 use cqlite_core::platform::Platform;
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
@@ -153,7 +154,7 @@ async fn collect_vec(reader: &SSTableReader, schema: &TableSchema) -> Vec<EntryS
 async fn collect_stream(reader: &SSTableReader, schema: &TableSchema) -> Vec<EntrySnapshot> {
     let mut out: Vec<EntrySnapshot> = Vec::new();
     reader
-        .stream_all_partitions_for_compaction(Some(schema), |row| {
+        .stream_all_partitions_for_compaction(Some(schema), &ScanCancel::default(), |row| {
             out.push(row);
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -509,7 +510,7 @@ async fn test_streaming_break_stops_early() {
 
     let mut collected: Vec<Vec<u8>> = Vec::new();
     reader
-        .stream_all_partitions_for_compaction(Some(&schema), |row| {
+        .stream_all_partitions_for_compaction(Some(&schema), &ScanCancel::default(), |row| {
             collected.push(row.key.as_bytes().to_vec());
             if collected.len() >= 5 {
                 Ok(std::ops::ControlFlow::Break(()))

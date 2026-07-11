@@ -230,14 +230,17 @@ async fn mid_scan_cancel_aborts_on_compressed_stitching_path() {
     const TOTAL: i32 = 2000;
     const TRIP_AT: usize = 300;
     let (_temp, data_path) = compressed_fixture(TOTAL).await;
-    let mut reader = open_reader(&data_path).await;
+    let reader = open_reader(&data_path).await;
 
+    // Issue #2346: `scan_cancel` is now a PER-CALL parameter, not a field
+    // mutated onto the reader — passed directly to
+    // `stream_all_partitions_for_compaction` below instead of via
+    // `set_scan_cancel`.
     let cancel = ScanCancel::new();
-    reader.set_scan_cancel(cancel.clone());
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), |_row| {
+        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, |_row| {
             count += 1;
             if count == TRIP_AT {
                 cancel.cancel();
@@ -268,7 +271,7 @@ async fn uncancelled_scan_streams_all_partitions() {
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), |_row| {
+        .stream_all_partitions_for_compaction(Some(&schema()), &ScanCancel::default(), |_row| {
             count += 1;
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -290,15 +293,14 @@ async fn uncancelled_scan_streams_all_partitions() {
 async fn pre_cancelled_scan_aborts_at_first_poll() {
     const TOTAL: i32 = 1000;
     let (_temp, data_path) = index_less_fixture(TOTAL).await;
-    let mut reader = open_reader(&data_path).await;
+    let reader = open_reader(&data_path).await;
 
     let cancel = ScanCancel::new();
     cancel.cancel();
-    reader.set_scan_cancel(cancel);
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), |_row| {
+        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, |_row| {
             count += 1;
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -331,14 +333,13 @@ async fn mid_scan_cancel_aborts_before_finishing() {
     const TOTAL: i32 = 2000;
     const TRIP_AT: usize = 300;
     let (_temp, data_path) = index_less_fixture(TOTAL).await;
-    let mut reader = open_reader(&data_path).await;
+    let reader = open_reader(&data_path).await;
 
     let cancel = ScanCancel::new();
-    reader.set_scan_cancel(cancel.clone());
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), |_row| {
+        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, |_row| {
             count += 1;
             if count == TRIP_AT {
                 cancel.cancel();
@@ -354,6 +355,213 @@ async fn mid_scan_cancel_aborts_before_finishing() {
     assert!(
         count >= TRIP_AT && count < TOTAL as usize,
         "must abort after the trip point but well before the full {TOTAL} partitions, got {count}"
+    );
+}
+
+/// Red-then-green (issue #2346, BLOCKER 1): the STITCHED `sequential_scan` path
+/// (`requires_chunk_stitching()` branch) must honour the PER-CALL cancel token.
+///
+/// Pre-#2346-fix, that branch called `stitch_and_parse_all_chunks` with NO token
+/// (only the non-stitching branch polled), so a pre-cancelled caller blocked
+/// until the ENTIRE data section was stitched + parsed and returned `Ok(all
+/// partitions)` — the `Err(Cancelled)` assertion below FAILS against that code.
+/// After the fix the chunk-stitch loop polls at chunk 0 (`stitch_all_chunks_
+/// cancellable`) and aborts with `Error::Cancelled`.
+///
+/// This drives `sequential_scan` DIRECTLY (rather than through
+/// `iterate_all_partitions_cancellable`, whose index-backed branch a
+/// writer-produced fixture may enter) so the stitched branch is unambiguously
+/// exercised — `table_id` is intentionally ignored there (see the branch's own
+/// comment), so any value serves.
+///
+/// Pre-cancel is the DETERMINISTIC discriminator (same convention as
+/// `pre_cancelled_scan_aborts_at_first_poll` above): `sequential_scan` returns a
+/// materialised `Vec` with no emit callback, so a concurrent mid-scan cancel
+/// would be a wall-clock race — a pre-cancelled token instead proves the poll
+/// fires on the FIRST chunk with no timing dependency. The uncancelled control
+/// first proves this exact path yields every partition, so the abort is cutting
+/// real work short, not passing on an empty scan.
+#[tokio::test(flavor = "multi_thread")]
+async fn stitched_sequential_scan_honors_per_call_cancel() {
+    use crate::types::TableId;
+    const TOTAL: i32 = 1000;
+    let (_temp, data_path) = index_less_fixture(TOTAL).await;
+    let reader = open_reader(&data_path).await;
+
+    // Non-vacuity guard: the fixture MUST take the STITCHED branch (the
+    // BLOCKER-1 gap), not the non-stitching branch that already polled.
+    assert!(
+        reader.requires_chunk_stitching(),
+        "fixture must take the stitched sequential-scan branch to cover the \
+         #2346 BLOCKER-1 gap"
+    );
+
+    let schema = schema();
+    // `table_id` is ignored in the stitching branch, so any value works.
+    let table_id = TableId::from("test_ks.test_table");
+
+    // Positive control: an uncancelled pass over THIS path returns every
+    // partition — so the pre-cancel abort below is cutting real work short.
+    let uncancelled = reader
+        .sequential_scan(
+            &table_id,
+            None,
+            None,
+            None,
+            Some(&schema),
+            &ScanCancel::default(),
+        )
+        .await
+        .expect("uncancelled stitched scan must succeed");
+    assert_eq!(
+        uncancelled.len(),
+        TOTAL as usize,
+        "the stitched sequential-scan path must return every partition when not cancelled"
+    );
+
+    let cancel = ScanCancel::new();
+    cancel.cancel();
+    let result = reader
+        .sequential_scan(&table_id, None, None, None, Some(&schema), &cancel)
+        .await;
+    assert!(
+        matches!(result, Err(crate::Error::Cancelled)),
+        "a pre-cancelled stitched sequential-scan must abort with Error::Cancelled \
+         (issue #2346 BLOCKER-1), got {:?}",
+        result.map(|v| v.len())
+    );
+}
+
+/// RED PROOF (issue #2346): two concurrent scans over ONE SHARED
+/// `Arc<SSTableReader>` cancel INDEPENDENTLY.
+///
+/// This is the core claim #2346 exists to unlock (a future Flight warm-handle
+/// registry serving two concurrent requests off ONE cached reader). It is
+/// impossible to even express against pre-#2346 `main`: cancellation there was
+/// mutable per-reader state set via `SSTableReader::set_scan_cancel(&mut self,
+/// ..)`. A SHARED `Arc<SSTableReader>` offers no `&mut self` (short of
+/// `Arc::get_mut`, which requires the refcount to be exactly 1 — impossible
+/// while a second concurrent scan holds its own clone), so two concurrent
+/// callers could not even give the ONE shared reader two DIFFERENT tokens; the
+/// only token that existed was whatever was mutated in last, racing/clobbering
+/// the other caller's. This test therefore FAILS TO COMPILE on pre-#2346 `main`
+/// — `stream_all_partitions_for_compaction` took no per-call `scan_cancel`
+/// argument at all, so there was no way to pass two independent tokens for two
+/// concurrent calls on one `&self` reader. The compile failure IS the red
+/// proof; there is no runtime "before" state to assert against.
+///
+/// After the fix, `scan_cancel` is a per-call `&ScanCancel` argument (issue
+/// #2346) — never reader-mutated state — so this spawns two scans on the SAME
+/// `Arc<SSTableReader>`: scan A self-cancels mid-stream via its OWN token; scan
+/// B (a different token, never cancelled) must still stream every partition,
+/// UNAFFECTED by A's cancellation — proving true independence, not shared
+/// mutable state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_scans_on_shared_reader_cancel_independently() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    const TOTAL: i32 = 2000;
+    const TRIP_AT: usize = 300;
+    const PARK_AT: usize = 300;
+    let (_temp, data_path) = index_less_fixture(TOTAL).await;
+    let reader = std::sync::Arc::new(open_reader(&data_path).await);
+
+    let cancel_a = ScanCancel::new();
+    let cancel_b = ScanCancel::new();
+
+    // Two-way handshake (roborev, issue #2346) — WITHOUT it scan B can finish
+    // before scan A ever cancels, so the test would pass even if cancellation
+    // WERE shared (A's cancel would arrive after B was already done). These
+    // latches force BOTH scans demonstrably in flight at the instant A cancels:
+    //   * `b_parked`  — B has reached PARK_AT (mid-scan, NOT finished) and is
+    //                   waiting; A must not cancel until this is set.
+    //   * `a_cancelled` — A has cancelled its own token; B resumes only after.
+    // Neither side can deadlock: each waits on a flag the OTHER (running on its
+    // own worker thread) sets independently. The busy-wait is a sync section
+    // inside the emit callback (which cannot `.await`); `worker_threads = 4`
+    // guarantees both tasks run on distinct workers concurrently. The `timeout`
+    // around the joins is a safety net, not the discriminator — the counts are.
+    let b_parked = std::sync::Arc::new(AtomicBool::new(false));
+    let a_cancelled = std::sync::Arc::new(AtomicBool::new(false));
+
+    let reader_a = std::sync::Arc::clone(&reader);
+    let cancel_a_task = cancel_a.clone();
+    let b_parked_a = std::sync::Arc::clone(&b_parked);
+    let a_cancelled_a = std::sync::Arc::clone(&a_cancelled);
+    let handle_a = tokio::spawn(async move {
+        let mut count = 0usize;
+        let result = reader_a
+            .stream_all_partitions_for_compaction(Some(&schema()), &cancel_a_task, |_row| {
+                count += 1;
+                if count == TRIP_AT {
+                    // Wait until B is demonstrably parked mid-scan, THEN cancel —
+                    // so B is provably still in flight when A's cancel fires.
+                    while !b_parked_a.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                    cancel_a_task.cancel();
+                    a_cancelled_a.store(true, Ordering::Release);
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            })
+            .await;
+        (result, count)
+    });
+
+    let reader_b = std::sync::Arc::clone(&reader);
+    let cancel_b_task = cancel_b.clone();
+    let b_parked_b = std::sync::Arc::clone(&b_parked);
+    let a_cancelled_b = std::sync::Arc::clone(&a_cancelled);
+    let handle_b = tokio::spawn(async move {
+        let mut count = 0usize;
+        let result = reader_b
+            .stream_all_partitions_for_compaction(Some(&schema()), &cancel_b_task, |_row| {
+                count += 1;
+                if count == PARK_AT {
+                    // Announce we are mid-scan, then hold here until A has
+                    // cancelled — guaranteeing B has NOT finished at that moment.
+                    b_parked_b.store(true, Ordering::Release);
+                    while !a_cancelled_b.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                    }
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            })
+            .await;
+        (result, count)
+    });
+
+    let (result_a, count_a) = tokio::time::timeout(Duration::from_secs(60), handle_a)
+        .await
+        .expect("scan A must finish within the safety timeout (no deadlock)")
+        .expect("scan A task did not panic");
+    let (result_b, count_b) = tokio::time::timeout(Duration::from_secs(60), handle_b)
+        .await
+        .expect("scan B must finish within the safety timeout (no deadlock)")
+        .expect("scan B task did not panic");
+
+    assert!(
+        matches!(result_a, Err(crate::Error::Cancelled)),
+        "scan A (self-cancelling mid-scan via its OWN token) must abort with \
+         Error::Cancelled, got {result_a:?}"
+    );
+    assert!(
+        count_a >= TRIP_AT && count_a < TOTAL as usize,
+        "scan A must stop after its own trip point but before the full {TOTAL} \
+         partitions, got {count_a}"
+    );
+
+    assert!(
+        result_b.is_ok(),
+        "scan B (never cancelled, independent token) must succeed even though A \
+         cancelled while B was provably mid-scan: {result_b:?}"
+    );
+    assert_eq!(
+        count_b, TOTAL as usize,
+        "scan B must stream every partition, UNAFFECTED by scan A's cancellation \
+         on the SAME shared reader while B was demonstrably in flight — proving \
+         the two tokens are truly independent, not per-reader mutable state (issue #2346)"
     );
 }
 

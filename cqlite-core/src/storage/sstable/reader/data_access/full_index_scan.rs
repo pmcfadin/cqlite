@@ -67,8 +67,15 @@ impl SSTableReader {
     /// - `Ok(None)` — the index/data section could not be proven complete or
     ///   internally consistent. The caller then emits a loud WARN and falls back to
     ///   `sequential_scan` (never a silent fallback).
+    ///
+    /// `scan_cancel` is an explicit PER-CALL cancellation token (issue #2346);
+    /// the sole caller ([`SSTableReader::iterate_all_partitions_cancellable`])
+    /// threads either the reader's own field (the pre-#2346 default) or a
+    /// caller-supplied token (the compaction path), so a shared/cached reader's
+    /// concurrent scans cancel independently.
     pub(in crate::storage::sstable::reader) async fn iterate_all_partitions_via_full_index(
         &self,
+        scan_cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
         let Some(index_reader) = &self.index_reader else {
             return Ok(None);
@@ -135,8 +142,8 @@ impl SSTableReader {
         for i in 0..entries.len() {
             // Cooperative cancellation (issue #2264): one real index-random-read +
             // Data.db parse per partition — poll every entry so a cancelled Flight
-            // `do_get` abandons the walk promptly.
-            self.scan_cancel.check()?;
+            // `do_get` abandons the walk promptly. Issue #2346: PER-CALL token.
+            scan_cancel.check()?;
 
             // Roborev job 1610 (finding 1): `raw_key: None` never actually occurs
             // in practice — `parse_big_index_entry` always sets `Some(raw_key)` —
