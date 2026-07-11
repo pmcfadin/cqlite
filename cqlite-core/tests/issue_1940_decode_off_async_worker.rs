@@ -146,6 +146,11 @@ async fn setup_db_buffered() -> Database {
     let mut core_config = cqlite_core::Config::default();
     core_config.storage.use_mmap = false;
     core_config.storage.disk_access_mode = cqlite_core::config::DiskAccessMode::Buffered;
+    // Force a COLD chunk path: disable the B1 block/chunk cache so the windowed scan
+    // always decompresses each chunk (recording a real decode thread) instead of
+    // possibly serving from a warm B1 cache, which would make the offload guard pass
+    // vacuously (roborev #1940 finding, never-vacuous doctrine).
+    core_config.memory.block_cache.enabled = false;
 
     let config = IngestionConfig {
         schema_paths: vec![schema_path],

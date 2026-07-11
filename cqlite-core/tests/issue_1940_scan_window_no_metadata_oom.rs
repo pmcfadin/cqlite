@@ -151,11 +151,17 @@ async fn setup() -> Option<Database> {
     if !data_dir.exists() {
         return None;
     }
+    // Force a COLD chunk path: disable the B1 block/chunk cache so every chunk is
+    // decompressed (and its scratch reserved) on the measured scan — a warm cache
+    // could otherwise serve chunks and skip the allocation path, making the peak-
+    // allocation guard pass vacuously (roborev #1940 finding, never-vacuous doctrine).
+    let mut core_config = cqlite_core::Config::default();
+    core_config.memory.block_cache.enabled = false;
     let config = IngestionConfig {
         schema_paths: vec![schema_path],
         data_dir,
         version_hint: Some("5.0".to_string()),
-        core_config: cqlite_core::Config::default(),
+        core_config,
         table_directory_filter: Some(format!("/{KEYSPACE}/")),
     };
     let result = ingest(config).await.ok()?;
