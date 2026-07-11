@@ -32,7 +32,7 @@ use cqlite_core::query::{
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
-use cqlite_core::types::{DataType, RowCells, ScanRow, Value};
+use cqlite_core::types::{DataType, RowCells, ScanRow};
 use cqlite_core::RowKey;
 
 use crate::agg::{AggError, AggPlan};
@@ -766,6 +766,8 @@ impl MergeProducer {
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
+        // Issue #2324 (roborev 1633): projection-aware assembly set, computed once.
+        let assemble_cols = self.assemble_columns();
 
         'partitions: loop {
             if cancel.is_cancelled() {
@@ -795,10 +797,17 @@ impl MergeProducer {
             // Count a partition actually scanned (post token-range filter).
             meter.record_partition();
             for entry in rows {
-                // Build the FULL row so predicates can reference any column, even
-                // one projected out of the output. Output projection is applied
-                // separately via `self.columns` during Arrow conversion.
-                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache) else {
+                // Build the row so predicates can reference any projected-out
+                // column too (`assemble_cols` includes filter-referenced columns);
+                // output projection is applied via `self.columns` during Arrow
+                // conversion. Columns the scan never reads are skipped in assembly.
+                let Some(row) = self.entry_to_row(
+                    &key.key,
+                    entry.row_data,
+                    &mut pk_cache,
+                    assemble_cols.as_ref(),
+                )?
+                else {
                     continue;
                 };
                 // Count a row materialised/examined by the scan (BEFORE the
@@ -880,6 +889,8 @@ impl MergeProducer {
         // Issue #1817: one partition-key decode cache for the whole aggregate
         // merge; each partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
+        // Issue #2324 (roborev 1633): projection-aware assembly set, computed once.
+        let assemble_cols = self.assemble_columns();
         loop {
             if cancel.is_cancelled() {
                 return Err(ProducerError::Cancelled);
@@ -902,7 +913,13 @@ impl MergeProducer {
                 }
             }
             for entry in rows {
-                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache) else {
+                let Some(row) = self.entry_to_row(
+                    &key.key,
+                    entry.row_data,
+                    &mut pk_cache,
+                    assemble_cols.as_ref(),
+                )?
+                else {
                     continue;
                 };
                 if let Some(filter) = &self.spec.filter {
@@ -916,46 +933,108 @@ impl MergeProducer {
         Ok(())
     }
 
-    /// Reconstruct one full logical row from a merged entry, or `None` for a row
+    /// Reconstruct one logical row from a merged entry, or `None` for a row
     /// tombstone. Cell tombstones are dropped so the column reads as null.
     ///
-    /// The row carries ALL columns (no projection) so predicate evaluation can
-    /// reference any column; output projection is applied later via `self.columns`.
+    /// The row carries the columns this scan actually reads — the output
+    /// projection PLUS any column the predicate or aggregation references, so
+    /// predicate evaluation can still reference a projected-out column. `needed`
+    /// (`None` = every column, a plain `SELECT *`) is threaded into
+    /// [`assemble_read_cells`]; a column outside that set is dropped BEFORE
+    /// reassembly. That is the projection-scoped fail-closed contract (issue
+    /// #2324, roborev 1633): the composite-keyed-collection error (#2339) fires
+    /// ONLY for a column the query projects/references — an unrelated `SELECT`
+    /// over a row that merely coexists with an unsupported composite-keyed
+    /// collection column succeeds, matching the observable pre-#2324 behaviour.
+    ///
+    /// Fallible: reassembling a collection column can surface authoritative
+    /// corruption (e.g. a map key whose `cell_path` bytes do not decode under the
+    /// declared key type). Such a failure is propagated as a `Merge` error rather
+    /// than silently dropping the row (issue #2324, no-heuristics / no-silent-loss).
     fn entry_to_row(
         &self,
         partition_key: &[u8],
         row_data: RowData,
         pk_cache: &mut PartitionKeyCache,
-    ) -> Option<QueryRow> {
+        needed: Option<&std::collections::HashSet<String>>,
+    ) -> Result<Option<QueryRow>, ProducerError> {
         let cells = match row_data {
             RowData::Live { cells } => cells,
             // Whole-row deletion: suppress from output.
-            RowData::Tombstone { .. } => return None,
+            RowData::Tombstone { .. } => return Ok(None),
         };
 
-        // Issue #1334: build the SAME `ScanRow::Row` carrier every scan producer
-        // builds, so `build_row_from_scan` disassembles it into real column values
-        // (previously this emitted `Value::Map`, which fell through to the non-row
-        // fallback and silently dropped every Flight column value — roborev H2).
-        let row_cells: RowCells = cells
-            .into_iter()
-            // A cell tombstone leaves the column absent → null in Arrow output,
-            // matching the CLI's "emit null for tombstoned cells" behaviour.
-            .filter(|c| !matches!(c.value, Value::Tombstone(_)))
-            .map(|c| (std::sync::Arc::from(c.column.as_str()), c.value))
-            .collect();
+        // Issue #2324: the k-way merger emits every element of a non-frozen
+        // collection (list/set/map) as its OWN cell, all sharing the column name.
+        // Keying those by name (as `build_row_from_scan` does) would keep only the
+        // LAST element and silently drop the rest of the collection. Reassemble
+        // the per-element cells into a single `Value::List` / `Value::Set` /
+        // `Value::Map` per column — mirroring the single-generation reader's
+        // collapsed shape — BEFORE building the row carrier. Simple cell tombstones
+        // are dropped (column reads null), matching the prior behaviour.
+        //
+        // Issue #1334: the assembled cells still feed the SAME `ScanRow::Row`
+        // carrier every scan producer builds, so `build_row_from_scan`
+        // disassembles it into real column values (never the non-row fallback that
+        // once emitted `Value::Map` and dropped every column — roborev H2).
+        let row_cells: RowCells = cqlite_core::storage::write_engine::merge::assemble_read_cells(
+            cells,
+            &self.schema,
+            needed,
+        )
+        .map_err(ProducerError::Merge)?;
 
         let key = RowKey::new(partition_key.to_vec());
         // Issue #1817: reuse the caller's per-merge partition-key decode cache so a
         // partition's rows (emitted consecutively by the k-way merger) decode the
         // key once, not once per row. Output is byte-identical.
-        build_row_from_scan_cached(
+        Ok(build_row_from_scan_cached(
             key,
             ScanRow::Row(row_cells),
             &[],
             Some(&self.schema),
             pk_cache,
-        )
+        ))
+    }
+
+    /// The projection-aware set of column names this scan actually reads — the
+    /// columns [`entry_to_row`](Self::entry_to_row) must materialize. `None` means
+    /// "every column": a plain `SELECT *` with no aggregation, where nothing is
+    /// dropped. Computed once per merge (negligible), threaded into
+    /// [`assemble_read_cells`] to scope the composite-keyed-collection fail-closed
+    /// error (#2339) to columns a query projects/references (issue #2324, roborev
+    /// 1633) and to skip reassembling collections the query never emits.
+    fn assemble_columns(&self) -> Option<std::collections::HashSet<String>> {
+        use std::collections::HashSet;
+        match &self.agg {
+            // Aggregation: the reassembled row feeds ONLY the aggregation (group-by
+            // keys + aggregate source columns) and the predicate filter — the
+            // projected row columns are NOT emitted (the partial aggregate schema
+            // is). So the needed set is exactly those, independent of projection;
+            // an aggregate that references no regular column (e.g. `count(*)`)
+            // needs none of the row's collection columns.
+            Some(agg) => {
+                let mut needed = HashSet::new();
+                agg.collect_referenced_columns(&mut needed);
+                if let Some(filter) = &self.spec.filter {
+                    filter.collect_referenced_columns(&mut needed);
+                }
+                Some(needed)
+            }
+            // Row path: a `SELECT *` (no projection) emits every column → assemble
+            // all (None). With an explicit projection the needed set is the output
+            // columns (`self.columns`, already projection-restricted) plus any the
+            // predicate filter references (a filter may test a projected-out column).
+            None => {
+                self.spec.projection.as_ref()?;
+                let mut needed: HashSet<String> =
+                    self.columns.iter().map(|c| c.name.clone()).collect();
+                if let Some(filter) = &self.spec.filter {
+                    filter.collect_referenced_columns(&mut needed);
+                }
+                Some(needed)
+            }
+        }
     }
 
     /// Merge `paths` WITHOUT the input prune, relying only on the per-partition

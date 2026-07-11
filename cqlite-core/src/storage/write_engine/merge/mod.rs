@@ -78,6 +78,13 @@ mod model;
 #[cfg(feature = "write-support")]
 pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, RowData};
 
+/// Read-shape reassembly of a merged row's per-column cells (issue #2324):
+/// collapse per-element collection cells back into a single `Value::List` /
+/// `Value::Set` / `Value::Map` for read consumers that key cells by column name.
+mod read_assembly;
+#[cfg(feature = "write-support")]
+pub use read_assembly::assemble_read_cells;
+
 /// Single-partition point-read merge builder (issue #2207): assembles a
 /// [`KWayMerger`] from per-candidate single-partition runs (seeked or key-filtered)
 /// for the Flight `do_get` point-read path. Byte-identical reconciliation to the
