@@ -309,8 +309,11 @@ impl SSTableReader {
         cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
         read_shadowing: bool,
+        scan_cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
-        let stitched_buffer = self.stitch_all_chunks(cursor).await?;
+        let stitched_buffer = self
+            .stitch_all_chunks_cancellable(cursor, scan_cancel)
+            .await?;
         let parser = self.build_v5_parser(read_shadowing);
 
         // Get schema (use provided schema or reader's schema)
@@ -380,7 +383,26 @@ impl SSTableReader {
     ///
     /// Precondition: the caller has seeked `cursor`'s file to the start of the
     /// data section (the cursor's chunk index starts at 0 when freshly minted).
+    ///
+    /// Existing callers use the reader's own [`SSTableReader::scan_cancel`]
+    /// field (unchanged pre-#2346 behaviour); this is a thin wrapper over
+    /// [`Self::stitch_all_chunks_cancellable`], which the per-call seam
+    /// (`sequential_scan`) drives with its caller-supplied token instead.
     pub(super) async fn stitch_all_chunks(&self, cursor: &ScanCursor) -> Result<Vec<u8>> {
+        self.stitch_all_chunks_cancellable(cursor, &self.scan_cancel)
+            .await
+    }
+
+    /// [`Self::stitch_all_chunks`] with an explicit PER-CALL cancel token
+    /// (issue #2346). `scan_cancel` is polled every 256 chunks so a cancelled
+    /// caller abandons the stitch — the chunk-read/decompress loop is the
+    /// I/O-bound phase of the stitched scan path, matching the compaction
+    /// stream's per-256-chunk cadence (`stream_all_partitions_for_compaction`).
+    pub(super) async fn stitch_all_chunks_cancellable(
+        &self,
+        cursor: &ScanCursor,
+        scan_cancel: &crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Vec<u8>> {
         use crate::storage::sstable::compression::Compression;
 
         // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
@@ -402,6 +424,12 @@ impl SSTableReader {
 
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
+            // Cooperative cancellation (issue #2346): poll the per-call token every
+            // 256 chunks so a cancelled stitched scan abandons the I/O/decompress
+            // walk promptly instead of stitching the entire data section first.
+            if chunk_count & 0xFF == 0 {
+                scan_cancel.check()?;
+            }
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
                 tracing::debug!(

@@ -260,9 +260,11 @@ impl SSTableReader {
                 "V5CompressedLegacy format detected, decompressing and stitching all chunks before parsing"
             );
 
-            // Use shared stitching helper method
+            // Use shared stitching helper method. Physical enumeration
+            // (`get_all_entries`) honours the reader's own cancel field —
+            // unchanged pre-#2346 behaviour.
             let entries = self
-                .stitch_and_parse_all_chunks(&cursor, None, false)
+                .stitch_and_parse_all_chunks(&cursor, None, false, &self.scan_cancel)
                 .await?;
             results.extend(entries);
         } else {
@@ -840,9 +842,14 @@ impl SSTableReader {
                 "SSTableReader::sequential_scan - V5CompressedLegacy NB detected, using stitched buffer"
             );
 
-            // Stitch all chunks together (reuse logic from get_all_entries)
+            // Stitch all chunks together (reuse logic from get_all_entries).
+            // Thread the PER-CALL cancel token (issue #2346) so a cancelled
+            // caller abandons the stitched walk promptly instead of blocking
+            // until the entire data section is stitched+parsed — the
+            // chunk-stitch loop polls at the same 256-chunk cadence as the
+            // non-stitching branch below.
             let all_entries = self
-                .stitch_and_parse_all_chunks(&cursor, schema, true)
+                .stitch_and_parse_all_chunks(&cursor, schema, true, scan_cancel)
                 .await?;
             tracing::debug!(
                 "SSTableReader::sequential_scan - Stitched parsing returned {} total entries",
@@ -853,7 +860,17 @@ impl SSTableReader {
             // before sorting.  Limit is applied AFTER sort so that LIMIT N returns the N
             // token-smallest partitions, not the first N encountered in parse order.
             // (BLOCKING-1: limit-after-order)
-            for (_entry_table_id, entry_key, entry_value) in all_entries {
+            for (idx, (_entry_table_id, entry_key, entry_value)) in
+                all_entries.into_iter().enumerate()
+            {
+                // Cooperative cancellation (issue #2346): the chunk-stitch loop
+                // poll covers the I/O phase, but `parse_block` materialises every
+                // entry in one shot — poll here at the same 256-entry cadence as
+                // the non-stitching branch so a cancelled caller does not walk a
+                // huge already-parsed result set to completion.
+                if idx & 0xFF == 0 {
+                    scan_cancel.check()?;
+                }
                 if let Some(start) = start_key {
                     if &entry_key < start {
                         continue;
