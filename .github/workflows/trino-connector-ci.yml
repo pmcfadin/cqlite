@@ -53,7 +53,14 @@ jobs:
         working-directory: trino-connector
         # verifyPublishedPomNettyPin asserts the netty pin survives into the
         # published POM's <dependencies> for downstream Maven consumers (issue #2300).
-        run: ./gradlew --no-daemon test verifyPublishedPomNettyPin
+        # generateMetadataFileForMavenPublication + generatePomFileForMavenPublication
+        # run Gradle 9.1's publication validation on EVERY PR (issue #2334): these tasks
+        # otherwise fire only on the publish path, so an enforced-platform / metadata
+        # leak (e.g. #2334's enforcedPlatform in a published variant) was invisible to
+        # CI until the release publish job failed. Running them here catches it pre-merge.
+        run: >-
+          ./gradlew --no-daemon test verifyPublishedPomNettyPin
+          generateMetadataFileForMavenPublication generatePomFileForMavenPublication
 
       - name: Assemble plugin
         if: env.RUN_FULL == 'true'

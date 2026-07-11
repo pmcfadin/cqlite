@@ -84,19 +84,36 @@ val nettyCoreModules = listOf(
 dependencies {
     compileOnly("io.trino:trino-spi:$trinoVersion")
 
-    // The enforced BOM constrains THIS build's resolution and reaches downstream
-    // GRADLE consumers via the published `.module` metadata — but a Maven/Central
-    // consumer assembling the plugin reads only the POM. A BOM `import` lands in the
-    // POM's <dependencyManagement>, and Maven dependencyManagement is NOT transitive
-    // to downstream consumers, so it would NOT stop a Maven assembly from resolving
+    // The BOM constrains THIS build's resolution. A Maven/Central consumer assembling
+    // the plugin reads only the POM: a BOM `import` lands in the POM's
+    // <dependencyManagement>, and Maven dependencyManagement is NOT transitive to
+    // downstream consumers, so it would NOT stop a Maven assembly from resolving
     // flight-core's transitive netty at 4.2.x (re-exposing the arrow-19 allocator
     // break; issue #2300). The explicit per-module declarations below land in the
     // POM's <dependencies> with pinned versions, so a downstream Maven build resolves
-    // them at 4.1.130.Final by nearest-wins. Keep the BOM too: it keeps the in-build
-    // stack (and any future un-enumerated netty module) aligned and covers Gradle
-    // consumers.
-    implementation(enforcedPlatform("io.netty:netty-bom:$nettyVersion"))
-    nettyCoreModules.forEach { implementation("io.netty:$it:$nettyVersion") }
+    // them at 4.1.130.Final by nearest-wins — those 11 pins carry the version
+    // authority for both this build and the published component.
+    //
+    // Use a NON-enforced `platform(...)`, not `enforcedPlatform(...)` (issue #2334):
+    // Gradle 9.1's publication validation rejects an enforced platform in a published
+    // component's `runtimeElements` variant because forced constraints leak to Gradle
+    // consumers as hard overrides (`generateMetadataFileForMavenPublication` FAILS).
+    // Enforcement is redundant given the explicit pins; if `platform()` alone ever
+    // lets a transitive netty core module float in the RESOLVED graph, the
+    // graph-derived `verifyPublishedPomNettyPin` task below catches it — resolve any
+    // such drift with an explicit pin, never by re-enforcing.
+    implementation(platform("io.netty:netty-bom:$nettyVersion"))
+    // STRICT version pins (issue #2334): a plain `implementation("io.netty:x:4.1.130")`
+    // declaration LOSES to grpc-netty/flight-core's transitive 4.2.x under Gradle's
+    // highest-version-wins, so the graph floats to 4.2.9.Final (re-exposing the arrow-19
+    // allocator break). A `strictly` constraint forces the downgrade to 4.1.130.Final,
+    // wins against the transitive requests, and — unlike `enforcedPlatform` — publishes
+    // cleanly as the module's own strict requirement (no enforced-platform leak, so
+    // Gradle 9.1's publication validation passes). These 11 strict pins ARE the version
+    // authority for the build and the published component.
+    nettyCoreModules.forEach {
+        implementation("io.netty:$it") { version { strictly(nettyVersion) } }
+    }
     implementation("org.apache.arrow:flight-core:$arrowVersion")
     implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonVersion")
 
