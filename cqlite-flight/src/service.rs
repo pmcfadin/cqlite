@@ -150,28 +150,38 @@ struct DoGetSetup {
     input: DoGetInput,
 }
 
-/// Cross-request setup caches (spec Requirement 8): the schema PARSE and the
-/// directory RESOLVE are the two per-request `do_get`-setup costs that survive a
-/// warm reader-cache hit unless memoized. Both are keyed on authoritative,
-/// pre-validated ticket inputs (the DDL string; the pathsafe-validated
-/// keyspace/table) and shared (`Arc`) across the `Clone`d per-RPC handles.
+/// Cross-request setup caches (spec Requirement 8): the schema PARSE is the one
+/// per-request `do_get`-setup cost that survives a warm reader-cache hit unless
+/// memoized. Keyed on the authoritative, pre-validated DDL string and shared
+/// (`Arc`) across the `Clone`d per-RPC handles.
+///
+/// The directory RESOLVE is deliberately NOT cached (roborev 1639, issue #2310
+/// finding 2 round 3): a naive path-string cache is unsound. A recreated table's
+/// OLD `<table>-<uuid>` dir commonly still exists on disk (Cassandra/the sidecar
+/// doesn't always remove it atomically with the new one landing), so a cheap
+/// `is_dir()` revalidation of a cached entry PASSES on the stale pin while a
+/// newer sibling dir is the authoritative resolution — and a cached base whose
+/// leaf later becomes a symlink swap evades the cold path's resolve-time
+/// containment check entirely. A correct revalidation (list the keyspace dir,
+/// pick the lexicographically-largest match, re-run containment) costs the same
+/// as a fresh resolve, so the cache buys nothing but the unsoundness: `resolve_dir`
+/// below re-resolves authoritatively EVERY request, exactly the pre-PR cold
+/// posture. This is not a Req-8 regression: Req 8's "approximately zero" covers
+/// PARSE work (schema parse, reader open, index/summary/bloom parse) — the
+/// directory resolve is the same cost class (one `read_dir`) as the per-request
+/// authoritative generation-set probe that spec Requirement 2 itself mandates on
+/// every request, so paying it every request was always the design, not a gap.
 #[derive(Default)]
 struct SetupCaches {
     /// Parsed schema per exact DDL string. Keyed on the full DDL (never a hash —
     /// a hash collision would serve the WRONG schema and corrupt decode). Bounded
     /// in practice by the number of distinct table DDLs queried.
     schemas: Mutex<HashMap<String, Arc<TableSchema>>>,
-    /// Resolved LIVE-mode table dir per (keyspace, table). Snapshot mode is NOT
-    /// cached on purpose: the field runs a fresh per-query `snapshots/<uuid>/`
-    /// dir per request, so a snapshot-keyed cache would grow unbounded with ZERO
-    /// hit benefit (the warm reader cache still elides the parse via inode
-    /// identity). Live mode's dir is stable, so caching it elides the resolve on
-    /// every repeat query — the dominant warm-hit case (spec Req 8).
-    live_dirs: Mutex<HashMap<(String, String), PathBuf>>,
     /// Work-done probe: schema PARSES actually performed (a cache hit adds 0).
     schema_parses: AtomicU64,
-    /// Work-done probe: directory RESOLVES actually performed (a live-mode cache
-    /// hit adds 0; a snapshot-mode request always resolves, by design above).
+    /// Work-done probe: directory RESOLVES actually performed. Always increments
+    /// once per request (live or snapshot mode) — the resolve is authoritative
+    /// per-request by design, never elided (see the struct doc above).
     resolves: AtomicU64,
 }
 
@@ -258,59 +268,12 @@ impl CqliteFlightService {
         Ok(schema)
     }
 
-    /// Resolve the SSTable directory for a ticket, reusing a cached LIVE-mode
-    /// resolution on a repeat (keyspace, table) (spec Req 8: directory resolve
-    /// elided on a warm hit). Snapshot mode always resolves fresh (see
-    /// [`SetupCaches::live_dirs`] for why caching it would leak). The
-    /// keyspace/table are pathsafe-validated by `FlightTicket::from_bytes`, so a
-    /// cached entry was validated when first resolved.
-    ///
-    /// The pin is CORRECTNESS-bounded (issue #2310 finding 2): a cached dir is
-    /// served only after a cheap existence re-check, so a dropped/recreated table
-    /// (whose `table-<uuid>` dir was renamed) invalidates the pin and forces a
-    /// fresh resolve — which correctly counts as resolve work; the Req-8 elision
-    /// claim only covers the steady state. And a non-existent resolution (the
-    /// `best.unwrap_or(exact)` fallback for a table with no dir on disk) is NEVER
-    /// cached, so the pin can never fossilize a wrong/absent path.
+    /// Resolve the SSTable directory for a ticket: the authoritative
+    /// `DirSource::resolve` (containment-checked, issue #1430), run EVERY
+    /// request — never cached (roborev 1639, issue #2310 finding 2 round 3; see
+    /// [`SetupCaches`] for why a directory-resolve cache is unsound). This
+    /// mirrors the pre-PR cold posture exactly.
     fn resolve_dir(&self, ticket: &FlightTicket) -> Result<PathBuf, Status> {
-        let snapshot_mode = ticket.snapshot.as_deref().is_some_and(|s| !s.is_empty());
-        if !snapshot_mode {
-            let cache_key = (ticket.keyspace.clone(), ticket.table.clone());
-            {
-                let mut live = self
-                    .caches
-                    .live_dirs
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                if let Some(hit) = live.get(&cache_key) {
-                    // Cheap re-validation: a still-present pinned dir is a warm hit
-                    // (zero resolve work). A missing/renamed one is a STALE pin —
-                    // drop it and fall through to a fresh resolve.
-                    if hit.is_dir() {
-                        return Ok(hit.clone());
-                    }
-                    live.remove(&cache_key);
-                }
-            }
-            let dir = self.resolve_dir_uncached(ticket)?;
-            // Only cache a resolution that actually EXISTS: never pin the
-            // non-existent `best.unwrap_or(exact)` fallback (would serve a wrong /
-            // stale path for the process lifetime).
-            if dir.is_dir() {
-                self.caches
-                    .live_dirs
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .entry(cache_key)
-                    .or_insert_with(|| dir.clone());
-            }
-            return Ok(dir);
-        }
-        self.resolve_dir_uncached(ticket)
-    }
-
-    /// The uncached `DirSource::resolve`, incrementing the resolve work probe.
-    fn resolve_dir_uncached(&self, ticket: &FlightTicket) -> Result<PathBuf, Status> {
         let dir = DirSource::resolve(
             &self.data_dir,
             &ticket.keyspace,
@@ -937,15 +900,18 @@ mod tests {
         );
     }
 
-    /// Spec Req 8 elision probe: two IDENTICAL live-mode `do_get`s re-parse the
-    /// schema ZERO times and re-resolve the directory ZERO times on the second
-    /// request. The first request pays exactly one parse + one resolve; the warm
-    /// second request reuses both caches. (The end-to-end latency win these
-    /// counters underwrite is measured downstream by the #2289/#1494 bench
-    /// harness — the counters it needs are exactly `setup_work()` +
-    /// `warm_metrics()`, in place as of this PR.)
+    /// Spec Req 8 elision probe (updated round 3, roborev 1639): two IDENTICAL
+    /// live-mode `do_get`s re-parse the schema ZERO times on the second request —
+    /// PARSE work is what Req 8 covers. The directory RESOLVE is deliberately
+    /// authoritative EVERY request (never elided): it increments on both the
+    /// first AND second request. See [`SetupCaches`] for why caching it is
+    /// unsound (a recreated table's old `<table>-<uuid>` dir commonly still
+    /// exists, so a cheap existence re-check cannot distinguish a stale pin from
+    /// a live one; and a cached base evades resolve-time containment on a
+    /// symlink swap). (The end-to-end latency win the parse-elision counters
+    /// underwrite is measured downstream by the #2289/#1494 bench harness.)
     #[test]
-    fn do_get_warm_hit_elides_schema_parse_and_dir_resolve() {
+    fn do_get_warm_hit_elides_schema_parse_not_dir_resolve() {
         let schema = simple_schema();
         let (_temp, data_dir, _dir) =
             build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
@@ -977,17 +943,22 @@ mod tests {
             "the warm second request re-parses the schema ZERO times (spec Req 8)"
         );
         assert_eq!(
-            after_second.resolves, 1,
-            "the warm second request re-resolves the directory ZERO times (spec Req 8)"
+            after_second.resolves, 2,
+            "the directory resolve is authoritative EVERY request, by design \
+             (roborev 1639) — it must NOT be elided on the warm second request"
         );
     }
 
-    /// Finding 2 (#2310): a live-dir pin must NOT survive a drop + recreate under
-    /// a new `table-<uuid>` name. The first resolve caches `items-aaaa`; after it
-    /// is removed and `items-bbbb` created, the next resolve must reach the NEW
-    /// dir, never the stale pin. Red on pre-fix code (serves the pinned path).
+    /// Finding 2 round 3 (#2310, roborev 1639): `resolve_dir` must be
+    /// authoritative EVERY request, even when a table's OLD `<table>-<uuid>` dir
+    /// is still present on disk (the common case: a recreate does not always
+    /// remove the old dir atomically with the new one landing). Red on the
+    /// round-2 cached code: the first resolve pins `items-aaaaaaaa`; a cheap
+    /// `is_dir()` revalidation of that pin PASSES (the old dir was never
+    /// removed), so the cached code serves the STALE `aaaaaaaa` dir forever
+    /// instead of the lexicographically-larger, authoritative `bbbbbbbb`.
     #[test]
-    fn live_dir_pin_invalidated_on_table_drop_and_recreate() {
+    fn resolve_dir_is_authoritative_every_request_even_when_old_dir_still_exists() {
         let temp = tempfile::TempDir::new().unwrap();
         let data_dir = temp.path().join("data");
         let ks_dir = data_dir.join(KS);
@@ -1004,23 +975,25 @@ mod tests {
         let r1 = svc.resolve_dir(&t).expect("first resolve");
         assert_eq!(r1, first, "first resolve picks the only table-<uuid> dir");
 
-        std::fs::remove_dir_all(&first).unwrap();
+        // The OLD dir is left in place (NOT removed) — the common recreate case
+        // a naive existence-only revalidation cannot distinguish from "still
+        // live". A newer, lexicographically-larger sibling appears alongside it.
         let second = ks_dir.join(format!("{TBL}-bbbbbbbb"));
         std::fs::create_dir_all(&second).unwrap();
 
         let r2 = svc.resolve_dir(&t).expect("second resolve");
         assert_eq!(
             r2, second,
-            "a dropped/recreated table dir must NOT serve the stale pin"
+            "resolve must be authoritative every request — the still-present old \
+             dir must NOT be served over the newer, correct resolution"
         );
     }
 
-    /// Finding 2 (#2310): a NON-EXISTENT resolution (the `best.unwrap_or(exact)`
-    /// fallback for a table with no dir yet) must never be cached — otherwise the
-    /// wrong/absent path fossilizes for the process lifetime. After the table dir
-    /// later appears under a `table-<uuid>` name, the next resolve must reach it.
+    /// Sanity: a table with no dir on disk yet, resolved once, then created —
+    /// the next resolve must reach the real dir (basic cold-resolve behavior,
+    /// no caching involved after roborev 1639's removal of the live-dir cache).
     #[test]
-    fn resolve_never_caches_a_nonexistent_dir() {
+    fn resolve_reaches_newly_created_table_dir_after_being_absent() {
         let temp = tempfile::TempDir::new().unwrap();
         let data_dir = temp.path().join("data");
         let ks_dir = data_dir.join(KS);
@@ -1036,15 +1009,11 @@ mod tests {
         let r1 = svc.resolve_dir(&t).expect("first resolve");
         assert!(!r1.is_dir(), "no table dir on disk yet, got {r1:?}");
 
-        // The table now lands under a uuid-suffixed dir.
         let real = ks_dir.join(format!("{TBL}-cccccccc"));
         std::fs::create_dir_all(&real).unwrap();
 
         let r2 = svc.resolve_dir(&t).expect("second resolve");
-        assert_eq!(
-            r2, real,
-            "a non-existent first resolution must not be cached over the real dir"
-        );
+        assert_eq!(r2, real, "the second resolve must reach the now-real dir");
     }
 
     /// Snapshot-mode warm path (spec Requirements 1/2/8): two identical `do_get`s

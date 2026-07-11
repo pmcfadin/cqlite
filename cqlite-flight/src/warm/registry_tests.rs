@@ -258,6 +258,102 @@ fn concurrent_same_key_rebuild_dedups_readers_and_bytes() {
     drop(temp);
 }
 
+/// Epoch guard (issue #2310, roborev 1639): a SLOW rebuild ("A") whose own
+/// disk-probe ran BEFORE a second generation landed — so A's `current_set`
+/// only knows about gen1 — must NOT be allowed to reach the swap after a
+/// FASTER, newer rebuild ("B", probed AFTER gen2 landed) already installed
+/// `{gen1, gen2}`. Without the epoch guard, A's stale `current_set = {gen1}`
+/// would make the ORIGINAL swap logic treat B's freshly-installed gen2 as
+/// "removed" (not in A's `current_set`) and EVICT it — silently losing a live
+/// generation. `open_barrier` pauses A (by thread name) right after its OWN
+/// probe/before it opens gen1, so B can land gen2 on disk and fully complete
+/// its rebuild+swap before A is released to attempt its (now stale) swap.
+#[test]
+fn slow_rebuild_does_not_overwrite_a_faster_newer_swap() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let schema = simple_schema();
+    let (temp, _data, table_dir) = build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+    let reg = Arc::new(WarmTableRegistry::new());
+
+    let arrived = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    {
+        let arrived = Arc::clone(&arrived);
+        let resume = Arc::clone(&resume);
+        reg.set_open_barrier(Arc::new(move || {
+            // Only the slow-A thread pauses here; B's calls to the same global
+            // hook no-op and proceed immediately.
+            if thread::current().name() == Some("slow-A") {
+                arrived.wait();
+                resume.wait();
+            }
+        }));
+    }
+
+    let a_reg = Arc::clone(&reg);
+    let a_schema = schema.clone();
+    let a_dir = table_dir.clone();
+    let a_handle = thread::Builder::new()
+        .name("slow-A".to_string())
+        .spawn(move || {
+            a_reg.warm_readers(&key(), ddl(), &a_schema, &a_dir, None, &CancelFlag::new())
+        })
+        .expect("spawn slow-A");
+
+    // Block until A has probed (sees ONLY gen1) and paused before opening it.
+    arrived.wait();
+
+    // gen2 lands on disk AFTER A's probe. B (this thread) probes, opens, and
+    // swaps to completion BEFORE A is released — B's install is the "newer"
+    // state A's stale probe never saw.
+    append_gen(&table_dir, &schema, vec![write_row(2, "b", 2, 100)]);
+    let b_result = reg
+        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &CancelFlag::new())
+        .expect("fast rebuild B installs the newer set");
+    assert_eq!(b_result.readers.len(), 2, "B installs both generations");
+
+    // Release A: it opens its own (already-stale) gen1 copy and attempts to
+    // swap against its stale current_set={gen1}.
+    resume.wait();
+    let a_result = a_handle
+        .join()
+        .expect("thread")
+        .expect("A's rebuild completes (discarded, not erroring)");
+
+    assert_eq!(
+        a_result.readers.len(),
+        2,
+        "A must be served the CURRENT (B's) fresher two-generation set, not \
+         have evicted gen2 based on its own stale one-generation probe"
+    );
+    assert_eq!(
+        a_result.outcome,
+        RefreshOutcome::FailClosedRetained,
+        "the discarded-stale-rebuild path is folded into FailClosedRetained \
+         (adjudicated, documented in warm/metrics.rs)"
+    );
+
+    // No reader churn: A must be served the IDENTICAL (B's) Arc<SSTableReader>s,
+    // never a freshly-reopened duplicate for either generation.
+    let mut a_ptrs: Vec<*const SSTableReader> = a_result.readers.iter().map(Arc::as_ptr).collect();
+    let mut b_ptrs: Vec<*const SSTableReader> = b_result.readers.iter().map(Arc::as_ptr).collect();
+    a_ptrs.sort();
+    b_ptrs.sort();
+    assert_eq!(
+        a_ptrs, b_ptrs,
+        "A's served readers must be the SAME Arcs as B's installed ones (no churn)"
+    );
+
+    assert_eq!(
+        reg.debug_reader_count(&key()),
+        2,
+        "the final cached set is B's two generations — gen2 was never evicted"
+    );
+    drop(temp);
+}
+
 /// Requirement 4 (fail-closed rebuild): a newly-added generation that cannot be
 /// opened returns the typed error and leaves the previously warm set fully
 /// intact — no partial view.

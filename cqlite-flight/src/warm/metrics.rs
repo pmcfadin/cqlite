@@ -29,7 +29,11 @@ pub enum RefreshOutcome {
     /// opened, removed dropped, unchanged kept).
     RebuiltDelta,
     /// A rebuild failed (an added generation would not open); the PREVIOUSLY warm
-    /// set was retained fully intact (fail-closed, mirrors #1749).
+    /// set was retained fully intact (fail-closed, mirrors #1749). ALSO recorded
+    /// (issue #2310, roborev 1639) when a rebuild's epoch guard discards its own
+    /// (older-probe) result because a concurrent rebuild already installed a
+    /// fresher one under the same key — the CURRENTLY installed (here,
+    /// concurrently NEWER) set is retained/served instead of being overwritten.
     FailClosedRetained,
 }
 

@@ -289,6 +289,14 @@ impl WarmTableRegistry {
     /// ADDED generations (BEFORE any swap), keep UNCHANGED parsed state, drop
     /// REMOVED, swap atomically. Any open failure returns the typed error with the
     /// previously warm set fully intact.
+    ///
+    /// Epoch guard (issue #2310, roborev 1639): right before the swap, re-checks
+    /// that the live cache entry's generation set still matches
+    /// `probe_start_set` (the state THIS delta was computed against). If a
+    /// concurrent rebuild already installed a fresher result for the same key in
+    /// the meantime, this rebuild discards its own (now-stale-probe) opened
+    /// readers and hands back the current, fresher set instead of overwriting
+    /// newer state with an older probe result.
     #[allow(clippy::too_many_arguments)]
     fn rebuild(
         &self,
@@ -306,7 +314,9 @@ impl WarmTableRegistry {
 
         // Which generations are already warm (and DDL still matches)? Snapshot
         // their ids so we open only the delta. Held briefly; opening happens
-        // OUTSIDE the lock (slow I/O).
+        // OUTSIDE the lock (slow I/O). `probe_start_set` is what THIS rebuild's
+        // delta was computed against — the epoch guard below re-checks it hasn't
+        // moved by the time we reach the swap (roborev 1639).
         let cached_ids: Vec<GenerationId> = {
             let inner = self.lock_inner();
             inner
@@ -316,6 +326,7 @@ impl WarmTableRegistry {
                 .map(|t| t.readers.iter().map(|r| r.id).collect())
                 .unwrap_or_default()
         };
+        let probe_start_set = GenerationSet::from_ids(cached_ids.clone());
 
         // ADDED = present now, not already warm. Open them (fail-closed).
         let added: Vec<&GenerationEntry> = entries
@@ -343,6 +354,52 @@ impl WarmTableRegistry {
 
         // Swap atomically under the write guard.
         let mut inner = self.lock_inner();
+
+        // Epoch guard (issue #2310, roborev 1639): if the LIVE entry's DDL
+        // matches ours but its generation set has already moved past
+        // `probe_start_set` — the state THIS rebuild's delta was computed
+        // against — a concurrent rebuild already installed a fresher result
+        // under this same key while we were opening our (now stale-probe)
+        // delta. Overwriting it would regress the cache to an older view, so we
+        // DISCARD our opened readers (dropped below, never swapped in) and hand
+        // back the CURRENT, already-fresher set instead: it satisfies this
+        // request (it is at least as fresh as what we probed). A live entry
+        // with a DIFFERENT ddl_hash, or no live entry at all, is not a valid
+        // fresher substitute — those fall through to the normal rebuild below
+        // exactly as before. Folded into the `FailClosedRetained` metric
+        // (adjudicated: "the previously-installed — here, concurrently
+        // NEWER — set was retained instead of being overwritten by an older
+        // probe result") rather than adding a new bounded label.
+        if let Some(live) = inner.tables.get(key) {
+            if live.ddl_hash == ddl_hash && live.generation_set() != probe_start_set {
+                let tick = inner.next_tick();
+                let entry = inner.tables.get_mut(key).expect("checked Some above");
+                for r in &mut entry.readers {
+                    r.last_access = tick;
+                }
+                let current = WarmSet {
+                    readers: entry
+                        .readers
+                        .iter()
+                        .map(|r| Arc::clone(&r.reader))
+                        .collect(),
+                    schema: Arc::clone(&entry.schema),
+                    outcome: RefreshOutcome::FailClosedRetained,
+                    reader_opens: 0,
+                };
+                drop(inner);
+                // `opened` (our now-discarded readers) drops here, releasing
+                // their `Arc<SSTableReader>`s without ever touching `used_bytes`
+                // — the work of opening them was still real I/O, so it still
+                // counts toward the reader-opens work-done probe.
+                drop(opened);
+                self.metrics.record_reader_opens(reader_opens);
+                self.metrics
+                    .record_refresh(RefreshOutcome::FailClosedRetained);
+                return Ok(current);
+            }
+        }
+
         let tick = inner.next_tick();
         let mut freed: u64 = 0;
         let mut removed_count: u64 = 0;
