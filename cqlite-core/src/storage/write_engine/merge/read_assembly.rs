@@ -296,7 +296,7 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 /// [`key_is_opaque_composite`]).
 #[cfg(feature = "write-support")]
 fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType) -> Result<()> {
-    if key_is_opaque_composite(cmp) {
+    if key_is_opaque_composite(cmp) || comparator_orders_by_raw_cell_path_bytes(cmp) {
         elements.sort_by(|a, b| cell_path_bytes(a).cmp(cell_path_bytes(b)));
         return Ok(());
     }
@@ -346,6 +346,27 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
         ComparatorType::Custom(name) => !(name == "time" || name == "inet"),
         // Tuple / Udt / Set / List / Map: undecodable by the scalar codec.
         _ => true,
+    }
+}
+
+/// True when the element/key type's Cassandra ordering IS unsigned raw-byte
+/// comparison of the `cell_path`, so decoding to a `Value` and routing through
+/// the scalar type comparator would MIS-order it.
+///
+/// `inet` (Cassandra `InetAddressType`) orders by unsigned comparison of the raw
+/// address bytes — but the scalar `Custom("inet")` comparator falls through to
+/// [`ComparatorType::compare`]'s `compare_custom`, which orders by the FORMATTED
+/// string (e.g. `"10.0.0.1" < "9.0.0.1"`), diverging from a single-generation
+/// `SELECT`. The element/key `cell_path` for an inet IS the raw address bytes, so
+/// ordering by `cell_path` bytes matches Cassandra exactly (roborev 1631, issue
+/// #2324). Branches on the DECLARED type only (no-heuristics, issue #28); recurses
+/// through `Frozen` defensively though inet is never frozen here.
+#[cfg(feature = "write-support")]
+fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
+    match cmp {
+        ComparatorType::Frozen(inner) => comparator_orders_by_raw_cell_path_bytes(inner),
+        ComparatorType::Custom(name) => name == "inet",
+        _ => false,
     }
 }
 
@@ -429,6 +450,9 @@ mod tests {
                 // Blob + raw-byte-order path.
                 col("fset", "set<frozen<addr_type>>"),
                 col("ftk", "map<frozen<tuple<int, text>>, bigint>"),
+                // inet element ordering (roborev 1631): InetAddressType orders by
+                // unsigned address bytes, NOT the formatted-string order.
+                col("iset", "set<inet>"),
             ],
             comments: HashMap::new(),
             dropped_columns: HashMap::new(),
@@ -526,6 +550,29 @@ mod tests {
                 (Value::Text("beta".into()), Value::BigInt(200)),
             ])),
             "MAP must reassemble every entry with the key decoded from cell_path"
+        );
+    }
+
+    #[test]
+    fn set_of_inet_orders_by_raw_bytes_not_string() {
+        // set<inet>: cell_path (and value) is the raw 4-byte address. Cassandra's
+        // InetAddressType orders by UNSIGNED address bytes, so 9.0.0.1 (bytes
+        // [9,0,0,1]) precedes 10.0.0.1 (bytes [10,0,0,1]). The formatted-string
+        // order the scalar `Custom("inet")` comparator would use is the REVERSE
+        // ("10.0.0.1" < "9.0.0.1"), which would mis-order a multi-SSTable set.
+        // Arrive out of order to prove the sort actually runs (roborev 1631).
+        let ip_9 = vec![9u8, 0, 0, 1];
+        let ip_10 = vec![10u8, 0, 0, 1];
+        let cells = vec![
+            elem("iset", Value::Inet(ip_10.clone()), ip_10.clone()),
+            elem("iset", Value::Inet(ip_9.clone()), ip_9.clone()),
+        ];
+        let out = assemble_read_cells(cells, &schema()).unwrap();
+        assert_eq!(
+            get(&out, "iset"),
+            Some(&Value::Set(vec![Value::Inet(ip_9), Value::Inet(ip_10),])),
+            "set<inet> must order by unsigned address bytes (9.0.0.1 before 10.0.0.1), \
+             not the reversed formatted-string order"
         );
     }
 
