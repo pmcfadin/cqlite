@@ -109,6 +109,10 @@ pub mod attr {
     /// `tombstones_build_no_prune`). Bounded by the enum itself; NEVER carries a
     /// partition key, predicate value, or query string.
     pub const FALLBACK_REASON: &str = "cqlite.query.fallback_reason";
+    /// Flight warm-handle refresh outcome (issue #2310). Bounded to the closed set
+    /// `"unchanged"`, `"rebuilt_delta"`, `"fail_closed_retained"` — a `&'static str`
+    /// from a fixed slot table, never a ticket, key, or path value.
+    pub const WARM_REFRESH_OUTCOME: &str = "cqlite.warm.refresh_outcome";
 }
 
 /// `cqlite.read.rows` — counter `{row}`.
@@ -518,6 +522,33 @@ pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
 /// carries a ticket, key, token range, or query-text attribute.
 pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
 
+/// `cqlite.warm.cache.hits` — counter `{1}` (issue #2310).
+///
+/// Flight warm-handle cache hits: a request whose probed SSTable generation set
+/// matched the cached set, served from warm parsed state with ZERO reader-open
+/// and zero Index/Summary/Statistics/bloom parse. No attributes (bounded).
+pub const WARM_CACHE_HITS: &str = "cqlite.warm.cache.hits";
+
+/// `cqlite.warm.cache.misses` — counter `{1}` (issue #2310).
+///
+/// Flight warm-handle cache misses: no cached entry, or the generation set
+/// changed so a (delta) rebuild was required. No attributes (bounded).
+pub const WARM_CACHE_MISSES: &str = "cqlite.warm.cache.misses";
+
+/// `cqlite.warm.cache.evicts` — counter `{1}` (issue #2310).
+///
+/// Warm generations evicted, whether by LRU (byte-budget pressure) or because a
+/// rebuild found them removed on disk. No attributes (bounded).
+pub const WARM_CACHE_EVICTS: &str = "cqlite.warm.cache.evicts";
+
+/// `cqlite.warm.cache.refresh` — counter `{1}` (issue #2310).
+///
+/// Warm-handle refresh outcomes, tagged by [`attr::WARM_REFRESH_OUTCOME`]
+/// (`unchanged` / `rebuilt_delta` / `fail_closed_retained`) — the single bounded
+/// dimension. Distinguishes a warm hit from a delta rebuild from a fail-closed
+/// retention in metrics alone (spec Requirement 6).
+pub const WARM_CACHE_REFRESH: &str = "cqlite.warm.cache.refresh";
+
 /// All catalog metric names, for tests and registration sanity checks.
 pub const ALL_METRICS: &[&str] = &[
     READ_ROWS,
@@ -573,6 +604,11 @@ pub const ALL_METRICS: &[&str] = &[
     RPC_BYTES,
     // In-progress read/query metrics (#2162)
     RPC_PHASE_DURATION,
+    // Flight warm-handle cache (#2310)
+    WARM_CACHE_HITS,
+    WARM_CACHE_MISSES,
+    WARM_CACHE_EVICTS,
+    WARM_CACHE_REFRESH,
 ];
 
 #[cfg(test)]
@@ -607,9 +643,27 @@ mod tests {
             attr::RPC_STATUS,
             attr::RPC_PHASE,
             attr::FALLBACK_REASON,
+            attr::WARM_REFRESH_OUTCOME,
         ] {
             assert!(key.starts_with("cqlite."), "attr {key} must be namespaced");
         }
+    }
+
+    #[test]
+    fn warm_cache_metrics_are_registered_and_namespaced() {
+        // Issue #2310: the warm-handle counters must be part of the canonical
+        // catalog so registration/uniqueness checks cover them, and rooted under
+        // `cqlite.` like every other metric.
+        for m in [
+            WARM_CACHE_HITS,
+            WARM_CACHE_MISSES,
+            WARM_CACHE_EVICTS,
+            WARM_CACHE_REFRESH,
+        ] {
+            assert!(ALL_METRICS.contains(&m), "{m} must be catalogued");
+            assert!(m.starts_with("cqlite.warm."));
+        }
+        assert!(attr::WARM_REFRESH_OUTCOME.starts_with("cqlite."));
     }
 
     #[test]

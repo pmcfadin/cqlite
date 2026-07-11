@@ -16,11 +16,13 @@ pub mod pathsafe;
 pub mod point_read;
 pub mod producer;
 mod producer_point;
+mod producer_warm;
 pub mod scan_progress;
 pub mod service;
 pub mod shutdown;
 pub mod stats;
 pub mod streaming;
+pub mod warm;
 
 // Shared byte-pin infrastructure (issues #2283/#2285): the single source of
 // truth for the `cassandra_easy_stress.keyvalue` field shape AND the
