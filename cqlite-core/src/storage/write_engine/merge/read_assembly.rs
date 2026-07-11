@@ -25,15 +25,21 @@
 //!
 //! Non-scalar set elements / map keys (`frozen<tuple>`, `frozen<udt>`, nested
 //! `frozen<collection>`) are NOT decodable by the scalar `deserialize_value_bytes`
-//! codec. Rather than fail the whole query — a regression from the canonical
-//! single-generation reader, which serves such keys as opaque bytes — this mirrors
-//! that reader's `parse_cell_path_key` (complex_column.rs): the key/element is
-//! served as a raw `Value::Blob(cell_path)` and ordered by raw `cell_path` byte
-//! comparison. Within one SSTable the elements are already comparator-sorted on
-//! disk, and a byte-comparable serialized form makes byte order == comparator
-//! order; cross-SSTable ordering of a non-byte-comparable composite is a documented
-//! limitation shared with (and no worse than) the single-generation read path. The
-//! opaque/scalar choice branches on the DECLARED schema type only (no guessing).
+//! codec. Serving them as an opaque `Value::Blob(cell_path)` does not actually
+//! reassemble them — the typed Arrow builder downstream expects a tuple/struct
+//! value for the declared type and BREAKS on raw bytes, the same failure the
+//! whole-row error produced, one layer deeper. So this path FAILS CLOSED with a
+//! clear error naming the column + declared key/element type
+//! ([`composite_collection_unsupported`]); full composite key/element decode via
+//! the value deserializer is follow-up #2339. The opaque/scalar choice branches
+//! on the DECLARED schema type only (no guessing).
+//!
+//! Two decodable scalars — `inet` (`InetAddressType`) and `time` (`TimeType`) —
+//! route through the comparator's `compare_custom`, which orders by the FORMATTED
+//! string and can diverge from Cassandra's raw-byte order; their serialized
+//! `cell_path` form IS unsigned-byte-comparable, so they are ordered by raw
+//! `cell_path` bytes instead ([`comparator_orders_by_raw_cell_path_bytes`],
+//! roborev 1631/1632).
 //!
 //! Tombstone handling follows Cassandra SELECT semantics (issue #1742: SELECT
 //! output is the read-path authority), NOT the single-generation reader's
@@ -236,6 +242,12 @@ fn assemble_complex(
         // a single-generation `SELECT` returns (issue #2324, roborev 1628).
         CqlType::Set(inner) => {
             let elem_cmp = ComparatorType::from_cql_type(inner)?;
+            // A frozen tuple/UDT/nested-collection element cannot be materialized
+            // as a typed Arrow value here — fail closed (see #2339) rather than
+            // emit opaque bytes that break the typed builder downstream.
+            if key_is_opaque_composite(&elem_cmp) {
+                return Err(composite_collection_unsupported(name, "set element", inner));
+            }
             sort_elements_by_cell_path(&mut elements, &elem_cmp)?;
             Ok(Value::Set(elements.into_iter().map(|e| e.value).collect()))
         }
@@ -248,25 +260,23 @@ fn assemble_complex(
         }
         CqlType::Map(key_type, _) => {
             let key_cmp = ComparatorType::from_cql_type(key_type)?;
-            // Order entries by the declared key comparator (scalar) or raw
-            // cell_path bytes (opaque composite) so a map spanning multiple
-            // SSTables reconstructs in authoritative key order — done on the cells
-            // up front so the key is decoded once, at build time, below.
+            // A frozen tuple/UDT/nested-collection KEY cannot be materialized as a
+            // typed Arrow value here — fail closed (see #2339) rather than serve an
+            // opaque Value::Blob(cell_path) that breaks the typed builder one layer
+            // deeper. Only scalar-keyed maps reassemble on this path.
+            if key_is_opaque_composite(&key_cmp) {
+                return Err(composite_collection_unsupported(name, "map key", key_type));
+            }
+            // Order entries by the declared (scalar) key comparator so a map
+            // spanning multiple SSTables reconstructs in authoritative key order —
+            // done on the cells up front so the key is decoded once, at build time.
             sort_elements_by_cell_path(&mut elements, &key_cmp)?;
-            let opaque = key_is_opaque_composite(&key_cmp);
             let mut entries = Vec::with_capacity(elements.len());
             for e in elements {
-                // The map key is the element's cell_path (raw key bytes, no
-                // length prefix). Decode a scalar key with the declared type; an
-                // opaque composite key (frozen tuple/udt/collection) is served as
-                // raw Blob bytes, mirroring the single-generation reader (module
-                // doc + `key_is_opaque_composite`).
+                // The map key is the element's cell_path (raw key bytes, no length
+                // prefix), decoded with the declared scalar type.
                 let key_bytes = e.cell_path.as_deref().unwrap_or(&[]);
-                let key = if opaque {
-                    Value::Blob(key_bytes.to_vec())
-                } else {
-                    deserialize_value_bytes(key_bytes, &key_cmp)?
-                };
+                let key = deserialize_value_bytes(key_bytes, &key_cmp)?;
                 entries.push((key, e.value));
             }
             Ok(Value::Map(entries))
@@ -287,13 +297,18 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 /// Order collection cells by their `cell_path` (the element/key identity), in
 /// place, using the declared element/key comparator.
 ///
-/// A SCALAR comparator decodes each `cell_path` to a `Value` and orders by the
-/// type comparator (e.g. signed-int order != raw byte order), surfacing any
-/// genuine decode error (wrong-width scalar) rather than masking it. An OPAQUE
-/// COMPOSITE comparator (frozen tuple/udt/collection — undecodable by the scalar
-/// codec) orders by raw `cell_path` byte comparison, mirroring the
-/// single-generation reader's opaque-bytes handling (see module doc +
-/// [`key_is_opaque_composite`]).
+/// The Set/Map callers now FAIL CLOSED on an opaque composite element/key before
+/// reaching here (see [`composite_collection_unsupported`], #2339), so in practice
+/// `cmp` is always a scalar. Two scalar shapes:
+///   * A `inet`/`time` comparator ([`comparator_orders_by_raw_cell_path_bytes`])
+///     orders by raw `cell_path` byte comparison — its serialized form's unsigned
+///     byte order IS its Cassandra order, and routing it through the scalar
+///     `compare_custom` would mis-order it (roborev 1631/1632).
+///   * Any other scalar decodes each `cell_path` to a `Value` and orders by the
+///     type comparator (e.g. signed-int order != raw byte order), surfacing any
+///     genuine decode error (wrong-width scalar) rather than masking it.
+/// The [`key_is_opaque_composite`] arm is retained as defensive belt-and-suspenders
+/// (raw-byte order) should the helper ever be reused without the upstream guard.
 #[cfg(feature = "write-support")]
 fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType) -> Result<()> {
     if key_is_opaque_composite(cmp) || comparator_orders_by_raw_cell_path_bytes(cmp) {
@@ -353,21 +368,51 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 /// comparison of the `cell_path`, so decoding to a `Value` and routing through
 /// the scalar type comparator would MIS-order it.
 ///
-/// `inet` (Cassandra `InetAddressType`) orders by unsigned comparison of the raw
-/// address bytes — but the scalar `Custom("inet")` comparator falls through to
-/// [`ComparatorType::compare`]'s `compare_custom`, which orders by the FORMATTED
-/// string (e.g. `"10.0.0.1" < "9.0.0.1"`), diverging from a single-generation
-/// `SELECT`. The element/key `cell_path` for an inet IS the raw address bytes, so
-/// ordering by `cell_path` bytes matches Cassandra exactly (roborev 1631, issue
-/// #2324). Branches on the DECLARED type only (no-heuristics, issue #28); recurses
-/// through `Frozen` defensively though inet is never frozen here.
+/// Every other scalar [`ComparatorType`] in this sort path has a proper
+/// [`ComparatorType::compare`] arm; the ONLY declared scalar types that fall
+/// through to `compare_custom` (which orders by the FORMATTED string, diverging
+/// from a single-generation `SELECT`) are the two decodable `Custom` names —
+/// `inet` and `time`. Both have a canonical serialized form whose UNSIGNED byte
+/// order equals their Cassandra order, and the element/key `cell_path` IS that
+/// serialized form, so ordering by raw `cell_path` bytes matches Cassandra
+/// exactly and closes the whole `compare_custom` class here (roborev 1631/1632):
+///   * `inet` (`InetAddressType`): raw address bytes, e.g. `9.0.0.1` = `[9,0,0,1]`
+///     precedes `10.0.0.1` = `[10,0,0,1]` (formatted-string order is the reverse).
+///   * `time` (`TimeType`): 8-byte big-endian nanoseconds-of-day, always
+///     non-negative, so byte order == numeric order (formatted `HH:MM:...` string
+///     order misorders, e.g. any value whose text form sorts against its magnitude).
+/// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
+/// `Frozen` defensively though neither inet nor time is ever frozen here.
 #[cfg(feature = "write-support")]
 fn comparator_orders_by_raw_cell_path_bytes(cmp: &ComparatorType) -> bool {
     match cmp {
         ComparatorType::Frozen(inner) => comparator_orders_by_raw_cell_path_bytes(inner),
-        ComparatorType::Custom(name) => name == "inet",
+        ComparatorType::Custom(name) => name == "inet" || name == "time",
         _ => false,
     }
+}
+
+/// Fail closed when a collection's key/element is an OPAQUE COMPOSITE — a frozen
+/// tuple / UDT / nested collection the scalar codec cannot decode — on the
+/// merged-read (Flight) assembly path.
+///
+/// Serving such a key/element as an opaque `Value::Blob(cell_path)` (the round-2
+/// route) does not actually reassemble it: the typed Arrow builder downstream
+/// expects a tuple/struct value for the declared type and BREAKS on raw bytes —
+/// the same failure the pre-#2324 whole-row error produced, only one layer
+/// deeper. A clear error naming the column + declared key/element type is
+/// strictly better than either, and composite decode was NEVER functional on
+/// this path (it collapsed to a scalar and errored in Arrow conversion). Full
+/// composite key/element decode via the value deserializer is follow-up #2339
+/// (roborev 1632).
+#[cfg(feature = "write-support")]
+fn composite_collection_unsupported(column: &str, kind: &str, declared: &CqlType) -> Error {
+    Error::unsupported_format(format!(
+        "column '{column}': composite-keyed collection decode unsupported on this \
+         path — {kind} type {declared:?} is a frozen tuple/UDT/nested collection the \
+         merged-read assembler cannot materialize as a typed Arrow value; failing \
+         closed rather than emitting opaque bytes (roborev 1632, follow-up #2339)"
+    ))
 }
 
 /// Sort `items` by the first tuple element with the fallible [`ComparatorType`],
@@ -450,9 +495,11 @@ mod tests {
                 // Blob + raw-byte-order path.
                 col("fset", "set<frozen<addr_type>>"),
                 col("ftk", "map<frozen<tuple<int, text>>, bigint>"),
-                // inet element ordering (roborev 1631): InetAddressType orders by
-                // unsigned address bytes, NOT the formatted-string order.
+                // inet/time element ordering (roborev 1631/1632): InetAddressType /
+                // TimeType order by raw serialized bytes, NOT the formatted-string
+                // order the scalar `compare_custom` would use.
                 col("iset", "set<inet>"),
+                col("tset", "set<time>"),
             ],
             comments: HashMap::new(),
             dropped_columns: HashMap::new(),
@@ -577,6 +624,34 @@ mod tests {
     }
 
     #[test]
+    fn set_of_time_orders_by_raw_bytes_not_formatted_string() {
+        // set<time>: cell_path is the 8-byte big-endian nanoseconds-of-day; Cassandra's
+        // TimeType orders by that raw long (non-negative → byte order == numeric order).
+        // The scalar Custom("time") comparator instead falls to compare_custom's
+        // FORMATTED-string order ("TIME(HH:MM:SS.nnn)"), which — because the hours
+        // field is only zero-padded to two digits — diverges from numeric order once
+        // the hours magnitude changes digit-width. 10h vs 100h: the string
+        // "TIME(100:..." sorts BEFORE "TIME(10:..." ('0' < ':'), the REVERSE of numeric
+        // order, so a multi-SSTable set would mis-order pre-fix. (Valid times-of-day
+        // happen to coincide under the current Display; ordering by the raw cell_path
+        // bytes is the robust, parity-correct rule and closes the compare_custom class,
+        // roborev 1632.) Arrive out of order to prove the sort runs.
+        let t_small = 36_000_000_000_000i64; // 10h in ns
+        let t_big = 360_000_000_000_000i64; // 100h in ns
+        let cells = vec![
+            elem("tset", Value::Time(t_big), t_big.to_be_bytes().to_vec()),
+            elem("tset", Value::Time(t_small), t_small.to_be_bytes().to_vec()),
+        ];
+        let out = assemble_read_cells(cells, &schema()).unwrap();
+        assert_eq!(
+            get(&out, "tset"),
+            Some(&Value::Set(vec![Value::Time(t_small), Value::Time(t_big)])),
+            "set<time> must order by the raw big-endian long (10h before 100h), \
+             not the reversed formatted-string order"
+        );
+    }
+
+    #[test]
     fn deleted_elements_are_dropped() {
         let mut deleted = elem("nums", Value::Integer(99), vec![0, 0, 0, 99]);
         deleted.is_deleted = true;
@@ -694,53 +769,43 @@ mod tests {
     }
 
     #[test]
-    fn map_with_frozen_tuple_key_served_as_blob_in_byte_order() {
-        // frozen<tuple> map key: undecodable by the scalar codec. Pre-fix
-        // `deserialize_value_bytes(Frozen(Tuple))` hit the `_ => Err` arm and
-        // failed the WHOLE row — a regression from the single-generation reader,
-        // which serves an undecodable composite key as opaque bytes. Now the key
-        // is a raw Value::Blob(cell_path), ordered by raw cell_path bytes, and the
-        // row succeeds (roborev 1629 F2).
+    fn map_with_frozen_tuple_key_fails_closed() {
+        // frozen<tuple> map key: an opaque composite the scalar codec cannot decode.
+        // The round-2 route served it as a raw Value::Blob(cell_path), but that Blob
+        // breaks the typed Arrow builder downstream (which expects a tuple/struct for
+        // the declared key type) — the same failure the pre-#2324 whole-row error
+        // produced, one layer deeper. So this path now FAILS CLOSED with a clear
+        // error naming the column + declared key type (roborev 1632; full composite
+        // key decode is follow-up #2339).
         let cells = vec![
             elem("ftk", Value::BigInt(2), vec![0x00, 0x00, 0x00, 0x09, 0x62]),
             elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
-        assert_eq!(
-            get(&out, "ftk"),
-            Some(&Value::Map(vec![
-                (
-                    Value::Blob(vec![0x00, 0x00, 0x00, 0x01, 0x61]),
-                    Value::BigInt(1)
-                ),
-                (
-                    Value::Blob(vec![0x00, 0x00, 0x00, 0x09, 0x62]),
-                    Value::BigInt(2)
-                ),
-            ])),
-            "frozen<tuple> map key served as opaque Blob(cell_path) in byte order"
+        let err = assemble_read_cells(cells, &schema()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ftk") && msg.contains("map key") && msg.contains("#2339"),
+            "composite map-key error must name the column, the kind, and the follow-up, got: {msg}"
         );
     }
 
     #[test]
-    fn set_of_frozen_udt_orders_by_cell_path_bytes() {
-        // frozen<udt> set element: undecodable by the scalar codec. The reader
-        // already decoded the member into e.value (kept as-is); cross-SSTable
-        // ordering falls back to raw cell_path byte order. Pre-fix the sort's
-        // `deserialize_value_bytes(Frozen(..))` errored the whole row; now it
-        // succeeds (roborev 1629 F2). Elements arrive OUT of cell_path order.
+    fn set_of_frozen_udt_fails_closed() {
+        // frozen<udt> set element: an opaque composite the scalar codec cannot decode.
+        // The round-2 route kept the reader's e.value (an opaque Blob) and ordered by
+        // raw cell_path bytes, but that Blob likewise breaks the typed Arrow builder
+        // for the declared element type. This path now FAILS CLOSED with a clear error
+        // naming the column + declared element type (roborev 1632; full composite
+        // element decode is follow-up #2339).
         let cells = vec![
             elem("fset", Value::Blob(vec![0xBB]), vec![0x02]),
             elem("fset", Value::Blob(vec![0xAA]), vec![0x01]),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
-        assert_eq!(
-            get(&out, "fset"),
-            Some(&Value::Set(vec![
-                Value::Blob(vec![0xAA]),
-                Value::Blob(vec![0xBB]),
-            ])),
-            "frozen<udt> set members order by raw cell_path bytes, not arrival order"
+        let err = assemble_read_cells(cells, &schema()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fset") && msg.contains("set element") && msg.contains("#2339"),
+            "composite set-element error must name the column, the kind, and the follow-up, got: {msg}"
         );
     }
 
