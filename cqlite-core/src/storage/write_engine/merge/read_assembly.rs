@@ -307,6 +307,7 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
 ///   * Any other scalar decodes each `cell_path` to a `Value` and orders by the
 ///     type comparator (e.g. signed-int order != raw byte order), surfacing any
 ///     genuine decode error (wrong-width scalar) rather than masking it.
+///
 /// The [`key_is_opaque_composite`] arm is retained as defensive belt-and-suspenders
 /// (raw-byte order) should the helper ever be reused without the upstream guard.
 #[cfg(feature = "write-support")]
@@ -381,6 +382,7 @@ fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
 ///   * `time` (`TimeType`): 8-byte big-endian nanoseconds-of-day, always
 ///     non-negative, so byte order == numeric order (formatted `HH:MM:...` string
 ///     order misorders, e.g. any value whose text form sorts against its magnitude).
+///
 /// Branches on the DECLARED type only (no-heuristics, issue #28); recurses through
 /// `Frozen` defensively though neither inet nor time is ever frozen here.
 #[cfg(feature = "write-support")]
