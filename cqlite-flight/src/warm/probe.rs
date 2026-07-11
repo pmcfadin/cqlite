@@ -14,13 +14,19 @@
 //!   a `manifest.json`; when it is byte-identical to the cached one, skip the
 //!   `read_dir` and take the warm hit. It is an OPTIMIZATION ONLY — equivalent to
 //!   the authoritative probe, never a weaker guarantee. Absent/unparsable
-//!   manifest → fall back to the authoritative listing (never a stale hit).
+//!   manifest → fall back to the authoritative listing (never a stale hit). Every
+//!   `manifest.json` read is per-file containment-checked (issue #1430 class,
+//!   roborev 1640) — see [`read_manifest_checked`].
 //!
 //! Fail-closed: any probe error — the dir unreadable, a per-entry iteration or
-//! `stat` failure, or a `Data.db` whose resolved path escapes the table dir
-//! (issue #1430 containment) — is surfaced so the caller treats it as "changed /
-//! re-resolve failed" rather than serving a stale warm hit or a silently smaller
-//! generation set that could mask a live generation.
+//! `stat` failure, a `Data.db` whose resolved path escapes the table dir, or a
+//! `manifest.json` whose resolved path escapes the table dir (issue #1430
+//! containment, both classes) — is surfaced so the caller treats it as "changed
+//! / re-resolve failed" rather than serving a stale warm hit or a silently
+//! smaller generation set that could mask a live generation. A containment
+//! VIOLATION specifically is never treated as "absent" / a fallback trigger —
+//! only a genuinely missing or benignly-unreadable file is (see
+//! [`read_manifest_checked`]'s doc for the distinction).
 
 use std::path::{Path, PathBuf};
 
@@ -73,11 +79,34 @@ impl ProbeOutcome {
 /// The snapshot manifest file Cassandra writes into a `snapshots/<name>/` dir.
 const MANIFEST_FILE: &str = "manifest.json";
 
-/// Read the snapshot `manifest.json` bytes from `dir`, when present. Used by the
-/// registry's manifest-hit-race fallback to re-cache the manifest after an
-/// authoritative re-enumeration.
-pub(super) fn read_manifest(dir: &Path) -> Option<Vec<u8>> {
-    std::fs::read(dir.join(MANIFEST_FILE)).ok()
+/// Read the snapshot `manifest.json` bytes from `dir`, when present AND
+/// contained within `dir` (issue #1430 containment class, roborev 1640). Used
+/// by the registry's manifest-hit-race fallback to re-cache the manifest after
+/// an authoritative re-enumeration, and by every manifest read inside
+/// [`probe_generation_set`].
+///
+/// A SYMLINKED `manifest.json` pointing outside the snapshot dir could
+/// otherwise (a) leak arbitrary file bytes into the fast-path comparison, or
+/// (b) let a forged, attacker-controlled manifest byte-match the cached one and
+/// pin a stale/incorrect warm hit — exactly the class of escape the cold
+/// `DirSource::data_paths` / warm `enumerate_generations` containment filters
+/// already close for `Data.db`. A containment violation here is a SECURITY
+/// ERROR, not a fallback trigger: it is surfaced as [`WarmError::ProbeEntry`]
+/// rather than treated as "absent" — the merely-absent case (no manifest, or a
+/// benign read failure) stays `Ok(None)` and DOES fall through to the
+/// authoritative listing (the existing "optimization only" invariant), but a
+/// violating PRESENT entry must abort the request rather than silently
+/// degrading to the slower-but-still-correct path, because at that point
+/// something is actively wrong, not merely missing.
+pub(super) fn read_manifest_checked(dir: &Path) -> Result<Option<Vec<u8>>, WarmError> {
+    let path = dir.join(MANIFEST_FILE);
+    if let Err(reason) = crate::pathsafe::assert_within("manifest", dir, &path) {
+        return Err(WarmError::ProbeEntry {
+            path,
+            reason: reason.to_string(),
+        });
+    }
+    Ok(std::fs::read(&path).ok())
 }
 
 /// Probe the current generation set for `dir`.
@@ -98,12 +127,15 @@ pub fn probe_generation_set(
     }
 
     // Fast path (2b): snapshot mode + a cached manifest that matches the on-disk
-    // one → the generation set is unchanged, skip the read_dir entirely. Any read
-    // failure or mismatch falls through to the authoritative listing below; the
-    // fast path is an optimization, never the correctness backbone.
+    // one → the generation set is unchanged, skip the read_dir entirely. A
+    // benign absence/mismatch falls through to the authoritative listing below
+    // (the fast path is an optimization, never the correctness backbone) — but a
+    // containment VIOLATION (issue #1430 class, roborev 1640) is a hard error,
+    // NOT a fallback trigger: propagate it rather than silently degrading to the
+    // slower path, since at that point something is actively wrong.
     if snapshot_mode {
         if let Some(cached) = cached_manifest {
-            if let Ok(current) = std::fs::read(dir.join(MANIFEST_FILE)) {
+            if let Some(current) = read_manifest_checked(dir)? {
                 if current == cached {
                     return Ok(ProbeOutcome::UnchangedByManifest);
                 }
@@ -117,9 +149,11 @@ pub fn probe_generation_set(
     }
 
     let entries = enumerate_generations(dir)?;
-    // In snapshot mode, cache the manifest bytes (if any) for the next fast path.
+    // In snapshot mode, cache the manifest bytes (if any) for the next fast
+    // path — containment-checked (a violation aborts this whole probe, never
+    // just skips caching, since something is actively wrong at that point).
     let manifest = if snapshot_mode {
-        std::fs::read(dir.join(MANIFEST_FILE)).ok()
+        read_manifest_checked(dir)?
     } else {
         None
     };
@@ -278,6 +312,38 @@ mod tests {
         cancel.cancel();
         let err = probe_generation_set(dir.path(), false, None, &cancel).unwrap_err();
         assert!(matches!(err, WarmError::Cancelled));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_manifest_escaping_dir_is_probe_error_not_trusted() {
+        // Finding 1 (#2310, roborev 1640): a manifest.json symlink escaping the
+        // snapshot dir must FAIL the probe (fail-closed containment, issue
+        // #1430 class), never be read+trusted for the fast-path comparison.
+        // Red on pre-fix code: the escapee's bytes are read via a plain
+        // `std::fs::read`, and if they byte-match the cached manifest, the fast
+        // path is taken (a forged/leaked manifest could pin a stale warm hit).
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("secret-manifest.json");
+        let payload = b"attacker-controlled bytes".to_vec();
+        std::fs::write(&secret, &payload).unwrap();
+        symlink(&secret, dir.path().join(MANIFEST_FILE)).unwrap();
+
+        // The direct helper must reject it outright.
+        let err = read_manifest_checked(dir.path())
+            .expect_err("an escaping manifest.json must fail containment, not be read");
+        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
+
+        // The fast path (attacker supplies a `cached_manifest` matching the
+        // secret's bytes, simulating a forged/leaked-then-replayed manifest)
+        // must propagate the SAME error — a containment violation is an ERROR,
+        // NEVER a silent fallback to the authoritative listing.
+        write_data(dir.path(), "nb-1-big-Data.db");
+        let err = probe_generation_set(dir.path(), true, Some(&payload), &CancelFlag::new())
+            .expect_err("a containment violation must abort the probe, not fall back");
+        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
     }
 
     #[test]

@@ -206,7 +206,11 @@ impl WarmTableRegistry {
                     return Ok(hit);
                 }
                 let entries = probe::enumerate_generations(dir)?;
-                let manifest = snapshot_mode.then(|| probe::read_manifest(dir)).flatten();
+                let manifest = if snapshot_mode {
+                    probe::read_manifest_checked(dir)?
+                } else {
+                    None
+                };
                 self.finish_enumerated(key, ddl_hash, schema, entries, manifest, cancel)
             }
             ProbeOutcome::Enumerated {
