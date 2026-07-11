@@ -23,6 +23,18 @@
 //! with the schema's declared key type via the canonical
 //! [`deserialize_value_bytes`] codec (never guessed).
 //!
+//! Non-scalar set elements / map keys (`frozen<tuple>`, `frozen<udt>`, nested
+//! `frozen<collection>`) are NOT decodable by the scalar `deserialize_value_bytes`
+//! codec. Rather than fail the whole query — a regression from the canonical
+//! single-generation reader, which serves such keys as opaque bytes — this mirrors
+//! that reader's `parse_cell_path_key` (complex_column.rs): the key/element is
+//! served as a raw `Value::Blob(cell_path)` and ordered by raw `cell_path` byte
+//! comparison. Within one SSTable the elements are already comparator-sorted on
+//! disk, and a byte-comparable serialized form makes byte order == comparator
+//! order; cross-SSTable ordering of a non-byte-comparable composite is a documented
+//! limitation shared with (and no worse than) the single-generation read path. The
+//! opaque/scalar choice branches on the DECLARED schema type only (no guessing).
+//!
 //! Tombstone handling follows Cassandra SELECT semantics (issue #1742: SELECT
 //! output is the read-path authority), NOT the single-generation reader's
 //! physical `collapsed_value`: a deleted set/list member or deleted MAP entry is
@@ -52,6 +64,14 @@ use crate::{Error, Result};
 use super::model::CellData;
 
 /// One column's accumulated cells while grouping a row's flat cell list.
+///
+/// The two shapes are mutually exclusive for any one column: in Cassandra 5.0
+/// (na+) a column's frozen-ness is a FIXED schema property (you cannot `ALTER`
+/// a column between frozen and non-frozen), so a single consistent row can never
+/// carry BOTH a whole-value (simple) cell AND per-element (complex) cells for the
+/// same column. If both nonetheless arrive during grouping the row is
+/// inconsistent/corrupt, so [`assemble_read_cells`] fails closed (issue #28)
+/// rather than silently keep whichever shape arrived first and drop the other.
 #[cfg(feature = "write-support")]
 enum ColumnAccum {
     /// A simple (single-cell) column: its one decoded value.
@@ -60,6 +80,19 @@ enum ColumnAccum {
     /// order (re-sorted by `cell_path` at collapse time). Element tombstones are
     /// already dropped.
     Complex(Vec<CellData>),
+}
+
+/// Fail-closed error for a column that arrives with BOTH simple and complex
+/// cells in one merged row (see [`ColumnAccum`] — impossible for a consistent
+/// na+ schema). Names the offending column; never silently drops a shape.
+#[cfg(feature = "write-support")]
+fn mixed_shape_error(column: &str) -> Error {
+    Error::corruption(format!(
+        "column '{column}': merged row mixes a whole-value (simple) cell and \
+         per-element (complex) cells for one column — impossible for a consistent \
+         Cassandra 5.0 (na+) schema (frozen-ness is fixed, un-ALTERable); failing \
+         closed rather than silently dropping either shape (issues #28/#2324)"
+    ))
 }
 
 /// Reassemble a merged live row's per-column cells into user-facing
@@ -105,10 +138,10 @@ pub fn assemble_read_cells(cells: Vec<CellData>, schema: &TableSchema) -> Result
             if cell.is_deleted || matches!(cell.value, Value::Tombstone(_)) {
                 continue;
             }
-            let slot = register_complex(&mut order, &mut index, &mut accums, name);
-            if let ColumnAccum::Complex(elems) = slot {
-                elems.push(cell);
-            }
+            // Fail closed if this column already accumulated a simple cell (mixed
+            // shape — impossible for a consistent na+ schema; see `ColumnAccum`).
+            let elems = register_complex(&mut order, &mut index, &mut accums, name)?;
+            elems.push(cell);
         } else {
             // Simple cell: a tombstoned simple cell leaves the column absent
             // (reads null downstream) — mirror the prior producer filter.
@@ -116,7 +149,11 @@ pub fn assemble_read_cells(cells: Vec<CellData>, schema: &TableSchema) -> Result
                 continue;
             }
             match index.get(name.as_ref()) {
-                Some(&i) => accums[i] = ColumnAccum::Simple(cell.value),
+                Some(&i) => match &mut accums[i] {
+                    ColumnAccum::Simple(v) => *v = cell.value,
+                    // Mixed shape: complex elements already present for this column.
+                    ColumnAccum::Complex(_) => return Err(mixed_shape_error(&name)),
+                },
                 None => {
                     index.insert(Arc::clone(&name), accums.len());
                     order.push(name);
@@ -140,14 +177,16 @@ pub fn assemble_read_cells(cells: Vec<CellData>, schema: &TableSchema) -> Result
 }
 
 /// Fetch (creating if absent) the [`ColumnAccum::Complex`] slot for `name`,
-/// returning a mutable reference to it.
+/// returning a mutable reference to its element vec. Fails closed with
+/// [`mixed_shape_error`] if the column already holds a simple cell (see
+/// [`ColumnAccum`]).
 #[cfg(feature = "write-support")]
 fn register_complex<'a>(
     order: &mut Vec<Arc<str>>,
     index: &mut HashMap<Arc<str>, usize>,
     accums: &'a mut Vec<ColumnAccum>,
     name: Arc<str>,
-) -> &'a mut ColumnAccum {
+) -> Result<&'a mut Vec<CellData>> {
     let i = match index.get(name.as_ref()) {
         Some(&i) => i,
         None => {
@@ -158,7 +197,12 @@ fn register_complex<'a>(
             i
         }
     };
-    &mut accums[i]
+    // `order[i]` is the column name for `accums[i]` (both pushed together), and
+    // borrows a different vec than `accums`, so it stays available for the error.
+    match &mut accums[i] {
+        ColumnAccum::Complex(elems) => Ok(elems),
+        ColumnAccum::Simple(_) => Err(mixed_shape_error(&order[i])),
+    }
 }
 
 /// Collapse the surviving live elements of one complex column into a single
@@ -192,7 +236,7 @@ fn assemble_complex(
         // a single-generation `SELECT` returns (issue #2324, roborev 1628).
         CqlType::Set(inner) => {
             let elem_cmp = ComparatorType::from_cql_type(inner)?;
-            sort_elements_by_cell_path_value(&mut elements, &elem_cmp)?;
+            sort_elements_by_cell_path(&mut elements, &elem_cmp)?;
             Ok(Value::Set(elements.into_iter().map(|e| e.value).collect()))
         }
         // A list element's `cell_path` is its position timeuuid, which orders by
@@ -204,17 +248,27 @@ fn assemble_complex(
         }
         CqlType::Map(key_type, _) => {
             let key_cmp = ComparatorType::from_cql_type(key_type)?;
+            // Order entries by the declared key comparator (scalar) or raw
+            // cell_path bytes (opaque composite) so a map spanning multiple
+            // SSTables reconstructs in authoritative key order — done on the cells
+            // up front so the key is decoded once, at build time, below.
+            sort_elements_by_cell_path(&mut elements, &key_cmp)?;
+            let opaque = key_is_opaque_composite(&key_cmp);
             let mut entries = Vec::with_capacity(elements.len());
             for e in elements {
                 // The map key is the element's cell_path (raw key bytes, no
-                // length prefix) — decode it with the declared key type.
+                // length prefix). Decode a scalar key with the declared type; an
+                // opaque composite key (frozen tuple/udt/collection) is served as
+                // raw Blob bytes, mirroring the single-generation reader (module
+                // doc + `key_is_opaque_composite`).
                 let key_bytes = e.cell_path.as_deref().unwrap_or(&[]);
-                let key = deserialize_value_bytes(key_bytes, &key_cmp)?;
+                let key = if opaque {
+                    Value::Blob(key_bytes.to_vec())
+                } else {
+                    deserialize_value_bytes(key_bytes, &key_cmp)?
+                };
                 entries.push((key, e.value));
             }
-            // Order entries by the declared key comparator so a map spanning
-            // multiple SSTables reconstructs in authoritative key order.
-            sort_entries_by_key(&mut entries, &key_cmp)?;
             Ok(Value::Map(entries))
         }
         // A non-collection complex column (e.g. non-frozen top-level UDT):
@@ -230,14 +284,24 @@ fn cell_path_bytes(cell: &CellData) -> &[u8] {
     cell.cell_path.as_deref().unwrap_or(&[])
 }
 
-/// Order set elements by their `cell_path` (the element identity) using the
-/// declared element comparator, in place. Decodes each `cell_path` once up front
-/// (fallible → propagated) so the sort itself is total and infallible.
+/// Order collection cells by their `cell_path` (the element/key identity), in
+/// place, using the declared element/key comparator.
+///
+/// A SCALAR comparator decodes each `cell_path` to a `Value` and orders by the
+/// type comparator (e.g. signed-int order != raw byte order), surfacing any
+/// genuine decode error (wrong-width scalar) rather than masking it. An OPAQUE
+/// COMPOSITE comparator (frozen tuple/udt/collection — undecodable by the scalar
+/// codec) orders by raw `cell_path` byte comparison, mirroring the
+/// single-generation reader's opaque-bytes handling (see module doc +
+/// [`key_is_opaque_composite`]).
 #[cfg(feature = "write-support")]
-fn sort_elements_by_cell_path_value(
-    elements: &mut Vec<CellData>,
-    cmp: &ComparatorType,
-) -> Result<()> {
+fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType) -> Result<()> {
+    if key_is_opaque_composite(cmp) {
+        elements.sort_by(|a, b| cell_path_bytes(a).cmp(cell_path_bytes(b)));
+        return Ok(());
+    }
+    // Decode each `cell_path` once up front (fallible → propagated) so the sort
+    // itself is total and infallible.
     let mut keyed: Vec<(Value, CellData)> = Vec::with_capacity(elements.len());
     for cell in std::mem::take(elements) {
         let key = deserialize_value_bytes(cell_path_bytes(&cell), cmp)?;
@@ -248,11 +312,41 @@ fn sort_elements_by_cell_path_value(
     Ok(())
 }
 
-/// Order `(key, value)` map entries by their key using the declared key
-/// comparator, in place.
+/// True when `cmp` names an element/key type the scalar [`deserialize_value_bytes`]
+/// codec CANNOT decode — a frozen tuple / UDT / nested collection (or any other
+/// non-scalar `Custom`). Such a key/element is served as an opaque
+/// `Value::Blob(cell_path)` in raw-byte order, mirroring the canonical
+/// single-generation reader's `parse_cell_path_key` (complex_column.rs) rather
+/// than failing the whole query. The set of decodable scalars is kept in lockstep
+/// with `deserialize_value_bytes`; branching on the DECLARED type only, never a
+/// byte pattern (no-heuristics, issue #28).
 #[cfg(feature = "write-support")]
-fn sort_entries_by_key(entries: &mut [(Value, Value)], cmp: &ComparatorType) -> Result<()> {
-    sort_by_comparator(entries, cmp)
+fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
+    match cmp {
+        // `frozen` only ever wraps a composite in a map key / collection element,
+        // but recurse defensively so a hypothetical frozen scalar still decodes.
+        ComparatorType::Frozen(inner) => key_is_opaque_composite(inner),
+        ComparatorType::Boolean
+        | ComparatorType::TinyInt
+        | ComparatorType::SmallInt
+        | ComparatorType::Int
+        | ComparatorType::BigInt
+        | ComparatorType::Counter
+        | ComparatorType::Float32
+        | ComparatorType::Float
+        | ComparatorType::Text
+        | ComparatorType::Blob
+        | ComparatorType::Timestamp
+        | ComparatorType::Date
+        | ComparatorType::Uuid
+        | ComparatorType::Varint
+        | ComparatorType::Decimal
+        | ComparatorType::Duration => false,
+        // `deserialize_value_bytes` decodes only these two Custom names.
+        ComparatorType::Custom(name) => !(name == "time" || name == "inet"),
+        // Tuple / Udt / Set / List / Map: undecodable by the scalar codec.
+        _ => true,
+    }
 }
 
 /// Sort `items` by the first tuple element with the fallible [`ComparatorType`],
@@ -330,6 +424,11 @@ mod tests {
                 col("nums", "set<int>"),
                 col("items", "list<int>"),
                 col("m", "map<text, bigint>"),
+                // Non-scalar element/key columns (roborev 1629 F2): the scalar
+                // codec cannot decode these, so they exercise the opaque-composite
+                // Blob + raw-byte-order path.
+                col("fset", "set<frozen<addr_type>>"),
+                col("ftk", "map<frozen<tuple<int, text>>, bigint>"),
             ],
             comments: HashMap::new(),
             dropped_columns: HashMap::new(),
@@ -515,6 +614,86 @@ mod tests {
                 (Value::Text("beta".into()), Value::BigInt(2)),
             ])),
             "a deleted map entry must be omitted (no (key, Null)) per Cassandra SELECT semantics"
+        );
+    }
+
+    #[test]
+    fn simple_then_complex_same_column_fails_closed() {
+        // A simple (whole-value) cell then a per-element (complex) cell for the
+        // SAME column: impossible for a consistent na+ schema (roborev 1629 F1).
+        // Pre-fix the element was SILENTLY DROPPED (register_complex's `if let`
+        // fell through); now it fails closed naming the column.
+        let simple = CellData::new("nums".into(), Value::Integer(5), 1);
+        let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
+        let err = assemble_read_cells(vec![simple, complex], &schema()).unwrap_err();
+        assert!(
+            err.to_string().contains("nums"),
+            "mixed-shape error must name the column, got: {err}"
+        );
+    }
+
+    #[test]
+    fn complex_then_simple_same_column_fails_closed() {
+        // The reverse arrival order: a complex element then a simple cell for the
+        // SAME column. Pre-fix the simple cell OVERWROTE (dropped) the whole
+        // collection; now it fails closed naming the column (roborev 1629 F1).
+        let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
+        let simple = CellData::new("nums".into(), Value::Integer(5), 1);
+        let err = assemble_read_cells(vec![complex, simple], &schema()).unwrap_err();
+        assert!(
+            err.to_string().contains("nums"),
+            "mixed-shape error must name the column, got: {err}"
+        );
+    }
+
+    #[test]
+    fn map_with_frozen_tuple_key_served_as_blob_in_byte_order() {
+        // frozen<tuple> map key: undecodable by the scalar codec. Pre-fix
+        // `deserialize_value_bytes(Frozen(Tuple))` hit the `_ => Err` arm and
+        // failed the WHOLE row — a regression from the single-generation reader,
+        // which serves an undecodable composite key as opaque bytes. Now the key
+        // is a raw Value::Blob(cell_path), ordered by raw cell_path bytes, and the
+        // row succeeds (roborev 1629 F2).
+        let cells = vec![
+            elem("ftk", Value::BigInt(2), vec![0x00, 0x00, 0x00, 0x09, 0x62]),
+            elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
+        ];
+        let out = assemble_read_cells(cells, &schema()).unwrap();
+        assert_eq!(
+            get(&out, "ftk"),
+            Some(&Value::Map(vec![
+                (
+                    Value::Blob(vec![0x00, 0x00, 0x00, 0x01, 0x61]),
+                    Value::BigInt(1)
+                ),
+                (
+                    Value::Blob(vec![0x00, 0x00, 0x00, 0x09, 0x62]),
+                    Value::BigInt(2)
+                ),
+            ])),
+            "frozen<tuple> map key served as opaque Blob(cell_path) in byte order"
+        );
+    }
+
+    #[test]
+    fn set_of_frozen_udt_orders_by_cell_path_bytes() {
+        // frozen<udt> set element: undecodable by the scalar codec. The reader
+        // already decoded the member into e.value (kept as-is); cross-SSTable
+        // ordering falls back to raw cell_path byte order. Pre-fix the sort's
+        // `deserialize_value_bytes(Frozen(..))` errored the whole row; now it
+        // succeeds (roborev 1629 F2). Elements arrive OUT of cell_path order.
+        let cells = vec![
+            elem("fset", Value::Blob(vec![0xBB]), vec![0x02]),
+            elem("fset", Value::Blob(vec![0xAA]), vec![0x01]),
+        ];
+        let out = assemble_read_cells(cells, &schema()).unwrap();
+        assert_eq!(
+            get(&out, "fset"),
+            Some(&Value::Set(vec![
+                Value::Blob(vec![0xAA]),
+                Value::Blob(vec![0xBB]),
+            ])),
+            "frozen<udt> set members order by raw cell_path bytes, not arrival order"
         );
     }
 
