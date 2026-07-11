@@ -13,9 +13,11 @@
 // trait methods. Boxing would only add churn at every call site.
 #![allow(clippy::result_large_err)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::ipc::writer::IpcWriteOptions;
@@ -147,6 +149,41 @@ struct DoGetSetup {
     input: DoGetInput,
 }
 
+/// Cross-request setup caches (spec Requirement 8): the schema PARSE and the
+/// directory RESOLVE are the two per-request `do_get`-setup costs that survive a
+/// warm reader-cache hit unless memoized. Both are keyed on authoritative,
+/// pre-validated ticket inputs (the DDL string; the pathsafe-validated
+/// keyspace/table) and shared (`Arc`) across the `Clone`d per-RPC handles.
+#[derive(Default)]
+struct SetupCaches {
+    /// Parsed schema per exact DDL string. Keyed on the full DDL (never a hash —
+    /// a hash collision would serve the WRONG schema and corrupt decode). Bounded
+    /// in practice by the number of distinct table DDLs queried.
+    schemas: Mutex<HashMap<String, Arc<TableSchema>>>,
+    /// Resolved LIVE-mode table dir per (keyspace, table). Snapshot mode is NOT
+    /// cached on purpose: the field runs a fresh per-query `snapshots/<uuid>/`
+    /// dir per request, so a snapshot-keyed cache would grow unbounded with ZERO
+    /// hit benefit (the warm reader cache still elides the parse via inode
+    /// identity). Live mode's dir is stable, so caching it elides the resolve on
+    /// every repeat query — the dominant warm-hit case (spec Req 8).
+    live_dirs: Mutex<HashMap<(String, String), PathBuf>>,
+    /// Work-done probe: schema PARSES actually performed (a cache hit adds 0).
+    schema_parses: AtomicU64,
+    /// Work-done probe: directory RESOLVES actually performed (a live-mode cache
+    /// hit adds 0; a snapshot-mode request always resolves, by design above).
+    resolves: AtomicU64,
+}
+
+/// A point-in-time read of the `do_get`-setup work counters, for the warm-hit
+/// elision tests (spec Requirement 8) and the #2289/#1494 bench harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupWorkSnapshot {
+    /// Schema parses performed (CQL DDL → `TableSchema`).
+    pub schema_parses: u64,
+    /// Directory resolves performed (`DirSource::resolve`).
+    pub resolves: u64,
+}
+
 /// Flight service over a node-local SSTable data directory.
 #[derive(Clone)]
 pub struct CqliteFlightService {
@@ -158,6 +195,8 @@ pub struct CqliteFlightService {
     /// readers so a repeated query on unchanged data pays ~0 reader-open/parse.
     /// Shared (`Arc`) across the `Clone`d per-RPC service handles.
     warm: Arc<WarmTableRegistry>,
+    /// Cross-request schema-parse + directory-resolve caches (spec Req 8).
+    caches: Arc<SetupCaches>,
 }
 
 impl CqliteFlightService {
@@ -167,6 +206,7 @@ impl CqliteFlightService {
             data_dir: data_dir.into(),
             batch_size: batch_size.max(1),
             warm: Arc::new(WarmTableRegistry::new()),
+            caches: Arc::new(SetupCaches::default()),
         }
     }
 
@@ -177,18 +217,96 @@ impl CqliteFlightService {
         self.warm.metrics().snapshot()
     }
 
+    /// A point-in-time read of the `do_get`-setup work counters (schema parses +
+    /// directory resolves) — the spec Req 8 elision probe (issue #2310).
+    pub fn setup_work(&self) -> SetupWorkSnapshot {
+        SetupWorkSnapshot {
+            schema_parses: self.caches.schema_parses.load(Ordering::Relaxed),
+            resolves: self.caches.resolves.load(Ordering::Relaxed),
+        }
+    }
+
     /// Parse the table schema from the ticket's CQL DDL.
     fn parse_schema(ticket: &FlightTicket) -> Result<TableSchema, Status> {
         parse_cql_schema(&ticket.ddl)
             .map_err(|e| Status::invalid_argument(format!("invalid ddl: {e}")))
     }
 
+    /// The parsed schema for a ticket, reusing a cached parse for a repeat DDL
+    /// (spec Req 8: schema parse elided on a warm hit). The CQL parse runs OUTSIDE
+    /// the cache lock; a rare concurrent first-parse of the same DDL just parses
+    /// twice (both correct), never holds the lock across the parse.
+    fn cached_schema(&self, ticket: &FlightTicket) -> Result<Arc<TableSchema>, Status> {
+        if let Some(hit) = self
+            .caches
+            .schemas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&ticket.ddl)
+        {
+            return Ok(Arc::clone(hit));
+        }
+        let schema = Arc::new(Self::parse_schema(ticket)?);
+        self.caches.schema_parses.fetch_add(1, Ordering::Relaxed);
+        self.caches
+            .schemas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(ticket.ddl.clone())
+            .or_insert_with(|| Arc::clone(&schema));
+        Ok(schema)
+    }
+
+    /// Resolve the SSTable directory for a ticket, reusing a cached LIVE-mode
+    /// resolution on a repeat (keyspace, table) (spec Req 8: directory resolve
+    /// elided on a warm hit). Snapshot mode always resolves fresh (see
+    /// [`SetupCaches::live_dirs`] for why caching it would leak). The
+    /// keyspace/table are pathsafe-validated by `FlightTicket::from_bytes`, so a
+    /// cached entry was validated when first resolved.
+    fn resolve_dir(&self, ticket: &FlightTicket) -> Result<PathBuf, Status> {
+        let snapshot_mode = ticket.snapshot.as_deref().is_some_and(|s| !s.is_empty());
+        if !snapshot_mode {
+            let cache_key = (ticket.keyspace.clone(), ticket.table.clone());
+            if let Some(hit) = self
+                .caches
+                .live_dirs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&cache_key)
+            {
+                return Ok(hit.clone());
+            }
+            let dir = self.resolve_dir_uncached(ticket)?;
+            self.caches
+                .live_dirs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(cache_key)
+                .or_insert_with(|| dir.clone());
+            return Ok(dir);
+        }
+        self.resolve_dir_uncached(ticket)
+    }
+
+    /// The uncached `DirSource::resolve`, incrementing the resolve work probe.
+    fn resolve_dir_uncached(&self, ticket: &FlightTicket) -> Result<PathBuf, Status> {
+        let dir = DirSource::resolve(
+            &self.data_dir,
+            &ticket.keyspace,
+            &ticket.table,
+            ticket.snapshot.as_deref(),
+        )?
+        .into_dir();
+        self.caches.resolves.fetch_add(1, Ordering::Relaxed);
+        Ok(dir)
+    }
+
     /// Build a producer for a ticket, applying its token-range/predicate/projection
     /// filters. Used by every RPC so the Arrow schema reflects the projection.
     fn build_producer(&self, ticket: &FlightTicket) -> Result<MergeProducer, Status> {
-        let schema = Self::parse_schema(ticket)?;
+        let schema = self.cached_schema(ticket)?;
         let spec = ScanSpec::from_ticket(ticket, &schema)?;
-        let producer = MergeProducer::with_spec(schema, self.batch_size, spec)?;
+        let producer = MergeProducer::with_spec((*schema).clone(), self.batch_size, spec)?;
         // Aggregation pushdown (issue #841): when the ticket carries an
         // aggregation spec, the producer emits PARTIAL aggregate rows under the
         // partial schema instead of full rows.
@@ -532,17 +650,15 @@ impl CqliteFlightService {
         tokio::task::spawn_blocking(move || -> Result<DoGetSetup, Status> {
             let producer = svc.build_producer(&ticket)?;
             let schema_ref = Arc::new(producer.arrow_schema()?);
-            let source = DirSource::resolve(
-                &svc.data_dir,
-                &ticket.keyspace,
-                &ticket.table,
-                ticket.snapshot.as_deref(),
-            )?;
+            // Spec Req 8: reuse a cached LIVE-mode resolution on a warm hit instead
+            // of re-running `DirSource::resolve` every request.
+            let dir = svc.resolve_dir(&ticket)?;
 
             // Aggregate route keeps the cold path (bounded per-group output, no
             // per-request reader-open regression): resolve + token-prune paths.
             // A cancellation surfaces as `ProducerError::Cancelled` → `aborted`.
             if producer.is_aggregating() {
+                let source = DirSource::new(dir.clone());
                 let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel)?;
                 return Ok(DoGetSetup {
                     producer,
@@ -556,7 +672,6 @@ impl CqliteFlightService {
             // snapshot manifest fast path) and serves cached readers on an
             // unchanged set (zero reader-open/parse), or fail-closed rebuilds
             // only the delta. Cancellation is honored inside `warm_readers`.
-            let dir = source.into_dir();
             let key = TableKey::new(&ticket.keyspace, &ticket.table);
             let warm = svc
                 .warm
@@ -642,7 +757,7 @@ impl CqliteFlightService {
 mod tests {
     use super::*;
     use crate::testutil::{
-        build_sstables, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL,
+        build_sstables, make_snapshot, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL,
     };
     use arrow::array::Array;
     use arrow::record_batch::RecordBatch;
@@ -672,6 +787,25 @@ mod tests {
         while let Some(batch) = rb.next().await {
             out.push(batch.expect("decode batch"));
         }
+        out
+    }
+
+    /// The `name` column values across all batches, sorted — a stable, order-
+    /// independent value fingerprint for asserting two responses are row-equal.
+    fn sorted_name_values(batches: &[RecordBatch]) -> Vec<String> {
+        let mut out = Vec::new();
+        for b in batches {
+            let names = b
+                .column_by_name("name")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap();
+            for i in 0..names.len() {
+                out.push(names.value(i).to_string());
+            }
+        }
+        out.sort();
         out
     }
 
@@ -734,25 +868,30 @@ mod tests {
         let svc = CqliteFlightService::new(data_dir, 1024);
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        let (rows1, rows2, opens_after_first) = rt.block_on(async {
+        let (vals1, vals2, opens_after_first) = rt.block_on(async {
             let bytes = ticket(KS, TBL).to_bytes().unwrap();
             let r1 = svc
                 .do_get(Request::new(Ticket::new(bytes.clone())))
                 .await
                 .expect("first do_get");
-            let rows1 = total_rows(&decode(r1.into_inner()).await);
+            let vals1 = sorted_name_values(&decode(r1.into_inner()).await);
             // Work-done probe checkpoint: opens charged BY the (cold) first request.
             let opens_after_first = svc.warm_metrics().reader_opens;
             let r2 = svc
                 .do_get(Request::new(Ticket::new(bytes)))
                 .await
                 .expect("second do_get");
-            let rows2 = total_rows(&decode(r2.into_inner()).await);
-            (rows1, rows2, opens_after_first)
+            let vals2 = sorted_name_values(&decode(r2.into_inner()).await);
+            (vals1, vals2, opens_after_first)
         });
 
-        assert_eq!(rows1, 2, "two partitions after LWW merge");
-        assert_eq!(rows2, rows1, "warm hit returns byte-identical row count");
+        assert_eq!(vals1.len(), 2, "two partitions after LWW merge");
+        // Value equality (not just row count): the warm hit returns the SAME rows.
+        assert_eq!(
+            vals2, vals1,
+            "warm hit returns value-identical rows, got {vals2:?} vs {vals1:?}"
+        );
+        assert!(vals1.contains(&"new".to_string()), "newer write wins");
 
         let m = svc.warm_metrics();
         assert_eq!(m.misses, 1, "exactly one cold build (first request)");
@@ -774,6 +913,97 @@ mod tests {
         assert_eq!(
             m.reader_opens, opens_after_first,
             "the warm hit performed zero reader-open/parse (spec Requirement 2)"
+        );
+    }
+
+    /// Spec Req 8 elision probe: two IDENTICAL live-mode `do_get`s re-parse the
+    /// schema ZERO times and re-resolve the directory ZERO times on the second
+    /// request. The first request pays exactly one parse + one resolve; the warm
+    /// second request reuses both caches. (The end-to-end latency win these
+    /// counters underwrite is measured downstream by the #2289/#1494 bench
+    /// harness — the counters it needs are exactly `setup_work()` +
+    /// `warm_metrics()`, in place as of this PR.)
+    #[test]
+    fn do_get_warm_hit_elides_schema_parse_and_dir_resolve() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let bytes = ticket(KS, TBL).to_bytes().unwrap();
+        rt.block_on(async {
+            let r1 = svc
+                .do_get(Request::new(Ticket::new(bytes.clone())))
+                .await
+                .expect("first do_get");
+            let _ = decode(r1.into_inner()).await;
+        });
+        let after_first = svc.setup_work();
+        assert_eq!(after_first.schema_parses, 1, "first request parses once");
+        assert_eq!(after_first.resolves, 1, "first request resolves once");
+
+        rt.block_on(async {
+            let r2 = svc
+                .do_get(Request::new(Ticket::new(bytes)))
+                .await
+                .expect("second do_get");
+            let _ = decode(r2.into_inner()).await;
+        });
+        let after_second = svc.setup_work();
+        assert_eq!(
+            after_second.schema_parses, 1,
+            "the warm second request re-parses the schema ZERO times (spec Req 8)"
+        );
+        assert_eq!(
+            after_second.resolves, 1,
+            "the warm second request re-resolves the directory ZERO times (spec Req 8)"
+        );
+    }
+
+    /// Snapshot-mode warm path (spec Requirements 1/2/8): two identical `do_get`s
+    /// against a `snapshots/<name>/` hardlink dir return BYTE-IDENTICAL batches,
+    /// the second a warm hit with zero further reader opens.
+    #[test]
+    fn do_get_snapshot_mode_second_request_is_a_value_identical_warm_hit() {
+        let schema = simple_schema();
+        let (_temp, data_dir, table_dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "old", 1, 100)],
+                vec![write_row(1, "new", 2, 200), write_row(2, "b", 3, 200)],
+            ],
+        );
+        make_snapshot(&table_dir, "snap1");
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut t = ticket(KS, TBL);
+        t.snapshot = Some("snap1".into());
+        let bytes = t.to_bytes().unwrap();
+
+        let (vals1, vals2, opens_after_first) = rt.block_on(async {
+            let r1 = svc
+                .do_get(Request::new(Ticket::new(bytes.clone())))
+                .await
+                .expect("first snapshot do_get");
+            let vals1 = sorted_name_values(&decode(r1.into_inner()).await);
+            let opens_after_first = svc.warm_metrics().reader_opens;
+            let r2 = svc
+                .do_get(Request::new(Ticket::new(bytes)))
+                .await
+                .expect("second snapshot do_get");
+            let vals2 = sorted_name_values(&decode(r2.into_inner()).await);
+            (vals1, vals2, opens_after_first)
+        });
+
+        assert_eq!(vals1.len(), 2, "two partitions after LWW merge");
+        assert_eq!(vals2, vals1, "snapshot warm hit is value-identical");
+        let m = svc.warm_metrics();
+        assert_eq!(m.hits, 1, "the second snapshot request is a warm hit");
+        assert_eq!(
+            m.reader_opens, opens_after_first,
+            "the snapshot warm hit opened zero further readers"
         );
     }
 

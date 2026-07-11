@@ -8,19 +8,24 @@
 //! mutates nothing and in-flight requests holding `Arc` clones complete against
 //! the pre-swap set.
 //!
-//! ## UDT-registry contract (WS1 #2345, from the #2346 review)
+//! ## UDT-registry posture — identical to the cold path (WS1 #2345, follow-up #2349)
 //!
 //! The reader-based merge seam `KWayMerger::new_from_readers` takes NO
 //! `udt_registry` parameter (a shared `Arc` reader has no `&mut self` for
-//! `set_udt_registry`). So the registry MUST open each reader WITH its UDT
-//! registry already resolved BEFORE wrapping it in `Arc` — otherwise a
-//! frozen/nested UDT cell silently decodes as `Blob` (the #1234 data-loss class),
-//! NOT an error. [`open_one_reader`] resolves + sets the registry and asserts it
-//! is present via `SSTableReader::has_udt_registry`. (A Flight ticket carries a
-//! single-table DDL with no `CREATE TYPE` bodies, so the resolved registry is the
-//! Cassandra-5 default set — the same authority the cold path had; the plumbing
-//! is present and provable so a future ticket that DOES carry UDT bodies is
-//! decoded structurally, never dropped.)
+//! `set_udt_registry`), so a reader must be opened WITH its registry already
+//! resolved BEFORE it is wrapped in `Arc`. The cold Flight path, however, opens
+//! its readers via `KWayMerger::new_cancellable`, which passes `udt_registry =
+//! None` — so the cold path currently decodes WITHOUT a UDT registry. To keep the
+//! spec non-goal (warm is a PARSE-COST change only, never a read-semantics
+//! change), the warm path opens readers with the EXACTLY SAME posture: no UDT
+//! registry. [`open_one_reader`] therefore does NOT set a registry, and both
+//! paths hand the merge readers with `has_udt_registry() == false`. Parity is
+//! guaranteed by identical posture, not by matching a non-null authority.
+//!
+//! Wiring a real UDT registry into BOTH paths (so a frozen/nested UDT cell in a
+//! collection decodes structurally instead of as `Blob`, the #1234 data-loss
+//! class) is tracked as a single follow-up, issue #2349 — it must land for the
+//! cold path and the warm path together so they never diverge.
 //!
 //! ## File-lifetime contract (from `from_readers.rs`)
 //!
@@ -31,11 +36,11 @@
 //! outlives the per-query dir (the link keeps the inode alive), so the contract
 //! is satisfied trivially.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use cqlite_core::schema::{TableSchema, UdtRegistry};
+use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::{Config, Platform};
 
@@ -112,6 +117,18 @@ pub struct WarmTableRegistry {
     platform: Mutex<Option<Arc<Platform>>>,
     budget_bytes: u64,
     metrics: Arc<WarmMetrics>,
+    /// Test-only rendezvous invoked inside [`Self::rebuild`] AFTER the added
+    /// generations are opened but BEFORE the swap lock is taken — lets the
+    /// concurrent-same-key-rebuild race test hold two threads "past the probe,
+    /// before either swaps" deterministically. `None` (a no-op) in production.
+    #[cfg(test)]
+    swap_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only hook invoked at the TOP of each [`Self::open_added`] loop
+    /// iteration (before its cancel check) — lets the mid-rebuild cancellation
+    /// test trip the cancel flag BETWEEN two added-generation opens. `None` in
+    /// production.
+    #[cfg(test)]
+    open_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Default for WarmTableRegistry {
@@ -134,6 +151,10 @@ impl WarmTableRegistry {
             platform: Mutex::new(None),
             budget_bytes: budget_bytes.max(1),
             metrics: Arc::new(WarmMetrics::default()),
+            #[cfg(test)]
+            swap_barrier: Mutex::new(None),
+            #[cfg(test)]
+            open_barrier: Mutex::new(None),
         }
     }
 
@@ -315,6 +336,11 @@ impl WarmTableRegistry {
         };
         let reader_opens = opened.len() as u64;
 
+        // Test-only rendezvous: hold here (past the probe + open, before the swap)
+        // so a concurrent same-key rebuild can be driven deterministically.
+        #[cfg(test)]
+        self.run_swap_barrier();
+
         // Swap atomically under the write guard.
         let mut inner = self.lock_inner();
         let tick = inner.next_tick();
@@ -343,9 +369,27 @@ impl WarmTableRegistry {
         }
 
         // NEW reader set = kept + newly-opened, newest-generation-first.
+        //
+        // DEDUP by generation identity under this swap lock (fail-closed against a
+        // concurrent same-key rebuild race): two requests can each MISS for the
+        // same table, both compute the SAME added delta from a pre-swap snapshot,
+        // and both open the same added generation OUTSIDE the lock. The first
+        // swap installs it; when THIS (second) swap re-reads `prev`, `kept` now
+        // already carries that generation (it is in `current_set`), and our own
+        // `opened` carries a SECOND copy. Keeping both would double-count the
+        // footprint and hand out two `WarmReader`s per inode → permanent
+        // `used_bytes` drift → spurious LRU evictions. So we count/keep a newly
+        // opened reader ONLY when its generation is not already present.
         let mut readers = kept;
+        let mut present: HashSet<GenerationId> = readers.iter().map(|r| r.id).collect();
         let mut added_bytes: u64 = 0;
         for mut r in opened {
+            if !present.insert(r.id) {
+                // A concurrent rebuild already installed this generation; its
+                // footprint is already accounted. Drop our duplicate copy (the
+                // `Arc<SSTableReader>` is released here).
+                continue;
+            }
             r.last_access = tick;
             added_bytes = added_bytes.saturating_add(r.footprint);
             readers.push(r);
@@ -420,13 +464,14 @@ impl WarmTableRegistry {
         evicted
     }
 
-    /// Open the ADDED generations, resolving each reader's UDT registry BEFORE
-    /// wrapping in `Arc` (the #2345 contract). Fail-closed: any open error (or a
-    /// cancellation) returns immediately WITHOUT partial state.
+    /// Open the ADDED generations. Fail-closed: any open error (or a
+    /// cancellation) returns immediately WITHOUT partial state. Readers are opened
+    /// with the SAME UDT-registry posture as the cold path (none — see the module
+    /// doc; #2349 wires a real registry into both paths together).
     fn open_added(
         &self,
         added: &[&GenerationEntry],
-        schema: &TableSchema,
+        _schema: &TableSchema,
         cancel: &CancelFlag,
     ) -> Result<Vec<WarmReader>, WarmError> {
         if added.is_empty() {
@@ -440,20 +485,15 @@ impl WarmTableRegistry {
             .map_err(|e| WarmError::Runtime(format!("build runtime: {e}")))?;
         let platform = self.platform(&runtime)?;
         let config = Config::default();
-        let udt_registry = resolve_udt_registry(schema);
 
         let mut opened = Vec::with_capacity(added.len());
         for entry in added {
+            #[cfg(test)]
+            self.run_open_barrier();
             if cancel.is_cancelled() {
                 return Err(WarmError::Cancelled);
             }
-            let reader = open_one_reader(
-                &runtime,
-                &entry.path,
-                &config,
-                Arc::clone(&platform),
-                udt_registry.clone(),
-            )?;
+            let reader = open_one_reader(&runtime, &entry.path, &config, Arc::clone(&platform))?;
             let footprint = account_footprint(&entry.path);
             opened.push(WarmReader {
                 id: entry.id,
@@ -482,41 +522,103 @@ impl WarmTableRegistry {
     fn lock_inner(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// Install the test-only swap rendezvous (see the field doc).
+    #[cfg(test)]
+    pub(crate) fn set_swap_barrier(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .swap_barrier
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(f);
+    }
+
+    /// Invoke the swap rendezvous if one is installed (clone the `Arc` out first
+    /// so it is called WITHOUT holding the `swap_barrier` lock).
+    #[cfg(test)]
+    fn run_swap_barrier(&self) {
+        let hook = self
+            .swap_barrier
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(f) = hook {
+            f();
+        }
+    }
+
+    /// Install the test-only per-open rendezvous (see the field doc).
+    #[cfg(test)]
+    pub(crate) fn set_open_barrier(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .open_barrier
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(f);
+    }
+
+    /// Invoke the per-open rendezvous if one is installed.
+    #[cfg(test)]
+    fn run_open_barrier(&self) {
+        let hook = self
+            .open_barrier
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(f) = hook {
+            f();
+        }
+    }
+
+    /// Test-only: the total accounted footprint (`used_bytes`).
+    #[cfg(test)]
+    pub(crate) fn debug_used_bytes(&self) -> u64 {
+        self.lock_inner().used_bytes
+    }
+
+    /// Test-only: the number of cached `WarmReader`s for `key` (counts DUPLICATES,
+    /// so the race test can catch a double-installed generation).
+    #[cfg(test)]
+    pub(crate) fn debug_reader_count(&self, key: &TableKey) -> usize {
+        self.lock_inner()
+            .tables
+            .get(key)
+            .map(|t| t.readers.len())
+            .unwrap_or(0)
+    }
+
+    /// Test-only: the number of DISTINCT generation ids cached for `key`.
+    #[cfg(test)]
+    pub(crate) fn debug_distinct_gen_count(&self, key: &TableKey) -> usize {
+        self.lock_inner()
+            .tables
+            .get(key)
+            .map(|t| t.readers.iter().map(|r| r.id).collect::<HashSet<_>>().len())
+            .unwrap_or(0)
+    }
 }
 
-/// Open ONE reader and set its UDT registry BEFORE it is shared (the #2345
-/// contract). Proves the registry is present via `has_udt_registry`; a reader
-/// that somehow lost it is a hard error rather than a silent `Blob`-decoding trap.
+/// Open ONE reader with the SAME UDT-registry posture as the cold path.
+///
+/// The cold Flight path (`KWayMerger::new_cancellable`) opens readers with
+/// `udt_registry = None`, so — to keep warm a parse-cost-only change with no
+/// read-semantics divergence — this does NOT set a registry either. Wiring a real
+/// registry into BOTH paths together is issue #2349; see the module doc.
 fn open_one_reader(
     runtime: &tokio::runtime::Runtime,
     path: &Path,
     config: &Config,
     platform: Arc<Platform>,
-    udt_registry: UdtRegistry,
 ) -> Result<SSTableReader, WarmError> {
-    let mut reader = runtime
+    let reader = runtime
         .block_on(SSTableReader::open(path, config, platform))
         .map_err(|source| WarmError::Open {
             path: path.to_path_buf(),
             source,
         })?;
-    reader.set_udt_registry(udt_registry);
     debug_assert!(
-        reader.has_udt_registry(),
-        "warm reader must be UDT-registry-aware before sharing (#2345/#1234)"
+        !reader.has_udt_registry(),
+        "warm reader must match the cold path's no-UDT-registry posture (#2349)"
     );
     Ok(reader)
-}
-
-/// Resolve the UDT registry to wire onto a warm reader (the #2345 contract).
-///
-/// A Flight ticket carries a single-table DDL with no `CREATE TYPE` bodies, so
-/// the authoritative registry is the Cassandra-5 default set — the same authority
-/// the cold path had. The plumbing is present and provable so a reader whose
-/// SSTable holds frozen/nested UDT cells is decoded structurally (never dropped
-/// as `Blob`, the #1234 class) once a registry with those bodies is available.
-fn resolve_udt_registry(_schema: &TableSchema) -> UdtRegistry {
-    UdtRegistry::with_cassandra5_defaults()
 }
 
 // Registry integration tests over real in-process SSTables (issue #2310), in a
@@ -536,14 +638,5 @@ mod tests {
         set.insert(TableKey::new("ks", "t"));
         assert!(set.contains(&TableKey::new("ks", "t")));
         assert!(!set.contains(&TableKey::new("ks", "other")));
-    }
-
-    #[test]
-    fn resolve_udt_registry_is_non_null() {
-        // The warm open must always have a registry to set (never `None` → the
-        // #1234 silent-Blob trap). A defaults registry is a valid, non-panicking
-        // authority.
-        let schema = crate::testutil::simple_schema();
-        let _reg = resolve_udt_registry(&schema);
     }
 }
