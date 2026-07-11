@@ -363,6 +363,24 @@ mod fixture_drain {
         chunks
     }
 
+    /// Decode raw compressed `chunks` into the decompressed `Bytes` the IO half
+    /// now ships on the channel (issue #1940, D2). The parse half no longer
+    /// decodes, so these helpers must pre-decode exactly as `decode_scan_chunk`
+    /// does (CRC was verified during the read that produced `chunks`).
+    fn decode_chunks(reader: &SSTableReader, chunks: &[Vec<u8>]) -> Result<Vec<bytes::Bytes>> {
+        let max_cl = reader
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.max_compressed_length as usize)
+            .unwrap_or(usize::MAX);
+        let mut out = Vec::with_capacity(chunks.len());
+        for (i, c) in chunks.iter().enumerate() {
+            let (decoded, _recycled) = reader.decode_scan_chunk(i, max_cl, c.clone())?;
+            out.push(decoded);
+        }
+        Ok(out)
+    }
+
     /// Run the blocking parse half over `chunks` with the given `io_failed`,
     /// returning the number of `(RowKey, Value)` entries it emitted. Runs on
     /// the current thread (the function is synchronous); the bounded channel
@@ -378,13 +396,14 @@ mod fixture_drain {
                 .map(|ci| ci.max_compressed_length as usize)
                 .unwrap_or(usize::MAX),
         };
-        // Feed raw chunks through an unbounded->bounded-shaped channel large
-        // enough to hold them all, then drop the sender so the parse half sees
-        // a CLEAN close; the `io_failed` flag (not the close reason) drives the
-        // terminal-drain decision under test.
-        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(chunks.len().max(1));
-        for c in chunks {
-            raw_tx.try_send(c.clone()).expect("prefill raw chunk");
+        // Feed DECODED chunks (issue #1940) through an unbounded->bounded-shaped
+        // channel large enough to hold them all, then drop the sender so the parse
+        // half sees a CLEAN close; the `io_failed` flag (not the close reason)
+        // drives the terminal-drain decision under test.
+        let decoded = decode_chunks(reader, chunks).expect("decode chunks");
+        let (raw_tx, raw_rx) = mpsc::channel::<bytes::Bytes>(decoded.len().max(1));
+        for c in decoded {
+            raw_tx.try_send(c).expect("prefill decoded chunk");
         }
         drop(raw_tx);
         // Output channel now carries batched rows (issue #1143). Big enough
@@ -436,36 +455,48 @@ mod fixture_drain {
         drain_count(reader, chunks, true)
     }
 
-    /// Run the blocking parse half over `chunks` followed by ONE deliberately
-    /// corrupt compressed chunk that fails to decompress mid-stream, returning
-    /// `(result, rows_received_before_error)`. The corrupt chunk is short enough
-    /// (`< max_compressed_length`) that the parse half routes it through
-    /// `Compression::decompress`, which errors — exercising the mid-stream
-    /// decompress-error path AFTER `chunks` already produced confirmed rows.
+    /// Reproduce the production sequence when a trailing chunk fails to decode
+    /// (issue #1940, D2): the IO half DECODES each chunk before shipping it, so a
+    /// corrupt chunk errors in the IO half — its bytes NEVER reach the parse half.
+    /// Returns `(decode_result_of_corrupt_chunk, rows_delivered_from_good_prefix)`:
+    /// the good prefix is decoded and fed to the parse half with `io_failed = true`
+    /// (mirroring the IO half having set the flag and dropped the sender after the
+    /// decode error), so the parse half delivers the prefix's confirmed rows and
+    /// SKIPS the terminal drain, and the corrupt chunk's decode Err is what the IO
+    /// half surfaces as the scan result.
     fn drain_with_trailing_corrupt(
         reader: &SSTableReader,
         chunks: &[Vec<u8>],
     ) -> (Result<()>, usize) {
         let ctx = ctx_for(reader);
-        // Capacity for the real chunks + the corrupt one.
-        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(chunks.len() + 1);
-        for c in chunks {
-            raw_tx.try_send(c.clone()).expect("prefill raw chunk");
-        }
         // A short, non-raw, non-decompressible chunk: 8 bytes that no supported
         // codec accepts. Strictly shorter than any real `max_compressed_length`,
-        // so it is NOT treated as an incompressible-raw chunk and goes through
-        // `decompress`, which returns Err.
-        raw_tx
-            .try_send(vec![0xFFu8; 8])
-            .expect("prefill corrupt chunk");
+        // so it is NOT an incompressible-raw chunk and goes through `decompress`,
+        // which returns Err — at DECODE time, in the IO half.
+        let max_cl = reader
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.max_compressed_length as usize)
+            .unwrap_or(usize::MAX);
+        let corrupt_result = reader
+            .decode_scan_chunk(chunks.len(), max_cl, vec![0xFFu8; 8])
+            .map(|_| ());
+
+        // Feed the DECODED good prefix to the parse half with io_failed = true.
+        let decoded = decode_chunks(reader, chunks).expect("decode good prefix");
+        let (raw_tx, raw_rx) = mpsc::channel::<bytes::Bytes>(decoded.len().max(1));
+        for c in decoded {
+            raw_tx.try_send(c).expect("prefill decoded chunk");
+        }
         drop(raw_tx);
 
         // Large output channel so `blocking_send` never blocks; we count rows
-        // delivered ACROSS batches BEFORE the terminal error.
+        // delivered ACROSS batches BEFORE the (IO-half) error.
         let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4096);
-        let flag = Arc::new(AtomicBool::new(false));
-        let result = reader.drain_scan_window_blocking(ctx, raw_rx, out_tx, flag);
+        let flag = Arc::new(AtomicBool::new(true));
+        reader
+            .drain_scan_window_blocking(ctx, raw_rx, out_tx, flag)
+            .expect("parse half over the clean prefix must not itself error");
 
         let mut received = 0usize;
         while let Ok(item) = out_rx.try_recv() {
@@ -473,7 +504,7 @@ mod fixture_drain {
                 received += rows.len();
             }
         }
-        (result, received)
+        (corrupt_result, received)
     }
 
     /// Issue #1143 — END-TO-END delivery + error-surfacing guard on the real
@@ -663,9 +694,10 @@ mod fixture_drain {
         // escaped the producer (i.e. are resident in the channel) and assert it
         // never exceeds the channel-resident bound.
         let ctx = ctx_for(&reader);
-        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(chunks.len().max(1));
-        for c in &chunks {
-            raw_tx.try_send(c.clone()).expect("prefill raw chunk");
+        let decoded = decode_chunks(&reader, &chunks).expect("decode chunks");
+        let (raw_tx, raw_rx) = mpsc::channel::<bytes::Bytes>(decoded.len().max(1));
+        for c in decoded {
+            raw_tx.try_send(c).expect("prefill decoded chunk");
         }
         drop(raw_tx);
         // PRODUCTION-sized batch channel, deliberately left undrained.

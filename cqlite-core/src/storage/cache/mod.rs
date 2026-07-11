@@ -9,8 +9,15 @@
 //! # Design (owner decision #1, LOCKED — see
 //! `openspec/changes/decompressed-chunk-cache/design.md`)
 //!
-//! - **Value = `Arc<[u8]>`** (D3): a hit is `Arc::clone` (refcount bump), never a
-//!   chunk-sized memcpy. Insert converts the decompressed `Vec<u8>` once.
+//! - **Value = [`bytes::Bytes`]** (D3; substrate migration issue #1940): a hit is a
+//!   `Bytes::clone` (refcount bump), never a chunk-sized memcpy. Insert converts the
+//!   decompressed `Vec<u8>` once via `Bytes::from(vec)`, which is ZERO-COPY — it
+//!   reuses the `Vec`'s existing heap allocation rather than allocating a fresh
+//!   `Arc<[u8]>` backing store and memcpy'ing into it (as `Arc::from(boxed_slice)`
+//!   did). This is what lets the windowed scan reach ≤1 alloc/chunk: the single
+//!   decompress-output allocation flows all the way into the cache untouched, and a
+//!   window fill borrows a refcounted `Bytes` view of it. `Bytes` is `Arc`-backed,
+//!   so the refcount-bump-on-hit contract is preserved verbatim.
 //! - **Bytes-bounded, not entry-count** (spec R1): each entry is weighed by its
 //!   decompressed length; after an insert the owning shard evicts LRU entries
 //!   until it is within its byte budget. A single entry larger than the budget is
@@ -41,10 +48,11 @@ pub use key_offset::{
     KeyOffsetCache, PartitionLoc, DEFAULT_KEY_CACHE_BYTES, DEFAULT_KEY_CACHE_SHARDS,
 };
 
+use bytes::Bytes;
 use lru::LruCache;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Default shard count (power of two). Production readers use this via
 /// [`DecompressedChunkCache::with_budget_bytes`].
@@ -107,7 +115,7 @@ impl ChunkKey {
 
 /// One shard: an unbounded-by-count `LruCache` plus running byte accounting.
 struct Shard {
-    lru: LruCache<ChunkKey, Arc<[u8]>>,
+    lru: LruCache<ChunkKey, Bytes>,
     current_bytes: usize,
 }
 
@@ -222,9 +230,10 @@ impl DecompressedChunkCache {
         &self.shards[idx]
     }
 
-    /// Look up a resident chunk. On a hit this bumps recency and returns an
-    /// `Arc::clone` (no chunk-sized allocation). On a miss returns `None`.
-    pub fn get(&self, key: &ChunkKey) -> Option<Arc<[u8]>> {
+    /// Look up a resident chunk. On a hit this bumps recency and returns a
+    /// `Bytes::clone` (refcount bump, no chunk-sized allocation). On a miss returns
+    /// `None`.
+    pub fn get(&self, key: &ChunkKey) -> Option<Bytes> {
         // No-op cache (issue #1568): a disabled cache never holds anything, so
         // reads bypass it without touching the hit/miss counters.
         if self.disabled {
@@ -233,7 +242,7 @@ impl DecompressedChunkCache {
         let mut guard = Self::lock(self.shard_for(key));
         match guard.lru.get(key) {
             Some(v) => {
-                let v = Arc::clone(v);
+                let v = v.clone();
                 drop(guard);
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 Some(v)
@@ -246,24 +255,27 @@ impl DecompressedChunkCache {
         }
     }
 
-    /// Insert `data` under `key`, returning the resident `Arc<[u8]>`.
+    /// Insert `data` under `key`, returning the resident [`Bytes`].
     ///
-    /// The `Vec<u8>` is converted to `Arc<[u8]>` exactly once here; the returned
-    /// handle and any subsequent [`get`](Self::get) share that one buffer. After
-    /// insertion the owning shard evicts LRU entries until it is within its byte
-    /// budget (never evicting the just-inserted entry).
-    pub fn insert(&self, key: ChunkKey, data: Vec<u8>) -> Arc<[u8]> {
-        let arc: Arc<[u8]> = Arc::from(data.into_boxed_slice());
+    /// The `Vec<u8>` is converted to `Bytes` exactly once here via `Bytes::from`,
+    /// which is ZERO-COPY: it takes ownership of the `Vec`'s existing heap
+    /// allocation rather than allocating a new backing store and copying (issue
+    /// #1940 substrate). The returned handle and any subsequent [`get`](Self::get)
+    /// share that one buffer (refcount-bumped clones). After insertion the owning
+    /// shard evicts LRU entries until it is within its byte budget (never evicting
+    /// the just-inserted entry).
+    pub fn insert(&self, key: ChunkKey, data: Vec<u8>) -> Bytes {
+        let bytes = Bytes::from(data);
         // No-op cache (issue #1568): return the freshly-produced buffer to the
         // caller without retaining it, so a disabled cache holds nothing.
         if self.disabled {
-            return arc;
+            return bytes;
         }
-        let len = arc.len();
+        let len = bytes.len();
         let mut guard = Self::lock(self.shard_for(&key));
 
         // Replacing an existing entry: reclaim its byte weight first.
-        if let Some(old) = guard.lru.put(key, Arc::clone(&arc)) {
+        if let Some(old) = guard.lru.put(key, bytes.clone()) {
             guard.current_bytes = guard.current_bytes.saturating_sub(old.len());
         }
         guard.current_bytes = guard.current_bytes.saturating_add(len);
@@ -286,7 +298,7 @@ impl DecompressedChunkCache {
         if evicted_here > 0 {
             self.evictions.fetch_add(evicted_here, Ordering::Relaxed);
         }
-        arc
+        bytes
     }
 
     /// Total resident decompressed bytes across all shards.
@@ -342,6 +354,7 @@ impl Default for DecompressedChunkCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn chunk(byte: u8, len: usize) -> Vec<u8> {
         vec![byte; len]
@@ -443,7 +456,10 @@ mod tests {
     }
 
     /// Task 1.3: zero-copy hit — insert once, get twice; every handle points at
-    /// the SAME underlying buffer (Arc pointer identity), no chunk-sized copy.
+    /// the SAME underlying buffer (`Bytes` shares the backing allocation), no
+    /// chunk-sized copy. `Bytes` has no `ptr_eq`, so buffer identity is proven via
+    /// `as_ptr()` (a clone shares the backing store and reports the same data
+    /// pointer; a copy would report a different one).
     #[test]
     fn zero_copy_hit_pointer_identity() {
         let cache = DecompressedChunkCache::with_budget_and_shards(1 << 20, 1);
@@ -453,10 +469,9 @@ mod tests {
         let h1 = cache.get(&k).expect("first hit");
         let h2 = cache.get(&k).expect("second hit");
 
-        // Same allocation: pointer identity, not a value clone.
-        assert!(Arc::ptr_eq(&inserted, &h1));
-        assert!(Arc::ptr_eq(&inserted, &h2));
+        // Same allocation: shared backing store, not a value copy.
         assert_eq!(h1.as_ptr(), inserted.as_ptr());
+        assert_eq!(h2.as_ptr(), inserted.as_ptr());
         assert_eq!(&*h1, &chunk(0x42, 1024)[..]);
     }
 
@@ -563,10 +578,11 @@ mod tests {
             "same offset with a different size must not alias the cached range"
         );
 
-        // The original size still hits the original bytes (Arc identity).
+        // The original size still hits the original bytes (shared backing store).
         let again = cache.get(&k16).expect("original ranged key still resident");
-        assert!(
-            Arc::ptr_eq(&v16, &again),
+        assert_eq!(
+            v16.as_ptr(),
+            again.as_ptr(),
             "same (offset,size) key returns the same buffer"
         );
 

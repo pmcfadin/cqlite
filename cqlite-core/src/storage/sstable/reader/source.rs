@@ -105,28 +105,6 @@ impl BlockSource {
         BlockSource::Direct(cursor)
     }
 
-    /// Whether reads from this backend BLOCK the calling thread synchronously
-    /// (issue #1593, F3). A memory map faults in cold pages with a disk read at
-    /// first access, and an `O_DIRECT`/`F_NOCACHE` cursor issues an uncached
-    /// blocking `pread`; both do that work synchronously inside `poll_read`, so a
-    /// scan reading them on a tokio async worker would starve the runtime. The
-    /// buffered backend, by contrast, is genuinely async (`tokio::fs`, reactor-
-    /// driven), so it returns `false` and its reads stay inline on the runtime.
-    ///
-    /// The windowed scan uses this to route a faulting backend's read loop onto a
-    /// `spawn_blocking` thread. Keying on the ACTUAL backend (not the configured
-    /// intent) matters: a `Direct` request that degrades to `Buffered` at open
-    /// returns `false` here and is read inline — never driven under a non-tokio
-    /// executor that lacks the reactor `tokio::fs` needs.
-    pub(crate) fn faults_synchronously(&self) -> bool {
-        match self {
-            BlockSource::Buffered { .. } => false,
-            BlockSource::Mapped(_) => true,
-            #[cfg(unix)]
-            BlockSource::Direct(_) => true,
-        }
-    }
-
     /// Returns `true` when this source is backed by a memory map.
     #[cfg(test)]
     pub(crate) fn is_mmap(&self) -> bool {

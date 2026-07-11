@@ -7,11 +7,49 @@
 //! size limit (issue #1135). Included via
 //! `#[cfg(test)] #[path = "block_io_retry_tests.rs"] mod retry_tests;` in the
 //! parent, so `use super::*` resolves to `block_io`'s private items
-//! (`retry_transient_once`, `is_transient_io`, `BlockSource`, `Error`, …).
+//! (`is_transient_io`, `BlockSource`, `Error`, …).
+//!
+//! `retry_transient_once` (the generic `Fn`-closure retry combinator) lives HERE
+//! because, since the issue-#1940 substrate work, the only PRODUCTION read path
+//! (`read_next_block`) inlines the identical retry policy (it threads a reusable
+//! `&mut` scratch a `Fn`-closure cannot capture). The combinator is retained only
+//! as the pinned reference implementation these guards exercise, so it is
+//! test-only and kept out of the over-threshold `block_io.rs` source.
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
+
+/// Run `attempt`, retrying it EXACTLY once — and only on a transient I/O fault —
+/// after re-seeking the source back to the ORIGINAL offset (issue #1588). This is
+/// the reference retry policy `read_next_block` inlines; see the module doc.
+async fn retry_transient_once<F, Fut, T>(file: &Arc<Mutex<BlockSource>>, attempt: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let original_pos = {
+        let mut guard = file.lock().await;
+        guard.stream_position().await.map_err(Error::Io)?
+    };
+    match attempt().await {
+        Ok(v) => Ok(v),
+        Err(e) if is_transient_io(&e) => {
+            tracing::warn!(
+                "transient I/O fault ({e}); re-seeking to offset {original_pos} and retrying once"
+            );
+            {
+                let mut guard = file.lock().await;
+                guard
+                    .seek(std::io::SeekFrom::Start(original_pos))
+                    .await
+                    .map_err(Error::Io)?;
+            }
+            attempt().await
+        }
+        Err(e) => Err(e),
+    }
+}
 
 /// Build an `Arc<Mutex<BlockSource>>` over `bytes`. The returned `TempDir` MUST
 /// be held for the source's lifetime. (Local to this module so the retry guards

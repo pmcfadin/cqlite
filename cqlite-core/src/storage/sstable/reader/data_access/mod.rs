@@ -716,8 +716,9 @@ impl SSTableReader {
     /// in-buffer slice, which is what lets the whole-section fallback read its bytes
     /// exactly once. This is the single place the chunk geometry, mismatch error,
     /// and memoization live — the two public verify entry points differ ONLY in how
-    /// they source each chunk's bytes.
-    fn verify_covering_chunks(
+    /// they source each chunk's bytes. Module-visible so the windowed scan's
+    /// synchronous uncompressed piece reader shares the same memoized path (#1940).
+    pub(in crate::storage::sstable::reader) fn verify_covering_chunks(
         &self,
         crc: &super::crc::CrcDb,
         start: u64,
@@ -834,7 +835,10 @@ impl SSTableReader {
         &self,
         cursor: &ScanCursor,
     ) -> Result<Option<Vec<u8>>> {
-        self.read_next_block_parts(&cursor.file, &cursor.chunk_index)
+        // Non-recycling callers (compaction, sequential fallback, tests) pass a
+        // throwaway scratch — one alloc/chunk, unchanged; the windowed IO half calls
+        // `read_next_block_parts` with a REUSED per-loop scratch (issue #1940, D2).
+        self.read_next_block_parts(&cursor.file, &cursor.chunk_index, &mut Vec::new())
             .await
     }
 
@@ -849,6 +853,7 @@ impl SSTableReader {
         &self,
         file: &std::sync::Arc<tokio::sync::Mutex<super::source::BlockSource>>,
         chunk_index: &std::sync::atomic::AtomicUsize,
+        scratch: &mut Vec<u8>,
     ) -> Result<Option<Vec<u8>>> {
         use super::block_io;
         block_io::read_next_block(
@@ -859,6 +864,7 @@ impl SSTableReader {
             self.crc_reader.as_deref(),
             chunk_index,
             self.actual_header_size as u64,
+            scratch,
         )
         .await
     }

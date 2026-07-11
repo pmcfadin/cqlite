@@ -15,8 +15,8 @@ use crate::storage::sstable::reader::block_io::read_compressed_chunk_at;
 use crate::storage::sstable::reader::data_access::DECOMPRESS_CALLS;
 use crate::storage::sstable::reader::read_at::ReadAt;
 use crate::{Error, Result};
+use bytes::Bytes;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 /// Single chunk decode plane: positioned read → CRC → decompress → B1 cache.
 ///
@@ -77,7 +77,7 @@ impl<'a> ChunkSource<'a> {
     ///
     /// Used by the BTI target-chunk path (self-reading) and can be called by the windowed
     /// scan if it moves to positioned reads. Returns `Ok(None)` at EOF.
-    pub(crate) fn chunk(&self, index: usize) -> Result<Option<Arc<[u8]>>> {
+    pub(crate) fn chunk(&self, index: usize) -> Result<Option<Bytes>> {
         // Build cache key from absolute chunk index in this namespace
         let key = ChunkKey::new(self.cache_id ^ self.namespace, index as u64);
 
@@ -118,7 +118,7 @@ impl<'a> ChunkSource<'a> {
         key: ChunkKey,
         compressed: Vec<u8>,
         incompressible: bool,
-    ) -> Result<Arc<[u8]>> {
+    ) -> Result<Bytes> {
         let decompressed = if incompressible {
             // Stored uncompressed by Cassandra: pass raw bytes through (no decompress counter)
             compressed
@@ -131,6 +131,14 @@ impl<'a> ChunkSource<'a> {
                 ))
             })?;
             DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
+            // CHUNK_PATH_ALLOCS (consumer E3/#1940): the decompress OUTPUT buffer is
+            // a per-chunk copy-chain heap allocation. It is the ONE surviving
+            // allocation after the D2 substrate work — it flows zero-copy into the
+            // B1 cache as `Bytes` (no `Arc::from` re-copy) and is the refcounted
+            // substrate the window borrows. Recording it here (not the old
+            // compressed-read-buffer site, which D2 turned into a reused scratch)
+            // makes the ≤1-alloc/chunk bound measurable. No-op in release.
+            crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
             d
         } else {
             // No compression reader: treat raw bytes as decompressed
@@ -138,6 +146,40 @@ impl<'a> ChunkSource<'a> {
         };
 
         // Insert into B1 cache (Vec→Arc conversion happens once here) and return
+        Ok(self.cache.insert(key, decompressed))
+    }
+
+    /// Decompress a CRC-validated COMPRESSIBLE chunk from a BORROWED slice, cache
+    /// it, and return the resident [`Bytes`] — leaving the compressed input buffer
+    /// owned by the caller so it can be RECYCLED as a per-loop scratch (issue #1940,
+    /// D2). This is the windowed-scan IO half's decode entry: unlike
+    /// [`decode_and_cache`](Self::decode_and_cache) (which takes the compressed `Vec`
+    /// by value and drops it), this borrows `&compressed`, so the caller keeps the
+    /// compressed buffer and reuses it for the next chunk read — the compressed-read
+    /// side then performs no per-chunk allocation, and the ONE surviving copy-chain
+    /// allocation is the decompress output (recorded here). Callers handle the
+    /// incompressible-raw and no-compressor cases directly (they move the buffer);
+    /// this method is only for the decompress path (`self.compression` is `Some`).
+    /// A `None` compressor is treated as a raw passthrough of a COPY (rare/never on
+    /// the windowed path, where compression is always resolved).
+    pub(crate) fn decode_borrowed(&self, key: ChunkKey, compressed: &[u8]) -> Result<Bytes> {
+        let decompressed = if let Some(compression) = self.compression {
+            let d = compression.decompress(compressed).map_err(|e| {
+                Error::corruption(format!(
+                    "ChunkSource: failed to decompress chunk (key={:?}): {}",
+                    key, e
+                ))
+            })?;
+            DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
+            // CHUNK_PATH_ALLOCS (consumer E3/#1940): the decompress OUTPUT buffer is
+            // the ONE surviving per-chunk copy-chain allocation after D2 — it flows
+            // zero-copy into the B1 cache as `Bytes` (no `Arc::from` re-copy) and is
+            // the refcounted substrate the window borrows. No-op in release.
+            crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
+            d
+        } else {
+            compressed.to_vec()
+        };
         Ok(self.cache.insert(key, decompressed))
     }
 

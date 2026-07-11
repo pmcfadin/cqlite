@@ -26,6 +26,15 @@ static LAST_PARSE_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
 /// `pread`) the read must run on a `spawn_blocking` thread, NOT an async worker;
 /// a guard test compares this against the enumerated async-worker set.
 static LAST_IO_READ_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
+/// The [`ThreadId`] on which the scan's chunk DECOMPRESSION last ran (issue
+/// #1940 runtime-placement guard). The D2 substrate change moved decompression
+/// into the IO-half feed loop; that loop must run on a `spawn_blocking` thread
+/// for EVERY backend (including the genuinely-async buffered backend), so the
+/// decode CPU never lands on the async reactor. A guard test compares this
+/// against the enumerated async-worker set — recorded at the actual
+/// `decode_scan_chunk` decompress site so it pins where decompression runs, not
+/// merely where the read is dispatched.
+static LAST_DECODE_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
 /// Number of times the per-partition scratch buffer GREW its backing store
 /// during the armed scan (issue #1333). With the scratch hoisted out of the
 /// per-partition loop and `.clear()`-reused this is a small bounded count
@@ -41,6 +50,9 @@ pub fn arm() {
         *g = None;
     }
     if let Ok(mut g) = LAST_IO_READ_THREAD.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = LAST_DECODE_THREAD.lock() {
         *g = None;
     }
     SCRATCH_ALLOCS.store(0, Ordering::SeqCst);
@@ -83,6 +95,24 @@ pub(super) fn record_io_read_thread() {
 /// #1593, F3).
 pub fn recorded_io_read_thread() -> Option<ThreadId> {
     LAST_IO_READ_THREAD.lock().ok().and_then(|g| *g)
+}
+
+/// Record the current thread as the chunk-DECODE (decompress) thread, if armed.
+/// Called from `decode_scan_chunk` at the actual decode site, once per decoded
+/// chunk (issue #1940 runtime-placement guard). Cheap enough to call per chunk:
+/// a `Relaxed` load plus, when armed, a short mutex store.
+pub(super) fn record_decode_thread() {
+    if ARMED.load(Ordering::Relaxed) {
+        if let Ok(mut g) = LAST_DECODE_THREAD.lock() {
+            *g = Some(std::thread::current().id());
+        }
+    }
+}
+
+/// The [`ThreadId`] on which the scan's chunk decompression last ran, if any
+/// (issue #1940 runtime-placement guard).
+pub fn recorded_decode_thread() -> Option<ThreadId> {
+    LAST_DECODE_THREAD.lock().ok().and_then(|g| *g)
 }
 
 /// Record that the per-partition scratch buffer's capacity changed from

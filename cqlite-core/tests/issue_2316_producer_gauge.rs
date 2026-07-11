@@ -293,7 +293,7 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
         if let Some(&v) = matches.last() {
             last_seen = Some(v);
         }
-        if matches.iter().any(|&v| v == 0.0) {
+        if matches.contains(&0.0) {
             observed_zero_record = true;
             break;
         }
