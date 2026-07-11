@@ -217,7 +217,7 @@ async fn corrupt_bti_trie_degrades_to_index_unavailable_not_err() {
         .unwrap();
 
     let outcome = reader
-        .read_single_partition_for_compaction(&key_bytes, Some(&schema))
+        .read_single_partition_for_compaction(&key_bytes, Some(&schema), &ScanCancel::default())
         .await
         .expect("a corrupt trie must degrade gracefully, never a hard Err");
     assert!(
@@ -340,7 +340,11 @@ async fn stale_index_offset_degrades_to_scan_fallback_and_finds_the_row() {
     // Layer 1: the primitive itself.
     let reader = open_reader(&data_path).await;
     let outcome = reader
-        .read_single_partition_for_compaction(&target_key_bytes, Some(&schema))
+        .read_single_partition_for_compaction(
+            &target_key_bytes,
+            Some(&schema),
+            &ScanCancel::default(),
+        )
         .await
         .expect("a stale offset must degrade gracefully, never a hard Err");
     assert!(
@@ -485,7 +489,7 @@ async fn big_foreign_partition_offset_degrades_to_scan_fallback_not_empty_rows()
     // Layer 1: the primitive itself.
     let reader = open_reader(&data_path).await;
     let outcome = reader
-        .read_single_partition_for_compaction(&key2, Some(&schema))
+        .read_single_partition_for_compaction(&key2, Some(&schema), &ScanCancel::default())
         .await
         .expect("a foreign-partition offset must degrade gracefully, never a hard Err");
     assert!(
@@ -683,7 +687,9 @@ async fn truncated_chunk_window_degrades_to_scan_fallback_not_partial_rows() {
 
     // Truncate Data.db to the new last-kept-chunk boundary (kept chunks stay
     // CRC-valid) ...
-    let cut = offsets[new_count] as u64;
+    // `chunk_offsets: Vec<u64>` — pre-existing unrelated `unnecessary_cast`
+    // clippy fix (file already touched by issue #2346), no behavior change.
+    let cut = offsets[new_count];
     let data_file = std::fs::OpenOptions::new()
         .write(true)
         .open(&data_path)
@@ -718,7 +724,7 @@ async fn truncated_chunk_window_degrades_to_scan_fallback_not_partial_rows() {
     // EOF (chunk `new_count` is gone) before reaching `end`.
     let reader = open_reader(&data_path).await;
     let outcome = reader
-        .read_single_partition_for_compaction(&key1, Some(&schema))
+        .read_single_partition_for_compaction(&key1, Some(&schema), &ScanCancel::default())
         .await
         .expect("a truncated chunk window must degrade gracefully, never a hard Err");
     assert!(
@@ -772,11 +778,12 @@ async fn valid_bti_fixture() -> (TempDir, std::path::PathBuf) {
 #[tokio::test]
 async fn pre_cancelled_seek_aborts_with_cancelled_not_rows() {
     let (_temp, data_path) = valid_bti_fixture().await;
-    let mut reader = open_reader(&data_path).await;
+    let reader = open_reader(&data_path).await;
 
+    // Issue #2346: `scan_cancel` is now a PER-CALL parameter, not a field
+    // mutated onto the reader.
     let cancel = ScanCancel::new();
     cancel.cancel();
-    reader.set_scan_cancel(cancel);
 
     let schema = schema();
     let key_bytes = WEPartitionKey::single("pk", Value::Integer(1))
@@ -784,7 +791,7 @@ async fn pre_cancelled_seek_aborts_with_cancelled_not_rows() {
         .unwrap();
 
     let result = reader
-        .read_single_partition_for_compaction(&key_bytes, Some(&schema))
+        .read_single_partition_for_compaction(&key_bytes, Some(&schema), &cancel)
         .await;
     assert!(
         matches!(result, Err(crate::Error::Cancelled)),
@@ -816,7 +823,7 @@ async fn bti_absent_key_is_definitely_absent_not_empty_rows() {
         .unwrap();
 
     let outcome = reader
-        .read_single_partition_for_compaction(&key_bytes, Some(&schema))
+        .read_single_partition_for_compaction(&key_bytes, Some(&schema), &ScanCancel::default())
         .await
         .expect("an absent-key probe must not error");
     assert!(

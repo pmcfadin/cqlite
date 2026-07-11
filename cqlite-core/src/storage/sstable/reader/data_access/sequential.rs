@@ -5,6 +5,11 @@
 //! These cover the BIG (`nb`) `V5CompressedLegacy` formats (chunk-stitched) and
 //! the non-stitching block-by-block formats. BTI (`da`) range/full scans are
 //! routed here only to delegate to [`SSTableReader::bti_scan_with_metadata`].
+//!
+//! File-size note (campsite rule, epic #1116): this file was already over the
+//! ~800-line source threshold before issue #2346's `scan_cancel` per-call
+//! parameter change (`sequential_scan`), which nudges it slightly further.
+//! Splitting it by responsibility is out of #2346's scope; tracked under #1116.
 
 use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
@@ -12,6 +17,7 @@ use super::super::SSTableReader;
 use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
+use crate::storage::scan_cancel::ScanCancel;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
@@ -114,7 +120,14 @@ impl SSTableReader {
                     "SSTableReader::scan - Index returned 0 entries (BTI format or incomplete parsing), falling back to sequential scan"
                 );
                 return self
-                    .sequential_scan(table_id, start_key, end_key, limit, schema)
+                    .sequential_scan(
+                        table_id,
+                        start_key,
+                        end_key,
+                        limit,
+                        schema,
+                        &self.scan_cancel,
+                    )
                     .await;
             }
 
@@ -123,7 +136,14 @@ impl SSTableReader {
             if has_zero_size {
                 tracing::debug!("SSTableReader::scan - Index reports size=0 for some entries, using sequential scan fallback");
                 return self
-                    .sequential_scan(table_id, start_key, end_key, limit, schema)
+                    .sequential_scan(
+                        table_id,
+                        start_key,
+                        end_key,
+                        limit,
+                        schema,
+                        &self.scan_cancel,
+                    )
                     .await;
             }
 
@@ -151,7 +171,14 @@ impl SSTableReader {
             // token order (NON-BLOCKING-1: avoid double-sort — return directly).
             tracing::debug!("SSTableReader::scan - No index, falling back to sequential scan");
             let seq_results = self
-                .sequential_scan(table_id, start_key, end_key, limit, schema)
+                .sequential_scan(
+                    table_id,
+                    start_key,
+                    end_key,
+                    limit,
+                    schema,
+                    &self.scan_cancel,
+                )
                 .await?;
             tracing::debug!(
                 "SSTableReader::scan - Sequential scan returned {} results",
@@ -756,6 +783,12 @@ impl SSTableReader {
         Ok(None)
     }
 
+    /// `scan_cancel` is an explicit PER-CALL cancellation token (issue #2346).
+    /// Every existing caller passes `&self.scan_cancel` (the reader's own field,
+    /// unchanged pre-#2346 semantics); the compaction path
+    /// ([`SSTableReader::iterate_all_partitions_cancellable`]) passes its
+    /// caller-supplied token instead, so a shared/cached reader's two concurrent
+    /// scans cancel independently.
     pub(in crate::storage::sstable::reader) async fn sequential_scan(
         &self,
         table_id: &TableId,
@@ -763,6 +796,7 @@ impl SSTableReader {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
+        scan_cancel: &ScanCancel,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
         tracing::debug!("SSTableReader::sequential_scan - Starting sequential scan");
         tracing::debug!("SSTableReader::sequential_scan - Table ID: {}", table_id);
@@ -865,7 +899,7 @@ impl SSTableReader {
             // absent) SSTable materialises EVERY partition here in one pass; poll
             // the token per block so a cancelled Flight `do_get` abandons the walk
             // promptly instead of running to completion under the ~1–2 min backstop.
-            self.scan_cancel.check()?;
+            scan_cancel.check()?;
             block_count += 1;
             tracing::debug!(
                 "SSTableReader::sequential_scan - Read block {}, size {} bytes",
@@ -891,7 +925,7 @@ impl SSTableReader {
                 // how large a single block turned out to be, independent of
                 // whichever inner parser branch produced `entries`.
                 if i & 0xFF == 0 {
-                    self.scan_cancel.check()?;
+                    scan_cancel.check()?;
                 }
                 tracing::debug!(
                     "SSTableReader::sequential_scan - Block {} entry {}: table_id='{}', key={:?}",
@@ -1045,7 +1079,14 @@ impl SSTableReader {
         // Non-stitching path: fall back to regular scan + empty metadata.
         // Per-cell metadata is not yet surfaced for block-entry formats.
         let plain = self
-            .sequential_scan(table_id, start_key, end_key, limit, schema)
+            .sequential_scan(
+                table_id,
+                start_key,
+                end_key,
+                limit,
+                schema,
+                &self.scan_cancel,
+            )
             .await?;
         Ok(plain
             .into_iter()

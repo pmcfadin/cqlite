@@ -570,6 +570,28 @@ impl SSTableReader {
     /// directly. For V5CompressedLegacy NB SSTables (the format the writer emits),
     /// `sequential_scan` uses the chunk-stitching path and returns every partition.
     pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, ScanRow)>> {
+        // Delegates to the per-call-token sibling with the reader's own field —
+        // byte-identical to the pre-#2346 behaviour of this method (every
+        // pre-existing caller keeps its exact cancellation semantics).
+        self.iterate_all_partitions_cancellable(&self.scan_cancel)
+            .await
+    }
+
+    /// Like [`Self::iterate_all_partitions`], but takes an explicit PER-CALL
+    /// cancellation token instead of always reading the reader's own
+    /// [`SSTableReader::scan_cancel`] field (issue #2346).
+    ///
+    /// A cached/shared `Arc<SSTableReader>` (a future warm-handle registry) has
+    /// no `&mut self` available to set a per-request cancel flag, so this seam
+    /// lets the compaction streaming path
+    /// ([`SSTableReader::stream_all_partitions_for_compaction`]'s non-stitching
+    /// fallback) drive two concurrent enumerations with two INDEPENDENT tokens.
+    /// `iterate_all_partitions` itself is UNCHANGED — it delegates here with
+    /// `&self.scan_cancel`, so every existing caller keeps identical behaviour.
+    pub(crate) async fn iterate_all_partitions_cancellable(
+        &self,
+        scan_cancel: &crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         // Index-random-read path (issue #2302): when a `Index.db` is present on a
         // BIG SSTable, enumerate EVERY partition via the full Index.db
         // partition-offset table instead of the sparse `Summary.db` samples.
@@ -586,7 +608,10 @@ impl SSTableReader {
         // compressed reader the per-partition slice is mapped to its covering
         // compression chunk(s) and decompressed (`read_compressed_offset_window`).
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
-            match self.iterate_all_partitions_via_full_index().await? {
+            match self
+                .iterate_all_partitions_via_full_index(scan_cancel)
+                .await?
+            {
                 Some(results) => return Ok(results),
                 None => {
                     // Present components that did NOT fully resolve: never silent.
@@ -651,7 +676,7 @@ impl SSTableReader {
         // format the reader's digest-based parser does not resolve).
         let table_id = self.scan_table_id();
         let schema = self.schema.as_deref();
-        self.sequential_scan(&table_id, None, None, None, schema)
+        self.sequential_scan(&table_id, None, None, None, schema, scan_cancel)
             .await
     }
 

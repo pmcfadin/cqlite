@@ -21,6 +21,7 @@
 
 use super::super::compaction_row::CompactionRow;
 use super::super::SSTableReader;
+use crate::storage::scan_cancel::ScanCancel;
 use crate::Result;
 use std::ops::ControlFlow;
 
@@ -89,10 +90,16 @@ impl SSTableReader {
     /// `partition_key` is the raw partition-key bytes (as
     /// `PartitionKey::to_bytes` produces). `schema` is the authoritative table
     /// schema (the parser needs column names).
+    ///
+    /// `scan_cancel` is an explicit PER-CALL cancellation token (issue #2346),
+    /// mirroring [`SSTableReader::stream_all_partitions_for_compaction`] — not
+    /// the reader's own `scan_cancel` field, so a shared/cached `Arc<SSTableReader>`
+    /// can serve two concurrent point-read probes with independent cancellation.
     pub async fn read_single_partition_for_compaction(
         &self,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
+        scan_cancel: &ScanCancel,
     ) -> Result<SinglePartitionCompaction> {
         // 1. Presence oracle — the only source of a definite prune. Emits
         //    `cqlite.read.sstables_pruned` internally on a definite negative.
@@ -179,7 +186,14 @@ impl SSTableReader {
         //    is stale/corrupt and pointed at another valid partition → scan
         //    fallback, never a silent drop).
         match self
-            .seek_partition_compaction_rows(offset, end_bound, partition_key, schema, is_bti)
+            .seek_partition_compaction_rows(
+                offset,
+                end_bound,
+                partition_key,
+                schema,
+                is_bti,
+                scan_cancel,
+            )
             .await?
         {
             Some(rows) => Ok(SinglePartitionCompaction::Rows(rows)),
@@ -204,6 +218,7 @@ impl SSTableReader {
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
         is_bti: bool,
+        scan_cancel: &ScanCancel,
     ) -> Result<Option<Vec<CompactionRow>>> {
         // Cooperative cancellation (issue #2207, roborev job 1620 MEDIUM): the seek
         // materializes a covering chunk window and parses one partition — the same
@@ -213,7 +228,9 @@ impl SSTableReader {
         // of decompressing/parsing to completion. Poll ONCE before materializing
         // (an already-cancelled read exits before any I/O), inside the chunk-window
         // pull loop (`pull_chunk_window`), and once more just before parsing.
-        self.scan_cancel.check()?;
+        // Issue #2346: `scan_cancel` is now the caller's PER-CALL token, not
+        // `self.scan_cancel`.
+        scan_cancel.check()?;
 
         let offset = offset as usize;
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
@@ -256,7 +273,7 @@ impl SSTableReader {
                     },
                 };
                 let (window, reached_end) = self
-                    .pull_chunk_window(target_chunk, window_base, end)
+                    .pull_chunk_window(target_chunk, window_base, end, scan_cancel)
                     .await?;
                 (window, within, reached_end)
             }
@@ -285,7 +302,7 @@ impl SSTableReader {
         // Cancellation poll just before the parse — the covering window is now
         // materialized, so a cancel observed here skips the (potentially large)
         // partition decode entirely (issue #2207 fail-safe cancellation).
-        self.scan_cancel.check()?;
+        scan_cancel.check()?;
 
         // Parse the FIRST partition at `window[within..]`. Collect every row whose
         // decoded key equals the queried key; a decoded DIFFERENT key means the
@@ -344,6 +361,7 @@ impl SSTableReader {
         target_chunk: usize,
         window_base: usize,
         end: usize,
+        scan_cancel: &ScanCancel,
     ) -> Result<(Vec<u8>, bool)> {
         use super::super::chunk_source::ChunkSource;
         use crate::storage::sstable::compression::Compression;
@@ -378,7 +396,7 @@ impl SSTableReader {
             // interval so a cancel is honoured mid-window, mirroring the full-scan
             // stream's `chunk_count & 0xFF == 0` poll (compaction.rs, issue #2264).
             if pulled & 0xFF == 0 {
-                self.scan_cancel.check()?;
+                scan_cancel.check()?;
             }
             pulled += 1;
             match chunk_source.chunk(chunk_index)? {

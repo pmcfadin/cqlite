@@ -21,10 +21,14 @@
 use super::{KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter};
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
-use crate::storage::sstable::reader::CompactionRow;
+use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
 use std::collections::{BinaryHeap, VecDeque};
 use std::path::{Path, PathBuf};
+// Unconditional (issue #2346): `build_single_partition_merger_from_readers`
+// takes `Vec<Arc<SSTableReader>>` regardless of the `tombstones` feature (its
+// `NeedsScan` fail-safe still needs `SSTableReader`/`Arc` either way).
+use std::sync::Arc;
 
 // Seek-only imports (the point-read primitive is `not(tombstones)` gated, like the
 // underlying single-partition seek machinery it composes).
@@ -35,11 +39,9 @@ use crate::config::DiskAccessMode;
 #[cfg(not(feature = "tombstones"))]
 use crate::platform::Platform;
 #[cfg(not(feature = "tombstones"))]
-use crate::storage::sstable::reader::{SSTableReader, SinglePartitionCompaction};
+use crate::storage::sstable::reader::SinglePartitionCompaction;
 #[cfg(not(feature = "tombstones"))]
 use crate::Config;
-#[cfg(not(feature = "tombstones"))]
-use std::sync::Arc;
 
 impl KWayMerger {
     /// Build a k-way merger from pre-constructed run iterators (issue #2207).
@@ -155,8 +157,9 @@ enum PathProbe {
 /// `paths` must be the same (token-pruned) candidate list, in the same order, the
 /// full-scan path would merge — run index is the position here, so LWW tie-breaks
 /// match. `keys` are raw partition-key bytes (as `PartitionKey::to_bytes`
-/// produces). `scan_cancel` is wired onto every opened reader so a client
-/// disconnect abandons an in-flight fail-safe scan promptly (#2264).
+/// produces). `scan_cancel` is threaded as a PER-CALL token into every probe/scan
+/// (issue #2346) so a client disconnect abandons an in-flight fail-safe scan
+/// promptly (#2264).
 pub fn build_single_partition_merger(
     paths: Vec<PathBuf>,
     keys: &[Vec<u8>],
@@ -241,17 +244,134 @@ pub fn build_single_partition_merger(
     Ok(Some(KWayMerger::from_row_iterators(runs, schema)?))
 }
 
-/// Open `path` ONCE and probe it for every requested key via the core seek
-/// primitive, combining the outcome (default `not(tombstones)` build).
+/// Reader-based analogue of [`build_single_partition_merger`] (issue #2346):
+/// assembles a [`KWayMerger`] that reads ONLY the target `keys`, but across
+/// already-open, possibly-SHARED `readers` instead of `paths` — the seam a
+/// future cached-reader caller (e.g. a Flight warm-handle registry) uses to
+/// avoid a fresh per-request reader-open/Index/Summary/Statistics/bloom parse.
+///
+/// Semantics mirror `build_single_partition_merger` exactly (same
+/// canonicalization, same three-way per-candidate probe via [`probe_reader`],
+/// same [`SinglePartitionFilterRun`] fail-safe, same run-index ordering) — only
+/// WHO opens/owns the `SSTableReader` differs. `readers` must be the same
+/// (token-pruned) candidate list, in the same order, the full-scan reader-based
+/// merger ([`KWayMerger::new_from_readers`]) would merge.
+pub fn build_single_partition_merger_from_readers(
+    readers: Vec<Arc<SSTableReader>>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    scan_cancel: ScanCancel,
+) -> Result<Option<KWayMerger>> {
+    schema.validate_dropped_columns()?;
+    if keys.is_empty() {
+        return Ok(None);
+    }
+
+    let mut canonical: Vec<Vec<u8>> = keys.to_vec();
+    canonical.sort_by_key(|k| crate::util::cassandra_murmur3::cassandra_murmur3_token(k));
+    canonical.dedup();
+    let keys: &[Vec<u8>] = &canonical;
+
+    let key_set: std::collections::HashSet<Vec<u8>> = keys.iter().cloned().collect();
+
+    let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
+    for (run_index, reader) in readers.into_iter().enumerate() {
+        // Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
+        // probe, so a disconnected point read does no further per-SSTable work.
+        scan_cancel.check()?;
+
+        match probe_reader(Arc::clone(&reader), keys, schema, scan_cancel.clone())? {
+            PathProbe::Empty => {
+                // Pruned / absent for every key. No run.
+            }
+            PathProbe::Seeked(rows) => {
+                if rows.is_empty() {
+                    continue;
+                }
+                let mut entries: Vec<MergeEntry> = Vec::with_capacity(rows.len());
+                for row in rows {
+                    entries.push(SSTableRowIteratorAdapter::build_merge_entry(
+                        run_index, row, schema,
+                    )?);
+                }
+                // See `build_single_partition_merger`'s identical sort — every
+                // `SSTableRowIterator` MUST yield ascending `MergeEntry` order.
+                entries.sort();
+                runs.push(Box::new(VecRun {
+                    entries: entries.into(),
+                }));
+            }
+            PathProbe::NeedsScan => {
+                // Fail-safe: scan this ONE shared reader's compaction stream,
+                // forwarding only the target partitions — never a fresh
+                // path-based open (issue #2346's whole point). `reader` (the
+                // ORIGINAL, not the clone `probe_reader` consumed above) is
+                // still available here.
+                let adapter = SSTableRowIteratorAdapter::open_from_reader(
+                    reader,
+                    run_index,
+                    schema,
+                    scan_cancel.clone(),
+                )?;
+                runs.push(Box::new(SinglePartitionFilterRun {
+                    inner: adapter,
+                    keys: key_set.clone(),
+                }));
+            }
+        }
+    }
+
+    if runs.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(KWayMerger::from_row_iterators(runs, schema)?))
+}
+
+/// Probe an ALREADY-OPEN `reader` for every requested key via the core seek
+/// primitive (default `not(tombstones)` build) — the shared core BOTH
+/// [`probe_path`] (path-based, opens its own reader then delegates here) and
+/// [`build_single_partition_merger_from_readers`] (reader-based) use, so the
+/// two never diverge (issue #2346).
 ///
 /// A single SSTable's index availability is a property of the SSTable (not the
 /// key), so the FIRST `IndexUnavailable` short-circuits to [`PathProbe::NeedsScan`]
 /// (scan the whole file, filtered). Otherwise every present key's seeked rows are
 /// concatenated (they share this SSTable's generation / run index).
+#[cfg(not(feature = "tombstones"))]
+async fn probe_reader_async(
+    reader: &SSTableReader,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    scan_cancel: &ScanCancel,
+) -> Result<PathProbe> {
+    let mut rows: Vec<CompactionRow> = Vec::new();
+    for key in keys {
+        match reader
+            .read_single_partition_for_compaction(key, Some(schema), scan_cancel)
+            .await?
+        {
+            SinglePartitionCompaction::DefinitelyAbsent => {}
+            SinglePartitionCompaction::Rows(mut r) => rows.append(&mut r),
+            // Index availability is per-SSTable, not per-key: fall back to
+            // scanning the whole file once, filtered to the key set.
+            SinglePartitionCompaction::IndexUnavailable => {
+                return Ok(PathProbe::NeedsScan);
+            }
+        }
+    }
+    if rows.is_empty() {
+        Ok(PathProbe::Empty)
+    } else {
+        Ok(PathProbe::Seeked(rows))
+    }
+}
+
+/// Open `path` ONCE and probe it for every requested key, delegating to
+/// [`probe_reader_async`] (issue #2346) once the reader is open.
 ///
 /// Runs the async open + seek on the shared bridge runtime. The reader is opened
-/// with buffered I/O (never mmap/direct — the file may be deleted after the read)
-/// and the cooperative cancel token wired in, matching the full-scan producer.
+/// with buffered I/O (never mmap/direct — the file may be deleted after the
+/// read), matching the full-scan producer's file-lifetime contract (issue #591).
 #[cfg(not(feature = "tombstones"))]
 fn probe_path(
     path: &Path,
@@ -267,30 +387,26 @@ fn probe_path(
         config.storage.use_mmap = false;
         config.storage.disk_access_mode = DiskAccessMode::Buffered;
         let platform = Arc::new(Platform::new(&config).await?);
-        let mut reader = SSTableReader::open(&path, &config, platform).await?;
-        reader.set_scan_cancel(scan_cancel);
-
-        let mut rows: Vec<CompactionRow> = Vec::new();
-        for key in &keys {
-            match reader
-                .read_single_partition_for_compaction(key, Some(&schema))
-                .await?
-            {
-                SinglePartitionCompaction::DefinitelyAbsent => {}
-                SinglePartitionCompaction::Rows(mut r) => rows.append(&mut r),
-                // Index availability is per-SSTable, not per-key: fall back to
-                // scanning the whole file once, filtered to the key set.
-                SinglePartitionCompaction::IndexUnavailable => {
-                    return Ok(PathProbe::NeedsScan);
-                }
-            }
-        }
-        if rows.is_empty() {
-            Ok(PathProbe::Empty)
-        } else {
-            Ok(PathProbe::Seeked(rows))
-        }
+        let reader = SSTableReader::open(&path, &config, platform).await?;
+        probe_reader_async(&reader, &keys, &schema, &scan_cancel).await
     })
+}
+
+/// Probe an ALREADY-OPEN, possibly-SHARED `reader` (issue #2346) — the
+/// reader-based analogue of [`probe_path`], used by
+/// [`build_single_partition_merger_from_readers`]. `reader` is an `Arc` clone
+/// (the caller keeps the original for the `NeedsScan` fail-safe path), moved
+/// into the bridged future so no borrow needs to outlive this call.
+#[cfg(not(feature = "tombstones"))]
+fn probe_reader(
+    reader: Arc<SSTableReader>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    scan_cancel: ScanCancel,
+) -> Result<PathProbe> {
+    let schema = schema.clone();
+    let keys: Vec<Vec<u8>> = keys.to_vec();
+    block_on_async(async move { probe_reader_async(&reader, &keys, &schema, &scan_cancel).await })
 }
 
 /// Tombstones-build fallback: the single-partition SEEK machinery
@@ -301,6 +417,18 @@ fn probe_path(
 #[cfg(feature = "tombstones")]
 fn probe_path(
     _path: &Path,
+    _keys: &[Vec<u8>],
+    _schema: &TableSchema,
+    _scan_cancel: ScanCancel,
+) -> Result<PathProbe> {
+    Ok(PathProbe::NeedsScan)
+}
+
+/// Tombstones-build fallback for the reader-based probe (issue #2346) — mirrors
+/// [`probe_path`]'s `tombstones` fallback above.
+#[cfg(feature = "tombstones")]
+fn probe_reader(
+    _reader: Arc<SSTableReader>,
     _keys: &[Vec<u8>],
     _schema: &TableSchema,
     _scan_cancel: ScanCancel,

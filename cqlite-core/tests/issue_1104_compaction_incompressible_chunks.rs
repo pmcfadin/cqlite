@@ -31,6 +31,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::{CompactionRow, CompactionRowData, SSTableReader};
 use cqlite_core::types::Value;
 use cqlite_core::{Config, Platform};
@@ -205,7 +206,7 @@ async fn issue_1104_stream_compaction_over_incompressible_chunks() {
     let collected: Arc<Mutex<Vec<CompactionRow>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&collected);
     reader
-        .stream_all_partitions_for_compaction(None, move |row| {
+        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), move |row| {
             sink.lock().unwrap().push(row);
             Ok(std::ops::ControlFlow::Continue(()))
         })
