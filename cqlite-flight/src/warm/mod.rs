@@ -64,6 +64,19 @@ pub enum WarmError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// A `*-Data.db` directory entry seen during the staleness probe was rejected:
+    /// its resolved path escaped the table directory (issue #1430 containment) or
+    /// it could not be `stat`ed. Fail-closed exactly like [`Probe`] — treated as
+    /// "changed" (full re-resolve), NEVER silently skipped into a smaller
+    /// generation set that could mask a generation and serve a stale warm hit
+    /// (issue #2310).
+    #[error("warm-handle probe rejected entry {path}: {reason}")]
+    ProbeEntry {
+        /// The offending directory entry.
+        path: PathBuf,
+        /// Why it was rejected (containment escape / stat failure).
+        reason: String,
+    },
     /// An added generation failed to open during a rebuild (e.g. a corrupt
     /// `Statistics.db`, #1626). The previously warm set is left fully intact
     /// (fail-closed); this typed error is surfaced.

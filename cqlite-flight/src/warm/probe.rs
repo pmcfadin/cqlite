@@ -16,8 +16,11 @@
 //!   the authoritative probe, never a weaker guarantee. Absent/unparsable
 //!   manifest → fall back to the authoritative listing (never a stale hit).
 //!
-//! Fail-closed: a probe error (dir unreadable) is surfaced so the caller treats
-//! it as "changed / re-resolve failed" rather than serving a stale warm hit.
+//! Fail-closed: any probe error — the dir unreadable, a per-entry iteration or
+//! `stat` failure, or a `Data.db` whose resolved path escapes the table dir
+//! (issue #1430 containment) — is surfaced so the caller treats it as "changed /
+//! re-resolve failed" rather than serving a stale warm hit or a silently smaller
+//! generation set that could mask a live generation.
 
 use std::path::{Path, PathBuf};
 
@@ -128,26 +131,60 @@ pub fn probe_generation_set(
 }
 
 /// Enumerate the inode-stable generations (`*-Data.db` files) directly under
-/// `dir`. A `read_dir` failure surfaces as [`WarmError::Probe`] (fail-closed —
-/// never a stale hit). A `Data.db` that cannot be `stat`ed (racing removal) is
-/// simply skipped: it is not a member of the current set.
+/// `dir`, fail-closed on the completeness posture of the cold path.
+///
+/// * A `read_dir` failure — or a per-entry iteration failure — surfaces as
+///   [`WarmError::Probe`] (never a silently smaller set, #2310).
+/// * Per-file containment (issue #1430) mirrors the cold-path
+///   `DirSource::data_paths` filter: a SYMLINK inside an otherwise-valid dir can
+///   resolve to a `Data.db` OUTSIDE it. Here it is fail-closed as
+///   [`WarmError::ProbeEntry`] (treated as changed) rather than silently
+///   excluded, so a poisoned entry can never produce a stale warm hit.
+/// * A `*-Data.db` we can list but cannot `stat` is likewise fail-closed as
+///   [`WarmError::ProbeEntry`] — a FAILED stat is treated as changed, distinct
+///   from a genuinely-not-an-SSTable filename (a benign, non-error skip).
 pub(super) fn enumerate_generations(dir: &Path) -> Result<Vec<GenerationEntry>, WarmError> {
     let read = std::fs::read_dir(dir).map_err(|source| WarmError::Probe {
         path: dir.to_path_buf(),
         source,
     })?;
     let mut entries = Vec::new();
-    for entry in read.flatten() {
+    for entry in read {
+        // A per-entry iteration failure is fail-closed (#2310): surface it as a
+        // probe error → treated as changed, never a silently smaller set.
+        let entry = entry.map_err(|source| WarmError::Probe {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
         let is_data = path
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.ends_with("-Data.db"));
         if !is_data {
+            // A genuinely-not-an-SSTable filename is a non-error skip (it is not a
+            // member of the generation set), distinct from a FAILED stat below.
             continue;
         }
-        if let Some(id) = GenerationId::resolve(&path) {
-            entries.push(GenerationEntry { id, path });
+        // Per-file containment (issue #1430), mirroring the cold path but
+        // fail-closed: an escaping entry aborts the probe (treated as changed).
+        if let Err(reason) = crate::pathsafe::assert_within("sstable", dir, &path) {
+            return Err(WarmError::ProbeEntry {
+                path,
+                reason: reason.to_string(),
+            });
+        }
+        match GenerationId::resolve(&path) {
+            Some(id) => entries.push(GenerationEntry { id, path }),
+            None => {
+                // A `*-Data.db` we can list but cannot `stat`: fail closed
+                // (treated as changed) rather than a silently smaller set (#2310).
+                let reason = std::fs::metadata(&path)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "Data.db entry could not be resolved".to_string());
+                return Err(WarmError::ProbeEntry { path, reason });
+            }
         }
     }
     Ok(entries)
@@ -169,6 +206,62 @@ mod tests {
         write_data(dir.path(), "nb-1-big-Index.db"); // ignored
         let entries = enumerate_generations(dir.path()).unwrap();
         assert_eq!(entries.len(), 2, "only Data.db files count as generations");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_escaping_data_db_is_probe_error_not_enumerated() {
+        // Finding 1 (#2310): a symlink inside the table dir whose name is a
+        // `*-Data.db` but whose target escapes the dir must FAIL the probe
+        // (fail-closed containment, issue #1430), never be enumerated as a
+        // generation. Red on pre-fix code: the escapee is silently enumerated.
+        use std::os::unix::fs::symlink;
+        let table = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let escapee = outside.path().join("nb-9-big-Data.db");
+        std::fs::write(&escapee, b"x").unwrap();
+        symlink(&escapee, table.path().join("nb-9-big-Data.db")).unwrap();
+
+        let err = enumerate_generations(table.path())
+            .expect_err("an escaping symlink Data.db must fail the probe, not enumerate");
+        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unstatable_data_db_entry_is_probe_error_not_silent_skip() {
+        // Finding 3 (#2310): a `*-Data.db` we can list but cannot `stat` (a
+        // dangling symlink) must fail closed (treated as changed), NOT be
+        // silently dropped into a smaller set. Red on pre-fix code: the entry is
+        // silently skipped and the probe returns Ok with a smaller set.
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::TempDir::new().unwrap();
+        write_data(dir.path(), "nb-1-big-Data.db");
+        symlink(
+            dir.path().join("missing-target"),
+            dir.path().join("nb-2-big-Data.db"),
+        )
+        .unwrap();
+
+        let err = enumerate_generations(dir.path())
+            .expect_err("an unstatable Data.db must fail the probe, not be skipped");
+        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn non_sstable_filename_is_a_non_error_skip() {
+        // The fail-closed posture must NOT turn a benign non-SSTable filename
+        // into an error: only Data.db entries participate in the set.
+        let dir = tempfile::TempDir::new().unwrap();
+        write_data(dir.path(), "nb-1-big-Data.db");
+        write_data(dir.path(), "nb-1-big-Index.db"); // not a Data.db
+        write_data(dir.path(), "manifest.json"); // not a Data.db
+        let entries = enumerate_generations(dir.path()).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the one Data.db counts; others skipped"
+        );
     }
 
     #[test]

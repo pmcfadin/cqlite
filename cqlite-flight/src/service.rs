@@ -96,9 +96,10 @@ fn warm_error_to_status(e: WarmError) -> Status {
         WarmError::Probe { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
             Status::not_found(msg)
         }
-        WarmError::Probe { .. } | WarmError::Open { .. } | WarmError::Runtime(_) => {
-            Status::internal(msg)
-        }
+        WarmError::Probe { .. }
+        | WarmError::ProbeEntry { .. }
+        | WarmError::Open { .. }
+        | WarmError::Runtime(_) => Status::internal(msg),
     }
 }
 
@@ -263,26 +264,46 @@ impl CqliteFlightService {
     /// [`SetupCaches::live_dirs`] for why caching it would leak). The
     /// keyspace/table are pathsafe-validated by `FlightTicket::from_bytes`, so a
     /// cached entry was validated when first resolved.
+    ///
+    /// The pin is CORRECTNESS-bounded (issue #2310 finding 2): a cached dir is
+    /// served only after a cheap existence re-check, so a dropped/recreated table
+    /// (whose `table-<uuid>` dir was renamed) invalidates the pin and forces a
+    /// fresh resolve — which correctly counts as resolve work; the Req-8 elision
+    /// claim only covers the steady state. And a non-existent resolution (the
+    /// `best.unwrap_or(exact)` fallback for a table with no dir on disk) is NEVER
+    /// cached, so the pin can never fossilize a wrong/absent path.
     fn resolve_dir(&self, ticket: &FlightTicket) -> Result<PathBuf, Status> {
         let snapshot_mode = ticket.snapshot.as_deref().is_some_and(|s| !s.is_empty());
         if !snapshot_mode {
             let cache_key = (ticket.keyspace.clone(), ticket.table.clone());
-            if let Some(hit) = self
-                .caches
-                .live_dirs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&cache_key)
             {
-                return Ok(hit.clone());
+                let mut live = self
+                    .caches
+                    .live_dirs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if let Some(hit) = live.get(&cache_key) {
+                    // Cheap re-validation: a still-present pinned dir is a warm hit
+                    // (zero resolve work). A missing/renamed one is a STALE pin —
+                    // drop it and fall through to a fresh resolve.
+                    if hit.is_dir() {
+                        return Ok(hit.clone());
+                    }
+                    live.remove(&cache_key);
+                }
             }
             let dir = self.resolve_dir_uncached(ticket)?;
-            self.caches
-                .live_dirs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(cache_key)
-                .or_insert_with(|| dir.clone());
+            // Only cache a resolution that actually EXISTS: never pin the
+            // non-existent `best.unwrap_or(exact)` fallback (would serve a wrong /
+            // stale path for the process lifetime).
+            if dir.is_dir() {
+                self.caches
+                    .live_dirs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .entry(cache_key)
+                    .or_insert_with(|| dir.clone());
+            }
             return Ok(dir);
         }
         self.resolve_dir_uncached(ticket)
@@ -958,6 +979,71 @@ mod tests {
         assert_eq!(
             after_second.resolves, 1,
             "the warm second request re-resolves the directory ZERO times (spec Req 8)"
+        );
+    }
+
+    /// Finding 2 (#2310): a live-dir pin must NOT survive a drop + recreate under
+    /// a new `table-<uuid>` name. The first resolve caches `items-aaaa`; after it
+    /// is removed and `items-bbbb` created, the next resolve must reach the NEW
+    /// dir, never the stale pin. Red on pre-fix code (serves the pinned path).
+    #[test]
+    fn live_dir_pin_invalidated_on_table_drop_and_recreate() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        let ks_dir = data_dir.join(KS);
+        let first = ks_dir.join(format!("{TBL}-aaaaaaaa"));
+        std::fs::create_dir_all(&first).unwrap();
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let t = FlightTicket {
+            keyspace: KS.into(),
+            table: TBL.into(),
+            ddl: SIMPLE_DDL.into(),
+            ..Default::default()
+        };
+
+        let r1 = svc.resolve_dir(&t).expect("first resolve");
+        assert_eq!(r1, first, "first resolve picks the only table-<uuid> dir");
+
+        std::fs::remove_dir_all(&first).unwrap();
+        let second = ks_dir.join(format!("{TBL}-bbbbbbbb"));
+        std::fs::create_dir_all(&second).unwrap();
+
+        let r2 = svc.resolve_dir(&t).expect("second resolve");
+        assert_eq!(
+            r2, second,
+            "a dropped/recreated table dir must NOT serve the stale pin"
+        );
+    }
+
+    /// Finding 2 (#2310): a NON-EXISTENT resolution (the `best.unwrap_or(exact)`
+    /// fallback for a table with no dir yet) must never be cached — otherwise the
+    /// wrong/absent path fossilizes for the process lifetime. After the table dir
+    /// later appears under a `table-<uuid>` name, the next resolve must reach it.
+    #[test]
+    fn resolve_never_caches_a_nonexistent_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        let ks_dir = data_dir.join(KS);
+        std::fs::create_dir_all(&ks_dir).unwrap(); // keyspace exists, table does not
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let t = FlightTicket {
+            keyspace: KS.into(),
+            table: TBL.into(),
+            ddl: SIMPLE_DDL.into(),
+            ..Default::default()
+        };
+
+        let r1 = svc.resolve_dir(&t).expect("first resolve");
+        assert!(!r1.is_dir(), "no table dir on disk yet, got {r1:?}");
+
+        // The table now lands under a uuid-suffixed dir.
+        let real = ks_dir.join(format!("{TBL}-cccccccc"));
+        std::fs::create_dir_all(&real).unwrap();
+
+        let r2 = svc.resolve_dir(&t).expect("second resolve");
+        assert_eq!(
+            r2, real,
+            "a non-existent first resolution must not be cached over the real dir"
         );
     }
 
