@@ -53,7 +53,7 @@
 #[cfg(feature = "write-support")]
 use std::cmp::Ordering;
 #[cfg(feature = "write-support")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "write-support")]
 use std::sync::Arc;
 
@@ -113,8 +113,26 @@ fn mixed_shape_error(column: &str) -> Error {
 /// A non-collection complex column (e.g. a non-frozen top-level UDT) is left as
 /// its individual cells — this reassembles collections only, the columns the
 /// issue names; other multi-cell shapes are unchanged (no worse than before).
+///
+/// `needed` is the projection-aware set of column names this scan will actually
+/// read (the output projection ∪ predicate-referenced ∪ aggregation-referenced
+/// columns); `None` means "every column" (a plain `SELECT *`). Cells of a column
+/// NOT in `needed` are dropped BEFORE reassembly — they are never emitted
+/// downstream (projection removes them from Arrow output, the filter and
+/// aggregation don't reference them). This scopes the composite-keyed-collection
+/// fail-closed error (a frozen tuple/UDT/nested-collection key/element the scalar
+/// codec cannot materialize, #2339) to the columns a query actually reads: an
+/// unrelated `SELECT` of scalar columns from a row that merely COEXISTS with an
+/// unsupported composite-keyed collection column SUCCEEDS — matching the
+/// observable pre-#2324 behaviour — while the clean error still fires when that
+/// composite column IS projected or referenced (issue #2324, roborev 1633). It
+/// is also a small perf win (unprojected collections are never reassembled).
 #[cfg(feature = "write-support")]
-pub fn assemble_read_cells(cells: Vec<CellData>, schema: &TableSchema) -> Result<RowCells> {
+pub fn assemble_read_cells(
+    cells: Vec<CellData>,
+    schema: &TableSchema,
+    needed: Option<&HashSet<String>>,
+) -> Result<RowCells> {
     // Group cells by column, preserving first-seen order so a stable, schema-
     // independent ordering results (downstream keys by name, so order is not
     // load-bearing — but a deterministic order keeps output reproducible).
@@ -123,6 +141,16 @@ pub fn assemble_read_cells(cells: Vec<CellData>, schema: &TableSchema) -> Result
     let mut accums: Vec<ColumnAccum> = Vec::new();
 
     for cell in cells {
+        // Projection-aware assembly (issue #2324, roborev 1633): drop cells of a
+        // column this scan never reads before touching the (fallible) reassembly.
+        // `None` = all columns → nothing dropped. This keeps the composite-keyed
+        // collection fail-closed error (#2339) from firing on a column an unrelated
+        // query does not project or reference (see the fn-level doc).
+        if let Some(needed) = needed {
+            if !needed.contains(cell.column.as_str()) {
+                continue;
+            }
+        }
         let name: Arc<str> = Arc::from(cell.column.as_str());
         if cell.is_complex_element {
             // Drop element tombstones (a deleted set/list member OR map entry):
@@ -534,7 +562,7 @@ mod tests {
     #[test]
     fn simple_column_passes_through() {
         let cells = vec![CellData::new("s".into(), Value::Integer(7), 1)];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(get(&out, "s"), Some(&Value::Integer(7)));
     }
 
@@ -549,7 +577,7 @@ mod tests {
             range_end: None,
         }));
         let cells = vec![CellData::new("s".into(), tomb, 1)];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "s"),
             None,
@@ -567,7 +595,7 @@ mod tests {
             elem("items", Value::Integer(2), vec![1]),
             elem("items", Value::Integer(3), vec![2]),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "nums"),
             Some(&Value::Set(vec![Value::Integer(10), Value::Integer(20)])),
@@ -591,7 +619,7 @@ mod tests {
             elem("m", Value::BigInt(100), b"alpha".to_vec()),
             elem("m", Value::BigInt(200), b"beta".to_vec()),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "m"),
             Some(&Value::Map(vec![
@@ -616,7 +644,7 @@ mod tests {
             elem("iset", Value::Inet(ip_10.clone()), ip_10.clone()),
             elem("iset", Value::Inet(ip_9.clone()), ip_9.clone()),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "iset"),
             Some(&Value::Set(vec![Value::Inet(ip_9), Value::Inet(ip_10),])),
@@ -644,7 +672,7 @@ mod tests {
             elem("tset", Value::Time(t_big), t_big.to_be_bytes().to_vec()),
             elem("tset", Value::Time(t_small), t_small.to_be_bytes().to_vec()),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "tset"),
             Some(&Value::Set(vec![Value::Time(t_small), Value::Time(t_big)])),
@@ -658,7 +686,7 @@ mod tests {
         let mut deleted = elem("nums", Value::Integer(99), vec![0, 0, 0, 99]);
         deleted.is_deleted = true;
         let cells = vec![elem("nums", Value::Integer(10), vec![0, 0, 0, 10]), deleted];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "nums"),
             Some(&Value::Set(vec![Value::Integer(10)])),
@@ -686,7 +714,7 @@ mod tests {
             elem("m", Value::BigInt(1), b"alpha".to_vec()),
             elem("m", Value::BigInt(2), b"beta".to_vec()),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "nums"),
             Some(&Value::Set(vec![
@@ -730,7 +758,7 @@ mod tests {
             deleted,
             elem("m", Value::BigInt(2), b"beta".to_vec()),
         ];
-        let out = assemble_read_cells(cells, &schema()).unwrap();
+        let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "m"),
             Some(&Value::Map(vec![
@@ -749,7 +777,7 @@ mod tests {
         // fell through); now it fails closed naming the column.
         let simple = CellData::new("nums".into(), Value::Integer(5), 1);
         let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
-        let err = assemble_read_cells(vec![simple, complex], &schema()).unwrap_err();
+        let err = assemble_read_cells(vec![simple, complex], &schema(), None).unwrap_err();
         assert!(
             err.to_string().contains("nums"),
             "mixed-shape error must name the column, got: {err}"
@@ -763,7 +791,7 @@ mod tests {
         // collection; now it fails closed naming the column (roborev 1629 F1).
         let complex = elem("nums", Value::Integer(10), vec![0, 0, 0, 10]);
         let simple = CellData::new("nums".into(), Value::Integer(5), 1);
-        let err = assemble_read_cells(vec![complex, simple], &schema()).unwrap_err();
+        let err = assemble_read_cells(vec![complex, simple], &schema(), None).unwrap_err();
         assert!(
             err.to_string().contains("nums"),
             "mixed-shape error must name the column, got: {err}"
@@ -783,7 +811,7 @@ mod tests {
             elem("ftk", Value::BigInt(2), vec![0x00, 0x00, 0x00, 0x09, 0x62]),
             elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
         ];
-        let err = assemble_read_cells(cells, &schema()).unwrap_err();
+        let err = assemble_read_cells(cells, &schema(), None).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("ftk") && msg.contains("map key") && msg.contains("#2339"),
@@ -803,7 +831,7 @@ mod tests {
             elem("fset", Value::Blob(vec![0xBB]), vec![0x02]),
             elem("fset", Value::Blob(vec![0xAA]), vec![0x01]),
         ];
-        let err = assemble_read_cells(cells, &schema()).unwrap_err();
+        let err = assemble_read_cells(cells, &schema(), None).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("fset") && msg.contains("set element") && msg.contains("#2339"),
@@ -815,11 +843,72 @@ mod tests {
     fn all_deleted_collection_is_absent() {
         let mut deleted = elem("nums", Value::Integer(99), vec![0, 0, 0, 99]);
         deleted.is_deleted = true;
-        let out = assemble_read_cells(vec![deleted], &schema()).unwrap();
+        let out = assemble_read_cells(vec![deleted], &schema(), None).unwrap();
         assert_eq!(
             get(&out, "nums"),
             None,
             "an all-deleted collection reads absent (empty non-frozen collection == null)"
+        );
+    }
+
+    #[test]
+    fn unprojected_composite_collection_column_is_dropped_not_errored() {
+        // Projection-aware assembly (issue #2324, roborev 1633): a row carrying a
+        // scalar column `s` AND an unsupported composite-keyed collection column
+        // `ftk` (frozen<tuple> map key). A query that projects ONLY `s` (so `ftk`
+        // is NOT in `needed`) must SUCCEED, dropping `ftk` entirely — matching the
+        // observable pre-#2324 behaviour where an unrelated SELECT never touched
+        // this column. Pre-fix (round-3, no `needed` filter — i.e. `None` here)
+        // this same row HARD-ERRORS the whole do_get; the guard closes that
+        // regression. (`fails_closed_without_projection_filter` below pins the red.)
+        let cells = vec![
+            CellData::new("s".into(), Value::Integer(7), 1),
+            elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
+        ];
+        let needed: HashSet<String> = ["s".to_string()].into_iter().collect();
+        let out = assemble_read_cells(cells, &schema(), Some(&needed)).unwrap();
+        assert_eq!(get(&out, "s"), Some(&Value::Integer(7)));
+        assert_eq!(
+            get(&out, "ftk"),
+            None,
+            "an unprojected composite-keyed collection column is dropped, not assembled/errored"
+        );
+    }
+
+    #[test]
+    fn fails_closed_without_projection_filter() {
+        // The RED anchor for the fix above: the SAME row, but with `needed = None`
+        // (the round-3 behaviour, and a plain `SELECT *`). Because every column is
+        // read, the composite-keyed `ftk` IS assembled and fails closed — proving
+        // the projection filter, not some incidental change, is what rescues the
+        // unrelated-projection case (roborev 1633).
+        let cells = vec![
+            CellData::new("s".into(), Value::Integer(7), 1),
+            elem("ftk", Value::BigInt(1), vec![0x00, 0x00, 0x00, 0x01, 0x61]),
+        ];
+        let err = assemble_read_cells(cells, &schema(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("ftk"),
+            "with no projection filter the composite column still fails closed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn projected_composite_collection_column_still_fails_closed() {
+        // The complement: when the composite column IS projected/referenced (it is
+        // in `needed`), the round-3 clean fail-closed error still fires — the fix
+        // scopes the error, it does not suppress it (roborev 1632/1633; #2339).
+        let cells = vec![elem(
+            "ftk",
+            Value::BigInt(1),
+            vec![0x00, 0x00, 0x00, 0x01, 0x61],
+        )];
+        let needed: HashSet<String> = ["ftk".to_string()].into_iter().collect();
+        let err = assemble_read_cells(cells, &schema(), Some(&needed)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ftk") && msg.contains("map key") && msg.contains("#2339"),
+            "a projected composite map-key column still fails closed, got: {msg}"
         );
     }
 }

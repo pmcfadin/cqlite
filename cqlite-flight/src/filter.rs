@@ -193,6 +193,28 @@ impl FilterExpr {
     pub fn keeps(&self, row: &QueryRow) -> bool {
         matches!(self.evaluate(row), Kleene::True)
     }
+
+    /// Insert every column name this predicate tree references into `out`.
+    ///
+    /// Used by the producer's projection-aware row assembly (issue #2324, roborev
+    /// 1633): a column a predicate reads must be materialized even when it is
+    /// projected OUT of the output, so it belongs in the assembler's "needed" set.
+    pub fn collect_referenced_columns(&self, out: &mut std::collections::HashSet<String>) {
+        match self {
+            FilterExpr::Leaf(p) => {
+                out.insert(p.column.clone());
+            }
+            FilterExpr::IsNull(column) => {
+                out.insert(column.clone());
+            }
+            FilterExpr::Not(inner) => inner.collect_referenced_columns(out),
+            FilterExpr::And(exprs) | FilterExpr::Or(exprs) => {
+                for e in exprs {
+                    e.collect_referenced_columns(out);
+                }
+            }
+        }
+    }
 }
 
 /// A fully-resolved scan: what to keep and which columns to emit.

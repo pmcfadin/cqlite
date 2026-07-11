@@ -178,6 +178,24 @@ impl AggPlan {
         })
     }
 
+    /// Insert every column this aggregation references — the group-by keys and
+    /// each aggregate's source column (`count(*)` has none) — into `out`.
+    ///
+    /// Used by the producer's projection-aware row assembly (issue #2324, roborev
+    /// 1633): these are exactly the columns the reassembled row must materialize
+    /// for the aggregation, so they belong in the assembler's "needed" set even
+    /// though an aggregate query emits the PARTIAL schema, not the base columns.
+    pub(crate) fn collect_referenced_columns(&self, out: &mut std::collections::HashSet<String>) {
+        for (name, _) in &self.group_by {
+            out.insert(name.clone());
+        }
+        for agg in &self.aggregates {
+            if let Some(column) = &agg.column {
+                out.insert(column.clone());
+            }
+        }
+    }
+
     fn plan_one(spec: &AggregateSpec, schema: &TableSchema) -> Result<PlannedAggregate, AggError> {
         // count(*) is the only function that may omit a column.
         let (source_type, sum_kind) = match (&spec.func, &spec.column) {
