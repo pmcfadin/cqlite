@@ -28,9 +28,28 @@ use tokio::sync::mpsc;
 use tonic::Status;
 use tracing::Span;
 
+use cqlite_core::storage::sstable::reader::SSTableReader;
+
 use crate::cancel::{CancelFlag, CancelGuard};
 use crate::obs::RpcMetrics;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
+
+/// The merge input for the streaming row path (issue #2310): either the cold
+/// per-request `Data.db` paths (opened fresh) or a WARM set of already-open,
+/// shared `Arc<SSTableReader>`s handed over by the warm-handle registry. The two
+/// drive byte-identical merges — only WHO opened the reader differs — so the
+/// single `spawn_streaming` egress serves both.
+pub(crate) enum MergeInput {
+    /// Cold path: open a fresh reader per path. Production row reads now take the
+    /// warm [`Self::Readers`] path (issue #2310), so this variant is retained as
+    /// the byte-identity regression oracle exercised by the streaming test suite
+    /// (`streaming_tests.rs`) — it proves the shared bounded-channel egress +
+    /// cancellation machinery still behaves identically for a cold input.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Paths(Vec<PathBuf>),
+    /// Warm path: drive the merge over cached, shared readers.
+    Readers(Vec<Arc<SSTableReader>>),
+}
 
 /// Boxed server response stream (matches `service::BoxStream<FlightData>`).
 pub(crate) type DoGetStream =
@@ -232,9 +251,44 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// caller's setup-phase guard is expected to already be disarmed by the time
 /// this runs, so the fresh guard armed here is the only one live from this
 /// point on.
+/// Warm analogue of [`spawn_streaming`] (issue #2310): drive the streaming
+/// row-merge over an already-open, shared warm reader set from the
+/// [`crate::warm::WarmTableRegistry`] instead of cold per-request paths. A thin
+/// wrapper that hands [`spawn_streaming`] a [`MergeInput::Readers`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_streaming_from_readers(
+    producer: MergeProducer,
+    readers: Vec<Arc<SSTableReader>>,
+    schema_ref: Arc<ArrowSchema>,
+    metrics: RpcMetrics,
+    capacity: usize,
+    probe: StreamProbe,
+    cancel: CancelFlag,
+    timer: crate::obs::PhaseTimer,
+) -> (DoGetStream, tokio::task::JoinHandle<()>) {
+    spawn_streaming(
+        producer,
+        MergeInput::Readers(readers),
+        schema_ref,
+        metrics,
+        capacity,
+        probe,
+        cancel,
+        timer,
+    )
+}
+
+/// Shared egress for the cold ([`MergeInput::Paths`]) and warm
+/// ([`MergeInput::Readers`]) streaming row paths (issue #2310). The two drive
+/// byte-identical merges; only the single merge-driving call inside the blocking
+/// closure branches on the input shape. `paths`-shaped inputs MUST already be
+/// token-pruned (as [`MergeProducer::resolve_paths`] returns); `readers`-shaped
+/// inputs are the warm registry's pre-parsed set. `cancel` is the SAME flag
+/// threaded through the caller's eager-setup phase (issue #1476, roborev F1).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_streaming(
     producer: MergeProducer,
-    paths: Vec<PathBuf>,
+    input: MergeInput,
     schema_ref: Arc<ArrowSchema>,
     metrics: RpcMetrics,
     capacity: usize,
@@ -276,9 +330,25 @@ pub(crate) fn spawn_streaming(
             // phase (or `merge_setup` if the merger build itself failed / there was
             // nothing to merge). Issue #2162.
             let mut timer = timer;
-            producer.produce_streaming(paths, &merge_cancel, &mut sink, &scan_progress, || {
+            let on_built = || {
                 timer.transition(crate::obs::PHASE_STREAM);
-            })
+            };
+            match input {
+                MergeInput::Paths(paths) => producer.produce_streaming(
+                    paths,
+                    &merge_cancel,
+                    &mut sink,
+                    &scan_progress,
+                    on_built,
+                ),
+                MergeInput::Readers(readers) => producer.produce_streaming_from_readers(
+                    readers,
+                    &merge_cancel,
+                    &mut sink,
+                    &scan_progress,
+                    on_built,
+                ),
+            }
         });
     });
 

@@ -781,3 +781,43 @@ fn copy_sstable_components(src: &Path, dst: &Path) {
         }
     }
 }
+
+// ---- Issue #2310: warm-handle wiring evidence over the REAL tonic transport ----
+
+/// WS5.3 e2e wiring evidence: run `FlightService::do_get` TWICE over the real
+/// loopback tonic transport for the same table/generation set. The first call
+/// warms the cache (miss); the second is a warm HIT that opens ZERO further
+/// readers (the work-done probe) and returns byte-identical rows. This exercises
+/// the named public surface (`do_get` over gRPC) end to end — the warm registry
+/// is shared across the `Clone`d per-connection service handles via its `Arc`.
+#[test]
+fn do_get_over_transport_second_request_is_a_warm_hit() {
+    let (_temp, data_dir) = build_fixture();
+    let svc = CqliteFlightService::new(data_dir, 1024);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let rows1 = rt.block_on(do_get_rows_over_transport(svc.clone(), ticket_bytes()));
+    let opens_after_first = svc.warm_metrics().reader_opens;
+    let rows2 = rt.block_on(do_get_rows_over_transport(svc.clone(), ticket_bytes()));
+
+    assert_eq!(rows1, 3, "the keyvalue fixture has 3 rows");
+    assert_eq!(
+        rows2, rows1,
+        "warm hit returns byte-identical rows over the wire"
+    );
+
+    let m = svc.warm_metrics();
+    assert_eq!(m.misses, 1, "one cold build (first transport request)");
+    assert_eq!(m.hits, 1, "one warm hit (second transport request)");
+    assert!(
+        opens_after_first >= 1,
+        "the first request opened the reader(s)"
+    );
+    assert_eq!(
+        m.reader_opens, opens_after_first,
+        "the warm hit over transport performed zero reader-open/parse (#2310)"
+    );
+}

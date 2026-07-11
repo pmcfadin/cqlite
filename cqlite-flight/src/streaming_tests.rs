@@ -75,7 +75,7 @@ fn first_batch_available_before_merge_completes() {
         let pr = probe();
         let (mut stream, handle) = spawn_streaming(
             producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -124,7 +124,7 @@ fn slow_consumer_bounds_produced_batches() {
         let pr = probe();
         let (mut stream, handle) = spawn_streaming(
             producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -169,7 +169,7 @@ fn dropping_stream_cancels_merge() {
         let pr = probe();
         let (mut stream, handle) = spawn_streaming(
             producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -532,7 +532,7 @@ fn metrics_parity_on_full_consumption() {
     rt.block_on(async move {
         let (stream, handle) = spawn_streaming(
             stream_producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -590,7 +590,7 @@ fn rpc_progress_moves_before_stream_completes() {
     rt.block_on(async move {
         let (mut stream, handle) = spawn_streaming(
             producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -648,7 +648,7 @@ fn per_batch_deltas_sum_to_unchanged_total() {
     rt.block_on(async move {
         let (stream, handle) = spawn_streaming(
             stream_producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -718,7 +718,7 @@ fn rows_scanned_flushes_incrementally_over_threshold() {
     rt.block_on(async move {
         let (stream, handle) = spawn_streaming(
             stream_producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -765,7 +765,7 @@ fn rows_scanned_sub_threshold_flushes_once() {
     rt.block_on(async move {
         let (stream, handle) = spawn_streaming(
             stream_producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -814,7 +814,7 @@ fn rows_scanned_flushes_remainder_on_limit_break() {
     rt.block_on(async move {
         let (stream, handle) = spawn_streaming(
             stream_producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
@@ -1005,7 +1005,7 @@ fn metrics_attribute_emitted_prefix_on_cancel() {
     rt.block_on(async move {
         let (mut stream, handle) = spawn_streaming(
             producer,
-            paths,
+            MergeInput::Paths(paths),
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,

@@ -30,12 +30,15 @@ use tonic::{Request, Response, Status, Streaming};
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
 use tracing::Instrument;
 
+use cqlite_core::storage::sstable::reader::SSTableReader;
+
 use crate::cancel::CancelFlag;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
 use crate::stats::{gather_table_stats, StatsError, TableStatsRequest, TABLE_STATS_ACTION};
 use crate::ticket::{FlightTicket, TicketError};
+use crate::warm::{ddl_hash, TableKey, WarmError, WarmMetricsSnapshot, WarmTableRegistry};
 
 /// Boxed server response stream alias.
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
@@ -79,6 +82,24 @@ impl From<ProducerError> for Status {
     }
 }
 
+/// Map a warm-handle failure (issue #2310) to a gRPC status, mirroring the
+/// producer error mapping: a cancellation is a clean `aborted`; a probe that
+/// hit a missing directory is `not_found` (the same class as a missing table on
+/// the cold path); an open/parse failure during a fail-closed rebuild (e.g. a
+/// corrupt `Statistics.db`, #1626) or a runtime failure is an `internal` fault.
+fn warm_error_to_status(e: WarmError) -> Status {
+    let msg = e.to_string();
+    match e {
+        WarmError::Cancelled => Status::aborted(msg),
+        WarmError::Probe { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            Status::not_found(msg)
+        }
+        WarmError::Probe { .. } | WarmError::Open { .. } | WarmError::Runtime(_) => {
+            Status::internal(msg)
+        }
+    }
+}
+
 /// Bad filter input (unknown column, type mismatch, malformed operand) is a
 /// client error.
 impl From<FilterError> for Status {
@@ -105,15 +126,25 @@ impl From<StatsError> for Status {
     }
 }
 
+/// The merge input the eager setup resolved for a `do_get`: the WARM,
+/// already-open reader set for the common row path (issue #2310), or the cold
+/// token-pruned paths for the aggregate route (which still opens fresh readers —
+/// no regression, and a bounded per-group output).
+enum DoGetInput {
+    /// Aggregate route: cold token-pruned `Data.db` paths.
+    Aggregate(Vec<PathBuf>),
+    /// Row/point route: a warm reader set from the [`WarmTableRegistry`].
+    Rows(Vec<Arc<SSTableReader>>),
+}
+
 /// Resolved, ready-to-serve `do_get` inputs produced by the eager setup step
-/// (issue #1476): the built producer, its Arrow schema, the token-pruned SSTable
-/// paths, and whether the ticket aggregates. Kept together so the row and
+/// (issue #1476): the built producer, its Arrow schema, and the merge input
+/// (warm readers or cold aggregate paths). Kept together so the row and
 /// aggregate response builders share one setup path.
 struct DoGetSetup {
     producer: MergeProducer,
     schema_ref: Arc<ArrowSchema>,
-    paths: Vec<PathBuf>,
-    aggregating: bool,
+    input: DoGetInput,
 }
 
 /// Flight service over a node-local SSTable data directory.
@@ -123,6 +154,10 @@ pub struct CqliteFlightService {
     data_dir: PathBuf,
     /// Max rows per emitted Arrow record batch.
     batch_size: usize,
+    /// Cross-request warm parse cache (issue #2310): generation-keyed open
+    /// readers so a repeated query on unchanged data pays ~0 reader-open/parse.
+    /// Shared (`Arc`) across the `Clone`d per-RPC service handles.
+    warm: Arc<WarmTableRegistry>,
 }
 
 impl CqliteFlightService {
@@ -131,7 +166,15 @@ impl CqliteFlightService {
         Self {
             data_dir: data_dir.into(),
             batch_size: batch_size.max(1),
+            warm: Arc::new(WarmTableRegistry::new()),
         }
+    }
+
+    /// A point-in-time read of the warm-cache counters (hit/miss/evict/
+    /// refresh-outcome + the reader-open work probe) for the #2289/#1494 bench
+    /// harness and end-to-end warm-behavior tests (issue #2310).
+    pub fn warm_metrics(&self) -> WarmMetricsSnapshot {
+        self.warm.metrics().snapshot()
     }
 
     /// Parse the table schema from the ticket's CQL DDL.
@@ -427,37 +470,38 @@ impl CqliteFlightService {
         let DoGetSetup {
             producer,
             schema_ref,
-            paths,
-            aggregating,
+            input,
         } = setup;
 
-        if aggregating {
+        match input {
             // Aggregate output is bounded (one row per group): keep materializing
             // and serve it as a stream, unchanged in content (issue #1476).
-            return Ok(Response::new(
+            DoGetInput::Aggregate(paths) => Ok(Response::new(
                 crate::streaming::build_aggregate_response(
                     producer, paths, schema_ref, metrics, cancel, timer,
                 )
                 .await?,
-            ));
+            )),
+            // Row/point path (issue #2310): drive the merge over the WARM,
+            // already-open reader set. The merge runs on the blocking pool and
+            // sends each batch into a bounded channel; peak resident payload is
+            // O(channel capacity · batch_size), not O(result). The merge task
+            // handle is detached (a dropped response stream cancels the merge
+            // cooperatively).
+            DoGetInput::Rows(readers) => {
+                let (stream, _merge_handle) = crate::streaming::spawn_streaming_from_readers(
+                    producer,
+                    readers,
+                    schema_ref,
+                    metrics,
+                    crate::streaming::DO_GET_CHANNEL_CAPACITY,
+                    crate::streaming::StreamProbe::default(),
+                    cancel,
+                    timer,
+                );
+                Ok(Response::new(stream))
+            }
         }
-
-        // Row path: the merge runs on the blocking pool and sends each batch into a
-        // bounded channel; the response wraps the receiver. Peak resident payload
-        // is O(channel capacity · batch_size), not O(result). The merge task handle
-        // is detached (dropping it does not cancel `spawn_blocking`; a dropped
-        // response stream cancels the merge cooperatively).
-        let (stream, _merge_handle) = crate::streaming::spawn_streaming(
-            producer,
-            paths,
-            schema_ref,
-            metrics,
-            crate::streaming::DO_GET_CHANNEL_CAPACITY,
-            crate::streaming::StreamProbe::default(),
-            cancel,
-            timer,
-        );
-        Ok(Response::new(stream))
     }
 
     /// Eager, fallible `do_get` setup shared by the row and aggregate paths: parse
@@ -494,17 +538,41 @@ impl CqliteFlightService {
                 &ticket.table,
                 ticket.snapshot.as_deref(),
             )?;
-            let aggregating = producer.is_aggregating();
-            // A cancellation here surfaces as `ProducerError::Cancelled`, mapped
-            // by `From<ProducerError> for Status` to `Status::aborted` — the same
-            // clean, expected-abort class as a merge-stage cancellation.
-            let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel)?;
 
+            // Aggregate route keeps the cold path (bounded per-group output, no
+            // per-request reader-open regression): resolve + token-prune paths.
+            // A cancellation surfaces as `ProducerError::Cancelled` → `aborted`.
+            if producer.is_aggregating() {
+                let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel)?;
+                return Ok(DoGetSetup {
+                    producer,
+                    schema_ref,
+                    input: DoGetInput::Aggregate(paths),
+                });
+            }
+
+            // Row/point route (issue #2310): obtain the WARM reader set. The
+            // registry probes the generation set (authoritative listing /
+            // snapshot manifest fast path) and serves cached readers on an
+            // unchanged set (zero reader-open/parse), or fail-closed rebuilds
+            // only the delta. Cancellation is honored inside `warm_readers`.
+            let dir = source.into_dir();
+            let key = TableKey::new(&ticket.keyspace, &ticket.table);
+            let warm = svc
+                .warm
+                .warm_readers(
+                    &key,
+                    ddl_hash(&ticket.ddl),
+                    &producer.schema,
+                    &dir,
+                    ticket.snapshot.as_deref(),
+                    &resolve_cancel,
+                )
+                .map_err(warm_error_to_status)?;
             Ok(DoGetSetup {
                 producer,
                 schema_ref,
-                paths,
-                aggregating,
+                input: DoGetInput::Rows(warm.readers),
             })
         })
         .await
@@ -643,6 +711,168 @@ mod tests {
         let values: Vec<&str> = (0..names.len()).map(|i| names.value(i)).collect();
         assert!(values.contains(&"new"), "newer write wins, got {values:?}");
         assert!(!values.contains(&"old"));
+    }
+
+    // ---- Issue #2310: warm-handle wiring evidence through the do_get surface ----
+
+    /// THE wiring-evidence test (spec Requirements 1/2/6/8): two `do_get`s for the
+    /// same table over an unchanged generation set. The FIRST warms the cache
+    /// (miss + reader opens); the SECOND is a warm HIT that performs ZERO further
+    /// reader-open/parse (the work-done probe), and returns byte-identical rows.
+    /// Drives the real public `FlightService::do_get` surface end to end. Fails on
+    /// pre-#2310 `main` (no warm state → every request re-opens readers).
+    #[test]
+    fn do_get_second_request_is_a_warm_hit_with_zero_reader_opens() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "old", 1, 100)],
+                vec![write_row(1, "new", 2, 200), write_row(2, "b", 3, 200)],
+            ],
+        );
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let (rows1, rows2, opens_after_first) = rt.block_on(async {
+            let bytes = ticket(KS, TBL).to_bytes().unwrap();
+            let r1 = svc
+                .do_get(Request::new(Ticket::new(bytes.clone())))
+                .await
+                .expect("first do_get");
+            let rows1 = total_rows(&decode(r1.into_inner()).await);
+            // Work-done probe checkpoint: opens charged BY the (cold) first request.
+            let opens_after_first = svc.warm_metrics().reader_opens;
+            let r2 = svc
+                .do_get(Request::new(Ticket::new(bytes)))
+                .await
+                .expect("second do_get");
+            let rows2 = total_rows(&decode(r2.into_inner()).await);
+            (rows1, rows2, opens_after_first)
+        });
+
+        assert_eq!(rows1, 2, "two partitions after LWW merge");
+        assert_eq!(rows2, rows1, "warm hit returns byte-identical row count");
+
+        let m = svc.warm_metrics();
+        assert_eq!(m.misses, 1, "exactly one cold build (first request)");
+        assert_eq!(m.hits, 1, "exactly one warm hit (second request)");
+        assert_eq!(
+            m.refresh_rebuilt_delta, 1,
+            "the first request recorded a delta rebuild"
+        );
+        assert_eq!(
+            m.refresh_unchanged, 1,
+            "the second request recorded an unchanged refresh"
+        );
+        assert!(
+            opens_after_first >= 2,
+            "the first request opened both generations' readers, got {opens_after_first}"
+        );
+        // THE work-done probe: the warm hit opened ZERO further readers — the
+        // cumulative open count is UNCHANGED across the second request.
+        assert_eq!(
+            m.reader_opens, opens_after_first,
+            "the warm hit performed zero reader-open/parse (spec Requirement 2)"
+        );
+    }
+
+    /// A flush that ADDS a generation between requests is visible on the next
+    /// request with zero staleness window (spec Requirement 2): the probe reports
+    /// "changed", the rebuild adds exactly the new generation, and the new data
+    /// appears. Records a second miss + rebuilt-delta.
+    #[test]
+    fn do_get_sees_a_newly_added_generation_on_next_request() {
+        let schema = simple_schema();
+        let (_temp, data_dir, table_dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let bytes = ticket(KS, TBL).to_bytes().unwrap();
+        // Warm the cache.
+        let n1 = rt.block_on(async {
+            let r1 = svc
+                .do_get(Request::new(Ticket::new(bytes.clone())))
+                .await
+                .expect("first do_get");
+            total_rows(&decode(r1.into_inner()).await)
+        });
+        assert_eq!(n1, 1);
+
+        // Simulate a flush OUTSIDE the runtime (append_sstable drives its own):
+        // drop a second SSTable (a new generation) into the live table dir.
+        append_sstable(&table_dir, &schema, vec![write_row(2, "b", 4, 200)]);
+
+        let rows = rt.block_on(async {
+            let r2 = svc
+                .do_get(Request::new(Ticket::new(bytes)))
+                .await
+                .expect("second do_get");
+            total_rows(&decode(r2.into_inner()).await)
+        });
+
+        assert_eq!(
+            rows, 2,
+            "the newly-flushed generation is visible immediately"
+        );
+        let m = svc.warm_metrics();
+        assert_eq!(m.misses, 2, "the added generation forced a rebuild");
+        assert_eq!(
+            m.refresh_rebuilt_delta, 2,
+            "both requests recorded delta rebuilds (second added the new gen)"
+        );
+    }
+
+    /// A pre-cancelled `do_get` performs zero warm-path work and surfaces the
+    /// distinct `Aborted` status (spec Requirement 7), never a stale hit.
+    #[test]
+    fn do_get_setup_pre_cancelled_does_zero_warm_work() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let err = rt.block_on(async {
+            let cancel = CancelFlag::new();
+            cancel.cancel();
+            let bytes = ticket(KS, TBL).to_bytes().unwrap();
+            match svc
+                .do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
+                .await
+            {
+                Ok(_) => panic!("a pre-cancelled setup must abort, not resolve"),
+                Err(e) => e,
+            }
+        });
+        assert_eq!(err.code(), tonic::Code::Aborted, "got: {err:?}");
+        let m = svc.warm_metrics();
+        assert_eq!(m.reader_opens, 0, "a cancelled request opens zero readers");
+        assert_eq!(m.misses, 0, "and does no build");
+    }
+
+    /// Append one more SSTable generation into an existing live table dir by
+    /// running a fresh write-engine flush pointed at the SAME data root.
+    fn append_sstable(
+        table_dir: &std::path::Path,
+        schema: &cqlite_core::schema::TableSchema,
+        rows: Vec<cqlite_core::storage::write_engine::Mutation>,
+    ) {
+        use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+        // table_dir = <data>/<ks>/<table>; recover the data root.
+        let data_dir = table_dir.parent().unwrap().parent().unwrap().to_path_buf();
+        let wal = table_dir.join(".wal_append");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let config = WriteEngineConfig::new(data_dir, wal, schema.clone());
+        let mut engine = WriteEngine::new(config).expect("engine");
+        for m in rows {
+            engine.write(m).expect("write");
+        }
+        rt.block_on(engine.flush()).expect("flush").expect("info");
     }
 
     #[tokio::test]
@@ -793,11 +1023,19 @@ mod tests {
                 .await
         });
         let setup = setup.expect("uncancelled setup resolves");
-        assert_eq!(
-            setup.paths.len(),
-            2,
-            "a full-ring token filter keeps both SSTables"
-        );
+        // The warm path (issue #2310) hands over the open reader set; a full-ring
+        // token filter keeps both generations (per-reader token prune happens in
+        // the merge stage, not here).
+        match setup.input {
+            DoGetInput::Rows(readers) => assert_eq!(
+                readers.len(),
+                2,
+                "a full-ring token filter keeps both SSTables' warm readers"
+            ),
+            DoGetInput::Aggregate(_) => {
+                panic!("non-aggregating ticket must take the warm row path")
+            }
+        }
     }
 
     // ---- Issue #1430: end-to-end path-traversal rejection (wiring evidence) ----

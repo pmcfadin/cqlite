@@ -1238,6 +1238,36 @@ impl SSTableReader {
         );
     }
 
+    /// Whether a UDT registry has been wired onto this reader (issue #2310, WS1
+    /// #2345). A warm-handle cache that hands SHARED `Arc<SSTableReader>`s to the
+    /// reader-based k-way merge seam (`KWayMerger::new_from_readers`, which takes
+    /// NO `udt_registry` parameter) MUST open each reader WITH its registry
+    /// already resolved before wrapping it in `Arc`; this getter lets that caller
+    /// PROVE the registry is present rather than silently decoding a frozen/nested
+    /// UDT cell as `Blob` (the #1234 data-loss class).
+    pub fn has_udt_registry(&self) -> bool {
+        self.udt_registry.is_some()
+    }
+
+    /// The `Data.db` path this reader was opened from (issue #2310). The warm
+    /// registry keys parsed state on the file's inode-stable generation identity,
+    /// so it needs the backing path to `stat` device+inode without re-listing the
+    /// directory.
+    pub fn file_path(&self) -> &Path {
+        &self.file_path
+    }
+
+    /// The immutable `[first_key_token, last_key_token]` endpoints cached at open
+    /// (issue #1576), or `None` when `Summary.db` was absent/empty. The Flight
+    /// warm registry (issue #2310) uses this to token-prune a WARM reader set with
+    /// ZERO extra I/O — a warm hit re-reads no `Summary.db`, preserving the
+    /// "zero Index/Summary/Statistics/bloom parse" property even for a
+    /// token-filtered scan. SSTables store partitions in token order, so the
+    /// first endpoint is the min token and the last the max.
+    pub fn endpoint_tokens(&self) -> Option<(i64, i64)> {
+        self.endpoint_tokens
+    }
+
     /// Wire a cooperative-cancellation token into this reader's long-running
     /// scans (issue #2264).
     ///
