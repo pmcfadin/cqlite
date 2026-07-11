@@ -32,7 +32,7 @@ use cqlite_core::query::{
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
-use cqlite_core::types::{DataType, RowCells, ScanRow, Value};
+use cqlite_core::types::{DataType, RowCells, ScanRow};
 use cqlite_core::RowKey;
 
 use crate::agg::{AggError, AggPlan};
@@ -798,7 +798,7 @@ impl MergeProducer {
                 // Build the FULL row so predicates can reference any column, even
                 // one projected out of the output. Output projection is applied
                 // separately via `self.columns` during Arrow conversion.
-                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache) else {
+                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache)? else {
                     continue;
                 };
                 // Count a row materialised/examined by the scan (BEFORE the
@@ -902,7 +902,7 @@ impl MergeProducer {
                 }
             }
             for entry in rows {
-                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache) else {
+                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &mut pk_cache)? else {
                     continue;
                 };
                 if let Some(filter) = &self.spec.filter {
@@ -921,41 +921,51 @@ impl MergeProducer {
     ///
     /// The row carries ALL columns (no projection) so predicate evaluation can
     /// reference any column; output projection is applied later via `self.columns`.
+    ///
+    /// Fallible: reassembling a collection column can surface authoritative
+    /// corruption (e.g. a map key whose `cell_path` bytes do not decode under the
+    /// declared key type). Such a failure is propagated as a `Merge` error rather
+    /// than silently dropping the row (issue #2324, no-heuristics / no-silent-loss).
     fn entry_to_row(
         &self,
         partition_key: &[u8],
         row_data: RowData,
         pk_cache: &mut PartitionKeyCache,
-    ) -> Option<QueryRow> {
+    ) -> Result<Option<QueryRow>, ProducerError> {
         let cells = match row_data {
             RowData::Live { cells } => cells,
             // Whole-row deletion: suppress from output.
-            RowData::Tombstone { .. } => return None,
+            RowData::Tombstone { .. } => return Ok(None),
         };
 
-        // Issue #1334: build the SAME `ScanRow::Row` carrier every scan producer
-        // builds, so `build_row_from_scan` disassembles it into real column values
-        // (previously this emitted `Value::Map`, which fell through to the non-row
-        // fallback and silently dropped every Flight column value — roborev H2).
-        let row_cells: RowCells = cells
-            .into_iter()
-            // A cell tombstone leaves the column absent → null in Arrow output,
-            // matching the CLI's "emit null for tombstoned cells" behaviour.
-            .filter(|c| !matches!(c.value, Value::Tombstone(_)))
-            .map(|c| (std::sync::Arc::from(c.column.as_str()), c.value))
-            .collect();
+        // Issue #2324: the k-way merger emits every element of a non-frozen
+        // collection (list/set/map) as its OWN cell, all sharing the column name.
+        // Keying those by name (as `build_row_from_scan` does) would keep only the
+        // LAST element and silently drop the rest of the collection. Reassemble
+        // the per-element cells into a single `Value::List` / `Value::Set` /
+        // `Value::Map` per column — mirroring the single-generation reader's
+        // collapsed shape — BEFORE building the row carrier. Simple cell tombstones
+        // are dropped (column reads null), matching the prior behaviour.
+        //
+        // Issue #1334: the assembled cells still feed the SAME `ScanRow::Row`
+        // carrier every scan producer builds, so `build_row_from_scan`
+        // disassembles it into real column values (never the non-row fallback that
+        // once emitted `Value::Map` and dropped every column — roborev H2).
+        let row_cells: RowCells =
+            cqlite_core::storage::write_engine::merge::assemble_read_cells(cells, &self.schema)
+                .map_err(ProducerError::Merge)?;
 
         let key = RowKey::new(partition_key.to_vec());
         // Issue #1817: reuse the caller's per-merge partition-key decode cache so a
         // partition's rows (emitted consecutively by the k-way merger) decode the
         // key once, not once per row. Output is byte-identical.
-        build_row_from_scan_cached(
+        Ok(build_row_from_scan_cached(
             key,
             ScanRow::Row(row_cells),
             &[],
             Some(&self.schema),
             pk_cache,
-        )
+        ))
     }
 
     /// Merge `paths` WITHOUT the input prune, relying only on the per-partition
