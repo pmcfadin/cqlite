@@ -53,7 +53,17 @@ impl MergeProducer {
         // Token-prune the warm reader set with zero extra I/O.
         let readers = self.prune_readers(readers);
         if readers.is_empty() {
-            on_merger_built();
+            // Cold-path parity (issue #2310, roborev 1641): the cold
+            // `produce_streaming` prunes paths in the CALLER before ever being
+            // invoked, so an empty post-prune set never reaches a merger-built
+            // call — its top-level `paths.is_empty()` check returns `Ok(())`
+            // WITHOUT firing `on_merger_built` (no merger is built when there is
+            // nothing to merge). The warm path prunes INTERNALLY (readers arrive
+            // unpruned), so it must mirror that exact "nothing to merge → no
+            // phase-boundary fire" behavior here, not treat an empty PRUNED set
+            // like the point-read route's deliberate "still fire the boundary"
+            // case (which fires because a merger-build attempt was genuinely
+            // dispatched and came back empty, not because pruning skipped it).
             return Ok(());
         }
 
@@ -134,5 +144,100 @@ impl MergeProducer {
             )?;
         }
         Ok(batches)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use cqlite_core::{Config, Platform};
+
+    use crate::filter::ScanSpec;
+    use crate::producer::CollectSink;
+    use crate::scan_progress::ScanProgress;
+    use crate::testutil::{build_sstables, simple_schema, write_row};
+    use crate::ticket::FlightTicket;
+
+    use super::*;
+
+    /// Finding 2 (#2310, roborev 1641): when token pruning empties the warm
+    /// reader set inside `produce_streaming_from_readers`, the call must return
+    /// WITHOUT firing `on_merger_built` — mirroring the cold path's "nothing to
+    /// merge → no phase-boundary fire" posture (`produce_streaming`'s top-level
+    /// `paths.is_empty()` check never fires it either, since the cold path prunes
+    /// in the CALLER before the merge-driving call is ever invoked). Red on
+    /// pre-fix code: the pruned-to-empty branch fired the callback
+    /// unconditionally before returning.
+    #[test]
+    fn empty_pruned_warm_set_fires_no_merger_built_callback() {
+        let schema = simple_schema();
+        let (_temp, _data, table_dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "a", 10, 100)]]);
+        let data_db = std::fs::read_dir(&table_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-Data.db"))
+            })
+            .expect("a Data.db exists");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let reader = rt.block_on(async {
+            let config = Config::default();
+            let platform = Arc::new(Platform::new(&config).await.unwrap());
+            Arc::new(
+                SSTableReader::open(&data_db, &config, platform)
+                    .await
+                    .unwrap(),
+            )
+        });
+        let (min_tok, max_tok) = reader
+            .endpoint_tokens()
+            .expect("Summary.db parsed, endpoint tokens known");
+
+        // A token range strictly beyond the reader's own span, guaranteed NOT to
+        // overlap it — pruning must drop this single reader entirely.
+        let spec = ScanSpec::from_ticket(
+            &FlightTicket {
+                token_start: Some(max_tok.saturating_add(1)),
+                token_end: Some(max_tok.saturating_add(2)),
+                ..Default::default()
+            },
+            &schema,
+        )
+        .unwrap();
+        assert!(
+            !spec.token.as_ref().unwrap().overlaps(min_tok, max_tok),
+            "the chosen range must genuinely exclude the reader's span"
+        );
+
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_probe = Arc::clone(&fired);
+        let mut batches = Vec::new();
+        let mut sink = CollectSink(&mut batches);
+        producer
+            .produce_streaming_from_readers(
+                vec![reader],
+                &CancelFlag::new(),
+                &mut sink,
+                &ScanProgress::default(),
+                move || fired_probe.store(true, Ordering::SeqCst),
+            )
+            .expect("empty-pruned warm set is a clean no-op, not an error");
+
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "on_merger_built must NOT fire when token pruning empties the warm \
+             reader set (cold-path phase-accounting parity, roborev 1641)"
+        );
+        assert!(batches.is_empty(), "nothing was merged, nothing streamed");
     }
 }
