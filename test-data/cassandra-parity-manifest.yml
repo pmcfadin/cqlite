@@ -4018,14 +4018,11 @@ scenarios:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
-      target_issue: 1402
+      target_issue: 1509
       target_suite: sstable_parity_compression_info_chunks
       gap: No real Cassandra Deflate-compressed fixture in the corpus.
       next_step: >-
-        Generate a DeflateCompressor SSTable fixture via issue #996 (epic #970) and
-        add it to the dataset; the strict lane will then decode and round-trip it.
-        Re-parked to open tracker #1402.
-
+        Generate a DeflateCompressor SSTable fixture and add it to the dataset; the strict lane will then decode and round-trip it. Re-parked to open tracker #1509 (Commission compression + checksum parity fixtures; successor to closed #970/#996/#1236; predecessor #1402 closed COMPLETED, PR #1523).
   - id: cass.compression_info.zstd.real_fixture_chunks.strict
     title: Zstd real-fixture CompressionInfo.db + chunk parity
     status: planned
@@ -4058,17 +4055,11 @@ scenarios:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
-      target_issue: 1402
+      target_issue: 1509
       target_suite: sstable_parity_compression_info_chunks
       gap: No real Cassandra Zstd-compressed fixture in the corpus (non-dictionary).
       next_step: >-
-        Generate a non-dictionary ZstdCompressor SSTable fixture via issue #996
-        (epic #970); the strict lane will then decode and round-trip it.
-        Re-parked to open tracker #1402.
-
-  # ----------------------------------------------------------------------------
-  # corruption_verify
-  # ----------------------------------------------------------------------------
+        Generate a non-dictionary ZstdCompressor SSTable fixture; the strict lane will then decode and round-trip it. Re-parked to open tracker #1509 (Commission compression + checksum parity fixtures; successor to closed #970/#996/#1236; predecessor #1402 closed COMPLETED, PR #1523).
   - id: cass.corruption_verify.component_corruption_detection
     title: Component corruption detection verify parity vs Cassandra 5.0.2 sstableverify
     status: mirrored
@@ -4628,10 +4619,10 @@ scenarios:
     ci:
       tier: manual_debug
     scope:
-      target_issue: 1387
+      target_issue: 1512
       gap: test_deltas dataset asset not published/enforced in CI (#701).
-      next_step: "Publish the test_deltas dataset and enforce scan_delta parity in CI. Re-parked to open tracker #1387."
-
+      next_step: >-
+        Publish/commit the test_deltas delta-generation corpus and enforce scan_delta parity in CI. Re-parked to open tracker #1512 (successor to closed #701; predecessor #1387 closed COMPLETED, PR #1429).
   - id: cass.tombstone_ttl.ttl_and_local_deletion_time
     title: TTL, local deletion time, and WRITETIME parity
     status: mirrored
@@ -5328,23 +5319,10 @@ scenarios:
     ci:
       tier: manual_debug
     scope:
-      target_issue: 1387
+      target_issue: 2303
       gap: No gated byte-for-byte comparison of compaction output.
       next_step: >-
-        Promote the debug byte tier in compaction-parity to a gated comparison
-        once writer output is byte-stable.
-        Re-parked to open tracker #1387.
-
-  # ----------------------------------------------------------------------------
-  # compaction differential harness (issue #1016, epic #973)
-  # Scenarios for the compaction-parity/ differential harness. The first three are
-  # anchored to Apache Cassandra compaction test sources; the last two describe the
-  # harness's own two tiers. NOTE on ids: the manifest id grammar requires a
-  # `cass.<group>...` prefix (schema + cassandra-parity lint), so the two harness
-  # scenarios use `cass.compaction.harness_*`. They correspond to the issue's
-  # conceptual identifiers `cqlite.compaction_parity.harness.logical_tier` and
-  # `cqlite.compaction_parity.harness.byte_tier_artifacts` respectively.
-  # ----------------------------------------------------------------------------
+        Promote the debug byte tier in compaction-parity to a gated comparison once writer output is byte-stable; the first gated cases now exist (row_delete_purge / range_tombstone_merge byte_for_byte, #1410). Re-parked to open tracker #2303 (predecessor #1387 closed COMPLETED, PR #1429).
   - id: cass.compaction.CompactionIteratorTest.differential_compaction_loop
     title: Differential compaction loop — same inputs through both engines (logical)
     status: mirrored
@@ -8535,16 +8513,12 @@ scenarios:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
-      target_issue: 1387
+      target_issue: 2303
       gap: >-
         BTI (da) range-tombstone-at-block-edge fixtures are not yet generated (no da
         tombstone generator).
       next_step: >-
-        Add a da/BTI wide-partition range-tombstone fixture generator and assert
-        BTI column-index boundary parity; file a follow-up issue.
-        Re-parked to open tracker #1387.
-
-  # --- #1014 resurrection safety -------------------------------------------
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
   - id: cass.tombstone_ttl.never_purge.cell_row_partition
     title: never_purge keeps cell/row/partition tombstones on read and compaction
     status: mirrored
@@ -13913,10 +13887,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors this specific cell-delete-then-gc-purge case; the general purge path is covered by the compaction_parity_tombstone_ttl suite.
       next_step: >-
-        Commission a Cassandra fixture for cell deletion + gc purge and add per-case sstabledump goldens to the compaction parity suite.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.CompactionColumnTest.cell_merge_lww
     title: "Per-column last-write-wins cell merge during compaction"
@@ -13952,10 +13925,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors this specific per-column LWW merge case.
       next_step: >-
-        Commission a fixture for per-column LWW merge and assert per-case goldens.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary
     title: "Purgeable-timestamp boundary computation during compaction"
@@ -13991,10 +13963,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors the CompactionController purgeable-timestamp boundary cases.
       next_step: >-
-        Commission fixtures spanning the purgeable-timestamp boundary and assert per-case goldens.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge
     title: "Partition delete + gc purge during compaction"
@@ -14030,14 +14001,13 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors this partition-delete-then-purge case.
       next_step: >-
-        Commission a partition-delete + gc-purge fixture and assert per-case goldens.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge
     title: "Row delete + gc purge during compaction"
-    status: partial
+    status: mirrored
     capability: compaction_merge
     priority: P1
     risk: p1_correctness
@@ -14058,17 +14028,17 @@ scenarios:
           the marker SURVIVES). The tombstone localDeletionTime is wall-clock-derived
           by Cassandra; the byte-parity test reads it from the committed golden JSONL
           (local_delete_time) and stamps CQLite's compaction inputs with the same LDT
-          (authoritative). The byte-for-byte assertion is currently #[ignore] blocked
-          on #1410: compute_baseline_min lets a live-only input's min_deletion_time=0
-          sentinel corrupt the merged localDeletionTime baseline, so CQLite emits a raw
-          LDT delta instead of LDT-minLDT.
+          (authoritative). Byte-for-byte parity is now asserted (test un-#[ignore]d):
+          #1410 fixed compute_baseline_min so a live-only input's min_deletion_time=0
+          sentinel no longer corrupts the merged localDeletionTime baseline (PR #1726).
     fixtures:
       datasets:
         - test-data/datasets/sstables
       references:
         - test-data/datasets/sstables/test_compaction_tombstone_ttl/shadow_row_delete-2b929be075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -14079,30 +14049,27 @@ scenarios:
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core --features write-support
         --test issue_1387_tombstone_ttl_compaction_byte_parity
-        -- --ignored shadow_row_delete
+        shadow_row_delete
       reference_paths:
         - test-data/datasets/sstables/test_compaction_tombstone_ttl/shadow_row_delete-2b929be075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
       failure_artifacts:
         - artifact.nightly_docker.byte_diff
       known_limitations: >-
-        Fixture COMMITTED and the byte-parity test WIRED (Data.db / Index.db /
-        Summary.db / Digest.crc32), but the byte-for-byte claim is gated on #1410 — a
-        real CQLite compute_baseline_min localDeletionTime baseline bug that this
-        fixture revealed. The revealing test is #[ignore = "blocked on #1410"]; it flips
-        to byte_for_byte once #1410 lands.
+        Fixture COMMITTED and the byte-parity test WIRED and RUN (Data.db / Index.db /
+        Summary.db / Digest.crc32 byte-identical). #1410 (PR #1726) fixed the
+        compute_baseline_min localDeletionTime baseline bug this fixture revealed;
+        shadow_row_delete_compaction_byte_for_byte is un-#[ignore]d and byte-matches.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
-        Byte-for-byte parity blocked on #1410 (compute_baseline_min localDeletionTime
-        baseline corruption when a live-only input contributes its min_deletion_time=0
-        sentinel to the merge).
+        None — byte-for-byte compaction parity is asserted. Resolved by #1410
+        (compute_baseline_min localDeletionTime baseline fix, PR #1726).
       next_step: >-
-        Fix #1410, un-#[ignore] shadow_row_delete_compaction_byte_for_byte, upgrade this
-        entry to byte_for_byte with strict: true.
+        Resolved: shadow_row_delete_compaction_byte_for_byte runs and byte-matches
+        (upgraded partial -> byte_for_byte, strict: true; #1410 / PR #1726).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1410
 
   - id: cass.compaction.CompactionDeletePKTest.partition_delete_preserved
     title: "Partition deletion preserved across compaction"
@@ -14138,14 +14105,13 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors this partition-delete-preservation case.
       next_step: >-
-        Commission a fixture asserting partition deletions survive compaction and add goldens.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge
     title: "Overlapping range-tombstone merge during compaction"
-    status: partial
+    status: mirrored
     capability: compaction_merge
     priority: P1
     risk: p1_correctness
@@ -14166,15 +14132,17 @@ scenarios:
           compaction synthesizes cross-generation open/close boundary markers
           (range_tombstone_bound + range_tombstone_boundary) in the merged output. The
           two wall-clock RT localDeletionTimes are read from the committed golden JSONL
-          and stamped on CQLite's inputs. The byte-for-byte assertion is #[ignore]
-          blocked on #1410 (compute_baseline_min localDeletionTime baseline corruption).
+          and stamped on CQLite's inputs. Byte-for-byte parity is now asserted (test
+          un-#[ignore]d) after #1410 fixed the compute_baseline_min localDeletionTime
+          baseline corruption (PR #1726).
     fixtures:
       datasets:
         - test-data/datasets/sstables
       references:
         - test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_cross_gen-2bd3757075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -14185,26 +14153,27 @@ scenarios:
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core --features write-support
         --test issue_1387_tombstone_ttl_compaction_byte_parity
-        -- --ignored rt_cross_gen
+        rt_cross_gen
       reference_paths:
         - test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_cross_gen-2bd3757075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
       failure_artifacts:
         - artifact.nightly_docker.byte_diff
       known_limitations: >-
         Fixture COMMITTED and the cross-generation range-tombstone byte-parity test
-        WIRED, but the byte-for-byte claim is gated on #1410 (compute_baseline_min
-        localDeletionTime baseline bug this fixture revealed). The revealing test is
-        #[ignore = "blocked on #1410"].
+        WIRED and RUN (byte-identical). #1410 (PR #1726) fixed the compute_baseline_min
+        localDeletionTime baseline bug this fixture revealed;
+        rt_cross_gen_compaction_byte_for_byte is un-#[ignore]d and byte-matches.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
-        Byte-for-byte overlapping range-tombstone compaction parity blocked on #1410.
+        None — byte-for-byte overlapping range-tombstone compaction parity is asserted.
+        Resolved by #1410 (compute_baseline_min localDeletionTime baseline fix, PR #1726).
       next_step: >-
-        Fix #1410, un-#[ignore] rt_cross_gen_compaction_byte_for_byte, upgrade to byte_for_byte.
+        Resolved: rt_cross_gen_compaction_byte_for_byte runs and byte-matches
+        (upgraded partial -> byte_for_byte, strict: true; #1410 / PR #1726).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1410
 
   - id: cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved
     title: "Row deletion markers preserved across compaction"
@@ -14240,10 +14209,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors this row-deletion-marker-preservation case.
       next_step: >-
-        Commission a row-deletion fixture and assert markers survive compaction.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge
     title: "Partial space-constrained compaction does not drop live rows"
@@ -14279,10 +14247,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors the disk-space-constrained partial-compaction case.
       next_step: >-
-        Commission overlapping-SSTable fixtures under a space constraint and assert live-row preservation.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table
     title: "Negative-LDTS detection / suspect-table handling in compaction"
@@ -14318,10 +14285,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors the negative-LDTS suspect-table cases.
       next_step: >-
-        Commission fixtures with negative local-deletion-time metadata and assert detection/goldens.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge
     title: "Forced/major compaction tombstone + TTL purge"
@@ -14380,10 +14346,9 @@ scenarios:
       gap: >-
         Empty-output purge contract only; a fully-purged compaction has no bytes to diff.
       next_step: >-
-        Keep the semantic purge contract; byte-for-byte surviving-tombstone parity is
-        covered by the other three #1387 scenarios (blocked on #1410).
+        Keep the semantic purge contract; byte-for-byte surviving-tombstone parity is now covered by the row_delete_purge and range_tombstone_merge byte_for_byte scenarios (fixed by #1410, PR #1726), with ttl_window_expiry_purge still pending. Re-parked to open tracker #2303 (predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.PartialCompactionsTest.tombstone_not_purged_excluded_sources
     title: "Tombstone not purged when source SSTables are excluded"
@@ -14419,10 +14384,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors this excluded-source tombstone-retention case.
       next_step: >-
-        Commission a partial-compaction fixture excluding sources and assert tombstones are retained.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.SSTablesIteratedTest.merge_no_shadow_without_timestamp
     title: "Merge does not let newer deletions shadow older live cells without timestamp ordering"
@@ -14458,10 +14422,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors the SSTablesIterated shadow-ordering case.
       next_step: >-
-        Commission overlapping fixtures and assert no live cell is shadowed without timestamp ordering.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation
     title: "Sharded compaction writer preserves rows across shard boundaries"
@@ -14497,10 +14460,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors sharded-compaction-writer shard-boundary preservation.
       next_step: >-
-        Commission sharded-writer fixtures and assert no partition is orphaned across shard boundaries.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count
     title: "Flush-triggered sharded multi-writer row-count integrity"
@@ -14536,10 +14498,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors flush-triggered sharded multi-writer row counts.
       next_step: >-
-        Commission flush-sharding fixtures and assert each partition yields the expected row count.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels
     title: "Leveled compaction strategy: non-overlapping per-level ordering"
@@ -14575,10 +14536,9 @@ scenarios:
       gap: >-
         CQLite does not yet run a leveled compaction strategy; merge output parity for LCS-produced inputs is unmirrored.
       next_step: >-
-        Implement/mirror leveled-strategy merge ordering or assert read parity over LCS-produced fixtures.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #905 (Support a compaction manager; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 905
 
   - id: cass.compaction.LeveledGenerationsTest.level_generation_merge_order
     title: "Leveled-generation SSTable merge order"
@@ -14614,10 +14574,9 @@ scenarios:
       gap: >-
         CQLite does not yet model leveled generations; merge-order parity is unmirrored.
       next_step: >-
-        Mirror leveled-generation merge ordering or assert read parity over generation-tagged fixtures.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #905 (Support a compaction manager; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 905
 
   - id: cass.compaction.LongLeveledCompactionStrategyTest.concurrent_level_merge_safety
     title: "Concurrent leveled-compaction overlapping-range safety"
@@ -14653,10 +14612,9 @@ scenarios:
       gap: >-
         CQLite does not yet run concurrent leveled compaction; overlapping-range merge safety is unmirrored.
       next_step: >-
-        Mirror concurrent leveled-compaction merge safety or assert read parity over the produced fixtures.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #905 (Support a compaction manager; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 905
 
   - id: cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge
     title: "Time-window compaction TTL/window expiry purge"
@@ -14715,9 +14673,9 @@ scenarios:
       gap: >-
         Byte-for-byte TTL-expiry compaction parity blocked on #1410.
       next_step: >-
-        Fix #1410, un-#[ignore] ttl_expired_live_compaction_byte_for_byte, upgrade to byte_for_byte.
+        Un-#[ignore] ttl_expired_live_compaction_byte_for_byte and upgrade to byte_for_byte. #1410 (baseline fix, PR #1726) un-ignored the sibling row/RT byte tests, but this expired-TTL case stayed #[ignore] on #1538 (WriteWithTtl authoritative localExpirationTime), which is now closed COMPLETED (PR #2056) without un-ignoring it. Re-parked to open tracker #2303 pending a successor tracker for the residual authoritative-expiration wiring.
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1410
+      target_issue: 2303
 
   - id: cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary
     title: "Unified compaction strategy gc_grace purge boundary"
@@ -14753,10 +14711,9 @@ scenarios:
       gap: >-
         CQLite does not yet run the unified compaction strategy; gc_grace purge-boundary parity is unmirrored.
       next_step: >-
-        Mirror UCS gc_grace purge boundary or assert read parity over UCS-produced fixtures.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #905 (Support a compaction manager; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 905
 
   - id: cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution
     title: "Unified compaction SSTable density distribution"
@@ -14792,10 +14749,9 @@ scenarios:
       gap: >-
         CQLite does not implement UCS density distribution; output sizing parity is unmirrored.
       next_step: >-
-        Mirror UCS density distribution or assert read parity over the produced SSTables.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #905 (Support a compaction manager; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 905
 
   - id: cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable
     title: "Single-SSTable LCS uplevel: metadata readable before promotion"
@@ -14831,10 +14787,9 @@ scenarios:
       gap: >-
         CQLite does not run LCS uplevel tasks; the single-table uplevel metadata path is unmirrored.
       next_step: >-
-        Mirror single-SSTable LCS uplevel metadata validation or assert metadata read parity.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #905 (Support a compaction manager; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 905
 
   - id: cass.compaction.ParallelizedTasksTest.sharded_row_partition_integrity
     title: "Parallelized compaction: row/partition integrity across shards"
@@ -14870,10 +14825,9 @@ scenarios:
       gap: >-
         CQLite does not run parallelized compaction tasks; sharded row/partition integrity over the produced output is unmirrored.
       next_step: >-
-        Mirror sharded row/partition integrity or assert read parity over parallelized-compaction fixtures.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #905 (Support a compaction manager; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 905
 
   - id: cass.write_load_path.FlushingTest.flush_no_phantom_rows
     title: "Flush produces no phantom rows; tombstones land correctly"
@@ -15228,10 +15182,9 @@ scenarios:
       gap: >-
         No dedicated burn-scale fixture mirrors the RangeTombstoneBurn cases.
       next_step: >-
-        Commission a range-tombstone burn fixture and assert deletes serialize and read back vs Cassandra.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.tombstone_ttl.ViewComplexTombstoneTest.cell_tombstone_not_purged
     title: "Cell (null-column) tombstones not prematurely purged"
@@ -15267,10 +15220,9 @@ scenarios:
       gap: >-
         No dedicated fixture mirrors the view complex cell-tombstone cases; MV maintenance is coordinator-side.
       next_step: >-
-        Commission a fixture with view-style cell tombstones and assert they are not prematurely purged on merge.
-        Re-parked to open tracker #1387.
+        Re-parked to open tracker #2303 (Commission the parity fixture library; predecessor #1387 closed COMPLETED, PR #1429).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 1387
+      target_issue: 2303
 
   - id: cass.compaction.AntiCompactionBytemanTest.repair_driven_anticompaction
     title: "Repair-driven anti-compaction SSTable lifecycle (Byteman)"
@@ -16085,9 +16037,9 @@ scenarios:
     scope:
       gap: CQLite has no disk-space budgeting guardrail; a merge that would exhaust free space is not detected
         before writing partial output.
-      next_step: Under the compaction fixture family (#1387), commission a space-constrained scenario and
-        add a pre-write disk-space estimate/guardrail to the compactor.
-      target_issue: 1387
+      next_step: >-
+        Under the compaction manager (#905), commission a space-constrained scenario and add a pre-write disk-space estimate/guardrail to the compactor. Re-parked to open tracker #905 (predecessor #1387 closed COMPLETED, PR #1429).
+      target_issue: 905
       target_suite: compaction_parity_tombstone_ttl
   - id: cass.tombstone_ttl.SSTableExpiredBlockersTest.fully_expired_drop_blockers
     title: Fully-expired SSTable drop-blocker detection
@@ -16125,9 +16077,9 @@ scenarios:
     scope:
       gap: Fully-expired-SSTable drop (and the overlapping-SSTable blocker check that gates it) is not implemented;
         expired data is filtered on read but not dropped.
-      next_step: 'Implement fully-expired-SSTable drop + blocker detection under #1388 and mirror the expired-blocker
-        semantics.'
-      target_issue: 1388
+      next_step: >-
+        The fully-expired-SSTable drop feature shipped (#1388 closed COMPLETED, PR #1740); the residual is to commission the overlapping-SSTable expired-blocker fixture and wire the parity test that asserts a fully-expired SSTable shadowing an EXCLUDED overlap is NOT dropped. Re-parked to open tracker #2303 (Commission the parity fixture library).
+      target_issue: 2303
       target_suite: compaction_parity_tombstone_ttl
   - id: cass.sstable_format.UpgradeSSTablesTest.upgrade_rewrite_out_of_scope
     title: nodetool upgradesstables / recompress rewrite
