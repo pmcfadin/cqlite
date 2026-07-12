@@ -33,8 +33,25 @@
 //! `Arc<SSTableReader>` clone is alive. This registry only ever evicts its OWN
 //! reference (per #1749's fail-closed model) and never deletes/replaces a
 //! generation's file out from under a live `Arc`; a snapshot's hardlinked inode
-//! outlives the per-query dir (the link keeps the inode alive), so the contract
-//! is satisfied trivially.
+//! outlives the per-query dir (the link keeps the inode alive), so THIS
+//! registry's own actions satisfy the contract trivially.
+//!
+//! That is not the whole story, though (issue #2352): an EXTERNAL actor — the
+//! Trino connector's per-query `SnapshotManager.clearSnapshot` — deletes the
+//! snapshot DIRECTORY (and, once its inode's last hardlink, the underlying
+//! `Data.db` bytes) once its query completes, entirely outside this registry's
+//! control. Inode identity keeps the cached READER alive as an `Arc` fine, but
+//! `SSTableReader`'s full-scan path re-opens `Data.db` LAZILY, by the path the
+//! reader was opened from (`new_scan_cursor` → `File::open`) — unlike the
+//! point-read path, which holds a dedicated fd for the reader's lifetime. A
+//! later warm hit over the SAME inode identity (a fresh per-query snapshot dir
+//! hardlinking it) would therefore serve a reader whose stored path is now dead,
+//! and a subsequent scan re-open would fail with ENOENT mid-merge. The
+//! path-liveness gate (`cached_paths_all_present` / `reader_backing_present`,
+//! checked at each warm-hit site below) is what covers this externally-driven
+//! case: a dead cached path forces a rebuild from the CURRENT live dir instead
+//! of being served. See the adjudication comment at the gate for the residual
+//! TOCTOU window this leaves open and why it is accepted.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -207,7 +224,10 @@ impl WarmTableRegistry {
                 // it would ENOENT mid-scan. A dead cached path falls through to an
                 // authoritative re-enumeration + rebuild from the current live dir.
                 // A rare race (a concurrent rebuild replaced the entry) also falls
-                // back here.
+                // back here. Accepted residual: a check-then-hit TOCTOU window
+                // between this `stat` and the served reader's later lazy scan
+                // re-open — see the adjudication comment on
+                // `cached_paths_all_present` (issue #2352, roborev job 1644).
                 if self.cached_paths_all_present(key, ddl_hash) {
                     if let Some(hit) = self.try_hit(key, ddl_hash, None) {
                         return Ok(hit);
@@ -244,7 +264,10 @@ impl WarmTableRegistry {
         // fresh per-query snapshot dir whose PRIOR dir was cleared would otherwise
         // hand back readers that ENOENT on their next lazy `Data.db` re-open. A
         // dead cached path forces the fail-closed rebuild below, which re-opens the
-        // affected generation(s) from the current live `entries` path.
+        // affected generation(s) from the current live `entries` path. Accepted
+        // residual: a check-then-hit TOCTOU window between this `stat` and the
+        // served reader's later lazy scan re-open — see the adjudication comment
+        // on `cached_paths_all_present` (issue #2352, roborev job 1644).
         if self.cached_paths_all_present(key, ddl_hash) {
             if let Some(hit) = self.try_hit(key, ddl_hash, Some((&current_set, manifest.clone()))) {
                 return Ok(hit);
@@ -649,6 +672,26 @@ impl WarmTableRegistry {
     /// the registry mutex (no filesystem I/O under the lock). A key with no cached
     /// entry returns `true` vacuously — there is nothing stale to guard; the
     /// caller's normal miss/rebuild handles it.
+    ///
+    /// ## Adjudicated residual: check-then-hit TOCTOU (issue #2352 adjudication,
+    /// roborev job 1644, rust-reviewer 2026-07-12)
+    ///
+    /// This gate is a `stat` at time T; the reader's next lazy scan re-open
+    /// (`new_scan_cursor` → `File::open`) happens LATER, at T+δ, and is
+    /// deliberately POST-LOCK (streaming holds no registry lock). A path can
+    /// therefore die inside the [T, T+δ) window — after this check passes but
+    /// before the scan actually opens the file. Accepted, not fixed here, because:
+    /// (1) holding the registry lock across the window cannot close it — the lazy
+    /// open lives inside the streaming producer, entirely outside any lock this
+    /// registry could hold; (2) a death inside the window surfaces as a transient
+    /// I/O error to that ONE in-flight request, never stale/incorrect DATA — the
+    /// reader's parsed state is untouched, only the byte source is gone; (3) the
+    /// NEXT request's gate re-`stat`s and self-heals via a fail-closed rebuild —
+    /// the same bound a freshly-swapped-in entry already has (it too could be
+    /// invalidated by an external actor moments after installation); (4) the true
+    /// closure — a durable fd/mmap held open at build time, or rebind-by-inode
+    /// instead of re-open-by-path — is a real design change, not a comment-sized
+    /// fix, and is tracked as issue #2356.
     fn cached_paths_all_present(&self, key: &TableKey, ddl_hash: u64) -> bool {
         let readers: Vec<Arc<SSTableReader>> = {
             let inner = self.lock_inner();
