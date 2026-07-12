@@ -117,6 +117,89 @@ fn cross_snapshot_dirs_share_one_warm_entry() {
     assert_eq!(w2.readers.len(), w1.readers.len(), "same reader set");
 }
 
+/// Regression (issue #2352): the connector creates a FRESH per-query snapshot
+/// dir and CLEARS the prior one after each query (`SnapshotManager.clearSnapshot`).
+/// The warm cache keys on inode identity, so query N+1's new snapshot dir (same
+/// inodes) is a set-match hit — but the cached reader re-opens its `Data.db`
+/// LAZILY by the PATH it was opened from (query N's snapshot dir), which the
+/// connector has since deleted. A full-scan through the warm readers then fails
+/// with `No such file or directory (os error 2)` mid-merge — the 9 nightly
+/// Flight↔Trino E2E failures.
+///
+/// RED on unfixed code: the second `warm_readers` returns a silent `Unchanged`
+/// hit carrying readers whose backing path (the deleted `snap1`) no longer
+/// resolves, so `decode_names` (the same streaming-merge path `do_get` drives)
+/// panics with the ENOENT. GREEN after the fix: a dead cached path forces an
+/// authoritative rebuild from the current LIVE dir (`snap2`), the scan reads the
+/// live inodes, and the rows decode correctly — counted as a refresh
+/// (`RebuiltDelta`), never a stale hit.
+#[test]
+fn warm_hit_after_snapshot_teardown_rebuilds_instead_of_enoent() {
+    let schema = simple_schema();
+    let (_temp, _data, table_dir) = build_sstables(
+        &schema,
+        vec![
+            vec![write_row(1, "a", 1, 100)],
+            vec![write_row(2, "b", 2, 100)],
+        ],
+    );
+
+    // Query N: a per-query snapshot dir; warm the cache from it (readers open
+    // with their `file_path` inside `snap1`).
+    let snap1 = make_snapshot(&table_dir, "snap1");
+    let reg = WarmTableRegistry::new();
+    let cancel = CancelFlag::new();
+    let w1 = reg
+        .warm_readers(&key(), ddl(), &schema, &snap1, Some("snap1"), &cancel)
+        .expect("first snapshot warms");
+    assert_eq!(w1.outcome, RefreshOutcome::RebuiltDelta, "first is a build");
+    assert_eq!(
+        decode_names(&schema, w1.readers),
+        vec!["a".to_string(), "b".to_string()],
+        "first query decodes correctly from the live snapshot dir"
+    );
+
+    // Connector clears the query-N snapshot; the LIVE inodes in `table_dir`
+    // persist. The cached readers' `file_path`s are now dead paths.
+    std::fs::remove_dir_all(&snap1).expect("clear the query-N snapshot dir");
+
+    // Query N+1: a NEW per-query snapshot dir over the SAME inodes. Inode-keyed
+    // identity makes this a set-match — but a dead cached path must NOT be served.
+    let snap2 = make_snapshot(&table_dir, "snap2");
+    let w2 = reg
+        .warm_readers(&key(), ddl(), &schema, &snap2, Some("snap2"), &cancel)
+        .expect("second snapshot request after the first was cleared");
+
+    // The fix: a dead cached path is a rebuild (a refresh outcome), never a
+    // silent stale hit.
+    assert_eq!(
+        w2.outcome,
+        RefreshOutcome::RebuiltDelta,
+        "a cleared cached snapshot path forces a rebuild from the current live \
+         dir, not a stale warm hit (issue #2352)"
+    );
+    // Every returned reader must have a LIVE backing path (rebuilt from snap2),
+    // so a full-scan re-open cannot ENOENT.
+    for r in &w2.readers {
+        assert!(
+            std::fs::metadata(r.file_path()).is_ok(),
+            "warm reader must back a live path after teardown, got dead {}",
+            r.file_path().display()
+        );
+    }
+    // THE regression assertion: streaming the warm readers (the exact path
+    // `do_get` drives) no longer ENOENTs and returns the correct rows. On unfixed
+    // code the stale `Unchanged` hit above carries readers pointing at the
+    // deleted `snap1`, so this `decode_names` panics with
+    // `No such file or directory (os error 2)` mid-merge — the nightly signature.
+    assert_eq!(
+        decode_names(&schema, w2.readers),
+        vec!["a".to_string(), "b".to_string()],
+        "streaming the rebuilt warm readers reads the live inodes correctly \
+         (no ENOENT mid-merge)"
+    );
+}
+
 /// Warm/cold UDT-registry PARITY (spec non-goal: warm is a parse-cost change
 /// only, never a read-semantics change; #2349): the warm path must open readers
 /// with the SAME UDT-registry posture as the cold path. The cold Flight path
@@ -524,12 +607,20 @@ fn lru_evicts_when_over_budget() {
     );
 }
 
-/// Requirement 3 (snapshot manifest fast path): a byte-identical snapshot
-/// `manifest.json` serves the cached set WITHOUT relisting the directory. Proven
-/// by making an authoritative listing impossible to satisfy — every `Data.db` is
-/// deleted after warming, so a `read_dir` would enumerate ZERO generations (→ a
-/// rebuild to an empty set), while the manifest fast path still serves the two
-/// cached readers.
+/// Requirement 3 (snapshot manifest fast path), corrected for issue #2352: a
+/// byte-identical snapshot `manifest.json` serves the cached set WITHOUT relisting
+/// the directory — proven by planting a THIRD `Data.db` on disk that the manifest
+/// does NOT list. The fast path (trusting the manifest) serves exactly the two
+/// cached readers and never `read_dir`s the third file; an authoritative relist
+/// would enumerate three generations and rebuild to a different set.
+///
+/// The pre-#2352 version proved "no relist" by DELETING every `Data.db` after
+/// warming and asserting the cached readers were still served. That encoded the
+/// exact ENOENT regression #2352 fixes: a warm hit must NEVER serve a reader whose
+/// backing `Data.db` has been cleared (a full-scan would re-open the dead path and
+/// fail mid-merge). So the two real files are kept LIVE here — a dead-path cached
+/// set now rebuilds from the current live dir instead of being served (see
+/// `warm_hit_after_snapshot_teardown_rebuilds_instead_of_enoent`).
 #[test]
 fn manifest_fast_path_serves_cached_without_relisting() {
     let schema = simple_schema();
@@ -555,17 +646,10 @@ fn manifest_fast_path_serves_cached_without_relisting() {
     assert_eq!(w1.readers.len(), 2, "both generations warmed");
     let opens = reg.metrics().snapshot().reader_opens;
 
-    // Delete every Data.db (the cached Arc readers keep the inodes alive), leaving
-    // the manifest byte-identical: an authoritative relisting would now find ZERO.
-    for e in std::fs::read_dir(&snap).unwrap().flatten() {
-        let p = e.path();
-        if p.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with("-Data.db"))
-        {
-            std::fs::remove_file(&p).unwrap();
-        }
-    }
+    // Plant a THIRD Data.db the manifest does NOT list, keeping the two real files
+    // LIVE. The manifest fast path (byte-identical manifest) must ignore it (no
+    // read_dir); an authoritative relist would enumerate 3 generations and rebuild.
+    std::fs::write(snap.join("nb-3-big-Data.db"), b"not-a-real-sstable").unwrap();
 
     let w2 = reg
         .warm_readers(&key(), ddl(), &schema, &snap, Some("snap1"), &cancel)
@@ -573,12 +657,13 @@ fn manifest_fast_path_serves_cached_without_relisting() {
     assert_eq!(
         w2.outcome,
         RefreshOutcome::Unchanged,
-        "identical manifest → warm hit (a relisting would have rebuilt to empty)"
+        "identical manifest → warm hit via the fast path (a relist would have \
+         seen 3 generations and NOT reported Unchanged)"
     );
     assert_eq!(
         w2.readers.len(),
         2,
-        "the cached set is served — the directory was NOT relisted"
+        "the two cached readers are served — the planted third file was never relisted"
     );
     assert_eq!(
         reg.metrics().snapshot().reader_opens,
