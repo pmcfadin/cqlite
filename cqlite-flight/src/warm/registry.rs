@@ -200,10 +200,18 @@ impl WarmTableRegistry {
         match probe::probe_generation_set(dir, snapshot_mode, cached_manifest.as_deref(), cancel)? {
             ProbeOutcome::UnchangedByManifest => {
                 // Manifest fast path matched: serve the cached set with no
-                // reader-open/parse. A rare race (a concurrent rebuild replaced
-                // the entry) falls back to an authoritative re-enumeration.
-                if let Some(hit) = self.try_hit(key, ddl_hash, None) {
-                    return Ok(hit);
+                // reader-open/parse — but ONLY when every cached reader's backing
+                // path still resolves (issue #2352). A cached reader re-opens its
+                // `Data.db` lazily by the path it was opened from; if that was a
+                // per-query snapshot dir the connector has since cleared, serving
+                // it would ENOENT mid-scan. A dead cached path falls through to an
+                // authoritative re-enumeration + rebuild from the current live dir.
+                // A rare race (a concurrent rebuild replaced the entry) also falls
+                // back here.
+                if self.cached_paths_all_present(key, ddl_hash) {
+                    if let Some(hit) = self.try_hit(key, ddl_hash, None) {
+                        return Ok(hit);
+                    }
                 }
                 let entries = probe::enumerate_generations(dir)?;
                 let manifest = if snapshot_mode {
@@ -231,8 +239,16 @@ impl WarmTableRegistry {
         cancel: &CancelFlag,
     ) -> Result<WarmSet, WarmError> {
         let current_set = ProbeOutcome::set(&entries);
-        if let Some(hit) = self.try_hit(key, ddl_hash, Some((&current_set, manifest.clone()))) {
-            return Ok(hit);
+        // Serve a warm hit only when the generation SET matches AND every cached
+        // reader's backing path still resolves (issue #2352): a set-match over a
+        // fresh per-query snapshot dir whose PRIOR dir was cleared would otherwise
+        // hand back readers that ENOENT on their next lazy `Data.db` re-open. A
+        // dead cached path forces the fail-closed rebuild below, which re-opens the
+        // affected generation(s) from the current live `entries` path.
+        if self.cached_paths_all_present(key, ddl_hash) {
+            if let Some(hit) = self.try_hit(key, ddl_hash, Some((&current_set, manifest.clone()))) {
+                return Ok(hit);
+            }
         }
         self.rebuild(
             key,
@@ -321,21 +337,46 @@ impl WarmTableRegistry {
         // OUTSIDE the lock (slow I/O). `probe_start_set` is what THIS rebuild's
         // delta was computed against — the epoch guard below re-checks it hasn't
         // moved by the time we reach the swap (roborev 1639).
-        let cached_ids: Vec<GenerationId> = {
+        // Snapshot each cached generation's identity AND its reader's backing
+        // path under the brief lock; the path-liveness `stat`s run OUTSIDE the
+        // lock (no filesystem I/O under the registry mutex).
+        let cached: Vec<(GenerationId, std::path::PathBuf)> = {
             let inner = self.lock_inner();
             inner
                 .tables
                 .get(key)
                 .filter(|t| t.ddl_hash == ddl_hash)
-                .map(|t| t.readers.iter().map(|r| r.id).collect())
+                .map(|t| {
+                    t.readers
+                        .iter()
+                        .map(|r| (r.id, r.reader.file_path().to_path_buf()))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
-        let probe_start_set = GenerationSet::from_ids(cached_ids.clone());
+        // `probe_start_set` is the FULL cached generation SET (by identity) this
+        // delta was computed against — the epoch guard below compares the LIVE
+        // entry's set to it to detect a concurrent fresher install. Path-liveness
+        // never changes the identity set, so the guard uses ALL cached ids.
+        let probe_start_set = GenerationSet::from_ids(cached.iter().map(|(id, _)| *id).collect());
 
-        // ADDED = present now, not already warm. Open them (fail-closed).
+        // Path-liveness (issue #2352): a cached generation counts as "already
+        // warm" ONLY when its backing `Data.db` still resolves. A dead-path
+        // generation (its per-query snapshot dir was cleared by the connector) is
+        // NOT kept — it lands in `added` and is RE-OPENED from the current live
+        // `entries` path, so a subsequent lazy scan re-open cannot ENOENT.
+        let alive_ids: HashSet<GenerationId> = cached
+            .iter()
+            .filter(|(_, p)| std::fs::metadata(p).is_ok())
+            .map(|(id, _)| *id)
+            .collect();
+
+        // ADDED = present now, not already warm on a LIVE path. Open them
+        // (fail-closed) — this includes both genuinely-new generations and
+        // dead-path ones being refreshed from the current live dir (#2352).
         let added: Vec<&GenerationEntry> = entries
             .iter()
-            .filter(|e| !cached_ids.contains(&e.id))
+            .filter(|e| !alive_ids.contains(&e.id))
             .collect();
         let opened = match self.open_added(&added, schema, cancel) {
             Ok(opened) => opened,
@@ -413,11 +454,18 @@ impl WarmTableRegistry {
         if let Some(prev) = inner.tables.remove(key) {
             if prev.ddl_hash == ddl_hash {
                 for r in prev.readers {
-                    if current_set.contains(&r.id) {
+                    // Keep a prior reader's parsed state ONLY when its generation
+                    // is still present AND its backing path is still live (issue
+                    // #2352). A present-but-dead-path generation is dropped here
+                    // and RE-OPENED from the live dir via `added`, so it is a
+                    // refresh (not an eviction) and is not counted as removed.
+                    if current_set.contains(&r.id) && alive_ids.contains(&r.id) {
                         kept.push(r);
                     } else {
                         freed = freed.saturating_add(r.footprint);
-                        removed_count += 1;
+                        if !current_set.contains(&r.id) {
+                            removed_count += 1;
+                        }
                     }
                 }
             } else {
@@ -584,6 +632,34 @@ impl WarmTableRegistry {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Whether every cached reader for `key` (when its DDL still matches) has a
+    /// backing `Data.db` that still resolves on disk (issue #2352).
+    ///
+    /// The warm cache keys parsed state on inode-stable generation identity, so a
+    /// fresh per-query snapshot hardlink dir (same inodes, new path) is a set
+    /// match — but a full-scan re-opens `Data.db` LAZILY by the PATH the reader
+    /// was opened from (`SSTableReader::new_scan_cursor` → `File::open`), unlike
+    /// the point-read path which holds a dedicated fd. When that path was an
+    /// ephemeral snapshot dir the connector has since cleared
+    /// (`SnapshotManager.clearSnapshot`), serving the cached reader would fail with
+    /// ENOENT mid-merge. Gating a warm hit on this predicate forces a dead-path
+    /// set to an authoritative rebuild from the current live dir instead.
+    ///
+    /// The reader `Arc`s are cloned under a brief lock; the `stat`s run OUTSIDE
+    /// the registry mutex (no filesystem I/O under the lock). A key with no cached
+    /// entry returns `true` vacuously — there is nothing stale to guard; the
+    /// caller's normal miss/rebuild handles it.
+    fn cached_paths_all_present(&self, key: &TableKey, ddl_hash: u64) -> bool {
+        let readers: Vec<Arc<SSTableReader>> = {
+            let inner = self.lock_inner();
+            match inner.tables.get(key).filter(|t| t.ddl_hash == ddl_hash) {
+                Some(t) => t.readers.iter().map(|r| Arc::clone(&r.reader)).collect(),
+                None => return true,
+            }
+        };
+        readers.iter().all(|r| reader_backing_present(r))
+    }
+
     /// Install the test-only swap rendezvous (see the field doc).
     #[cfg(test)]
     pub(crate) fn set_swap_barrier(&self, f: Arc<dyn Fn() + Send + Sync>) {
@@ -663,6 +739,17 @@ impl WarmTableRegistry {
 /// `udt_registry = None`, so — to keep warm a parse-cost-only change with no
 /// read-semantics divergence — this does NOT set a registry either. Wiring a real
 /// registry into BOTH paths together is issue #2349; see the module doc.
+/// Whether a cached reader's backing `Data.db` still resolves on disk (issue
+/// #2352). A cheap `metadata` stat on the reader's `file_path` — the path is
+/// almost always dentry-cached, and this runs only on the per-request warm probe
+/// path, never a hot inner loop. Returning `false` (an ENOENT/`stat` failure)
+/// means the reader was opened from a path that has since been cleared (a
+/// per-query snapshot dir), so it must be re-opened from the current live dir
+/// rather than served (which would ENOENT on its next lazy scan re-open).
+fn reader_backing_present(reader: &SSTableReader) -> bool {
+    std::fs::metadata(reader.file_path()).is_ok()
+}
+
 fn open_one_reader(
     runtime: &tokio::runtime::Runtime,
     path: &Path,
