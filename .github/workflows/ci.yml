@@ -269,14 +269,53 @@ jobs:
           bash scripts/ci/ci-timing-summary.sh measure "core integration archive" -- bash <<'BASH'
           set -euo pipefail
           ARCHIVE_FILE="target/nextest/core-integration-tests.tar.zst"
+          # Enumerate cqlite-core integration `--test` targets from authoritative
+          # Cargo metadata (issue #2359). A feature-blind `find` archived every
+          # tests/*.rs with only `--features cli-helpers`, so a target carrying
+          # `required-features` NOT satisfiable here (the arrow-only
+          # issue_1495_arrow_accessor_parity, the work-counters+write-support
+          # issue_2302_written_index_resolve) broke the archive build. Each such
+          # target has its OWN dedicated gate executor (see cqlite-core/Cargo.toml),
+          # so we skip them here — LOUDLY, never silently — and this stays correct
+          # as new feature-gated targets land.
+          core_metadata="$(cargo metadata --no-deps --format-version 1)"
+          # Subset rule: skip a target ONLY when its required-features are not a
+          # subset of this build's transitively-enabled feature set — the closure
+          # of cqlite-core's `default` feature + `cli-helpers` (`--features` ADDS
+          # to defaults, it does not replace them) over the metadata `.features`
+          # graph, never a hand-maintained list. A target gated on an
+          # already-enabled feature (e.g. the default `write-support`) is
+          # satisfiable and stays archived.
+          enabled_features="$(printf '%s' "$core_metadata" | jq -c '
+            .packages[] | select(.name == "cqlite-core") | .features as $f
+            | def close: . as $s
+                | ([$s[], ($s[] | ($f[.] // [])[] | select(in($f)))] | unique)
+                | if length == ($s | length) then . else close end;
+            (["default", "cli-helpers"] | map(select(in($f)))) | close')"
+          echo "Archive-enabled cqlite-core feature closure: $enabled_features"
           mapfile -t integration_tests < <(
-            find cqlite-core/tests -maxdepth 1 -type f -name '*.rs' -print \
-              | sed 's#^cqlite-core/tests/##; s#\.rs$##' \
-              | sort
+            printf '%s' "$core_metadata" | jq -r --argjson enabled "$enabled_features" '
+              .packages[] | select(.name == "cqlite-core") | .targets[]
+              | select(.kind[] == "test")
+              | select((((."required-features" // []) - $enabled) | length) == 0)
+              | .name' | sort
+          )
+          mapfile -t skipped_tests < <(
+            printf '%s' "$core_metadata" | jq -r --argjson enabled "$enabled_features" '
+              .packages[] | select(.name == "cqlite-core") | .targets[]
+              | select(.kind[] == "test")
+              | select((((."required-features" // []) - $enabled) | length) > 0)
+              | "\(.name) [requires: \((."required-features") | join(","))]"' | sort
           )
           if [ "${#integration_tests[@]}" -eq 0 ]; then
             echo "No cqlite-core integration test targets found" >&2
             exit 1
+          fi
+          if [ "${#skipped_tests[@]}" -gt 0 ]; then
+            echo "⚠️  Skipping ${#skipped_tests[@]} cqlite-core --test target(s) whose required-features are not a subset of this archive's enabled feature closure (default + cli-helpers); each has a dedicated gate executor:" >&2
+            for skipped in "${skipped_tests[@]}"; do
+              echo "     - $skipped" >&2
+            done
           fi
 
           cmd=(
@@ -296,7 +335,8 @@ jobs:
             echo "### Core integration nextest archive"
             echo
             echo "- Archive: \`$ARCHIVE_FILE\`"
-            echo "- Target set: ${#integration_tests[@]} explicit \`cqlite-core/tests/*.rs\` integration targets"
+            echo "- Target set: ${#integration_tests[@]} metadata-enumerated \`cqlite-core\` integration \`--test\` targets"
+            echo "- Skipped (required-features not satisfiable here; dedicated gate executors): ${#skipped_tests[@]}"
           } >> "$GITHUB_STEP_SUMMARY"
           BASH
 
@@ -561,7 +601,6 @@ jobs:
           # are intentionally excluded here because they use synthetic metadata with
           # inconsistent chunk sizes unrelated to the UUID-discovery fix.
           cargo test --package cqlite-integration-tests \
-            --test chunked_data_reader_direct_test \
             --test comprehensive_component_integration_tests \
             --test fixture_specific_integration_tests \
             --test golden_path_get_operations_tests \
