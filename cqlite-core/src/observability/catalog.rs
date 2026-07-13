@@ -156,6 +156,23 @@ pub const READ_PARTITIONS: &str = "cqlite.read.partitions";
 /// attributes: [`attr::SSTABLE_FORMAT`].
 pub const READ_DURATION: &str = "cqlite.read.duration";
 
+/// `cqlite.sstable.index_parses_total` — counter `1` (issue #2383).
+///
+/// Incremented ONCE each time the full BIG/NB `Index.db` partition index is
+/// parsed end-to-end into partition entries (`parse_all_partition_keys_with_summary`,
+/// the O(entries) `memcmp`/vint loop that dominates opening a reader for a
+/// many-partition SSTable). It is the scale-free, path-independent probe for the
+/// #2383 resolve-phase CPU spin: the field failure re-parsed the SAME 1.58M-entry
+/// Index.db 8× for one logical query (redundant per-generation opens across
+/// per-query snapshot teardown + un-coalesced concurrent splits), so this counter
+/// climbs far past the number of distinct generations. A correct read path parses
+/// each generation's Index.db at most ONCE per query (warm reuse / rebind
+/// thereafter), so `index_parses_total ≈ Σ generations`, not `Σ generations ×
+/// opens`. Emitted from every full-parse site (warm rebuild, aggregate merge,
+/// point-read routing) so no single call path can hide a redundant parse. No
+/// high-cardinality attributes.
+pub const INDEX_PARSES_TOTAL: &str = "cqlite.sstable.index_parses_total";
+
 /// `cqlite.storage.open.sstables` — counter `{sstable}`.
 ///
 /// SSTables discovered and opened by a single [`StorageEngine`] open, summed
@@ -574,6 +591,7 @@ pub const ALL_METRICS: &[&str] = &[
     MERGE_ROWS_IN,
     MERGE_ROWS_OUT,
     QUERY_DEGRADED_PATH,
+    INDEX_PARSES_TOTAL,
     STORAGE_OPEN_SSTABLES,
     STORAGE_OPEN_BYTES,
     STORAGE_OPEN_TABLES,
@@ -697,6 +715,15 @@ mod tests {
         assert!(ALL_METRICS.contains(&RPC_PHASE_ACTIVE));
         assert_eq!(RPC_PHASE_ACTIVE, "cqlite.rpc.phase.active");
         assert!(RPC_PHASE_ACTIVE.starts_with("cqlite."));
+    }
+
+    #[test]
+    fn index_parses_total_counter_is_registered_and_namespaced() {
+        // Issue #2383: the redundant-Index.db-parse probe must be catalogued (so
+        // the registration/uniqueness checks cover it) and namespaced.
+        assert!(ALL_METRICS.contains(&INDEX_PARSES_TOTAL));
+        assert_eq!(INDEX_PARSES_TOTAL, "cqlite.sstable.index_parses_total");
+        assert!(INDEX_PARSES_TOTAL.starts_with("cqlite."));
     }
 
     #[test]

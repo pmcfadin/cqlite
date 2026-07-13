@@ -70,7 +70,7 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
         tracing::debug!("SSTableReader::scan - Starting scan");
-        tracing::debug!("SSTableReader::scan - File path: {:?}", self.file_path);
+        tracing::debug!("SSTableReader::scan - File path: {:?}", self.file_path());
         tracing::debug!("SSTableReader::scan - Table ID: {}", table_id);
         tracing::debug!("SSTableReader::scan - Start key: {:?}", start_key);
         tracing::debug!("SSTableReader::scan - End key: {:?}", end_key);

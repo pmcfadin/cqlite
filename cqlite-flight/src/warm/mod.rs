@@ -37,6 +37,7 @@ pub mod budget;
 pub mod identity;
 pub mod metrics;
 pub mod probe;
+pub mod rebuild;
 pub mod registry;
 
 pub use identity::{GenerationId, GenerationSet};

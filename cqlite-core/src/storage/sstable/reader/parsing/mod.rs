@@ -183,13 +183,13 @@ impl SSTableReader {
             if let Some(registry) = self.schema_registry.as_ref() {
                 // Extract keyspace/table from SSTable path (authoritative source)
                 // Directory structure: {keyspace}/{table_name}-{uuid}/Data.db
-                let (keyspace, table_name) = match extract_keyspace_table_from_path(&self.file_path)
-                {
+                let file_path = self.file_path();
+                let (keyspace, table_name) = match extract_keyspace_table_from_path(&file_path) {
                     Ok(names) => names,
                     Err(e) => {
                         debug!(
                             "get_table_schema: Failed to extract names from path {}: {}. Falling back to header names.",
-                            self.file_path.display(), e
+                            file_path.display(), e
                         );
                         // Fallback to header names if path parsing fails
                         (self.header.keyspace.clone(), self.header.table_name.clone())

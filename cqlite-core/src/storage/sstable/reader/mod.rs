@@ -95,7 +95,7 @@ use header::{
     calculate_actual_header_size, extract_generation_from_path, parse_header_with_version_detection,
 };
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
@@ -351,6 +351,24 @@ impl SSTableReader {
         Self::open_with_cache(path, config, platform, cache).await
     }
 
+    /// Cancel-aware [`open`](Self::open) (issue #2383 fix C).
+    ///
+    /// Threads a synchronous [`ScanCancel`](crate::storage::scan_cancel::ScanCancel)
+    /// into the Index.db partition-index parse so a client-disconnect cancel
+    /// aborts a 1.58M-entry parse within one poll interval instead of pinning a
+    /// tokio worker to completion. Non-cancellable callers use [`open`](Self::open)
+    /// (a default never-cancel flag). Returns [`Error::Cancelled`] on a mid-parse
+    /// trip.
+    pub async fn open_cancellable(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        cancel: crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Self> {
+        let cache = super::build_chunk_cache(config);
+        Self::open_with_cache_cancellable(path, config, platform, cache, cancel).await
+    }
+
     /// Open an SSTable file for reading, sharing the provided
     /// [`DecompressedChunkCache`](crate::storage::cache::DecompressedChunkCache).
     ///
@@ -362,6 +380,26 @@ impl SSTableReader {
         config: &Config,
         platform: Arc<Platform>,
         cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+    ) -> Result<Self> {
+        Self::open_with_cache_cancellable(
+            path,
+            config,
+            platform,
+            cache,
+            crate::storage::scan_cancel::ScanCancel::default(),
+        )
+        .await
+    }
+
+    /// Cancel-aware [`open_with_cache`](Self::open_with_cache) (issue #2383 fix C):
+    /// same as it but threads `cancel` into the Index.db parse. See
+    /// [`open_cancellable`](Self::open_cancellable).
+    pub async fn open_with_cache_cancellable(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+        cancel: crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Self> {
         use crate::observability::{self as obs, catalog};
         use tracing::Instrument as _;
@@ -376,7 +414,7 @@ impl SSTableReader {
         // `.await`: entering a span guard and then awaiting can attach unrelated
         // async work scheduled on this task to the span. `Instrument` enters the
         // span only while this specific future is polled.
-        let result = Self::open_inner(path, config, platform, cache)
+        let result = Self::open_inner(path, config, platform, cache, cancel)
             .instrument(span.clone())
             .await;
         match &result {
@@ -413,6 +451,7 @@ impl SSTableReader {
         config: &Config,
         platform: Arc<Platform>,
         chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+        cancel: crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Self> {
         // Retain the open-time Config before any local `config` shadowing so
         // `perform_integrity_check` can delegate to `verify::verify_sstable`
@@ -654,7 +693,7 @@ impl SSTableReader {
         }
 
         // Load index if available (supports both integrated and component-based)
-        let index = Self::load_index(&file, &header, &platform, path)
+        let index = Self::load_index(&file, &header, &platform, path, &cancel)
             .instrument(tracing::debug_span!("sstable.reader.open.load_index"))
             .await?;
 
@@ -667,11 +706,11 @@ impl SSTableReader {
         // Index.db from a present-but-unloadable one (issue #2302) so the full
         // enumeration can WARN loud on the latter instead of silently full-scanning.
         let (index_reader, index_present_but_unloadable) =
-            match Self::load_index_reader(path, &platform)
+            match Self::load_index_reader(path, &platform, &cancel)
                 .instrument(tracing::debug_span!(
                     "sstable.reader.open.load_index_reader"
                 ))
-                .await
+                .await?
             {
                 component_loading::IndexLoadOutcome::Loaded(reader) => (Some(*reader), false),
                 component_loading::IndexLoadOutcome::Absent => (None, false),
@@ -809,7 +848,7 @@ impl SSTableReader {
         });
 
         Ok(Self {
-            file_path: path.to_path_buf(),
+            file_path: arc_swap::ArcSwap::from_pointee(path.to_path_buf()),
             file,
             scan_source,
             point_source,
@@ -1253,8 +1292,58 @@ impl SSTableReader {
     /// registry keys parsed state on the file's inode-stable generation identity,
     /// so it needs the backing path to `stat` device+inode without re-listing the
     /// directory.
-    pub fn file_path(&self) -> &Path {
-        &self.file_path
+    pub fn file_path(&self) -> PathBuf {
+        // Owned clone (cheap relative to a scan/point-read): the path is now
+        // interior-mutable to support [`Self::rebind_path`] (#2383), so we cannot
+        // hand out a borrow into the `ArcSwap`.
+        self.file_path.load().as_ref().clone()
+    }
+
+    /// The `Data.db` size in bytes captured at open. Used by the warm registry's
+    /// authoritative rebind identity check (issue #2383): a rebind is accepted
+    /// only when the live candidate's `(device, inode)` AND size match this
+    /// reader's, else it fails closed to a full re-open.
+    pub fn file_size(&self) -> u64 {
+        self.stats.file_size
+    }
+
+    /// Rebind this reader's lazy-scan path to `new_path` WITHOUT re-opening or
+    /// re-parsing (issue #2383, the #2356 "rebind-by-inode" direction).
+    ///
+    /// The caller MUST have already established that `new_path` is the SAME
+    /// on-disk generation as this reader by AUTHORITATIVE identity — matching
+    /// `(device, inode)` and size (issue #28 no-heuristics; Cassandra snapshot
+    /// files are hardlinks to the immutable SSTable, so a same-inode candidate is
+    /// byte-identical). The already-open point/scan handles reference the shared
+    /// inode and stay valid across the swap; only [`Self::new_scan_cursor`]'s
+    /// per-scan `File::open` reads this path, so pointing it at a LIVE hardlink
+    /// restores the #2352 ENOENT protection with zero parse cost.
+    ///
+    /// ## In-flight isolation invariant (roborev-1654 HIGH, adjudicated)
+    ///
+    /// Mutating this shared `Arc<SSTableReader>`'s path while a concurrent request
+    /// scans it does NOT break the in-flight request's isolation, because the
+    /// rebind is byte-transparent and monotone-toward-live:
+    /// 1. **Same immutable inode.** The sole caller (`warm::registry::rebind`)
+    ///    fires only after `rebuild::rebind_matches` proves
+    ///    `(device, inode, generation)` + size equality; every rebind target is a
+    ///    hardlink to the SAME immutable SSTable inode, so any path this reader
+    ///    carries yields byte-identical data (issue #28 no-heuristics).
+    /// 2. **Atomic swap.** `file_path` is an `arc_swap::ArcSwap<PathBuf>`; a
+    ///    concurrent `file_path()` sees either the old or the new whole `PathBuf`,
+    ///    never a torn value.
+    /// 3. **Dead → live only.** A rebind happens only when the current path is
+    ///    dead and an identity-matching LIVE hardlink exists, so an in-flight
+    ///    request's NEXT `new_scan_cursor` `File::open` is strictly MORE likely to
+    ///    succeed after the rebind than before (pre-rebind it would ENOENT).
+    /// 4. **No semantics off the path.** No `file_path()` consumer re-derives
+    ///    keyspace/table/schema from the path after `open`; the scan path uses it
+    ///    ONLY for `File::open` (bytes) and all parsed read state (header,
+    ///    compression info, CRC, index, generation) lives on `&self`, fixed at
+    ///    open — the swapped path changes which hardlink is read, never what the
+    ///    bytes mean.
+    pub fn rebind_path(&self, new_path: &Path) {
+        self.file_path.store(Arc::new(new_path.to_path_buf()));
     }
 
     /// The immutable `[first_key_token, last_key_token]` endpoints cached at open
@@ -1287,7 +1376,7 @@ impl SSTableReader {
 
     /// Close the reader and release resources
     pub async fn close(self) -> Result<()> {
-        debug!("Closing SSTable reader for {:?}", self.file_path);
+        debug!("Closing SSTable reader for {:?}", self.file_path());
         // File will be closed automatically when dropped. The shared B1
         // decompressed-chunk cache is reference-counted and outlives one reader
         // (issue #1568: the per-reader block cache that was cleared here is gone).
@@ -1336,12 +1425,12 @@ impl SSTableReader {
 
     /// Get the SSTable format version string
     pub fn format_version(&self) -> Result<String> {
-        let filename = self
-            .file_path
+        let file_path = self.file_path();
+        let filename = file_path
             .file_name()
             .and_then(|f| f.to_str())
             .ok_or_else(|| {
-                Error::InvalidPath(format!("Invalid SSTable filename: {:?}", self.file_path))
+                Error::InvalidPath(format!("Invalid SSTable filename: {:?}", file_path))
             })?;
 
         let parts: Vec<&str> = filename.split('-').collect();
@@ -1416,7 +1505,7 @@ impl Drop for SSTableReader {
 impl std::fmt::Debug for SSTableReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SSTableReader")
-            .field("file_path", &self.file_path)
+            .field("file_path", &self.file_path())
             .field("header", &self.header)
             .field("has_index", &self.index.is_some())
             .field("has_bloom_filter", &self.bloom_filter.is_some())

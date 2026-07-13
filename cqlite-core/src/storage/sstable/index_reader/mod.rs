@@ -23,7 +23,7 @@ use super::summary_reader::SummaryReader;
 // working for `verify.rs`, `s3_verification_test.rs`, and the in-module tests.
 mod parse;
 pub(crate) use parse::parse_big_index_entry;
-use parse::parse_index_data_with_summary;
+use parse::parse_index_data_cancellable;
 // `parse_all_partition_keys` (legacy API) is consumed only by in-crate test modules
 // (`s3_verification_test.rs`, the `tests` module below).
 #[cfg(test)]
@@ -165,6 +165,26 @@ impl IndexReader {
         platform: Arc<Platform>,
         summary_reader: Option<&SummaryReader>,
     ) -> Result<Self> {
+        Self::open_with_summary_cancellable(
+            path,
+            platform,
+            summary_reader,
+            &crate::storage::scan_cancel::ScanCancel::default(),
+        )
+        .await
+    }
+
+    /// Cancel-aware variant of [`Self::open_with_summary`] (issue #2383 fix C):
+    /// the O(entries) partition-index parse polls `cancel` at a bounded interval
+    /// and returns [`Error::Cancelled`] promptly on a client-disconnect trip,
+    /// instead of pinning a worker to completion. Non-cancellable callers use
+    /// [`Self::open`]/[`Self::open_with_summary`] with a default never-cancel flag.
+    pub async fn open_with_summary_cancellable(
+        path: &Path,
+        platform: Arc<Platform>,
+        summary_reader: Option<&SummaryReader>,
+        cancel: &crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<Self> {
         if !platform.fs().exists(path).await? {
             return Err(Error::not_found(format!(
                 "Index.db file not found: {}",
@@ -197,15 +217,20 @@ impl IndexReader {
         // sensitive FULL enumeration can reject a mid-entry-truncated index; the
         // residual boundary-aligned-drop gap is closed at the enumeration site by
         // the last-partition coverage check. No heuristics (issue #28).
-        let (remaining, index_data) = match parse_index_data_with_summary(&buffer, summary_reader) {
-            Ok((remaining, data)) => (remaining, data),
-            Err(e) => {
-                return Err(Error::corruption(format!(
-                    "Failed to parse Index.db: {:?}",
-                    e
-                )));
-            }
-        };
+        let (remaining, index_data) =
+            match parse_index_data_cancellable(&buffer, summary_reader, cancel) {
+                Ok((remaining, data)) => (remaining, data),
+                // A mid-parse cancellation (issue #2383) is surfaced by VARIANT, never
+                // masked as a corruption error, so the warm path maps it to
+                // `WarmError::Cancelled` rather than a fail-closed retain.
+                Err(e @ Error::Cancelled) => return Err(e),
+                Err(e) => {
+                    return Err(Error::corruption(format!(
+                        "Failed to parse Index.db: {:?}",
+                        e
+                    )));
+                }
+            };
 
         // A well-formed Index.db is a sequence of WHOLE entries running exactly to
         // EOF (the `rest.is_empty()` parity asserts in this module's tests). Leftover

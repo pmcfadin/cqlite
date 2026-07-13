@@ -9,73 +9,65 @@
 
 use super::{IndexData, IndexHeader, PartitionIndexEntry, PromotedIndexData};
 use crate::parser::vint::parse_vuint;
+use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::header_spec::get_global_registry;
 use crate::storage::sstable::summary_reader::SummaryReader;
+use crate::Result;
 use nom::{bytes::complete::take, number::complete::be_u16, IResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Parse Index.db file data with optional Summary.db correlation using spec-driven approach
+/// How often the O(entries) `Index.db` parse loop polls the cancel flag
+/// (issue #2383 fix C): once per this many entries, NOT per entry — a single
+/// relaxed atomic load amortised over ~64k `memcmp`/vint decodes is free, yet a
+/// client-disconnect cancel still aborts a 1.58M-entry parse within one interval
+/// instead of pinning a worker to completion.
+const CANCEL_POLL_INTERVAL: usize = 1 << 16;
+
+/// Parse Index.db file data with optional Summary.db correlation using spec-driven approach.
+///
+/// Non-cancellable façade over [`parse_index_data_cancellable`] (issue #2383): the
+/// default [`ScanCancel`] never trips, so the cancel arm is unreachable here.
 pub(super) fn parse_index_data_with_summary<'a>(
     input: &'a [u8],
     summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], IndexData> {
     use nom::error::{Error as NomError, ErrorKind};
-
-    // First try spec-driven header parsing
-    let registry = get_global_registry();
-    let (remaining, header) = match registry.parse_index_header(input) {
-        Ok(parsed_header) => {
-            tracing::debug!("Successfully parsed Index.db header using spec-driven approach");
-
-            // Convert ParsedHeader to IndexHeader
-            let header = IndexHeader {
-                version: parsed_header
-                    .fields
-                    .get("version")
-                    .and_then(|v| v.as_u32().ok())
-                    .unwrap_or(1),
-                entry_count: parsed_header
-                    .fields
-                    .get("entry_count")
-                    .and_then(|v| v.as_u32().ok())
-                    .unwrap_or(0),
-                data_size: parsed_header
-                    .fields
-                    .get("data_size")
-                    .and_then(|v| v.as_u64().ok())
-                    .unwrap_or(input.len() as u64),
-                checksum: parsed_header
-                    .fields
-                    .get("checksum")
-                    .and_then(|v| v.as_u32().ok())
-                    .unwrap_or(0),
-            };
-
-            // Skip header bytes for data parsing
-            let header_size = parsed_header.header_size;
-            if input.len() < header_size {
-                return Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)));
-            }
-            (&input[header_size..], header)
+    match parse_index_data_cancellable(input, summary_reader, &ScanCancel::default()) {
+        Ok(pair) => Ok(pair),
+        // Restore the pre-refactor error shape for the IResult callers (roborev-1654):
+        // a header that declares more bytes than the file holds is a TRUNCATION and
+        // must map back to `Eof` (the only `Corruption` this path can emit is that
+        // header-truncation signal from `parse_index_header_prefix`; the entry loop
+        // `break`s rather than erroring). Any other structural failure stays `Fail`.
+        // A default (never-cancel) flag cannot yield `Cancelled`.
+        Err(crate::Error::Corruption(_)) => {
+            Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)))
         }
-        Err(_) => {
-            tracing::debug!("Spec-driven header parsing failed, assuming headerless format");
+        Err(_) => Err(nom::Err::Error(NomError::new(input, ErrorKind::Fail))),
+    }
+}
 
-            // Parse all partition key digests - no header in some formats
-            let header = IndexHeader {
-                version: 1,
-                entry_count: 0, // Will be updated after parsing entries
-                data_size: input.len() as u64,
-                checksum: 0,
-            };
-            (input, header)
-        }
-    };
+/// Cancel-aware Index.db parse (issue #2383 fix C).
+///
+/// Polls `cancel` before the header and roughly every [`CANCEL_POLL_INTERVAL`]
+/// entries inside the O(entries) loop, returning [`crate::Error::Cancelled`]
+/// promptly instead of running a 1.58M-entry parse to completion after a client
+/// disconnect. This is the SINGLE site that emits `index_parses_total`, so both
+/// the cancellable and non-cancellable façades count a full parse exactly once.
+pub(super) fn parse_index_data_cancellable<'a>(
+    input: &'a [u8],
+    summary_reader: Option<&SummaryReader>,
+    cancel: &ScanCancel,
+) -> Result<(&'a [u8], IndexData)> {
+    // Coarse pre-parse cancel check (covers a pre-cancelled open).
+    cancel.check()?;
 
-    // Parse partition entries from remaining data
+    let (remaining, header) = parse_index_header_prefix(input)?;
+
+    // Parse partition entries (cancel-polled) from the post-header data.
     let (remaining, partition_entries) =
-        parse_all_partition_keys_with_summary(remaining, summary_reader)?;
+        parse_all_partition_keys_cancellable(remaining, summary_reader, cancel)?;
 
     // Build lookup table with zero-copy approach using Arc::clone (reference counting only)
     // This eliminates the memory explosion from cloning Vec<u8> key digests
@@ -98,6 +90,60 @@ pub(super) fn parse_index_data_with_summary<'a>(
             key_lookup,
         },
     ))
+}
+
+/// Parse (or synthesize, for the headerless format) the `Index.db` header prefix,
+/// returning the post-header remainder. An unparseable header falls back to the
+/// headerless layout exactly as before (issue #28, no heuristics — the spec-driven
+/// registry is the authority, the headerless case is the documented Cassandra 5.0
+/// shape). A header that DECLARES more bytes than the file holds is a truncation
+/// error (preserves the pre-refactor `Eof`→corruption behavior).
+fn parse_index_header_prefix(input: &[u8]) -> Result<(&[u8], IndexHeader)> {
+    let registry = get_global_registry();
+    match registry.parse_index_header(input) {
+        Ok(parsed_header) => {
+            tracing::debug!("Successfully parsed Index.db header using spec-driven approach");
+            let header = IndexHeader {
+                version: parsed_header
+                    .fields
+                    .get("version")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(1),
+                entry_count: parsed_header
+                    .fields
+                    .get("entry_count")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(0),
+                data_size: parsed_header
+                    .fields
+                    .get("data_size")
+                    .and_then(|v| v.as_u64().ok())
+                    .unwrap_or(input.len() as u64),
+                checksum: parsed_header
+                    .fields
+                    .get("checksum")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(0),
+            };
+            let header_size = parsed_header.header_size;
+            if input.len() < header_size {
+                return Err(crate::Error::corruption(
+                    "Index.db header declares more bytes than the file holds",
+                ));
+            }
+            Ok((&input[header_size..], header))
+        }
+        Err(_) => {
+            tracing::debug!("Spec-driven header parsing failed, assuming headerless format");
+            let header = IndexHeader {
+                version: 1,
+                entry_count: 0, // Will be updated after parsing entries
+                data_size: input.len() as u64,
+                checksum: 0,
+            };
+            Ok((input, header))
+        }
+    }
 }
 
 /// Parse all partition entries from the Index.db file.
@@ -127,13 +173,42 @@ pub(super) fn parse_index_data_with_summary<'a>(
 /// inline so Summary.db correlation is no longer needed for parsing.
 pub(super) fn parse_all_partition_keys_with_summary<'a>(
     input: &'a [u8],
-    _summary_reader: Option<&SummaryReader>,
+    summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], Vec<PartitionIndexEntry>> {
+    use nom::error::{Error as NomError, ErrorKind};
+    // Non-cancellable façade over the break-on-error entry loop: it returns the
+    // parsed prefix as `Ok` on a malformed/truncated tail (never a structural
+    // `Err`), and a default flag never trips `Cancelled`, so no `Err` is reachable
+    // here in practice. Map defensively but preserve the shape distinction for
+    // symmetry with `parse_index_data_with_summary` (roborev-1654): a `Corruption`
+    // (truncation) → `Eof`, anything else → `Fail`.
+    match parse_all_partition_keys_cancellable(input, summary_reader, &ScanCancel::default()) {
+        Ok(pair) => Ok(pair),
+        Err(crate::Error::Corruption(_)) => {
+            Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)))
+        }
+        Err(_) => Err(nom::Err::Error(NomError::new(input, ErrorKind::Fail))),
+    }
+}
+
+/// Cancel-aware entry loop (issue #2383 fix C). Polls `cancel` once per
+/// [`CANCEL_POLL_INTERVAL`] entries; on a trip returns [`crate::Error::Cancelled`]
+/// promptly. Emits the `index_parses_total` counter exactly once on a full pass —
+/// the SINGLE full-parse site (both façades route here).
+pub(super) fn parse_all_partition_keys_cancellable<'a>(
+    input: &'a [u8],
+    _summary_reader: Option<&SummaryReader>,
+    cancel: &ScanCancel,
+) -> Result<(&'a [u8], Vec<PartitionIndexEntry>)> {
     let mut entries = Vec::new();
     let mut remaining = input;
 
-    let mut entry_index = 0;
+    let mut entry_index = 0usize;
     while !remaining.is_empty() {
+        // #2383 fix C: bounded-interval cooperative cancel (not per entry).
+        if entry_index % CANCEL_POLL_INTERVAL == 0 {
+            cancel.check()?;
+        }
         match parse_big_index_entry(remaining) {
             Ok((rest, entry)) => {
                 debug_assert!(
@@ -156,6 +231,19 @@ pub(super) fn parse_all_partition_keys_with_summary<'a>(
     }
 
     tracing::debug!("Parsed {} partition entries from Index.db", entries.len());
+    // Issue #2383 (roborev-1653 Low): count only a FULL pass — `remaining`
+    // non-empty means the loop `break`-ed early on a malformed/truncated tail
+    // (the documented partial-prefix tolerance `IndexReader::open` relies on for
+    // BIG point-lookup callers), which is NOT the "re-parsed the same generation"
+    // spin this counter exists to observe. Counting it would over-count partial
+    // parses against the counter's documented "one full Index.db parse" meaning.
+    if remaining.is_empty() {
+        crate::observability::add_counter(
+            crate::observability::catalog::INDEX_PARSES_TOTAL,
+            1,
+            &[],
+        );
+    }
     Ok((remaining, entries))
 }
 
