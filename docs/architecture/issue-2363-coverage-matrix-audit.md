@@ -1,6 +1,6 @@
 # Issue #2363 — Coverage-matrix blind-spot audit (field axes vs local E2E coverage)
 
-Status: IN PROGRESS — mapper evidence landing; synthesis + hole verification pending.
+Status: COMPLETE 2026-07-13 — six axes mapped, holes verified against code routing, issues #2370–#2381 filed.
 Method: issue #2363 body (owner-approved 2026-07-12). Round-7 context: #2286.
 Do-not-refile set: #2358 (E2E not on PRs), #2362 (uncompressed scan path + streaming asserts),
 #2356 (per-query-snapshot mode), missing-index-components synthesis (noted on #2295),
@@ -244,20 +244,20 @@ UNCOVERED or PARTIAL.
 
 | Issue | Holes | Priority |
 |---|---|---|
-| Concurrent do_get integration coverage (N≥8 streams; in_flight/phase.active settle + mid-flight read-back; process thread budget; uncompressed variant) | CONC-1..4, QS-3 | P1 |
-| Shadowed data through the real do_get transport (row-set asserts; TTL + range-tombstone seams; sparse predicate+LIMIT at rpc; upgrade seam pin count→set) | SHAD-1,2,3,6 + QS-1 | P2 |
-| BTI (da) E2E via Flight do_get + testbed BTI variant (SummaryReader boundary-key risk — may be red on first run) | BTI-1 | P2 |
-| Compressed (stitching) BIG-nb through Flight do_get (close the testbed-inversion gap) | FMT-1 | P2 |
-| Query-semantics oracle routed through Flight do_get (parity lane) | SHAD-4 | P2 |
-| Aggregate/count(*) through real do_get (`DoGetInput::Aggregate` rpc-layer test) | QS-2 | P2 |
-| #2352 clearSnapshot regression at Flight transport + generation turnover during in-flight scan | FI-1, FI-3 | P2 |
-| Testbed/loadtest E2E gaps: shadowed rows in load table, point-lookup + sparse-predicate+LIMIT queries, gating driver exit, automated count(*) parity | SHAD-5, QS-5, CONC driver note | P2 |
-| Trino page-source cancel/close teardown test | QS-4 | P3 |
-| Real process-kill mid-stream injection in testbed | FI-2 | P3 |
-| BTI compression-axis fixtures (Snappy/Zstd/Deflate/uncompressed-BTI) — under fixture epic #2303; constrained by corpus-regen freeze #2222 | FMT-2 | P3 |
-| Adjudicate Branch C dead compressed offset-window arm | FMT-3 | P3 |
+| **#2370** — Concurrent do_get integration coverage (N≥8 streams; in_flight/phase.active settle + mid-flight read-back; process thread budget; uncompressed variant) | CONC-1..4, QS-3 | P1 |
+| **#2371** — Shadowed data through the real do_get transport (row-set asserts; TTL + range-tombstone seams; sparse predicate+LIMIT at rpc; upgrade seam pin count→set) | SHAD-1,2,3,6 + QS-1 | P2 |
+| **#2372** — BTI (da) E2E via Flight do_get + testbed BTI variant (SummaryReader boundary-key risk — may be red on first run) | BTI-1 | P2 |
+| **#2373** — Compressed (stitching) BIG-nb through Flight do_get (close the testbed-inversion gap) | FMT-1 | P2 |
+| **#2374** — Query-semantics oracle routed through Flight do_get (parity lane) | SHAD-4 | P2 |
+| **#2375** — Aggregate/count(*) through real do_get (`DoGetInput::Aggregate` rpc-layer test) | QS-2 | P2 |
+| **#2376** — #2352 clearSnapshot regression at Flight transport + generation turnover during in-flight scan | FI-1, FI-3 | P2 |
+| **#2377** — Testbed/loadtest E2E gaps: shadowed rows in load table, point-lookup + sparse-predicate+LIMIT queries, gating driver exit, automated count(*) parity | SHAD-5, QS-5, CONC driver note | P2 |
+| **#2378** — Trino page-source cancel/close teardown test | QS-4 | P3 |
+| **#2379** — Real process-kill mid-stream injection in testbed | FI-2 | P3 |
+| **#2380** — BTI compression-axis fixtures (Snappy/Zstd/Deflate/uncompressed-BTI) — under fixture epic #2303; constrained by corpus-regen freeze #2222 | FMT-2 | P3 |
+| **#2381** — Adjudicate Branch C dead compressed offset-window arm | FMT-3 | P3 |
 
-(Issue numbers stamped after filing.)
+Filed 2026-07-13: #2370–#2381.
 
 ### Suspected-but-unconfirmed (recorded, NOT filed)
 - Flight boundary-key resolution via `SummaryReader` (producer.rs:296-309) may be broken or
