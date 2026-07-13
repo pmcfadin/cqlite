@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["cqlite_core",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.0/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"struct\" href=\"cqlite_core/storage/write_engine/merge/struct.MergeEntry.html\" title=\"struct cqlite_core::storage::write_engine::merge::MergeEntry\">MergeEntry</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.0/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"struct\" href=\"cqlite_core/storage/write_engine/mutation/struct.ClusteringKey.html\" title=\"struct cqlite_core::storage::write_engine::mutation::ClusteringKey\">ClusteringKey</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.0/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"struct\" href=\"cqlite_core/storage/write_engine/mutation/struct.DecoratedKey.html\" title=\"struct cqlite_core::storage::write_engine::mutation::DecoratedKey\">DecoratedKey</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.0/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"struct\" href=\"cqlite_core/types/struct.RowKey.html\" title=\"struct cqlite_core::types::RowKey\">RowKey</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.97.0/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"struct\" href=\"cqlite_core/types/struct.TableId.html\" title=\"struct cqlite_core::types::TableId\">TableId</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[1515]}

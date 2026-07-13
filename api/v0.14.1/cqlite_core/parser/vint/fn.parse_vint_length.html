@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Parse an UNSIGNED VInt length/count field (Cassandra `writeUnsignedVInt`)."><title>parse_vint_length in cqlite_core::parser::vint - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">parse_vint_length</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">parse_<wbr>vint_<wbr>length</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#producer-classification-issue-1623" title="Producer classification (Issue #1623)">Producer classification (Issue #1623)</a><ul><li><a href="#call-site-verdicts" title="Call-site verdicts">Call-site verdicts</a></li></ul></li><li><a href="#safety" title="Safety">Safety</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>parser::<wbr>vint</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">parser</a>::<wbr><a href="index.html">vint</a></div><h1>Function <span class="fn">parse_<wbr>vint_<wbr>length</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/parser/vint.rs.html#552-565">Source</a> </span></div><pre class="rust item-decl"><code>pub fn parse_vint_length(input: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.0/std/primitive.u8.html">u8</a>]) -&gt; IResult&lt;&amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.0/std/primitive.u8.html">u8</a>], <a class="primitive" href="https://doc.rust-lang.org/1.97.0/std/primitive.usize.html">usize</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Parse an UNSIGNED VInt length/count field (Cassandra <code>writeUnsignedVInt</code>).</p>
+<h2 id="producer-classification-issue-1623"><a class="doc-anchor" href="#producer-classification-issue-1623">§</a>Producer classification (Issue #1623)</h2>
+<p>Cassandra encodes length, count, and collection-element-count fields with
+<code>writeUnsignedVInt</code> — UNSIGNED, no ZigZag (see Appendix B, encodings cheat
+sheet). ZigZag is used ONLY for genuinely-signed deltas. This function
+therefore routes through <a href="fn.parse_vuint.html" title="fn cqlite_core::parser::vint::parse_vuint"><code>parse_vuint</code></a>, NOT the signed <a href="fn.parse_vint.html" title="fn cqlite_core::parser::vint::parse_vint"><code>parse_vint</code></a>.</p>
+<p>The prior implementation routed through the signed ZigZag decoder, silently
+mis-reading any unsigned length whose bit pattern differs under ZigZag while
+consuming the same byte count (e.g. raw <code>0x05</code> is length 5, but ZigZag reads
+it as -3 → error; <code>0x04</code> is length 4 but ZigZag reads 2).</p>
+<h3 id="call-site-verdicts"><a class="doc-anchor" href="#call-site-verdicts">§</a>Call-site verdicts</h3>
+<p>FLIP-TO-UNSIGNED — bytes written by Cassandra, or read-only parsers that
+model a Cassandra on-disk structure (<code>writeUnsignedVInt</code>). These call
+<a href="fn.parse_vint_length.html" title="fn cqlite_core::parser::vint::parse_vint_length"><code>parse_vint_length</code></a>:</p>
+<ul>
+<li>Data.db rows/cells: <code>storage/sstable/row_cell_state_machine</code> and
+<code>reader/parsing/{key_parsing,block_entries,value_parsing,comparator_value_parsing}</code>.</li>
+<li>Cassandra v5 collection element counts/lengths: the <code>parse_*_v5_format</code>
+paths in <code>parser/types/collections.rs</code> (a mixed file — its legacy paths
+are KEEP-SIGNED, see below).</li>
+<li>Header-spec structural length/count fields: <code>storage/.../header_spec.rs</code>
+<code>VBytes</code>/<code>Array</code>/<code>Map</code> (read-only Cassandra header spec; no CQLite ZigZag
+writer to pair with).</li>
+</ul>
+<p>KEEP-SIGNED — CQLite-internal round-trips whose paired writer emits ZigZag
+<code>encode_vint</code>; flipping one side would corrupt the pair. These call
+<a href="fn.parse_vint_length_signed.html" title="fn cqlite_core::parser::vint::parse_vint_length_signed"><code>parse_vint_length_signed</code></a>:</p>
+<ul>
+<li>Legacy/schema/registry collection counts in <code>parser/types/collections.rs</code>,
+plus <code>parser/types/{primitives,udt}</code> (all paired with <code>serialize_cql_value</code>
+in <code>parser/types/mod.rs</code>).</li>
+<li><code>parser/statistics.rs</code> (self-encoded round-trip; the production Statistics.db
+read path is <code>enhanced_statistics_parser</code>, not these functions).</li>
+<li><code>parser/header.rs</code> standard body (paired with <code>serialize_sstable_header</code>
+<code>encode_vint</code>; real V5 data is short-circuited via
+<code>parse_cassandra5_simplified_header</code>).</li>
+<li>Range-tombstone <code>range_start</code>/<code>range_end</code> bounds in
+<code>parser/types/tombstones.rs</code> (paired with <code>serialize_cql_value</code>
+<code>encode_vint</code>).</li>
+</ul>
+<h2 id="safety"><a class="doc-anchor" href="#safety">§</a>Safety</h2>
+<p>Enforces a maximum length of 1GB (<a href="constant.MAX_VINT_LENGTH.html" title="constant cqlite_core::parser::vint::MAX_VINT_LENGTH"><code>MAX_VINT_LENGTH</code></a>) to prevent:</p>
+<ul>
+<li>Overflow on 32-bit platforms where usize is 4 bytes</li>
+<li>Memory exhaustion attacks via malicious input claiming huge lengths</li>
+</ul>
+</div></details></section></div></main></body></html>

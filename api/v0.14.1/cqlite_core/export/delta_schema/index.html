@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Delta-scan Arrow schema derivation (Epic #696, Issue #703)."><title>cqlite_core::export::delta_schema - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module delta_schema</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module delta_<wbr>schema</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#schema-layout" title="Schema layout">Schema layout</a></li><li><a href="#feature-gate" title="Feature gate">Feature gate</a></li><li><a href="#fail-before-writing-rules" title="Fail-before-writing rules">Fail-before-writing rules</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>export</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">export</a></div><h1>Module <span>delta_<wbr>schema</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/export/delta_schema.rs.html#1-493">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Delta-scan Arrow schema derivation (Epic #696, Issue #703).</p>
+<p>Derives the Arrow envelope schema from a <a href="../../schema/struct.TableSchema.html" title="struct cqlite_core::schema::TableSchema"><code>TableSchema</code></a> for CDC-style
+Parquet projections of individual SSTable generations.</p>
+<h3 id="schema-layout"><a class="doc-anchor" href="#schema-layout">§</a>Schema layout</h3>
+<p>For a table <code>t (pk int, ck text, val text, st text STATIC, PRIMARY KEY (pk, ck))</code>:</p>
+<div class="example-wrap"><pre class="language-text"><code>pk          : Int32               -- partition key, plain type
+ck          : Utf8                -- clustering key, plain type (null on partition/static ops)
+val         : Struct(nullable) {  -- regular column cell struct
+                value:      Utf8,
+                writetime:  Int64,
+                expires_at: Int64 (nullable),
+              }
+st          : Struct(nullable) {  -- static column cell struct (no `replaced`)
+                value:      Utf8,
+                writetime:  Int64,
+                expires_at: Int64 (nullable),
+              }
+__op        : Dictionary(Int8, Utf8)   -- op discriminator, dictionary-encoded
+__ts        : Int64 (nullable)         -- deletion/liveness timestamp
+__range_start : Struct(nullable) {    -- range-delete lower bound
+                  ck:         Utf8,
+                  inclusive:  Boolean,
+                }
+__range_end   : Struct(nullable) {    -- range-delete upper bound
+                  ck:         Utf8,
+                  inclusive:  Boolean,
+                }</code></pre></div><h3 id="feature-gate"><a class="doc-anchor" href="#feature-gate">§</a>Feature gate</h3>
+<p>This module is compiled only when <strong>both</strong> <code>delta-scan</code> and <code>arrow</code> features
+are enabled.  It deliberately reuses [<code>cql_type_to_arrow_data_type</code>] from
+<code>export::arrow_convert</code> (the #673 mapping) for the cell <code>value</code> field, so
+there is no duplicated CQL → Arrow type logic.</p>
+<h3 id="fail-before-writing-rules"><a class="doc-anchor" href="#fail-before-writing-rules">§</a>Fail-before-writing rules</h3>
+<p>Both error conditions are raised at schema-derivation time, before any
+output bytes are produced:</p>
+<ol>
+<li><strong>Counter tables</strong> — rejected with a descriptive error.</li>
+<li><strong>Column-name collisions</strong> — a user column whose name matches an envelope
+reserved name (e.g. <code>__op</code>) causes a hard error.  The caller may provide
+a custom <a href="struct.DeltaSchemaOpts.html#structfield.envelope_prefix" title="field cqlite_core::export::delta_schema::DeltaSchemaOpts::envelope_prefix"><code>DeltaSchemaOpts::envelope_prefix</code></a> (e.g. <code>"_cqlite_"</code>) to
+choose a different prefix for all reserved names; the error message names
+the option.</li>
+</ol>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DeltaSchemaOpts.html" title="struct cqlite_core::export::delta_schema::DeltaSchemaOpts">Delta<wbr>Schema<wbr>Opts</a></dt><dd>Options for <a href="fn.derive_delta_schema.html" title="fn cqlite_core::export::delta_schema::derive_delta_schema"><code>derive_delta_schema</code></a>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.DeltaSchemaError.html" title="enum cqlite_core::export::delta_schema::DeltaSchemaError">Delta<wbr>Schema<wbr>Error</a></dt><dd>Errors produced by <a href="fn.derive_delta_schema.html" title="fn cqlite_core::export::delta_schema::derive_delta_schema"><code>derive_delta_schema</code></a> at schema-derivation time.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.derive_delta_schema.html" title="fn cqlite_core::export::delta_schema::derive_delta_schema">derive_<wbr>delta_<wbr>schema</a></dt><dd>Derive the Arrow envelope schema for a <a href="../../schema/struct.TableSchema.html" title="struct cqlite_core::schema::TableSchema"><code>TableSchema</code></a>.</dd></dl></section></div></main></body></html>

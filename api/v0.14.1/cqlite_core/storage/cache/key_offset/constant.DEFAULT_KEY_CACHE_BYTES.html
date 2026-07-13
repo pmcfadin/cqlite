@@ -1,0 +1,42 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Default per-reader key-cache BYTE budget."><title>DEFAULT_KEY_CACHE_BYTES in cqlite_core::storage::cache::key_offset - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc constant"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">DEFAULT_KEY_CACHE_BYTES</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">DEFAULT_<wbr>KEY_<wbr>CACHE_<wbr>BYTES</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-bytes-not-an-entry-count-the-1570-roborev-fix" title="Why bytes, not an entry count (the #1570 roborev fix)">Why bytes, not an entry count (the #1570 roborev fix)</a></li><li><a href="#aggregate-footprint-math-byte-bounded-key-size-independent" title="Aggregate-footprint math (byte-bounded, key-size-independent)">Aggregate-footprint math (byte-bounded, key-size-independent)</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>cache::<wbr>key_<wbr>offset</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">cache</a>::<wbr><a href="index.html">key_offset</a></div><h1>Constant <span class="constant">DEFAULT_<wbr>KEY_<wbr>CACHE_<wbr>BYTES</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/cache/key_offset.rs.html#136">Source</a> </span></div><pre class="rust item-decl"><code>pub const DEFAULT_KEY_CACHE_BYTES: <a class="primitive" href="https://doc.rust-lang.org/1.97.0/std/primitive.usize.html">usize</a> = _; // 524_288usize</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Default <strong>per-reader</strong> key-cache BYTE budget.</p>
+<p>This cache is per-reader (design D2): each open SSTable reader owns one, so the
+resident memory that matters for the <code>&lt;128MB</code> budget is the <strong>aggregate</strong> across
+every concurrently-open reader. There is no global ceiling across readers, so
+this per-reader budget must be chosen so a generous open-reader count stays
+comfortably within budget.</p>
+<h2 id="why-bytes-not-an-entry-count-the-1570-roborev-fix"><a class="doc-anchor" href="#why-bytes-not-an-entry-count-the-1570-roborev-fix">§</a>Why bytes, not an entry count (the #1570 roborev fix)</h2>
+<p>The previous bound was an entry <em>count</em> (<code>4096</code>/reader). Partition keys are
+variable-length (composite/text keys run to Cassandra’s ~64 KB limit), so a
+count cap does NOT bound resident <em>bytes</em>: worst case <code>~40 readers × 4096 entries × ~1 KB keys ≈ 160 MB</code> — over the hard <code>&lt;128MB</code> budget. The <code>~80 B/entry</code>
+math the count cap assumed only holds for small (UUID-sized) keys. Bounding by
+bytes makes the aggregate footprint <strong>independent of key size</strong>.</p>
+<h2 id="aggregate-footprint-math-byte-bounded-key-size-independent"><a class="doc-anchor" href="#aggregate-footprint-math-byte-bounded-key-size-independent">§</a>Aggregate-footprint math (byte-bounded, key-size-independent)</h2>
+<p>With a per-reader budget <code>B</code> and <code>N</code> concurrently-open readers the aggregate
+resident footprint is <code>≈ N × B</code> for typical (small) keys, because each reader’s
+cache evicts to stay within <code>B</code> bytes. This is an approximation, not an exact
+cap: the eviction guard never evicts the just-resolved entry (the <code>lru.len() &gt; 1</code>
+condition), so a shard may exceed its per-shard budget by at most <strong>one</strong>
+oversized entry. With <code>shard_count = 16</code> per reader and a Cassandra partition key
+up to ~64 KB, each of the 16 shards can retain one ~64 KB entry beyond its 32 KiB
+per-shard budget, so a single reader’s true worst case is ~1 MB (~2× the nominal
+512 KiB). The exact upper bound is therefore
+<code>N × (B + shard_count × max_key_bytes)</code>; the figures below are the <strong>typical</strong>
+small-key case, which dominates in practice.</p>
+<ul>
+<li><code>B = 512 KiB</code> per reader.</li>
+<li>A point-read-heavy workload with ~40 open generations (typical keys):
+<code>40 × 512 KiB ≈ 20 MB</code> — well within <code>&lt;128MB</code>, leaving the majority for B1’s
+decompressed-chunk cache and the working set.</li>
+<li>Even a very generous ~128 open readers is <code>≈ 128 × 512 KiB = 64 MB</code> for typical
+keys, still within budget. The typical footprint no longer depends on whether
+keys are 16 B UUIDs or 1 KB composites — the byte budget bounds it either way,
+with the bounded oversized-entry slack above as the only exception.</li>
+</ul>
+<p>Each shard’s bucket array still grows only with actual occupancy (unbounded
+<code>LruCache</code> + manual byte-budget eviction), so an idle/empty reader’s cache costs
+~nothing; the budget bounds only the fully-occupied worst case.</p>
+<p>A single <strong>global bounded cache</strong> keyed on <code>(sstable_id, key)</code> (Cassandra’s
+key-cache model) would bound the aggregate regardless of reader count and is
+noted as a deferred future optimization (see <code>design.md</code> “Deferred”); it is a
+larger architectural change beyond B4’s audit-approved per-reader scope.</p>
+</div></details></section></div></main></body></html>

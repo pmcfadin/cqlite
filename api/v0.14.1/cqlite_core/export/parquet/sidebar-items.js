@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ParquetCompression","ParquetExportError"],"fn":["create_streaming_parquet_writer"],"struct":["ParquetExportOptions","ParquetWriter","StreamingParquetWriter"]};

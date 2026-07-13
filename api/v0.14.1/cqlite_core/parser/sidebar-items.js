@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_cql_schema"],"mod":["benchmarks","binary","collection_benchmarks","complex_types","enhanced_statistics_parser","header","repair_metadata","statistics","toc_walk_metrics","types","vint"]};

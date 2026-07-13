@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["VersionSource"],"struct":["ResolvedVersion","VersionHintResolver"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error","ErrorCategory"],"struct":["ParseError"],"type":["ParseResult","Result"]};

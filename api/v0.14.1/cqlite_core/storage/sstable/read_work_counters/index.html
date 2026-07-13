@@ -1,0 +1,154 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Cfg-gated read-work counters for the read-path optimization program (Issue #1566, Epic A / A5)."><title>cqlite_core::storage::sstable::read_work_counters - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module read_work_counters</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module read_<wbr>work_<wbr>counters</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists" title="Why this exists">Why this exists</a></li><li><a href="#why-cfg-gated-unlike-work_counters" title="Why cfg-gated (unlike `work_counters`)">Why cfg-gated (unlike <code>work_counters</code>)</a></li><li><a href="#counters-and-their-consuming-epic-children" title="Counters and their consuming epic-children">Counters and their consuming epic-children</a></li><li><a href="#parser-work-counters-issue-1618-epic-h--h5" title="Parser work counters (Issue #1618, Epic H / H5)">Parser work counters (Issue #1618, Epic H / H5)</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">sstable</a></div><h1>Module <span>read_<wbr>work_<wbr>counters</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/sstable/read_work_counters.rs.html#1-890">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Cfg-gated read-work counters for the read-path optimization program
+(Issue #1566, Epic A / A5).</p>
+<h2 id="why-this-exists"><a class="doc-anchor" href="#why-this-exists">§</a>Why this exists</h2>
+<p>The July 2026 read-path audit (<code>docs/reports/read-path-performance-audit-2026-07-01.md</code>
+§Epic A) is measurement-first: land the gauges before the optimizations so every
+later claim (epics B–G) is pinned. Correct result rows never prove <em>how much
+work</em> a read did — a regression can return the right answer while decompressing
+the whole file, walking the trie twice, or reopening <code>Data.db</code> per lookup. These
+counters make that work observable so a later epic can assert on it the
+no-heuristics way: observe the <em>work</em>, not just the result.</p>
+<h2 id="why-cfg-gated-unlike-work_counters"><a class="doc-anchor" href="#why-cfg-gated-unlike-work_counters">§</a>Why cfg-gated (unlike <a href="../work_counters/index.html" title="mod cqlite_core::storage::sstable::work_counters"><code>work_counters</code></a>)</h2>
+<p>The existing <a href="../work_counters/index.html" title="mod cqlite_core::storage::sstable::work_counters"><code>work_counters</code></a> sit on <em>cold per-lookup
+boundaries</em> (once per candidate SSTable / once per returned partition) and are
+therefore always-on. A5’s counters sit on <em>per-chunk / per-seek / per-open</em>
+paths that are much hotter, and the issue’s DoD demands “zero overhead in
+release builds”. So the pattern here (design.md Decision 1) is:</p>
+<ul>
+<li>The <code>record_*()</code> functions are <strong>unconditional public functions</strong> — the read
+path calls e.g. <a href="fn.record_decompress.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_decompress"><code>record_decompress</code></a> with no <code>#[cfg]</code> at the call site, so
+production code reads identically in every build.</li>
+<li>Their <strong>body</strong> is <code>#[cfg(any(test, feature = "work-counters"))]</code>. In a
+default/release build (no <code>work-counters</code>, no <code>cfg(test)</code>) the body is empty
+and the <code>#[inline(always)]</code> no-op is optimized away → <strong>zero overhead</strong>. No
+atomic is even linked (the static and its module are compiled only under the
+same cfg), so the release read path pays literally nothing.</li>
+<li>The <strong>getters + <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a></strong> are <code>#[cfg(any(test, feature = "work-counters"))]</code>:
+only test/feature builds read the values. In-crate unit tests get them via the
+<code>test</code> cfg; integration tests in <code>tests/</code> and benches enable the
+<code>work-counters</code> feature (they compile the lib WITHOUT its <code>test</code> cfg — the same
+reason the <code>SCAN_FOR_KEY_CALLS</code> probe exists).</li>
+</ul>
+<p>A local-[<code>Counters</code>]-instance unit test (per issue #1071) gives deterministic
+absolute-value assertions immune to parallel tests mutating the process-global.</p>
+<h2 id="counters-and-their-consuming-epic-children"><a class="doc-anchor" href="#counters-and-their-consuming-epic-children">§</a>Counters and their consuming epic-children</h2>
+<p>Grep a counter name to find its consumer, the same discoverability
+<a href="../work_counters/index.html" title="mod cqlite_core::storage::sstable::work_counters"><code>work_counters</code></a> provides:</p>
+<ul>
+<li><a href="fn.record_trie_walk.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_trie_walk"><code>record_trie_walk</code></a> / <a href="fn.trie_walks.html" title="fn cqlite_core::storage::sstable::read_work_counters::trie_walks"><code>trie_walks</code></a> — <strong><code>TRIE_WALKS</code></strong>: one per BTI trie
+descent (<code>lookup_partition_via_bti_trie</code>). Consumers <strong>C3</strong> (single-walk point
+lookup) and <strong>C4</strong> (hoist the trie rehash out of the loop): both must prove a
+point lookup descends the trie exactly once.</li>
+<li><a href="fn.record_key_hash.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_key_hash"><code>record_key_hash</code></a> / <a href="fn.key_hash_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::key_hash_calls"><code>key_hash_calls</code></a> — <strong><code>KEY_HASH_CALLS</code></strong>: one per
+Murmur3 hash + BTI byte-comparable encoding of a query partition key
+(<code>encode_partition_key_for_bti_trie</code>). Consumer <strong>C4</strong> (hoist per-candidate
+rehashing): a multi-generation <code>WHERE pk = ?</code> point read must hash+encode the
+query key exactly ONCE per read (the encoding is identical for every candidate
+SSTable), not once per candidate. On <code>main</code>/pre-C4 the candidate-prune loop
+re-encoded per candidate (N hashes for N generations); after C4 it is 1.</li>
+<li><a href="fn.record_range_short_circuit.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_range_short_circuit"><code>record_range_short_circuit</code></a> / <a href="fn.range_short_circuits.html" title="fn cqlite_core::storage::sstable::read_work_counters::range_short_circuits"><code>range_short_circuits</code></a> —
+<strong><code>RANGE_SHORT_CIRCUITS</code></strong>: one per point read answered as authoritative
+absence from the SSTable’s <code>[first_key, last_key]</code> bound (parsed from
+Summary.db) BEFORE any bloom check, <code>Index.db</code> probe, or BTI trie descent.
+Consumer <strong>C5</strong> (first/last-key range short-circuit): an out-of-range point
+read performs zero presence work (<code>INDEX_PROBES == 0</code>, <code>scan_for_key</code>
+untouched) and records exactly one short-circuit; an in-range read records
+zero so the normal presence path runs unchanged (no false miss).</li>
+<li><a href="fn.record_decompress.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_decompress"><code>record_decompress</code></a> / <a href="fn.decompress_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::decompress_calls"><code>decompress_calls</code></a> — <strong><code>DECOMPRESS_CALLS</code></strong>: one per
+compression-chunk decompress (<code>Compressor::decompress</code>). Consumers <strong>B1</strong>
+(chunk cache — a cache hit must skip the decompress) and <strong>E3</strong> (copy-chain —
+count the decompress invocations a read triggers).</li>
+<li><a href="fn.record_seek.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_seek"><code>record_seek</code></a> / <a href="fn.seek_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::seek_calls"><code>seek_calls</code></a> — <strong><code>SEEK_CALLS</code></strong>: one per production
+read-path seek. Wired across every read-path seek site: the compressed
+chunk-read seek in <code>reader/block_io.rs</code> and the point-lookup / single-partition
+/ whole-section / scan seeks in the <code>reader/data_access</code> modules
+(<code>bti.rs</code> BTI target-chunk + fallback + scan, <code>big_promoted.rs</code> BIG
+reverse-block target-chunk + last-partition seek-to-end). Consumer <strong>E4</strong> (drop
+redundant seeks): a sequential chunk walk must not re-seek to the position it is
+already at.</li>
+<li><a href="fn.record_file_open.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_file_open"><code>record_file_open</code></a> / <a href="fn.file_opens.html" title="fn cqlite_core::storage::sstable::read_work_counters::file_opens"><code>file_opens</code></a> — <strong><code>FILE_OPENS</code></strong>: one per <code>open(2)</code> that
+mints a reader <code>BlockSource</code> file descriptor (<code>reader/source.rs</code> scan opens +
+the reader’s cold-open sites). Consumer <strong>C2</strong> (pread / kill the per-lookup
+open): a point lookup must not <code>open(2)</code> <code>Data.db</code> on every call.</li>
+<li><a href="fn.fd_high_water.html" title="fn cqlite_core::storage::sstable::read_work_counters::fd_high_water"><code>fd_high_water</code></a> — the <strong>fd high-water helper</strong>: samples the process’s current
+open-fd count (<code>/dev/fd</code> on macOS, <code>/proc/self/fd</code> on Linux, <code>None</code> elsewhere).
+Consumer <strong>C2</strong> (fd-exhaustion guard): a test brackets an operation with this
+to bound fd growth. It is a <em>sample</em>, not an atomic — wrapping every
+<code>open</code>/<code>close</code> to keep a live count is invasive and racy; sampling at a test
+checkpoint is what the guard actually needs.</li>
+</ul>
+<h2 id="parser-work-counters-issue-1618-epic-h--h5"><a class="doc-anchor" href="#parser-work-counters-issue-1618-epic-h--h5">§</a>Parser work counters (Issue #1618, Epic H / H5)</h2>
+<p>H5 lands the <em>parser</em> gauges the audit (<code>§Epic H</code>, block 2) needs so epics
+J1/K2/K3/L1/L3 can assert their claims (“zero <code>to_lowercase</code> per cell”, “one
+header try-parse per partition”, “&lt;40 BTI nodes visited”). Same cfg-gated,
+zero-in-release pattern as the A5 counters above:</p>
+<ul>
+<li><a href="fn.record_type_normalize.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_type_normalize"><code>record_type_normalize</code></a> / <a href="fn.type_normalize_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::type_normalize_calls"><code>type_normalize_calls</code></a> — <strong><code>TYPE_NORMALIZE_CALLS</code></strong>:
+the per-cell decode-path type-normalization gauge. <strong>J1 (issue #1635) delivered</strong>:
+dispatch is now resolved ONCE per column at <code>RowColumnResolution::build</code>
+(cached on <code>ColumnToParse.kind</code>/<code>is_complex</code>), so the per-cell <code>to_lowercase</code>
+sites — the value-parse normalization (<code>row_decoder/cell_value.rs</code>) and
+the per-row complex-check (<code>row_decoder/udt.rs::is_complex_column</code>) —
+are gone. A full fixture scan therefore records <code>0</code> (on <code>main</code>/pre-J1 it was
+≥2/cell). No production site calls <a href="fn.record_type_normalize.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_type_normalize"><code>record_type_normalize</code></a> anymore; the counter
+is retained as a regression tripwire — any reintroduced per-cell normalization
+must record it, flipping the J1 <code>== 0</code> assertions red.</li>
+<li><a href="fn.record_partition_header_try_parse.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_partition_header_try_parse"><code>record_partition_header_try_parse</code></a> / <a href="fn.partition_header_try_parses.html" title="fn cqlite_core::storage::sstable::read_work_counters::partition_header_try_parses"><code>partition_header_try_parses</code></a> —
+<strong><code>PARTITION_HEADER_TRY_PARSES</code></strong>: one per speculative partition-header parse
+(<code>row_decoder/row_framing.rs::parse_partition_header_full</code>, the single
+boundary-peek/try-parse primitive every emit path routes through). Consumer
+<strong>K2/K3</strong> (one try-parse per partition): flips to an exact per-partition bound.</li>
+<li><a href="fn.record_bti_node_visited.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_bti_node_visited"><code>record_bti_node_visited</code></a> / <a href="fn.bti_nodes_visited.html" title="fn cqlite_core::storage::sstable::read_work_counters::bti_nodes_visited"><code>bti_nodes_visited</code></a> — <strong><code>BTI_NODES_VISITED</code></strong>:
+one per node the BTI DFS enters (<code>bti/parser/traversal.rs</code>). Consumer <strong>L1/L3</strong>
+(&lt;40 BTI nodes visited): flips to the bounded-descent count.</li>
+<li><a href="fn.record_bti_pointer_decode.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_bti_pointer_decode"><code>record_bti_pointer_decode</code></a> / <a href="fn.bti_pointer_decodes.html" title="fn cqlite_core::storage::sstable::read_work_counters::bti_pointer_decodes"><code>bti_pointer_decodes</code></a> — <strong><code>BTI_POINTER_DECODES</code></strong>:
+one per BTI CHILD-pointer decode (<code>node_decode.rs</code> records one per materialized child
+slot; <code>slice_walk.rs</code> records exactly one for the single matching child). Consumer
+<strong>L1/L3</strong>: a targeted descent decodes ONE pointer per byte (Dense-256 node = 1, not 256).</li>
+<li><a href="fn.record_row_sort.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_row_sort"><code>record_row_sort</code></a> / <a href="fn.row_sort_invocations.html" title="fn cqlite_core::storage::sstable::read_work_counters::row_sort_invocations"><code>row_sort_invocations</code></a> — <strong><code>ROW_SORT_INVOCATIONS</code></strong>:
+the per-row cell <code>sort_by</code> gauge at the shared display-row builder
+(<code>row_decoder/mod.rs::build_display_row</code>, which #1334 consolidated the
+former <code>block_emit</code>/<code>block_emit_windowed</code> sort sites into). <strong>K3 (issue #1642)
+delivered</strong>: the decoder now emits cells positionally in serialization-header
+column order (deterministic by CONSTRUCTION), so <code>build_display_row</code> performs
+NO per-row sort and a full scan of standard fixtures through the primary
+decoder records <code>0</code> (on <code>main</code>/pre-K3 it was one per returned live row). The
+only remaining callers are the two cold schema-less fallbacks in
+<code>reader/parsing/mod.rs</code> (<code>extract_value_from_parsed_row_fallback</code> and
+<code>extract_value_from_parsed_row_with_schema</code>), which sort recovered cells for a
+deterministic emit order and DO record it — so the counter honestly counts
+EVERY per-row cell sort. The primary V5 decoder path records <code>0</code>; the counter
+is a regression tripwire — any reintroduced per-row cell sort on the primary
+path must record it, flipping the K3 <code>== 0</code> scan assertions red.</li>
+</ul>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.bti_nodes_visited.html" title="fn cqlite_core::storage::sstable::read_work_counters::bti_nodes_visited">bti_<wbr>nodes_<wbr>visited</a></dt><dd>Number of BTI DFS node entries since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a> (<code>BTI_NODES_VISITED</code>,
+Issue #1618).</dd><dt><a class="fn" href="fn.bti_pointer_decodes.html" title="fn cqlite_core::storage::sstable::read_work_counters::bti_pointer_decodes">bti_<wbr>pointer_<wbr>decodes</a></dt><dd>Number of BTI node/pointer decodes since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>BTI_POINTER_DECODES</code>, Issue #1618).</dd><dt><a class="fn" href="fn.chunk_path_allocs.html" title="fn cqlite_core::storage::sstable::read_work_counters::chunk_path_allocs">chunk_<wbr>path_<wbr>allocs</a></dt><dd>Number of per-chunk copy-chain heap allocations since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>CHUNK_PATH_ALLOCS</code>).</dd><dt><a class="fn" href="fn.compression_info_parses.html" title="fn cqlite_core::storage::sstable::read_work_counters::compression_info_parses">compression_<wbr>info_<wbr>parses</a></dt><dd>Number of <code>CompressionInfo.db</code> parses since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>COMPRESSION_INFO_PARSES</code>, Issue #1597).</dd><dt><a class="fn" href="fn.decompress_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::decompress_calls">decompress_<wbr>calls</a></dt><dd>Number of compression-chunk decompress invocations since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>DECOMPRESS_CALLS</code>).</dd><dt><a class="fn" href="fn.fd_high_water.html" title="fn cqlite_core::storage::sstable::read_work_counters::fd_high_water">fd_<wbr>high_<wbr>water</a></dt><dd>Sample the process’s current open file-descriptor count (the fd high-water
+helper; consumer C2).</dd><dt><a class="fn" href="fn.file_opens.html" title="fn cqlite_core::storage::sstable::read_work_counters::file_opens">file_<wbr>opens</a></dt><dd>Number of <code>open(2)</code> reader-fd mints since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a> (<code>FILE_OPENS</code>).</dd><dt><a class="fn" href="fn.index_probes.html" title="fn cqlite_core::storage::sstable::read_work_counters::index_probes">index_<wbr>probes</a></dt><dd>Number of BIG <code>Index.db</code> partition probes since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>INDEX_PROBES</code>, Issue #1570).</dd><dt><a class="fn" href="fn.key_hash_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::key_hash_calls">key_<wbr>hash_<wbr>calls</a></dt><dd>Number of query-key Murmur3 hash + BTI encodings since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>KEY_HASH_CALLS</code>, Issue #1575 / C4).</dd><dt><a class="fn" href="fn.partition_header_try_parses.html" title="fn cqlite_core::storage::sstable::read_work_counters::partition_header_try_parses">partition_<wbr>header_<wbr>try_<wbr>parses</a></dt><dd>Number of speculative partition-header parses since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>PARTITION_HEADER_TRY_PARSES</code>, Issue #1618).</dd><dt><a class="fn" href="fn.range_short_circuits.html" title="fn cqlite_core::storage::sstable::read_work_counters::range_short_circuits">range_<wbr>short_<wbr>circuits</a></dt><dd>Number of first/last-key range short-circuits since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>RANGE_SHORT_CIRCUITS</code>, Issue #1576 / C5).</dd><dt><a class="fn" href="fn.read_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::read_calls">read_<wbr>calls</a></dt><dd>Number of compressed-chunk <code>read_exact</code> reads since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>READ_CALLS</code>).</dd><dt><a class="fn" href="fn.record_bti_node_visited.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_bti_node_visited">record_<wbr>bti_<wbr>node_<wbr>visited</a></dt><dd>Record one BTI DFS node entry (<code>BTI_NODES_VISITED</code>; consumers L1/L3, Issue #1618).</dd><dt><a class="fn" href="fn.record_bti_pointer_decode.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_bti_pointer_decode">record_<wbr>bti_<wbr>pointer_<wbr>decode</a></dt><dd>Record one BTI child-pointer decode (<code>BTI_POINTER_DECODES</code>; consumers L1/L3,
+Issue #1618 / #1650).</dd><dt><a class="fn" href="fn.record_chunk_path_alloc.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_chunk_path_alloc">record_<wbr>chunk_<wbr>path_<wbr>alloc</a></dt><dd>Record one heap allocation in the per-chunk read→decompress→window-fill copy
+chain (<code>CHUNK_PATH_ALLOCS</code>; consumer E3/#1940).</dd><dt><a class="fn" href="fn.record_compression_info_parse.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_compression_info_parse">record_<wbr>compression_<wbr>info_<wbr>parse</a></dt><dd>Record one <code>CompressionInfo.db</code> parse (<code>COMPRESSION_INFO_PARSES</code>; consumer G1,
+Issue #1597).</dd><dt><a class="fn" href="fn.record_decompress.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_decompress">record_<wbr>decompress</a></dt><dd>Record one compression-chunk decompress (<code>DECOMPRESS_CALLS</code>; consumers B1/E3).</dd><dt><a class="fn" href="fn.record_file_open.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_file_open">record_<wbr>file_<wbr>open</a></dt><dd>Record one <code>open(2)</code> that mints a reader <code>BlockSource</code> fd (<code>FILE_OPENS</code>;
+consumer C2).</dd><dt><a class="fn" href="fn.record_index_probe.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_index_probe">record_<wbr>index_<wbr>probe</a></dt><dd>Record one real BIG <code>Index.db</code> partition probe (<code>INDEX_PROBES</code>; consumer B4,
+Issue #1570).</dd><dt><a class="fn" href="fn.record_key_hash.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_key_hash">record_<wbr>key_<wbr>hash</a></dt><dd>Record one query-key Murmur3 hash + BTI byte-comparable encoding
+(<code>KEY_HASH_CALLS</code>; consumer C4, Issue #1575).</dd><dt><a class="fn" href="fn.record_partition_header_try_parse.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_partition_header_try_parse">record_<wbr>partition_<wbr>header_<wbr>try_<wbr>parse</a></dt><dd>Record one speculative partition-header parse (<code>PARTITION_HEADER_TRY_PARSES</code>;
+consumers K2/K3, Issue #1618).</dd><dt><a class="fn" href="fn.record_range_short_circuit.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_range_short_circuit">record_<wbr>range_<wbr>short_<wbr>circuit</a></dt><dd>Record one first/last-key range short-circuit (<code>RANGE_SHORT_CIRCUITS</code>; consumer
+C5, Issue #1576).</dd><dt><a class="fn" href="fn.record_read.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_read">record_<wbr>read</a></dt><dd>Record one logical <code>read_exact</code> of a compression chunk’s bytes (<code>READ_CALLS</code>;
+consumer E3).</dd><dt><a class="fn" href="fn.record_row_sort.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_row_sort">record_<wbr>row_<wbr>sort</a></dt><dd>Record one per-row cell <code>sort_by</code> (<code>ROW_SORT_INVOCATIONS</code>; consumer K3,
+Issue #1618 / #1642).</dd><dt><a class="fn" href="fn.record_rows_db_entry_resolve.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_rows_db_entry_resolve">record_<wbr>rows_<wbr>db_<wbr>entry_<wbr>resolve</a></dt><dd>Record one per-partition <code>Rows.db</code> row-index entry deserialization
+(<code>ROWS_DB_ENTRY_RESOLVES</code>; consumer L1, Issue #1647).</dd><dt><a class="fn" href="fn.record_seek.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_seek">record_<wbr>seek</a></dt><dd>Record one production read-path seek (<code>SEEK_CALLS</code>; consumer E4).</dd><dt><a class="fn" href="fn.record_trie_walk.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_trie_walk">record_<wbr>trie_<wbr>walk</a></dt><dd>Record one BTI trie descent (<code>TRIE_WALKS</code>; consumers C3/C4).</dd><dt><a class="fn" href="fn.record_type_normalize.html" title="fn cqlite_core::storage::sstable::read_work_counters::record_type_normalize">record_<wbr>type_<wbr>normalize</a></dt><dd>Record one <code>data_type.to_lowercase()</code> in the per-cell decode path
+(<code>TYPE_NORMALIZE_CALLS</code>; consumer J1, Issue #1618 / #1635).</dd><dt><a class="fn" href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset">reset</a></dt><dd>Clear all four process-global counters. Integration tests call this before a
+measured operation so a stale value cannot satisfy a later assertion. Because
+the global is shared, callers serialize on the shared test mutex (per the
+existing counter-test convention); the in-crate unit test sidesteps this by
+asserting against a local [<code>Counters</code>] instance (issue #1071).</dd><dt><a class="fn" href="fn.row_sort_invocations.html" title="fn cqlite_core::storage::sstable::read_work_counters::row_sort_invocations">row_<wbr>sort_<wbr>invocations</a></dt><dd>Number of per-row cell <code>sort_by</code> invocations since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>ROW_SORT_INVOCATIONS</code>, Issue #1618).</dd><dt><a class="fn" href="fn.rows_db_entry_resolves.html" title="fn cqlite_core::storage::sstable::read_work_counters::rows_db_entry_resolves">rows_<wbr>db_<wbr>entry_<wbr>resolves</a></dt><dd>Number of per-partition <code>Rows.db</code> row-index entry deserializations since the
+last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a> (<code>ROWS_DB_ENTRY_RESOLVES</code>, Issue #1647 / L1).</dd><dt><a class="fn" href="fn.seek_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::seek_calls">seek_<wbr>calls</a></dt><dd>Number of block-read seeks since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a> (<code>SEEK_CALLS</code>).</dd><dt><a class="fn" href="fn.trie_walks.html" title="fn cqlite_core::storage::sstable::read_work_counters::trie_walks">trie_<wbr>walks</a></dt><dd>Number of BTI trie descents since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a> (<code>TRIE_WALKS</code>).</dd><dt><a class="fn" href="fn.type_normalize_calls.html" title="fn cqlite_core::storage::sstable::read_work_counters::type_normalize_calls">type_<wbr>normalize_<wbr>calls</a></dt><dd>Number of per-cell <code>data_type.to_lowercase()</code> calls since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::read_work_counters::reset"><code>reset</code></a>
+(<code>TYPE_NORMALIZE_CALLS</code>, Issue #1618).</dd></dl></section></div></main></body></html>

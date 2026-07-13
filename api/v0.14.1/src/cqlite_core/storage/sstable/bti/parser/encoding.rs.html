@@ -1,0 +1,302 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/bti/parser/encoding.rs`."><title>encoding.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/bti/parser/</div>encoding.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Cassandra OSS50 **byte-comparable** clustering-bound encoding.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! These encoders reproduce the on-disk separator bytes the `Rows.db` row-index
+<a href=#4 id=4 data-nosnippet>4</a>//! trie stores (the SAME encoding), NOT CQLite's custom
+<a href=#5 id=5 data-nosnippet>5</a>//! [`ByteComparableEncoder`](crate::storage::sstable::bti::encoder::ByteComparableEncoder)
+<a href=#6 id=6 data-nosnippet>6</a>//! (which prepends a 1-byte type discriminator and so is byte-incompatible with
+<a href=#7 id=7 data-nosnippet>7</a>//! the on-disk trie).
+<a href=#8 id=8 data-nosnippet>8</a>
+<a href=#9 id=9 data-nosnippet>9</a></span><span class="kw">use crate</span>::{error::Error, storage::sstable::bti::node::BtiResult, types::Value};
+<a href=#10 id=10 data-nosnippet>10</a>
+<a href=#11 id=11 data-nosnippet>11</a><span class="doccomment">/// Cassandra component separator used between clustering components in the
+<a href=#12 id=12 data-nosnippet>12</a>/// OSS50 byte-comparable form.  Mirrors `ByteSource.NEXT_COMPONENT` (value
+<a href=#13 id=13 data-nosnippet>13</a>/// `0x40`) emitted by `ClusteringComparator.asByteComparable` /
+<a href=#14 id=14 data-nosnippet>14</a>/// `ByteSource.withTerminator`/`ByteSource.of(...)` in
+<a href=#15 id=15 data-nosnippet>15</a>/// `org.apache.cassandra.utils.bytecomparable.ByteSource` (cassandra-5.0.0).
+<a href=#16 id=16 data-nosnippet>16</a></span><span class="kw">const </span>OSS50_NEXT_COMPONENT: u8 = <span class="number">0x40</span>;
+<a href=#17 id=17 data-nosnippet>17</a>
+<a href=#18 id=18 data-nosnippet>18</a><span class="doccomment">/// OSS50 variable-length byte-comparable encoding for `BytesType`/`UTF8Type`
+<a href=#19 id=19 data-nosnippet>19</a>/// (Cassandra `ByteSource`): every literal `0x00` byte is escaped as
+<a href=#20 id=20 data-nosnippet>20</a>/// `0x00 0xFE` (`ESCAPE` + `ESCAPED_0_CONT`) and the component is terminated
+<a href=#21 id=21 data-nosnippet>21</a>/// with `0x00 0xFF` (`ESCAPE` + `ESCAPED_0_DONE`).  This makes the encoding
+<a href=#22 id=22 data-nosnippet>22</a>/// weakly prefix-free, so a shorter value sorts before a longer value that
+<a href=#23 id=23 data-nosnippet>23</a>/// shares its prefix — matching the separators stored in a real `Rows.db`
+<a href=#24 id=24 data-nosnippet>24</a>/// trie.  (The project's `ByteComparableEncoder` uses a different,
+<a href=#25 id=25 data-nosnippet>25</a>/// non-Cassandra escape scheme and must NOT be used for trie-compatible bounds.)
+<a href=#26 id=26 data-nosnippet>26</a></span><span class="kw">fn </span>encode_varlen_oss50(bytes: <span class="kw-2">&amp;</span>[u8], out: <span class="kw-2">&amp;mut </span>Vec&lt;u8&gt;) {
+<a href=#27 id=27 data-nosnippet>27</a>    <span class="kw">for </span><span class="kw-2">&amp;</span>b <span class="kw">in </span>bytes {
+<a href=#28 id=28 data-nosnippet>28</a>        out.push(b);
+<a href=#29 id=29 data-nosnippet>29</a>        <span class="kw">if </span>b == <span class="number">0x00 </span>{
+<a href=#30 id=30 data-nosnippet>30</a>            out.push(<span class="number">0xFE</span>);
+<a href=#31 id=31 data-nosnippet>31</a>        }
+<a href=#32 id=32 data-nosnippet>32</a>    }
+<a href=#33 id=33 data-nosnippet>33</a>    out.push(<span class="number">0x00</span>);
+<a href=#34 id=34 data-nosnippet>34</a>    out.push(<span class="number">0xFF</span>);
+<a href=#35 id=35 data-nosnippet>35</a>}
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="doccomment">/// Encode a single clustering-component [`Value`] in Cassandra OSS50
+<a href=#38 id=38 data-nosnippet>38</a>/// **byte-comparable** form (the SAME encoding the `Rows.db` row-index trie
+<a href=#39 id=39 data-nosnippet>39</a>/// stores its separators in), appending to `out`.
+<a href=#40 id=40 data-nosnippet>40</a>///
+<a href=#41 id=41 data-nosnippet>41</a>/// This reproduces the per-type `AbstractType.asComparableBytes(...)` production
+<a href=#42 id=42 data-nosnippet>42</a>/// used by Cassandra to build the byte-comparable keys:
+<a href=#43 id=43 data-nosnippet>43</a>///
+<a href=#44 id=44 data-nosnippet>44</a>/// - `Int32Type` → `(v as u32 ^ 0x8000_0000)` big-endian (sign-flip, 4B).
+<a href=#45 id=45 data-nosnippet>45</a>/// - `LongType` → `(v as u64 ^ 0x8000_0000_0000_0000)` big-endian (8B).
+<a href=#46 id=46 data-nosnippet>46</a>/// - `ShortType`/`ByteType` (`smallint`/`tinyint`) → sign-flip big-endian.
+<a href=#47 id=47 data-nosnippet>47</a>/// - `BooleanType` → single byte `0x00`/`0x01`.
+<a href=#48 id=48 data-nosnippet>48</a>/// - `TimestampType` (`timestamp`) → `LongType`-style sign-flip 8B.
+<a href=#49 id=49 data-nosnippet>49</a>/// - `UUIDType`/`TimeUUIDType` → the 16 raw bytes.
+<a href=#50 id=50 data-nosnippet>50</a>/// - `UTF8Type`/`AsciiType` and `BytesType` (`blob`) → raw value bytes,
+<a href=#51 id=51 data-nosnippet>51</a>///   terminated by the OSS50 variable-length component terminator.
+<a href=#52 id=52 data-nosnippet>52</a>///
+<a href=#53 id=53 data-nosnippet>53</a>/// Any clustering type not enumerated here returns an explicit parse error
+<a href=#54 id=54 data-nosnippet>54</a>/// (NO silent wrong results — issue #28 no-heuristics mandate).
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">fn </span>encode_clustering_component_oss50(value: <span class="kw-2">&amp;</span>Value, out: <span class="kw-2">&amp;mut </span>Vec&lt;u8&gt;) -&gt; BtiResult&lt;()&gt; {
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="kw">match </span>value {
+<a href=#57 id=57 data-nosnippet>57</a>        <span class="comment">// int — Int32Type: sign-flip, big-endian (matches `wide_table` separators,
+<a href=#58 id=58 data-nosnippet>58</a>        // e.g. ck=8 → 80 00 00 08).
+<a href=#59 id=59 data-nosnippet>59</a>        </span>Value::Integer(v) =&gt; {
+<a href=#60 id=60 data-nosnippet>60</a>            out.extend_from_slice(<span class="kw-2">&amp;</span>((<span class="kw-2">*</span>v <span class="kw">as </span>u32) ^ <span class="number">0x8000_0000</span>).to_be_bytes());
+<a href=#61 id=61 data-nosnippet>61</a>            <span class="prelude-val">Ok</span>(())
+<a href=#62 id=62 data-nosnippet>62</a>        }
+<a href=#63 id=63 data-nosnippet>63</a>        <span class="comment">// bigint — LongType: sign-flip, big-endian, 8 bytes.
+<a href=#64 id=64 data-nosnippet>64</a>        </span>Value::BigInt(v) | Value::Counter(v) =&gt; {
+<a href=#65 id=65 data-nosnippet>65</a>            out.extend_from_slice(<span class="kw-2">&amp;</span>((<span class="kw-2">*</span>v <span class="kw">as </span>u64) ^ <span class="number">0x8000_0000_0000_0000</span>).to_be_bytes());
+<a href=#66 id=66 data-nosnippet>66</a>            <span class="prelude-val">Ok</span>(())
+<a href=#67 id=67 data-nosnippet>67</a>        }
+<a href=#68 id=68 data-nosnippet>68</a>        <span class="comment">// smallint — ShortType: sign-flip, big-endian, 2 bytes.
+<a href=#69 id=69 data-nosnippet>69</a>        </span>Value::SmallInt(v) =&gt; {
+<a href=#70 id=70 data-nosnippet>70</a>            out.extend_from_slice(<span class="kw-2">&amp;</span>((<span class="kw-2">*</span>v <span class="kw">as </span>u16) ^ <span class="number">0x8000</span>).to_be_bytes());
+<a href=#71 id=71 data-nosnippet>71</a>            <span class="prelude-val">Ok</span>(())
+<a href=#72 id=72 data-nosnippet>72</a>        }
+<a href=#73 id=73 data-nosnippet>73</a>        <span class="comment">// tinyint — ByteType: sign-flip, 1 byte.
+<a href=#74 id=74 data-nosnippet>74</a>        </span>Value::TinyInt(v) =&gt; {
+<a href=#75 id=75 data-nosnippet>75</a>            out.push((<span class="kw-2">*</span>v <span class="kw">as </span>u8) ^ <span class="number">0x80</span>);
+<a href=#76 id=76 data-nosnippet>76</a>            <span class="prelude-val">Ok</span>(())
+<a href=#77 id=77 data-nosnippet>77</a>        }
+<a href=#78 id=78 data-nosnippet>78</a>        <span class="comment">// boolean — BooleanType: single 0x00/0x01 byte.
+<a href=#79 id=79 data-nosnippet>79</a>        </span>Value::Boolean(b) =&gt; {
+<a href=#80 id=80 data-nosnippet>80</a>            out.push(<span class="kw">if </span><span class="kw-2">*</span>b { <span class="number">0x01 </span>} <span class="kw">else </span>{ <span class="number">0x00 </span>});
+<a href=#81 id=81 data-nosnippet>81</a>            <span class="prelude-val">Ok</span>(())
+<a href=#82 id=82 data-nosnippet>82</a>        }
+<a href=#83 id=83 data-nosnippet>83</a>        <span class="comment">// timestamp — TimestampType shares LongType's comparable form (8-byte
+<a href=#84 id=84 data-nosnippet>84</a>        // sign-flip big-endian of the millisecond value).
+<a href=#85 id=85 data-nosnippet>85</a>        </span>Value::Timestamp(v) =&gt; {
+<a href=#86 id=86 data-nosnippet>86</a>            out.extend_from_slice(<span class="kw-2">&amp;</span>((<span class="kw-2">*</span>v <span class="kw">as </span>u64) ^ <span class="number">0x8000_0000_0000_0000</span>).to_be_bytes());
+<a href=#87 id=87 data-nosnippet>87</a>            <span class="prelude-val">Ok</span>(())
+<a href=#88 id=88 data-nosnippet>88</a>        }
+<a href=#89 id=89 data-nosnippet>89</a>        <span class="comment">// uuid / timeuuid — raw 16 bytes (already byte-comparable in the on-disk
+<a href=#90 id=90 data-nosnippet>90</a>        // separator form for this fixed-length type).
+<a href=#91 id=91 data-nosnippet>91</a>        </span>Value::Uuid(bytes) =&gt; {
+<a href=#92 id=92 data-nosnippet>92</a>            out.extend_from_slice(bytes);
+<a href=#93 id=93 data-nosnippet>93</a>            <span class="prelude-val">Ok</span>(())
+<a href=#94 id=94 data-nosnippet>94</a>        }
+<a href=#95 id=95 data-nosnippet>95</a>        <span class="comment">// text / ascii — OSS50 variable-length byte-comparable encoding.
+<a href=#96 id=96 data-nosnippet>96</a>        </span>Value::Text(s) =&gt; {
+<a href=#97 id=97 data-nosnippet>97</a>            encode_varlen_oss50(s.as_bytes(), out);
+<a href=#98 id=98 data-nosnippet>98</a>            <span class="prelude-val">Ok</span>(())
+<a href=#99 id=99 data-nosnippet>99</a>        }
+<a href=#100 id=100 data-nosnippet>100</a>        <span class="comment">// blob / inet — OSS50 variable-length byte-comparable encoding.
+<a href=#101 id=101 data-nosnippet>101</a>        </span>Value::Blob(b) | Value::Inet(b) =&gt; {
+<a href=#102 id=102 data-nosnippet>102</a>            encode_varlen_oss50(b, out);
+<a href=#103 id=103 data-nosnippet>103</a>            <span class="prelude-val">Ok</span>(())
+<a href=#104 id=104 data-nosnippet>104</a>        }
+<a href=#105 id=105 data-nosnippet>105</a>        other =&gt; <span class="prelude-val">Err</span>(Error::Parse(<span class="macro">format!</span>(
+<a href=#106 id=106 data-nosnippet>106</a>            <span class="string">"BTI range_query: byte-comparable encoding not implemented for {:?}"</span>,
+<a href=#107 id=107 data-nosnippet>107</a>            other.data_type()
+<a href=#108 id=108 data-nosnippet>108</a>        ))),
+<a href=#109 id=109 data-nosnippet>109</a>    }
+<a href=#110 id=110 data-nosnippet>110</a>}
+<a href=#111 id=111 data-nosnippet>111</a>
+<a href=#112 id=112 data-nosnippet>112</a><span class="doccomment">/// Encode a multi-component clustering bound (`&amp;[Value]`) in Cassandra OSS50
+<a href=#113 id=113 data-nosnippet>113</a>/// byte-comparable form — the SAME encoding the `Rows.db` trie stores.
+<a href=#114 id=114 data-nosnippet>114</a>///
+<a href=#115 id=115 data-nosnippet>115</a>/// A single-component clustering encodes to the bare component bytes (matching
+<a href=#116 id=116 data-nosnippet>116</a>/// the `wide_table` fixture separators, e.g. ck=8 → `80 00 00 08`, NO framing).
+<a href=#117 id=117 data-nosnippet>117</a>/// Multi-component clusterings concatenate per-component byte-comparable
+<a href=#118 id=118 data-nosnippet>118</a>/// encodings separated by [`OSS50_NEXT_COMPONENT`] (`ByteSource.NEXT_COMPONENT`,
+<a href=#119 id=119 data-nosnippet>119</a>/// per `ClusteringComparator.asByteComparable`), with no leading/trailing frame
+<a href=#120 id=120 data-nosnippet>120</a>/// so a prefix bound sorts before any longer key sharing it.
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub fn </span>encode_clustering_bound_oss50(values: <span class="kw-2">&amp;</span>[Value]) -&gt; BtiResult&lt;Vec&lt;u8&gt;&gt; {
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="comment">// All-ascending convenience: every component uses its base byte-comparable
+<a href=#123 id=123 data-nosnippet>123</a>    // form. Equivalent to `encode_clustering_bound_oss50_with_order` with all
+<a href=#124 id=124 data-nosnippet>124</a>    // `is_reversed = false`.
+<a href=#125 id=125 data-nosnippet>125</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>out = Vec::new();
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="kw">for </span>(i, v) <span class="kw">in </span>values.iter().enumerate() {
+<a href=#127 id=127 data-nosnippet>127</a>        <span class="kw">if </span>i &gt; <span class="number">0 </span>{
+<a href=#128 id=128 data-nosnippet>128</a>            out.push(OSS50_NEXT_COMPONENT);
+<a href=#129 id=129 data-nosnippet>129</a>        }
+<a href=#130 id=130 data-nosnippet>130</a>        encode_clustering_component_oss50(v, <span class="kw-2">&amp;mut </span>out)<span class="question-mark">?</span>;
+<a href=#131 id=131 data-nosnippet>131</a>    }
+<a href=#132 id=132 data-nosnippet>132</a>    <span class="prelude-val">Ok</span>(out)
+<a href=#133 id=133 data-nosnippet>133</a>}
+<a href=#134 id=134 data-nosnippet>134</a>
+<a href=#135 id=135 data-nosnippet>135</a><span class="doccomment">/// Encode a multi-component clustering bound applying each column's clustering
+<a href=#136 id=136 data-nosnippet>136</a>/// **ORDER** (ASC/DESC), producing Cassandra OSS50 byte-comparable separators
+<a href=#137 id=137 data-nosnippet>137</a>/// that sort in the SAME order the rows are physically written.
+<a href=#138 id=138 data-nosnippet>138</a>///
+<a href=#139 id=139 data-nosnippet>139</a>/// ## Why DESC must invert the component bytes
+<a href=#140 id=140 data-nosnippet>140</a>///
+<a href=#141 id=141 data-nosnippet>141</a>/// Cassandra wraps a `CLUSTERING ORDER BY (c DESC)` column's type in
+<a href=#142 id=142 data-nosnippet>142</a>/// `ReversedType`. `ReversedType.asComparableBytes` delegates to the base type's
+<a href=#143 id=143 data-nosnippet>143</a>/// byte-comparable production and then inverts the resulting `ByteSource` via
+<a href=#144 id=144 data-nosnippet>144</a>/// `ByteSource.invert(...)`, which complements every emitted data byte
+<a href=#145 id=145 data-nosnippet>145</a>/// (`b -&gt; 0xFF ^ b`). Complementing every byte of a (weakly prefix-free)
+<a href=#146 id=146 data-nosnippet>146</a>/// byte-comparable encoding reverses its lexicographic order, so a DESCENDING
+<a href=#147 id=147 data-nosnippet>147</a>/// value order maps to an ASCENDING byte order. This is exactly what a `Rows.db`
+<a href=#148 id=148 data-nosnippet>148</a>/// row-index trie needs: separators are always stored in ascending *byte* order,
+<a href=#149 id=149 data-nosnippet>149</a>/// while the underlying clustering values run descending for a DESC column.
+<a href=#150 id=150 data-nosnippet>150</a>/// (cassandra-5.0.0 `org.apache.cassandra.db.marshal.ReversedType.asComparableBytes`
+<a href=#151 id=151 data-nosnippet>151</a>/// + `org.apache.cassandra.utils.bytecomparable.ByteSource.invert`.)
+<a href=#152 id=152 data-nosnippet>152</a>///
+<a href=#153 id=153 data-nosnippet>153</a>/// The inter-component framing byte ([`OSS50_NEXT_COMPONENT`], `0x40`) is emitted
+<a href=#154 id=154 data-nosnippet>154</a>/// by the *comparator* (`ClusteringComparator.asByteComparable`), NOT by a
+<a href=#155 id=155 data-nosnippet>155</a>/// component's type, so it is **not** inverted even when neighbouring components
+<a href=#156 id=156 data-nosnippet>156</a>/// are DESC — only the per-component byte-comparable bytes are complemented. This
+<a href=#157 id=157 data-nosnippet>157</a>/// matches Cassandra, where each `subtype(i)` (possibly a `ReversedType`) emits
+<a href=#158 id=158 data-nosnippet>158</a>/// its own (already inverted) byte source and the comparator separates them with
+<a href=#159 id=159 data-nosnippet>159</a>/// the un-inverted `NEXT_COMPONENT` byte.
+<a href=#160 id=160 data-nosnippet>160</a>///
+<a href=#161 id=161 data-nosnippet>161</a>/// `is_reversed[i]` MUST correspond positionally to `values[i]` (i.e. the schema
+<a href=#162 id=162 data-nosnippet>162</a>/// clustering-key order). A short `is_reversed` slice treats missing entries as
+<a href=#163 id=163 data-nosnippet>163</a>/// ascending (`false`).
+<a href=#164 id=164 data-nosnippet>164</a></span><span class="kw">pub fn </span>encode_clustering_bound_oss50_with_order(
+<a href=#165 id=165 data-nosnippet>165</a>    values: <span class="kw-2">&amp;</span>[Value],
+<a href=#166 id=166 data-nosnippet>166</a>    is_reversed: <span class="kw-2">&amp;</span>[bool],
+<a href=#167 id=167 data-nosnippet>167</a>) -&gt; BtiResult&lt;Vec&lt;u8&gt;&gt; {
+<a href=#168 id=168 data-nosnippet>168</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::new();
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="kw">for </span>(i, v) <span class="kw">in </span>values.iter().enumerate() {
+<a href=#170 id=170 data-nosnippet>170</a>        <span class="kw">if </span>i &gt; <span class="number">0 </span>{
+<a href=#171 id=171 data-nosnippet>171</a>            out.push(OSS50_NEXT_COMPONENT);
+<a href=#172 id=172 data-nosnippet>172</a>        }
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="kw">if </span>is_reversed.get(i).copied().unwrap_or(<span class="bool-val">false</span>) {
+<a href=#174 id=174 data-nosnippet>174</a>            <span class="comment">// Encode the base component into a scratch buffer, then complement
+<a href=#175 id=175 data-nosnippet>175</a>            // every byte (ReversedType / ByteSource.invert).
+<a href=#176 id=176 data-nosnippet>176</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>scratch = Vec::new();
+<a href=#177 id=177 data-nosnippet>177</a>            encode_clustering_component_oss50(v, <span class="kw-2">&amp;mut </span>scratch)<span class="question-mark">?</span>;
+<a href=#178 id=178 data-nosnippet>178</a>            <span class="kw">for </span>b <span class="kw">in </span><span class="kw-2">&amp;</span>scratch {
+<a href=#179 id=179 data-nosnippet>179</a>                out.push(<span class="number">0xFF </span>^ <span class="kw-2">*</span>b);
+<a href=#180 id=180 data-nosnippet>180</a>            }
+<a href=#181 id=181 data-nosnippet>181</a>        } <span class="kw">else </span>{
+<a href=#182 id=182 data-nosnippet>182</a>            encode_clustering_component_oss50(v, <span class="kw-2">&amp;mut </span>out)<span class="question-mark">?</span>;
+<a href=#183 id=183 data-nosnippet>183</a>        }
+<a href=#184 id=184 data-nosnippet>184</a>    }
+<a href=#185 id=185 data-nosnippet>185</a>    <span class="prelude-val">Ok</span>(out)
+<a href=#186 id=186 data-nosnippet>186</a>}
+<a href=#187 id=187 data-nosnippet>187</a>
+<a href=#188 id=188 data-nosnippet>188</a><span class="attr">#[cfg(test)]
+<a href=#189 id=189 data-nosnippet>189</a></span><span class="kw">mod </span>tests {
+<a href=#190 id=190 data-nosnippet>190</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#191 id=191 data-nosnippet>191</a>
+<a href=#192 id=192 data-nosnippet>192</a>    <span class="doccomment">/// The OSS50 byte-comparable clustering encoder (issue #832 Finding 1)
+<a href=#193 id=193 data-nosnippet>193</a>    /// reproduces the on-disk trie separator bytes.
+<a href=#194 id=194 data-nosnippet>194</a>    </span><span class="attr">#[test]
+<a href=#195 id=195 data-nosnippet>195</a>    </span><span class="kw">fn </span>oss50_clustering_encoder() {
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="comment">// Single int component — bare, sign-flip big-endian (matches fixture).
+<a href=#197 id=197 data-nosnippet>197</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#198 id=198 data-nosnippet>198</a>            encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Integer(<span class="number">8</span>)]).unwrap(),
+<a href=#199 id=199 data-nosnippet>199</a>            <span class="macro">vec!</span>[<span class="number">0x80</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x08</span>]
+<a href=#200 id=200 data-nosnippet>200</a>        );
+<a href=#201 id=201 data-nosnippet>201</a>        <span class="macro">assert_eq!</span>(
+<a href=#202 id=202 data-nosnippet>202</a>            encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Integer(-<span class="number">1</span>)]).unwrap(),
+<a href=#203 id=203 data-nosnippet>203</a>            <span class="macro">vec!</span>[<span class="number">0x7F</span>, <span class="number">0xFF</span>, <span class="number">0xFF</span>, <span class="number">0xFF</span>]
+<a href=#204 id=204 data-nosnippet>204</a>        );
+<a href=#205 id=205 data-nosnippet>205</a>        <span class="comment">// Ordering is preserved: -1 &lt; 0 &lt; 100 byte-comparably.
+<a href=#206 id=206 data-nosnippet>206</a>        </span><span class="kw">let </span>neg = encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Integer(-<span class="number">1</span>)]).unwrap();
+<a href=#207 id=207 data-nosnippet>207</a>        <span class="kw">let </span>zero = encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Integer(<span class="number">0</span>)]).unwrap();
+<a href=#208 id=208 data-nosnippet>208</a>        <span class="kw">let </span>pos = encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Integer(<span class="number">100</span>)]).unwrap();
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="macro">assert!</span>(neg &lt; zero &amp;&amp; zero &lt; pos);
+<a href=#210 id=210 data-nosnippet>210</a>
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="comment">// bigint — 8-byte sign-flip BE.
+<a href=#212 id=212 data-nosnippet>212</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#213 id=213 data-nosnippet>213</a>            encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::BigInt(<span class="number">1</span>)]).unwrap(),
+<a href=#214 id=214 data-nosnippet>214</a>            <span class="macro">vec!</span>[<span class="number">0x80</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0x01</span>]
+<a href=#215 id=215 data-nosnippet>215</a>        );
+<a href=#216 id=216 data-nosnippet>216</a>
+<a href=#217 id=217 data-nosnippet>217</a>        <span class="comment">// Multi-component: int(1) + text("ab") joined with 0x40 NEXT_COMPONENT,
+<a href=#218 id=218 data-nosnippet>218</a>        // text terminated by the OSS50 end marker 0x00 0xFF.
+<a href=#219 id=219 data-nosnippet>219</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#220 id=220 data-nosnippet>220</a>            encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Integer(<span class="number">1</span>), Value::Text(<span class="string">"ab"</span>.to_string())])
+<a href=#221 id=221 data-nosnippet>221</a>                .unwrap(),
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="macro">vec!</span>[<span class="number">0x80</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x01</span>, <span class="number">0x40</span>, <span class="string">b'a'</span>, <span class="string">b'b'</span>, <span class="number">0x00</span>, <span class="number">0xFF</span>]
+<a href=#223 id=223 data-nosnippet>223</a>        );
+<a href=#224 id=224 data-nosnippet>224</a>
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="comment">// Variable-length OSS50: text terminates with 0x00 0xFF; a literal 0x00
+<a href=#226 id=226 data-nosnippet>226</a>        // byte is escaped as 0x00 0xFE so it never collides with the terminator.
+<a href=#227 id=227 data-nosnippet>227</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#228 id=228 data-nosnippet>228</a>            encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Text(<span class="string">"a"</span>.to_string())]).unwrap(),
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="macro">vec!</span>[<span class="string">b'a'</span>, <span class="number">0x00</span>, <span class="number">0xFF</span>]
+<a href=#230 id=230 data-nosnippet>230</a>        );
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="macro">assert_eq!</span>(
+<a href=#232 id=232 data-nosnippet>232</a>            encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Blob(<span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x00</span>, <span class="number">0x02</span>])]).unwrap(),
+<a href=#233 id=233 data-nosnippet>233</a>            <span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x00</span>, <span class="number">0xFE</span>, <span class="number">0x02</span>, <span class="number">0x00</span>, <span class="number">0xFF</span>]
+<a href=#234 id=234 data-nosnippet>234</a>        );
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="comment">// Prefix-free ordering: "a" sorts before "ab".
+<a href=#236 id=236 data-nosnippet>236</a>        </span><span class="kw">let </span>a = encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Text(<span class="string">"a"</span>.to_string())]).unwrap();
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="kw">let </span>ab = encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Text(<span class="string">"ab"</span>.to_string())]).unwrap();
+<a href=#238 id=238 data-nosnippet>238</a>        <span class="macro">assert!</span>(a &lt; ab);
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="comment">// Unsupported clustering type errors out explicitly.
+<a href=#241 id=241 data-nosnippet>241</a>        </span><span class="macro">assert!</span>(encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Float(<span class="number">1.0</span>)]).is_err());
+<a href=#242 id=242 data-nosnippet>242</a>    }
+<a href=#243 id=243 data-nosnippet>243</a>
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="doccomment">/// Order-aware OSS50 encoder (DESC clustering): a `CLUSTERING ORDER BY DESC`
+<a href=#245 id=245 data-nosnippet>245</a>    /// column wraps in Cassandra `ReversedType`, whose `asComparableBytes`
+<a href=#246 id=246 data-nosnippet>246</a>    /// complements every byte of the base byte-comparable form.
+<a href=#247 id=247 data-nosnippet>247</a>    </span><span class="attr">#[test]
+<a href=#248 id=248 data-nosnippet>248</a>    </span><span class="kw">fn </span>oss50_clustering_encoder_reversed_order() {
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="comment">// DESC int(8): base 80 00 00 08, complemented -&gt; 7F FF FF F7.
+<a href=#250 id=250 data-nosnippet>250</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#251 id=251 data-nosnippet>251</a>            encode_clustering_bound_oss50_with_order(<span class="kw-2">&amp;</span>[Value::Integer(<span class="number">8</span>)], <span class="kw-2">&amp;</span>[<span class="bool-val">true</span>]).unwrap(),
+<a href=#252 id=252 data-nosnippet>252</a>            <span class="macro">vec!</span>[<span class="number">0x7F</span>, <span class="number">0xFF</span>, <span class="number">0xFF</span>, <span class="number">0xF7</span>]
+<a href=#253 id=253 data-nosnippet>253</a>        );
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="comment">// ASC path is identical to the plain encoder.
+<a href=#255 id=255 data-nosnippet>255</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#256 id=256 data-nosnippet>256</a>            encode_clustering_bound_oss50_with_order(<span class="kw-2">&amp;</span>[Value::Integer(<span class="number">8</span>)], <span class="kw-2">&amp;</span>[<span class="bool-val">false</span>]).unwrap(),
+<a href=#257 id=257 data-nosnippet>257</a>            encode_clustering_bound_oss50(<span class="kw-2">&amp;</span>[Value::Integer(<span class="number">8</span>)]).unwrap()
+<a href=#258 id=258 data-nosnippet>258</a>        );
+<a href=#259 id=259 data-nosnippet>259</a>
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="comment">// The decisive property: for DESC, larger VALUE =&gt; smaller BYTES.
+<a href=#261 id=261 data-nosnippet>261</a>        </span><span class="kw">let </span>enc = |v: i32| {
+<a href=#262 id=262 data-nosnippet>262</a>            encode_clustering_bound_oss50_with_order(<span class="kw-2">&amp;</span>[Value::Integer(v)], <span class="kw-2">&amp;</span>[<span class="bool-val">true</span>]).unwrap()
+<a href=#263 id=263 data-nosnippet>263</a>        };
+<a href=#264 id=264 data-nosnippet>264</a>        <span class="comment">// Physical write order for DESC: 5,4,3,2,1,0. Their separator bytes must
+<a href=#265 id=265 data-nosnippet>265</a>        // be strictly ASCENDING in that same sequence.
+<a href=#266 id=266 data-nosnippet>266</a>        </span><span class="kw">let </span>write_order = [<span class="number">5</span>, <span class="number">4</span>, <span class="number">3</span>, <span class="number">2</span>, <span class="number">1</span>, <span class="number">0</span>];
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">for </span>w <span class="kw">in </span>write_order.windows(<span class="number">2</span>) {
+<a href=#268 id=268 data-nosnippet>268</a>            <span class="macro">assert!</span>(
+<a href=#269 id=269 data-nosnippet>269</a>                enc(w[<span class="number">0</span>]) &lt; enc(w[<span class="number">1</span>]),
+<a href=#270 id=270 data-nosnippet>270</a>                <span class="string">"DESC: value {} written before {} must yield smaller separator bytes"</span>,
+<a href=#271 id=271 data-nosnippet>271</a>                w[<span class="number">0</span>],
+<a href=#272 id=272 data-nosnippet>272</a>                w[<span class="number">1</span>]
+<a href=#273 id=273 data-nosnippet>273</a>            );
+<a href=#274 id=274 data-nosnippet>274</a>        }
+<a href=#275 id=275 data-nosnippet>275</a>
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="comment">// Mixed ASC/DESC: first column ASC int, second column DESC int.
+<a href=#277 id=277 data-nosnippet>277</a>        </span><span class="kw">let </span>mixed = encode_clustering_bound_oss50_with_order(
+<a href=#278 id=278 data-nosnippet>278</a>            <span class="kw-2">&amp;</span>[Value::Integer(<span class="number">1</span>), Value::Integer(<span class="number">8</span>)],
+<a href=#279 id=279 data-nosnippet>279</a>            <span class="kw-2">&amp;</span>[<span class="bool-val">false</span>, <span class="bool-val">true</span>],
+<a href=#280 id=280 data-nosnippet>280</a>        )
+<a href=#281 id=281 data-nosnippet>281</a>        .unwrap();
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="macro">assert_eq!</span>(
+<a href=#283 id=283 data-nosnippet>283</a>            mixed,
+<a href=#284 id=284 data-nosnippet>284</a>            <span class="macro">vec!</span>[<span class="number">0x80</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x01</span>, <span class="number">0x40</span>, <span class="number">0x7F</span>, <span class="number">0xFF</span>, <span class="number">0xFF</span>, <span class="number">0xF7</span>],
+<a href=#285 id=285 data-nosnippet>285</a>            <span class="string">"ASC component bare, 0x40 framing un-inverted, DESC component complemented"
+<a href=#286 id=286 data-nosnippet>286</a>        </span>);
+<a href=#287 id=287 data-nosnippet>287</a>
+<a href=#288 id=288 data-nosnippet>288</a>        <span class="comment">// Mixed-order monotonicity.
+<a href=#289 id=289 data-nosnippet>289</a>        </span><span class="kw">let </span>m = |a: i32, b: i32| {
+<a href=#290 id=290 data-nosnippet>290</a>            encode_clustering_bound_oss50_with_order(
+<a href=#291 id=291 data-nosnippet>291</a>                <span class="kw-2">&amp;</span>[Value::Integer(a), Value::Integer(b)],
+<a href=#292 id=292 data-nosnippet>292</a>                <span class="kw-2">&amp;</span>[<span class="bool-val">false</span>, <span class="bool-val">true</span>],
+<a href=#293 id=293 data-nosnippet>293</a>            )
+<a href=#294 id=294 data-nosnippet>294</a>            .unwrap()
+<a href=#295 id=295 data-nosnippet>295</a>        };
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="comment">// Same first key (1), second key descending 9,8,7 -&gt; ascending bytes.
+<a href=#297 id=297 data-nosnippet>297</a>        </span><span class="macro">assert!</span>(m(<span class="number">1</span>, <span class="number">9</span>) &lt; m(<span class="number">1</span>, <span class="number">8</span>) &amp;&amp; m(<span class="number">1</span>, <span class="number">8</span>) &lt; m(<span class="number">1</span>, <span class="number">7</span>));
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="comment">// Different first key dominates regardless of second (ASC leading).
+<a href=#299 id=299 data-nosnippet>299</a>        </span><span class="macro">assert!</span>(m(<span class="number">1</span>, <span class="number">0</span>) &lt; m(<span class="number">2</span>, <span class="number">9</span>));
+<a href=#300 id=300 data-nosnippet>300</a>    }
+<a href=#301 id=301 data-nosnippet>301</a>}
+</code></pre></div></section></main></body></html>

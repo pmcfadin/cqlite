@@ -1,0 +1,654 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs`."><title>encoding.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/writer/data_writer/</div>encoding.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Value/element serialization and op-classification helpers used across the writer (serialize_value, collection elements, static-op classification, range-tombstone coverage).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Part of the `data_writer` responsibility split (issue #1118). `use super::*`
+<a href=#4 id=4 data-nosnippet>4</a>//! provides the crate imports and sibling helpers re-exported from
+<a href=#5 id=5 data-nosnippet>5</a>//! `data_writer/mod.rs`. No emitted bytes change.
+<a href=#6 id=6 data-nosnippet>6</a>
+<a href=#7 id=7 data-nosnippet>7</a></span><span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#8 id=8 data-nosnippet>8</a>
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>column_order_key(column: <span class="kw-2">&amp;</span>Column) -&gt; (bool, <span class="kw-2">&amp;</span>str) {
+<a href=#10 id=10 data-nosnippet>10</a>    (is_complex_column(<span class="kw-2">&amp;</span>column.data_type), column.name.as_str())
+<a href=#11 id=11 data-nosnippet>11</a>}
+<a href=#12 id=12 data-nosnippet>12</a>
+<a href=#13 id=13 data-nosnippet>13</a><span class="doccomment">/// The column name targeted by a cell operation, if any (issue #927: used by
+<a href=#14 id=14 data-nosnippet>14</a>/// mixed-stream reconciliation). `DeleteRow` targets no specific column.
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>merged_op_column(
+<a href=#16 id=16 data-nosnippet>16</a>    op: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::write_engine::mutation::CellOperation,
+<a href=#17 id=17 data-nosnippet>17</a>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt; {
+<a href=#18 id=18 data-nosnippet>18</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::mutation::CellOperation;
+<a href=#19 id=19 data-nosnippet>19</a>    <span class="kw">match </span>op {
+<a href=#20 id=20 data-nosnippet>20</a>        CellOperation::Write { column, .. }
+<a href=#21 id=21 data-nosnippet>21</a>        | CellOperation::WriteWithTtl { column, .. }
+<a href=#22 id=22 data-nosnippet>22</a>        | CellOperation::Delete { column, .. }
+<a href=#23 id=23 data-nosnippet>23</a>        | CellOperation::WriteComplexElement { column, .. }
+<a href=#24 id=24 data-nosnippet>24</a>        | CellOperation::ComplexDeletion { column, .. } =&gt; <span class="prelude-val">Some</span>(column.as_str()),
+<a href=#25 id=25 data-nosnippet>25</a>        CellOperation::DeleteRow =&gt; <span class="prelude-val">None</span>,
+<a href=#26 id=26 data-nosnippet>26</a>    }
+<a href=#27 id=27 data-nosnippet>27</a>}
+<a href=#28 id=28 data-nosnippet>28</a>
+<a href=#29 id=29 data-nosnippet>29</a><span class="doccomment">/// The `localDeletionTime` (seconds, GC clock) to stamp a cell tombstone with for
+<a href=#30 id=30 data-nosnippet>30</a>/// an op carried by `mutation` (#921 finding 2).
+<a href=#31 id=31 data-nosnippet>31</a>///
+<a href=#32 id=32 data-nosnippet>32</a>/// A `CellOperation::Delete` that carries its OWN `local_deletion_time` (set by
+<a href=#33 id=33 data-nosnippet>33</a>/// the compaction merge→rewrite path from the SOURCE cell tombstone's surfaced
+<a href=#34 id=34 data-nosnippet>34</a>/// LDT) is honored VERBATIM so a surviving within-grace cell tombstone keeps its
+<a href=#35 id=35 data-nosnippet>35</a>/// original GC clock across compactions. For every other op — and for a `Delete`
+<a href=#36 id=36 data-nosnippet>36</a>/// with no surfaced LDT (`None`) — fall back to the mutation's
+<a href=#37 id=37 data-nosnippet>37</a>/// [`effective_local_deletion_time`](crate::storage::write_engine::mutation::Mutation::effective_local_deletion_time),
+<a href=#38 id=38 data-nosnippet>38</a>/// preserving the historical behavior (WAL / CQL-DELETE paths, row-derived LDT).
+<a href=#39 id=39 data-nosnippet>39</a>/// Choose the `localDeletionTime` the cell/row tombstone of `op` is actually
+<a href=#40 id=40 data-nosnippet>40</a>/// emitted with.
+<a href=#41 id=41 data-nosnippet>41</a>///
+<a href=#42 id=42 data-nosnippet>42</a>/// A `CellOperation::Delete { local_deletion_time: Some(ldt), .. }` carries an
+<a href=#43 id=43 data-nosnippet>43</a>/// explicit per-cell LDT (#921 finding 2) that the DataWriter stamps VERBATIM;
+<a href=#44 id=44 data-nosnippet>44</a>/// every other op (a `Delete` without a per-cell LDT, or a `DeleteRow`) derives
+<a href=#45 id=45 data-nosnippet>45</a>/// the LDT from the enclosing mutation. The SSTable writer's STATS/baseline
+<a href=#46 id=46 data-nosnippet>46</a>/// collection MUST record this exact value (not just
+<a href=#47 id=47 data-nosnippet>47</a>/// `mutation.effective_local_deletion_time()`), otherwise a per-cell LDT below
+<a href=#48 id=48 data-nosnippet>48</a>/// the mutation-derived value underflows the Data.db delta encoding, and one
+<a href=#49 id=49 data-nosnippet>49</a>/// above it leaves Statistics.db min/max/histogram describing a tombstone that
+<a href=#50 id=50 data-nosnippet>50</a>/// was never written (#921 finding 2 — roborev Medium).
+<a href=#51 id=51 data-nosnippet>51</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>op_cell_local_deletion_time(
+<a href=#52 id=52 data-nosnippet>52</a>    op: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::write_engine::mutation::CellOperation,
+<a href=#53 id=53 data-nosnippet>53</a>    mutation: <span class="kw-2">&amp;</span>Mutation,
+<a href=#54 id=54 data-nosnippet>54</a>) -&gt; i32 {
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::mutation::CellOperation;
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="kw">match </span>op {
+<a href=#57 id=57 data-nosnippet>57</a>        CellOperation::Delete {
+<a href=#58 id=58 data-nosnippet>58</a>            local_deletion_time: <span class="prelude-val">Some</span>(ldt),
+<a href=#59 id=59 data-nosnippet>59</a>            ..
+<a href=#60 id=60 data-nosnippet>60</a>        } =&gt; <span class="kw-2">*</span>ldt,
+<a href=#61 id=61 data-nosnippet>61</a>        <span class="kw">_ </span>=&gt; mutation.effective_local_deletion_time(),
+<a href=#62 id=62 data-nosnippet>62</a>    }
+<a href=#63 id=63 data-nosnippet>63</a>}
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="doccomment">/// The write timestamp (microseconds) to stamp on the static cell emitted for
+<a href=#66 id=66 data-nosnippet>66</a>/// `op` within `mutation` (issue #1018).
+<a href=#67 id=67 data-nosnippet>67</a>///
+<a href=#68 id=68 data-nosnippet>68</a>/// A `Write`/`WriteWithTtl`/`Delete` op carries its OWN per-cell write timestamp
+<a href=#69 id=69 data-nosnippet>69</a>/// when the compaction merge→mutation path recorded one in
+<a href=#70 id=70 data-nosnippet>70</a>/// [`Mutation::cell_write_timestamps`](crate::storage::write_engine::mutation::Mutation::cell_write_timestamps)
+<a href=#71 id=71 data-nosnippet>71</a>/// (a surviving live cell's writetime, or a static cell tombstone's
+<a href=#72 id=72 data-nosnippet>72</a>/// `markedForDeleteAt`). It is resolved via
+<a href=#73 id=73 data-nosnippet>73</a>/// [`Mutation::cell_write_timestamp`](crate::storage::write_engine::mutation::Mutation::cell_write_timestamp),
+<a href=#74 id=74 data-nosnippet>74</a>/// which falls back to the mutation's row `timestamp_micros` when no per-cell
+<a href=#75 id=75 data-nosnippet>75</a>/// override exists. Every other op (and the no-override case) resolves to exactly
+<a href=#76 id=76 data-nosnippet>76</a>/// `mutation.timestamp_micros`, so the single-writetime behavior is unchanged.
+<a href=#77 id=77 data-nosnippet>77</a>///
+<a href=#78 id=78 data-nosnippet>78</a>/// Shared by `collect_static_operations` (the compaction/partition path) and
+<a href=#79 id=79 data-nosnippet>79</a>/// `DataWriter::write_static_row` (the public single-mutation entry point) so both
+<a href=#80 id=80 data-nosnippet>80</a>/// resolve per-cell static writetimes IDENTICALLY — without it the public entry
+<a href=#81 id=81 data-nosnippet>81</a>/// point would rewrite older static cells (live OR cell tombstones) to the row max.
+<a href=#82 id=82 data-nosnippet>82</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>op_cell_write_timestamp(
+<a href=#83 id=83 data-nosnippet>83</a>    op: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::write_engine::mutation::CellOperation,
+<a href=#84 id=84 data-nosnippet>84</a>    mutation: <span class="kw-2">&amp;</span>Mutation,
+<a href=#85 id=85 data-nosnippet>85</a>) -&gt; i64 {
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::mutation::CellOperation;
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="kw">match </span>op {
+<a href=#88 id=88 data-nosnippet>88</a>        CellOperation::Write { column, .. }
+<a href=#89 id=89 data-nosnippet>89</a>        | CellOperation::WriteWithTtl { column, .. }
+<a href=#90 id=90 data-nosnippet>90</a>        | CellOperation::Delete { column, .. } =&gt; mutation.cell_write_timestamp(column),
+<a href=#91 id=91 data-nosnippet>91</a>        <span class="kw">_ </span>=&gt; mutation.timestamp_micros,
+<a href=#92 id=92 data-nosnippet>92</a>    }
+<a href=#93 id=93 data-nosnippet>93</a>}
+<a href=#94 id=94 data-nosnippet>94</a>
+<a href=#95 id=95 data-nosnippet>95</a><span class="doccomment">/// Generate a version-1 TimeUUID for use as a list cell path.
+<a href=#96 id=96 data-nosnippet>96</a>///
+<a href=#97 id=97 data-nosnippet>97</a>/// List elements in Cassandra use TimeUUIDs as cell paths to maintain insertion order.
+<a href=#98 id=98 data-nosnippet>98</a>/// Each call with a different `element_index` produces a monotonically increasing UUID.
+<a href=#99 id=99 data-nosnippet>99</a>///
+<a href=#100 id=100 data-nosnippet>100</a>/// # Arguments
+<a href=#101 id=101 data-nosnippet>101</a>/// * `timestamp_micros` - Mutation timestamp in microseconds since Unix epoch
+<a href=#102 id=102 data-nosnippet>102</a>/// * `element_index` - Index of the element within the list (for monotonic ordering)
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>generate_list_cell_path_timeuuid(
+<a href=#104 id=104 data-nosnippet>104</a>    timestamp_micros: i64,
+<a href=#105 id=105 data-nosnippet>105</a>    element_index: u64,
+<a href=#106 id=106 data-nosnippet>106</a>) -&gt; [u8; <span class="number">16</span>] {
+<a href=#107 id=107 data-nosnippet>107</a>    <span class="comment">// UUID v1 timestamp: 100-nanosecond intervals since UUID epoch (Oct 15, 1582)
+<a href=#108 id=108 data-nosnippet>108</a>    // Offset from Unix epoch to UUID epoch in 100-ns units
+<a href=#109 id=109 data-nosnippet>109</a>    </span><span class="kw">const </span>UUID_EPOCH_OFFSET: u64 = <span class="number">0x01B2_1DD2_1381_4000</span>;
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a>    <span class="kw">let </span>ts_100ns = (timestamp_micros <span class="kw">as </span>u64) * <span class="number">10 </span>+ element_index;
+<a href=#112 id=112 data-nosnippet>112</a>    <span class="kw">let </span>uuid_ts = ts_100ns + UUID_EPOCH_OFFSET;
+<a href=#113 id=113 data-nosnippet>113</a>
+<a href=#114 id=114 data-nosnippet>114</a>    <span class="comment">// Extract time fields per RFC 4122
+<a href=#115 id=115 data-nosnippet>115</a>    </span><span class="kw">let </span>time_low = (uuid_ts &amp; <span class="number">0xFFFF_FFFF</span>) <span class="kw">as </span>u32;
+<a href=#116 id=116 data-nosnippet>116</a>    <span class="kw">let </span>time_mid = ((uuid_ts &gt;&gt; <span class="number">32</span>) &amp; <span class="number">0xFFFF</span>) <span class="kw">as </span>u16;
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="kw">let </span>time_hi = ((uuid_ts &gt;&gt; <span class="number">48</span>) &amp; <span class="number">0x0FFF</span>) <span class="kw">as </span>u16 | <span class="number">0x1000</span>; <span class="comment">// version 1
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a>    // Fixed clock_seq and node for deterministic output
+<a href=#120 id=120 data-nosnippet>120</a>    </span><span class="kw">let </span>clock_seq: u16 = <span class="number">0x80</span>; <span class="comment">// variant bits (10xx) + seq=0
+<a href=#121 id=121 data-nosnippet>121</a>    </span><span class="kw">let </span>node: [u8; <span class="number">6</span>] = [<span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>];
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="kw">let </span><span class="kw-2">mut </span>uuid = [<span class="number">0u8</span>; <span class="number">16</span>];
+<a href=#124 id=124 data-nosnippet>124</a>    uuid[<span class="number">0</span>..<span class="number">4</span>].copy_from_slice(<span class="kw-2">&amp;</span>time_low.to_be_bytes());
+<a href=#125 id=125 data-nosnippet>125</a>    uuid[<span class="number">4</span>..<span class="number">6</span>].copy_from_slice(<span class="kw-2">&amp;</span>time_mid.to_be_bytes());
+<a href=#126 id=126 data-nosnippet>126</a>    uuid[<span class="number">6</span>..<span class="number">8</span>].copy_from_slice(<span class="kw-2">&amp;</span>time_hi.to_be_bytes());
+<a href=#127 id=127 data-nosnippet>127</a>    uuid[<span class="number">8</span>] = (clock_seq &gt;&gt; <span class="number">8</span>) <span class="kw">as </span>u8;
+<a href=#128 id=128 data-nosnippet>128</a>    uuid[<span class="number">9</span>] = (clock_seq &amp; <span class="number">0xFF</span>) <span class="kw">as </span>u8;
+<a href=#129 id=129 data-nosnippet>129</a>    uuid[<span class="number">10</span>..<span class="number">16</span>].copy_from_slice(<span class="kw-2">&amp;</span>node);
+<a href=#130 id=130 data-nosnippet>130</a>
+<a href=#131 id=131 data-nosnippet>131</a>    uuid
+<a href=#132 id=132 data-nosnippet>132</a>}
+<a href=#133 id=133 data-nosnippet>133</a>
+<a href=#134 id=134 data-nosnippet>134</a><span class="doccomment">/// Convert a usize length to i32 for Cassandra's collection wire format.
+<a href=#135 id=135 data-nosnippet>135</a>/// Returns an error if the length exceeds i32::MAX.
+<a href=#136 id=136 data-nosnippet>136</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>len_as_i32(len: usize) -&gt; <span class="prelude-ty">Result</span>&lt;i32&gt; {
+<a href=#137 id=137 data-nosnippet>137</a>    i32::try_from(len).map_err(|<span class="kw">_</span>| {
+<a href=#138 id=138 data-nosnippet>138</a>        Error::InvalidInput(<span class="macro">format!</span>(
+<a href=#139 id=139 data-nosnippet>139</a>            <span class="string">"Length {} exceeds maximum i32 for collection encoding"</span>,
+<a href=#140 id=140 data-nosnippet>140</a>            len
+<a href=#141 id=141 data-nosnippet>141</a>        ))
+<a href=#142 id=142 data-nosnippet>142</a>    })
+<a href=#143 id=143 data-nosnippet>143</a>}
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a><span class="doccomment">/// Serialize a collection element, rejecting null (CQL semantics: lists/sets cannot contain null).
+<a href=#146 id=146 data-nosnippet>146</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>serialize_collection_element(
+<a href=#147 id=147 data-nosnippet>147</a>    value: <span class="kw-2">&amp;</span>Value,
+<a href=#148 id=148 data-nosnippet>148</a>    collection_kind: <span class="kw-2">&amp;</span>str,
+<a href=#149 id=149 data-nosnippet>149</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="kw">if </span><span class="macro">matches!</span>(value, Value::Null) {
+<a href=#151 id=151 data-nosnippet>151</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidInput(<span class="macro">format!</span>(
+<a href=#152 id=152 data-nosnippet>152</a>            <span class="string">"{} elements cannot be null (CQL semantics)"</span>,
+<a href=#153 id=153 data-nosnippet>153</a>            collection_kind
+<a href=#154 id=154 data-nosnippet>154</a>        )));
+<a href=#155 id=155 data-nosnippet>155</a>    }
+<a href=#156 id=156 data-nosnippet>156</a>    serialize_value(value)
+<a href=#157 id=157 data-nosnippet>157</a>}
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a><span class="doccomment">/// Serialize a Value to bytes for cell storage
+<a href=#160 id=160 data-nosnippet>160</a>///
+<a href=#161 id=161 data-nosnippet>161</a>/// This follows Cassandra's type-specific serialization rules.
+<a href=#162 id=162 data-nosnippet>162</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>serialize_value(value: <span class="kw-2">&amp;</span>Value) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#163 id=163 data-nosnippet>163</a>    <span class="kw">match </span>value {
+<a href=#164 id=164 data-nosnippet>164</a>        Value::Null =&gt; <span class="prelude-val">Ok</span>(Vec::new()),
+<a href=#165 id=165 data-nosnippet>165</a>        Value::Boolean(b) =&gt; <span class="prelude-val">Ok</span>(<span class="macro">vec!</span>[<span class="kw">if </span><span class="kw-2">*</span>b { <span class="number">1 </span>} <span class="kw">else </span>{ <span class="number">0 </span>}]),
+<a href=#166 id=166 data-nosnippet>166</a>        Value::TinyInt(n) =&gt; <span class="prelude-val">Ok</span>(<span class="macro">vec!</span>[<span class="kw-2">*</span>n <span class="kw">as </span>u8]),
+<a href=#167 id=167 data-nosnippet>167</a>        Value::SmallInt(n) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#168 id=168 data-nosnippet>168</a>        Value::Integer(n) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#169 id=169 data-nosnippet>169</a>        Value::BigInt(n) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#170 id=170 data-nosnippet>170</a>        Value::Counter(n) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#171 id=171 data-nosnippet>171</a>        Value::Float32(f) =&gt; <span class="prelude-val">Ok</span>(f.to_bits().to_be_bytes().to_vec()),
+<a href=#172 id=172 data-nosnippet>172</a>        Value::Float(f) =&gt; <span class="prelude-val">Ok</span>(f.to_bits().to_be_bytes().to_vec()),
+<a href=#173 id=173 data-nosnippet>173</a>        Value::Text(s) =&gt; <span class="prelude-val">Ok</span>(s.as_bytes().to_vec()),
+<a href=#174 id=174 data-nosnippet>174</a>        Value::Blob(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#175 id=175 data-nosnippet>175</a>        Value::Timestamp(millis) =&gt; <span class="prelude-val">Ok</span>(millis.to_be_bytes().to_vec()),
+<a href=#176 id=176 data-nosnippet>176</a>        Value::Date(days) =&gt; {
+<a href=#177 id=177 data-nosnippet>177</a>            <span class="comment">// Cassandra DATE: stored as unsigned int with Integer.MIN_VALUE offset
+<a href=#178 id=178 data-nosnippet>178</a>            </span><span class="kw">let </span>stored = days.wrapping_sub(i32::MIN) <span class="kw">as </span>u32;
+<a href=#179 id=179 data-nosnippet>179</a>            <span class="prelude-val">Ok</span>(stored.to_be_bytes().to_vec())
+<a href=#180 id=180 data-nosnippet>180</a>        }
+<a href=#181 id=181 data-nosnippet>181</a>        Value::Time(nanos) =&gt; <span class="prelude-val">Ok</span>(nanos.to_be_bytes().to_vec()),
+<a href=#182 id=182 data-nosnippet>182</a>        Value::Uuid(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
+<a href=#183 id=183 data-nosnippet>183</a>        Value::Inet(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#184 id=184 data-nosnippet>184</a>        Value::Varint(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#185 id=185 data-nosnippet>185</a>        Value::Decimal { scale, unscaled } =&gt; {
+<a href=#186 id=186 data-nosnippet>186</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::new();
+<a href=#187 id=187 data-nosnippet>187</a>            result.extend_from_slice(<span class="kw-2">&amp;</span>scale.to_be_bytes());
+<a href=#188 id=188 data-nosnippet>188</a>            result.extend_from_slice(unscaled);
+<a href=#189 id=189 data-nosnippet>189</a>            <span class="prelude-val">Ok</span>(result)
+<a href=#190 id=190 data-nosnippet>190</a>        }
+<a href=#191 id=191 data-nosnippet>191</a>        Value::Duration {
+<a href=#192 id=192 data-nosnippet>192</a>            months,
+<a href=#193 id=193 data-nosnippet>193</a>            days,
+<a href=#194 id=194 data-nosnippet>194</a>            nanos,
+<a href=#195 id=195 data-nosnippet>195</a>        } =&gt; {
+<a href=#196 id=196 data-nosnippet>196</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::new();
+<a href=#197 id=197 data-nosnippet>197</a>            <span class="comment">// Cassandra DurationType stores three signed VInts, not fixed-width ints.
+<a href=#198 id=198 data-nosnippet>198</a>            </span>encode_signed(<span class="kw-2">*</span>months <span class="kw">as </span>i64, <span class="kw-2">&amp;mut </span>result);
+<a href=#199 id=199 data-nosnippet>199</a>            encode_signed(<span class="kw-2">*</span>days <span class="kw">as </span>i64, <span class="kw-2">&amp;mut </span>result);
+<a href=#200 id=200 data-nosnippet>200</a>            encode_signed(<span class="kw-2">*</span>nanos, <span class="kw-2">&amp;mut </span>result);
+<a href=#201 id=201 data-nosnippet>201</a>            <span class="prelude-val">Ok</span>(result)
+<a href=#202 id=202 data-nosnippet>202</a>        }
+<a href=#203 id=203 data-nosnippet>203</a>        Value::Udt(udt_value) =&gt; {
+<a href=#204 id=204 data-nosnippet>204</a>            <span class="comment">// Construct UdtTypeDef from UdtValue fields by inferring types
+<a href=#205 id=205 data-nosnippet>205</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>schema =
+<a href=#206 id=206 data-nosnippet>206</a>                UdtTypeDef::new(udt_value.keyspace.clone(), udt_value.type_name.clone());
+<a href=#207 id=207 data-nosnippet>207</a>
+<a href=#208 id=208 data-nosnippet>208</a>            <span class="comment">// Infer field types from values
+<a href=#209 id=209 data-nosnippet>209</a>            </span><span class="kw">for </span>field <span class="kw">in </span><span class="kw-2">&amp;</span>udt_value.fields {
+<a href=#210 id=210 data-nosnippet>210</a>                <span class="kw">let </span>field_type = infer_cql_type_from_value(field.value.as_ref());
+<a href=#211 id=211 data-nosnippet>211</a>                schema = schema.with_field(field.name.clone(), field_type, <span class="bool-val">true</span>);
+<a href=#212 id=212 data-nosnippet>212</a>            }
+<a href=#213 id=213 data-nosnippet>213</a>
+<a href=#214 id=214 data-nosnippet>214</a>            <span class="kw">let </span>serializer = TypeSerializer::new();
+<a href=#215 id=215 data-nosnippet>215</a>            serializer.serialize_udt(value, <span class="kw-2">&amp;</span>schema)
+<a href=#216 id=216 data-nosnippet>216</a>        }
+<a href=#217 id=217 data-nosnippet>217</a>        Value::List(elements) =&gt; {
+<a href=#218 id=218 data-nosnippet>218</a>            <span class="comment">// ListType preserves insertion order — do NOT sort.
+<a href=#219 id=219 data-nosnippet>219</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>buf = Vec::new();
+<a href=#220 id=220 data-nosnippet>220</a>            buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(elements.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#221 id=221 data-nosnippet>221</a>            <span class="kw">for </span>elem <span class="kw">in </span>elements {
+<a href=#222 id=222 data-nosnippet>222</a>                <span class="kw">let </span>elem_bytes = serialize_collection_element(elem, <span class="string">"Collection"</span>)<span class="question-mark">?</span>;
+<a href=#223 id=223 data-nosnippet>223</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(elem_bytes.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#224 id=224 data-nosnippet>224</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>elem_bytes);
+<a href=#225 id=225 data-nosnippet>225</a>            }
+<a href=#226 id=226 data-nosnippet>226</a>            <span class="prelude-val">Ok</span>(buf)
+<a href=#227 id=227 data-nosnippet>227</a>        }
+<a href=#228 id=228 data-nosnippet>228</a>        Value::Set(elements) =&gt; {
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="comment">// Cassandra SetType is a sorted collection: a frozen set serializes its
+<a href=#230 id=230 data-nosnippet>230</a>            // elements in the SetType element-type comparator's order (issue #1254,
+<a href=#231 id=231 data-nosnippet>231</a>            // #1275). Order by `compare_collection_elements` — SIGNED for numeric
+<a href=#232 id=232 data-nosnippet>232</a>            // element types, unsigned-byte otherwise — decided from the element
+<a href=#233 id=233 data-nosnippet>233</a>            // `Value`s (authoritative type), the SAME single comparator the
+<a href=#234 id=234 data-nosnippet>234</a>            // non-frozen SET cell path uses (`write_set_complex_cells` in
+<a href=#235 id=235 data-nosnippet>235</a>            // complex.rs). A raw serialized-byte sort (the pre-#1275 behavior) put
+<a href=#236 id=236 data-nosnippet>236</a>            // negatives last, e.g. `frozen&lt;set&lt;int&gt;&gt;` of {-1,0,1} serialized in the
+<a href=#237 id=237 data-nosnippet>237</a>            // wrong order. Then serialize each element in that order
+<a href=#238 id=238 data-nosnippet>238</a>            // (`serialize_collection_element` rejects Value::Null).
+<a href=#239 id=239 data-nosnippet>239</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>ordered: Vec&lt;<span class="kw-2">&amp;</span>Value&gt; = elements.iter().collect();
+<a href=#240 id=240 data-nosnippet>240</a>            ordered.sort_by(|a, b| compare_collection_elements(a, b));
+<a href=#241 id=241 data-nosnippet>241</a>            <span class="kw">let </span>serialized: Vec&lt;Vec&lt;u8&gt;&gt; = ordered
+<a href=#242 id=242 data-nosnippet>242</a>                .iter()
+<a href=#243 id=243 data-nosnippet>243</a>                .map(|e| serialize_collection_element(e, <span class="string">"Collection"</span>))
+<a href=#244 id=244 data-nosnippet>244</a>                .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#245 id=245 data-nosnippet>245</a>
+<a href=#246 id=246 data-nosnippet>246</a>            <span class="kw">let </span><span class="kw-2">mut </span>buf = Vec::new();
+<a href=#247 id=247 data-nosnippet>247</a>            buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(serialized.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#248 id=248 data-nosnippet>248</a>            <span class="kw">for </span>elem_bytes <span class="kw">in </span><span class="kw-2">&amp;</span>serialized {
+<a href=#249 id=249 data-nosnippet>249</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(elem_bytes.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#250 id=250 data-nosnippet>250</a>                buf.extend_from_slice(elem_bytes);
+<a href=#251 id=251 data-nosnippet>251</a>            }
+<a href=#252 id=252 data-nosnippet>252</a>            <span class="prelude-val">Ok</span>(buf)
+<a href=#253 id=253 data-nosnippet>253</a>        }
+<a href=#254 id=254 data-nosnippet>254</a>        Value::Map(entries) =&gt; {
+<a href=#255 id=255 data-nosnippet>255</a>            <span class="comment">// Cassandra MapType is a sorted collection: a frozen map serializes its
+<a href=#256 id=256 data-nosnippet>256</a>            // entries in the KEY-type comparator's order (issue #1254, #1275). Order
+<a href=#257 id=257 data-nosnippet>257</a>            // by `compare_collection_elements` over the KEY `Value`s — SIGNED for
+<a href=#258 id=258 data-nosnippet>258</a>            // numeric key types, unsigned-byte otherwise — the SAME single
+<a href=#259 id=259 data-nosnippet>259</a>            // comparator the non-frozen MAP cell path uses (`write_map_complex_cells`
+<a href=#260 id=260 data-nosnippet>260</a>            // in complex.rs). A raw serialized-KEY-byte sort (the pre-#1275 behavior)
+<a href=#261 id=261 data-nosnippet>261</a>            // ordered a `map&lt;int,…&gt;` with negative keys wrong. Then serialize each
+<a href=#262 id=262 data-nosnippet>262</a>            // key/value in that order.
+<a href=#263 id=263 data-nosnippet>263</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>ordered: Vec&lt;<span class="kw-2">&amp;</span>(Value, Value)&gt; = entries.iter().collect();
+<a href=#264 id=264 data-nosnippet>264</a>            ordered.sort_by(|a, b| compare_collection_elements(<span class="kw-2">&amp;</span>a.<span class="number">0</span>, <span class="kw-2">&amp;</span>b.<span class="number">0</span>));
+<a href=#265 id=265 data-nosnippet>265</a>            <span class="kw">let </span>serialized: Vec&lt;(Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt; = ordered
+<a href=#266 id=266 data-nosnippet>266</a>                .iter()
+<a href=#267 id=267 data-nosnippet>267</a>                .map(|(key, val)| {
+<a href=#268 id=268 data-nosnippet>268</a>                    <span class="kw">if </span><span class="macro">matches!</span>(key, Value::Null) {
+<a href=#269 id=269 data-nosnippet>269</a>                        <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidInput(
+<a href=#270 id=270 data-nosnippet>270</a>                            <span class="string">"MAP keys cannot be null (CQL semantics)"</span>.to_string(),
+<a href=#271 id=271 data-nosnippet>271</a>                        ));
+<a href=#272 id=272 data-nosnippet>272</a>                    }
+<a href=#273 id=273 data-nosnippet>273</a>                    <span class="prelude-val">Ok</span>((serialize_value(key)<span class="question-mark">?</span>, serialize_value(val)<span class="question-mark">?</span>))
+<a href=#274 id=274 data-nosnippet>274</a>                })
+<a href=#275 id=275 data-nosnippet>275</a>                .collect::&lt;<span class="prelude-ty">Result</span>&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;&gt;()<span class="question-mark">?</span>;
+<a href=#276 id=276 data-nosnippet>276</a>
+<a href=#277 id=277 data-nosnippet>277</a>            <span class="kw">let </span><span class="kw-2">mut </span>buf = Vec::new();
+<a href=#278 id=278 data-nosnippet>278</a>            buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(serialized.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#279 id=279 data-nosnippet>279</a>            <span class="kw">for </span>(key_bytes, val_bytes) <span class="kw">in </span><span class="kw-2">&amp;</span>serialized {
+<a href=#280 id=280 data-nosnippet>280</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(key_bytes.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#281 id=281 data-nosnippet>281</a>                buf.extend_from_slice(key_bytes);
+<a href=#282 id=282 data-nosnippet>282</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(val_bytes.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#283 id=283 data-nosnippet>283</a>                buf.extend_from_slice(val_bytes);
+<a href=#284 id=284 data-nosnippet>284</a>            }
+<a href=#285 id=285 data-nosnippet>285</a>            <span class="prelude-val">Ok</span>(buf)
+<a href=#286 id=286 data-nosnippet>286</a>        }
+<a href=#287 id=287 data-nosnippet>287</a>        Value::Tuple(fields) =&gt; {
+<a href=#288 id=288 data-nosnippet>288</a>            <span class="kw">let </span><span class="kw-2">mut </span>buf = Vec::new();
+<a href=#289 id=289 data-nosnippet>289</a>            <span class="kw">for </span>field <span class="kw">in </span>fields {
+<a href=#290 id=290 data-nosnippet>290</a>                <span class="kw">match </span>field {
+<a href=#291 id=291 data-nosnippet>291</a>                    Value::Null =&gt; buf.extend_from_slice(<span class="kw-2">&amp;</span>(-<span class="number">1i32</span>).to_be_bytes()),
+<a href=#292 id=292 data-nosnippet>292</a>                    other =&gt; {
+<a href=#293 id=293 data-nosnippet>293</a>                        <span class="kw">let </span>field_bytes = serialize_value(other)<span class="question-mark">?</span>;
+<a href=#294 id=294 data-nosnippet>294</a>                        buf.extend_from_slice(<span class="kw-2">&amp;</span>len_as_i32(field_bytes.len())<span class="question-mark">?</span>.to_be_bytes());
+<a href=#295 id=295 data-nosnippet>295</a>                        buf.extend_from_slice(<span class="kw-2">&amp;</span>field_bytes);
+<a href=#296 id=296 data-nosnippet>296</a>                    }
+<a href=#297 id=297 data-nosnippet>297</a>                }
+<a href=#298 id=298 data-nosnippet>298</a>            }
+<a href=#299 id=299 data-nosnippet>299</a>            <span class="prelude-val">Ok</span>(buf)
+<a href=#300 id=300 data-nosnippet>300</a>        }
+<a href=#301 id=301 data-nosnippet>301</a>        Value::Frozen(inner) =&gt; serialize_value(inner),
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(Error::InvalidInput(<span class="macro">format!</span>(
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="string">"Unsupported value type for serialization: {:?}"</span>,
+<a href=#304 id=304 data-nosnippet>304</a>            value
+<a href=#305 id=305 data-nosnippet>305</a>        ))),
+<a href=#306 id=306 data-nosnippet>306</a>    }
+<a href=#307 id=307 data-nosnippet>307</a>}
+<a href=#308 id=308 data-nosnippet>308</a>
+<a href=#309 id=309 data-nosnippet>309</a><span class="doccomment">/// Infer CQL type from a Value instance
+<a href=#310 id=310 data-nosnippet>310</a>///
+<a href=#311 id=311 data-nosnippet>311</a>/// Used for UDT serialization when schema context is not available.
+<a href=#312 id=312 data-nosnippet>312</a>/// Empty collections still fall back to `text` because there is no element
+<a href=#313 id=313 data-nosnippet>313</a>/// value available to inspect.
+<a href=#314 id=314 data-nosnippet>314</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>infer_cql_type_from_value(value: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>Value&gt;) -&gt; CqlType {
+<a href=#315 id=315 data-nosnippet>315</a>    <span class="kw">match </span>value {
+<a href=#316 id=316 data-nosnippet>316</a>        <span class="prelude-val">None </span>| <span class="prelude-val">Some</span>(Value::Null) =&gt; CqlType::Text, <span class="comment">// Default for NULL
+<a href=#317 id=317 data-nosnippet>317</a>        </span><span class="prelude-val">Some</span>(Value::Boolean(<span class="kw">_</span>)) =&gt; CqlType::Boolean,
+<a href=#318 id=318 data-nosnippet>318</a>        <span class="prelude-val">Some</span>(Value::TinyInt(<span class="kw">_</span>)) =&gt; CqlType::TinyInt,
+<a href=#319 id=319 data-nosnippet>319</a>        <span class="prelude-val">Some</span>(Value::SmallInt(<span class="kw">_</span>)) =&gt; CqlType::SmallInt,
+<a href=#320 id=320 data-nosnippet>320</a>        <span class="prelude-val">Some</span>(Value::Integer(<span class="kw">_</span>)) =&gt; CqlType::Int,
+<a href=#321 id=321 data-nosnippet>321</a>        <span class="prelude-val">Some</span>(Value::BigInt(<span class="kw">_</span>)) =&gt; CqlType::BigInt,
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="prelude-val">Some</span>(Value::Float32(<span class="kw">_</span>)) =&gt; CqlType::Float,
+<a href=#323 id=323 data-nosnippet>323</a>        <span class="prelude-val">Some</span>(Value::Float(<span class="kw">_</span>)) =&gt; CqlType::Double,
+<a href=#324 id=324 data-nosnippet>324</a>        <span class="prelude-val">Some</span>(Value::Text(<span class="kw">_</span>)) =&gt; CqlType::Text,
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="prelude-val">Some</span>(Value::Blob(<span class="kw">_</span>)) =&gt; CqlType::Blob,
+<a href=#326 id=326 data-nosnippet>326</a>        <span class="prelude-val">Some</span>(Value::Timestamp(<span class="kw">_</span>)) =&gt; CqlType::Timestamp,
+<a href=#327 id=327 data-nosnippet>327</a>        <span class="prelude-val">Some</span>(Value::Date(<span class="kw">_</span>)) =&gt; CqlType::Date,
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="prelude-val">Some</span>(Value::Time(<span class="kw">_</span>)) =&gt; CqlType::Time,
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="prelude-val">Some</span>(Value::Uuid(<span class="kw">_</span>)) =&gt; CqlType::Uuid,
+<a href=#330 id=330 data-nosnippet>330</a>        <span class="prelude-val">Some</span>(Value::Inet(<span class="kw">_</span>)) =&gt; CqlType::Inet,
+<a href=#331 id=331 data-nosnippet>331</a>        <span class="prelude-val">Some</span>(Value::Varint(<span class="kw">_</span>)) =&gt; CqlType::Varint,
+<a href=#332 id=332 data-nosnippet>332</a>        <span class="prelude-val">Some</span>(Value::Decimal { .. }) =&gt; CqlType::Decimal,
+<a href=#333 id=333 data-nosnippet>333</a>        <span class="prelude-val">Some</span>(Value::Duration { .. }) =&gt; CqlType::Duration,
+<a href=#334 id=334 data-nosnippet>334</a>        <span class="prelude-val">Some</span>(Value::Counter(<span class="kw">_</span>)) =&gt; CqlType::Counter,
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="prelude-val">Some</span>(Value::List(elements)) =&gt; CqlType::List(Box::new(
+<a href=#336 id=336 data-nosnippet>336</a>            elements
+<a href=#337 id=337 data-nosnippet>337</a>                .first()
+<a href=#338 id=338 data-nosnippet>338</a>                .map(|elem| infer_cql_type_from_value(<span class="prelude-val">Some</span>(elem)))
+<a href=#339 id=339 data-nosnippet>339</a>                .unwrap_or(CqlType::Text),
+<a href=#340 id=340 data-nosnippet>340</a>        )),
+<a href=#341 id=341 data-nosnippet>341</a>        <span class="prelude-val">Some</span>(Value::Set(elements)) =&gt; CqlType::Set(Box::new(
+<a href=#342 id=342 data-nosnippet>342</a>            elements
+<a href=#343 id=343 data-nosnippet>343</a>                .first()
+<a href=#344 id=344 data-nosnippet>344</a>                .map(|elem| infer_cql_type_from_value(<span class="prelude-val">Some</span>(elem)))
+<a href=#345 id=345 data-nosnippet>345</a>                .unwrap_or(CqlType::Text),
+<a href=#346 id=346 data-nosnippet>346</a>        )),
+<a href=#347 id=347 data-nosnippet>347</a>        <span class="prelude-val">Some</span>(Value::Map(entries)) =&gt; {
+<a href=#348 id=348 data-nosnippet>348</a>            <span class="kw">let </span>(key_type, value_type) = entries
+<a href=#349 id=349 data-nosnippet>349</a>                .first()
+<a href=#350 id=350 data-nosnippet>350</a>                .map(|(key, value)| {
+<a href=#351 id=351 data-nosnippet>351</a>                    (
+<a href=#352 id=352 data-nosnippet>352</a>                        infer_cql_type_from_value(<span class="prelude-val">Some</span>(key)),
+<a href=#353 id=353 data-nosnippet>353</a>                        infer_cql_type_from_value(<span class="prelude-val">Some</span>(value)),
+<a href=#354 id=354 data-nosnippet>354</a>                    )
+<a href=#355 id=355 data-nosnippet>355</a>                })
+<a href=#356 id=356 data-nosnippet>356</a>                .unwrap_or((CqlType::Text, CqlType::Text));
+<a href=#357 id=357 data-nosnippet>357</a>            CqlType::Map(Box::new(key_type), Box::new(value_type))
+<a href=#358 id=358 data-nosnippet>358</a>        }
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="prelude-val">Some</span>(Value::Tuple(fields)) =&gt; CqlType::Tuple(
+<a href=#360 id=360 data-nosnippet>360</a>            fields
+<a href=#361 id=361 data-nosnippet>361</a>                .iter()
+<a href=#362 id=362 data-nosnippet>362</a>                .map(|field| infer_cql_type_from_value(<span class="prelude-val">Some</span>(field)))
+<a href=#363 id=363 data-nosnippet>363</a>                .collect(),
+<a href=#364 id=364 data-nosnippet>364</a>        ),
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="prelude-val">Some</span>(Value::Udt(udt)) =&gt; CqlType::Udt(
+<a href=#366 id=366 data-nosnippet>366</a>            udt.type_name.clone(),
+<a href=#367 id=367 data-nosnippet>367</a>            udt.fields
+<a href=#368 id=368 data-nosnippet>368</a>                .iter()
+<a href=#369 id=369 data-nosnippet>369</a>                .map(|field| {
+<a href=#370 id=370 data-nosnippet>370</a>                    (
+<a href=#371 id=371 data-nosnippet>371</a>                        field.name.clone(),
+<a href=#372 id=372 data-nosnippet>372</a>                        infer_cql_type_from_value(field.value.as_ref()),
+<a href=#373 id=373 data-nosnippet>373</a>                    )
+<a href=#374 id=374 data-nosnippet>374</a>                })
+<a href=#375 id=375 data-nosnippet>375</a>                .collect(),
+<a href=#376 id=376 data-nosnippet>376</a>        ),
+<a href=#377 id=377 data-nosnippet>377</a>        <span class="prelude-val">Some</span>(Value::Frozen(inner)) =&gt; {
+<a href=#378 id=378 data-nosnippet>378</a>            CqlType::Frozen(Box::new(infer_cql_type_from_value(<span class="prelude-val">Some</span>(inner))))
+<a href=#379 id=379 data-nosnippet>379</a>        }
+<a href=#380 id=380 data-nosnippet>380</a>        <span class="prelude-val">Some</span>(Value::Tombstone(<span class="kw">_</span>)) =&gt; CqlType::Text, <span class="comment">// Tombstones shouldn't appear in UDT fields
+<a href=#381 id=381 data-nosnippet>381</a>        </span><span class="prelude-val">Some</span>(Value::Json(<span class="kw">_</span>)) =&gt; CqlType::Text,      <span class="comment">// JSON is stored as text
+<a href=#382 id=382 data-nosnippet>382</a>    </span>}
+<a href=#383 id=383 data-nosnippet>383</a>}
+<a href=#384 id=384 data-nosnippet>384</a>
+<a href=#385 id=385 data-nosnippet>385</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>cell_value_uses_length_prefix(value: <span class="kw-2">&amp;</span>Value) -&gt; bool {
+<a href=#386 id=386 data-nosnippet>386</a>    !<span class="macro">matches!</span>(
+<a href=#387 id=387 data-nosnippet>387</a>        value,
+<a href=#388 id=388 data-nosnippet>388</a>        Value::Boolean(<span class="kw">_</span>)
+<a href=#389 id=389 data-nosnippet>389</a>            | Value::Integer(<span class="kw">_</span>)
+<a href=#390 id=390 data-nosnippet>390</a>            | Value::BigInt(<span class="kw">_</span>)
+<a href=#391 id=391 data-nosnippet>391</a>            | Value::Float32(<span class="kw">_</span>)
+<a href=#392 id=392 data-nosnippet>392</a>            | Value::Float(<span class="kw">_</span>)
+<a href=#393 id=393 data-nosnippet>393</a>            | Value::Timestamp(<span class="kw">_</span>)
+<a href=#394 id=394 data-nosnippet>394</a>            | Value::Uuid(<span class="kw">_</span>)
+<a href=#395 id=395 data-nosnippet>395</a>    )
+<a href=#396 id=396 data-nosnippet>396</a>}
+<a href=#397 id=397 data-nosnippet>397</a>
+<a href=#398 id=398 data-nosnippet>398</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_static_row_mutation(mutation: <span class="kw-2">&amp;</span>Mutation, schema: <span class="kw-2">&amp;</span>TableSchema) -&gt; bool {
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">if </span>mutation.clustering_key.is_some() || !schema.columns.iter().any(|column| column.is_static) {
+<a href=#400 id=400 data-nosnippet>400</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#401 id=401 data-nosnippet>401</a>    }
+<a href=#402 id=402 data-nosnippet>402</a>
+<a href=#403 id=403 data-nosnippet>403</a>    mutation.operations.iter().all(|operation| <span class="kw">match </span>operation {
+<a href=#404 id=404 data-nosnippet>404</a>        <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::Write { column, .. }
+<a href=#405 id=405 data-nosnippet>405</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
+<a href=#406 id=406 data-nosnippet>406</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::Delete { column, .. }
+<a href=#407 id=407 data-nosnippet>407</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+<a href=#408 id=408 data-nosnippet>408</a>            column,
+<a href=#409 id=409 data-nosnippet>409</a>            ..
+<a href=#410 id=410 data-nosnippet>410</a>        }
+<a href=#411 id=411 data-nosnippet>411</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+<a href=#412 id=412 data-nosnippet>412</a>            column, ..
+<a href=#413 id=413 data-nosnippet>413</a>        } =&gt; schema
+<a href=#414 id=414 data-nosnippet>414</a>            .columns
+<a href=#415 id=415 data-nosnippet>415</a>            .iter()
+<a href=#416 id=416 data-nosnippet>416</a>            .find(|candidate| candidate.name == <span class="kw-2">*</span>column)
+<a href=#417 id=417 data-nosnippet>417</a>            .map(|candidate| candidate.is_static)
+<a href=#418 id=418 data-nosnippet>418</a>            .unwrap_or(<span class="bool-val">false</span>),
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::DeleteRow =&gt; <span class="bool-val">true</span>,
+<a href=#420 id=420 data-nosnippet>420</a>    })
+<a href=#421 id=421 data-nosnippet>421</a>}
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a><span class="doccomment">/// Returns true if this single operation targets a static column.
+<a href=#424 id=424 data-nosnippet>424</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_static_operation(
+<a href=#425 id=425 data-nosnippet>425</a>    op: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::write_engine::mutation::CellOperation,
+<a href=#426 id=426 data-nosnippet>426</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#427 id=427 data-nosnippet>427</a>) -&gt; bool {
+<a href=#428 id=428 data-nosnippet>428</a>    <span class="kw">match </span>op {
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::Write { column, .. }
+<a href=#430 id=430 data-nosnippet>430</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
+<a href=#431 id=431 data-nosnippet>431</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::Delete { column, .. }
+<a href=#432 id=432 data-nosnippet>432</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+<a href=#433 id=433 data-nosnippet>433</a>            column,
+<a href=#434 id=434 data-nosnippet>434</a>            ..
+<a href=#435 id=435 data-nosnippet>435</a>        }
+<a href=#436 id=436 data-nosnippet>436</a>        | <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+<a href=#437 id=437 data-nosnippet>437</a>            column, ..
+<a href=#438 id=438 data-nosnippet>438</a>        } =&gt; schema
+<a href=#439 id=439 data-nosnippet>439</a>            .columns
+<a href=#440 id=440 data-nosnippet>440</a>            .iter()
+<a href=#441 id=441 data-nosnippet>441</a>            .find(|c| c.name == <span class="kw-2">*</span>column)
+<a href=#442 id=442 data-nosnippet>442</a>            .map(|c| c.is_static)
+<a href=#443 id=443 data-nosnippet>443</a>            .unwrap_or(<span class="bool-val">false</span>),
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="kw">crate</span>::storage::write_engine::mutation::CellOperation::DeleteRow =&gt; <span class="bool-val">false</span>,
+<a href=#445 id=445 data-nosnippet>445</a>    }
+<a href=#446 id=446 data-nosnippet>446</a>}
+<a href=#447 id=447 data-nosnippet>447</a>
+<a href=#448 id=448 data-nosnippet>448</a><span class="doccomment">/// Returns true if `column` is part of the primary key — a partition-key or
+<a href=#449 id=449 data-nosnippet>449</a>/// clustering-key column.
+<a href=#450 id=450 data-nosnippet>450</a>///
+<a href=#451 id=451 data-nosnippet>451</a>/// Primary-key columns are encoded positionally (the partition key and the row's
+<a href=#452 id=452 data-nosnippet>452</a>/// clustering prefix); they must NEVER be written as regular cells. The compaction
+<a href=#453 id=453 data-nosnippet>453</a>/// path can surface a clustering column as a `Write` op (the merger keeps the
+<a href=#454 id=454 data-nosnippet>454</a>/// clustering cell for its own read-back, and `merge_entry_to_mutation` turns it
+<a href=#455 id=455 data-nosnippet>455</a>/// into a `Write`); emitting it as a cell writes the value a second time and
+<a href=#456 id=456 data-nosnippet>456</a>/// corrupts the row body for strict readers (#857). The writer drops such ops.
+<a href=#457 id=457 data-nosnippet>457</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_primary_key_column(column: <span class="kw-2">&amp;</span>str, schema: <span class="kw-2">&amp;</span>TableSchema) -&gt; bool {
+<a href=#458 id=458 data-nosnippet>458</a>    schema.partition_keys.iter().any(|k| k.name == column)
+<a href=#459 id=459 data-nosnippet>459</a>        || schema.clustering_keys.iter().any(|k| k.name == column)
+<a href=#460 id=460 data-nosnippet>460</a>}
+<a href=#461 id=461 data-nosnippet>461</a>
+<a href=#462 id=462 data-nosnippet>462</a><span class="doccomment">/// Collect and merge static-column operations from all mutations in a partition.
+<a href=#463 id=463 data-nosnippet>463</a>///
+<a href=#464 id=464 data-nosnippet>464</a>/// Scans every mutation (regardless of whether it has a clustering key) and
+<a href=#465 id=465 data-nosnippet>465</a>/// collects operations that target static columns.  Last-write-wins by
+<a href=#466 id=466 data-nosnippet>466</a>/// `timestamp_micros` when the same column is written more than once.
+<a href=#467 id=467 data-nosnippet>467</a>///
+<a href=#468 id=468 data-nosnippet>468</a>/// Mutations at or before `shadow_floor` (the partition tombstone's deletion
+<a href=#469 id=469 data-nosnippet>469</a>/// timestamp) are skipped: their static cells are shadowed and an sstable
+<a href=#470 id=470 data-nosnippet>470</a>/// must be internally reconciled (see `DataWriter::write_partition`).
+<a href=#471 id=471 data-nosnippet>471</a>///
+<a href=#472 id=472 data-nosnippet>472</a>/// Returns the merged operations in an unspecified order (the writer will
+<a href=#473 id=473 data-nosnippet>473</a>/// sort them by schema column order when building the row body). Each op
+<a href=#474 id=474 data-nosnippet>474</a>/// carries the originating mutation's timestamp and explicit local deletion
+<a href=#475 id=475 data-nosnippet>475</a>/// time (Issue #764) so a surviving older static delete keeps its own LDT
+<a href=#476 id=476 data-nosnippet>476</a>/// instead of inheriting the newest static mutation's value.
+<a href=#477 id=477 data-nosnippet>477</a>///
+<a href=#478 id=478 data-nosnippet>478</a>/// Issue #1668, stage 5c-ii: a thin wrapper over [`StaticOpsTracker`] — the
+<a href=#479 id=479 data-nosnippet>479</a>/// SAME per-mutation last-write-wins fold, now factored into a running
+<a href=#480 id=480 data-nosnippet>480</a>/// tracker so a future incremental writer entry point (stage 5c-iv) can feed
+<a href=#481 id=481 data-nosnippet>481</a>/// it one cluster group at a time instead of requiring the whole `&amp;[Mutation]`
+<a href=#482 id=482 data-nosnippet>482</a>/// slice upfront. Byte-identical to the prior whole-slice implementation.
+<a href=#483 id=483 data-nosnippet>483</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>collect_static_operations(
+<a href=#484 id=484 data-nosnippet>484</a>    mutations: <span class="kw-2">&amp;</span>[Mutation],
+<a href=#485 id=485 data-nosnippet>485</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#486 id=486 data-nosnippet>486</a>    shadow_floor: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#487 id=487 data-nosnippet>487</a>) -&gt; Vec&lt;StaticMergedOp&gt; {
+<a href=#488 id=488 data-nosnippet>488</a>    <span class="kw">let </span><span class="kw-2">mut </span>tracker = StaticOpsTracker::new();
+<a href=#489 id=489 data-nosnippet>489</a>    <span class="kw">for </span>mutation <span class="kw">in </span>mutations {
+<a href=#490 id=490 data-nosnippet>490</a>        tracker.feed(mutation, schema, shadow_floor);
+<a href=#491 id=491 data-nosnippet>491</a>    }
+<a href=#492 id=492 data-nosnippet>492</a>    tracker.finish()
+<a href=#493 id=493 data-nosnippet>493</a>}
+<a href=#494 id=494 data-nosnippet>494</a>
+<a href=#495 id=495 data-nosnippet>495</a><span class="doccomment">/// Derive a static row's liveness timestamp + TTL from the SURVIVING merged
+<a href=#496 id=496 data-nosnippet>496</a>/// static ops (issue #1018, roborev HIGH).
+<a href=#497 id=497 data-nosnippet>497</a>///
+<a href=#498 id=498 data-nosnippet>498</a>/// The static row carries no row-level liveness in the emitted bytes (#1196 —
+<a href=#499 id=499 data-nosnippet>499</a>/// the writetime rides on each static CELL), but the partition path still
+<a href=#500 id=500 data-nosnippet>500</a>/// threads a `(latest_ts, ttl)` pair into `write_static_row_with_prev_size`.
+<a href=#501 id=501 data-nosnippet>501</a>/// That pair MUST be derived from the ops that actually SURVIVED
+<a href=#502 id=502 data-nosnippet>502</a>/// `collect_static_operations` — each carrying its own per-cell
+<a href=#503 id=503 data-nosnippet>503</a>/// `timestamp_micros` after the per-cell shadow floor — NOT from the set of
+<a href=#504 id=504 data-nosnippet>504</a>/// mutations that merely cleared the floor on their ROW MAX. A static `Write`
+<a href=#505 id=505 data-nosnippet>505</a>/// whose per-cell writetime is `&lt;= shadow_floor` is already dropped from
+<a href=#506 id=506 data-nosnippet>506</a>/// `merged`, so it cannot contribute liveness/TTL here; deriving from the
+<a href=#507 id=507 data-nosnippet>507</a>/// mutations' row max could otherwise resurrect a shadowed static cell's
+<a href=#508 id=508 data-nosnippet>508</a>/// writetime. Returns the max per-cell timestamp and the TTL of the op holding
+<a href=#509 id=509 data-nosnippet>509</a>/// it (last-write-wins). `None` when there are no surviving ops.
+<a href=#510 id=510 data-nosnippet>510</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>static_liveness_from_ops(ops: <span class="kw-2">&amp;</span>[StaticMergedOp]) -&gt; <span class="prelude-ty">Option</span>&lt;(i64, <span class="prelude-ty">Option</span>&lt;u32&gt;)&gt; {
+<a href=#511 id=511 data-nosnippet>511</a>    ops.iter()
+<a href=#512 id=512 data-nosnippet>512</a>        .max_by_key(|mop| mop.timestamp_micros)
+<a href=#513 id=513 data-nosnippet>513</a>        .map(|mop| (mop.timestamp_micros, mop.row_ttl_seconds))
+<a href=#514 id=514 data-nosnippet>514</a>}
+<a href=#515 id=515 data-nosnippet>515</a>
+<a href=#516 id=516 data-nosnippet>516</a><span class="doccomment">/// Whether a range tombstone's clustering range covers the given clustering key.
+<a href=#517 id=517 data-nosnippet>517</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>range_tombstone_covers(
+<a href=#518 id=518 data-nosnippet>518</a>    rt: <span class="kw-2">&amp;</span>RangeTombstone,
+<a href=#519 id=519 data-nosnippet>519</a>    clustering_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>ClusteringKey&gt;,
+<a href=#520 id=520 data-nosnippet>520</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#521 id=521 data-nosnippet>521</a>) -&gt; bool {
+<a href=#522 id=522 data-nosnippet>522</a>    <span class="kw">use </span>std::cmp::Ordering;
+<a href=#523 id=523 data-nosnippet>523</a>
+<a href=#524 id=524 data-nosnippet>524</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(ck) = clustering_key <span class="kw">else </span>{
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#526 id=526 data-nosnippet>526</a>    };
+<a href=#527 id=527 data-nosnippet>527</a>    <span class="kw">let </span>cmp = |bound: <span class="kw-2">&amp;</span>ClusteringKey| ck.compare(bound, schema).unwrap_or_else(|<span class="kw">_</span>| ck.cmp(bound));
+<a href=#528 id=528 data-nosnippet>528</a>
+<a href=#529 id=529 data-nosnippet>529</a>    <span class="kw">let </span>after_start = <span class="kw">match </span><span class="kw-2">&amp;</span>rt.start {
+<a href=#530 id=530 data-nosnippet>530</a>        ClusteringBound::Inclusive(b) =&gt; cmp(b) != Ordering::Less,
+<a href=#531 id=531 data-nosnippet>531</a>        ClusteringBound::Exclusive(b) =&gt; cmp(b) == Ordering::Greater,
+<a href=#532 id=532 data-nosnippet>532</a>        ClusteringBound::Bottom =&gt; <span class="bool-val">true</span>,
+<a href=#533 id=533 data-nosnippet>533</a>        ClusteringBound::Top =&gt; <span class="bool-val">false</span>,
+<a href=#534 id=534 data-nosnippet>534</a>    };
+<a href=#535 id=535 data-nosnippet>535</a>    <span class="kw">let </span>before_end = <span class="kw">match </span><span class="kw-2">&amp;</span>rt.end {
+<a href=#536 id=536 data-nosnippet>536</a>        ClusteringBound::Inclusive(b) =&gt; cmp(b) != Ordering::Greater,
+<a href=#537 id=537 data-nosnippet>537</a>        ClusteringBound::Exclusive(b) =&gt; cmp(b) == Ordering::Less,
+<a href=#538 id=538 data-nosnippet>538</a>        ClusteringBound::Top =&gt; <span class="bool-val">true</span>,
+<a href=#539 id=539 data-nosnippet>539</a>        ClusteringBound::Bottom =&gt; <span class="bool-val">false</span>,
+<a href=#540 id=540 data-nosnippet>540</a>    };
+<a href=#541 id=541 data-nosnippet>541</a>    after_start &amp;&amp; before_end
+<a href=#542 id=542 data-nosnippet>542</a>}
+<a href=#543 id=543 data-nosnippet>543</a>
+<a href=#544 id=544 data-nosnippet>544</a><span class="doccomment">/// Serialize value for clustering key (type-specific encoding)
+<a href=#545 id=545 data-nosnippet>545</a>///
+<a href=#546 id=546 data-nosnippet>546</a>/// Fixed-width types: raw bytes (no length prefix)
+<a href=#547 id=547 data-nosnippet>547</a>/// Variable-width types: VInt length + bytes
+<a href=#548 id=548 data-nosnippet>548</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>serialize_value_for_clustering(
+<a href=#549 id=549 data-nosnippet>549</a>    value: <span class="kw-2">&amp;</span>Value,
+<a href=#550 id=550 data-nosnippet>550</a>    comparator: <span class="kw-2">&amp;</span>ComparatorType,
+<a href=#551 id=551 data-nosnippet>551</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#552 id=552 data-nosnippet>552</a>    <span class="kw">match </span>(value, comparator) {
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="comment">// Fixed-width types (no length prefix)
+<a href=#554 id=554 data-nosnippet>554</a>        </span>(Value::Boolean(b), ComparatorType::Boolean) =&gt; <span class="prelude-val">Ok</span>(<span class="macro">vec!</span>[<span class="kw">if </span><span class="kw-2">*</span>b { <span class="number">1 </span>} <span class="kw">else </span>{ <span class="number">0 </span>}]),
+<a href=#555 id=555 data-nosnippet>555</a>        (Value::TinyInt(n), ComparatorType::TinyInt) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#556 id=556 data-nosnippet>556</a>        (Value::SmallInt(n), ComparatorType::SmallInt) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#557 id=557 data-nosnippet>557</a>        (Value::Integer(n), ComparatorType::Int) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#558 id=558 data-nosnippet>558</a>        (Value::BigInt(n), ComparatorType::BigInt) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
+<a href=#559 id=559 data-nosnippet>559</a>        (Value::Float32(f), ComparatorType::Float32) =&gt; <span class="prelude-val">Ok</span>(f.to_bits().to_be_bytes().to_vec()),
+<a href=#560 id=560 data-nosnippet>560</a>        (Value::Float(f), ComparatorType::Float) =&gt; <span class="prelude-val">Ok</span>(f.to_bits().to_be_bytes().to_vec()),
+<a href=#561 id=561 data-nosnippet>561</a>        (Value::Timestamp(millis), ComparatorType::Timestamp) =&gt; <span class="prelude-val">Ok</span>(millis.to_be_bytes().to_vec()),
+<a href=#562 id=562 data-nosnippet>562</a>        (Value::Date(days), ComparatorType::Date) =&gt; {
+<a href=#563 id=563 data-nosnippet>563</a>            <span class="comment">// Cassandra DATE in clustering keys: stored as unsigned int with Integer.MIN_VALUE offset
+<a href=#564 id=564 data-nosnippet>564</a>            </span><span class="kw">let </span>stored = days.wrapping_sub(i32::MIN) <span class="kw">as </span>u32;
+<a href=#565 id=565 data-nosnippet>565</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::new();
+<a href=#566 id=566 data-nosnippet>566</a>            encode_unsigned(<span class="number">4</span>, <span class="kw-2">&amp;mut </span>result);
+<a href=#567 id=567 data-nosnippet>567</a>            result.extend_from_slice(<span class="kw-2">&amp;</span>stored.to_be_bytes());
+<a href=#568 id=568 data-nosnippet>568</a>            <span class="prelude-val">Ok</span>(result)
+<a href=#569 id=569 data-nosnippet>569</a>        }
+<a href=#570 id=570 data-nosnippet>570</a>        (Value::Uuid(bytes), ComparatorType::Uuid) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
+<a href=#571 id=571 data-nosnippet>571</a>
+<a href=#572 id=572 data-nosnippet>572</a>        <span class="comment">// Variable-width types (VInt length + bytes)
+<a href=#573 id=573 data-nosnippet>573</a>        </span>(Value::Text(s), ComparatorType::Text) =&gt; {
+<a href=#574 id=574 data-nosnippet>574</a>            <span class="kw">let </span>bytes = s.as_bytes();
+<a href=#575 id=575 data-nosnippet>575</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::new();
+<a href=#576 id=576 data-nosnippet>576</a>            encode_unsigned(bytes.len() <span class="kw">as </span>u64, <span class="kw-2">&amp;mut </span>result);
+<a href=#577 id=577 data-nosnippet>577</a>            result.extend_from_slice(bytes);
+<a href=#578 id=578 data-nosnippet>578</a>            <span class="prelude-val">Ok</span>(result)
+<a href=#579 id=579 data-nosnippet>579</a>        }
+<a href=#580 id=580 data-nosnippet>580</a>        (Value::Blob(bytes), ComparatorType::Blob) =&gt; {
+<a href=#581 id=581 data-nosnippet>581</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::new();
+<a href=#582 id=582 data-nosnippet>582</a>            encode_unsigned(bytes.len() <span class="kw">as </span>u64, <span class="kw-2">&amp;mut </span>result);
+<a href=#583 id=583 data-nosnippet>583</a>            result.extend_from_slice(bytes);
+<a href=#584 id=584 data-nosnippet>584</a>            <span class="prelude-val">Ok</span>(result)
+<a href=#585 id=585 data-nosnippet>585</a>        }
+<a href=#586 id=586 data-nosnippet>586</a>
+<a href=#587 id=587 data-nosnippet>587</a>        <span class="comment">// Frozen collections as clustering keys: serialize the full collection bytes with VInt length prefix
+<a href=#588 id=588 data-nosnippet>588</a>        </span>(Value::Frozen(inner), <span class="kw">_</span>) =&gt; {
+<a href=#589 id=589 data-nosnippet>589</a>            <span class="kw">let </span>bytes = serialize_value(inner)<span class="question-mark">?</span>;
+<a href=#590 id=590 data-nosnippet>590</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::new();
+<a href=#591 id=591 data-nosnippet>591</a>            encode_unsigned(bytes.len() <span class="kw">as </span>u64, <span class="kw-2">&amp;mut </span>result);
+<a href=#592 id=592 data-nosnippet>592</a>            result.extend_from_slice(<span class="kw-2">&amp;</span>bytes);
+<a href=#593 id=593 data-nosnippet>593</a>            <span class="prelude-val">Ok</span>(result)
+<a href=#594 id=594 data-nosnippet>594</a>        }
+<a href=#595 id=595 data-nosnippet>595</a>
+<a href=#596 id=596 data-nosnippet>596</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(Error::InvalidInput(<span class="macro">format!</span>(
+<a href=#597 id=597 data-nosnippet>597</a>            <span class="string">"Type mismatch or unsupported clustering type: value={:?}, comparator={:?}"</span>,
+<a href=#598 id=598 data-nosnippet>598</a>            value, comparator
+<a href=#599 id=599 data-nosnippet>599</a>        ))),
+<a href=#600 id=600 data-nosnippet>600</a>    }
+<a href=#601 id=601 data-nosnippet>601</a>}
+<a href=#602 id=602 data-nosnippet>602</a>
+<a href=#603 id=603 data-nosnippet>603</a><span class="doccomment">/// Serialize a `ClusteringKey` as a Cassandra `ClusteringPrefix` byte sequence.
+<a href=#604 id=604 data-nosnippet>604</a>///
+<a href=#605 id=605 data-nosnippet>605</a>/// Format (same as the clustering prefix written in Data.db rows):
+<a href=#606 id=606 data-nosnippet>606</a>/// ```text
+<a href=#607 id=607 data-nosnippet>607</a>/// [header: unsigned VInt]   ← 2 bits per column: 00=present, 10=null
+<a href=#608 id=608 data-nosnippet>608</a>/// [value bytes…]            ← type-specific bytes for each PRESENT column
+<a href=#609 id=609 data-nosnippet>609</a>/// ```
+<a href=#610 id=610 data-nosnippet>610</a>///
+<a href=#611 id=611 data-nosnippet>611</a>/// Returns `Err` if a clustering column type is unknown; the caller falls back
+<a href=#612 id=612 data-nosnippet>612</a>/// to `[0x00]` (empty header VInt, valid for "no columns") in that case.
+<a href=#613 id=613 data-nosnippet>613</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>serialize_clustering_prefix_to_vec(
+<a href=#614 id=614 data-nosnippet>614</a>    clustering_key: <span class="kw-2">&amp;</span>ClusteringKey,
+<a href=#615 id=615 data-nosnippet>615</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#616 id=616 data-nosnippet>616</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#617 id=617 data-nosnippet>617</a>    <span class="kw">let </span><span class="kw-2">mut </span>header = <span class="number">0u64</span>;
+<a href=#618 id=618 data-nosnippet>618</a>    <span class="kw">for </span>(i, (<span class="kw">_</span>, value)) <span class="kw">in </span>clustering_key.columns.iter().enumerate() {
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">let </span>state: u64 = <span class="kw">match </span>value {
+<a href=#620 id=620 data-nosnippet>620</a>            Value::Null =&gt; <span class="number">2</span>, <span class="comment">// NULL
+<a href=#621 id=621 data-nosnippet>621</a>            </span><span class="kw">_ </span>=&gt; <span class="number">0</span>,           <span class="comment">// PRESENT
+<a href=#622 id=622 data-nosnippet>622</a>        </span>};
+<a href=#623 id=623 data-nosnippet>623</a>        header |= state &lt;&lt; (i * <span class="number">2</span>);
+<a href=#624 id=624 data-nosnippet>624</a>    }
+<a href=#625 id=625 data-nosnippet>625</a>
+<a href=#626 id=626 data-nosnippet>626</a>    <span class="kw">let </span><span class="kw-2">mut </span>buf: Vec&lt;u8&gt; = Vec::new();
+<a href=#627 id=627 data-nosnippet>627</a>    encode_unsigned(header, <span class="kw-2">&amp;mut </span>buf);
+<a href=#628 id=628 data-nosnippet>628</a>
+<a href=#629 id=629 data-nosnippet>629</a>    <span class="kw">for </span>(i, (<span class="kw">_</span>, value)) <span class="kw">in </span>clustering_key.columns.iter().enumerate() {
+<a href=#630 id=630 data-nosnippet>630</a>        <span class="kw">if </span>!<span class="macro">matches!</span>(value, Value::Null) {
+<a href=#631 id=631 data-nosnippet>631</a>            <span class="kw">if </span>i &gt;= schema.clustering_keys.len() {
+<a href=#632 id=632 data-nosnippet>632</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="kw">crate</span>::error::Error::Schema(<span class="macro">format!</span>(
+<a href=#633 id=633 data-nosnippet>633</a>                    <span class="string">"Clustering key index {} out of range (schema has {})"</span>,
+<a href=#634 id=634 data-nosnippet>634</a>                    i,
+<a href=#635 id=635 data-nosnippet>635</a>                    schema.clustering_keys.len()
+<a href=#636 id=636 data-nosnippet>636</a>                )));
+<a href=#637 id=637 data-nosnippet>637</a>            }
+<a href=#638 id=638 data-nosnippet>638</a>            <span class="kw">let </span>cluster_col = <span class="kw-2">&amp;</span>schema.clustering_keys[i];
+<a href=#639 id=639 data-nosnippet>639</a>            <span class="kw">let </span>comparator = ComparatorType::from_data_type(<span class="kw-2">&amp;</span>cluster_col.data_type)<span class="question-mark">?</span>;
+<a href=#640 id=640 data-nosnippet>640</a>            <span class="kw">let </span>value_bytes = serialize_value_for_clustering(value, <span class="kw-2">&amp;</span>comparator)<span class="question-mark">?</span>;
+<a href=#641 id=641 data-nosnippet>641</a>            buf.extend_from_slice(<span class="kw-2">&amp;</span>value_bytes);
+<a href=#642 id=642 data-nosnippet>642</a>        }
+<a href=#643 id=643 data-nosnippet>643</a>    }
+<a href=#644 id=644 data-nosnippet>644</a>
+<a href=#645 id=645 data-nosnippet>645</a>    <span class="prelude-val">Ok</span>(buf)
+<a href=#646 id=646 data-nosnippet>646</a>}
+<a href=#647 id=647 data-nosnippet>647</a>
+<a href=#648 id=648 data-nosnippet>648</a><span class="comment">// Promoted-index (`IndexInfo`) `ClusteringPrefix` serialization lives in the
+<a href=#649 id=649 data-nosnippet>649</a>// `index_prefix` submodule (Issue #1186 / epic #1116 file-size split). The helpers
+<a href=#650 id=650 data-nosnippet>650</a>// are re-exported from `mod.rs` so existing `use super::*` callers (`partition.rs`)
+<a href=#651 id=651 data-nosnippet>651</a>// resolve `serialize_clustering_prefix_for_index`, `empty_clustering_prefix_for_index`,
+<a href=#652 id=652 data-nosnippet>652</a>// `serialize_marker_bound_prefix_for_index`, and `marker_bound_prefix_for_index`
+<a href=#653 id=653 data-nosnippet>653</a>// unchanged.
+</span></code></pre></div></section></main></body></html>

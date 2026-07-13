@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Statistics.db writer - writes SSTable metadata"><title>cqlite_core::storage::sstable::writer::stats_writer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module stats_writer</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module stats_<wbr>writer</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#statisticsdb-format-cassandra-50-compatible" title="Statistics.db Format (Cassandra 5.0 Compatible)">Statistics.db Format (Cassandra 5.0 Compatible)</a><ul><li><a href="#format-structure" title="Format Structure">Format Structure</a></li><li><a href="#metadatatype-component-ids" title="MetadataType Component IDs">MetadataType Component IDs</a></li></ul></li><li><a href="#module-layout" title="Module layout">Module layout</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable::<wbr>writer</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../../index.html">cqlite_core</a>::<wbr><a href="../../../index.html">storage</a>::<wbr><a href="../../index.html">sstable</a>::<wbr><a href="../index.html">writer</a></div><h1>Module <span>stats_<wbr>writer</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../../src/cqlite_core/storage/sstable/writer/stats_writer/mod.rs.html#1-787">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Statistics.db writer - writes SSTable metadata</p>
+<p>Generates the Statistics.db component with min/max timestamps, TTL, and
+other metadata used for delta encoding in Data.db.</p>
+<p>Critical requirements:</p>
+<ul>
+<li>MUST be written BEFORE Data.db (provides delta encoding baseline)</li>
+<li>Min timestamp, max timestamp</li>
+<li>Min TTL, max TTL</li>
+<li>Min local deletion time, max local deletion time</li>
+<li>Partition count, row count</li>
+</ul>
+<h2 id="statisticsdb-format-cassandra-50-compatible"><a class="doc-anchor" href="#statisticsdb-format-cassandra-50-compatible">§</a>Statistics.db Format (Cassandra 5.0 Compatible)</h2>
+<p>This implementation produces a full Cassandra 5.0 nb-format Statistics.db with:</p>
+<ul>
+<li>TOC (Table of Contents) with checksums</li>
+<li>Four metadata components: VALIDATION, COMPACTION, STATS, HEADER</li>
+<li>Per-component CRC32 checksums</li>
+<li>Global CRC32 checksum validation</li>
+</ul>
+<h3 id="format-structure"><a class="doc-anchor" href="#format-structure">§</a>Format Structure</h3><div class="example-wrap"><pre class="language-text"><code>[0-3]   num_components (u32 BE) = 4
+[4-7]   CRC32(num_components)
+[8-39]  TOC entries (4 components × 8 bytes each):
+          [u32 BE] component_type (MetadataType ordinal)
+          [u32 BE] component_offset
+[40-43] CRC32(num_components + all TOC entries) [cumulative]
+[44+]   Component data:
+          [N bytes] component_data
+          [4 bytes] CRC32(component_data)
+          ... (repeated for each component)</code></pre></div><h3 id="metadatatype-component-ids"><a class="doc-anchor" href="#metadatatype-component-ids">§</a>MetadataType Component IDs</h3>
+<p>From Cassandra’s <code>MetadataType.java</code> enum (ordinal values):</p>
+<ul>
+<li>0: VALIDATION (validator class name)</li>
+<li>1: COMPACTION (compaction metadata)</li>
+<li>2: STATS (statistics including EncodingStats)</li>
+<li>3: SERIALIZATION_HEADER (table schema)</li>
+</ul>
+<h2 id="module-layout"><a class="doc-anchor" href="#module-layout">§</a>Module layout</h2>
+<p>This writer is split by responsibility (epic #1116):</p>
+<ul>
+<li><a href="metadata/index.html" title="mod cqlite_core::storage::sstable::writer::stats_writer::metadata"><code>metadata</code></a>: <code>StatisticsMetadata</code> aggregation + <code>TombstoneHistogram</code></li>
+<li>[<code>marshal</code>]: CQL type name → Cassandra marshal-type conversion</li>
+<li>[<code>components</code>]: VALIDATION / COMPACTION / STATS component builders</li>
+<li>[<code>serialization_header</code>]: the SERIALIZATION_HEADER builder</li>
+<li>this module: <code>StatisticsWriter</code> orchestration (TOC + <code>write</code>)</li>
+</ul>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.StatisticsMetadata"><code>pub use metadata::<a class="struct" href="metadata/struct.StatisticsMetadata.html" title="struct cqlite_core::storage::sstable::writer::stats_writer::metadata::StatisticsMetadata">StatisticsMetadata</a>;</code></dt><dt id="reexport.TombstoneHistogram"><code>pub use metadata::<a class="struct" href="metadata/struct.TombstoneHistogram.html" title="struct cqlite_core::storage::sstable::writer::stats_writer::metadata::TombstoneHistogram">TombstoneHistogram</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="metadata/index.html" title="mod cqlite_core::storage::sstable::writer::stats_writer::metadata">metadata</a></dt><dd>Statistics metadata collected during memtable flush.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.EstimatedHistogram.html" title="struct cqlite_core::storage::sstable::writer::stats_writer::EstimatedHistogram">Estimated<wbr>Histogram</a></dt><dd>A Cassandra-canonical <code>EstimatedHistogram</code> used for <code>estimatedPartitionSize</code>
+and <code>estimatedCellPerPartitionCount</code>.</dd><dt><a class="struct" href="struct.StatisticsWriter.html" title="struct cqlite_core::storage::sstable::writer::stats_writer::StatisticsWriter">Statistics<wbr>Writer</a></dt><dd>Statistics.db component writer</dd></dl></section></div></main></body></html>

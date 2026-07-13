@@ -1,0 +1,55 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Compute the subset of `input_paths` that may be DROPPED WHOLE for this compaction (parity with Cassandra `CompactionController.getFullyExpiredSSTables`)."><title>fully_expired_sstables in cqlite_core::storage::write_engine::merge - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">fully_expired_sstables</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>write_<wbr>engine::<wbr>merge</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">write_engine</a>::<wbr><a href="index.html">merge</a></div><h1>Function <span class="fn">fully_<wbr>expired_<wbr>sstables</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/write_engine/merge/fully_expired.rs.html#153-187">Source</a> </span></div><pre class="rust item-decl"><code>pub fn fully_expired_sstables(
+    input_paths: &amp;[<a class="struct" href="https://doc.rust-lang.org/1.97.0/std/path/struct.PathBuf.html" title="struct std::path::PathBuf">PathBuf</a>],
+    outside_paths: &amp;[<a class="struct" href="https://doc.rust-lang.org/1.97.0/std/path/struct.PathBuf.html" title="struct std::path::PathBuf">PathBuf</a>],
+    gc_before_secs: <a class="enum" href="https://doc.rust-lang.org/1.97.0/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.97.0/std/primitive.i64.html">i64</a>&gt;,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/1.97.0/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;<a class="struct" href="https://doc.rust-lang.org/1.97.0/std/path/struct.PathBuf.html" title="struct std::path::PathBuf">PathBuf</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Compute the subset of <code>input_paths</code> that may be DROPPED WHOLE for this
+compaction (parity with Cassandra <code>CompactionController.getFullyExpiredSSTables</code>).</p>
+<p>A candidate is included in the drop-set iff BOTH hold, from authoritative
+<code>Statistics.db</code> metadata only (no cell scan):</p>
+<ol>
+<li><strong>Fully expired</strong> — <code>max_deletion_time &lt; gc_before_secs</code> (see
+[<code>is_fully_expired</code>]). Since #1728 the writer stamps live cells with the
+<code>NO_DELETION_TIME</code> sentinel, so a MIXED SSTable (an old tombstone below
+<code>gcBefore</code> PLUS any live non-TTL cell) finalizes <code>max_deletion_time</code> as the
+<code>i32::MAX</code> live sentinel (parsed back as <code>i64::MAX</code>), which is never
+<code>&lt; gc_before_secs</code>. Such a mixed SSTable is therefore correctly NOT
+fully-expired — closing the former data-loss gap (roborev F1) with the now
+authoritative <code>max_local_deletion_time</code>.</li>
+<li><strong>Overlap-safe</strong> — its authoritative <code>max_timestamp</code> is STRICTLY LESS THAN
+the minimum write timestamp across every overlapping SSTable that is NOT
+itself fully-expired: both the OUTSIDE overlapping SSTables (<code>outside_paths</code>)
+AND the NON-EXPIRED inputs of THIS compaction. If the candidate’s newest
+write predates all of them, nothing it holds (tombstone or data) can shadow
+live data that would otherwise survive, so dropping it can never resurrect
+data. Mirrors Cassandra <code>CompactionController.getFullyExpiredSSTables</code>, which
+folds the min write timestamp of the non-fully-expired <em>compacting</em> SSTables
+into the same overlap bound as the non-compacting overlapping ones. The
+non-compacting bound reuses <a href="fn.compute_max_purgeable_timestamp.html" title="fn cqlite_core::storage::write_engine::merge::compute_max_purgeable_timestamp"><code>compute_max_purgeable_timestamp</code></a> (the coarse
+global-<code>min_timestamp</code> #935 gate; OQ-2 → (A), key-range precision deferred).
+Since #1729 the candidate’s <code>max_timestamp</code> may be the <code>i64::MIN</code> UNAVAILABLE
+sentinel; a candidate whose newest write is unknown CANNOT be proven to
+predate the overlap bound, so it FAILS CLOSED (is retained, never dropped) —
+closing the former resurrection gap (roborev F2).</li>
+</ol>
+<p>A non-expired INPUT is included in the bound because dropping a fully-expired
+SSTable whose tombstone shadows an OLDER live cell in a <em>co-compacting</em> input
+would resurrect that cell: the tombstone (dropped) no longer purges it, and the
+co-input’s live cell is merged into the output. (A fully-expired co-input is NOT
+folded in: its own data is past <code>gcBefore</code> and would be purged anyway, so a
+tombstone shadowing it can never resurrect surviving data.)</p>
+<p>Conservatism (never resurrect data, never drop live data):</p>
+<ul>
+<li><code>gc_before_secs == None</code> (invalid/absent gc_grace disables purging) ⇒ empty
+drop-set.</li>
+<li>An empty <code>outside_paths</code> AND no non-expired inputs (e.g. a FULL/major
+compaction of only-expired SSTables) ⇒ the bound is <code>+inf</code> ⇒ every candidate
+is droppable.</li>
+<li>A non-empty <code>outside_paths</code> whose bound is UNKNOWN
+(<code>compute_max_purgeable_timestamp</code> returned <code>None</code> because an outside
+<code>Statistics.db</code> was unreadable) ⇒ empty drop-set (cannot prove safety).</li>
+<li>A candidate whose own <code>Statistics.db</code> is absent/unreadable ⇒ not droppable
+(it is treated as non-expired, and its <code>min_timestamp</code> is unknown, so it also
+cannot lower the bound — the whole drop-set is disabled to stay safe).</li>
+</ul>
+<p>The returned paths are a subset of <code>input_paths</code>, in input order.</p>
+</div></details></section></div></main></body></html>

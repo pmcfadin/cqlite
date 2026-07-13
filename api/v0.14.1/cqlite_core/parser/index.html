@@ -1,0 +1,90 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="SSTable Binary Format Parser Module"><title>cqlite_core::parser - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module parser</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module parser</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#sstable-binary-format-parser-module" title="SSTable Binary Format Parser Module">SSTable Binary Format Parser Module</a><ul><li><a href="#architecture-overview" title="Architecture Overview">Architecture Overview</a></li><li><a href="#module-architecture" title="Module Architecture">Module Architecture</a></li><li><a href="#key-distinction-parser-vs-cql" title="Key Distinction: parser/ vs cql/">Key Distinction: parser/ vs cql/</a></li><li><a href="#sub-module-reference" title="Sub-module Reference">Sub-module Reference</a></li><li><a href="#usage-examples" title="Usage Examples">Usage Examples</a></li><li><a href="#backward-compatibility" title="Backward Compatibility">Backward Compatibility</a></li><li><a href="#related-documentation" title="Related Documentation">Related Documentation</a></li></ul></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate cqlite_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">cqlite_core</a></div><h1>Module <span>parser</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/cqlite_core/parser/mod.rs.html#1-194">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="sstable-binary-format-parser-module"><a class="doc-anchor" href="#sstable-binary-format-parser-module">§</a>SSTable Binary Format Parser Module</h2>
+<p>This module provides parsing functionality for Apache Cassandra SSTable binary formats.
+It handles deserialization of binary data structures from SSTable files (Data.db,
+Index.db, Statistics.db, etc.) produced by Cassandra 5.0+.</p>
+<h3 id="architecture-overview"><a class="doc-anchor" href="#architecture-overview">§</a>Architecture Overview</h3>
+<p>This is one of four parsing subsystems in cqlite-core:</p>
+<div><table><thead><tr><th>Module</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>cql/</code></td><td>Full CQL text → AST parsing</td></tr>
+<tr><td><strong><code>parser/</code></strong></td><td>SSTable binary format parsing (this module)</td></tr>
+<tr><td><code>schema/cql_parser.rs</code></td><td>CREATE TABLE → TableSchema</td></tr>
+<tr><td><code>query/parser.rs</code></td><td>Lightweight DML → ParsedQuery</td></tr>
+</tbody></table>
+</div>
+<p>See <code>docs/architecture/parser-overview.md</code> for the complete architecture overview.</p>
+<h3 id="module-architecture"><a class="doc-anchor" href="#module-architecture">§</a>Module Architecture</h3><div class="example-wrap"><pre class="language-text"><code>parser/ (SSTable Binary Format Parsing)
+│
+├── Core Binary Parsing
+│   ├── vint.rs              - Variable-length integer (VInt) encoding
+│   └── header.rs            - SSTable header parsing (magic numbers, version detection)
+│
+├── Statistics Parsing
+│   ├── statistics.rs        - Statistics.db basic format
+│   └── enhanced_statistics_parser.rs - Statistics.db enhanced format (nb/oa)
+│
+├── CQL Type Deserialization
+│   ├── types.rs             - All CQL primitive types (int, text, uuid, etc.)
+│   └── complex_types.rs     - Collections, UDTs, tuples, frozen types
+│
+└── High-Level Interface
+    └── binary.rs            - SSTableParser facade</code></pre></div>
+<p>Note: Test modules (<code>*_test.rs</code>, <code>*_tests.rs</code>) and benchmarks (<code>*_benchmarks.rs</code>)
+are omitted from the diagram. See feature flag <code>benchmarks</code> for performance testing.</p>
+<h3 id="key-distinction-parser-vs-cql"><a class="doc-anchor" href="#key-distinction-parser-vs-cql">§</a>Key Distinction: parser/ vs cql/</h3><div><table><thead><tr><th>Module</th><th>Purpose</th><th>Input</th><th>Output</th></tr></thead><tbody>
+<tr><td><strong>parser/</strong></td><td>SSTable binary parsing</td><td>Raw bytes from .db files</td><td>Structured Rust values</td></tr>
+<tr><td><strong>cql/</strong></td><td>CQL text parsing</td><td>Query strings (“SELECT…”)</td><td>Abstract Syntax Trees</td></tr>
+</tbody></table>
+</div>
+<p>This module (<code>parser/</code>) handles <strong>binary deserialization</strong>:</p>
+<ul>
+<li>Reading bytes from SSTable files (Data.db, Statistics.db, etc.)</li>
+<li>Decoding VInt-encoded integers per Cassandra’s wire format</li>
+<li>Deserializing CQL values (int → i32, text → String, uuid → Uuid)</li>
+</ul>
+<p>For <strong>CQL text parsing</strong> (CREATE TABLE, SELECT, etc.), see the <a href="../cql/index.html" title="mod cqlite_core::cql"><code>crate::cql</code></a> module.</p>
+<h3 id="sub-module-reference"><a class="doc-anchor" href="#sub-module-reference">§</a>Sub-module Reference</h3><h4 id="variable-length-integer-encoding"><a class="doc-anchor" href="#variable-length-integer-encoding">§</a>Variable-Length Integer Encoding</h4>
+<ul>
+<li><a href="vint/index.html" title="mod cqlite_core::parser::vint"><code>vint</code></a> - VInt encoding/decoding per Cassandra specification</li>
+</ul>
+<h4 id="sstable-headers"><a class="doc-anchor" href="#sstable-headers">§</a>SSTable Headers</h4>
+<ul>
+<li><a href="header/index.html" title="mod cqlite_core::parser::header"><code>header</code></a> - SSTable header parsing with version detection (oa/nb/legacy formats)</li>
+</ul>
+<h4 id="statistics-files"><a class="doc-anchor" href="#statistics-files">§</a>Statistics Files</h4>
+<ul>
+<li><a href="statistics/index.html" title="mod cqlite_core::parser::statistics"><code>statistics</code></a> - Statistics.db parsing for row counts, timestamps, min/max metadata</li>
+<li><a href="enhanced_statistics_parser/index.html" title="mod cqlite_core::parser::enhanced_statistics_parser"><code>enhanced_statistics_parser</code></a> - Enhanced Statistics.db format for Cassandra 5.0’s
+nb (nested btree) and oa (open addressing) formats</li>
+</ul>
+<h4 id="cql-type-deserialization"><a class="doc-anchor" href="#cql-type-deserialization">§</a>CQL Type Deserialization</h4>
+<ul>
+<li><a href="types/index.html" title="mod cqlite_core::parser::types"><code>types</code></a> - All 20+ CQL primitive types: int, bigint, text, blob, uuid, timestamp,
+date, time, inet, varint, decimal, duration, boolean, float, double, ascii, timeuuid</li>
+<li><a href="complex_types/index.html" title="mod cqlite_core::parser::complex_types"><code>complex_types</code></a> - Collections (list, set, map), UDTs, tuples, with depth tracking
+for nested types</li>
+</ul>
+<h4 id="high-level-interface"><a class="doc-anchor" href="#high-level-interface">§</a>High-Level Interface</h4>
+<ul>
+<li><a href="binary/index.html" title="mod cqlite_core::parser::binary"><code>binary</code></a> - <code>SSTableParser</code> facade providing unified access to parsing functionality</li>
+</ul>
+<h3 id="usage-examples"><a class="doc-anchor" href="#usage-examples">§</a>Usage Examples</h3>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>cqlite_core::parser::{parse_vint, SSTableHeader, CqlType};
+
+<span class="comment">// Parse variable-length integer from raw bytes
+</span><span class="kw">let </span>bytes = [<span class="number">0x8A</span>, <span class="number">0x01</span>]; <span class="comment">// VInt-encoded value
+</span><span class="kw">let </span>(remaining, value) = parse_vint(<span class="kw-2">&amp;</span>bytes)<span class="question-mark">?</span>;
+
+<span class="comment">// Parse SSTable header to detect format version
+</span><span class="kw">let </span>header = SSTableHeader::parse(<span class="kw-2">&amp;</span>file_bytes)<span class="question-mark">?</span>;
+<span class="macro">println!</span>(<span class="string">"SSTable format: {:?}"</span>, header.format_type);</code></pre></div><h3 id="backward-compatibility"><a class="doc-anchor" href="#backward-compatibility">§</a>Backward Compatibility</h3>
+<p>The <a href="fn.parse_cql_schema.html" title="fn cqlite_core::parser::parse_cql_schema"><code>parse_cql_schema</code></a> function is maintained for backward compatibility with
+existing code. <strong>New code should use <a href="../cql/schema_integration/fn.parse_cql_schema_enhanced.html" title="fn cqlite_core::cql::schema_integration::parse_cql_schema_enhanced"><code>crate::cql::parse_cql_schema_enhanced</code></a></strong>
+which provides better error handling and configuration options.</p>
+<h3 id="related-documentation"><a class="doc-anchor" href="#related-documentation">§</a>Related Documentation</h3>
+<ul>
+<li>SSTable format specification: <code>docs/sstables-definitive-guide/</code></li>
+<li>Known limitations: <code>docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md</code></li>
+</ul>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.CQLiteParseError"><code>pub use binary::<a class="enum" href="binary/enum.CQLiteParseError.html" title="enum cqlite_core::parser::binary::CQLiteParseError">CQLiteParseError</a>;</code></dt><dt id="reexport.ParseResult"><code>pub use binary::<a class="type" href="binary/type.ParseResult.html" title="type cqlite_core::parser::binary::ParseResult">ParseResult</a>;</code></dt><dt id="reexport.SSTableParser"><code>pub use binary::<a class="struct" href="binary/struct.SSTableParser.html" title="struct cqlite_core::parser::binary::SSTableParser">SSTableParser</a>;</code></dt><dt id="reexport.CqlResult"><code>pub use crate::error::<a class="type" href="../error/type.Result.html" title="type cqlite_core::error::Result">Result</a> as CqlResult;</code></dt><dt><code>pub use <a class="mod" href="benchmarks/index.html" title="mod cqlite_core::parser::benchmarks">benchmarks</a>::*;</code></dt><dt><code>pub use <a class="mod" href="complex_types/index.html" title="mod cqlite_core::parser::complex_types">complex_types</a>::*;</code></dt><dt><code>pub use <a class="mod" href="enhanced_statistics_parser/index.html" title="mod cqlite_core::parser::enhanced_statistics_parser">enhanced_statistics_parser</a>::*;</code></dt><dt><code>pub use <a class="mod" href="header/index.html" title="mod cqlite_core::parser::header">header</a>::*;</code></dt><dt><code>pub use <a class="mod" href="statistics/index.html" title="mod cqlite_core::parser::statistics">statistics</a>::*;</code></dt><dt><code>pub use <a class="mod" href="types/index.html" title="mod cqlite_core::parser::types">types</a>::*;</code></dt><dt><code>pub use <a class="mod" href="vint/index.html" title="mod cqlite_core::parser::vint">vint</a>::*;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="benchmarks/index.html" title="mod cqlite_core::parser::benchmarks">benchmarks</a></dt><dd>Parser performance benchmarks</dd><dt><a class="mod" href="binary/index.html" title="mod cqlite_core::parser::binary">binary</a></dt><dd>Binary format parsing for backward compatibility</dd><dt><a class="mod" href="collection_benchmarks/index.html" title="mod cqlite_core::parser::collection_benchmarks">collection_<wbr>benchmarks</a></dt><dd>Performance benchmarks for collection parsing and serialization</dd><dt><a class="mod" href="complex_types/index.html" title="mod cqlite_core::parser::complex_types">complex_<wbr>types</a></dt><dd>Complex Type Parsing for Cassandra Data Types</dd><dt><a class="mod" href="enhanced_statistics_parser/index.html" title="mod cqlite_core::parser::enhanced_statistics_parser">enhanced_<wbr>statistics_<wbr>parser</a></dt><dd>Enhanced Statistics.db parser for Cassandra 5.0 ‘nb’ format</dd><dt><a class="mod" href="header/index.html" title="mod cqlite_core::parser::header">header</a></dt><dd>SSTable header parsing for Cassandra 5+ ‘oa’ format</dd><dt><a class="mod" href="repair_metadata/index.html" title="mod cqlite_core::parser::repair_metadata">repair_<wbr>metadata</a></dt><dd>Repair-state metadata decode from the <code>Statistics.db</code> STATS component
+(issue #988, epic #968).</dd><dt><a class="mod" href="statistics/index.html" title="mod cqlite_core::parser::statistics">statistics</a></dt><dd>Statistics.db parser for Cassandra 5+ SSTable format</dd><dt><a class="mod" href="toc_walk_metrics/index.html" title="mod cqlite_core::parser::toc_walk_metrics">toc_<wbr>walk_<wbr>metrics</a></dt><dd>Minimal process-wide counter for Statistics.db Table-of-Contents (TOC) walks
+(issue #1658, epic #1606).</dd><dt><a class="mod" href="types/index.html" title="mod cqlite_core::parser::types">types</a></dt><dd>CQL type system parsing and serialization</dd><dt><a class="mod" href="vint/index.html" title="mod cqlite_core::parser::vint">vint</a></dt><dd>Variable-length integer encoding/decoding for Cassandra SSTable format</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt class="deprecated"><a class="fn" href="fn.parse_cql_schema.html" title="fn cqlite_core::parser::parse_cql_schema">parse_<wbr>cql_<wbr>schema</a><wbr><span class="stab deprecated" title="">Deprecated</span></dt><dd>Parse CQL CREATE TABLE statement (backward compatibility function)</dd></dl></section></div></main></body></html>

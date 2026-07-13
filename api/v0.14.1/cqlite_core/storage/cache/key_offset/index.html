@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Bounded, sharded key→partition-offset cache (issue #1570, Epic B/B4)."><title>cqlite_core::storage::cache::key_offset - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module key_offset</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module key_<wbr>offset</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design-see-openspecchangeskey-partition-offset-cachedesignmd" title="Design (see `openspec/changes/key-partition-offset-cache/design.md`)">Design (see <code>openspec/changes/key-partition-offset-cache/design.md</code>)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>cache</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">cache</a></div><h1>Module <span>key_<wbr>offset</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/cache/key_offset.rs.html#1-685">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Bounded, sharded key→partition-offset cache (issue #1570, Epic B/B4).</p>
+<p>The Cassandra <strong>key-cache</strong> analogue: a small LRU that maps a partition key to
+the location the index/trie descent produces, so a repeated hot point read can
+seek straight to the partition and skip re-walking <code>Index.db</code> (BIG) or the
+<code>Partitions.db</code> trie (BTI). B1’s [<code>DecompressedChunkCache</code>] caches decompressed
+<em>chunk bytes</em>; this caches <em>locations</em> — immutable facts about an immutable
+SSTable, never row data (rows change shape under projection).</p>
+<h2 id="design-see-openspecchangeskey-partition-offset-cachedesignmd"><a class="doc-anchor" href="#design-see-openspecchangeskey-partition-offset-cachedesignmd">§</a>Design (see <code>openspec/changes/key-partition-offset-cache/design.md</code>)</h2>
+<ul>
+<li><strong>Keyed on the FULL raw partition-key bytes</strong> (D1): the correctness guardrail
+is “a cache hit returns the SAME location a fresh lookup would.” Hashing the
+key to a <code>u64</code> would admit collisions → a hit could return a <em>different</em> key’s
+offset, so the LRU is keyed on the owned key bytes (<code>Box&lt;[u8]&gt;</code>), collision-free
+by construction.</li>
+<li><strong>Per-reader</strong> (D2): a location is meaningful only within one SSTable’s offset
+domain, so each reader owns its cache. Invalidation is trivial — the cache dies
+with the reader on remove/reload (the audit’s “SSTables are immutable, evict by
+sstable identity” rule), so there is never a stale-location hazard.</li>
+<li><strong>Sharded <code>Mutex&lt;Shard&gt;</code>, APPROXIMATE-BYTE bounded</strong> (D3): <code>LruCache::get</code>
+mutates recency (hence a <code>Mutex</code>, not an <code>RwLock</code>), hand-sharded (power-of-two,
+masked) so the hit path locks exactly ONE shard, never a process-wide lock —
+B1’s concurrency rule. Each shard is an <code>LruCache::unbounded()</code> whose resident
+footprint is bounded MANUALLY by an approximate-BYTE budget (not a raw entry
+count), mirroring B1’s [<code>DecompressedChunkCache</code>]. Partition keys are
+variable-length (composite/text, up to Cassandra’s ~64 KB), so bounding by
+entry <em>count</em> would NOT bound resident <em>bytes</em> — a count cap of 4096 with
+worst-case ~1 KB keys across ~40 readers is ~160 MB, breaching the <code>&lt;128MB</code>
+budget. Bounding by bytes makes the aggregate footprint independent of key
+size (see <a href="constant.DEFAULT_KEY_CACHE_BYTES.html" title="constant cqlite_core::storage::cache::key_offset::DEFAULT_KEY_CACHE_BYTES"><code>DEFAULT_KEY_CACHE_BYTES</code></a>). Each shard’s bucket array still grows
+only with actual occupancy, so an idle/empty reader’s cache costs ~nothing.</li>
+<li><strong>Resolution-hit only, never a MISS</strong> (D4): the cache stores only a location a
+lookup actually resolved, never a definitive MISS, so it can never fabricate a
+hit for a key the underlying structure did not resolve. Both read paths preserve
+the correctness guardrail (a cache hit returns the SAME location a fresh lookup
+would, so any downstream check reaches the identical conclusion), but “resolved”
+means something slightly different for each:
+<ul>
+<li><strong>BIG = confirmed-resolution-only</strong>: only a confirmed <code>Some</code> from the
+<code>Index.db</code> raw-key lookup is inserted, so an absent key is never cached and
+the cache simply misses (authoritative absence).</li>
+<li><strong>BTI = trie-hit-including-candidates</strong>: any trie HIT is cached, which
+includes prefix-collision candidates — an offset that may belong to a
+different or even absent key — so an absent key CAN receive a cache entry
+pointing at its candidate offset. This is not a correctness bug: the caller
+(<code>bti_point_lookup</code>) re-verifies the key bytes at the resolved offset, and a
+cache hit returns the SAME candidate offset a fresh descent returns, so
+re-verification reaches the identical conclusion (mirrors the C3
+<code>bti_lookup_memo</code>, which likewise stores <code>Some(offset)</code> for a candidate). A
+trie MISS is never cached.</li>
+</ul>
+</li>
+<li><strong>Poison-tolerant</strong> (D3): every lock uses <code>lock().unwrap_or_else(|e| e.into_inner())</code> so one panicking thread cannot wedge the cache. No
+<code>unwrap()</code>/<code>expect()</code>.</li>
+<li><strong>No-heuristics</strong> (mandate #28): the key is the authoritative partition-key
+bytes the index/trie is itself keyed on — never inferred from byte content.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.KeyOffsetCache.html" title="struct cqlite_core::storage::cache::key_offset::KeyOffsetCache">KeyOffset<wbr>Cache</a></dt><dd>A bounded, sharded key→partition-offset cache.</dd><dt><a class="struct" href="struct.PartitionLoc.html" title="struct cqlite_core::storage::cache::key_offset::PartitionLoc">Partition<wbr>Loc</a></dt><dd>The resolved location of a partition, exactly what the index/trie descent
+produces.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_KEY_CACHE_BYTES.html" title="constant cqlite_core::storage::cache::key_offset::DEFAULT_KEY_CACHE_BYTES">DEFAULT_<wbr>KEY_<wbr>CACHE_<wbr>BYTES</a></dt><dd>Default <strong>per-reader</strong> key-cache BYTE budget.</dd><dt><a class="constant" href="constant.DEFAULT_KEY_CACHE_SHARDS.html" title="constant cqlite_core::storage::cache::key_offset::DEFAULT_KEY_CACHE_SHARDS">DEFAULT_<wbr>KEY_<wbr>CACHE_<wbr>SHARDS</a></dt><dd>Default shard count (power of two), mirroring <a href="../struct.DecompressedChunkCache.html" title="struct cqlite_core::storage::cache::DecompressedChunkCache"><code>DecompressedChunkCache</code></a>’s
+<code>DEFAULT_SHARDS</code>.</dd></dl></section></div></main></body></html>
