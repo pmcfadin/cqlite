@@ -234,6 +234,10 @@ impl SSTableReader {
                 )));
             }
 
+            // Work-probe (issue #2398): one partition body read + parsed. A
+            // token-range split must keep this bounded to its in-range slice, not
+            // the SSTable's whole partition count.
+            crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
             let parsed = parser.parse_block(&raw, schema, self)?;
             for (_table_id, row_key, value) in parsed {
                 if self.filter_tombstone(&value) {

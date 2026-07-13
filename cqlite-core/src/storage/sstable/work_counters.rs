@@ -114,6 +114,20 @@ struct Counters {
     /// `SSTableWriter::finish()` must leave this at 0; a regression that
     /// reintroduces the finish-time double re-read bumps it (2 on the old path).
     data_db_checksum_full_reads: AtomicU64,
+    /// Partition BODIES read + parsed by a `do_get` compaction-merge scan — one
+    /// per partition whose `Data.db` slice is decoded (Issue #2398). Incremented on
+    /// BOTH per-SSTable enumeration paths: the streaming full-index walk
+    /// (`stream_all_partitions_via_full_index`, the uncompressed `V5_0Uncompressed`
+    /// field path, issue #2361) AND the chunk-stitching walk
+    /// (`drain_compaction_window`, the `nb`/`V5CompressedLegacy` path). This is the
+    /// O(partitions actually walked) signal for a scan. A token-range split must
+    /// walk only the entries whose token falls in the split's `(start, end]` range
+    /// (the index/data are token-ordered), NOT every partition in the SSTable: the
+    /// current read paths apply the token filter only DOWNSTREAM at the consumer
+    /// (`MergeProducer::drive_merge`), so this bumps by the SSTable's WHOLE
+    /// partition count regardless of how narrow the split range (or `LIMIT`) is —
+    /// the fixed multi-second warm-scan setup this counter exists to make visible.
+    stream_walk_partitions_parsed: AtomicU64,
 }
 
 impl Counters {
@@ -127,6 +141,7 @@ impl Counters {
             reverse_blocks_decoded: AtomicU64::new(0),
             reverse_peak_block_rows: AtomicU64::new(0),
             data_db_checksum_full_reads: AtomicU64::new(0),
+            stream_walk_partitions_parsed: AtomicU64::new(0),
         }
     }
 
@@ -176,6 +191,15 @@ impl Counters {
         self.data_db_checksum_full_reads.load(Ordering::Relaxed)
     }
 
+    fn add_stream_walk_partition_parsed(&self) {
+        self.stream_walk_partitions_parsed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn stream_walk_partitions_parsed(&self) -> u64 {
+        self.stream_walk_partitions_parsed.load(Ordering::Relaxed)
+    }
+
     fn reverse_blocks_decoded(&self) -> u64 {
         self.reverse_blocks_decoded.load(Ordering::Relaxed)
     }
@@ -213,6 +237,8 @@ impl Counters {
         self.reverse_blocks_decoded.store(0, Ordering::Relaxed);
         self.reverse_peak_block_rows.store(0, Ordering::Relaxed);
         self.data_db_checksum_full_reads.store(0, Ordering::Relaxed);
+        self.stream_walk_partitions_parsed
+            .store(0, Ordering::Relaxed);
     }
 }
 
@@ -317,6 +343,31 @@ pub(crate) fn observe_reverse_block_rows(rows: u64) {
 #[cfg(feature = "write-support")]
 pub fn add_data_db_checksum_full_read() {
     COUNTERS.add_data_db_checksum_full_read();
+}
+
+/// Record that a `do_get` compaction-merge scan read + parsed one partition body
+/// (issue #2361 / #2398). Called once per partition whose `Data.db` slice is
+/// decoded, on BOTH the streaming full-index walk and the chunk-stitching walk.
+///
+/// Not gated behind any feature: these walks run on the default read path (BIG
+/// SSTable, no BTI), and integration/flight tests compile against the library
+/// crate without its `test` cfg, so the increment must be present in every build
+/// (same rationale as the other read-work counters).
+pub(crate) fn add_stream_walk_partition_parsed() {
+    COUNTERS.add_stream_walk_partition_parsed();
+}
+
+/// Number of partition bodies a `do_get` scan read + parsed since the last
+/// [`reset`] (Issue #2398).
+///
+/// For a token-range split this SHOULD stay bounded by the number of partitions
+/// whose token falls in the split's `(start, end]` range, NOT the SSTable's whole
+/// partition count. The current read paths filter tokens only at the consumer, so
+/// today this reads the full count for any overlapping SSTable — the fixed
+/// warm-scan setup cost independent of the split range and of `LIMIT` that issue
+/// #2398 tracks.
+pub fn stream_walk_partitions_parsed() -> u64 {
+    COUNTERS.stream_walk_partitions_parsed()
 }
 
 /// Number of full `Data.db` re-reads performed for checksum computation since
