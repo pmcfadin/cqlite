@@ -291,8 +291,11 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         for (ReplicaInfo range : replicas.readReplicas()) {
             // Sidecar returns replicas as "ip:storage_port"; the flight server listens on
             // flightPort at the same host, so keep only the host. The ordered list's first
-            // entry is exactly the pickReplica choice (same local-DC-then-global ordering).
-            List<String> ordered = orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter);
+            // entry is exactly the pickReplica choice; the primary is a deterministic per-range
+            // rotation keyed on the range start token (issue #2397) so RF==N ranges spread
+            // across owners instead of collapsing onto the lexicographic head.
+            List<String> ordered =
+                    orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter, range.startToken());
             if (ordered.isEmpty()) {
                 continue; // range with no known replica — nothing to read
             }
@@ -329,25 +332,44 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
     }
 
     /**
-     * The range's replica hosts in try order (issue #2241): local-datacenter owners first
-     * (lexicographic by address), then every other datacenter's owners (lexicographic),
-     * mapped to bare hosts via {@link #hostOnly} and de-duplicated preserving order. The
-     * first element equals {@link #pickReplica}'s choice, so it is the split's primary and
-     * the rest are ordered availability fallbacks.
+     * The range's replica hosts in try order (issues #2241, #2397): the primary first, then
+     * the range's other owners as ordered availability fallbacks, mapped to bare hosts via
+     * {@link #hostOnly} and de-duplicated preserving order. The first element equals
+     * {@link #pickReplica}'s choice.
+     *
+     * <p>Primary selection is a deterministic per-range ROTATION over the sorted eligible
+     * owner set, not the lexicographic head (issue #2397): with RF == N every range shares
+     * one identical owner set, so a fixed head pinned EVERY split to the same replica and
+     * collapsed all flight reads onto a single pod (round-9 field finding). The primary is
+     * {@code sorted[floorMod(rotationKey, size)]} (a stable per-range value — the range's
+     * start token) and the remaining owners follow in sorted order as fallbacks. Rotation is
+     * applied WITHIN the local-datacenter owner set when that DC has replicas for the range
+     * (datacenter preference preserved), else across the whole owner set; owners in other
+     * datacenters are appended, sorted, as further fallbacks.
      */
-    static List<String> orderedReplicaHosts(Map<String, List<String>> replicasByDatacenter, String localDatacenter) {
-        List<String> orderedAddresses = new ArrayList<>();
-        if (localDatacenter != null) {
-            List<String> local = replicasByDatacenter.get(localDatacenter);
-            if (local != null) {
-                local.stream().sorted().forEach(orderedAddresses::add);
-            }
+    static List<String> orderedReplicaHosts(
+            Map<String, List<String>> replicasByDatacenter, String localDatacenter, long rotationKey) {
+        List<String> primaryGroup;
+        List<String> tailGroup;
+        List<String> local = localDatacenter != null ? replicasByDatacenter.get(localDatacenter) : null;
+        if (local != null && !local.isEmpty()) {
+            // Rotate within the local DC; other DCs are fallback-only, appended sorted.
+            primaryGroup = local.stream().sorted().collect(java.util.stream.Collectors.toList());
+            tailGroup = replicasByDatacenter.entrySet().stream()
+                    .filter(e -> !e.getKey().equals(localDatacenter))
+                    .flatMap(e -> e.getValue().stream())
+                    .sorted()
+                    .collect(java.util.stream.Collectors.toList());
+        } else {
+            // No local-DC preference for this range: the whole owner set is rotation-eligible.
+            primaryGroup = replicasByDatacenter.values().stream()
+                    .flatMap(List::stream)
+                    .sorted()
+                    .collect(java.util.stream.Collectors.toList());
+            tailGroup = List.of();
         }
-        replicasByDatacenter.entrySet().stream()
-                .filter(e -> !e.getKey().equals(localDatacenter))
-                .flatMap(e -> e.getValue().stream())
-                .sorted()
-                .forEach(orderedAddresses::add);
+        List<String> orderedAddresses = new ArrayList<>(rotate(primaryGroup, rotationKey));
+        orderedAddresses.addAll(tailGroup);
         List<String> hosts = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         for (String address : orderedAddresses) {
@@ -360,18 +382,44 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
     }
 
     /**
-     * The distinct set of replica hosts the scan's splits will read — the same
-     * deterministic {@link #pickReplica} choice used by {@link #buildSplits}, one host per
-     * range, deduplicated. Order-preserving (insertion order) so per-host snapshot creation
-     * is stable across re-planning. This is exactly the set of hosts a per-query snapshot
-     * must be created on (issue #2227).
+     * Deterministic per-range rotation of a sorted owner list (issue #2397): the head is
+     * {@code sorted[floorMod(rotationKey, n)]}, the remaining entries follow in their natural
+     * sorted order. Stable for a given {@code rotationKey} (the range start token), so splits
+     * are reproducible across re-planning while spreading primaries across owners. A list of
+     * size &le; 1 is returned unchanged.
+     */
+    private static List<String> rotate(List<String> sorted, long rotationKey) {
+        int n = sorted.size();
+        if (n <= 1) {
+            return sorted;
+        }
+        int head = Math.floorMod(rotationKey, n);
+        List<String> rotated = new ArrayList<>(n);
+        rotated.add(sorted.get(head));
+        for (int i = 0; i < n; i++) {
+            if (i != head) {
+                rotated.add(sorted.get(i));
+            }
+        }
+        return rotated;
+    }
+
+    /**
+     * The distinct set of replica hosts the scan's splits will read — the same deterministic
+     * rotated {@link #pickReplica} choice used by {@link #buildSplits}, one host per range,
+     * deduplicated (issue #2397 routes this through the rotated chooser so every pinned
+     * primary has its snapshot). Order-preserving (insertion order) so per-host snapshot
+     * creation is stable across re-planning. This is exactly the set of hosts a per-query
+     * snapshot must be created on (issue #2227).
      */
     static Set<String> distinctReplicaHosts(TokenRangeReplicasResponse replicas, String localDatacenter) {
         Set<String> hosts = new LinkedHashSet<>();
         for (ReplicaInfo range : replicas.readReplicas()) {
-            String replica = pickReplica(range.replicasByDatacenter(), localDatacenter);
-            if (replica != null) {
-                hosts.add(hostOnly(replica));
+            // pickReplica returns the rotated primary already as a bare host (via
+            // orderedReplicaHosts), so it is added directly — no second port strip.
+            String host = pickReplica(range.replicasByDatacenter(), localDatacenter, range.startToken());
+            if (host != null) {
+                hosts.add(host);
             }
         }
         return hosts;
@@ -389,28 +437,25 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
     static Set<String> allReplicaHosts(TokenRangeReplicasResponse replicas, String localDatacenter) {
         Set<String> hosts = new LinkedHashSet<>();
         for (ReplicaInfo range : replicas.readReplicas()) {
-            hosts.addAll(orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter));
+            // The full owner union is rotation-independent (order within a range does not
+            // change the set); pass the range's start token to match orderedReplicaHosts.
+            hosts.addAll(orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter, range.startToken()));
         }
         return hosts;
     }
 
     /**
-     * Choose one replica for a range: prefer the local datacenter, else any DC.
-     * Selection is deterministic (lexicographically smallest address) so repeated
-     * planning yields stable splits.
+     * Choose one replica for a range: prefer the local datacenter, else any DC. Selection is
+     * a deterministic per-range ROTATION over the sorted eligible owners (issue #2397) — the
+     * head of {@link #orderedReplicaHosts} — so repeated planning yields stable splits AND
+     * primaries spread across owners instead of all pinning to the lexicographic head (which
+     * collapsed every RF==N range onto one replica). Returns {@code null} for a range with no
+     * known replica.
      */
-    static String pickReplica(Map<String, List<String>> replicasByDatacenter, String localDatacenter) {
-        if (localDatacenter != null) {
-            List<String> local = replicasByDatacenter.get(localDatacenter);
-            if (local != null && !local.isEmpty()) {
-                return local.stream().sorted().findFirst().orElseThrow();
-            }
-        }
-        return replicasByDatacenter.values().stream()
-                .flatMap(List::stream)
-                .sorted()
-                .findFirst()
-                .orElse(null);
+    static String pickReplica(
+            Map<String, List<String>> replicasByDatacenter, String localDatacenter, long rotationKey) {
+        List<String> ordered = orderedReplicaHosts(replicasByDatacenter, localDatacenter, rotationKey);
+        return ordered.isEmpty() ? null : ordered.get(0);
     }
 
     /**

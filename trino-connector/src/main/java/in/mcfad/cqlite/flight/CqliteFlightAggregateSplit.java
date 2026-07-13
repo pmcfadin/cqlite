@@ -3,8 +3,11 @@ package in.mcfad.cqlite.flight;
 import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The single "finalize split" for an aggregated table handle (issue #841).
@@ -30,12 +33,20 @@ public record CqliteFlightAggregateSplit(
 
     @Override
     public List<HostAddress> getAddresses() {
-        // No single locality home: the finalize split fans out to every range's
-        // replica. Returning the first range as a soft hint at most.
+        // No single locality home: the finalize split fans out to every range's replica.
+        // Emit one soft hint per DISTINCT range PRIMARY (issue #2397), preserving order and
+        // deduplicating, so the hint reflects the rotated spread rather than always pinning
+        // to the first range's host — the fan-out itself dials each range's rotated primary.
         if (ranges.isEmpty()) {
             return List.of();
         }
-        CqliteFlightSplit first = ranges.get(0);
-        return List.of(HostAddress.fromParts(first.host(), first.port()));
+        List<HostAddress> addresses = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (CqliteFlightSplit range : ranges) {
+            if (seen.add(range.host())) {
+                addresses.add(HostAddress.fromParts(range.host(), range.port()));
+            }
+        }
+        return addresses;
     }
 }
