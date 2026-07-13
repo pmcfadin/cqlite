@@ -52,12 +52,52 @@ impl Index {
         }
     }
 
-    /// Create index from a vector of entries
+    /// Create index from a vector of entries.
+    ///
+    /// Issue #2385: builds the per-table `sorted_keys` by collecting each table's
+    /// unique keys and sorting ONCE (O(N log N) total) rather than the per-entry
+    /// `binary_search` + `Vec::insert` of [`Self::add_entry`], which is O(N²) when
+    /// keys do not arrive in ascending byte order (real `Index.db` arrives in token
+    /// order, but `RowKey` sorts by raw bytes, so every insert lands mid-vector).
+    /// The result is byte-for-byte identical to feeding the same entries through
+    /// `add_entry` one at a time: last write wins per `(table_id, key)`, duplicate
+    /// keys collapse in `sorted_keys`, and `total_entries` counts input entries.
     pub fn from_entries(entries: Vec<IndexEntry>) -> Self {
         let mut index = Self::new();
+        // `total_entries` matches `add_entry`'s call-count semantics (incremented
+        // unconditionally, including for a duplicate key).
+        index.total_entries = entries.len();
 
         for entry in entries {
-            index.add_entry(entry);
+            let table_id = entry.table_id.clone();
+
+            // Reverse index: unqualified name -> qualified TableId (dedup).
+            let table_name = table_id.name();
+            let unqualified = if let Some(dot_pos) = table_name.rfind('.') {
+                table_name[dot_pos + 1..].to_string()
+            } else {
+                table_name.to_string()
+            };
+            let qualified_list = index.unqualified_to_qualified.entry(unqualified).or_default();
+            if !qualified_list.contains(&table_id) {
+                qualified_list.push(table_id.clone());
+            }
+
+            // Entries map: last write wins per key (matches add_entry).
+            index
+                .entries
+                .entry(table_id)
+                .or_default()
+                .insert(entry.key.clone(), entry);
+        }
+
+        // Sort each table's keys ONCE. The keys come from the entries map, so they
+        // are already unique (duplicates collapsed) — sorting yields the same
+        // ascending byte order add_entry maintained incrementally.
+        for (table_id, table_entries) in &index.entries {
+            let mut keys: Vec<RowKey> = table_entries.keys().cloned().collect();
+            keys.sort();
+            index.sorted_keys.insert(table_id.clone(), keys);
         }
 
         index

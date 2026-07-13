@@ -70,8 +70,10 @@ pub(super) fn parse_index_data_cancellable<'a>(
         parse_all_partition_keys_cancellable(remaining, summary_reader, cancel)?;
 
     // Build lookup table with zero-copy approach using Arc::clone (reference counting only)
-    // This eliminates the memory explosion from cloning Vec<u8> key digests
-    let mut key_lookup = HashMap::new();
+    // This eliminates the memory explosion from cloning Vec<u8> key digests.
+    // Issue #2385: pre-size EXACTLY from the parsed entry count so the map never
+    // rehashes while filling.
+    let mut key_lookup = HashMap::with_capacity(partition_entries.len());
     for (index, entry) in partition_entries.iter().enumerate() {
         key_lookup.insert(Arc::clone(&entry.key_digest), index);
     }
@@ -200,7 +202,17 @@ pub(super) fn parse_all_partition_keys_cancellable<'a>(
     _summary_reader: Option<&SummaryReader>,
     cancel: &ScanCancel,
 ) -> Result<(&'a [u8], Vec<PartitionIndexEntry>)> {
-    let mut entries = Vec::new();
+    // Issue #2385: pre-size the entry Vec from a cheap file-size estimate so the
+    // O(entries) parse loop does not repeatedly reallocate-and-copy (each doubling
+    // moves every prior entry). A typical BIG Index.db entry is ~24 bytes
+    // ([key_len:2][raw key:~16][data_offset vint][promoted_len vint]); the hint is
+    // CAPPED so a corrupt/oversized Index.db cannot trigger a hostile up-front
+    // reservation — the Vec still grows past the cap via normal doubling if a
+    // genuinely larger file needs it.
+    const AVG_ENTRY_BYTES: usize = 24;
+    const MAX_CAP_HINT: usize = 4_000_000;
+    let cap_hint = (input.len() / AVG_ENTRY_BYTES).min(MAX_CAP_HINT);
+    let mut entries = Vec::with_capacity(cap_hint);
     let mut remaining = input;
 
     let mut entry_index = 0usize;
