@@ -114,10 +114,34 @@ fn phase_active_and_in_flight_read_true_concurrent_count_then_settle() {
                     first.is_some(),
                     "each held stream must yield at least one batch before parking"
                 );
-                // Signal "I am in flight and holding", then wait for release while
-                // keeping the stream (and thus the RPC accounting) alive.
-                barrier.wait().await;
-                release.notified().await;
+                // Register for release BEFORE crossing the barrier (roborev job
+                // 1655 MEDIUM): `Notify::notify_waiters()` only wakes waiters that
+                // were already `enable()`d/polled AT THE TIME it is called — a
+                // holder that calls `release.notified().await` for the first time
+                // AFTER main has already called `notify_waiters()` would miss the
+                // wake and block forever. `enable()`ing here, before this holder
+                // crosses the barrier, makes registration happen-before this
+                // holder's OWN barrier-wait return, which happens-before ALL other
+                // parties' (including main's) barrier-wait return, which
+                // happens-before main's `notify_waiters()` call below — so the
+                // release can never be missed regardless of scheduling.
+                let released = release.notified();
+                tokio::pin!(released);
+                released.as_mut().enable();
+                // Signal "I am in flight and holding", then wait (BOUNDED — a
+                // panicked sibling holder can never let this hang the whole
+                // process; timeouts are a fail-loud bound, not the sync
+                // mechanism) for release while keeping the stream (and thus the
+                // RPC accounting) alive.
+                tokio::time::timeout(GAUGE_TIMEOUT, barrier.wait())
+                    .await
+                    .expect(
+                        "holder timed out at the in-flight barrier (issue #2370 roborev 1655) \
+                         — a sibling holder likely panicked before reaching it",
+                    );
+                tokio::time::timeout(GAUGE_TIMEOUT, released)
+                    .await
+                    .expect("holder timed out waiting for release (issue #2370 roborev 1655)");
                 // Release: drop the stream + client WITHOUT draining (a midstream
                 // drop under backpressure — the #2264 shape).
                 drop(rb);
@@ -126,7 +150,12 @@ fn phase_active_and_in_flight_read_true_concurrent_count_then_settle() {
         }
 
         // All N have read a batch and are holding → every stream is in flight.
-        barrier.wait().await;
+        tokio::time::timeout(GAUGE_TIMEOUT, barrier.wait())
+            .await
+            .expect(
+                "main timed out at the in-flight barrier (issue #2370 roborev 1655) — a holder \
+                 likely panicked before reaching it",
+            );
 
         // THE read-back: both gauges must reflect the true concurrent count N.
         let if_level = poll_until_at_least(baseline_if + N as i64, GAUGE_TIMEOUT, || {

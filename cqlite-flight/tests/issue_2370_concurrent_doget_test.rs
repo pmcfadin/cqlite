@@ -27,12 +27,14 @@
 //! cargo test -p cqlite-flight --test issue_2370_concurrent_doget_test
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
 use arrow_flight::Ticket;
 use futures::StreamExt;
+use tokio::sync::Barrier;
 
 use cqlite_flight::service::CqliteFlightService;
 
@@ -60,8 +62,23 @@ enum Shape {
 
 /// Drive one `do_get` of `shape` against a fresh client dialed at `addr`, fully
 /// checking the per-shape result. Returns a human label for diagnostics.
-async fn run_shape(addr: std::net::SocketAddr, shape: Shape, total: usize) -> String {
+///
+/// `start` is a shared start barrier (roborev job 1655 LOW): every caller
+/// connects FIRST, then rendezvous on `start` before issuing its `do_get`, so
+/// all N clients genuinely fire their RPC together — no client can finish (or
+/// even begin) before every other client has connected and is ready to go. This
+/// strengthens the overlap guarantee the test exists to prove; without it, a
+/// fast-connecting client could complete its whole `do_get` before a
+/// slower-connecting sibling even issues its RPC, undermining the "N truly
+/// concurrent" claim.
+async fn run_shape(
+    addr: std::net::SocketAddr,
+    shape: Shape,
+    total: usize,
+    start: Arc<Barrier>,
+) -> String {
     let mut client = support::connect(addr).await;
+    start.wait().await;
     match shape {
         Shape::Scan { expect_rows } => {
             let batches = support::do_get_batches(&mut client, support::scan_ticket()).await;
@@ -167,13 +184,21 @@ fn eight_concurrent_mixed_shape_do_gets_all_complete_correctly() {
         let n = shapes.len();
         assert!(n >= 8, "issue #2370 requires N>=8 concurrent streams, have {n}");
 
+        // Shared start barrier (roborev job 1655 LOW): every client connects, THEN
+        // rendezvous here before issuing its `do_get`, so all N genuinely fire
+        // together — no client can finish (or even start streaming) before every
+        // other client is connected and ready, strengthening the overlap this
+        // suite exists to prove.
+        let start = Arc::new(Barrier::new(n));
+
         // Spawn every stream simultaneously; each is bounded by its own hang
         // detector so a single wedged stream fails loudly (naming its shape)
         // rather than the whole test timing out anonymously.
         let mut handles = Vec::new();
         for shape in shapes {
+            let start = start.clone();
             handles.push(tokio::spawn(async move {
-                tokio::time::timeout(STREAM_TIMEOUT, run_shape(addr, shape, total))
+                tokio::time::timeout(STREAM_TIMEOUT, run_shape(addr, shape, total, start))
                     .await
                     .expect("a concurrent do_get stream did not complete within the hang-detector timeout")
             }));
