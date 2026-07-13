@@ -1,6 +1,6 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/key_digest.rs`."><title>key_digest.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>key_digest.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Partition key digest computation for Index.db lookups
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/key_digest.rs`."><title>key_digest.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>key_digest.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Partition key digest computation for Index.db lookups
 <a href=#2 id=2 data-nosnippet>2</a>
-<a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>crate::{schema::registry::ParsingContext, <span class="prelude-ty">Result</span>};
+<a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span><span class="kw">crate</span>::Result;
 <a href=#4 id=4 data-nosnippet>4</a>
 <a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::key_digest::KeyDigestComputer;
 <a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span><span class="kw">super</span>::types::SSTableReader;
@@ -16,7 +16,7 @@
 <a href=#16 id=16 data-nosnippet>16</a>    ///
 <a href=#17 id=17 data-nosnippet>17</a>    /// NOTE (Issue #553): This function is no longer called from the main
 <a href=#18 id=18 data-nosnippet>18</a>    /// `lookup_partition_with_index` path, which now uses raw key bytes directly.
-<a href=#19 id=19 data-nosnippet>19</a>    /// It is retained for potential future use and for `lookup_partition_with_schema_context`.
+<a href=#19 id=19 data-nosnippet>19</a>    /// It is retained for potential future use.
 <a href=#20 id=20 data-nosnippet>20</a>    </span><span class="attr">#[allow(dead_code)]
 <a href=#21 id=21 data-nosnippet>21</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>compute_partition_key_digest(
 <a href=#22 id=22 data-nosnippet>22</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
@@ -41,7 +41,7 @@
 <a href=#41 id=41 data-nosnippet>41</a>                        .<span class="kw">await
 <a href=#42 id=42 data-nosnippet>42</a>                    </span>{
 <a href=#43 id=43 data-nosnippet>43</a>                        <span class="prelude-val">Ok</span>(parsing_context) =&gt; {
-<a href=#44 id=44 data-nosnippet>44</a>                            <span class="macro">log::debug!</span>(
+<a href=#44 id=44 data-nosnippet>44</a>                            <span class="macro">tracing::debug!</span>(
 <a href=#45 id=45 data-nosnippet>45</a>                                <span class="string">"Using schema-driven Murmur3 digest for modern format {:?}"</span>,
 <a href=#46 id=46 data-nosnippet>46</a>                                <span class="self">self</span>.header.cassandra_version
 <a href=#47 id=47 data-nosnippet>47</a>                            );
@@ -78,12 +78,12 @@
 <a href=#78 id=78 data-nosnippet>78</a>                        .<span class="kw">await
 <a href=#79 id=79 data-nosnippet>79</a>                    </span>{
 <a href=#80 id=80 data-nosnippet>80</a>                        <span class="prelude-val">Ok</span>(parsing_context) =&gt; {
-<a href=#81 id=81 data-nosnippet>81</a>                            <span class="macro">log::debug!</span>(<span class="string">"Using schema-driven Murmur3 digest for legacy format"</span>);
+<a href=#81 id=81 data-nosnippet>81</a>                            <span class="macro">tracing::debug!</span>(<span class="string">"Using schema-driven Murmur3 digest for legacy format"</span>);
 <a href=#82 id=82 data-nosnippet>82</a>                            <span class="kw">return </span>computer
 <a href=#83 id=83 data-nosnippet>83</a>                                .compute_partition_key_digest(partition_key, <span class="kw-2">&amp;</span>parsing_context);
 <a href=#84 id=84 data-nosnippet>84</a>                        }
 <a href=#85 id=85 data-nosnippet>85</a>                        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#86 id=86 data-nosnippet>86</a>                            <span class="macro">log::warn!</span>(
+<a href=#86 id=86 data-nosnippet>86</a>                            <span class="macro">tracing::warn!</span>(
 <a href=#87 id=87 data-nosnippet>87</a>                                <span class="string">"Failed to get parsing context for legacy format, falling back to simple digest: {}"</span>,
 <a href=#88 id=88 data-nosnippet>88</a>                                e
 <a href=#89 id=89 data-nosnippet>89</a>                            );
@@ -97,34 +97,20 @@
 <a href=#97 id=97 data-nosnippet>97</a>        <span class="comment">// Legacy path: only allow simple digest when legacy-heuristics feature is enabled
 <a href=#98 id=98 data-nosnippet>98</a>        </span><span class="attr">#[cfg(feature = <span class="string">"legacy-heuristics"</span>)]
 <a href=#99 id=99 data-nosnippet>99</a>        </span>{
-<a href=#100 id=100 data-nosnippet>100</a>            <span class="macro">log::warn!</span>(<span class="string">"Falling back to simple digest - this may cause incorrect Index.db lookups"</span>);
-<a href=#101 id=101 data-nosnippet>101</a>            computer.compute_simple_digest(partition_key)
-<a href=#102 id=102 data-nosnippet>102</a>        }
-<a href=#103 id=103 data-nosnippet>103</a>
-<a href=#104 id=104 data-nosnippet>104</a>        <span class="attr">#[cfg(not(feature = <span class="string">"legacy-heuristics"</span>))]
-<a href=#105 id=105 data-nosnippet>105</a>        </span>{
-<a href=#106 id=106 data-nosnippet>106</a>            <span class="comment">// For modern builds, reject simple digest to force schema-driven approach
-<a href=#107 id=107 data-nosnippet>107</a>            </span><span class="prelude-val">Err</span>(<span class="kw">crate</span>::error::Error::invalid_operation(
-<a href=#108 id=108 data-nosnippet>108</a>                <span class="string">"Schema-driven digest required for Index.db lookup in modern format. \
-<a href=#109 id=109 data-nosnippet>109</a>                 Enable 'legacy-heuristics' feature only for legacy compatibility testing."</span>,
-<a href=#110 id=110 data-nosnippet>110</a>            ))
-<a href=#111 id=111 data-nosnippet>111</a>        }
-<a href=#112 id=112 data-nosnippet>112</a>    }
-<a href=#113 id=113 data-nosnippet>113</a>
-<a href=#114 id=114 data-nosnippet>114</a>    <span class="doccomment">/// Compute partition key digest using table schema comparator
-<a href=#115 id=115 data-nosnippet>115</a>    ///
-<a href=#116 id=116 data-nosnippet>116</a>    /// This is the proper implementation that should be used when table schema
-<a href=#117 id=117 data-nosnippet>117</a>    /// is available. It uses the partition key comparator to create the exact
-<a href=#118 id=118 data-nosnippet>118</a>    /// digest that Cassandra would store in Index.db.
-<a href=#119 id=119 data-nosnippet>119</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>compute_partition_key_digest_with_schema(
-<a href=#120 id=120 data-nosnippet>120</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#121 id=121 data-nosnippet>121</a>        partition_key: <span class="kw-2">&amp;</span>[u8],
-<a href=#122 id=122 data-nosnippet>122</a>        parsing_context: <span class="kw-2">&amp;</span>ParsingContext,
-<a href=#123 id=123 data-nosnippet>123</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
-<a href=#124 id=124 data-nosnippet>124</a>        <span class="kw">let </span><span class="kw-2">mut </span>computer = KeyDigestComputer::new();
-<a href=#125 id=125 data-nosnippet>125</a>
-<a href=#126 id=126 data-nosnippet>126</a>        <span class="comment">// Use the proper schema-driven digest computation
-<a href=#127 id=127 data-nosnippet>127</a>        </span>computer.compute_partition_key_digest(partition_key, parsing_context)
-<a href=#128 id=128 data-nosnippet>128</a>    }
-<a href=#129 id=129 data-nosnippet>129</a>}
+<a href=#100 id=100 data-nosnippet>100</a>            <span class="macro">tracing::warn!</span>(
+<a href=#101 id=101 data-nosnippet>101</a>                <span class="string">"Falling back to simple digest - this may cause incorrect Index.db lookups"
+<a href=#102 id=102 data-nosnippet>102</a>            </span>);
+<a href=#103 id=103 data-nosnippet>103</a>            computer.compute_simple_digest(partition_key)
+<a href=#104 id=104 data-nosnippet>104</a>        }
+<a href=#105 id=105 data-nosnippet>105</a>
+<a href=#106 id=106 data-nosnippet>106</a>        <span class="attr">#[cfg(not(feature = <span class="string">"legacy-heuristics"</span>))]
+<a href=#107 id=107 data-nosnippet>107</a>        </span>{
+<a href=#108 id=108 data-nosnippet>108</a>            <span class="comment">// For modern builds, reject simple digest to force schema-driven approach
+<a href=#109 id=109 data-nosnippet>109</a>            </span><span class="prelude-val">Err</span>(<span class="kw">crate</span>::error::Error::invalid_operation(
+<a href=#110 id=110 data-nosnippet>110</a>                <span class="string">"Schema-driven digest required for Index.db lookup in modern format. \
+<a href=#111 id=111 data-nosnippet>111</a>                 Enable 'legacy-heuristics' feature only for legacy compatibility testing."</span>,
+<a href=#112 id=112 data-nosnippet>112</a>            ))
+<a href=#113 id=113 data-nosnippet>113</a>        }
+<a href=#114 id=114 data-nosnippet>114</a>    }
+<a href=#115 id=115 data-nosnippet>115</a>}
 </code></pre></div></section></main></body></html>

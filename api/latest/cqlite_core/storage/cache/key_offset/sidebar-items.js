@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_KEY_CACHE_BYTES","DEFAULT_KEY_CACHE_SHARDS"],"struct":["KeyOffsetCache","PartitionLoc"]};

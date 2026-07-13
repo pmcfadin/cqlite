@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["decode_partition_key_columns","deserialize_value_bytes","encode_partition_key_columns"]};
+window.SIDEBAR_ITEMS = {"fn":["decode_partition_key_columns","deserialize_value_bytes","encode_partition_key_columns","encode_single_component_key_typed"]};

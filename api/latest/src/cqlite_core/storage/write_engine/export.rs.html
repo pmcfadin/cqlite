@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/export.rs`."><title>export.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/</div>export.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SSTable export functionality for M5.2 (Issue #388)
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/export.rs`."><title>export.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/</div>export.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SSTable export functionality for M5.2 (Issue #388)
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Provides the `export_sstable()` API for consolidating internal SSTables
 <a href=#4 id=4 data-nosnippet>4</a>//! into a single, Cassandra-compatible SSTable suitable for distribution.
@@ -294,7 +294,7 @@
 <a href=#294 id=294 data-nosnippet>294</a>        </span>validate_export_name(<span class="kw-2">&amp;</span>options.keyspace, <span class="string">"keyspace"</span>)<span class="question-mark">?</span>;
 <a href=#295 id=295 data-nosnippet>295</a>        validate_export_name(<span class="kw-2">&amp;</span>options.table, <span class="string">"table"</span>)<span class="question-mark">?</span>;
 <a href=#296 id=296 data-nosnippet>296</a>
-<a href=#297 id=297 data-nosnippet>297</a>        <span class="macro">log::info!</span>(
+<a href=#297 id=297 data-nosnippet>297</a>        <span class="macro">tracing::info!</span>(
 <a href=#298 id=298 data-nosnippet>298</a>            <span class="string">"Starting SSTable export to {} with keyspace={}, table={}, generation={}"</span>,
 <a href=#299 id=299 data-nosnippet>299</a>            output_dir.display(),
 <a href=#300 id=300 data-nosnippet>300</a>            options.keyspace,
@@ -313,19 +313,19 @@
 <a href=#313 id=313 data-nosnippet>313</a>
 <a href=#314 id=314 data-nosnippet>314</a>        <span class="comment">// Step 1: Flush memtable if not empty
 <a href=#315 id=315 data-nosnippet>315</a>        </span><span class="kw">if </span>!<span class="self">self</span>.memtable.is_empty() {
-<a href=#316 id=316 data-nosnippet>316</a>            <span class="macro">log::info!</span>(
+<a href=#316 id=316 data-nosnippet>316</a>            <span class="macro">tracing::info!</span>(
 <a href=#317 id=317 data-nosnippet>317</a>                <span class="string">"Flushing memtable before export ({} rows, {} bytes)"</span>,
 <a href=#318 id=318 data-nosnippet>318</a>                <span class="self">self</span>.memtable_row_count(),
 <a href=#319 id=319 data-nosnippet>319</a>                <span class="self">self</span>.memtable_size()
 <a href=#320 id=320 data-nosnippet>320</a>            );
 <a href=#321 id=321 data-nosnippet>321</a>            <span class="self">self</span>.flush_internal_async().<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#322 id=322 data-nosnippet>322</a>        } <span class="kw">else </span>{
-<a href=#323 id=323 data-nosnippet>323</a>            <span class="macro">log::info!</span>(<span class="string">"Memtable is empty, skipping flush"</span>);
+<a href=#323 id=323 data-nosnippet>323</a>            <span class="macro">tracing::info!</span>(<span class="string">"Memtable is empty, skipping flush"</span>);
 <a href=#324 id=324 data-nosnippet>324</a>        }
 <a href=#325 id=325 data-nosnippet>325</a>
 <a href=#326 id=326 data-nosnippet>326</a>        <span class="comment">// Step 2: Compaction (deprecated on ExportOptions — use maintenance_step() instead)
 <a href=#327 id=327 data-nosnippet>327</a>        </span><span class="kw">if </span>options.compact_before_export {
-<a href=#328 id=328 data-nosnippet>328</a>            <span class="macro">log::warn!</span>(
+<a href=#328 id=328 data-nosnippet>328</a>            <span class="macro">tracing::warn!</span>(
 <a href=#329 id=329 data-nosnippet>329</a>                <span class="string">"compact_before_export on ExportOptions is deprecated. \
 <a href=#330 id=330 data-nosnippet>330</a>                 Use WriteEngine::maintenance_step() before export instead."
 <a href=#331 id=331 data-nosnippet>331</a>            </span>);
@@ -363,7 +363,7 @@
 <a href=#363 id=363 data-nosnippet>363</a>            <span class="kw">let </span>source_path = source_dir.join(<span class="kw-2">&amp;</span>source_filename);
 <a href=#364 id=364 data-nosnippet>364</a>
 <a href=#365 id=365 data-nosnippet>365</a>            <span class="kw">if </span>!source_path.exists() {
-<a href=#366 id=366 data-nosnippet>366</a>                <span class="macro">log::warn!</span>(
+<a href=#366 id=366 data-nosnippet>366</a>                <span class="macro">tracing::warn!</span>(
 <a href=#367 id=367 data-nosnippet>367</a>                    <span class="string">"Component {} not found at {}, skipping"</span>,
 <a href=#368 id=368 data-nosnippet>368</a>                    component_name,
 <a href=#369 id=369 data-nosnippet>369</a>                    source_path.display()
@@ -386,7 +386,7 @@
 <a href=#386 id=386 data-nosnippet>386</a>                    ))
 <a href=#387 id=387 data-nosnippet>387</a>                })<span class="question-mark">?</span>;
 <a href=#388 id=388 data-nosnippet>388</a>
-<a href=#389 id=389 data-nosnippet>389</a>            <span class="macro">log::debug!</span>(
+<a href=#389 id=389 data-nosnippet>389</a>            <span class="macro">tracing::debug!</span>(
 <a href=#390 id=390 data-nosnippet>390</a>                <span class="string">"Copied {} to {}"</span>,
 <a href=#391 id=391 data-nosnippet>391</a>                source_path.display(),
 <a href=#392 id=392 data-nosnippet>392</a>                dest_path.display()
@@ -416,12 +416,12 @@
 <a href=#416 id=416 data-nosnippet>416</a>
 <a href=#417 id=417 data-nosnippet>417</a>        <span class="comment">// Step 5: Validate exported SSTable (if enabled)
 <a href=#418 id=418 data-nosnippet>418</a>        </span><span class="kw">if </span>options.validate_after_export {
-<a href=#419 id=419 data-nosnippet>419</a>            <span class="macro">log::info!</span>(<span class="string">"Validating exported SSTable"</span>);
+<a href=#419 id=419 data-nosnippet>419</a>            <span class="macro">tracing::info!</span>(<span class="string">"Validating exported SSTable"</span>);
 <a href=#420 id=420 data-nosnippet>420</a>            report.validate_components()<span class="question-mark">?</span>;
-<a href=#421 id=421 data-nosnippet>421</a>            <span class="macro">log::info!</span>(<span class="string">"Validation passed"</span>);
+<a href=#421 id=421 data-nosnippet>421</a>            <span class="macro">tracing::info!</span>(<span class="string">"Validation passed"</span>);
 <a href=#422 id=422 data-nosnippet>422</a>        }
 <a href=#423 id=423 data-nosnippet>423</a>
-<a href=#424 id=424 data-nosnippet>424</a>        <span class="macro">log::info!</span>(
+<a href=#424 id=424 data-nosnippet>424</a>        <span class="macro">tracing::info!</span>(
 <a href=#425 id=425 data-nosnippet>425</a>            <span class="string">"Export complete: {} partitions, {} rows, {} total bytes"</span>,
 <a href=#426 id=426 data-nosnippet>426</a>            report.partition_count,
 <a href=#427 id=427 data-nosnippet>427</a>            report.row_count,
@@ -563,7 +563,7 @@
 <a href=#563 id=563 data-nosnippet>563</a>    {
 <a href=#564 id=564 data-nosnippet>564</a>        <span class="prelude-val">Ok</span>(counts) =&gt; counts,
 <a href=#565 id=565 data-nosnippet>565</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#566 id=566 data-nosnippet>566</a>            <span class="macro">log::warn!</span>(<span class="string">"Failed to read counts from Statistics.db: {e}; defaulting to 0"</span>);
+<a href=#566 id=566 data-nosnippet>566</a>            <span class="macro">tracing::warn!</span>(<span class="string">"Failed to read counts from Statistics.db: {e}; defaulting to 0"</span>);
 <a href=#567 id=567 data-nosnippet>567</a>            <span class="kw">crate</span>::parser::repair_metadata::TableCounts {
 <a href=#568 id=568 data-nosnippet>568</a>                partition_count: <span class="number">0</span>,
 <a href=#569 id=569 data-nosnippet>569</a>                total_rows: <span class="prelude-val">None</span>,
@@ -576,11 +576,11 @@
 <a href=#576 id=576 data-nosnippet>576</a>        // field 12 (e.g. unmodeled improved-min-max bounds). `nb` exports use
 <a href=#577 id=577 data-nosnippet>577</a>        // the legacy min/max branch, which is always traversable, so this is a
 <a href=#578 id=578 data-nosnippet>578</a>        // fail-safe rather than an expected path.
-<a href=#579 id=579 data-nosnippet>579</a>        </span><span class="macro">log::warn!</span>(<span class="string">"Statistics.db STATS walk could not reach totalRows; defaulting to 0"</span>);
+<a href=#579 id=579 data-nosnippet>579</a>        </span><span class="macro">tracing::warn!</span>(<span class="string">"Statistics.db STATS walk could not reach totalRows; defaulting to 0"</span>);
 <a href=#580 id=580 data-nosnippet>580</a>        <span class="number">0
 <a href=#581 id=581 data-nosnippet>581</a>    </span>});
 <a href=#582 id=582 data-nosnippet>582</a>
-<a href=#583 id=583 data-nosnippet>583</a>    <span class="macro">log::info!</span>(
+<a href=#583 id=583 data-nosnippet>583</a>    <span class="macro">tracing::info!</span>(
 <a href=#584 id=584 data-nosnippet>584</a>        <span class="string">"Read from export: row_count={}, partition_count={}"</span>,
 <a href=#585 id=585 data-nosnippet>585</a>        row_count,
 <a href=#586 id=586 data-nosnippet>586</a>        partition_count
@@ -591,7 +591,7 @@
 <a href=#591 id=591 data-nosnippet>591</a>
 <a href=#592 id=592 data-nosnippet>592</a><span class="attr">#[cfg(all(test, feature = <span class="string">"write-support"</span>))]
 <a href=#593 id=593 data-nosnippet>593</a></span><span class="kw">mod </span>tests {
-<a href=#594 id=594 data-nosnippet>594</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#594 id=594 data-nosnippet>594</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
 <a href=#595 id=595 data-nosnippet>595</a>    <span class="kw">use </span><span class="kw">crate</span>::schema::{Column, KeyColumn, TableSchema};
 <a href=#596 id=596 data-nosnippet>596</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
 <a href=#597 id=597 data-nosnippet>597</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::{WriteEngine, WriteEngineConfig};

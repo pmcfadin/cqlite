@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["parse_cql_schema"],"mod":["benchmarks","binary","collection_benchmarks","complex_types","enhanced_statistics_parser","header","optimized_complex_types","repair_metadata","statistics","types","vint","vint_fixed","zero_copy_parser"]};
+window.SIDEBAR_ITEMS = {"fn":["parse_cql_schema"],"mod":["benchmarks","binary","collection_benchmarks","complex_types","enhanced_statistics_parser","header","repair_metadata","statistics","toc_walk_metrics","types","vint"]};

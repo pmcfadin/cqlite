@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["CQLiteParseError"],"fn":["parse_binary_data","parse_vint_binary"],"struct":["SSTableParser"],"type":["ParseResult"]};
+window.SIDEBAR_ITEMS = {"enum":["CQLiteParseError"],"fn":["parse_binary_data"],"struct":["SSTableParser"],"type":["ParseResult"]};

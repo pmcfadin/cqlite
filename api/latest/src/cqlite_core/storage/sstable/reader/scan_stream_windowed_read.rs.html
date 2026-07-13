@@ -1,0 +1,419 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/scan_stream_windowed_read.rs`."><title>scan_stream_windowed_read.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>scan_stream_windowed_read.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Synchronous positional chunk reader for the windowed streaming scan's IO half
+<a href=#2 id=2 data-nosnippet>2</a>//! (issue #1940 restructure).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! # Why this exists
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! The windowed feed runs inside a single `spawn_blocking` task (issues #1593,
+<a href=#7 id=7 data-nosnippet>7</a>//! #1940): both the raw chunk read AND its decompression must stay OFF the async
+<a href=#8 id=8 data-nosnippet>8</a>//! worker pool. The former implementation drove the read with
+<a href=#9 id=9 data-nosnippet>9</a>//! `futures::executor::block_on(read_next_block_parts(..))` — an async read over a
+<a href=#10 id=10 data-nosnippet>10</a>//! `tokio::fs::File`. Even though it ran on a blocking thread, `tokio::fs`'s
+<a href=#11 id=11 data-nosnippet>11</a>//! `poll_read` RE-DISPATCHES the actual `read(2)` to tokio's blocking pool, so each
+<a href=#12 id=12 data-nosnippet>12</a>//! chunk read amplified into a second blocking-pool thread. rust-reviewer proved it
+<a href=#13 id=13 data-nosnippet>13</a>//! bounded, but roborev flagged it as a latent hang under a small custom
+<a href=#14 id=14 data-nosnippet>14</a>//! `max_blocking_threads`. Owner decision (issue #1940): REMOVE the hazard class —
+<a href=#15 id=15 data-nosnippet>15</a>//! read SYNCHRONOUSLY on the `spawn_blocking` thread, with zero nested async and
+<a href=#16 id=16 data-nosnippet>16</a>//! zero blocking-pool amplification.
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! These helpers read via the reader's `point_source` — the positional
+<a href=#19 id=19 data-nosnippet>19</a>//! [`ReadAt`](super::read_at::ReadAt) plane built once at open for EVERY backend
+<a href=#20 id=20 data-nosnippet>20</a>//! (buffered = `pread` on a dedicated `std::fs::File`; mmap = a resident slice;
+<a href=#21 id=21 data-nosnippet>21</a>//! `O_DIRECT` = an aligned positioned read). A positional read carries its offset
+<a href=#22 id=22 data-nosnippet>22</a>//! as a parameter and touches no tokio reactor/timer, so it completes fully on the
+<a href=#23 id=23 data-nosnippet>23</a>//! calling (blocking) thread — no `tokio::fs`, no `block_on`, no second blocking
+<a href=#24 id=24 data-nosnippet>24</a>//! thread. `read_at.rs`'s module docs anticipated exactly this adoption ("shaped so
+<a href=#25 id=25 data-nosnippet>25</a>//! the windowed streaming scan can adopt it later"). Decompression continues to run
+<a href=#26 id=26 data-nosnippet>26</a>//! in `decode_scan_chunk` on the same blocking thread (the D2 substrate placement,
+<a href=#27 id=27 data-nosnippet>27</a>//! unchanged).
+<a href=#28 id=28 data-nosnippet>28</a>//!
+<a href=#29 id=29 data-nosnippet>29</a>//! Byte-parity + integrity are preserved verbatim from the former cursor path:
+<a href=#30 id=30 data-nosnippet>30</a>//! - **compressed NB** (`CompressionInfo` present): the same per-chunk record
+<a href=#31 id=31 data-nosnippet>31</a>//!   geometry (`compressed_chunk_offset`/`compressed_chunk_size`, incl. the +4
+<a href=#32 id=32 data-nosnippet>32</a>//!   trailing CRC), the same corrupt-offset bounds check (roborev #970), the same
+<a href=#33 id=33 data-nosnippet>33</a>//!   degenerate empty-trailing-chunk EOF bound (issue #2225), and the same
+<a href=#34 id=34 data-nosnippet>34</a>//!   CRC32-BEFORE-decompress order (the CRC is verified here; the payload is
+<a href=#35 id=35 data-nosnippet>35</a>//!   returned only after it matches, so a corrupt chunk never reaches the
+<a href=#36 id=36 data-nosnippet>36</a>//!   decompressor). The compressed read reuses the caller's per-loop scratch (≤1
+<a href=#37 id=37 data-nosnippet>37</a>//!   alloc/chunk, D2) and records a scratch-regrowth as a copy-chain alloc so the
+<a href=#38 id=38 data-nosnippet>38</a>//!   `issue_1940_scan_window_substrate_allocs` guard stays honest.
+<a href=#39 id=39 data-nosnippet>39</a>//! - **uncompressed NB** (no `CompressionInfo`; CQLite's own write surface): the
+<a href=#40 id=40 data-nosnippet>40</a>//!   data section is fed in bounded pieces, and every `CRC.db` chunk covering a
+<a href=#41 id=41 data-nosnippet>41</a>//!   piece is verified BEFORE the piece is handed on — computing the CRC from the
+<a href=#42 id=42 data-nosnippet>42</a>//!   resident piece bytes when a chunk is fully contained, else reading the
+<a href=#43 id=43 data-nosnippet>43</a>//!   straddling prefix/suffix positionally (mirrors
+<a href=#44 id=44 data-nosnippet>44</a>//!   `verify_uncompressed_section_in_buffer`). Each chunk is verified at most once
+<a href=#45 id=45 data-nosnippet>45</a>//!   per reader lifetime via the shared `verified_uncompressed_chunks` memo.
+<a href=#46 id=46 data-nosnippet>46</a>//!
+<a href=#47 id=47 data-nosnippet>47</a>//! Kept in a sibling file (campsite rule, epic #1116); included via
+<a href=#48 id=48 data-nosnippet>48</a>//! `#[path = "scan_stream_windowed_read.rs"] impl`-carrying module in the parent.
+<a href=#49 id=49 data-nosnippet>49</a>
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="kw">use </span>std::sync::Arc;
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a><span class="kw">use </span>tokio::sync::mpsc;
+<a href=#53 id=53 data-nosnippet>53</a>
+<a href=#54 id=54 data-nosnippet>54</a><span class="kw">use </span><span class="kw">super</span>::SSTableReader;
+<a href=#55 id=55 data-nosnippet>55</a><span class="kw">use </span><span class="kw">crate</span>::storage::sstable::read_work_counters <span class="kw">as </span>rwc;
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">use crate</span>::{Error, <span class="prelude-ty">Result</span>};
+<a href=#57 id=57 data-nosnippet>57</a>
+<a href=#58 id=58 data-nosnippet>58</a><span class="doccomment">/// Bytes handed to the parse half per uncompressed-NB read. Mirrors Cassandra's
+<a href=#59 id=59 data-nosnippet>59</a>/// default 64 KiB compression chunk so the piece size is uniform with the
+<a href=#60 id=60 data-nosnippet>60</a>/// compressed path; the sliding window stitches across pieces, so the boundary is
+<a href=#61 id=61 data-nosnippet>61</a>/// invisible to the parse output. CRC verification is done on `CRC.db` chunk
+<a href=#62 id=62 data-nosnippet>62</a>/// boundaries independently of this piece size.
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="kw">const </span>UNCOMPRESSED_READ_PIECE_BYTES: usize = <span class="number">64 </span>* <span class="number">1024</span>;
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="doccomment">/// Wrap a positional-read failure with human-readable `context` WITHOUT
+<a href=#66 id=66 data-nosnippet>66</a>/// discarding its [`ErrorKind`](std::io::ErrorKind) (issue #1940 BLOCKER-2).
+<a href=#67 id=67 data-nosnippet>67</a>///
+<a href=#68 id=68 data-nosnippet>68</a>/// The synchronous positional read path used to relabel every read failure as
+<a href=#69 id=69 data-nosnippet>69</a>/// `std::io::Error::other(..)` (kind `Other`), which erased the source kind — so
+<a href=#70 id=70 data-nosnippet>70</a>/// a genuine transient fault (`Interrupted`/`WouldBlock`/`TimedOut`) surfacing
+<a href=#71 id=71 data-nosnippet>71</a>/// through the feed could no longer be recognised by [`is_transient_io`] and was
+<a href=#72 id=72 data-nosnippet>72</a>/// silently NOT retried. Rebuilding the wrapper with the SAME kind keeps the
+<a href=#73 id=73 data-nosnippet>73</a>/// classifier honest and lets callers up the stack still see the true io kind,
+<a href=#74 id=74 data-nosnippet>74</a>/// mirroring `block_io::io_error_with_context`. Non-`Io` variants
+<a href=#75 id=75 data-nosnippet>75</a>/// (corruption/format) are already typed and pass through unchanged.
+<a href=#76 id=76 data-nosnippet>76</a></span><span class="kw">fn </span>io_error_with_context(context: <span class="kw">impl </span>std::fmt::Display, source: Error) -&gt; Error {
+<a href=#77 id=77 data-nosnippet>77</a>    <span class="kw">match </span>source {
+<a href=#78 id=78 data-nosnippet>78</a>        Error::Io(io) =&gt; {
+<a href=#79 id=79 data-nosnippet>79</a>            <span class="kw">let </span>kind = io.kind();
+<a href=#80 id=80 data-nosnippet>80</a>            Error::Io(std::io::Error::new(kind, <span class="macro">format!</span>(<span class="string">"{context}: {io}"</span>)))
+<a href=#81 id=81 data-nosnippet>81</a>        }
+<a href=#82 id=82 data-nosnippet>82</a>        other =&gt; other,
+<a href=#83 id=83 data-nosnippet>83</a>    }
+<a href=#84 id=84 data-nosnippet>84</a>}
+<a href=#85 id=85 data-nosnippet>85</a>
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">impl </span>SSTableReader {
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="doccomment">/// Positional `read_exact_at` that applies the SAME one-shot transient-I/O
+<a href=#88 id=88 data-nosnippet>88</a>    /// retry the former async feed path had (issue #1588 / #1940 BLOCKER-2), and
+<a href=#89 id=89 data-nosnippet>89</a>    /// records the read thread at the REAL read site (issue #1940 guard
+<a href=#90 id=90 data-nosnippet>90</a>    /// integrity).
+<a href=#91 id=91 data-nosnippet>91</a>    ///
+<a href=#92 id=92 data-nosnippet>92</a>    /// A transient kernel fault (`Interrupted` EINTR / `WouldBlock` EAGAIN /
+<a href=#93 id=93 data-nosnippet>93</a>    /// `TimedOut`) is retried EXACTLY once by re-reading at the SAME captured
+<a href=#94 id=94 data-nosnippet>94</a>    /// `offset` (a positional read carries its offset as a parameter, so the retry
+<a href=#95 id=95 data-nosnippet>95</a>    /// needs no re-seek); every other error — deterministic corruption/format, or
+<a href=#96 id=96 data-nosnippet>96</a>    /// a non-transient io kind — fails fast. The returned error is the backend's
+<a href=#97 id=97 data-nosnippet>97</a>    /// `Error::Io`, so its `ErrorKind` is PRESERVED for the caller to annotate via
+<a href=#98 id=98 data-nosnippet>98</a>    /// [`io_error_with_context`] (never collapsed to `Error::other`).
+<a href=#99 id=99 data-nosnippet>99</a>    ///
+<a href=#100 id=100 data-nosnippet>100</a>    /// The `record_io_read_thread` probe fires HERE, at the actual
+<a href=#101 id=101 data-nosnippet>101</a>    /// `point_source.read_exact_at` call site (not at the top of the feed closure),
+<a href=#102 id=102 data-nosnippet>102</a>    /// so the #1940 no-nesting guard records the thread that performs the real read
+<a href=#103 id=103 data-nosnippet>103</a>    /// — making its `io_read_thread == decode_thread` equality a true detector of a
+<a href=#104 id=104 data-nosnippet>104</a>    /// read dispatched off the feed thread. Compiled only under `scan-offload-probe`.
+<a href=#105 id=105 data-nosnippet>105</a>    </span><span class="kw">fn </span>positional_read_exact_retry_once(<span class="kw-2">&amp;</span><span class="self">self</span>, offset: u64, buf: <span class="kw-2">&amp;mut </span>[u8]) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#106 id=106 data-nosnippet>106</a>        <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
+<a href=#107 id=107 data-nosnippet>107</a>        </span><span class="kw">super</span>::probe::record_io_read_thread();
+<a href=#108 id=108 data-nosnippet>108</a>        <span class="kw">let </span><span class="kw-2">mut </span>attempt = <span class="number">0u8</span>;
+<a href=#109 id=109 data-nosnippet>109</a>        <span class="kw">loop </span>{
+<a href=#110 id=110 data-nosnippet>110</a>            <span class="kw">match </span><span class="self">self</span>.point_source.read_exact_at(offset, buf) {
+<a href=#111 id=111 data-nosnippet>111</a>                <span class="prelude-val">Ok</span>(()) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(()),
+<a href=#112 id=112 data-nosnippet>112</a>                <span class="prelude-val">Err</span>(e)
+<a href=#113 id=113 data-nosnippet>113</a>                    <span class="kw">if </span>attempt == <span class="number">0
+<a href=#114 id=114 data-nosnippet>114</a>                        </span>&amp;&amp; <span class="kw">crate</span>::storage::sstable::reader::block_io::is_transient_io(<span class="kw-2">&amp;</span>e) =&gt;
+<a href=#115 id=115 data-nosnippet>115</a>                {
+<a href=#116 id=116 data-nosnippet>116</a>                    <span class="macro">tracing::warn!</span>(
+<a href=#117 id=117 data-nosnippet>117</a>                        <span class="string">"transient I/O fault ({e}) on positional read at offset 0x{offset:x}; \
+<a href=#118 id=118 data-nosnippet>118</a>                         re-reading once"
+<a href=#119 id=119 data-nosnippet>119</a>                    </span>);
+<a href=#120 id=120 data-nosnippet>120</a>                    attempt = <span class="number">1</span>;
+<a href=#121 id=121 data-nosnippet>121</a>                }
+<a href=#122 id=122 data-nosnippet>122</a>                <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e),
+<a href=#123 id=123 data-nosnippet>123</a>            }
+<a href=#124 id=124 data-nosnippet>124</a>        }
+<a href=#125 id=125 data-nosnippet>125</a>    }
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="doccomment">/// Read compressed chunk `chunk_index` SYNCHRONOUSLY via `point_source`,
+<a href=#128 id=128 data-nosnippet>128</a>    /// verifying its trailing CRC32 before returning the compressed payload (issue
+<a href=#129 id=129 data-nosnippet>129</a>    /// #1940). Returns `Ok(None)` at EOF (past the last chunk, or the degenerate
+<a href=#130 id=130 data-nosnippet>130</a>    /// empty trailing chunk, issue #2225). Mirrors `read_nb_format_chunk_data`'s
+<a href=#131 id=131 data-nosnippet>131</a>    /// geometry + integrity checks exactly, but positional (no cursor mutex, no
+<a href=#132 id=132 data-nosnippet>132</a>    /// `tokio::fs`) and reusing the caller's `scratch` (≤1 alloc/chunk, D2).
+<a href=#133 id=133 data-nosnippet>133</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>read_compressed_chunk_sync(
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#135 id=135 data-nosnippet>135</a>        chunk_index: usize,
+<a href=#136 id=136 data-nosnippet>136</a>        scratch: <span class="kw-2">&amp;mut </span>Vec&lt;u8&gt;,
+<a href=#137 id=137 data-nosnippet>137</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;Vec&lt;u8&gt;&gt;&gt; {
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="kw">let </span>comp_info = <span class="kw">match </span><span class="self">self</span>.compression_info.as_ref() {
+<a href=#139 id=139 data-nosnippet>139</a>            <span class="prelude-val">Some</span>(ci) =&gt; ci,
+<a href=#140 id=140 data-nosnippet>140</a>            <span class="comment">// Callers gate on `compression_info.is_some()`; a None here is a bug.
+<a href=#141 id=141 data-nosnippet>141</a>            </span><span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#142 id=142 data-nosnippet>142</a>        };
+<a href=#143 id=143 data-nosnippet>143</a>        <span class="kw">let </span>file_size = <span class="self">self</span>.point_source.len();
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a>        <span class="kw">if </span>chunk_index &gt;= comp_info.chunk_offsets.len() {
+<a href=#146 id=146 data-nosnippet>146</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>); <span class="comment">// EOF
+<a href=#147 id=147 data-nosnippet>147</a>        </span>}
+<a href=#148 id=148 data-nosnippet>148</a>
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="comment">// Degenerate empty trailing chunk (issue #2225): a chunk whose logical
+<a href=#150 id=150 data-nosnippet>150</a>        // start is at/after `data_length` carries 0 real bytes; Cassandra's reader
+<a href=#151 id=151 data-nosnippet>151</a>        // never touches it (every logical position &lt; data_length maps earlier), and
+<a href=#152 id=152 data-nosnippet>152</a>        // handing 0 bytes to a decompressor fails. Treat it (and anything beyond,
+<a href=#153 id=153 data-nosnippet>153</a>        // chunk starts being monotonic) as EOF — identical to the cursor path.
+<a href=#154 id=154 data-nosnippet>154</a>        </span><span class="kw">let </span>chunk_length = comp_info.chunk_length <span class="kw">as </span>u64;
+<a href=#155 id=155 data-nosnippet>155</a>        <span class="kw">if </span>chunk_length &gt; <span class="number">0 </span>{
+<a href=#156 id=156 data-nosnippet>156</a>            <span class="kw">let </span>logical_start = (chunk_index <span class="kw">as </span>u64).saturating_mul(chunk_length);
+<a href=#157 id=157 data-nosnippet>157</a>            <span class="kw">if </span>logical_start &gt;= comp_info.data_length {
+<a href=#158 id=158 data-nosnippet>158</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#159 id=159 data-nosnippet>159</a>            }
+<a href=#160 id=160 data-nosnippet>160</a>        }
+<a href=#161 id=161 data-nosnippet>161</a>
+<a href=#162 id=162 data-nosnippet>162</a>        <span class="kw">let </span>chunk_offset = comp_info
+<a href=#163 id=163 data-nosnippet>163</a>            .compressed_chunk_offset(chunk_index)
+<a href=#164 id=164 data-nosnippet>164</a>            .ok_or_else(|| Error::InvalidFormat(<span class="macro">format!</span>(<span class="string">"No offset for chunk {chunk_index}"</span>)))<span class="question-mark">?</span>;
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="kw">let </span>total_chunk_size = comp_info
+<a href=#166 id=166 data-nosnippet>166</a>            .compressed_chunk_size(chunk_index, file_size)
+<a href=#167 id=167 data-nosnippet>167</a>            .ok_or_else(|| {
+<a href=#168 id=168 data-nosnippet>168</a>                Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#169 id=169 data-nosnippet>169</a>                    <span class="string">"Cannot determine size for chunk {chunk_index} (file_size={file_size})"
+<a href=#170 id=170 data-nosnippet>170</a>                </span>))
+<a href=#171 id=171 data-nosnippet>171</a>            })<span class="question-mark">?</span>;
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="kw">if </span>total_chunk_size &lt; <span class="number">4 </span>{
+<a href=#173 id=173 data-nosnippet>173</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#174 id=174 data-nosnippet>174</a>                <span class="string">"Chunk {chunk_index} size too small: {total_chunk_size} bytes (minimum 4 for CRC)"
+<a href=#175 id=175 data-nosnippet>175</a>            </span>)));
+<a href=#176 id=176 data-nosnippet>176</a>        }
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="comment">// Bounds-check against the real Data.db length BEFORE allocating — a corrupt
+<a href=#178 id=178 data-nosnippet>178</a>        // CompressionInfo offset must surface as a recoverable error, never a
+<a href=#179 id=179 data-nosnippet>179</a>        // multi-exabyte allocation (roborev #970). NB chunk offsets are absolute
+<a href=#180 id=180 data-nosnippet>180</a>        // (header_offset = 0).
+<a href=#181 id=181 data-nosnippet>181</a>        </span><span class="kw">let </span>chunk_end = chunk_offset.checked_add(total_chunk_size);
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">match </span>chunk_end {
+<a href=#183 id=183 data-nosnippet>183</a>            <span class="prelude-val">Some</span>(end) <span class="kw">if </span>end &lt;= file_size =&gt; {}
+<a href=#184 id=184 data-nosnippet>184</a>            <span class="kw">_ </span>=&gt; {
+<a href=#185 id=185 data-nosnippet>185</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#186 id=186 data-nosnippet>186</a>                    <span class="string">"Chunk {chunk_index} at offset 0x{chunk_offset:x} with size {total_chunk_size} \
+<a href=#187 id=187 data-nosnippet>187</a>                     exceeds Data.db length {file_size} — corrupt CompressionInfo.db chunk offset"
+<a href=#188 id=188 data-nosnippet>188</a>                </span>)));
+<a href=#189 id=189 data-nosnippet>189</a>            }
+<a href=#190 id=190 data-nosnippet>190</a>        }
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="kw">let </span>chunk_data_size = (total_chunk_size - <span class="number">4</span>) <span class="kw">as </span>usize;
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="comment">// A5 counters (E4 SEEK_CALLS + E3 READ_CALLS): the positioned read stands in
+<a href=#194 id=194 data-nosnippet>194</a>        // for the cursor path's per-chunk seek + read, so record one of each per
+<a href=#195 id=195 data-nosnippet>195</a>        // chunk to keep the `reads == decompresses` substrate invariant intact.
+<a href=#196 id=196 data-nosnippet>196</a>        </span>rwc::record_seek();
+<a href=#197 id=197 data-nosnippet>197</a>        rwc::record_read();
+<a href=#198 id=198 data-nosnippet>198</a>
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="comment">// ONE positioned read for payload + trailing CRC into the REUSED scratch
+<a href=#200 id=200 data-nosnippet>200</a>        // (D2). Grow-on-demand to the CHECKED `total_chunk_size` for THIS chunk —
+<a href=#201 id=201 data-nosnippet>201</a>        // never a giant upfront reserve to the metadata `max_compressed_length`
+<a href=#202 id=202 data-nosnippet>202</a>        // (which Cassandra commonly stamps as `i32::MAX`, an OOM/DoS on ordinary
+<a href=#203 id=203 data-nosnippet>203</a>        // files, issue #1940 BLOCKER-1). `try_reserve_exact` returns a typed error
+<a href=#204 id=204 data-nosnippet>204</a>        // on allocation failure instead of panicking/aborting. After the first few
+<a href=#205 id=205 data-nosnippet>205</a>        // chunks the scratch has reached the working-set high-water mark, so
+<a href=#206 id=206 data-nosnippet>206</a>        // subsequent chunks hit neither the reserve nor the resize regrowth —
+<a href=#207 id=207 data-nosnippet>207</a>        // preserving the ≤1-alloc/chunk STEADY STATE (the `record_chunk_path_alloc`
+<a href=#208 id=208 data-nosnippet>208</a>        // regrowth counter proves it). `clear()`+`resize` reuses the backing store
+<a href=#209 id=209 data-nosnippet>209</a>        // when large enough (mirrors `read_nb_format_chunk_data`).
+<a href=#210 id=210 data-nosnippet>210</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>buf = std::mem::take(scratch);
+<a href=#211 id=211 data-nosnippet>211</a>        buf.clear();
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="kw">let </span>cap_before = buf.capacity();
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="kw">let </span>need = total_chunk_size <span class="kw">as </span>usize;
+<a href=#214 id=214 data-nosnippet>214</a>        <span class="kw">if </span>need &gt; buf.capacity() {
+<a href=#215 id=215 data-nosnippet>215</a>            <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = buf.try_reserve_exact(need) {
+<a href=#216 id=216 data-nosnippet>216</a>                <span class="comment">// Return the scratch to the caller so a retry could reuse it.
+<a href=#217 id=217 data-nosnippet>217</a>                </span><span class="kw-2">*</span>scratch = buf;
+<a href=#218 id=218 data-nosnippet>218</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::memory(<span class="macro">format!</span>(
+<a href=#219 id=219 data-nosnippet>219</a>                    <span class="string">"failed to reserve {need} bytes for chunk {chunk_index} \
+<a href=#220 id=220 data-nosnippet>220</a>                     (data+CRC at offset 0x{chunk_offset:x}): {e}"
+<a href=#221 id=221 data-nosnippet>221</a>                </span>)));
+<a href=#222 id=222 data-nosnippet>222</a>            }
+<a href=#223 id=223 data-nosnippet>223</a>        }
+<a href=#224 id=224 data-nosnippet>224</a>        buf.resize(need, <span class="number">0u8</span>);
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="kw">if </span>buf.capacity() &gt; cap_before {
+<a href=#226 id=226 data-nosnippet>226</a>            rwc::record_chunk_path_alloc();
+<a href=#227 id=227 data-nosnippet>227</a>        }
+<a href=#228 id=228 data-nosnippet>228</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="self">self</span>.positional_read_exact_retry_once(chunk_offset, <span class="kw-2">&amp;mut </span>buf) {
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="comment">// Return the scratch's capacity to the caller so the next read reuses it.
+<a href=#230 id=230 data-nosnippet>230</a>            </span>buf.clear();
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="kw-2">*</span>scratch = buf;
+<a href=#232 id=232 data-nosnippet>232</a>            <span class="comment">// Preserve the source io kind (issue #1940 BLOCKER-2) — never collapse
+<a href=#233 id=233 data-nosnippet>233</a>            // a transient fault to `Error::other`.
+<a href=#234 id=234 data-nosnippet>234</a>            </span><span class="kw">return </span><span class="prelude-val">Err</span>(io_error_with_context(
+<a href=#235 id=235 data-nosnippet>235</a>                <span class="macro">format!</span>(
+<a href=#236 id=236 data-nosnippet>236</a>                    <span class="string">"Failed to read chunk {chunk_index} data+CRC ({total_chunk_size} bytes at \
+<a href=#237 id=237 data-nosnippet>237</a>                     offset 0x{chunk_offset:x})"
+<a href=#238 id=238 data-nosnippet>238</a>                </span>),
+<a href=#239 id=239 data-nosnippet>239</a>                e,
+<a href=#240 id=240 data-nosnippet>240</a>            ));
+<a href=#241 id=241 data-nosnippet>241</a>        }
+<a href=#242 id=242 data-nosnippet>242</a>
+<a href=#243 id=243 data-nosnippet>243</a>        <span class="comment">// Split the trailing 4-byte big-endian CRC32 off the payload and verify it
+<a href=#244 id=244 data-nosnippet>244</a>        // BEFORE the payload is trusted (guardrail #1411): a mismatch is a typed
+<a href=#245 id=245 data-nosnippet>245</a>        // error and the payload never reaches the decompressor.
+<a href=#246 id=246 data-nosnippet>246</a>        </span><span class="kw">let </span>expected_crc = u32::from_be_bytes([
+<a href=#247 id=247 data-nosnippet>247</a>            buf[chunk_data_size],
+<a href=#248 id=248 data-nosnippet>248</a>            buf[chunk_data_size + <span class="number">1</span>],
+<a href=#249 id=249 data-nosnippet>249</a>            buf[chunk_data_size + <span class="number">2</span>],
+<a href=#250 id=250 data-nosnippet>250</a>            buf[chunk_data_size + <span class="number">3</span>],
+<a href=#251 id=251 data-nosnippet>251</a>        ]);
+<a href=#252 id=252 data-nosnippet>252</a>        buf.truncate(chunk_data_size);
+<a href=#253 id=253 data-nosnippet>253</a>        <span class="kw">let </span>computed_crc = crc32fast::hash(<span class="kw-2">&amp;</span>buf);
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw">if </span>computed_crc != expected_crc {
+<a href=#255 id=255 data-nosnippet>255</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#256 id=256 data-nosnippet>256</a>                <span class="string">"CRC32 mismatch for chunk {chunk_index} at offset 0x{chunk_offset:x}: \
+<a href=#257 id=257 data-nosnippet>257</a>                 expected=0x{expected_crc:08x}, computed=0x{computed_crc:08x}, \
+<a href=#258 id=258 data-nosnippet>258</a>                 chunk_size={chunk_data_size}"
+<a href=#259 id=259 data-nosnippet>259</a>            </span>)));
+<a href=#260 id=260 data-nosnippet>260</a>        }
+<a href=#261 id=261 data-nosnippet>261</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(buf))
+<a href=#262 id=262 data-nosnippet>262</a>    }
+<a href=#263 id=263 data-nosnippet>263</a>
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="doccomment">/// Read the next bounded piece of an UNCOMPRESSED-NB data section
+<a href=#265 id=265 data-nosnippet>265</a>    /// SYNCHRONOUSLY via `point_source`, starting at byte `pos` (an absolute
+<a href=#266 id=266 data-nosnippet>266</a>    /// Data.db offset). Returns `Ok(None)` at EOF, else `Ok(Some((piece, next_pos)))`.
+<a href=#267 id=267 data-nosnippet>267</a>    /// Every `CRC.db` chunk covering the piece is verified (once per reader
+<a href=#268 id=268 data-nosnippet>268</a>    /// lifetime) BEFORE the piece is returned — from the resident bytes when a
+<a href=#269 id=269 data-nosnippet>269</a>    /// chunk is fully contained, else by reading the straddling remainder
+<a href=#270 id=270 data-nosnippet>270</a>    /// positionally (issue #1396; mirrors `verify_uncompressed_section_in_buffer`).
+<a href=#271 id=271 data-nosnippet>271</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>read_uncompressed_piece_sync(<span class="kw-2">&amp;</span><span class="self">self</span>, pos: u64) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;(Vec&lt;u8&gt;, u64)&gt;&gt; {
+<a href=#272 id=272 data-nosnippet>272</a>        <span class="kw">let </span>file_size = <span class="self">self</span>.point_source.len();
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="kw">let </span>remaining = file_size.saturating_sub(pos);
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">if </span>remaining == <span class="number">0 </span>{
+<a href=#275 id=275 data-nosnippet>275</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>); <span class="comment">// EOF
+<a href=#276 id=276 data-nosnippet>276</a>        </span>}
+<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span>to_read = remaining.min(UNCOMPRESSED_READ_PIECE_BYTES <span class="kw">as </span>u64) <span class="kw">as </span>usize;
+<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; to_read];
+<a href=#279 id=279 data-nosnippet>279</a>        <span class="comment">// Same one-shot transient-retry + kind-preserving wrap as the compressed
+<a href=#280 id=280 data-nosnippet>280</a>        // path (issue #1940 BLOCKER-2): a transient fault is re-read once, and the
+<a href=#281 id=281 data-nosnippet>281</a>        // source io kind is preserved (never collapsed to `Error::other`).
+<a href=#282 id=282 data-nosnippet>282</a>        </span><span class="self">self</span>.positional_read_exact_retry_once(pos, <span class="kw-2">&amp;mut </span>buf)
+<a href=#283 id=283 data-nosnippet>283</a>            .map_err(|e| {
+<a href=#284 id=284 data-nosnippet>284</a>                io_error_with_context(
+<a href=#285 id=285 data-nosnippet>285</a>                    <span class="macro">format!</span>(<span class="string">"Failed to read uncompressed piece ({to_read} bytes at 0x{pos:x})"</span>),
+<a href=#286 id=286 data-nosnippet>286</a>                    e,
+<a href=#287 id=287 data-nosnippet>287</a>                )
+<a href=#288 id=288 data-nosnippet>288</a>            })<span class="question-mark">?</span>;
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">let </span>end = pos + to_read <span class="kw">as </span>u64;
+<a href=#290 id=290 data-nosnippet>290</a>
+<a href=#291 id=291 data-nosnippet>291</a>        <span class="comment">// CRC verification (no-op when this reader has no CRC.db). Compute each
+<a href=#292 id=292 data-nosnippet>292</a>        // covering chunk's CRC from the resident piece when fully contained, else
+<a href=#293 id=293 data-nosnippet>293</a>        // read the straddling prefix/suffix positionally. `verify_covering_chunks`
+<a href=#294 id=294 data-nosnippet>294</a>        // is synchronous and memoizes each chunk so it is checked at most once.
+<a href=#295 id=295 data-nosnippet>295</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(crc) = <span class="self">self</span>.crc_reader.as_deref() {
+<a href=#296 id=296 data-nosnippet>296</a>            <span class="kw">let </span>piece = <span class="kw-2">&amp;</span>buf;
+<a href=#297 id=297 data-nosnippet>297</a>            <span class="self">self</span>.verify_covering_chunks(crc, pos, end, |lo, hi, chunk| {
+<a href=#298 id=298 data-nosnippet>298</a>                <span class="kw">if </span>lo &gt;= pos &amp;&amp; hi &lt;= end {
+<a href=#299 id=299 data-nosnippet>299</a>                    <span class="kw">let </span>s = (lo - pos) <span class="kw">as </span>usize;
+<a href=#300 id=300 data-nosnippet>300</a>                    <span class="kw">let </span>e = (hi - pos) <span class="kw">as </span>usize;
+<a href=#301 id=301 data-nosnippet>301</a>                    <span class="prelude-val">Ok</span>(crc32fast::hash(<span class="kw-2">&amp;</span>piece[s..e]))
+<a href=#302 id=302 data-nosnippet>302</a>                } <span class="kw">else </span>{
+<a href=#303 id=303 data-nosnippet>303</a>                    <span class="kw">let </span><span class="kw-2">mut </span>cbuf = <span class="macro">vec!</span>[<span class="number">0u8</span>; (hi - lo) <span class="kw">as </span>usize];
+<a href=#304 id=304 data-nosnippet>304</a>                    <span class="self">self</span>.point_source
+<a href=#305 id=305 data-nosnippet>305</a>                        .read_exact_at(lo, <span class="kw-2">&amp;mut </span>cbuf)
+<a href=#306 id=306 data-nosnippet>306</a>                        .map_err(|e| {
+<a href=#307 id=307 data-nosnippet>307</a>                            Error::corruption(<span class="macro">format!</span>(
+<a href=#308 id=308 data-nosnippet>308</a>                                <span class="string">"failed to read uncompressed chunk {chunk} at Data.db offset \
+<a href=#309 id=309 data-nosnippet>309</a>                             0x{lo:x} for CRC verification: {e}"
+<a href=#310 id=310 data-nosnippet>310</a>                            </span>))
+<a href=#311 id=311 data-nosnippet>311</a>                        })<span class="question-mark">?</span>;
+<a href=#312 id=312 data-nosnippet>312</a>                    <span class="prelude-val">Ok</span>(crc32fast::hash(<span class="kw-2">&amp;</span>cbuf))
+<a href=#313 id=313 data-nosnippet>313</a>                }
+<a href=#314 id=314 data-nosnippet>314</a>            })<span class="question-mark">?</span>;
+<a href=#315 id=315 data-nosnippet>315</a>        }
+<a href=#316 id=316 data-nosnippet>316</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>((buf, end)))
+<a href=#317 id=317 data-nosnippet>317</a>    }
+<a href=#318 id=318 data-nosnippet>318</a>
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="doccomment">/// Synchronous compressed-NB feed body (issue #1940): read each compressed
+<a href=#320 id=320 data-nosnippet>320</a>    /// chunk positionally (CRC verified in the read), decode it (D2), and ship the
+<a href=#321 id=321 data-nosnippet>321</a>    /// decompressed `Bytes` on `raw_tx`. `Ok(())` on clean EOF or
+<a href=#322 id=322 data-nosnippet>322</a>    /// consumer-ended-early; `Err` on a read/decode failure. Runs on the feed's
+<a href=#323 id=323 data-nosnippet>323</a>    /// `spawn_blocking` thread — no `tokio::fs`, no `block_on`, no blocking-pool
+<a href=#324 id=324 data-nosnippet>324</a>    /// amplification.
+<a href=#325 id=325 data-nosnippet>325</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>feed_compressed_chunks(
+<a href=#326 id=326 data-nosnippet>326</a>        reader: <span class="kw-2">&amp;</span>Arc&lt;<span class="self">Self</span>&gt;,
+<a href=#327 id=327 data-nosnippet>327</a>        raw_tx: <span class="kw-2">&amp;</span>mpsc::Sender&lt;bytes::Bytes&gt;,
+<a href=#328 id=328 data-nosnippet>328</a>        max_compressed_length: usize,
+<a href=#329 id=329 data-nosnippet>329</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#330 id=330 data-nosnippet>330</a>        <span class="comment">// Reused compressed-read scratch (issue #1940, D2): read fills it, decode
+<a href=#331 id=331 data-nosnippet>331</a>        // borrows it, recycle for the next read — no per-chunk compressed alloc.
+<a href=#332 id=332 data-nosnippet>332</a>        //
+<a href=#333 id=333 data-nosnippet>333</a>        // Reserve ONCE to the ACTUAL working-set high-water mark — the largest
+<a href=#334 id=334 data-nosnippet>334</a>        // real compressed-chunk RECORD size, computed from the authoritative
+<a href=#335 id=335 data-nosnippet>335</a>        // `chunk_offsets` deltas (issue #1940 BLOCKER-1). This is NOT the metadata
+<a href=#336 id=336 data-nosnippet>336</a>        // `max_compressed_length`: Cassandra COMMONLY stamps that field as
+<a href=#337 id=337 data-nosnippet>337</a>        // `i32::MAX` (it equals `i32::MAX` whenever `minCompressRatio == 0`, the
+<a href=#338 id=338 data-nosnippet>338</a>        // DEFAULT — CompressionParams.java:186-189), so a `max_compressed_length`-
+<a href=#339 id=339 data-nosnippet>339</a>        // driven reserve would attempt a multi-GB allocation on opening an ORDINARY
+<a href=#340 id=340 data-nosnippet>340</a>        // compressed scan (an OOM/DoS before any real chunk size is known). The
+<a href=#341 id=341 data-nosnippet>341</a>        // offset-delta high-water mark is bounded by the real per-chunk record size
+<a href=#342 id=342 data-nosnippet>342</a>        // (a small multiple of `chunk_length`, e.g. 16 KiB), never the file size or
+<a href=#343 id=343 data-nosnippet>343</a>        // the i32::MAX bound. Reserving to it once means the per-chunk
+<a href=#344 id=344 data-nosnippet>344</a>        // `clear()`+`resize` never regrows in steady state — preserving the
+<a href=#345 id=345 data-nosnippet>345</a>        // ≤1-alloc/chunk property the `issue_1940_scan_window_substrate_allocs`
+<a href=#346 id=346 data-nosnippet>346</a>        // guard measures (the read path's per-chunk `try_reserve_exact` remains a
+<a href=#347 id=347 data-nosnippet>347</a>        // bounds-checked safety net that records a regrowth only if a chunk ever
+<a href=#348 id=348 data-nosnippet>348</a>        // exceeds this mark). `try_reserve_exact` returns a typed error on
+<a href=#349 id=349 data-nosnippet>349</a>        // allocation failure instead of aborting; a corrupt oversized delta surfaces
+<a href=#350 id=350 data-nosnippet>350</a>        // as `Error::memory`, never a panic. Authoritative metadata, no heuristic.
+<a href=#351 id=351 data-nosnippet>351</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>scratch: Vec&lt;u8&gt; = Vec::new();
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(ci) = reader.compression_info.as_ref() {
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="kw">let </span>file_size = reader.point_source.len();
+<a href=#354 id=354 data-nosnippet>354</a>            <span class="kw">let </span>max_record = (<span class="number">0</span>..ci.chunk_offsets.len())
+<a href=#355 id=355 data-nosnippet>355</a>                .filter_map(|i| ci.compressed_chunk_size(i, file_size))
+<a href=#356 id=356 data-nosnippet>356</a>                .max()
+<a href=#357 id=357 data-nosnippet>357</a>                .unwrap_or(<span class="number">0</span>);
+<a href=#358 id=358 data-nosnippet>358</a>            <span class="kw">let </span>want = usize::try_from(max_record).unwrap_or(usize::MAX);
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="kw">if </span>want &gt; <span class="number">0 </span>{
+<a href=#360 id=360 data-nosnippet>360</a>                scratch.try_reserve_exact(want).map_err(|e| {
+<a href=#361 id=361 data-nosnippet>361</a>                    Error::memory(<span class="macro">format!</span>(
+<a href=#362 id=362 data-nosnippet>362</a>                        <span class="string">"failed to reserve {want} bytes for the windowed compressed-read scratch \
+<a href=#363 id=363 data-nosnippet>363</a>                         (largest actual chunk record): {e}"
+<a href=#364 id=364 data-nosnippet>364</a>                    </span>))
+<a href=#365 id=365 data-nosnippet>365</a>                })<span class="question-mark">?</span>;
+<a href=#366 id=366 data-nosnippet>366</a>            }
+<a href=#367 id=367 data-nosnippet>367</a>        }
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="kw">let </span><span class="kw-2">mut </span>chunk_index = <span class="number">0usize</span>;
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="kw">loop </span>{
+<a href=#370 id=370 data-nosnippet>370</a>            <span class="comment">// SYNCHRONOUS positional read + CRC (issue #1940): CRC is verified inside
+<a href=#371 id=371 data-nosnippet>371</a>            // the read, BEFORE the payload is trusted (guardrail #1411), exactly as
+<a href=#372 id=372 data-nosnippet>372</a>            // the former cursor path did.
+<a href=#373 id=373 data-nosnippet>373</a>            </span><span class="kw">match </span>reader.read_compressed_chunk_sync(chunk_index, <span class="kw-2">&amp;mut </span>scratch)<span class="question-mark">? </span>{
+<a href=#374 id=374 data-nosnippet>374</a>                <span class="prelude-val">Some</span>(compressed) =&gt; {
+<a href=#375 id=375 data-nosnippet>375</a>                    <span class="comment">// Decompression stays HERE, on this blocking thread (D2), off the
+<a href=#376 id=376 data-nosnippet>376</a>                    // async reactor for every backend.
+<a href=#377 id=377 data-nosnippet>377</a>                    </span><span class="kw">let </span>(decoded, recycled) =
+<a href=#378 id=378 data-nosnippet>378</a>                        reader.decode_scan_chunk(chunk_index, max_compressed_length, compressed)<span class="question-mark">?</span>;
+<a href=#379 id=379 data-nosnippet>379</a>                    scratch = recycled;
+<a href=#380 id=380 data-nosnippet>380</a>                    chunk_index += <span class="number">1</span>;
+<a href=#381 id=381 data-nosnippet>381</a>                    <span class="kw">if </span>raw_tx.blocking_send(decoded).is_err() {
+<a href=#382 id=382 data-nosnippet>382</a>                        <span class="kw">return </span><span class="prelude-val">Ok</span>(()); <span class="comment">// consumer/parse ended early
+<a href=#383 id=383 data-nosnippet>383</a>                    </span>}
+<a href=#384 id=384 data-nosnippet>384</a>                }
+<a href=#385 id=385 data-nosnippet>385</a>                <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(()), <span class="comment">// EOF
+<a href=#386 id=386 data-nosnippet>386</a>            </span>}
+<a href=#387 id=387 data-nosnippet>387</a>        }
+<a href=#388 id=388 data-nosnippet>388</a>    }
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a>    <span class="doccomment">/// Synchronous uncompressed-NB feed body (issue #1940): read the data section
+<a href=#391 id=391 data-nosnippet>391</a>    /// in bounded positional pieces (each `CRC.db`-verified before it is shipped),
+<a href=#392 id=392 data-nosnippet>392</a>    /// decode (zero-copy `Vec`→`Bytes`, no decompressor), and ship on `raw_tx`.
+<a href=#393 id=393 data-nosnippet>393</a>    /// `Ok(())` on clean EOF or consumer-ended-early; `Err` on a read/CRC failure.
+<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>feed_uncompressed_pieces(
+<a href=#395 id=395 data-nosnippet>395</a>        reader: <span class="kw-2">&amp;</span>Arc&lt;<span class="self">Self</span>&gt;,
+<a href=#396 id=396 data-nosnippet>396</a>        raw_tx: <span class="kw-2">&amp;</span>mpsc::Sender&lt;bytes::Bytes&gt;,
+<a href=#397 id=397 data-nosnippet>397</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="kw">let </span><span class="kw-2">mut </span>pos = reader.calculate_header_size() <span class="kw">as </span>u64;
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">let </span><span class="kw-2">mut </span>chunk_index = <span class="number">0usize</span>;
+<a href=#400 id=400 data-nosnippet>400</a>        <span class="kw">loop </span>{
+<a href=#401 id=401 data-nosnippet>401</a>            <span class="kw">match </span>reader.read_uncompressed_piece_sync(pos)<span class="question-mark">? </span>{
+<a href=#402 id=402 data-nosnippet>402</a>                <span class="prelude-val">Some</span>((piece, next_pos)) =&gt; {
+<a href=#403 id=403 data-nosnippet>403</a>                    <span class="comment">// No compressor: `decode_scan_chunk` moves the piece into the B1
+<a href=#404 id=404 data-nosnippet>404</a>                    // cache zero-copy (`Bytes::from(Vec)`) — no per-piece copy — and
+<a href=#405 id=405 data-nosnippet>405</a>                    // returns the refcounted substrate the window borrows.
+<a href=#406 id=406 data-nosnippet>406</a>                    </span><span class="kw">let </span>(decoded, _recycled) =
+<a href=#407 id=407 data-nosnippet>407</a>                        reader.decode_scan_chunk(chunk_index, usize::MAX, piece)<span class="question-mark">?</span>;
+<a href=#408 id=408 data-nosnippet>408</a>                    pos = next_pos;
+<a href=#409 id=409 data-nosnippet>409</a>                    chunk_index += <span class="number">1</span>;
+<a href=#410 id=410 data-nosnippet>410</a>                    <span class="kw">if </span>raw_tx.blocking_send(decoded).is_err() {
+<a href=#411 id=411 data-nosnippet>411</a>                        <span class="kw">return </span><span class="prelude-val">Ok</span>(()); <span class="comment">// consumer/parse ended early
+<a href=#412 id=412 data-nosnippet>412</a>                    </span>}
+<a href=#413 id=413 data-nosnippet>413</a>                }
+<a href=#414 id=414 data-nosnippet>414</a>                <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(()), <span class="comment">// EOF
+<a href=#415 id=415 data-nosnippet>415</a>            </span>}
+<a href=#416 id=416 data-nosnippet>416</a>        }
+<a href=#417 id=417 data-nosnippet>417</a>    }
+<a href=#418 id=418 data-nosnippet>418</a>}
+</code></pre></div></section></main></body></html>

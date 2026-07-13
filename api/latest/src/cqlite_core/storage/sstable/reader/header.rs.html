@@ -1,11 +1,11 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/header.rs`."><title>header.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>header.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SSTable header parsing and detection
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/header.rs`."><title>header.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>header.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SSTable header parsing and detection
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module handles header parsing, version detection, and conversion
 <a href=#4 id=4 data-nosnippet>4</a>//! for different Cassandra SSTable formats.
 <a href=#5 id=5 data-nosnippet>5</a>
 <a href=#6 id=6 data-nosnippet>6</a></span><span class="kw">use </span>std::path::Path;
 <a href=#7 id=7 data-nosnippet>7</a>
-<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span>crate::{
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use crate</span>::{
 <a href=#9 id=9 data-nosnippet>9</a>    parser::header::{
 <a href=#10 id=10 data-nosnippet>10</a>        parse_sstable_header, CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader,
 <a href=#11 id=11 data-nosnippet>11</a>        SSTableStats, SUPPORTED_MAGIC_NUMBERS,
@@ -183,7 +183,7 @@
 <a href=#183 id=183 data-nosnippet>183</a>            .unwrap_or(<span class="bool-val">false</span>);
 <a href=#184 id=184 data-nosnippet>184</a>
 <a href=#185 id=185 data-nosnippet>185</a>    <span class="kw">if </span>is_nb_or_oa_format {
-<a href=#186 id=186 data-nosnippet>186</a>        <span class="macro">log::debug!</span>(
+<a href=#186 id=186 data-nosnippet>186</a>        <span class="macro">tracing::debug!</span>(
 <a href=#187 id=187 data-nosnippet>187</a>            <span class="string">"Detected BIG format (nb/oa) from filename '{}' — checking for embedded header presence"</span>,
 <a href=#188 id=188 data-nosnippet>188</a>            path.display()
 <a href=#189 id=189 data-nosnippet>189</a>        );
@@ -232,7 +232,7 @@
 <a href=#232 id=232 data-nosnippet>232</a>            ) &amp;&amp; (header_buffer[<span class="number">0</span>] &amp; <span class="number">0x80</span>) != <span class="number">0</span>;
 <a href=#233 id=233 data-nosnippet>233</a>
 <a href=#234 id=234 data-nosnippet>234</a>            <span class="kw">if </span>detected_version.is_some() &amp;&amp; !is_snappy_varint_collision {
-<a href=#235 id=235 data-nosnippet>235</a>                <span class="macro">log::debug!</span>(
+<a href=#235 id=235 data-nosnippet>235</a>                <span class="macro">tracing::debug!</span>(
 <a href=#236 id=236 data-nosnippet>236</a>                    <span class="string">"NB format file '{}' has embedded header (magic: 0x{:08x}) - using standard header parsing"</span>,
 <a href=#237 id=237 data-nosnippet>237</a>                    path.display(),
 <a href=#238 id=238 data-nosnippet>238</a>                    first_4_bytes
@@ -240,7 +240,7 @@
 <a href=#240 id=240 data-nosnippet>240</a>                <span class="comment">// Fall through to standard header parsing below
 <a href=#241 id=241 data-nosnippet>241</a>            </span>} <span class="kw">else if </span>is_snappy_varint_collision {
 <a href=#242 id=242 data-nosnippet>242</a>                <span class="comment">// Snappy varint collision detected - treat as headerless
-<a href=#243 id=243 data-nosnippet>243</a>                </span><span class="macro">log::debug!</span>(
+<a href=#243 id=243 data-nosnippet>243</a>                </span><span class="macro">tracing::debug!</span>(
 <a href=#244 id=244 data-nosnippet>244</a>                    <span class="string">"NB format file '{}' has Snappy varint collision with magic 0x{:08x} - treating as headerless"</span>,
 <a href=#245 id=245 data-nosnippet>245</a>                    path.display(),
 <a href=#246 id=246 data-nosnippet>246</a>                    first_4_bytes
@@ -248,7 +248,7 @@
 <a href=#248 id=248 data-nosnippet>248</a>                <span class="kw">return </span>create_minimal_nb_header(path).<span class="kw">await</span>;
 <a href=#249 id=249 data-nosnippet>249</a>            } <span class="kw">else </span>{
 <a href=#250 id=250 data-nosnippet>250</a>                <span class="comment">// True headerless NB format - first 4 bytes are compressed data
-<a href=#251 id=251 data-nosnippet>251</a>                </span><span class="macro">log::debug!</span>(
+<a href=#251 id=251 data-nosnippet>251</a>                </span><span class="macro">tracing::debug!</span>(
 <a href=#252 id=252 data-nosnippet>252</a>                    <span class="string">"NB format file '{}' is headerless (first bytes: 0x{:08x}) - loading CompressionInfo.db"</span>,
 <a href=#253 id=253 data-nosnippet>253</a>                    path.display(),
 <a href=#254 id=254 data-nosnippet>254</a>                    first_4_bytes
@@ -257,7 +257,7 @@
 <a href=#257 id=257 data-nosnippet>257</a>            }
 <a href=#258 id=258 data-nosnippet>258</a>        } <span class="kw">else </span>{
 <a href=#259 id=259 data-nosnippet>259</a>            <span class="comment">// Buffer too small for magic number check, assume headerless
-<a href=#260 id=260 data-nosnippet>260</a>            </span><span class="macro">log::warn!</span>(
+<a href=#260 id=260 data-nosnippet>260</a>            </span><span class="macro">tracing::warn!</span>(
 <a href=#261 id=261 data-nosnippet>261</a>                <span class="string">"NB format file '{}' has insufficient header buffer ({} bytes) - assuming headerless format"</span>,
 <a href=#262 id=262 data-nosnippet>262</a>                path.display(),
 <a href=#263 id=263 data-nosnippet>263</a>                header_buffer.len()
@@ -272,7 +272,7 @@
 <a href=#272 id=272 data-nosnippet>272</a>    // never an embedded magic number, so we go straight to a minimal header
 <a href=#273 id=273 data-nosnippet>273</a>    // (versioned V5_0Bti so schema extraction and the V5 row parser engage).
 <a href=#274 id=274 data-nosnippet>274</a>    </span><span class="kw">if </span><span class="macro">matches!</span>(gates, VersionGates::Bti(<span class="kw">_</span>)) {
-<a href=#275 id=275 data-nosnippet>275</a>        <span class="macro">log::debug!</span>(
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="macro">tracing::debug!</span>(
 <a href=#276 id=276 data-nosnippet>276</a>            <span class="string">"Detected BTI (da) format from filename '{}' — headerless Data.db, \
 <a href=#277 id=277 data-nosnippet>277</a>             building minimal header from CompressionInfo.db"</span>,
 <a href=#278 id=278 data-nosnippet>278</a>            path.display()
@@ -311,7 +311,7 @@
 <a href=#311 id=311 data-nosnippet>311</a>        <span class="kw">let </span>compression_info_exists = check_compression_info_exists(path, parent_dir);
 <a href=#312 id=312 data-nosnippet>312</a>
 <a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">if </span>!compression_info_exists {
-<a href=#314 id=314 data-nosnippet>314</a>            <span class="macro">log::debug!</span>(
+<a href=#314 id=314 data-nosnippet>314</a>            <span class="macro">tracing::debug!</span>(
 <a href=#315 id=315 data-nosnippet>315</a>                <span class="string">"Detected V5_0Uncompressed magic (0x{:08x}) but no CompressionInfo.db file exists - \
 <a href=#316 id=316 data-nosnippet>316</a>                 treating as headerless uncompressed format (partition data collision). File: '{}'"</span>,
 <a href=#317 id=317 data-nosnippet>317</a>                first_4_bytes,
@@ -321,7 +321,7 @@
 <a href=#321 id=321 data-nosnippet>321</a>            // This ensures block_io.rs uses the uncompressed read path
 <a href=#322 id=322 data-nosnippet>322</a>            </span><span class="kw">return </span>create_minimal_uncompressed_header(path).<span class="kw">await</span>;
 <a href=#323 id=323 data-nosnippet>323</a>        } <span class="kw">else </span>{
-<a href=#324 id=324 data-nosnippet>324</a>            <span class="macro">log::debug!</span>(
+<a href=#324 id=324 data-nosnippet>324</a>            <span class="macro">tracing::debug!</span>(
 <a href=#325 id=325 data-nosnippet>325</a>                <span class="string">"Detected V5_0Uncompressed magic (0x{:08x}) with CompressionInfo.db present - \
 <a href=#326 id=326 data-nosnippet>326</a>                 parsing as standard header. File: '{}'"</span>,
 <a href=#327 id=327 data-nosnippet>327</a>                first_4_bytes,
@@ -334,7 +334,7 @@
 <a href=#334 id=334 data-nosnippet>334</a>    // If first 4 bytes don't match any known magic number, treat as CRC32 checksum
 <a href=#335 id=335 data-nosnippet>335</a>    </span><span class="kw">let </span>actual_header = <span class="kw">if </span>CassandraVersion::from_magic_number(first_4_bytes).is_none() {
 <a href=#336 id=336 data-nosnippet>336</a>        <span class="comment">// First 4 bytes are likely a CRC32 checksum prefix
-<a href=#337 id=337 data-nosnippet>337</a>        </span><span class="macro">log::debug!</span>(
+<a href=#337 id=337 data-nosnippet>337</a>        </span><span class="macro">tracing::debug!</span>(
 <a href=#338 id=338 data-nosnippet>338</a>            <span class="string">"Detected CRC32 checksum prefix: 0x{:08x} in file '{}'"</span>,
 <a href=#339 id=339 data-nosnippet>339</a>            first_4_bytes,
 <a href=#340 id=340 data-nosnippet>340</a>            path.display()
@@ -357,7 +357,7 @@
 <a href=#357 id=357 data-nosnippet>357</a>
 <a href=#358 id=358 data-nosnippet>358</a>        <span class="kw">if </span>computed_checksum != expected_checksum {
 <a href=#359 id=359 data-nosnippet>359</a>            <span class="comment">// Don't fail - just warn. The checksum algorithm or scope may be different.
-<a href=#360 id=360 data-nosnippet>360</a>            </span><span class="macro">log::warn!</span>(
+<a href=#360 id=360 data-nosnippet>360</a>            </span><span class="macro">tracing::warn!</span>(
 <a href=#361 id=361 data-nosnippet>361</a>                <span class="string">"Header CRC32 checksum mismatch for file '{}' \
 <a href=#362 id=362 data-nosnippet>362</a>                 (Expected: 0x{:08x}, Computed: 0x{:08x}). \
 <a href=#363 id=363 data-nosnippet>363</a>                 Proceeding with parsing - checksum validation may use different algorithm."</span>,
@@ -366,7 +366,7 @@
 <a href=#366 id=366 data-nosnippet>366</a>                computed_checksum
 <a href=#367 id=367 data-nosnippet>367</a>            );
 <a href=#368 id=368 data-nosnippet>368</a>        } <span class="kw">else </span>{
-<a href=#369 id=369 data-nosnippet>369</a>            <span class="macro">log::info!</span>(
+<a href=#369 id=369 data-nosnippet>369</a>            <span class="macro">tracing::info!</span>(
 <a href=#370 id=370 data-nosnippet>370</a>                <span class="string">"Header CRC32 validated (0x{:08x}) for file '{}'"</span>,
 <a href=#371 id=371 data-nosnippet>371</a>                expected_checksum,
 <a href=#372 id=372 data-nosnippet>372</a>                path.display()
@@ -383,7 +383,7 @@
 <a href=#383 id=383 data-nosnippet>383</a>    </span><span class="kw">let </span>registry = get_global_registry();
 <a href=#384 id=384 data-nosnippet>384</a>    <span class="kw">match </span>registry.parse_data_header(actual_header) {
 <a href=#385 id=385 data-nosnippet>385</a>        <span class="prelude-val">Ok</span>(parsed_header) =&gt; {
-<a href=#386 id=386 data-nosnippet>386</a>            <span class="macro">log::debug!</span>(
+<a href=#386 id=386 data-nosnippet>386</a>            <span class="macro">tracing::debug!</span>(
 <a href=#387 id=387 data-nosnippet>387</a>                <span class="string">"Successfully parsed Data.db header using spec-driven approach for file '{}' \
 <a href=#388 id=388 data-nosnippet>388</a>                 with version: {:?}"</span>,
 <a href=#389 id=389 data-nosnippet>389</a>                path.display(),
@@ -394,7 +394,7 @@
 <a href=#394 id=394 data-nosnippet>394</a>            </span><span class="kw">return </span>convert_parsed_header_to_sstable_header(parsed_header, actual_header);
 <a href=#395 id=395 data-nosnippet>395</a>        }
 <a href=#396 id=396 data-nosnippet>396</a>        <span class="prelude-val">Err</span>(spec_error) =&gt; {
-<a href=#397 id=397 data-nosnippet>397</a>            <span class="macro">log::debug!</span>(
+<a href=#397 id=397 data-nosnippet>397</a>            <span class="macro">tracing::debug!</span>(
 <a href=#398 id=398 data-nosnippet>398</a>                <span class="string">"Spec-driven parsing failed for file '{}', falling back to legacy parser: {}"</span>,
 <a href=#399 id=399 data-nosnippet>399</a>                path.display(),
 <a href=#400 id=400 data-nosnippet>400</a>                spec_error
@@ -439,7 +439,7 @@
 <a href=#439 id=439 data-nosnippet>439</a>    <span class="comment">// Try to parse using the existing header parser (using actual_header)
 <a href=#440 id=440 data-nosnippet>440</a>    </span><span class="kw">match </span>parse_sstable_header(actual_header) {
 <a href=#441 id=441 data-nosnippet>441</a>        <span class="prelude-val">Ok</span>((<span class="kw">_</span>, <span class="kw-2">mut </span>header)) =&gt; {
-<a href=#442 id=442 data-nosnippet>442</a>            <span class="macro">log::debug!</span>(
+<a href=#442 id=442 data-nosnippet>442</a>            <span class="macro">tracing::debug!</span>(
 <a href=#443 id=443 data-nosnippet>443</a>                <span class="string">"Successfully parsed header for file '{}' with version: {:?}"</span>,
 <a href=#444 id=444 data-nosnippet>444</a>                path.display(),
 <a href=#445 id=445 data-nosnippet>445</a>                header.cassandra_version
@@ -457,7 +457,7 @@
 <a href=#457 id=457 data-nosnippet>457</a>            </span><span class="kw">if </span>cassandra_version == CassandraVersion::Legacy {
 <a href=#458 id=458 data-nosnippet>458</a>                <span class="attr">#[cfg(feature = <span class="string">"legacy-heuristics"</span>)]
 <a href=#459 id=459 data-nosnippet>459</a>                </span>{
-<a href=#460 id=460 data-nosnippet>460</a>                    <span class="macro">log::warn!</span>(
+<a href=#460 id=460 data-nosnippet>460</a>                    <span class="macro">tracing::warn!</span>(
 <a href=#461 id=461 data-nosnippet>461</a>                        <span class="string">"Failed to parse full header for legacy format file '{}', \
 <a href=#462 id=462 data-nosnippet>462</a>                         attempting minimal legacy header parsing: {:?}"</span>,
 <a href=#463 id=463 data-nosnippet>463</a>                        path.display(),
@@ -592,7 +592,7 @@
 <a href=#592 id=592 data-nosnippet>592</a>/// This is used when partition data coincidentally matches V5_0Uncompressed magic
 <a href=#593 id=593 data-nosnippet>593</a>/// but no CompressionInfo.db file exists, indicating a headerless uncompressed table.
 <a href=#594 id=594 data-nosnippet>594</a></span><span class="kw">async fn </span>create_minimal_uncompressed_header(path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Result</span>&lt;SSTableHeader&gt; {
-<a href=#595 id=595 data-nosnippet>595</a>    <span class="macro">log::info!</span>(
+<a href=#595 id=595 data-nosnippet>595</a>    <span class="macro">tracing::info!</span>(
 <a href=#596 id=596 data-nosnippet>596</a>        <span class="string">"Creating minimal uncompressed header for headerless file: {}"</span>,
 <a href=#597 id=597 data-nosnippet>597</a>        path.display()
 <a href=#598 id=598 data-nosnippet>598</a>    );
@@ -628,7 +628,7 @@
 <a href=#628 id=628 data-nosnippet>628</a>    <span class="comment">// Try to load CompressionInfo.db to determine compression algorithm
 <a href=#629 id=629 data-nosnippet>629</a>    </span><span class="kw">let </span>compression_algorithm = <span class="kw">match </span>load_nb_compression_info(path).<span class="kw">await </span>{
 <a href=#630 id=630 data-nosnippet>630</a>        <span class="prelude-val">Ok</span>(info) =&gt; {
-<a href=#631 id=631 data-nosnippet>631</a>            <span class="macro">log::info!</span>(
+<a href=#631 id=631 data-nosnippet>631</a>            <span class="macro">tracing::info!</span>(
 <a href=#632 id=632 data-nosnippet>632</a>                <span class="string">"Loaded CompressionInfo.db for NB format: algorithm={}, chunk_length={}, chunks={}"</span>,
 <a href=#633 id=633 data-nosnippet>633</a>                info.algorithm,
 <a href=#634 id=634 data-nosnippet>634</a>                info.chunk_length,
@@ -637,7 +637,7 @@
 <a href=#637 id=637 data-nosnippet>637</a>            info.algorithm
 <a href=#638 id=638 data-nosnippet>638</a>        }
 <a href=#639 id=639 data-nosnippet>639</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#640 id=640 data-nosnippet>640</a>            <span class="macro">log::warn!</span>(
+<a href=#640 id=640 data-nosnippet>640</a>            <span class="macro">tracing::warn!</span>(
 <a href=#641 id=641 data-nosnippet>641</a>                <span class="string">"Could not load CompressionInfo.db for NB format file '{}': {}. Assuming no compression."</span>,
 <a href=#642 id=642 data-nosnippet>642</a>                path.display(),
 <a href=#643 id=643 data-nosnippet>643</a>                e
@@ -683,7 +683,7 @@
 <a href=#683 id=683 data-nosnippet>683</a></span><span class="kw">async fn </span>create_minimal_bti_header(path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Result</span>&lt;SSTableHeader&gt; {
 <a href=#684 id=684 data-nosnippet>684</a>    <span class="kw">let </span>compression_algorithm = <span class="kw">match </span>load_nb_compression_info(path).<span class="kw">await </span>{
 <a href=#685 id=685 data-nosnippet>685</a>        <span class="prelude-val">Ok</span>(info) =&gt; {
-<a href=#686 id=686 data-nosnippet>686</a>            <span class="macro">log::info!</span>(
+<a href=#686 id=686 data-nosnippet>686</a>            <span class="macro">tracing::info!</span>(
 <a href=#687 id=687 data-nosnippet>687</a>                <span class="string">"Loaded CompressionInfo.db for BTI format: algorithm={}, chunk_length={}, chunks={}"</span>,
 <a href=#688 id=688 data-nosnippet>688</a>                info.algorithm,
 <a href=#689 id=689 data-nosnippet>689</a>                info.chunk_length,
@@ -692,7 +692,7 @@
 <a href=#692 id=692 data-nosnippet>692</a>            info.algorithm
 <a href=#693 id=693 data-nosnippet>693</a>        }
 <a href=#694 id=694 data-nosnippet>694</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#695 id=695 data-nosnippet>695</a>            <span class="macro">log::warn!</span>(
+<a href=#695 id=695 data-nosnippet>695</a>            <span class="macro">tracing::warn!</span>(
 <a href=#696 id=696 data-nosnippet>696</a>                <span class="string">"Could not load CompressionInfo.db for BTI format file '{}': {}. Assuming no compression."</span>,
 <a href=#697 id=697 data-nosnippet>697</a>                path.display(),
 <a href=#698 id=698 data-nosnippet>698</a>                e
@@ -774,7 +774,7 @@
 <a href=#774 id=774 data-nosnippet>774</a>    </span><span class="kw">let </span>version = <span class="kw">if </span>header_buffer.len() &gt;= <span class="number">6 </span>{
 <a href=#775 id=775 data-nosnippet>775</a>        u16::from_be_bytes([header_buffer[<span class="number">4</span>], header_buffer[<span class="number">5</span>]])
 <a href=#776 id=776 data-nosnippet>776</a>    } <span class="kw">else </span>{
-<a href=#777 id=777 data-nosnippet>777</a>        <span class="macro">log::warn!</span>(
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="macro">tracing::warn!</span>(
 <a href=#778 id=778 data-nosnippet>778</a>            <span class="string">"Legacy header too short for version extraction, using default version. File: {}"</span>,
 <a href=#779 id=779 data-nosnippet>779</a>            path.display()
 <a href=#780 id=780 data-nosnippet>780</a>        );
@@ -791,7 +791,7 @@
 <a href=#791 id=791 data-nosnippet>791</a>        )));
 <a href=#792 id=792 data-nosnippet>792</a>    }
 <a href=#793 id=793 data-nosnippet>793</a>
-<a href=#794 id=794 data-nosnippet>794</a>    <span class="macro">log::info!</span>(
+<a href=#794 id=794 data-nosnippet>794</a>    <span class="macro">tracing::info!</span>(
 <a href=#795 id=795 data-nosnippet>795</a>        <span class="string">"Creating minimal legacy header for file '{}' with version {}"</span>,
 <a href=#796 id=796 data-nosnippet>796</a>        path.display(),
 <a href=#797 id=797 data-nosnippet>797</a>        version
@@ -833,7 +833,7 @@
 <a href=#833 id=833 data-nosnippet>833</a>
 <a href=#834 id=834 data-nosnippet>834</a><span class="attr">#[cfg(test)]
 <a href=#835 id=835 data-nosnippet>835</a></span><span class="kw">mod </span>tests {
-<a href=#836 id=836 data-nosnippet>836</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#836 id=836 data-nosnippet>836</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
 <a href=#837 id=837 data-nosnippet>837</a>
 <a href=#838 id=838 data-nosnippet>838</a>    <span class="doccomment">/// Test Snappy varint collision detection for V5_0WideRows magic number.
 <a href=#839 id=839 data-nosnippet>839</a>    ///

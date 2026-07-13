@@ -1,0 +1,76 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Blocking-pool admission control for windowed streaming scans (issue #1594, Epic F finding F4)."><title>cqlite_core::storage::sstable::reader::scan_stream_windowed::scan_admission - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module scan_admission</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module scan_<wbr>admission</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists" title="Why this exists">Why this exists</a></li><li><a href="#the-mechanism" title="The mechanism">The mechanism</a></li><li><a href="#scope" title="Scope">Scope</a></li><li><a href="#deadlock-freedom" title="Deadlock-freedom">Deadlock-freedom</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable::<wbr>reader::<wbr>scan_<wbr>stream_<wbr>windowed</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../../../index.html">cqlite_core</a>::<wbr><a href="../../../../index.html">storage</a>::<wbr><a href="../../../index.html">sstable</a>::<wbr><a href="../../index.html">reader</a>::<wbr><a href="../index.html">scan_stream_windowed</a></div><h1>Module <span>scan_<wbr>admission</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../../../src/cqlite_core/storage/sstable/reader/scan_admission.rs.html#1-389">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Blocking-pool admission control for windowed streaming scans (issue #1594,
+Epic F finding F4).</p>
+<h2 id="why-this-exists"><a class="doc-anchor" href="#why-this-exists">§</a>Why this exists</h2>
+<p><code>run_scan_stream_windowed</code> spawns a long-lived <code>spawn_blocking</code> PARSE task per
+scan (issue #1143), and — for a synchronously-faulting backend (mmap page
+fault / <code>O_DIRECT</code> <code>pread</code>) — a SECOND long-lived <code>spawn_blocking</code> FEED task
+per scan (issue #1593, F3). So a faulting-backend scan pins TWO blocking-pool
+threads for its full duration; <code>K</code> concurrent cold scans pin <code>~2K</code> threads.
+tokio’s blocking pool defaults to 512 threads and is SHARED with tokio-fs
+internals, so at high scan concurrency latency-critical point-read file ops
+queue behind these long-lived throughput tasks — the priority inversion the
+July 2026 read-path audit named (§Epic F / F4).</p>
+<h2 id="the-mechanism"><a class="doc-anchor" href="#the-mechanism">§</a>The mechanism</h2>
+<p>A process-wide [<code>tokio::sync::Semaphore</code>] caps the number of scan OPERATIONS
+admitted to the blocking pool concurrently. Admission is per top-level scan
+OPERATION — NOT per blocking thread and NOT per fan-out sub-scan (issue #1594
+deadlock fix):</p>
+<ul>
+<li>A direct single-generation scan
+(<a href="../../struct.SSTableReader.html#method.run_scan_stream" title="method cqlite_core::storage::sstable::reader::SSTableReader::run_scan_stream"><code>run_scan_stream</code></a> invoked with
+[<code>ScanAdmission::Acquire</code>]) acquires exactly ONE permit ([<code>admit</code>]) at the
+TOP of the scan — BEFORE any <code>spawn_blocking</code> — and holds it via the RAII
+[<code>ScanAdmissionPermit</code>] guard for the whole scan.</li>
+<li>A cross-generation fan-out merge (<code>SSTableManager::scan_stream</code>) is ONE
+operation that legitimately opens N per-generation sub-scans and primes a
+head from EVERY sub-scan before draining any. It acquires exactly ONE permit
+for the whole merge and opens each sub-scan with [<code>ScanAdmission::Exempt</code>], so
+the sub-scans do NOT independently admit. A single query therefore needs
+exactly ONE permit, never N.</li>
+</ul>
+<p>The permit (and therefore the admission slot) is returned on EVERY exit path —
+success, error, or cancellation/drop — because the guard’s <code>Drop</code> returns the
+owned permit. A scan can never leak a slot.</p>
+<p>One permit per scan OPERATION (not per blocking thread, not per sub-scan): the
+bound limits concurrent INDEPENDENT scan operations (the K-concurrent-cold-scans
+case the July 2026 audit named). For the common single-generation table each
+admitted operation owns its (up to two, faulting-backend) blocking threads, so
+<code>cap</code> operations bound the footprint to <code>~2 × cap</code> threads — a small fraction of
+tokio’s 512-thread default, leaving ample headroom for latency-critical fs/point
+ops. A cross-generation operation’s fan-out inherently needs its N sub-scans
+live AT ONCE (it primes every head before draining), so that intra-operation
+fan-out is deliberately NOT throttled: throttling it would deadlock (see below).
+The admission bound is therefore on operation concurrency, not on the total
+blocking threads a single multi-generation operation may transiently use.</p>
+<h2 id="scope"><a class="doc-anchor" href="#scope">§</a>Scope</h2>
+<p>Admission covers the LAZY/WINDOWED scan path only. The write-support
+multi-generation EAGER-materialize branch (<code>merge_generations_for_read</code> in
+<code>storage/sstable/mod.rs</code>, which drains a <code>KWayMerger</code> inside a single
+<code>spawn_blocking</code>) does NOT pass through admission — it predates F4 and is not
+the <code>spawn_blocking</code>-windowed target. Do not assume ALL reads are throttled by
+this semaphore; wiring that eager path in would be a separate change.</p>
+<h2 id="deadlock-freedom"><a class="doc-anchor" href="#deadlock-freedom">§</a>Deadlock-freedom</h2>
+<p>Admission is per top-level scan OPERATION; a fan-out merge’s sub-scans are
+EXEMPT and never independently admit. No code path blocks on [<code>admit</code>] while
+already holding a permit, and no permit-holder’s progress depends on another
+permit being granted: an operation acquires AT MOST ONE permit, once, at its
+top, holding no other permit/lock while awaiting, and its internal fan-out
+sub-scans run permit-free. Independent operations that queue at [<code>admit</code>] hold
+nothing, so they cannot block a permit-holder. Hence there is no hold-and-wait
+cycle — the mechanism stays deadlock-free even when a single query fans out to
+<code>N &gt; cap</code> generations.</p>
+<p>This is the exact bug an earlier per-SUB-SCAN design introduced: with each
+sub-scan admitting independently, a fan-out to <code>N &gt; cap</code> generations let <code>cap</code>
+sub-scans win permits and park in consumer backpressure while the remaining
+sub-scans blocked forever at <code>admit</code>; the merge — stuck priming a head from
+EVERY sub-scan — never drained the permit-holders, so no permit ever freed
+(permanent hang). Admitting at operation granularity removes the hold-and-wait.</p>
+<p>Queue-full behavior is WAIT, not error: when <code>cap</code> operations are admitted the
+<code>cap + 1</code>-th operation simply blocks at <code>admit().await</code> until a permit frees,
+then proceeds (natural backpressure).</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="probe/index.html" title="mod cqlite_core::storage::sstable::reader::scan_stream_windowed::scan_admission::probe">probe</a></dt><dd>Test-only admission instrumentation (issue #1594 wiring guard). Compiled ONLY
+under the non-default <code>scan-offload-probe</code> feature: in a normal/default/release
+build this module, its statics, and its call-sites do not exist, so admission
+control adds zero test surface and no public API. Exposed as <code>pub</code> (via the
+parent’s feature-gated <code>pub mod scan_admission</code>) so the integration guard can
+install a low cap and read the in-flight counters.</dd></dl></section></div></main></body></html>

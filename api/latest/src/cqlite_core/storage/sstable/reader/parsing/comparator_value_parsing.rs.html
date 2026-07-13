@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/comparator_value_parsing.rs`."><title>comparator_value_parsing.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/</div>comparator_value_parsing.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Standalone comparator-based value parsing for V5 format
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/comparator_value_parsing.rs`."><title>comparator_value_parsing.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/</div>comparator_value_parsing.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Standalone comparator-based value parsing for V5 format
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module provides schema-aware value parsing that can be used independently
 <a href=#4 id=4 data-nosnippet>4</a>//! of the SSTableReader, making it suitable for use in the row_cell_state_machine.
@@ -9,17 +9,17 @@
 <a href=#9 id=9 data-nosnippet>9</a>//!
 <a href=#10 id=10 data-nosnippet>10</a>//! **Element length encoding**: Uses VInt-encoded lengths for non-frozen
 <a href=#11 id=11 data-nosnippet>11</a>//! collection elements. This differs from frozen collections in
-<a href=#12 id=12 data-nosnippet>12</a>//! `v5_compressed_legacy.rs` which use i32 BE lengths per Cassandra's
+<a href=#12 id=12 data-nosnippet>12</a>//! `row_decoder.rs` which use i32 BE lengths per Cassandra's
 <a href=#13 id=13 data-nosnippet>13</a>//! `AbstractType.writeValue()`.
 <a href=#14 id=14 data-nosnippet>14</a>
-<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">use </span>crate::{
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">use crate</span>::{
 <a href=#16 id=16 data-nosnippet>16</a>    parser::vint::parse_vint,
 <a href=#17 id=17 data-nosnippet>17</a>    types::{ComparatorType, UdtValue, Value},
 <a href=#18 id=18 data-nosnippet>18</a>    Error, <span class="prelude-ty">Result</span>,
 <a href=#19 id=19 data-nosnippet>19</a>};
 <a href=#20 id=20 data-nosnippet>20</a>
 <a href=#21 id=21 data-nosnippet>21</a><span class="doccomment">/// Maximum nesting depth for recursive value decoding, mirroring the V5 frozen
-<a href=#22 id=22 data-nosnippet>22</a>/// guard (`MAX_TYPE_NESTING_DEPTH` in `v5_compressed_legacy::mod`). A corrupt or
+<a href=#22 id=22 data-nosnippet>22</a>/// guard (`MAX_TYPE_NESTING_DEPTH` in `row_decoder::mod`). A corrupt or
 <a href=#23 id=23 data-nosnippet>23</a>/// adversarial deeply-nested type (e.g. `frozen&lt;frozen&lt;frozen&lt;...&gt;&gt;&gt;`) must
 <a href=#24 id=24 data-nosnippet>24</a>/// return `Err` rather than recurse until the stack overflows and aborts the
 <a href=#25 id=25 data-nosnippet>25</a>/// process (issue #1632). Shared by both exact-slice decoders — the standalone
@@ -230,7 +230,7 @@
 <a href=#230 id=230 data-nosnippet>230</a>                .map_err(|<span class="kw">_</span>| Error::corruption(<span class="string">"Invalid UTF-8 in JSON value"</span>))<span class="question-mark">?</span>;
 <a href=#231 id=231 data-nosnippet>231</a>            <span class="kw">let </span>json_value: serde_json::Value = serde_json::from_str(<span class="kw-2">&amp;</span>json_text)
 <a href=#232 id=232 data-nosnippet>232</a>                .map_err(|<span class="kw">_</span>| Error::corruption(<span class="string">"Invalid JSON value"</span>))<span class="question-mark">?</span>;
-<a href=#233 id=233 data-nosnippet>233</a>            <span class="prelude-val">Ok</span>(Value::Json(json_value))
+<a href=#233 id=233 data-nosnippet>233</a>            <span class="prelude-val">Ok</span>(Value::Json(Box::new(json_value)))
 <a href=#234 id=234 data-nosnippet>234</a>        }
 <a href=#235 id=235 data-nosnippet>235</a>        <span class="comment">// Structural types route through the ONE shared structural body in
 <a href=#236 id=236 data-nosnippet>236</a>        // `value_parsing` (issue #1636 / J2). Non-frozen collections use VInt
@@ -272,11 +272,11 @@
 <a href=#272 id=272 data-nosnippet>272</a>            )<span class="question-mark">?</span>;
 <a href=#273 id=273 data-nosnippet>273</a>            <span class="comment">// Preserve decoder #2's provenance (type_name/keyspace from the
 <a href=#274 id=274 data-nosnippet>274</a>            // comparator) rather than the helper's "unknown" placeholders.
-<a href=#275 id=275 data-nosnippet>275</a>            </span><span class="prelude-val">Ok</span>(Value::Udt(UdtValue {
+<a href=#275 id=275 data-nosnippet>275</a>            </span><span class="prelude-val">Ok</span>(Value::Udt(Box::new(UdtValue {
 <a href=#276 id=276 data-nosnippet>276</a>                keyspace: keyspace.clone().unwrap_or_else(|| <span class="string">"unknown"</span>.to_string()),
 <a href=#277 id=277 data-nosnippet>277</a>                type_name: type_name.to_string(),
 <a href=#278 id=278 data-nosnippet>278</a>                fields: udt.fields,
-<a href=#279 id=279 data-nosnippet>279</a>            }))
+<a href=#279 id=279 data-nosnippet>279</a>            })))
 <a href=#280 id=280 data-nosnippet>280</a>        }
 <a href=#281 id=281 data-nosnippet>281</a>        ComparatorType::Frozen(inner_comparator) =&gt; {
 <a href=#282 id=282 data-nosnippet>282</a>            <span class="kw">let </span>inner_value =
@@ -340,7 +340,7 @@
 <a href=#340 id=340 data-nosnippet>340</a>
 <a href=#341 id=341 data-nosnippet>341</a><span class="attr">#[cfg(test)]
 <a href=#342 id=342 data-nosnippet>342</a></span><span class="kw">mod </span>tests {
-<a href=#343 id=343 data-nosnippet>343</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
 <a href=#344 id=344 data-nosnippet>344</a>
 <a href=#345 id=345 data-nosnippet>345</a>    <span class="doccomment">/// Local signed-VInt encoder for tests — avoids depending on
 <a href=#346 id=346 data-nosnippet>346</a>    /// `crate::storage::serialization::vint`, which is gated behind the
@@ -643,7 +643,7 @@
 <a href=#643 id=643 data-nosnippet>643</a>            result,
 <a href=#644 id=644 data-nosnippet>644</a>            Value::Map(<span class="macro">vec!</span>[(
 <a href=#645 id=645 data-nosnippet>645</a>                Value::Text(<span class="string">"k"</span>.to_string()),
-<a href=#646 id=646 data-nosnippet>646</a>                Value::Json(<span class="macro">serde_json::json!</span>([<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>])),
+<a href=#646 id=646 data-nosnippet>646</a>                Value::Json(Box::new(<span class="macro">serde_json::json!</span>([<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]))),
 <a href=#647 id=647 data-nosnippet>647</a>            )])
 <a href=#648 id=648 data-nosnippet>648</a>        );
 <a href=#649 id=649 data-nosnippet>649</a>    }

@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/row_cell_state_machine.rs`."><title>row_cell_state_machine.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/</div>row_cell_state_machine.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Cassandra 5 'oa' format row/cell state machine
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/row_cell_state_machine.rs`."><title>row_cell_state_machine.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/</div>row_cell_state_machine.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Cassandra 5 'oa' format row/cell state machine
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module implements a spec-accurate state machine for parsing Cassandra 5+ SSTable
 <a href=#4 id=4 data-nosnippet>4</a>//! row and cell data according to the exact binary format specification.
@@ -9,7 +9,7 @@
 <a href=#9 id=9 data-nosnippet>9</a>//! Each state validates input and transitions appropriately using proper VInt decoding
 <a href=#10 id=10 data-nosnippet>10</a>//! and handles optional components like deletion info, static rows, and TTL information.
 <a href=#11 id=11 data-nosnippet>11</a>
-<a href=#12 id=12 data-nosnippet>12</a></span><span class="kw">use </span>crate::{
+<a href=#12 id=12 data-nosnippet>12</a></span><span class="kw">use crate</span>::{
 <a href=#13 id=13 data-nosnippet>13</a>    error::{Error, <span class="prelude-ty">Result</span>},
 <a href=#14 id=14 data-nosnippet>14</a>    parser::{
 <a href=#15 id=15 data-nosnippet>15</a>        types::{parse_cql_value_raw, CqlTypeId},
@@ -1010,7 +1010,7 @@
 <a href=#1010 id=1010 data-nosnippet>1010</a>
 <a href=#1011 id=1011 data-nosnippet>1011</a>            <span class="comment">// Skip empty or very small chunks
 <a href=#1012 id=1012 data-nosnippet>1012</a>            </span><span class="kw">if </span>remaining_data.len() &lt; <span class="number">8 </span>{
-<a href=#1013 id=1013 data-nosnippet>1013</a>                <span class="macro">log::debug!</span>(
+<a href=#1013 id=1013 data-nosnippet>1013</a>                <span class="macro">tracing::debug!</span>(
 <a href=#1014 id=1014 data-nosnippet>1014</a>                    <span class="string">"Skipping small data chunk of {} bytes"</span>,
 <a href=#1015 id=1015 data-nosnippet>1015</a>                    remaining_data.len()
 <a href=#1016 id=1016 data-nosnippet>1016</a>                );
@@ -1026,12 +1026,12 @@
 <a href=#1026 id=1026 data-nosnippet>1026</a>
 <a href=#1027 id=1027 data-nosnippet>1027</a>                    <span class="comment">// Prevent infinite loops
 <a href=#1028 id=1028 data-nosnippet>1028</a>                    </span><span class="kw">if </span>consumed_bytes == <span class="number">0 </span>{
-<a href=#1029 id=1029 data-nosnippet>1029</a>                        <span class="macro">log::debug!</span>(<span class="string">"No progress made, stopping partition parsing"</span>);
+<a href=#1029 id=1029 data-nosnippet>1029</a>                        <span class="macro">tracing::debug!</span>(<span class="string">"No progress made, stopping partition parsing"</span>);
 <a href=#1030 id=1030 data-nosnippet>1030</a>                        <span class="kw">break</span>;
 <a href=#1031 id=1031 data-nosnippet>1031</a>                    }
 <a href=#1032 id=1032 data-nosnippet>1032</a>                }
 <a href=#1033 id=1033 data-nosnippet>1033</a>                <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#1034 id=1034 data-nosnippet>1034</a>                    <span class="macro">log::debug!</span>(<span class="string">"Failed to parse row at offset {}: {}"</span>, offset, e);
+<a href=#1034 id=1034 data-nosnippet>1034</a>                    <span class="macro">tracing::debug!</span>(<span class="string">"Failed to parse row at offset {}: {}"</span>, offset, e);
 <a href=#1035 id=1035 data-nosnippet>1035</a>
 <a href=#1036 id=1036 data-nosnippet>1036</a>                    <span class="comment">// For Issue #35 compliance, try more aggressive parsing methods
 <a href=#1037 id=1037 data-nosnippet>1037</a>                    // before giving up completely
@@ -1042,11 +1042,11 @@
 <a href=#1042 id=1042 data-nosnippet>1042</a>                            </span>offset += std::cmp::min(remaining_data.len(), <span class="number">64</span>);
 <a href=#1043 id=1043 data-nosnippet>1043</a>                        }
 <a href=#1044 id=1044 data-nosnippet>1044</a>                        <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; {
-<a href=#1045 id=1045 data-nosnippet>1045</a>                            <span class="macro">log::debug!</span>(<span class="string">"No alternative parsing method succeeded, stopping"</span>);
+<a href=#1045 id=1045 data-nosnippet>1045</a>                            <span class="macro">tracing::debug!</span>(<span class="string">"No alternative parsing method succeeded, stopping"</span>);
 <a href=#1046 id=1046 data-nosnippet>1046</a>                            <span class="kw">break</span>;
 <a href=#1047 id=1047 data-nosnippet>1047</a>                        }
 <a href=#1048 id=1048 data-nosnippet>1048</a>                        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-<a href=#1049 id=1049 data-nosnippet>1049</a>                            <span class="macro">log::debug!</span>(<span class="string">"All parsing methods failed, stopping"</span>);
+<a href=#1049 id=1049 data-nosnippet>1049</a>                            <span class="macro">tracing::debug!</span>(<span class="string">"All parsing methods failed, stopping"</span>);
 <a href=#1050 id=1050 data-nosnippet>1050</a>                            <span class="kw">break</span>;
 <a href=#1051 id=1051 data-nosnippet>1051</a>                        }
 <a href=#1052 id=1052 data-nosnippet>1052</a>                    }
@@ -1054,7 +1054,7 @@
 <a href=#1054 id=1054 data-nosnippet>1054</a>            }
 <a href=#1055 id=1055 data-nosnippet>1055</a>        }
 <a href=#1056 id=1056 data-nosnippet>1056</a>
-<a href=#1057 id=1057 data-nosnippet>1057</a>        <span class="macro">log::debug!</span>(<span class="string">"Parsed {} rows from partition data"</span>, results.len());
+<a href=#1057 id=1057 data-nosnippet>1057</a>        <span class="macro">tracing::debug!</span>(<span class="string">"Parsed {} rows from partition data"</span>, results.len());
 <a href=#1058 id=1058 data-nosnippet>1058</a>        <span class="prelude-val">Ok</span>(results)
 <a href=#1059 id=1059 data-nosnippet>1059</a>    }
 <a href=#1060 id=1060 data-nosnippet>1060</a>
@@ -1490,7 +1490,7 @@
 <a href=#1490 id=1490 data-nosnippet>1490</a>
 <a href=#1491 id=1491 data-nosnippet>1491</a><span class="attr">#[cfg(test)]
 <a href=#1492 id=1492 data-nosnippet>1492</a></span><span class="kw">mod </span>tests {
-<a href=#1493 id=1493 data-nosnippet>1493</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#1493 id=1493 data-nosnippet>1493</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
 <a href=#1494 id=1494 data-nosnippet>1494</a>
 <a href=#1495 id=1495 data-nosnippet>1495</a>    <span class="attr">#[test]
 <a href=#1496 id=1496 data-nosnippet>1496</a>    </span><span class="kw">fn </span>test_state_machine_creation() {

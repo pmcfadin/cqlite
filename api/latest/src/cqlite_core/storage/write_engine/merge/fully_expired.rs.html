@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/merge/fully_expired.rs`."><title>fully_expired.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/merge/</div>fully_expired.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Fully-expired SSTable drop classification (issue #1388).
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/merge/fully_expired.rs`."><title>fully_expired.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/merge/</div>fully_expired.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Fully-expired SSTable drop classification (issue #1388).
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Parity with Cassandra `CompactionController.getFullyExpiredSSTables`: before a
 <a href=#4 id=4 data-nosnippet>4</a>//! compaction rewrites anything, classify the subset of input SSTables that are
@@ -20,7 +20,7 @@
 <a href=#20 id=20 data-nosnippet>20</a>
 <a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">use </span>std::path::{Path, PathBuf};
 <a href=#22 id=22 data-nosnippet>22</a>
-<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use </span>super::{compute_max_purgeable_timestamp, stats_path_for};
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use super</span>::{compute_max_purgeable_timestamp, stats_path_for};
 <a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span><span class="kw">crate</span>::parser::statistics::TimestampStatistics;
 <a href=#25 id=25 data-nosnippet>25</a>
 <a href=#26 id=26 data-nosnippet>26</a><span class="doccomment">/// Classify a candidate SSTable as *fully expired* for a compaction with cutoff
@@ -50,602 +50,609 @@
 <a href=#50 id=50 data-nosnippet>50</a>/// would compare below any overlap bound and wrongly permit a drop). Returning
 <a href=#51 id=51 data-nosnippet>51</a>/// `None` here forces the overlap gate to FAIL CLOSED (retain the candidate).
 <a href=#52 id=52 data-nosnippet>52</a></span><span class="kw">fn </span>authoritative_max_timestamp(stats: <span class="kw-2">&amp;</span>TimestampStatistics) -&gt; <span class="prelude-ty">Option</span>&lt;i64&gt; {
-<a href=#53 id=53 data-nosnippet>53</a>    <span class="kw">match </span>stats.max_timestamp {
-<a href=#54 id=54 data-nosnippet>54</a>        i64::MIN =&gt; <span class="prelude-val">None</span>,
-<a href=#55 id=55 data-nosnippet>55</a>        v =&gt; <span class="prelude-val">Some</span>(v),
-<a href=#56 id=56 data-nosnippet>56</a>    }
-<a href=#57 id=57 data-nosnippet>57</a>}
-<a href=#58 id=58 data-nosnippet>58</a>
-<a href=#59 id=59 data-nosnippet>59</a><span class="doccomment">/// Read a candidate SSTable's `TimestampStatistics` from its sibling
-<a href=#60 id=60 data-nosnippet>60</a>/// `Statistics.db`. Returns `None` when the file is absent or fails to parse — the
-<a href=#61 id=61 data-nosnippet>61</a>/// conservative signal that its expiry/timestamp facts are UNKNOWN, so the
-<a href=#62 id=62 data-nosnippet>62</a>/// candidate must NOT be dropped (matches `compute_max_purgeable_timestamp`
-<a href=#63 id=63 data-nosnippet>63</a>/// degradation). Authoritative metadata only (no cell scan).
-<a href=#64 id=64 data-nosnippet>64</a></span><span class="kw">fn </span>read_timestamp_stats(data_path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Option</span>&lt;TimestampStatistics&gt; {
-<a href=#65 id=65 data-nosnippet>65</a>    <span class="kw">let </span>stats_path = stats_path_for(data_path);
-<a href=#66 id=66 data-nosnippet>66</a>    <span class="kw">if </span>!stats_path.exists() {
-<a href=#67 id=67 data-nosnippet>67</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
-<a href=#68 id=68 data-nosnippet>68</a>    }
-<a href=#69 id=69 data-nosnippet>69</a>    <span class="kw">let </span>stats_bytes = <span class="kw">match </span>std::fs::read(<span class="kw-2">&amp;</span>stats_path) {
-<a href=#70 id=70 data-nosnippet>70</a>        <span class="prelude-val">Ok</span>(b) =&gt; b,
-<a href=#71 id=71 data-nosnippet>71</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#72 id=72 data-nosnippet>72</a>            <span class="macro">log::warn!</span>(
-<a href=#73 id=73 data-nosnippet>73</a>                <span class="string">"Could not read Statistics.db {:?} for fully-expired check: {}"</span>,
-<a href=#74 id=74 data-nosnippet>74</a>                stats_path,
-<a href=#75 id=75 data-nosnippet>75</a>                e
-<a href=#76 id=76 data-nosnippet>76</a>            );
-<a href=#77 id=77 data-nosnippet>77</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
-<a href=#78 id=78 data-nosnippet>78</a>        }
-<a href=#79 id=79 data-nosnippet>79</a>    };
-<a href=#80 id=80 data-nosnippet>80</a>    <span class="kw">match </span><span class="kw">crate</span>::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-<a href=#81 id=81 data-nosnippet>81</a>        <span class="kw-2">&amp;</span>stats_bytes,
-<a href=#82 id=82 data-nosnippet>82</a>        <span class="prelude-val">None</span>,
-<a href=#83 id=83 data-nosnippet>83</a>    ) {
-<a href=#84 id=84 data-nosnippet>84</a>        <span class="prelude-val">Ok</span>((<span class="kw">_</span>, sstable_stats)) =&gt; <span class="prelude-val">Some</span>(sstable_stats.timestamp_stats),
-<a href=#85 id=85 data-nosnippet>85</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#86 id=86 data-nosnippet>86</a>            <span class="macro">log::warn!</span>(
-<a href=#87 id=87 data-nosnippet>87</a>                <span class="string">"Could not parse Statistics.db {:?} for fully-expired check: {:?}"</span>,
-<a href=#88 id=88 data-nosnippet>88</a>                stats_path,
-<a href=#89 id=89 data-nosnippet>89</a>                e
-<a href=#90 id=90 data-nosnippet>90</a>            );
-<a href=#91 id=91 data-nosnippet>91</a>            <span class="prelude-val">None
-<a href=#92 id=92 data-nosnippet>92</a>        </span>}
-<a href=#93 id=93 data-nosnippet>93</a>    }
-<a href=#94 id=94 data-nosnippet>94</a>}
-<a href=#95 id=95 data-nosnippet>95</a>
-<a href=#96 id=96 data-nosnippet>96</a><span class="doccomment">/// Compute the subset of `input_paths` that may be DROPPED WHOLE for this
-<a href=#97 id=97 data-nosnippet>97</a>/// compaction (parity with Cassandra `CompactionController.getFullyExpiredSSTables`).
-<a href=#98 id=98 data-nosnippet>98</a>///
-<a href=#99 id=99 data-nosnippet>99</a>/// A candidate is included in the drop-set iff BOTH hold, from authoritative
-<a href=#100 id=100 data-nosnippet>100</a>/// `Statistics.db` metadata only (no cell scan):
-<a href=#101 id=101 data-nosnippet>101</a>///
-<a href=#102 id=102 data-nosnippet>102</a>/// 1. **Fully expired** — `max_deletion_time &lt; gc_before_secs` (see
-<a href=#103 id=103 data-nosnippet>103</a>///    [`is_fully_expired`]). Since #1728 the writer stamps live cells with the
-<a href=#104 id=104 data-nosnippet>104</a>///    `NO_DELETION_TIME` sentinel, so a MIXED SSTable (an old tombstone below
-<a href=#105 id=105 data-nosnippet>105</a>///    `gcBefore` PLUS any live non-TTL cell) finalizes `max_deletion_time` as the
-<a href=#106 id=106 data-nosnippet>106</a>///    `i32::MAX` live sentinel (parsed back as `i64::MAX`), which is never
-<a href=#107 id=107 data-nosnippet>107</a>///    `&lt; gc_before_secs`. Such a mixed SSTable is therefore correctly NOT
-<a href=#108 id=108 data-nosnippet>108</a>///    fully-expired — closing the former data-loss gap (roborev F1) with the now
-<a href=#109 id=109 data-nosnippet>109</a>///    authoritative `max_local_deletion_time`.
-<a href=#110 id=110 data-nosnippet>110</a>/// 2. **Overlap-safe** — its authoritative `max_timestamp` is STRICTLY LESS THAN
-<a href=#111 id=111 data-nosnippet>111</a>///    the minimum write timestamp across every overlapping SSTable that is NOT
-<a href=#112 id=112 data-nosnippet>112</a>///    itself fully-expired: both the OUTSIDE overlapping SSTables (`outside_paths`)
-<a href=#113 id=113 data-nosnippet>113</a>///    AND the NON-EXPIRED inputs of THIS compaction. If the candidate's newest
-<a href=#114 id=114 data-nosnippet>114</a>///    write predates all of them, nothing it holds (tombstone or data) can shadow
-<a href=#115 id=115 data-nosnippet>115</a>///    live data that would otherwise survive, so dropping it can never resurrect
-<a href=#116 id=116 data-nosnippet>116</a>///    data. Mirrors Cassandra `CompactionController.getFullyExpiredSSTables`, which
-<a href=#117 id=117 data-nosnippet>117</a>///    folds the min write timestamp of the non-fully-expired *compacting* SSTables
-<a href=#118 id=118 data-nosnippet>118</a>///    into the same overlap bound as the non-compacting overlapping ones. The
-<a href=#119 id=119 data-nosnippet>119</a>///    non-compacting bound reuses [`compute_max_purgeable_timestamp`] (the coarse
-<a href=#120 id=120 data-nosnippet>120</a>///    global-`min_timestamp` #935 gate; OQ-2 → (A), key-range precision deferred).
-<a href=#121 id=121 data-nosnippet>121</a>///    Since #1729 the candidate's `max_timestamp` may be the `i64::MIN` UNAVAILABLE
-<a href=#122 id=122 data-nosnippet>122</a>///    sentinel; a candidate whose newest write is unknown CANNOT be proven to
-<a href=#123 id=123 data-nosnippet>123</a>///    predate the overlap bound, so it FAILS CLOSED (is retained, never dropped) —
-<a href=#124 id=124 data-nosnippet>124</a>///    closing the former resurrection gap (roborev F2).
-<a href=#125 id=125 data-nosnippet>125</a>///
-<a href=#126 id=126 data-nosnippet>126</a>/// A non-expired INPUT is included in the bound because dropping a fully-expired
-<a href=#127 id=127 data-nosnippet>127</a>/// SSTable whose tombstone shadows an OLDER live cell in a *co-compacting* input
-<a href=#128 id=128 data-nosnippet>128</a>/// would resurrect that cell: the tombstone (dropped) no longer purges it, and the
-<a href=#129 id=129 data-nosnippet>129</a>/// co-input's live cell is merged into the output. (A fully-expired co-input is NOT
-<a href=#130 id=130 data-nosnippet>130</a>/// folded in: its own data is past `gcBefore` and would be purged anyway, so a
-<a href=#131 id=131 data-nosnippet>131</a>/// tombstone shadowing it can never resurrect surviving data.)
-<a href=#132 id=132 data-nosnippet>132</a>///
-<a href=#133 id=133 data-nosnippet>133</a>/// Conservatism (never resurrect data, never drop live data):
-<a href=#134 id=134 data-nosnippet>134</a>/// - `gc_before_secs == None` (invalid/absent gc_grace disables purging) ⇒ empty
-<a href=#135 id=135 data-nosnippet>135</a>///   drop-set.
-<a href=#136 id=136 data-nosnippet>136</a>/// - An empty `outside_paths` AND no non-expired inputs (e.g. a FULL/major
-<a href=#137 id=137 data-nosnippet>137</a>///   compaction of only-expired SSTables) ⇒ the bound is `+inf` ⇒ every candidate
-<a href=#138 id=138 data-nosnippet>138</a>///   is droppable.
-<a href=#139 id=139 data-nosnippet>139</a>/// - A non-empty `outside_paths` whose bound is UNKNOWN
-<a href=#140 id=140 data-nosnippet>140</a>///   (`compute_max_purgeable_timestamp` returned `None` because an outside
-<a href=#141 id=141 data-nosnippet>141</a>///   `Statistics.db` was unreadable) ⇒ empty drop-set (cannot prove safety).
-<a href=#142 id=142 data-nosnippet>142</a>/// - A candidate whose own `Statistics.db` is absent/unreadable ⇒ not droppable
-<a href=#143 id=143 data-nosnippet>143</a>///   (it is treated as non-expired, and its `min_timestamp` is unknown, so it also
-<a href=#144 id=144 data-nosnippet>144</a>///   cannot lower the bound — the whole drop-set is disabled to stay safe).
-<a href=#145 id=145 data-nosnippet>145</a>///
-<a href=#146 id=146 data-nosnippet>146</a>/// The returned paths are a subset of `input_paths`, in input order.
-<a href=#147 id=147 data-nosnippet>147</a></span><span class="kw">pub fn </span>fully_expired_sstables(
-<a href=#148 id=148 data-nosnippet>148</a>    input_paths: <span class="kw-2">&amp;</span>[PathBuf],
-<a href=#149 id=149 data-nosnippet>149</a>    outside_paths: <span class="kw-2">&amp;</span>[PathBuf],
-<a href=#150 id=150 data-nosnippet>150</a>    gc_before_secs: <span class="prelude-ty">Option</span>&lt;i64&gt;,
-<a href=#151 id=151 data-nosnippet>151</a>) -&gt; Vec&lt;PathBuf&gt; {
-<a href=#152 id=152 data-nosnippet>152</a>    <span class="comment">// No cutoff ⇒ purging is disabled ⇒ never drop (conservative, matches
-<a href=#153 id=153 data-nosnippet>153</a>    // compute_gc_before degradation).
-<a href=#154 id=154 data-nosnippet>154</a>    </span><span class="kw">let </span><span class="prelude-val">Some</span>(gc_before) = gc_before_secs <span class="kw">else </span>{
-<a href=#155 id=155 data-nosnippet>155</a>        <span class="kw">return </span>Vec::new();
-<a href=#156 id=156 data-nosnippet>156</a>    };
-<a href=#157 id=157 data-nosnippet>157</a>
-<a href=#158 id=158 data-nosnippet>158</a>    <span class="comment">// Read each input's timestamp stats ONCE. A candidate whose own Statistics.db
-<a href=#159 id=159 data-nosnippet>159</a>    // is unreadable is treated as non-expired (not droppable) AND, because its
-<a href=#160 id=160 data-nosnippet>160</a>    // min_timestamp is then unknown, it cannot be safely folded into the overlap
-<a href=#161 id=161 data-nosnippet>161</a>    // bound — so an unreadable INPUT disables the whole drop-set (conservative).
-<a href=#162 id=162 data-nosnippet>162</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>input_stats: Vec&lt;(<span class="kw-2">&amp;</span>PathBuf, <span class="prelude-ty">Option</span>&lt;TimestampStatistics&gt;)&gt; =
-<a href=#163 id=163 data-nosnippet>163</a>        Vec::with_capacity(input_paths.len());
-<a href=#164 id=164 data-nosnippet>164</a>    <span class="kw">for </span>p <span class="kw">in </span>input_paths {
-<a href=#165 id=165 data-nosnippet>165</a>        input_stats.push((p, read_timestamp_stats(p)));
-<a href=#166 id=166 data-nosnippet>166</a>    }
-<a href=#167 id=167 data-nosnippet>167</a>
-<a href=#168 id=168 data-nosnippet>168</a>    <span class="comment">// Outside overlap bound (non-compacting overlapping SSTables). An empty outside
-<a href=#169 id=169 data-nosnippet>169</a>    // set contributes +inf; a non-empty set with an UNKNOWN bound (an outside
-<a href=#170 id=170 data-nosnippet>170</a>    // Statistics.db unreadable) ⇒ cannot prove safety ⇒ drop nothing.
-<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="kw">let </span>outside_bound: <span class="prelude-ty">Option</span>&lt;i64&gt; = <span class="kw">if </span>outside_paths.is_empty() {
-<a href=#172 id=172 data-nosnippet>172</a>        <span class="prelude-val">Some</span>(i64::MAX)
-<a href=#173 id=173 data-nosnippet>173</a>    } <span class="kw">else </span>{
-<a href=#174 id=174 data-nosnippet>174</a>        <span class="kw">match </span>compute_max_purgeable_timestamp(outside_paths) {
-<a href=#175 id=175 data-nosnippet>175</a>            <span class="prelude-val">Some</span>(bound) =&gt; <span class="prelude-val">Some</span>(bound),
-<a href=#176 id=176 data-nosnippet>176</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">return </span>Vec::new(),
-<a href=#177 id=177 data-nosnippet>177</a>        }
-<a href=#178 id=178 data-nosnippet>178</a>    };
-<a href=#179 id=179 data-nosnippet>179</a>
-<a href=#180 id=180 data-nosnippet>180</a>    classify_drop_set(<span class="kw-2">&amp;</span>input_stats, outside_bound, gc_before)
-<a href=#181 id=181 data-nosnippet>181</a>}
-<a href=#182 id=182 data-nosnippet>182</a>
-<a href=#183 id=183 data-nosnippet>183</a><span class="doccomment">/// Pure drop-set classifier over already-read stats (no I/O), shared by
-<a href=#184 id=184 data-nosnippet>184</a>/// [`fully_expired_sstables`] and its regression tests.
-<a href=#185 id=185 data-nosnippet>185</a>///
-<a href=#186 id=186 data-nosnippet>186</a>/// `outside_bound` is the overlap bound from the OUTSIDE (non-compacting) SSTables:
-<a href=#187 id=187 data-nosnippet>187</a>/// `Some(i64::MAX)` for an empty outside set (+inf), `Some(b)` for a known bound,
-<a href=#188 id=188 data-nosnippet>188</a>/// and callers must have already returned an empty drop-set for an UNKNOWN outside
-<a href=#189 id=189 data-nosnippet>189</a>/// bound before calling this. It is here typed `Option` only so a caller can pass a
-<a href=#190 id=190 data-nosnippet>190</a>/// resolved bound; a `None` here fails closed (empty drop-set).
+<a href=#53 id=53 data-nosnippet>53</a>    <span class="comment">// `max_timestamp` is already `Option` (issue #1653): `Some` only when the
+<a href=#54 id=54 data-nosnippet>54</a>    // authoritative maximum was decoded, `None` when unavailable. Propagate it,
+<a href=#55 id=55 data-nosnippet>55</a>    // but defense-in-depth (#1653): a drop/GC gate must NEVER treat Cassandra's
+<a href=#56 id=56 data-nosnippet>56</a>    // `Long.MIN_VALUE` "no max recorded" sentinel as a real newest write (it
+<a href=#57 id=57 data-nosnippet>57</a>    // would compare below any overlap bound and wrongly permit a drop). Degrade
+<a href=#58 id=58 data-nosnippet>58</a>    // a stray `Some(i64::MIN)` from any source to `None` so the overlap gate
+<a href=#59 id=59 data-nosnippet>59</a>    // FAILS CLOSED (retain the candidate).
+<a href=#60 id=60 data-nosnippet>60</a>    </span>stats
+<a href=#61 id=61 data-nosnippet>61</a>        .max_timestamp
+<a href=#62 id=62 data-nosnippet>62</a>        .filter(|<span class="kw-2">&amp;</span>ts| ts != <span class="kw">crate</span>::parser::repair_metadata::NO_MAX_TIMESTAMP_SENTINEL)
+<a href=#63 id=63 data-nosnippet>63</a>}
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="doccomment">/// Read a candidate SSTable's `TimestampStatistics` from its sibling
+<a href=#66 id=66 data-nosnippet>66</a>/// `Statistics.db`. Returns `None` when the file is absent or fails to parse — the
+<a href=#67 id=67 data-nosnippet>67</a>/// conservative signal that its expiry/timestamp facts are UNKNOWN, so the
+<a href=#68 id=68 data-nosnippet>68</a>/// candidate must NOT be dropped (matches `compute_max_purgeable_timestamp`
+<a href=#69 id=69 data-nosnippet>69</a>/// degradation). Authoritative metadata only (no cell scan).
+<a href=#70 id=70 data-nosnippet>70</a></span><span class="kw">fn </span>read_timestamp_stats(data_path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Option</span>&lt;TimestampStatistics&gt; {
+<a href=#71 id=71 data-nosnippet>71</a>    <span class="kw">let </span>stats_path = stats_path_for(data_path);
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="kw">if </span>!stats_path.exists() {
+<a href=#73 id=73 data-nosnippet>73</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#74 id=74 data-nosnippet>74</a>    }
+<a href=#75 id=75 data-nosnippet>75</a>    <span class="kw">let </span>stats_bytes = <span class="kw">match </span>std::fs::read(<span class="kw-2">&amp;</span>stats_path) {
+<a href=#76 id=76 data-nosnippet>76</a>        <span class="prelude-val">Ok</span>(b) =&gt; b,
+<a href=#77 id=77 data-nosnippet>77</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#78 id=78 data-nosnippet>78</a>            <span class="macro">tracing::warn!</span>(
+<a href=#79 id=79 data-nosnippet>79</a>                <span class="string">"Could not read Statistics.db {:?} for fully-expired check: {}"</span>,
+<a href=#80 id=80 data-nosnippet>80</a>                stats_path,
+<a href=#81 id=81 data-nosnippet>81</a>                e
+<a href=#82 id=82 data-nosnippet>82</a>            );
+<a href=#83 id=83 data-nosnippet>83</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#84 id=84 data-nosnippet>84</a>        }
+<a href=#85 id=85 data-nosnippet>85</a>    };
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="kw">match </span><span class="kw">crate</span>::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+<a href=#87 id=87 data-nosnippet>87</a>        <span class="kw-2">&amp;</span>stats_bytes,
+<a href=#88 id=88 data-nosnippet>88</a>        <span class="prelude-val">None</span>,
+<a href=#89 id=89 data-nosnippet>89</a>    ) {
+<a href=#90 id=90 data-nosnippet>90</a>        <span class="prelude-val">Ok</span>((<span class="kw">_</span>, sstable_stats)) =&gt; <span class="prelude-val">Some</span>(sstable_stats.timestamp_stats),
+<a href=#91 id=91 data-nosnippet>91</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#92 id=92 data-nosnippet>92</a>            <span class="macro">tracing::warn!</span>(
+<a href=#93 id=93 data-nosnippet>93</a>                <span class="string">"Could not parse Statistics.db {:?} for fully-expired check: {:?}"</span>,
+<a href=#94 id=94 data-nosnippet>94</a>                stats_path,
+<a href=#95 id=95 data-nosnippet>95</a>                e
+<a href=#96 id=96 data-nosnippet>96</a>            );
+<a href=#97 id=97 data-nosnippet>97</a>            <span class="prelude-val">None
+<a href=#98 id=98 data-nosnippet>98</a>        </span>}
+<a href=#99 id=99 data-nosnippet>99</a>    }
+<a href=#100 id=100 data-nosnippet>100</a>}
+<a href=#101 id=101 data-nosnippet>101</a>
+<a href=#102 id=102 data-nosnippet>102</a><span class="doccomment">/// Compute the subset of `input_paths` that may be DROPPED WHOLE for this
+<a href=#103 id=103 data-nosnippet>103</a>/// compaction (parity with Cassandra `CompactionController.getFullyExpiredSSTables`).
+<a href=#104 id=104 data-nosnippet>104</a>///
+<a href=#105 id=105 data-nosnippet>105</a>/// A candidate is included in the drop-set iff BOTH hold, from authoritative
+<a href=#106 id=106 data-nosnippet>106</a>/// `Statistics.db` metadata only (no cell scan):
+<a href=#107 id=107 data-nosnippet>107</a>///
+<a href=#108 id=108 data-nosnippet>108</a>/// 1. **Fully expired** — `max_deletion_time &lt; gc_before_secs` (see
+<a href=#109 id=109 data-nosnippet>109</a>///    [`is_fully_expired`]). Since #1728 the writer stamps live cells with the
+<a href=#110 id=110 data-nosnippet>110</a>///    `NO_DELETION_TIME` sentinel, so a MIXED SSTable (an old tombstone below
+<a href=#111 id=111 data-nosnippet>111</a>///    `gcBefore` PLUS any live non-TTL cell) finalizes `max_deletion_time` as the
+<a href=#112 id=112 data-nosnippet>112</a>///    `i32::MAX` live sentinel (parsed back as `i64::MAX`), which is never
+<a href=#113 id=113 data-nosnippet>113</a>///    `&lt; gc_before_secs`. Such a mixed SSTable is therefore correctly NOT
+<a href=#114 id=114 data-nosnippet>114</a>///    fully-expired — closing the former data-loss gap (roborev F1) with the now
+<a href=#115 id=115 data-nosnippet>115</a>///    authoritative `max_local_deletion_time`.
+<a href=#116 id=116 data-nosnippet>116</a>/// 2. **Overlap-safe** — its authoritative `max_timestamp` is STRICTLY LESS THAN
+<a href=#117 id=117 data-nosnippet>117</a>///    the minimum write timestamp across every overlapping SSTable that is NOT
+<a href=#118 id=118 data-nosnippet>118</a>///    itself fully-expired: both the OUTSIDE overlapping SSTables (`outside_paths`)
+<a href=#119 id=119 data-nosnippet>119</a>///    AND the NON-EXPIRED inputs of THIS compaction. If the candidate's newest
+<a href=#120 id=120 data-nosnippet>120</a>///    write predates all of them, nothing it holds (tombstone or data) can shadow
+<a href=#121 id=121 data-nosnippet>121</a>///    live data that would otherwise survive, so dropping it can never resurrect
+<a href=#122 id=122 data-nosnippet>122</a>///    data. Mirrors Cassandra `CompactionController.getFullyExpiredSSTables`, which
+<a href=#123 id=123 data-nosnippet>123</a>///    folds the min write timestamp of the non-fully-expired *compacting* SSTables
+<a href=#124 id=124 data-nosnippet>124</a>///    into the same overlap bound as the non-compacting overlapping ones. The
+<a href=#125 id=125 data-nosnippet>125</a>///    non-compacting bound reuses [`compute_max_purgeable_timestamp`] (the coarse
+<a href=#126 id=126 data-nosnippet>126</a>///    global-`min_timestamp` #935 gate; OQ-2 → (A), key-range precision deferred).
+<a href=#127 id=127 data-nosnippet>127</a>///    Since #1729 the candidate's `max_timestamp` may be the `i64::MIN` UNAVAILABLE
+<a href=#128 id=128 data-nosnippet>128</a>///    sentinel; a candidate whose newest write is unknown CANNOT be proven to
+<a href=#129 id=129 data-nosnippet>129</a>///    predate the overlap bound, so it FAILS CLOSED (is retained, never dropped) —
+<a href=#130 id=130 data-nosnippet>130</a>///    closing the former resurrection gap (roborev F2).
+<a href=#131 id=131 data-nosnippet>131</a>///
+<a href=#132 id=132 data-nosnippet>132</a>/// A non-expired INPUT is included in the bound because dropping a fully-expired
+<a href=#133 id=133 data-nosnippet>133</a>/// SSTable whose tombstone shadows an OLDER live cell in a *co-compacting* input
+<a href=#134 id=134 data-nosnippet>134</a>/// would resurrect that cell: the tombstone (dropped) no longer purges it, and the
+<a href=#135 id=135 data-nosnippet>135</a>/// co-input's live cell is merged into the output. (A fully-expired co-input is NOT
+<a href=#136 id=136 data-nosnippet>136</a>/// folded in: its own data is past `gcBefore` and would be purged anyway, so a
+<a href=#137 id=137 data-nosnippet>137</a>/// tombstone shadowing it can never resurrect surviving data.)
+<a href=#138 id=138 data-nosnippet>138</a>///
+<a href=#139 id=139 data-nosnippet>139</a>/// Conservatism (never resurrect data, never drop live data):
+<a href=#140 id=140 data-nosnippet>140</a>/// - `gc_before_secs == None` (invalid/absent gc_grace disables purging) ⇒ empty
+<a href=#141 id=141 data-nosnippet>141</a>///   drop-set.
+<a href=#142 id=142 data-nosnippet>142</a>/// - An empty `outside_paths` AND no non-expired inputs (e.g. a FULL/major
+<a href=#143 id=143 data-nosnippet>143</a>///   compaction of only-expired SSTables) ⇒ the bound is `+inf` ⇒ every candidate
+<a href=#144 id=144 data-nosnippet>144</a>///   is droppable.
+<a href=#145 id=145 data-nosnippet>145</a>/// - A non-empty `outside_paths` whose bound is UNKNOWN
+<a href=#146 id=146 data-nosnippet>146</a>///   (`compute_max_purgeable_timestamp` returned `None` because an outside
+<a href=#147 id=147 data-nosnippet>147</a>///   `Statistics.db` was unreadable) ⇒ empty drop-set (cannot prove safety).
+<a href=#148 id=148 data-nosnippet>148</a>/// - A candidate whose own `Statistics.db` is absent/unreadable ⇒ not droppable
+<a href=#149 id=149 data-nosnippet>149</a>///   (it is treated as non-expired, and its `min_timestamp` is unknown, so it also
+<a href=#150 id=150 data-nosnippet>150</a>///   cannot lower the bound — the whole drop-set is disabled to stay safe).
+<a href=#151 id=151 data-nosnippet>151</a>///
+<a href=#152 id=152 data-nosnippet>152</a>/// The returned paths are a subset of `input_paths`, in input order.
+<a href=#153 id=153 data-nosnippet>153</a></span><span class="kw">pub fn </span>fully_expired_sstables(
+<a href=#154 id=154 data-nosnippet>154</a>    input_paths: <span class="kw-2">&amp;</span>[PathBuf],
+<a href=#155 id=155 data-nosnippet>155</a>    outside_paths: <span class="kw-2">&amp;</span>[PathBuf],
+<a href=#156 id=156 data-nosnippet>156</a>    gc_before_secs: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#157 id=157 data-nosnippet>157</a>) -&gt; Vec&lt;PathBuf&gt; {
+<a href=#158 id=158 data-nosnippet>158</a>    <span class="comment">// No cutoff ⇒ purging is disabled ⇒ never drop (conservative, matches
+<a href=#159 id=159 data-nosnippet>159</a>    // compute_gc_before degradation).
+<a href=#160 id=160 data-nosnippet>160</a>    </span><span class="kw">let </span><span class="prelude-val">Some</span>(gc_before) = gc_before_secs <span class="kw">else </span>{
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="kw">return </span>Vec::new();
+<a href=#162 id=162 data-nosnippet>162</a>    };
+<a href=#163 id=163 data-nosnippet>163</a>
+<a href=#164 id=164 data-nosnippet>164</a>    <span class="comment">// Read each input's timestamp stats ONCE. A candidate whose own Statistics.db
+<a href=#165 id=165 data-nosnippet>165</a>    // is unreadable is treated as non-expired (not droppable) AND, because its
+<a href=#166 id=166 data-nosnippet>166</a>    // min_timestamp is then unknown, it cannot be safely folded into the overlap
+<a href=#167 id=167 data-nosnippet>167</a>    // bound — so an unreadable INPUT disables the whole drop-set (conservative).
+<a href=#168 id=168 data-nosnippet>168</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>input_stats: Vec&lt;(<span class="kw-2">&amp;</span>PathBuf, <span class="prelude-ty">Option</span>&lt;TimestampStatistics&gt;)&gt; =
+<a href=#169 id=169 data-nosnippet>169</a>        Vec::with_capacity(input_paths.len());
+<a href=#170 id=170 data-nosnippet>170</a>    <span class="kw">for </span>p <span class="kw">in </span>input_paths {
+<a href=#171 id=171 data-nosnippet>171</a>        input_stats.push((p, read_timestamp_stats(p)));
+<a href=#172 id=172 data-nosnippet>172</a>    }
+<a href=#173 id=173 data-nosnippet>173</a>
+<a href=#174 id=174 data-nosnippet>174</a>    <span class="comment">// Outside overlap bound (non-compacting overlapping SSTables). An empty outside
+<a href=#175 id=175 data-nosnippet>175</a>    // set contributes +inf; a non-empty set with an UNKNOWN bound (an outside
+<a href=#176 id=176 data-nosnippet>176</a>    // Statistics.db unreadable) ⇒ cannot prove safety ⇒ drop nothing.
+<a href=#177 id=177 data-nosnippet>177</a>    </span><span class="kw">let </span>outside_bound: <span class="prelude-ty">Option</span>&lt;i64&gt; = <span class="kw">if </span>outside_paths.is_empty() {
+<a href=#178 id=178 data-nosnippet>178</a>        <span class="prelude-val">Some</span>(i64::MAX)
+<a href=#179 id=179 data-nosnippet>179</a>    } <span class="kw">else </span>{
+<a href=#180 id=180 data-nosnippet>180</a>        <span class="kw">match </span>compute_max_purgeable_timestamp(outside_paths) {
+<a href=#181 id=181 data-nosnippet>181</a>            <span class="prelude-val">Some</span>(bound) =&gt; <span class="prelude-val">Some</span>(bound),
+<a href=#182 id=182 data-nosnippet>182</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">return </span>Vec::new(),
+<a href=#183 id=183 data-nosnippet>183</a>        }
+<a href=#184 id=184 data-nosnippet>184</a>    };
+<a href=#185 id=185 data-nosnippet>185</a>
+<a href=#186 id=186 data-nosnippet>186</a>    classify_drop_set(<span class="kw-2">&amp;</span>input_stats, outside_bound, gc_before)
+<a href=#187 id=187 data-nosnippet>187</a>}
+<a href=#188 id=188 data-nosnippet>188</a>
+<a href=#189 id=189 data-nosnippet>189</a><span class="doccomment">/// Pure drop-set classifier over already-read stats (no I/O), shared by
+<a href=#190 id=190 data-nosnippet>190</a>/// [`fully_expired_sstables`] and its regression tests.
 <a href=#191 id=191 data-nosnippet>191</a>///
-<a href=#192 id=192 data-nosnippet>192</a>/// Returns the subset of paths (in order) that may be dropped whole. See
-<a href=#193 id=193 data-nosnippet>193</a>/// [`fully_expired_sstables`] for the full contract.
-<a href=#194 id=194 data-nosnippet>194</a></span><span class="kw">fn </span>classify_drop_set(
-<a href=#195 id=195 data-nosnippet>195</a>    input_stats: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>PathBuf, <span class="prelude-ty">Option</span>&lt;TimestampStatistics&gt;)],
-<a href=#196 id=196 data-nosnippet>196</a>    outside_bound: <span class="prelude-ty">Option</span>&lt;i64&gt;,
-<a href=#197 id=197 data-nosnippet>197</a>    gc_before: i64,
-<a href=#198 id=198 data-nosnippet>198</a>) -&gt; Vec&lt;PathBuf&gt; {
-<a href=#199 id=199 data-nosnippet>199</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(<span class="kw-2">mut </span>overlap_bound) = outside_bound <span class="kw">else </span>{
-<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">return </span>Vec::new();
-<a href=#201 id=201 data-nosnippet>201</a>    };
-<a href=#202 id=202 data-nosnippet>202</a>
-<a href=#203 id=203 data-nosnippet>203</a>    <span class="comment">// Fold in the min write timestamp of every NON-EXPIRED input of THIS
-<a href=#204 id=204 data-nosnippet>204</a>    // compaction (Cassandra parity). A fully-expired input does not constrain the
-<a href=#205 id=205 data-nosnippet>205</a>    // bound (its own data is past gcBefore and purged anyway). An input whose
-<a href=#206 id=206 data-nosnippet>206</a>    // stats could not be read is NON-expired with an UNKNOWN min_timestamp, which
-<a href=#207 id=207 data-nosnippet>207</a>    // we cannot fold safely ⇒ disable the drop-set.
-<a href=#208 id=208 data-nosnippet>208</a>    </span><span class="kw">for </span>(<span class="kw">_</span>, stats) <span class="kw">in </span>input_stats {
-<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">match </span>stats {
-<a href=#210 id=210 data-nosnippet>210</a>            <span class="prelude-val">Some</span>(s) <span class="kw">if </span>is_fully_expired(s, gc_before) =&gt; {}
-<a href=#211 id=211 data-nosnippet>211</a>            <span class="prelude-val">Some</span>(s) =&gt; overlap_bound = overlap_bound.min(s.min_timestamp),
-<a href=#212 id=212 data-nosnippet>212</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">return </span>Vec::new(),
-<a href=#213 id=213 data-nosnippet>213</a>        }
-<a href=#214 id=214 data-nosnippet>214</a>    }
-<a href=#215 id=215 data-nosnippet>215</a>
-<a href=#216 id=216 data-nosnippet>216</a>    input_stats
-<a href=#217 id=217 data-nosnippet>217</a>        .iter()
-<a href=#218 id=218 data-nosnippet>218</a>        .filter_map(|(path, stats)| {
-<a href=#219 id=219 data-nosnippet>219</a>            <span class="kw">let </span>stats = stats.as_ref()<span class="question-mark">?</span>;
-<a href=#220 id=220 data-nosnippet>220</a>            <span class="comment">// Fully expired AND provably shadows nothing that would otherwise
-<a href=#221 id=221 data-nosnippet>221</a>            // survive (its newest write predates every non-expired overlap).
-<a href=#222 id=222 data-nosnippet>222</a>            // #1729: an UNAVAILABLE max_timestamp (i64::MIN sentinel) cannot be
-<a href=#223 id=223 data-nosnippet>223</a>            // proven to predate the bound ⇒ fail closed (retain, never drop).
-<a href=#224 id=224 data-nosnippet>224</a>            </span><span class="kw">let </span>candidate_max_ts = authoritative_max_timestamp(stats)<span class="question-mark">?</span>;
-<a href=#225 id=225 data-nosnippet>225</a>            <span class="kw">if </span>is_fully_expired(stats, gc_before) &amp;&amp; candidate_max_ts &lt; overlap_bound {
-<a href=#226 id=226 data-nosnippet>226</a>                <span class="prelude-val">Some</span>((<span class="kw-2">*</span>path).clone())
-<a href=#227 id=227 data-nosnippet>227</a>            } <span class="kw">else </span>{
-<a href=#228 id=228 data-nosnippet>228</a>                <span class="prelude-val">None
-<a href=#229 id=229 data-nosnippet>229</a>            </span>}
-<a href=#230 id=230 data-nosnippet>230</a>        })
-<a href=#231 id=231 data-nosnippet>231</a>        .collect()
-<a href=#232 id=232 data-nosnippet>232</a>}
-<a href=#233 id=233 data-nosnippet>233</a>
-<a href=#234 id=234 data-nosnippet>234</a><span class="doccomment">/// Split `input_paths` into `(merge_inputs, dropped_whole)` given a `drop_set`
-<a href=#235 id=235 data-nosnippet>235</a>/// (a subset of `input_paths`, e.g. from [`fully_expired_sstables`]).
-<a href=#236 id=236 data-nosnippet>236</a>///
-<a href=#237 id=237 data-nosnippet>237</a>/// `merge_inputs` is `input_paths` minus the drop-set — the SSTables the K-way
-<a href=#238 id=238 data-nosnippet>238</a>/// merger will actually read. `dropped_whole` is the FULL drop-set: the SSTables
-<a href=#239 id=239 data-nosnippet>239</a>/// proven fully expired + overlap-safe, to be reported and reclaimed after
-<a href=#240 id=240 data-nosnippet>240</a>/// publish.
-<a href=#241 id=241 data-nosnippet>241</a>///
-<a href=#242 id=242 data-nosnippet>242</a>/// Degenerate all-dropped guard: the merger requires at least one input, so when
-<a href=#243 id=243 data-nosnippet>243</a>/// the drop-set is EVERY input (a major compaction of an only-expired input set),
-<a href=#244 id=244 data-nosnippet>244</a>/// ONE dropped SSTable is ALSO retained in `merge_inputs` (its rows purge to empty
-<a href=#245 id=245 data-nosnippet>245</a>/// through the normal merge path) so the merger has a source. That retained
-<a href=#246 id=246 data-nosnippet>246</a>/// SSTable stays in `dropped_whole` too, so the drop is reported honestly and
-<a href=#247 id=247 data-nosnippet>247</a>/// reclaimed on both surfaces (roborev #1388 Medium): the reclaim loops dedupe
-<a href=#248 id=248 data-nosnippet>248</a>/// against `merge_inputs` (which the core WriteEngine path deletes anyway) so the
-<a href=#249 id=249 data-nosnippet>249</a>/// retained SSTable is deleted exactly once. Only the retained SSTable pays a read
-<a href=#250 id=250 data-nosnippet>250</a>/// cost; the rest are still excluded from the merge.
-<a href=#251 id=251 data-nosnippet>251</a>///
-<a href=#252 id=252 data-nosnippet>252</a>/// Shared by both compaction surfaces so the exclusion + all-dropped guard live in
-<a href=#253 id=253 data-nosnippet>253</a>/// one place (issue #1388).
-<a href=#254 id=254 data-nosnippet>254</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>split_merge_and_dropped(
-<a href=#255 id=255 data-nosnippet>255</a>    input_paths: <span class="kw-2">&amp;</span>[PathBuf],
-<a href=#256 id=256 data-nosnippet>256</a>    drop_set: Vec&lt;PathBuf&gt;,
-<a href=#257 id=257 data-nosnippet>257</a>) -&gt; (Vec&lt;PathBuf&gt;, Vec&lt;PathBuf&gt;) {
-<a href=#258 id=258 data-nosnippet>258</a>    <span class="kw">let </span>dropped_lookup: std::collections::HashSet&lt;<span class="kw-2">&amp;</span>PathBuf&gt; = drop_set.iter().collect();
-<a href=#259 id=259 data-nosnippet>259</a>    <span class="kw">let </span><span class="kw-2">mut </span>merge_inputs: Vec&lt;PathBuf&gt; = input_paths
-<a href=#260 id=260 data-nosnippet>260</a>        .iter()
-<a href=#261 id=261 data-nosnippet>261</a>        .filter(|p| !dropped_lookup.contains(<span class="kw-2">*</span>p))
-<a href=#262 id=262 data-nosnippet>262</a>        .cloned()
-<a href=#263 id=263 data-nosnippet>263</a>        .collect();
-<a href=#264 id=264 data-nosnippet>264</a>    <span class="kw">if </span>!merge_inputs.is_empty() {
-<a href=#265 id=265 data-nosnippet>265</a>        <span class="kw">return </span>(merge_inputs, drop_set);
-<a href=#266 id=266 data-nosnippet>266</a>    }
-<a href=#267 id=267 data-nosnippet>267</a>    <span class="comment">// Everything was dropped: retain one for the merger. It STAYS in the drop-set
-<a href=#268 id=268 data-nosnippet>268</a>    // so the drop is reported/reclaimed honestly; reclaim sites dedupe against
-<a href=#269 id=269 data-nosnippet>269</a>    // `merge_inputs` to delete it exactly once (roborev #1388 Medium).
-<a href=#270 id=270 data-nosnippet>270</a>    </span><span class="kw">if let </span><span class="prelude-val">Some</span>(retained) = drop_set.first() {
-<a href=#271 id=271 data-nosnippet>271</a>        merge_inputs.push(retained.clone());
+<a href=#192 id=192 data-nosnippet>192</a>/// `outside_bound` is the overlap bound from the OUTSIDE (non-compacting) SSTables:
+<a href=#193 id=193 data-nosnippet>193</a>/// `Some(i64::MAX)` for an empty outside set (+inf), `Some(b)` for a known bound,
+<a href=#194 id=194 data-nosnippet>194</a>/// and callers must have already returned an empty drop-set for an UNKNOWN outside
+<a href=#195 id=195 data-nosnippet>195</a>/// bound before calling this. It is here typed `Option` only so a caller can pass a
+<a href=#196 id=196 data-nosnippet>196</a>/// resolved bound; a `None` here fails closed (empty drop-set).
+<a href=#197 id=197 data-nosnippet>197</a>///
+<a href=#198 id=198 data-nosnippet>198</a>/// Returns the subset of paths (in order) that may be dropped whole. See
+<a href=#199 id=199 data-nosnippet>199</a>/// [`fully_expired_sstables`] for the full contract.
+<a href=#200 id=200 data-nosnippet>200</a></span><span class="kw">fn </span>classify_drop_set(
+<a href=#201 id=201 data-nosnippet>201</a>    input_stats: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>PathBuf, <span class="prelude-ty">Option</span>&lt;TimestampStatistics&gt;)],
+<a href=#202 id=202 data-nosnippet>202</a>    outside_bound: <span class="prelude-ty">Option</span>&lt;i64&gt;,
+<a href=#203 id=203 data-nosnippet>203</a>    gc_before: i64,
+<a href=#204 id=204 data-nosnippet>204</a>) -&gt; Vec&lt;PathBuf&gt; {
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(<span class="kw-2">mut </span>overlap_bound) = outside_bound <span class="kw">else </span>{
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="kw">return </span>Vec::new();
+<a href=#207 id=207 data-nosnippet>207</a>    };
+<a href=#208 id=208 data-nosnippet>208</a>
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="comment">// Fold in the min write timestamp of every NON-EXPIRED input of THIS
+<a href=#210 id=210 data-nosnippet>210</a>    // compaction (Cassandra parity). A fully-expired input does not constrain the
+<a href=#211 id=211 data-nosnippet>211</a>    // bound (its own data is past gcBefore and purged anyway). An input whose
+<a href=#212 id=212 data-nosnippet>212</a>    // stats could not be read is NON-expired with an UNKNOWN min_timestamp, which
+<a href=#213 id=213 data-nosnippet>213</a>    // we cannot fold safely ⇒ disable the drop-set.
+<a href=#214 id=214 data-nosnippet>214</a>    </span><span class="kw">for </span>(<span class="kw">_</span>, stats) <span class="kw">in </span>input_stats {
+<a href=#215 id=215 data-nosnippet>215</a>        <span class="kw">match </span>stats {
+<a href=#216 id=216 data-nosnippet>216</a>            <span class="prelude-val">Some</span>(s) <span class="kw">if </span>is_fully_expired(s, gc_before) =&gt; {}
+<a href=#217 id=217 data-nosnippet>217</a>            <span class="prelude-val">Some</span>(s) =&gt; overlap_bound = overlap_bound.min(s.min_timestamp),
+<a href=#218 id=218 data-nosnippet>218</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">return </span>Vec::new(),
+<a href=#219 id=219 data-nosnippet>219</a>        }
+<a href=#220 id=220 data-nosnippet>220</a>    }
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a>    input_stats
+<a href=#223 id=223 data-nosnippet>223</a>        .iter()
+<a href=#224 id=224 data-nosnippet>224</a>        .filter_map(|(path, stats)| {
+<a href=#225 id=225 data-nosnippet>225</a>            <span class="kw">let </span>stats = stats.as_ref()<span class="question-mark">?</span>;
+<a href=#226 id=226 data-nosnippet>226</a>            <span class="comment">// Fully expired AND provably shadows nothing that would otherwise
+<a href=#227 id=227 data-nosnippet>227</a>            // survive (its newest write predates every non-expired overlap).
+<a href=#228 id=228 data-nosnippet>228</a>            // #1729: an UNAVAILABLE max_timestamp (i64::MIN sentinel) cannot be
+<a href=#229 id=229 data-nosnippet>229</a>            // proven to predate the bound ⇒ fail closed (retain, never drop).
+<a href=#230 id=230 data-nosnippet>230</a>            </span><span class="kw">let </span>candidate_max_ts = authoritative_max_timestamp(stats)<span class="question-mark">?</span>;
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="kw">if </span>is_fully_expired(stats, gc_before) &amp;&amp; candidate_max_ts &lt; overlap_bound {
+<a href=#232 id=232 data-nosnippet>232</a>                <span class="prelude-val">Some</span>((<span class="kw-2">*</span>path).clone())
+<a href=#233 id=233 data-nosnippet>233</a>            } <span class="kw">else </span>{
+<a href=#234 id=234 data-nosnippet>234</a>                <span class="prelude-val">None
+<a href=#235 id=235 data-nosnippet>235</a>            </span>}
+<a href=#236 id=236 data-nosnippet>236</a>        })
+<a href=#237 id=237 data-nosnippet>237</a>        .collect()
+<a href=#238 id=238 data-nosnippet>238</a>}
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a><span class="doccomment">/// Split `input_paths` into `(merge_inputs, dropped_whole)` given a `drop_set`
+<a href=#241 id=241 data-nosnippet>241</a>/// (a subset of `input_paths`, e.g. from [`fully_expired_sstables`]).
+<a href=#242 id=242 data-nosnippet>242</a>///
+<a href=#243 id=243 data-nosnippet>243</a>/// `merge_inputs` is `input_paths` minus the drop-set — the SSTables the K-way
+<a href=#244 id=244 data-nosnippet>244</a>/// merger will actually read. `dropped_whole` is the FULL drop-set: the SSTables
+<a href=#245 id=245 data-nosnippet>245</a>/// proven fully expired + overlap-safe, to be reported and reclaimed after
+<a href=#246 id=246 data-nosnippet>246</a>/// publish.
+<a href=#247 id=247 data-nosnippet>247</a>///
+<a href=#248 id=248 data-nosnippet>248</a>/// Degenerate all-dropped guard: the merger requires at least one input, so when
+<a href=#249 id=249 data-nosnippet>249</a>/// the drop-set is EVERY input (a major compaction of an only-expired input set),
+<a href=#250 id=250 data-nosnippet>250</a>/// ONE dropped SSTable is ALSO retained in `merge_inputs` (its rows purge to empty
+<a href=#251 id=251 data-nosnippet>251</a>/// through the normal merge path) so the merger has a source. That retained
+<a href=#252 id=252 data-nosnippet>252</a>/// SSTable stays in `dropped_whole` too, so the drop is reported honestly and
+<a href=#253 id=253 data-nosnippet>253</a>/// reclaimed on both surfaces (roborev #1388 Medium): the reclaim loops dedupe
+<a href=#254 id=254 data-nosnippet>254</a>/// against `merge_inputs` (which the core WriteEngine path deletes anyway) so the
+<a href=#255 id=255 data-nosnippet>255</a>/// retained SSTable is deleted exactly once. Only the retained SSTable pays a read
+<a href=#256 id=256 data-nosnippet>256</a>/// cost; the rest are still excluded from the merge.
+<a href=#257 id=257 data-nosnippet>257</a>///
+<a href=#258 id=258 data-nosnippet>258</a>/// Shared by both compaction surfaces so the exclusion + all-dropped guard live in
+<a href=#259 id=259 data-nosnippet>259</a>/// one place (issue #1388).
+<a href=#260 id=260 data-nosnippet>260</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>split_merge_and_dropped(
+<a href=#261 id=261 data-nosnippet>261</a>    input_paths: <span class="kw-2">&amp;</span>[PathBuf],
+<a href=#262 id=262 data-nosnippet>262</a>    drop_set: Vec&lt;PathBuf&gt;,
+<a href=#263 id=263 data-nosnippet>263</a>) -&gt; (Vec&lt;PathBuf&gt;, Vec&lt;PathBuf&gt;) {
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="kw">let </span>dropped_lookup: std::collections::HashSet&lt;<span class="kw-2">&amp;</span>PathBuf&gt; = drop_set.iter().collect();
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">let </span><span class="kw-2">mut </span>merge_inputs: Vec&lt;PathBuf&gt; = input_paths
+<a href=#266 id=266 data-nosnippet>266</a>        .iter()
+<a href=#267 id=267 data-nosnippet>267</a>        .filter(|p| !dropped_lookup.contains(<span class="kw-2">*</span>p))
+<a href=#268 id=268 data-nosnippet>268</a>        .cloned()
+<a href=#269 id=269 data-nosnippet>269</a>        .collect();
+<a href=#270 id=270 data-nosnippet>270</a>    <span class="kw">if </span>!merge_inputs.is_empty() {
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">return </span>(merge_inputs, drop_set);
 <a href=#272 id=272 data-nosnippet>272</a>    }
-<a href=#273 id=273 data-nosnippet>273</a>    (merge_inputs, drop_set)
-<a href=#274 id=274 data-nosnippet>274</a>}
-<a href=#275 id=275 data-nosnippet>275</a>
-<a href=#276 id=276 data-nosnippet>276</a><span class="doccomment">/// Reclaim (best-effort component-delete) each SSTable in `dropped_whole` that the
-<a href=#277 id=277 data-nosnippet>277</a>/// caller is NOT already deleting via another path, calling `delete` on the
-<a href=#278 id=278 data-nosnippet>278</a>/// survivors. The degenerate all-dropped guard retains one dropped SSTable in BOTH
-<a href=#279 id=279 data-nosnippet>279</a>/// `dropped_whole` and `merge_inputs` (see [`split_merge_and_dropped`]), so it is
-<a href=#280 id=280 data-nosnippet>280</a>/// reclaimed exactly once:
-<a href=#281 id=281 data-nosnippet>281</a>///
-<a href=#282 id=282 data-nosnippet>282</a>/// - Core WriteEngine surface: it deletes ALL merge inputs separately, so it
-<a href=#283 id=283 data-nosnippet>283</a>///   passes `already_deleted = merge_inputs` here to skip the retained one (avoid a
-<a href=#284 id=284 data-nosnippet>284</a>///   double-delete + spurious orphan warning).
-<a href=#285 id=285 data-nosnippet>285</a>/// - CLI one-shot surface: it deletes NO merge inputs (the operator owns the input
-<a href=#286 id=286 data-nosnippet>286</a>///   dir; output lands in a separate `--output` dir), so it passes an EMPTY
-<a href=#287 id=287 data-nosnippet>287</a>///   `already_deleted` and the retained SSTable IS reclaimed here — closing the
-<a href=#288 id=288 data-nosnippet>288</a>///   former "all-expired input left on disk" gap (roborev #1388 Medium).
-<a href=#289 id=289 data-nosnippet>289</a>///
-<a href=#290 id=290 data-nosnippet>290</a>/// `delete` is the surface's own best-effort delete (logs, never errors), so this
-<a href=#291 id=291 data-nosnippet>291</a>/// helper only decides the set to reclaim.
-<a href=#292 id=292 data-nosnippet>292</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>reclaim_dropped_whole&lt;F: FnMut(<span class="kw-2">&amp;</span>Path)&gt;(
-<a href=#293 id=293 data-nosnippet>293</a>    dropped_whole: <span class="kw-2">&amp;</span>[PathBuf],
-<a href=#294 id=294 data-nosnippet>294</a>    already_deleted: <span class="kw-2">&amp;</span>[PathBuf],
-<a href=#295 id=295 data-nosnippet>295</a>    <span class="kw-2">mut </span>delete: F,
-<a href=#296 id=296 data-nosnippet>296</a>) {
-<a href=#297 id=297 data-nosnippet>297</a>    <span class="kw">let </span>skip: std::collections::HashSet&lt;<span class="kw-2">&amp;</span>PathBuf&gt; = already_deleted.iter().collect();
-<a href=#298 id=298 data-nosnippet>298</a>    <span class="kw">for </span>dropped <span class="kw">in </span>dropped_whole {
-<a href=#299 id=299 data-nosnippet>299</a>        <span class="kw">if </span>skip.contains(dropped) {
-<a href=#300 id=300 data-nosnippet>300</a>            <span class="kw">continue</span>;
-<a href=#301 id=301 data-nosnippet>301</a>        }
-<a href=#302 id=302 data-nosnippet>302</a>        delete(dropped);
-<a href=#303 id=303 data-nosnippet>303</a>    }
-<a href=#304 id=304 data-nosnippet>304</a>}
-<a href=#305 id=305 data-nosnippet>305</a>
-<a href=#306 id=306 data-nosnippet>306</a><span class="attr">#[cfg(test)]
-<a href=#307 id=307 data-nosnippet>307</a></span><span class="kw">mod </span>tests {
-<a href=#308 id=308 data-nosnippet>308</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
-<a href=#309 id=309 data-nosnippet>309</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
-<a href=#310 id=310 data-nosnippet>310</a>    <span class="kw">use </span>tempfile::TempDir;
+<a href=#273 id=273 data-nosnippet>273</a>    <span class="comment">// Everything was dropped: retain one for the merger. It STAYS in the drop-set
+<a href=#274 id=274 data-nosnippet>274</a>    // so the drop is reported/reclaimed honestly; reclaim sites dedupe against
+<a href=#275 id=275 data-nosnippet>275</a>    // `merge_inputs` to delete it exactly once (roborev #1388 Medium).
+<a href=#276 id=276 data-nosnippet>276</a>    </span><span class="kw">if let </span><span class="prelude-val">Some</span>(retained) = drop_set.first() {
+<a href=#277 id=277 data-nosnippet>277</a>        merge_inputs.push(retained.clone());
+<a href=#278 id=278 data-nosnippet>278</a>    }
+<a href=#279 id=279 data-nosnippet>279</a>    (merge_inputs, drop_set)
+<a href=#280 id=280 data-nosnippet>280</a>}
+<a href=#281 id=281 data-nosnippet>281</a>
+<a href=#282 id=282 data-nosnippet>282</a><span class="doccomment">/// Reclaim (best-effort component-delete) each SSTable in `dropped_whole` that the
+<a href=#283 id=283 data-nosnippet>283</a>/// caller is NOT already deleting via another path, calling `delete` on the
+<a href=#284 id=284 data-nosnippet>284</a>/// survivors. The degenerate all-dropped guard retains one dropped SSTable in BOTH
+<a href=#285 id=285 data-nosnippet>285</a>/// `dropped_whole` and `merge_inputs` (see [`split_merge_and_dropped`]), so it is
+<a href=#286 id=286 data-nosnippet>286</a>/// reclaimed exactly once:
+<a href=#287 id=287 data-nosnippet>287</a>///
+<a href=#288 id=288 data-nosnippet>288</a>/// - Core WriteEngine surface: it deletes ALL merge inputs separately, so it
+<a href=#289 id=289 data-nosnippet>289</a>///   passes `already_deleted = merge_inputs` here to skip the retained one (avoid a
+<a href=#290 id=290 data-nosnippet>290</a>///   double-delete + spurious orphan warning).
+<a href=#291 id=291 data-nosnippet>291</a>/// - CLI one-shot surface: it deletes NO merge inputs (the operator owns the input
+<a href=#292 id=292 data-nosnippet>292</a>///   dir; output lands in a separate `--output` dir), so it passes an EMPTY
+<a href=#293 id=293 data-nosnippet>293</a>///   `already_deleted` and the retained SSTable IS reclaimed here — closing the
+<a href=#294 id=294 data-nosnippet>294</a>///   former "all-expired input left on disk" gap (roborev #1388 Medium).
+<a href=#295 id=295 data-nosnippet>295</a>///
+<a href=#296 id=296 data-nosnippet>296</a>/// `delete` is the surface's own best-effort delete (logs, never errors), so this
+<a href=#297 id=297 data-nosnippet>297</a>/// helper only decides the set to reclaim.
+<a href=#298 id=298 data-nosnippet>298</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>reclaim_dropped_whole&lt;F: FnMut(<span class="kw-2">&amp;</span>Path)&gt;(
+<a href=#299 id=299 data-nosnippet>299</a>    dropped_whole: <span class="kw-2">&amp;</span>[PathBuf],
+<a href=#300 id=300 data-nosnippet>300</a>    already_deleted: <span class="kw-2">&amp;</span>[PathBuf],
+<a href=#301 id=301 data-nosnippet>301</a>    <span class="kw-2">mut </span>delete: F,
+<a href=#302 id=302 data-nosnippet>302</a>) {
+<a href=#303 id=303 data-nosnippet>303</a>    <span class="kw">let </span>skip: std::collections::HashSet&lt;<span class="kw-2">&amp;</span>PathBuf&gt; = already_deleted.iter().collect();
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="kw">for </span>dropped <span class="kw">in </span>dropped_whole {
+<a href=#305 id=305 data-nosnippet>305</a>        <span class="kw">if </span>skip.contains(dropped) {
+<a href=#306 id=306 data-nosnippet>306</a>            <span class="kw">continue</span>;
+<a href=#307 id=307 data-nosnippet>307</a>        }
+<a href=#308 id=308 data-nosnippet>308</a>        delete(dropped);
+<a href=#309 id=309 data-nosnippet>309</a>    }
+<a href=#310 id=310 data-nosnippet>310</a>}
 <a href=#311 id=311 data-nosnippet>311</a>
-<a href=#312 id=312 data-nosnippet>312</a>    <span class="doccomment">/// Construct a `TimestampStatistics` with the two fields the drop decision
-<a href=#313 id=313 data-nosnippet>313</a>    /// consults set explicitly; the rest are irrelevant.
-<a href=#314 id=314 data-nosnippet>314</a>    </span><span class="kw">fn </span>ts_stats(max_deletion_time: i64, max_timestamp: i64) -&gt; TimestampStatistics {
-<a href=#315 id=315 data-nosnippet>315</a>        TimestampStatistics {
-<a href=#316 id=316 data-nosnippet>316</a>            min_timestamp: <span class="number">0</span>,
-<a href=#317 id=317 data-nosnippet>317</a>            max_timestamp,
-<a href=#318 id=318 data-nosnippet>318</a>            min_deletion_time: <span class="number">0</span>,
-<a href=#319 id=319 data-nosnippet>319</a>            max_deletion_time,
-<a href=#320 id=320 data-nosnippet>320</a>            min_ttl: <span class="prelude-val">None</span>,
-<a href=#321 id=321 data-nosnippet>321</a>            max_ttl: <span class="prelude-val">None</span>,
-<a href=#322 id=322 data-nosnippet>322</a>            rows_with_ttl: <span class="number">0</span>,
-<a href=#323 id=323 data-nosnippet>323</a>        }
-<a href=#324 id=324 data-nosnippet>324</a>    }
-<a href=#325 id=325 data-nosnippet>325</a>
-<a href=#326 id=326 data-nosnippet>326</a>    <span class="doccomment">/// R1: an all-expired SSTable (`max_deletion_time &lt; gcBefore`) is classified
-<a href=#327 id=327 data-nosnippet>327</a>    /// fully expired.
-<a href=#328 id=328 data-nosnippet>328</a>    </span><span class="attr">#[test]
-<a href=#329 id=329 data-nosnippet>329</a>    </span><span class="kw">fn </span>is_fully_expired_true_when_max_ldt_below_gc_before() {
-<a href=#330 id=330 data-nosnippet>330</a>        <span class="macro">assert!</span>(is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(<span class="number">900</span>, <span class="number">0</span>), <span class="number">1_000</span>));
-<a href=#331 id=331 data-nosnippet>331</a>    }
-<a href=#332 id=332 data-nosnippet>332</a>
-<a href=#333 id=333 data-nosnippet>333</a>    <span class="doccomment">/// R1: `max_deletion_time` at or above `gcBefore` is NOT fully expired (the
-<a href=#334 id=334 data-nosnippet>334</a>    /// strict `&lt;` predicate retains the boundary, matching Cassandra).
-<a href=#335 id=335 data-nosnippet>335</a>    </span><span class="attr">#[test]
-<a href=#336 id=336 data-nosnippet>336</a>    </span><span class="kw">fn </span>is_fully_expired_false_at_or_above_gc_before() {
-<a href=#337 id=337 data-nosnippet>337</a>        <span class="macro">assert!</span>(!is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(<span class="number">1_000</span>, <span class="number">0</span>), <span class="number">1_000</span>));
-<a href=#338 id=338 data-nosnippet>338</a>        <span class="macro">assert!</span>(!is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(<span class="number">1_500</span>, <span class="number">0</span>), <span class="number">1_000</span>));
-<a href=#339 id=339 data-nosnippet>339</a>    }
-<a href=#340 id=340 data-nosnippet>340</a>
-<a href=#341 id=341 data-nosnippet>341</a>    <span class="doccomment">/// R1: the LIVE / NO_DELETION_TIME sentinel (`i64::MAX`) is never expired.
-<a href=#342 id=342 data-nosnippet>342</a>    </span><span class="attr">#[test]
-<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">fn </span>is_fully_expired_false_for_live_sentinel() {
-<a href=#344 id=344 data-nosnippet>344</a>        <span class="macro">assert!</span>(!is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(i64::MAX, <span class="number">0</span>), <span class="number">1_000</span>));
+<a href=#312 id=312 data-nosnippet>312</a><span class="attr">#[cfg(test)]
+<a href=#313 id=313 data-nosnippet>313</a></span><span class="kw">mod </span>tests {
+<a href=#314 id=314 data-nosnippet>314</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#315 id=315 data-nosnippet>315</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+<a href=#316 id=316 data-nosnippet>316</a>    <span class="kw">use </span>tempfile::TempDir;
+<a href=#317 id=317 data-nosnippet>317</a>
+<a href=#318 id=318 data-nosnippet>318</a>    <span class="doccomment">/// Construct a `TimestampStatistics` with the two fields the drop decision
+<a href=#319 id=319 data-nosnippet>319</a>    /// consults set explicitly; the rest are irrelevant.
+<a href=#320 id=320 data-nosnippet>320</a>    </span><span class="kw">fn </span>ts_stats(max_deletion_time: i64, max_timestamp: <span class="prelude-ty">Option</span>&lt;i64&gt;) -&gt; TimestampStatistics {
+<a href=#321 id=321 data-nosnippet>321</a>        TimestampStatistics {
+<a href=#322 id=322 data-nosnippet>322</a>            min_timestamp: <span class="number">0</span>,
+<a href=#323 id=323 data-nosnippet>323</a>            max_timestamp,
+<a href=#324 id=324 data-nosnippet>324</a>            min_deletion_time: <span class="number">0</span>,
+<a href=#325 id=325 data-nosnippet>325</a>            max_deletion_time,
+<a href=#326 id=326 data-nosnippet>326</a>            min_ttl: <span class="prelude-val">None</span>,
+<a href=#327 id=327 data-nosnippet>327</a>            max_ttl: <span class="prelude-val">None</span>,
+<a href=#328 id=328 data-nosnippet>328</a>            rows_with_ttl: <span class="prelude-val">None</span>,
+<a href=#329 id=329 data-nosnippet>329</a>        }
+<a href=#330 id=330 data-nosnippet>330</a>    }
+<a href=#331 id=331 data-nosnippet>331</a>
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="doccomment">/// R1: an all-expired SSTable (`max_deletion_time &lt; gcBefore`) is classified
+<a href=#333 id=333 data-nosnippet>333</a>    /// fully expired.
+<a href=#334 id=334 data-nosnippet>334</a>    </span><span class="attr">#[test]
+<a href=#335 id=335 data-nosnippet>335</a>    </span><span class="kw">fn </span>is_fully_expired_true_when_max_ldt_below_gc_before() {
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="macro">assert!</span>(is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(<span class="number">900</span>, <span class="prelude-val">Some</span>(<span class="number">0</span>)), <span class="number">1_000</span>));
+<a href=#337 id=337 data-nosnippet>337</a>    }
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a>    <span class="doccomment">/// R1: `max_deletion_time` at or above `gcBefore` is NOT fully expired (the
+<a href=#340 id=340 data-nosnippet>340</a>    /// strict `&lt;` predicate retains the boundary, matching Cassandra).
+<a href=#341 id=341 data-nosnippet>341</a>    </span><span class="attr">#[test]
+<a href=#342 id=342 data-nosnippet>342</a>    </span><span class="kw">fn </span>is_fully_expired_false_at_or_above_gc_before() {
+<a href=#343 id=343 data-nosnippet>343</a>        <span class="macro">assert!</span>(!is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(<span class="number">1_000</span>, <span class="prelude-val">Some</span>(<span class="number">0</span>)), <span class="number">1_000</span>));
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="macro">assert!</span>(!is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(<span class="number">1_500</span>, <span class="prelude-val">Some</span>(<span class="number">0</span>)), <span class="number">1_000</span>));
 <a href=#345 id=345 data-nosnippet>345</a>    }
 <a href=#346 id=346 data-nosnippet>346</a>
-<a href=#347 id=347 data-nosnippet>347</a>    <span class="doccomment">/// Write a synthetic Statistics.db beside a zero-byte Data.db, returning the
-<a href=#348 id=348 data-nosnippet>348</a>    /// Data.db path. `max_ldt == i32::MAX` = "no tombstones / live" (parses back as
-<a href=#349 id=349 data-nosnippet>349</a>    /// the `i64::MAX` NO_DELETION_TIME sentinel).
-<a href=#350 id=350 data-nosnippet>350</a>    </span><span class="kw">fn </span>write_expiry_stats(dir: <span class="kw-2">&amp;</span>Path, <span class="kw">gen</span>: u32, max_ldt: i32, max_ts: i64, min_ts: i64) -&gt; PathBuf {
-<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">let </span>data_path = dir.join(<span class="macro">format!</span>(<span class="string">"nb-{gen}-big-Data.db"</span>));
-<a href=#352 id=352 data-nosnippet>352</a>        std::fs::write(<span class="kw-2">&amp;</span>data_path, <span class="string">b"synthetic-data-never-read"</span>).expect(<span class="string">"touch Data.db"</span>);
-<a href=#353 id=353 data-nosnippet>353</a>        <span class="kw">let </span>stats_path = dir.join(<span class="macro">format!</span>(<span class="string">"nb-{gen}-big-Statistics.db"</span>));
-<a href=#354 id=354 data-nosnippet>354</a>        <span class="kw">let </span><span class="kw-2">mut </span>meta = StatisticsMetadata::new();
-<a href=#355 id=355 data-nosnippet>355</a>        meta.max_local_deletion_time = max_ldt;
-<a href=#356 id=356 data-nosnippet>356</a>        meta.min_local_deletion_time = max_ldt.min(<span class="number">0</span>);
-<a href=#357 id=357 data-nosnippet>357</a>        meta.max_timestamp = max_ts;
-<a href=#358 id=358 data-nosnippet>358</a>        meta.min_timestamp = min_ts;
-<a href=#359 id=359 data-nosnippet>359</a>        StatisticsWriter::new(stats_path)
-<a href=#360 id=360 data-nosnippet>360</a>            .write(<span class="kw-2">&amp;</span>meta, <span class="prelude-val">None</span>)
-<a href=#361 id=361 data-nosnippet>361</a>            .expect(<span class="string">"write Statistics.db"</span>);
-<a href=#362 id=362 data-nosnippet>362</a>        data_path
-<a href=#363 id=363 data-nosnippet>363</a>    }
-<a href=#364 id=364 data-nosnippet>364</a>
-<a href=#365 id=365 data-nosnippet>365</a>    <span class="doccomment">/// R1 scenario "classified fully expired without a cell scan": the drop-set is
-<a href=#366 id=366 data-nosnippet>366</a>    /// computed purely from Statistics.db metadata. Proven by DELETING the
-<a href=#367 id=367 data-nosnippet>367</a>    /// candidate's Data.db after writing its Statistics.db — classification still
-<a href=#368 id=368 data-nosnippet>368</a>    /// succeeds because it never touches Data.db.
-<a href=#369 id=369 data-nosnippet>369</a>    </span><span class="attr">#[test]
-<a href=#370 id=370 data-nosnippet>370</a>    </span><span class="kw">fn </span>fully_expired_detection_reads_no_data_db() {
-<a href=#371 id=371 data-nosnippet>371</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#372 id=372 data-nosnippet>372</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">5_000</span>);
-<a href=#373 id=373 data-nosnippet>373</a>        std::fs::remove_file(<span class="kw-2">&amp;</span>cand).expect(<span class="string">"remove Data.db to prove no read"</span>);
-<a href=#374 id=374 data-nosnippet>374</a>
-<a href=#375 id=375 data-nosnippet>375</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand.clone()], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#376 id=376 data-nosnippet>376</a>        <span class="macro">assert_eq!</span>(
-<a href=#377 id=377 data-nosnippet>377</a>            dropped,
-<a href=#378 id=378 data-nosnippet>378</a>            <span class="macro">vec!</span>[cand],
-<a href=#379 id=379 data-nosnippet>379</a>            <span class="string">"fully-expired classification must come from Statistics.db alone, no Data.db read"
-<a href=#380 id=380 data-nosnippet>380</a>        </span>);
-<a href=#381 id=381 data-nosnippet>381</a>    }
-<a href=#382 id=382 data-nosnippet>382</a>
-<a href=#383 id=383 data-nosnippet>383</a>    <span class="doccomment">/// R1 scenario: a live SSTable is never dropped.
-<a href=#384 id=384 data-nosnippet>384</a>    </span><span class="attr">#[test]
-<a href=#385 id=385 data-nosnippet>385</a>    </span><span class="kw">fn </span>live_sstable_never_dropped() {
-<a href=#386 id=386 data-nosnippet>386</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#387 id=387 data-nosnippet>387</a>        <span class="kw">let </span>live = write_expiry_stats(tmp.path(), <span class="number">1</span>, i32::MAX, <span class="number">10_000</span>, <span class="number">5_000</span>);
-<a href=#388 id=388 data-nosnippet>388</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[live], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#389 id=389 data-nosnippet>389</a>        <span class="macro">assert!</span>(dropped.is_empty(), <span class="string">"a live SSTable must never be dropped"</span>);
-<a href=#390 id=390 data-nosnippet>390</a>    }
-<a href=#391 id=391 data-nosnippet>391</a>
-<a href=#392 id=392 data-nosnippet>392</a>    <span class="doccomment">/// R1 scenario: `gcBefore == None` drops nothing, even for an expired SSTable.
-<a href=#393 id=393 data-nosnippet>393</a>    </span><span class="attr">#[test]
-<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">fn </span>fully_expired_none_gc_before_drops_nothing() {
-<a href=#395 id=395 data-nosnippet>395</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#396 id=396 data-nosnippet>396</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">5_000</span>);
-<a href=#397 id=397 data-nosnippet>397</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[], <span class="prelude-val">None</span>);
-<a href=#398 id=398 data-nosnippet>398</a>        <span class="macro">assert!</span>(
-<a href=#399 id=399 data-nosnippet>399</a>            dropped.is_empty(),
-<a href=#400 id=400 data-nosnippet>400</a>            <span class="string">"None gcBefore must disable dropping (conservative)"
-<a href=#401 id=401 data-nosnippet>401</a>        </span>);
-<a href=#402 id=402 data-nosnippet>402</a>    }
-<a href=#403 id=403 data-nosnippet>403</a>
-<a href=#404 id=404 data-nosnippet>404</a>    <span class="doccomment">/// R1 scenario: an unreadable/absent candidate Statistics.db drops nothing.
-<a href=#405 id=405 data-nosnippet>405</a>    </span><span class="attr">#[test]
-<a href=#406 id=406 data-nosnippet>406</a>    </span><span class="kw">fn </span>fully_expired_unreadable_candidate_stats_drops_nothing() {
-<a href=#407 id=407 data-nosnippet>407</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">let </span>cand = tmp.path().join(<span class="string">"nb-1-big-Data.db"</span>);
-<a href=#409 id=409 data-nosnippet>409</a>        std::fs::write(<span class="kw-2">&amp;</span>cand, <span class="string">b""</span>).expect(<span class="string">"touch Data.db"</span>);
-<a href=#410 id=410 data-nosnippet>410</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#411 id=411 data-nosnippet>411</a>        <span class="macro">assert!</span>(
-<a href=#412 id=412 data-nosnippet>412</a>            dropped.is_empty(),
-<a href=#413 id=413 data-nosnippet>413</a>            <span class="string">"an unreadable candidate Statistics.db must not be dropped"
-<a href=#414 id=414 data-nosnippet>414</a>        </span>);
-<a href=#415 id=415 data-nosnippet>415</a>    }
-<a href=#416 id=416 data-nosnippet>416</a>
-<a href=#417 id=417 data-nosnippet>417</a>    <span class="doccomment">/// R2 scenario: a fully-expired candidate that could shadow older data outside
-<a href=#418 id=418 data-nosnippet>418</a>    /// the set is RETAINED.
-<a href=#419 id=419 data-nosnippet>419</a>    </span><span class="attr">#[test]
-<a href=#420 id=420 data-nosnippet>420</a>    </span><span class="kw">fn </span>overlap_gate_retains_shadowing_candidate() {
-<a href=#421 id=421 data-nosnippet>421</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#422 id=422 data-nosnippet>422</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">8_000</span>);
-<a href=#423 id=423 data-nosnippet>423</a>        <span class="comment">// Outside min write ts (5_000) &lt;= candidate max_timestamp (10_000) ⇒ retain.
-<a href=#424 id=424 data-nosnippet>424</a>        </span><span class="kw">let </span>outside = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">20_000</span>, <span class="number">5_000</span>);
-<a href=#425 id=425 data-nosnippet>425</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#426 id=426 data-nosnippet>426</a>        <span class="macro">assert!</span>(
-<a href=#427 id=427 data-nosnippet>427</a>            dropped.is_empty(),
-<a href=#428 id=428 data-nosnippet>428</a>            <span class="string">"a candidate that could shadow older outside data must be retained"
-<a href=#429 id=429 data-nosnippet>429</a>        </span>);
-<a href=#430 id=430 data-nosnippet>430</a>    }
-<a href=#431 id=431 data-nosnippet>431</a>
-<a href=#432 id=432 data-nosnippet>432</a>    <span class="doccomment">/// R2 scenario: a fully-expired candidate older than everything outside the
-<a href=#433 id=433 data-nosnippet>433</a>    /// set is DROPPED.
-<a href=#434 id=434 data-nosnippet>434</a>    </span><span class="attr">#[test]
-<a href=#435 id=435 data-nosnippet>435</a>    </span><span class="kw">fn </span>overlap_gate_drops_candidate_older_than_outside() {
-<a href=#436 id=436 data-nosnippet>436</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#437 id=437 data-nosnippet>437</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">4_000</span>, <span class="number">1_000</span>);
-<a href=#438 id=438 data-nosnippet>438</a>        <span class="comment">// Outside min write ts (5_000) &gt; candidate max_timestamp (4_000) ⇒ drop.
-<a href=#439 id=439 data-nosnippet>439</a>        </span><span class="kw">let </span>outside = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">20_000</span>, <span class="number">5_000</span>);
-<a href=#440 id=440 data-nosnippet>440</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand.clone()], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#441 id=441 data-nosnippet>441</a>        <span class="macro">assert_eq!</span>(
-<a href=#442 id=442 data-nosnippet>442</a>            dropped,
-<a href=#443 id=443 data-nosnippet>443</a>            <span class="macro">vec!</span>[cand],
-<a href=#444 id=444 data-nosnippet>444</a>            <span class="string">"a candidate older than every outside SSTable must be dropped"
-<a href=#445 id=445 data-nosnippet>445</a>        </span>);
-<a href=#446 id=446 data-nosnippet>446</a>    }
-<a href=#447 id=447 data-nosnippet>447</a>
-<a href=#448 id=448 data-nosnippet>448</a>    <span class="doccomment">/// R2 scenario: a major/full compaction (empty outside set) drops every
-<a href=#449 id=449 data-nosnippet>449</a>    /// fully-expired candidate whose newest write predates the co-compacting live
-<a href=#450 id=450 data-nosnippet>450</a>    /// input's oldest write, keeping the live input. Expired data is OLDER than the
-<a href=#451 id=451 data-nosnippet>451</a>    /// live data (the realistic case), so both expired inputs are droppable.
-<a href=#452 id=452 data-nosnippet>452</a>    </span><span class="attr">#[test]
-<a href=#453 id=453 data-nosnippet>453</a>    </span><span class="kw">fn </span>major_compaction_empty_outside_drops_expired_older_than_live() {
-<a href=#454 id=454 data-nosnippet>454</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#455 id=455 data-nosnippet>455</a>        <span class="comment">// Expired inputs at LOW write timestamps (older than the live input).
-<a href=#456 id=456 data-nosnippet>456</a>        </span><span class="kw">let </span>expired_a = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">3_000</span>, <span class="number">1_000</span>);
-<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">let </span>expired_b = write_expiry_stats(tmp.path(), <span class="number">2</span>, <span class="number">800</span>, <span class="number">4_000</span>, <span class="number">1_000</span>);
-<a href=#458 id=458 data-nosnippet>458</a>        <span class="comment">// Live co-input at a HIGHER min write ts (5_000): the expired tombstones
-<a href=#459 id=459 data-nosnippet>459</a>        // (max_ts 3_000/4_000) predate it, so dropping them resurrects nothing.
-<a href=#460 id=460 data-nosnippet>460</a>        </span><span class="kw">let </span>live = write_expiry_stats(tmp.path(), <span class="number">3</span>, i32::MAX, <span class="number">10_000</span>, <span class="number">5_000</span>);
-<a href=#461 id=461 data-nosnippet>461</a>        <span class="kw">let </span>dropped = fully_expired_sstables(
-<a href=#462 id=462 data-nosnippet>462</a>            <span class="kw-2">&amp;</span>[expired_a.clone(), live, expired_b.clone()],
-<a href=#463 id=463 data-nosnippet>463</a>            <span class="kw-2">&amp;</span>[],
-<a href=#464 id=464 data-nosnippet>464</a>            <span class="prelude-val">Some</span>(<span class="number">1_000</span>),
-<a href=#465 id=465 data-nosnippet>465</a>        );
-<a href=#466 id=466 data-nosnippet>466</a>        <span class="macro">assert_eq!</span>(
-<a href=#467 id=467 data-nosnippet>467</a>            dropped,
-<a href=#468 id=468 data-nosnippet>468</a>            <span class="macro">vec!</span>[expired_a, expired_b],
-<a href=#469 id=469 data-nosnippet>469</a>            <span class="string">"a major compaction drops fully-expired inputs older than the live co-input, keeping live"
-<a href=#470 id=470 data-nosnippet>470</a>        </span>);
-<a href=#471 id=471 data-nosnippet>471</a>    }
-<a href=#472 id=472 data-nosnippet>472</a>
-<a href=#473 id=473 data-nosnippet>473</a>    <span class="doccomment">/// R2 scenario (Cassandra parity / #1384 regression guard): a fully-expired
-<a href=#474 id=474 data-nosnippet>474</a>    /// input whose tombstone could shadow OLDER live data in a CO-COMPACTING input
-<a href=#475 id=475 data-nosnippet>475</a>    /// is NOT dropped — even in a full compaction (empty outside set). Folding the
-<a href=#476 id=476 data-nosnippet>476</a>    /// non-expired input's min write timestamp into the overlap bound prevents the
-<a href=#477 id=477 data-nosnippet>477</a>    /// resurrection that dropping the tombstone whole would otherwise cause.
-<a href=#478 id=478 data-nosnippet>478</a>    </span><span class="attr">#[test]
-<a href=#479 id=479 data-nosnippet>479</a>    </span><span class="kw">fn </span>co_input_shadowing_expired_sstable_not_dropped() {
-<a href=#480 id=480 data-nosnippet>480</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#481 id=481 data-nosnippet>481</a>        <span class="comment">// Fully-expired input holding a tombstone at a HIGH write ts (10_000): it
-<a href=#482 id=482 data-nosnippet>482</a>        // would shadow the live co-input's older data.
-<a href=#483 id=483 data-nosnippet>483</a>        </span><span class="kw">let </span>expired = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">9_000</span>);
-<a href=#484 id=484 data-nosnippet>484</a>        <span class="comment">// Live co-input with OLDER data (min write ts 5_000 &lt;= tombstone max_ts).
-<a href=#485 id=485 data-nosnippet>485</a>        </span><span class="kw">let </span>live = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">8_000</span>, <span class="number">5_000</span>);
-<a href=#486 id=486 data-nosnippet>486</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[expired, live], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#487 id=487 data-nosnippet>487</a>        <span class="macro">assert!</span>(
-<a href=#488 id=488 data-nosnippet>488</a>            dropped.is_empty(),
-<a href=#489 id=489 data-nosnippet>489</a>            <span class="string">"an expired input whose tombstone shadows a co-input's older live data must not be dropped"
-<a href=#490 id=490 data-nosnippet>490</a>        </span>);
-<a href=#491 id=491 data-nosnippet>491</a>    }
-<a href=#492 id=492 data-nosnippet>492</a>
-<a href=#493 id=493 data-nosnippet>493</a>    <span class="doccomment">/// Roborev F2 (former resurrection) regression: the overlap gate compares the
-<a href=#494 id=494 data-nosnippet>494</a>    /// candidate's TRUE NEWEST write (`max_timestamp`, #1729-authoritative), not its
-<a href=#495 id=495 data-nosnippet>495</a>    /// `min_timestamp`. A candidate whose `min_timestamp &lt; overlap_bound &lt;
-<a href=#496 id=496 data-nosnippet>496</a>    /// max_timestamp` (an old tombstone min but a NEWER tombstone max) is RETAINED —
-<a href=#497 id=497 data-nosnippet>497</a>    /// its newest write does NOT predate the outside data, so dropping it could
-<a href=#498 id=498 data-nosnippet>498</a>    /// resurrect data. A gate that mistakenly used `min_timestamp` would drop it.
-<a href=#499 id=499 data-nosnippet>499</a>    </span><span class="attr">#[test]
-<a href=#500 id=500 data-nosnippet>500</a>    </span><span class="kw">fn </span>overlap_gate_uses_max_timestamp_not_min_retains_when_max_above_bound() {
-<a href=#501 id=501 data-nosnippet>501</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#502 id=502 data-nosnippet>502</a>        <span class="comment">// Candidate: fully expired (LDT 500 &lt; 1_000), min write ts 1_000 (OLD),
-<a href=#503 id=503 data-nosnippet>503</a>        // max write ts 8_000 (NEW — a later tombstone/write in the same SSTable).
-<a href=#504 id=504 data-nosnippet>504</a>        </span><span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">8_000</span>, <span class="number">1_000</span>);
-<a href=#505 id=505 data-nosnippet>505</a>        <span class="comment">// Outside min write ts = 5_000 ⇒ overlap_bound = 5_000. The candidate's
-<a href=#506 id=506 data-nosnippet>506</a>        // min (1_000) is BELOW the bound, but its max (8_000) is ABOVE it.
-<a href=#507 id=507 data-nosnippet>507</a>        </span><span class="kw">let </span>outside = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">20_000</span>, <span class="number">5_000</span>);
-<a href=#508 id=508 data-nosnippet>508</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#509 id=509 data-nosnippet>509</a>        <span class="macro">assert!</span>(
-<a href=#510 id=510 data-nosnippet>510</a>            dropped.is_empty(),
-<a href=#511 id=511 data-nosnippet>511</a>            <span class="string">"min&lt;bound&lt;max must RETAIN: the gate compares the true newest write \
-<a href=#512 id=512 data-nosnippet>512</a>             (max_timestamp), so a candidate whose newest write postdates the bound \
-<a href=#513 id=513 data-nosnippet>513</a>             is not droppable (F2 resurrection guard)"
-<a href=#514 id=514 data-nosnippet>514</a>        </span>);
-<a href=#515 id=515 data-nosnippet>515</a>    }
-<a href=#516 id=516 data-nosnippet>516</a>
-<a href=#517 id=517 data-nosnippet>517</a>    <span class="doccomment">/// Roborev F2 fail-closed: since #1729 a candidate's `max_timestamp` may be the
-<a href=#518 id=518 data-nosnippet>518</a>    /// `i64::MIN` UNAVAILABLE sentinel. An unknown newest write cannot be proven to
-<a href=#519 id=519 data-nosnippet>519</a>    /// predate the overlap bound, so the candidate is RETAINED (never dropped) even
-<a href=#520 id=520 data-nosnippet>520</a>    /// though it is fully expired and its (unavailable) sentinel would compare below
-<a href=#521 id=521 data-nosnippet>521</a>    /// any real bound. Exercised through the pure classifier so the in-memory
-<a href=#522 id=522 data-nosnippet>522</a>    /// sentinel is honest (the on-disk StatisticsWriter finalize normalizes
-<a href=#523 id=523 data-nosnippet>523</a>    /// `i64::MIN → 0`, so it cannot round-trip the sentinel).
-<a href=#524 id=524 data-nosnippet>524</a>    </span><span class="attr">#[test]
-<a href=#525 id=525 data-nosnippet>525</a>    </span><span class="kw">fn </span>overlap_gate_fails_closed_on_unavailable_max_timestamp() {
-<a href=#526 id=526 data-nosnippet>526</a>        <span class="kw">let </span>cand: PathBuf = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
-<a href=#527 id=527 data-nosnippet>527</a>        <span class="comment">// Fully expired (LDT 500 &lt; 1_000) but max_timestamp is the #1729 unavailable
-<a href=#528 id=528 data-nosnippet>528</a>        // sentinel (i64::MIN). A naive `sentinel &lt; bound` comparison would wrongly
-<a href=#529 id=529 data-nosnippet>529</a>        // permit a drop; the authoritative accessor forces a retain.
-<a href=#530 id=530 data-nosnippet>530</a>        </span><span class="kw">let </span>stats = ts_stats(<span class="number">500</span>, i64::MIN);
-<a href=#531 id=531 data-nosnippet>531</a>        <span class="kw">let </span>input_stats = [(<span class="kw-2">&amp;</span>cand, <span class="prelude-val">Some</span>(stats))];
-<a href=#532 id=532 data-nosnippet>532</a>        <span class="comment">// Concrete, above-sentinel outside bound (5_000).
-<a href=#533 id=533 data-nosnippet>533</a>        </span><span class="kw">let </span>dropped = classify_drop_set(<span class="kw-2">&amp;</span>input_stats, <span class="prelude-val">Some</span>(<span class="number">5_000</span>), <span class="number">1_000</span>);
-<a href=#534 id=534 data-nosnippet>534</a>        <span class="macro">assert!</span>(
-<a href=#535 id=535 data-nosnippet>535</a>            dropped.is_empty(),
-<a href=#536 id=536 data-nosnippet>536</a>            <span class="string">"an UNAVAILABLE (i64::MIN) max_timestamp must fail closed: retain, never drop (#1729 F2)"
-<a href=#537 id=537 data-nosnippet>537</a>        </span>);
-<a href=#538 id=538 data-nosnippet>538</a>
-<a href=#539 id=539 data-nosnippet>539</a>        <span class="comment">// Control: the SAME candidate with a real, below-bound max_timestamp IS
-<a href=#540 id=540 data-nosnippet>540</a>        // droppable, proving it is the sentinel (not some other field) that retains.
-<a href=#541 id=541 data-nosnippet>541</a>        </span><span class="kw">let </span>live_max = ts_stats(<span class="number">500</span>, <span class="number">4_000</span>);
-<a href=#542 id=542 data-nosnippet>542</a>        <span class="kw">let </span>input_stats_live = [(<span class="kw-2">&amp;</span>cand, <span class="prelude-val">Some</span>(live_max))];
-<a href=#543 id=543 data-nosnippet>543</a>        <span class="macro">assert_eq!</span>(
-<a href=#544 id=544 data-nosnippet>544</a>            classify_drop_set(<span class="kw-2">&amp;</span>input_stats_live, <span class="prelude-val">Some</span>(<span class="number">5_000</span>), <span class="number">1_000</span>),
-<a href=#545 id=545 data-nosnippet>545</a>            <span class="macro">vec!</span>[cand.clone()],
-<a href=#546 id=546 data-nosnippet>546</a>            <span class="string">"a concrete below-bound max_timestamp on the same candidate is droppable"
-<a href=#547 id=547 data-nosnippet>547</a>        </span>);
-<a href=#548 id=548 data-nosnippet>548</a>    }
-<a href=#549 id=549 data-nosnippet>549</a>
-<a href=#550 id=550 data-nosnippet>550</a>    <span class="doccomment">/// The [`authoritative_max_timestamp`] accessor mirrors #1729: `None` for the
-<a href=#551 id=551 data-nosnippet>551</a>    /// `i64::MIN` sentinel, `Some(v)` otherwise (incl. concrete negatives).
-<a href=#552 id=552 data-nosnippet>552</a>    </span><span class="attr">#[test]
-<a href=#553 id=553 data-nosnippet>553</a>    </span><span class="kw">fn </span>authoritative_max_timestamp_maps_sentinel_to_none() {
-<a href=#554 id=554 data-nosnippet>554</a>        <span class="macro">assert_eq!</span>(authoritative_max_timestamp(<span class="kw-2">&amp;</span>ts_stats(<span class="number">0</span>, i64::MIN)), <span class="prelude-val">None</span>);
-<a href=#555 id=555 data-nosnippet>555</a>        <span class="macro">assert_eq!</span>(
-<a href=#556 id=556 data-nosnippet>556</a>            authoritative_max_timestamp(<span class="kw-2">&amp;</span>ts_stats(<span class="number">0</span>, <span class="number">8_000</span>)),
-<a href=#557 id=557 data-nosnippet>557</a>            <span class="prelude-val">Some</span>(<span class="number">8_000</span>)
-<a href=#558 id=558 data-nosnippet>558</a>        );
-<a href=#559 id=559 data-nosnippet>559</a>        <span class="macro">assert_eq!</span>(
-<a href=#560 id=560 data-nosnippet>560</a>            authoritative_max_timestamp(<span class="kw-2">&amp;</span>ts_stats(<span class="number">0</span>, i64::MIN + <span class="number">1</span>)),
-<a href=#561 id=561 data-nosnippet>561</a>            <span class="prelude-val">Some</span>(i64::MIN + <span class="number">1</span>)
-<a href=#562 id=562 data-nosnippet>562</a>        );
-<a href=#563 id=563 data-nosnippet>563</a>    }
-<a href=#564 id=564 data-nosnippet>564</a>
-<a href=#565 id=565 data-nosnippet>565</a>    <span class="doccomment">/// Roborev #1388 (Medium): the all-dropped guard retains ONE input for the
-<a href=#566 id=566 data-nosnippet>566</a>    /// merger but keeps the FULL drop-set in `dropped_whole` (so nothing is
-<a href=#567 id=567 data-nosnippet>567</a>    /// underreported or left unreclaimed). The retained input appears in BOTH
-<a href=#568 id=568 data-nosnippet>568</a>    /// returned lists; reclaim sites dedup it.
-<a href=#569 id=569 data-nosnippet>569</a>    </span><span class="attr">#[test]
-<a href=#570 id=570 data-nosnippet>570</a>    </span><span class="kw">fn </span>split_all_dropped_retains_one_but_reports_full_drop_set() {
-<a href=#571 id=571 data-nosnippet>571</a>        <span class="kw">let </span>a = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
-<a href=#572 id=572 data-nosnippet>572</a>        <span class="kw">let </span>b = PathBuf::from(<span class="string">"nb-2-big-Data.db"</span>);
-<a href=#573 id=573 data-nosnippet>573</a>        <span class="kw">let </span>inputs = [a.clone(), b.clone()];
-<a href=#574 id=574 data-nosnippet>574</a>        <span class="kw">let </span>drop_set = <span class="macro">vec!</span>[a.clone(), b.clone()];
-<a href=#575 id=575 data-nosnippet>575</a>
-<a href=#576 id=576 data-nosnippet>576</a>        <span class="kw">let </span>(merge_inputs, dropped_whole) = split_merge_and_dropped(<span class="kw-2">&amp;</span>inputs, drop_set);
-<a href=#577 id=577 data-nosnippet>577</a>        <span class="macro">assert_eq!</span>(
-<a href=#578 id=578 data-nosnippet>578</a>            merge_inputs.len(),
-<a href=#579 id=579 data-nosnippet>579</a>            <span class="number">1</span>,
-<a href=#580 id=580 data-nosnippet>580</a>            <span class="string">"exactly one input is retained for the merger's at-least-one requirement"
-<a href=#581 id=581 data-nosnippet>581</a>        </span>);
-<a href=#582 id=582 data-nosnippet>582</a>        <span class="macro">assert_eq!</span>(
-<a href=#583 id=583 data-nosnippet>583</a>            dropped_whole,
-<a href=#584 id=584 data-nosnippet>584</a>            <span class="macro">vec!</span>[a, b],
-<a href=#585 id=585 data-nosnippet>585</a>            <span class="string">"the FULL drop-set is still reported (no underreporting)"
-<a href=#586 id=586 data-nosnippet>586</a>        </span>);
-<a href=#587 id=587 data-nosnippet>587</a>        <span class="macro">assert!</span>(
-<a href=#588 id=588 data-nosnippet>588</a>            dropped_whole.contains(<span class="kw-2">&amp;</span>merge_inputs[<span class="number">0</span>]),
-<a href=#589 id=589 data-nosnippet>589</a>            <span class="string">"the retained merger input is also in the reported drop-set"
-<a href=#590 id=590 data-nosnippet>590</a>        </span>);
-<a href=#591 id=591 data-nosnippet>591</a>    }
-<a href=#592 id=592 data-nosnippet>592</a>
-<a href=#593 id=593 data-nosnippet>593</a>    <span class="doccomment">/// A partial drop-set (a live input survives) leaves `merge_inputs` non-empty
-<a href=#594 id=594 data-nosnippet>594</a>    /// and `dropped_whole` unchanged — the guard does not fire.
-<a href=#595 id=595 data-nosnippet>595</a>    </span><span class="attr">#[test]
-<a href=#596 id=596 data-nosnippet>596</a>    </span><span class="kw">fn </span>split_partial_drop_leaves_live_input_and_full_drop_set() {
-<a href=#597 id=597 data-nosnippet>597</a>        <span class="kw">let </span>expired = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
-<a href=#598 id=598 data-nosnippet>598</a>        <span class="kw">let </span>live = PathBuf::from(<span class="string">"nb-2-big-Data.db"</span>);
-<a href=#599 id=599 data-nosnippet>599</a>        <span class="kw">let </span>inputs = [expired.clone(), live.clone()];
-<a href=#600 id=600 data-nosnippet>600</a>        <span class="kw">let </span>(merge_inputs, dropped_whole) = split_merge_and_dropped(<span class="kw-2">&amp;</span>inputs, <span class="macro">vec!</span>[expired.clone()]);
-<a href=#601 id=601 data-nosnippet>601</a>        <span class="macro">assert_eq!</span>(merge_inputs, <span class="macro">vec!</span>[live], <span class="string">"only the live input is merged"</span>);
-<a href=#602 id=602 data-nosnippet>602</a>        <span class="macro">assert_eq!</span>(dropped_whole, <span class="macro">vec!</span>[expired], <span class="string">"the expired input is dropped"</span>);
-<a href=#603 id=603 data-nosnippet>603</a>    }
-<a href=#604 id=604 data-nosnippet>604</a>
-<a href=#605 id=605 data-nosnippet>605</a>    <span class="doccomment">/// [`reclaim_dropped_whole`] deletes only the drops NOT already deleted by the
-<a href=#606 id=606 data-nosnippet>606</a>    /// caller: the core surface (which deletes all merge inputs) skips the retained
-<a href=#607 id=607 data-nosnippet>607</a>    /// one; the CLI surface (empty `already_deleted`) reclaims every drop.
-<a href=#608 id=608 data-nosnippet>608</a>    </span><span class="attr">#[test]
-<a href=#609 id=609 data-nosnippet>609</a>    </span><span class="kw">fn </span>reclaim_dedups_against_already_deleted() {
-<a href=#610 id=610 data-nosnippet>610</a>        <span class="kw">let </span>a = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
-<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw">let </span>b = PathBuf::from(<span class="string">"nb-2-big-Data.db"</span>);
-<a href=#612 id=612 data-nosnippet>612</a>        <span class="kw">let </span>dropped_whole = [a.clone(), b.clone()];
-<a href=#613 id=613 data-nosnippet>613</a>
-<a href=#614 id=614 data-nosnippet>614</a>        <span class="comment">// Core surface: `b` is the retained merge input (already deleted) ⇒ only `a`.
-<a href=#615 id=615 data-nosnippet>615</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>core_deleted = Vec::new();
-<a href=#616 id=616 data-nosnippet>616</a>        reclaim_dropped_whole(<span class="kw-2">&amp;</span>dropped_whole, <span class="kw-2">&amp;</span>[b.clone()], |p| {
-<a href=#617 id=617 data-nosnippet>617</a>            core_deleted.push(p.to_path_buf())
-<a href=#618 id=618 data-nosnippet>618</a>        });
-<a href=#619 id=619 data-nosnippet>619</a>        <span class="macro">assert_eq!</span>(
-<a href=#620 id=620 data-nosnippet>620</a>            core_deleted,
-<a href=#621 id=621 data-nosnippet>621</a>            <span class="macro">vec!</span>[a.clone()],
-<a href=#622 id=622 data-nosnippet>622</a>            <span class="string">"core surface skips the retained merge input to avoid a double-delete"
-<a href=#623 id=623 data-nosnippet>623</a>        </span>);
-<a href=#624 id=624 data-nosnippet>624</a>
-<a href=#625 id=625 data-nosnippet>625</a>        <span class="comment">// CLI surface: nothing pre-deleted ⇒ both reclaimed here.
-<a href=#626 id=626 data-nosnippet>626</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>cli_deleted = Vec::new();
-<a href=#627 id=627 data-nosnippet>627</a>        reclaim_dropped_whole(<span class="kw-2">&amp;</span>dropped_whole, <span class="kw-2">&amp;</span>[], |p| cli_deleted.push(p.to_path_buf()));
-<a href=#628 id=628 data-nosnippet>628</a>        <span class="macro">assert_eq!</span>(
-<a href=#629 id=629 data-nosnippet>629</a>            cli_deleted,
-<a href=#630 id=630 data-nosnippet>630</a>            <span class="macro">vec!</span>[a, b],
-<a href=#631 id=631 data-nosnippet>631</a>            <span class="string">"CLI surface reclaims every drop (it deletes no merge inputs otherwise)"
-<a href=#632 id=632 data-nosnippet>632</a>        </span>);
-<a href=#633 id=633 data-nosnippet>633</a>    }
-<a href=#634 id=634 data-nosnippet>634</a>
-<a href=#635 id=635 data-nosnippet>635</a>    <span class="doccomment">/// R2 scenario: an UNKNOWN outside bound in a PARTIAL compaction retains ALL
-<a href=#636 id=636 data-nosnippet>636</a>    /// fully-expired candidates.
-<a href=#637 id=637 data-nosnippet>637</a>    </span><span class="attr">#[test]
-<a href=#638 id=638 data-nosnippet>638</a>    </span><span class="kw">fn </span>unknown_outside_bound_retains_all() {
-<a href=#639 id=639 data-nosnippet>639</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
-<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">4_000</span>, <span class="number">1_000</span>);
-<a href=#641 id=641 data-nosnippet>641</a>        <span class="comment">// Outside Data.db with NO sibling Statistics.db ⇒ unknown bound.
-<a href=#642 id=642 data-nosnippet>642</a>        </span><span class="kw">let </span>outside = tmp.path().join(<span class="string">"nb-2-big-Data.db"</span>);
-<a href=#643 id=643 data-nosnippet>643</a>        std::fs::write(<span class="kw-2">&amp;</span>outside, <span class="string">b""</span>).expect(<span class="string">"touch outside Data.db"</span>);
-<a href=#644 id=644 data-nosnippet>644</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
-<a href=#645 id=645 data-nosnippet>645</a>        <span class="macro">assert!</span>(
-<a href=#646 id=646 data-nosnippet>646</a>            dropped.is_empty(),
-<a href=#647 id=647 data-nosnippet>647</a>            <span class="string">"an unknown outside bound in a partial compaction must retain all candidates"
-<a href=#648 id=648 data-nosnippet>648</a>        </span>);
-<a href=#649 id=649 data-nosnippet>649</a>    }
-<a href=#650 id=650 data-nosnippet>650</a>}
+<a href=#347 id=347 data-nosnippet>347</a>    <span class="doccomment">/// R1: the LIVE / NO_DELETION_TIME sentinel (`i64::MAX`) is never expired.
+<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="attr">#[test]
+<a href=#349 id=349 data-nosnippet>349</a>    </span><span class="kw">fn </span>is_fully_expired_false_for_live_sentinel() {
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="macro">assert!</span>(!is_fully_expired(<span class="kw-2">&amp;</span>ts_stats(i64::MAX, <span class="prelude-val">Some</span>(<span class="number">0</span>)), <span class="number">1_000</span>));
+<a href=#351 id=351 data-nosnippet>351</a>    }
+<a href=#352 id=352 data-nosnippet>352</a>
+<a href=#353 id=353 data-nosnippet>353</a>    <span class="doccomment">/// Write a synthetic Statistics.db beside a zero-byte Data.db, returning the
+<a href=#354 id=354 data-nosnippet>354</a>    /// Data.db path. `max_ldt == i32::MAX` = "no tombstones / live" (parses back as
+<a href=#355 id=355 data-nosnippet>355</a>    /// the `i64::MAX` NO_DELETION_TIME sentinel).
+<a href=#356 id=356 data-nosnippet>356</a>    </span><span class="kw">fn </span>write_expiry_stats(dir: <span class="kw-2">&amp;</span>Path, <span class="kw">gen</span>: u32, max_ldt: i32, max_ts: i64, min_ts: i64) -&gt; PathBuf {
+<a href=#357 id=357 data-nosnippet>357</a>        <span class="kw">let </span>data_path = dir.join(<span class="macro">format!</span>(<span class="string">"nb-{gen}-big-Data.db"</span>));
+<a href=#358 id=358 data-nosnippet>358</a>        std::fs::write(<span class="kw-2">&amp;</span>data_path, <span class="string">b"synthetic-data-never-read"</span>).expect(<span class="string">"touch Data.db"</span>);
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="kw">let </span>stats_path = dir.join(<span class="macro">format!</span>(<span class="string">"nb-{gen}-big-Statistics.db"</span>));
+<a href=#360 id=360 data-nosnippet>360</a>        <span class="kw">let </span><span class="kw-2">mut </span>meta = StatisticsMetadata::new();
+<a href=#361 id=361 data-nosnippet>361</a>        meta.max_local_deletion_time = max_ldt;
+<a href=#362 id=362 data-nosnippet>362</a>        meta.min_local_deletion_time = max_ldt.min(<span class="number">0</span>);
+<a href=#363 id=363 data-nosnippet>363</a>        meta.max_timestamp = max_ts;
+<a href=#364 id=364 data-nosnippet>364</a>        meta.min_timestamp = min_ts;
+<a href=#365 id=365 data-nosnippet>365</a>        StatisticsWriter::new(stats_path)
+<a href=#366 id=366 data-nosnippet>366</a>            .write(<span class="kw-2">&amp;</span>meta, <span class="prelude-val">None</span>)
+<a href=#367 id=367 data-nosnippet>367</a>            .expect(<span class="string">"write Statistics.db"</span>);
+<a href=#368 id=368 data-nosnippet>368</a>        data_path
+<a href=#369 id=369 data-nosnippet>369</a>    }
+<a href=#370 id=370 data-nosnippet>370</a>
+<a href=#371 id=371 data-nosnippet>371</a>    <span class="doccomment">/// R1 scenario "classified fully expired without a cell scan": the drop-set is
+<a href=#372 id=372 data-nosnippet>372</a>    /// computed purely from Statistics.db metadata. Proven by DELETING the
+<a href=#373 id=373 data-nosnippet>373</a>    /// candidate's Data.db after writing its Statistics.db — classification still
+<a href=#374 id=374 data-nosnippet>374</a>    /// succeeds because it never touches Data.db.
+<a href=#375 id=375 data-nosnippet>375</a>    </span><span class="attr">#[test]
+<a href=#376 id=376 data-nosnippet>376</a>    </span><span class="kw">fn </span>fully_expired_detection_reads_no_data_db() {
+<a href=#377 id=377 data-nosnippet>377</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">5_000</span>);
+<a href=#379 id=379 data-nosnippet>379</a>        std::fs::remove_file(<span class="kw-2">&amp;</span>cand).expect(<span class="string">"remove Data.db to prove no read"</span>);
+<a href=#380 id=380 data-nosnippet>380</a>
+<a href=#381 id=381 data-nosnippet>381</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand.clone()], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="macro">assert_eq!</span>(
+<a href=#383 id=383 data-nosnippet>383</a>            dropped,
+<a href=#384 id=384 data-nosnippet>384</a>            <span class="macro">vec!</span>[cand],
+<a href=#385 id=385 data-nosnippet>385</a>            <span class="string">"fully-expired classification must come from Statistics.db alone, no Data.db read"
+<a href=#386 id=386 data-nosnippet>386</a>        </span>);
+<a href=#387 id=387 data-nosnippet>387</a>    }
+<a href=#388 id=388 data-nosnippet>388</a>
+<a href=#389 id=389 data-nosnippet>389</a>    <span class="doccomment">/// R1 scenario: a live SSTable is never dropped.
+<a href=#390 id=390 data-nosnippet>390</a>    </span><span class="attr">#[test]
+<a href=#391 id=391 data-nosnippet>391</a>    </span><span class="kw">fn </span>live_sstable_never_dropped() {
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#393 id=393 data-nosnippet>393</a>        <span class="kw">let </span>live = write_expiry_stats(tmp.path(), <span class="number">1</span>, i32::MAX, <span class="number">10_000</span>, <span class="number">5_000</span>);
+<a href=#394 id=394 data-nosnippet>394</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[live], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#395 id=395 data-nosnippet>395</a>        <span class="macro">assert!</span>(dropped.is_empty(), <span class="string">"a live SSTable must never be dropped"</span>);
+<a href=#396 id=396 data-nosnippet>396</a>    }
+<a href=#397 id=397 data-nosnippet>397</a>
+<a href=#398 id=398 data-nosnippet>398</a>    <span class="doccomment">/// R1 scenario: `gcBefore == None` drops nothing, even for an expired SSTable.
+<a href=#399 id=399 data-nosnippet>399</a>    </span><span class="attr">#[test]
+<a href=#400 id=400 data-nosnippet>400</a>    </span><span class="kw">fn </span>fully_expired_none_gc_before_drops_nothing() {
+<a href=#401 id=401 data-nosnippet>401</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">5_000</span>);
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[], <span class="prelude-val">None</span>);
+<a href=#404 id=404 data-nosnippet>404</a>        <span class="macro">assert!</span>(
+<a href=#405 id=405 data-nosnippet>405</a>            dropped.is_empty(),
+<a href=#406 id=406 data-nosnippet>406</a>            <span class="string">"None gcBefore must disable dropping (conservative)"
+<a href=#407 id=407 data-nosnippet>407</a>        </span>);
+<a href=#408 id=408 data-nosnippet>408</a>    }
+<a href=#409 id=409 data-nosnippet>409</a>
+<a href=#410 id=410 data-nosnippet>410</a>    <span class="doccomment">/// R1 scenario: an unreadable/absent candidate Statistics.db drops nothing.
+<a href=#411 id=411 data-nosnippet>411</a>    </span><span class="attr">#[test]
+<a href=#412 id=412 data-nosnippet>412</a>    </span><span class="kw">fn </span>fully_expired_unreadable_candidate_stats_drops_nothing() {
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="kw">let </span>cand = tmp.path().join(<span class="string">"nb-1-big-Data.db"</span>);
+<a href=#415 id=415 data-nosnippet>415</a>        std::fs::write(<span class="kw-2">&amp;</span>cand, <span class="string">b""</span>).expect(<span class="string">"touch Data.db"</span>);
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="macro">assert!</span>(
+<a href=#418 id=418 data-nosnippet>418</a>            dropped.is_empty(),
+<a href=#419 id=419 data-nosnippet>419</a>            <span class="string">"an unreadable candidate Statistics.db must not be dropped"
+<a href=#420 id=420 data-nosnippet>420</a>        </span>);
+<a href=#421 id=421 data-nosnippet>421</a>    }
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a>    <span class="doccomment">/// R2 scenario: a fully-expired candidate that could shadow older data outside
+<a href=#424 id=424 data-nosnippet>424</a>    /// the set is RETAINED.
+<a href=#425 id=425 data-nosnippet>425</a>    </span><span class="attr">#[test]
+<a href=#426 id=426 data-nosnippet>426</a>    </span><span class="kw">fn </span>overlap_gate_retains_shadowing_candidate() {
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">8_000</span>);
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="comment">// Outside min write ts (5_000) &lt;= candidate max_timestamp (10_000) ⇒ retain.
+<a href=#430 id=430 data-nosnippet>430</a>        </span><span class="kw">let </span>outside = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">20_000</span>, <span class="number">5_000</span>);
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#432 id=432 data-nosnippet>432</a>        <span class="macro">assert!</span>(
+<a href=#433 id=433 data-nosnippet>433</a>            dropped.is_empty(),
+<a href=#434 id=434 data-nosnippet>434</a>            <span class="string">"a candidate that could shadow older outside data must be retained"
+<a href=#435 id=435 data-nosnippet>435</a>        </span>);
+<a href=#436 id=436 data-nosnippet>436</a>    }
+<a href=#437 id=437 data-nosnippet>437</a>
+<a href=#438 id=438 data-nosnippet>438</a>    <span class="doccomment">/// R2 scenario: a fully-expired candidate older than everything outside the
+<a href=#439 id=439 data-nosnippet>439</a>    /// set is DROPPED.
+<a href=#440 id=440 data-nosnippet>440</a>    </span><span class="attr">#[test]
+<a href=#441 id=441 data-nosnippet>441</a>    </span><span class="kw">fn </span>overlap_gate_drops_candidate_older_than_outside() {
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">4_000</span>, <span class="number">1_000</span>);
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="comment">// Outside min write ts (5_000) &gt; candidate max_timestamp (4_000) ⇒ drop.
+<a href=#445 id=445 data-nosnippet>445</a>        </span><span class="kw">let </span>outside = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">20_000</span>, <span class="number">5_000</span>);
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand.clone()], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#447 id=447 data-nosnippet>447</a>        <span class="macro">assert_eq!</span>(
+<a href=#448 id=448 data-nosnippet>448</a>            dropped,
+<a href=#449 id=449 data-nosnippet>449</a>            <span class="macro">vec!</span>[cand],
+<a href=#450 id=450 data-nosnippet>450</a>            <span class="string">"a candidate older than every outside SSTable must be dropped"
+<a href=#451 id=451 data-nosnippet>451</a>        </span>);
+<a href=#452 id=452 data-nosnippet>452</a>    }
+<a href=#453 id=453 data-nosnippet>453</a>
+<a href=#454 id=454 data-nosnippet>454</a>    <span class="doccomment">/// R2 scenario: a major/full compaction (empty outside set) drops every
+<a href=#455 id=455 data-nosnippet>455</a>    /// fully-expired candidate whose newest write predates the co-compacting live
+<a href=#456 id=456 data-nosnippet>456</a>    /// input's oldest write, keeping the live input. Expired data is OLDER than the
+<a href=#457 id=457 data-nosnippet>457</a>    /// live data (the realistic case), so both expired inputs are droppable.
+<a href=#458 id=458 data-nosnippet>458</a>    </span><span class="attr">#[test]
+<a href=#459 id=459 data-nosnippet>459</a>    </span><span class="kw">fn </span>major_compaction_empty_outside_drops_expired_older_than_live() {
+<a href=#460 id=460 data-nosnippet>460</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#461 id=461 data-nosnippet>461</a>        <span class="comment">// Expired inputs at LOW write timestamps (older than the live input).
+<a href=#462 id=462 data-nosnippet>462</a>        </span><span class="kw">let </span>expired_a = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">3_000</span>, <span class="number">1_000</span>);
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="kw">let </span>expired_b = write_expiry_stats(tmp.path(), <span class="number">2</span>, <span class="number">800</span>, <span class="number">4_000</span>, <span class="number">1_000</span>);
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="comment">// Live co-input at a HIGHER min write ts (5_000): the expired tombstones
+<a href=#465 id=465 data-nosnippet>465</a>        // (max_ts 3_000/4_000) predate it, so dropping them resurrects nothing.
+<a href=#466 id=466 data-nosnippet>466</a>        </span><span class="kw">let </span>live = write_expiry_stats(tmp.path(), <span class="number">3</span>, i32::MAX, <span class="number">10_000</span>, <span class="number">5_000</span>);
+<a href=#467 id=467 data-nosnippet>467</a>        <span class="kw">let </span>dropped = fully_expired_sstables(
+<a href=#468 id=468 data-nosnippet>468</a>            <span class="kw-2">&amp;</span>[expired_a.clone(), live, expired_b.clone()],
+<a href=#469 id=469 data-nosnippet>469</a>            <span class="kw-2">&amp;</span>[],
+<a href=#470 id=470 data-nosnippet>470</a>            <span class="prelude-val">Some</span>(<span class="number">1_000</span>),
+<a href=#471 id=471 data-nosnippet>471</a>        );
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="macro">assert_eq!</span>(
+<a href=#473 id=473 data-nosnippet>473</a>            dropped,
+<a href=#474 id=474 data-nosnippet>474</a>            <span class="macro">vec!</span>[expired_a, expired_b],
+<a href=#475 id=475 data-nosnippet>475</a>            <span class="string">"a major compaction drops fully-expired inputs older than the live co-input, keeping live"
+<a href=#476 id=476 data-nosnippet>476</a>        </span>);
+<a href=#477 id=477 data-nosnippet>477</a>    }
+<a href=#478 id=478 data-nosnippet>478</a>
+<a href=#479 id=479 data-nosnippet>479</a>    <span class="doccomment">/// R2 scenario (Cassandra parity / #1384 regression guard): a fully-expired
+<a href=#480 id=480 data-nosnippet>480</a>    /// input whose tombstone could shadow OLDER live data in a CO-COMPACTING input
+<a href=#481 id=481 data-nosnippet>481</a>    /// is NOT dropped — even in a full compaction (empty outside set). Folding the
+<a href=#482 id=482 data-nosnippet>482</a>    /// non-expired input's min write timestamp into the overlap bound prevents the
+<a href=#483 id=483 data-nosnippet>483</a>    /// resurrection that dropping the tombstone whole would otherwise cause.
+<a href=#484 id=484 data-nosnippet>484</a>    </span><span class="attr">#[test]
+<a href=#485 id=485 data-nosnippet>485</a>    </span><span class="kw">fn </span>co_input_shadowing_expired_sstable_not_dropped() {
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#487 id=487 data-nosnippet>487</a>        <span class="comment">// Fully-expired input holding a tombstone at a HIGH write ts (10_000): it
+<a href=#488 id=488 data-nosnippet>488</a>        // would shadow the live co-input's older data.
+<a href=#489 id=489 data-nosnippet>489</a>        </span><span class="kw">let </span>expired = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">10_000</span>, <span class="number">9_000</span>);
+<a href=#490 id=490 data-nosnippet>490</a>        <span class="comment">// Live co-input with OLDER data (min write ts 5_000 &lt;= tombstone max_ts).
+<a href=#491 id=491 data-nosnippet>491</a>        </span><span class="kw">let </span>live = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">8_000</span>, <span class="number">5_000</span>);
+<a href=#492 id=492 data-nosnippet>492</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[expired, live], <span class="kw-2">&amp;</span>[], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="macro">assert!</span>(
+<a href=#494 id=494 data-nosnippet>494</a>            dropped.is_empty(),
+<a href=#495 id=495 data-nosnippet>495</a>            <span class="string">"an expired input whose tombstone shadows a co-input's older live data must not be dropped"
+<a href=#496 id=496 data-nosnippet>496</a>        </span>);
+<a href=#497 id=497 data-nosnippet>497</a>    }
+<a href=#498 id=498 data-nosnippet>498</a>
+<a href=#499 id=499 data-nosnippet>499</a>    <span class="doccomment">/// Roborev F2 (former resurrection) regression: the overlap gate compares the
+<a href=#500 id=500 data-nosnippet>500</a>    /// candidate's TRUE NEWEST write (`max_timestamp`, #1729-authoritative), not its
+<a href=#501 id=501 data-nosnippet>501</a>    /// `min_timestamp`. A candidate whose `min_timestamp &lt; overlap_bound &lt;
+<a href=#502 id=502 data-nosnippet>502</a>    /// max_timestamp` (an old tombstone min but a NEWER tombstone max) is RETAINED —
+<a href=#503 id=503 data-nosnippet>503</a>    /// its newest write does NOT predate the outside data, so dropping it could
+<a href=#504 id=504 data-nosnippet>504</a>    /// resurrect data. A gate that mistakenly used `min_timestamp` would drop it.
+<a href=#505 id=505 data-nosnippet>505</a>    </span><span class="attr">#[test]
+<a href=#506 id=506 data-nosnippet>506</a>    </span><span class="kw">fn </span>overlap_gate_uses_max_timestamp_not_min_retains_when_max_above_bound() {
+<a href=#507 id=507 data-nosnippet>507</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="comment">// Candidate: fully expired (LDT 500 &lt; 1_000), min write ts 1_000 (OLD),
+<a href=#509 id=509 data-nosnippet>509</a>        // max write ts 8_000 (NEW — a later tombstone/write in the same SSTable).
+<a href=#510 id=510 data-nosnippet>510</a>        </span><span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">8_000</span>, <span class="number">1_000</span>);
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="comment">// Outside min write ts = 5_000 ⇒ overlap_bound = 5_000. The candidate's
+<a href=#512 id=512 data-nosnippet>512</a>        // min (1_000) is BELOW the bound, but its max (8_000) is ABOVE it.
+<a href=#513 id=513 data-nosnippet>513</a>        </span><span class="kw">let </span>outside = write_expiry_stats(tmp.path(), <span class="number">2</span>, i32::MAX, <span class="number">20_000</span>, <span class="number">5_000</span>);
+<a href=#514 id=514 data-nosnippet>514</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="macro">assert!</span>(
+<a href=#516 id=516 data-nosnippet>516</a>            dropped.is_empty(),
+<a href=#517 id=517 data-nosnippet>517</a>            <span class="string">"min&lt;bound&lt;max must RETAIN: the gate compares the true newest write \
+<a href=#518 id=518 data-nosnippet>518</a>             (max_timestamp), so a candidate whose newest write postdates the bound \
+<a href=#519 id=519 data-nosnippet>519</a>             is not droppable (F2 resurrection guard)"
+<a href=#520 id=520 data-nosnippet>520</a>        </span>);
+<a href=#521 id=521 data-nosnippet>521</a>    }
+<a href=#522 id=522 data-nosnippet>522</a>
+<a href=#523 id=523 data-nosnippet>523</a>    <span class="doccomment">/// Roborev F2 fail-closed: since #1729 a candidate's `max_timestamp` may be the
+<a href=#524 id=524 data-nosnippet>524</a>    /// `i64::MIN` UNAVAILABLE sentinel. An unknown newest write cannot be proven to
+<a href=#525 id=525 data-nosnippet>525</a>    /// predate the overlap bound, so the candidate is RETAINED (never dropped) even
+<a href=#526 id=526 data-nosnippet>526</a>    /// though it is fully expired and its (unavailable) sentinel would compare below
+<a href=#527 id=527 data-nosnippet>527</a>    /// any real bound. Exercised through the pure classifier so the in-memory
+<a href=#528 id=528 data-nosnippet>528</a>    /// sentinel is honest (the on-disk StatisticsWriter finalize normalizes
+<a href=#529 id=529 data-nosnippet>529</a>    /// `i64::MIN → 0`, so it cannot round-trip the sentinel).
+<a href=#530 id=530 data-nosnippet>530</a>    </span><span class="attr">#[test]
+<a href=#531 id=531 data-nosnippet>531</a>    </span><span class="kw">fn </span>overlap_gate_fails_closed_on_unavailable_max_timestamp() {
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="kw">let </span>cand: PathBuf = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
+<a href=#533 id=533 data-nosnippet>533</a>        <span class="comment">// Fully expired (LDT 500 &lt; 1_000) but max_timestamp is unavailable
+<a href=#534 id=534 data-nosnippet>534</a>        // (`None`, issue #1653/#1729). A naive "unavailable compares below bound"
+<a href=#535 id=535 data-nosnippet>535</a>        // would wrongly permit a drop; the authoritative accessor forces a retain.
+<a href=#536 id=536 data-nosnippet>536</a>        </span><span class="kw">let </span>stats = ts_stats(<span class="number">500</span>, <span class="prelude-val">None</span>);
+<a href=#537 id=537 data-nosnippet>537</a>        <span class="kw">let </span>input_stats = [(<span class="kw-2">&amp;</span>cand, <span class="prelude-val">Some</span>(stats))];
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="comment">// Concrete, above-sentinel outside bound (5_000).
+<a href=#539 id=539 data-nosnippet>539</a>        </span><span class="kw">let </span>dropped = classify_drop_set(<span class="kw-2">&amp;</span>input_stats, <span class="prelude-val">Some</span>(<span class="number">5_000</span>), <span class="number">1_000</span>);
+<a href=#540 id=540 data-nosnippet>540</a>        <span class="macro">assert!</span>(
+<a href=#541 id=541 data-nosnippet>541</a>            dropped.is_empty(),
+<a href=#542 id=542 data-nosnippet>542</a>            <span class="string">"an UNAVAILABLE (None) max_timestamp must fail closed: retain, never drop (#1729 F2/#1653)"
+<a href=#543 id=543 data-nosnippet>543</a>        </span>);
+<a href=#544 id=544 data-nosnippet>544</a>
+<a href=#545 id=545 data-nosnippet>545</a>        <span class="comment">// Control: the SAME candidate with a real, below-bound max_timestamp IS
+<a href=#546 id=546 data-nosnippet>546</a>        // droppable, proving it is the unavailable case (not some other field)
+<a href=#547 id=547 data-nosnippet>547</a>        // that retains.
+<a href=#548 id=548 data-nosnippet>548</a>        </span><span class="kw">let </span>live_max = ts_stats(<span class="number">500</span>, <span class="prelude-val">Some</span>(<span class="number">4_000</span>));
+<a href=#549 id=549 data-nosnippet>549</a>        <span class="kw">let </span>input_stats_live = [(<span class="kw-2">&amp;</span>cand, <span class="prelude-val">Some</span>(live_max))];
+<a href=#550 id=550 data-nosnippet>550</a>        <span class="macro">assert_eq!</span>(
+<a href=#551 id=551 data-nosnippet>551</a>            classify_drop_set(<span class="kw-2">&amp;</span>input_stats_live, <span class="prelude-val">Some</span>(<span class="number">5_000</span>), <span class="number">1_000</span>),
+<a href=#552 id=552 data-nosnippet>552</a>            <span class="macro">vec!</span>[cand.clone()],
+<a href=#553 id=553 data-nosnippet>553</a>            <span class="string">"a concrete below-bound max_timestamp on the same candidate is droppable"
+<a href=#554 id=554 data-nosnippet>554</a>        </span>);
+<a href=#555 id=555 data-nosnippet>555</a>    }
+<a href=#556 id=556 data-nosnippet>556</a>
+<a href=#557 id=557 data-nosnippet>557</a>    <span class="doccomment">/// The [`authoritative_max_timestamp`] accessor mirrors #1729/#1653: `None`
+<a href=#558 id=558 data-nosnippet>558</a>    /// when the max is unavailable, `Some(v)` otherwise (incl. concrete negatives).
+<a href=#559 id=559 data-nosnippet>559</a>    </span><span class="attr">#[test]
+<a href=#560 id=560 data-nosnippet>560</a>    </span><span class="kw">fn </span>authoritative_max_timestamp_maps_sentinel_to_none() {
+<a href=#561 id=561 data-nosnippet>561</a>        <span class="macro">assert_eq!</span>(authoritative_max_timestamp(<span class="kw-2">&amp;</span>ts_stats(<span class="number">0</span>, <span class="prelude-val">None</span>)), <span class="prelude-val">None</span>);
+<a href=#562 id=562 data-nosnippet>562</a>        <span class="macro">assert_eq!</span>(
+<a href=#563 id=563 data-nosnippet>563</a>            authoritative_max_timestamp(<span class="kw-2">&amp;</span>ts_stats(<span class="number">0</span>, <span class="prelude-val">Some</span>(<span class="number">8_000</span>))),
+<a href=#564 id=564 data-nosnippet>564</a>            <span class="prelude-val">Some</span>(<span class="number">8_000</span>)
+<a href=#565 id=565 data-nosnippet>565</a>        );
+<a href=#566 id=566 data-nosnippet>566</a>        <span class="macro">assert_eq!</span>(
+<a href=#567 id=567 data-nosnippet>567</a>            authoritative_max_timestamp(<span class="kw-2">&amp;</span>ts_stats(<span class="number">0</span>, <span class="prelude-val">Some</span>(i64::MIN + <span class="number">1</span>))),
+<a href=#568 id=568 data-nosnippet>568</a>            <span class="prelude-val">Some</span>(i64::MIN + <span class="number">1</span>)
+<a href=#569 id=569 data-nosnippet>569</a>        );
+<a href=#570 id=570 data-nosnippet>570</a>    }
+<a href=#571 id=571 data-nosnippet>571</a>
+<a href=#572 id=572 data-nosnippet>572</a>    <span class="doccomment">/// Roborev #1388 (Medium): the all-dropped guard retains ONE input for the
+<a href=#573 id=573 data-nosnippet>573</a>    /// merger but keeps the FULL drop-set in `dropped_whole` (so nothing is
+<a href=#574 id=574 data-nosnippet>574</a>    /// underreported or left unreclaimed). The retained input appears in BOTH
+<a href=#575 id=575 data-nosnippet>575</a>    /// returned lists; reclaim sites dedup it.
+<a href=#576 id=576 data-nosnippet>576</a>    </span><span class="attr">#[test]
+<a href=#577 id=577 data-nosnippet>577</a>    </span><span class="kw">fn </span>split_all_dropped_retains_one_but_reports_full_drop_set() {
+<a href=#578 id=578 data-nosnippet>578</a>        <span class="kw">let </span>a = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
+<a href=#579 id=579 data-nosnippet>579</a>        <span class="kw">let </span>b = PathBuf::from(<span class="string">"nb-2-big-Data.db"</span>);
+<a href=#580 id=580 data-nosnippet>580</a>        <span class="kw">let </span>inputs = [a.clone(), b.clone()];
+<a href=#581 id=581 data-nosnippet>581</a>        <span class="kw">let </span>drop_set = <span class="macro">vec!</span>[a.clone(), b.clone()];
+<a href=#582 id=582 data-nosnippet>582</a>
+<a href=#583 id=583 data-nosnippet>583</a>        <span class="kw">let </span>(merge_inputs, dropped_whole) = split_merge_and_dropped(<span class="kw-2">&amp;</span>inputs, drop_set);
+<a href=#584 id=584 data-nosnippet>584</a>        <span class="macro">assert_eq!</span>(
+<a href=#585 id=585 data-nosnippet>585</a>            merge_inputs.len(),
+<a href=#586 id=586 data-nosnippet>586</a>            <span class="number">1</span>,
+<a href=#587 id=587 data-nosnippet>587</a>            <span class="string">"exactly one input is retained for the merger's at-least-one requirement"
+<a href=#588 id=588 data-nosnippet>588</a>        </span>);
+<a href=#589 id=589 data-nosnippet>589</a>        <span class="macro">assert_eq!</span>(
+<a href=#590 id=590 data-nosnippet>590</a>            dropped_whole,
+<a href=#591 id=591 data-nosnippet>591</a>            <span class="macro">vec!</span>[a, b],
+<a href=#592 id=592 data-nosnippet>592</a>            <span class="string">"the FULL drop-set is still reported (no underreporting)"
+<a href=#593 id=593 data-nosnippet>593</a>        </span>);
+<a href=#594 id=594 data-nosnippet>594</a>        <span class="macro">assert!</span>(
+<a href=#595 id=595 data-nosnippet>595</a>            dropped_whole.contains(<span class="kw-2">&amp;</span>merge_inputs[<span class="number">0</span>]),
+<a href=#596 id=596 data-nosnippet>596</a>            <span class="string">"the retained merger input is also in the reported drop-set"
+<a href=#597 id=597 data-nosnippet>597</a>        </span>);
+<a href=#598 id=598 data-nosnippet>598</a>    }
+<a href=#599 id=599 data-nosnippet>599</a>
+<a href=#600 id=600 data-nosnippet>600</a>    <span class="doccomment">/// A partial drop-set (a live input survives) leaves `merge_inputs` non-empty
+<a href=#601 id=601 data-nosnippet>601</a>    /// and `dropped_whole` unchanged — the guard does not fire.
+<a href=#602 id=602 data-nosnippet>602</a>    </span><span class="attr">#[test]
+<a href=#603 id=603 data-nosnippet>603</a>    </span><span class="kw">fn </span>split_partial_drop_leaves_live_input_and_full_drop_set() {
+<a href=#604 id=604 data-nosnippet>604</a>        <span class="kw">let </span>expired = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="kw">let </span>live = PathBuf::from(<span class="string">"nb-2-big-Data.db"</span>);
+<a href=#606 id=606 data-nosnippet>606</a>        <span class="kw">let </span>inputs = [expired.clone(), live.clone()];
+<a href=#607 id=607 data-nosnippet>607</a>        <span class="kw">let </span>(merge_inputs, dropped_whole) = split_merge_and_dropped(<span class="kw-2">&amp;</span>inputs, <span class="macro">vec!</span>[expired.clone()]);
+<a href=#608 id=608 data-nosnippet>608</a>        <span class="macro">assert_eq!</span>(merge_inputs, <span class="macro">vec!</span>[live], <span class="string">"only the live input is merged"</span>);
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="macro">assert_eq!</span>(dropped_whole, <span class="macro">vec!</span>[expired], <span class="string">"the expired input is dropped"</span>);
+<a href=#610 id=610 data-nosnippet>610</a>    }
+<a href=#611 id=611 data-nosnippet>611</a>
+<a href=#612 id=612 data-nosnippet>612</a>    <span class="doccomment">/// [`reclaim_dropped_whole`] deletes only the drops NOT already deleted by the
+<a href=#613 id=613 data-nosnippet>613</a>    /// caller: the core surface (which deletes all merge inputs) skips the retained
+<a href=#614 id=614 data-nosnippet>614</a>    /// one; the CLI surface (empty `already_deleted`) reclaims every drop.
+<a href=#615 id=615 data-nosnippet>615</a>    </span><span class="attr">#[test]
+<a href=#616 id=616 data-nosnippet>616</a>    </span><span class="kw">fn </span>reclaim_dedups_against_already_deleted() {
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw">let </span>a = PathBuf::from(<span class="string">"nb-1-big-Data.db"</span>);
+<a href=#618 id=618 data-nosnippet>618</a>        <span class="kw">let </span>b = PathBuf::from(<span class="string">"nb-2-big-Data.db"</span>);
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw">let </span>dropped_whole = [a.clone(), b.clone()];
+<a href=#620 id=620 data-nosnippet>620</a>
+<a href=#621 id=621 data-nosnippet>621</a>        <span class="comment">// Core surface: `b` is the retained merge input (already deleted) ⇒ only `a`.
+<a href=#622 id=622 data-nosnippet>622</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>core_deleted = Vec::new();
+<a href=#623 id=623 data-nosnippet>623</a>        reclaim_dropped_whole(<span class="kw-2">&amp;</span>dropped_whole, <span class="kw-2">&amp;</span>[b.clone()], |p| {
+<a href=#624 id=624 data-nosnippet>624</a>            core_deleted.push(p.to_path_buf())
+<a href=#625 id=625 data-nosnippet>625</a>        });
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="macro">assert_eq!</span>(
+<a href=#627 id=627 data-nosnippet>627</a>            core_deleted,
+<a href=#628 id=628 data-nosnippet>628</a>            <span class="macro">vec!</span>[a.clone()],
+<a href=#629 id=629 data-nosnippet>629</a>            <span class="string">"core surface skips the retained merge input to avoid a double-delete"
+<a href=#630 id=630 data-nosnippet>630</a>        </span>);
+<a href=#631 id=631 data-nosnippet>631</a>
+<a href=#632 id=632 data-nosnippet>632</a>        <span class="comment">// CLI surface: nothing pre-deleted ⇒ both reclaimed here.
+<a href=#633 id=633 data-nosnippet>633</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>cli_deleted = Vec::new();
+<a href=#634 id=634 data-nosnippet>634</a>        reclaim_dropped_whole(<span class="kw-2">&amp;</span>dropped_whole, <span class="kw-2">&amp;</span>[], |p| cli_deleted.push(p.to_path_buf()));
+<a href=#635 id=635 data-nosnippet>635</a>        <span class="macro">assert_eq!</span>(
+<a href=#636 id=636 data-nosnippet>636</a>            cli_deleted,
+<a href=#637 id=637 data-nosnippet>637</a>            <span class="macro">vec!</span>[a, b],
+<a href=#638 id=638 data-nosnippet>638</a>            <span class="string">"CLI surface reclaims every drop (it deletes no merge inputs otherwise)"
+<a href=#639 id=639 data-nosnippet>639</a>        </span>);
+<a href=#640 id=640 data-nosnippet>640</a>    }
+<a href=#641 id=641 data-nosnippet>641</a>
+<a href=#642 id=642 data-nosnippet>642</a>    <span class="doccomment">/// R2 scenario: an UNKNOWN outside bound in a PARTIAL compaction retains ALL
+<a href=#643 id=643 data-nosnippet>643</a>    /// fully-expired candidates.
+<a href=#644 id=644 data-nosnippet>644</a>    </span><span class="attr">#[test]
+<a href=#645 id=645 data-nosnippet>645</a>    </span><span class="kw">fn </span>unknown_outside_bound_retains_all() {
+<a href=#646 id=646 data-nosnippet>646</a>        <span class="kw">let </span>tmp = TempDir::new().expect(<span class="string">"temp dir"</span>);
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw">let </span>cand = write_expiry_stats(tmp.path(), <span class="number">1</span>, <span class="number">500</span>, <span class="number">4_000</span>, <span class="number">1_000</span>);
+<a href=#648 id=648 data-nosnippet>648</a>        <span class="comment">// Outside Data.db with NO sibling Statistics.db ⇒ unknown bound.
+<a href=#649 id=649 data-nosnippet>649</a>        </span><span class="kw">let </span>outside = tmp.path().join(<span class="string">"nb-2-big-Data.db"</span>);
+<a href=#650 id=650 data-nosnippet>650</a>        std::fs::write(<span class="kw-2">&amp;</span>outside, <span class="string">b""</span>).expect(<span class="string">"touch outside Data.db"</span>);
+<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">let </span>dropped = fully_expired_sstables(<span class="kw-2">&amp;</span>[cand], <span class="kw-2">&amp;</span>[outside], <span class="prelude-val">Some</span>(<span class="number">1_000</span>));
+<a href=#652 id=652 data-nosnippet>652</a>        <span class="macro">assert!</span>(
+<a href=#653 id=653 data-nosnippet>653</a>            dropped.is_empty(),
+<a href=#654 id=654 data-nosnippet>654</a>            <span class="string">"an unknown outside bound in a partial compaction must retain all candidates"
+<a href=#655 id=655 data-nosnippet>655</a>        </span>);
+<a href=#656 id=656 data-nosnippet>656</a>    }
+<a href=#657 id=657 data-nosnippet>657</a>}
 </code></pre></div></section></main></body></html>
