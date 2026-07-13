@@ -51,7 +51,12 @@ mod compaction;
 mod compressed_offset;
 mod full_index_scan; // Full-Index.db partition enumeration (issue #2302)
 mod full_index_stream; // True-streaming full-Index.db enumeration (issue #2361)
-#[cfg(test)]
+// The fixtures use `SSTableWriter` + `write_engine::mutation` (write-support-only
+// APIs) to build a real Index.db-backed SSTable, so — like the sibling
+// `compaction_cancel_tests` above — this module needs BOTH gates: `data_access`
+// itself compiles on every build (it's the read path), but the test module does
+// not (issue #2361, minimal-build gate finding).
+#[cfg(all(test, feature = "write-support"))]
 mod full_index_stream_tests; // Streaming + LIMIT + cancel coverage (issue #2361)
 mod model;
 // Single-partition compaction seek (issue #2207): the public point-read primitive
