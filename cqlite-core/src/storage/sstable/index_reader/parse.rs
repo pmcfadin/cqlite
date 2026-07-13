@@ -156,6 +156,10 @@ pub(super) fn parse_all_partition_keys_with_summary<'a>(
     }
 
     tracing::debug!("Parsed {} partition entries from Index.db", entries.len());
+    // Issue #2383: count every full Index.db parse so a redundant re-parse of the
+    // SAME generation (the resolve-phase CPU spin) is observable in metrics — a
+    // correct read path parses each generation's index at most once per query.
+    crate::observability::add_counter(crate::observability::catalog::INDEX_PARSES_TOTAL, 1, &[]);
     Ok((remaining, entries))
 }
 

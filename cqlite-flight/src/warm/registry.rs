@@ -785,6 +785,12 @@ fn open_one_reader(
 #[path = "registry_tests.rs"]
 mod registry_tests;
 
+// Issue #2383 resolve-phase CPU-spin RED repros (rebind / single-flight / cancel
+// granularity), in a separate file (campsite rule) loaded here.
+#[cfg(test)]
+#[path = "spin_tests_2383.rs"]
+mod spin_tests_2383;
+
 #[cfg(test)]
 mod tests {
     use super::*;
