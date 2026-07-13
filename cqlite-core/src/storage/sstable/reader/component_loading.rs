@@ -215,8 +215,13 @@ impl SSTableReader {
         };
         let index_path = parent.join(format!("{}-Index.db", base_name));
 
-        match IndexReader::open_with_summary_cancellable(&index_path, platform.clone(), None, cancel)
-            .await
+        match IndexReader::open_with_summary_cancellable(
+            &index_path,
+            platform.clone(),
+            None,
+            cancel,
+        )
+        .await
         {
             Ok(reader) => {
                 tracing::debug!("Loaded Index.db reader for {}", index_path.display());

@@ -320,7 +320,9 @@ fn open_one_reader(
     cancel: ScanCancel,
 ) -> Result<SSTableReader, WarmError> {
     let reader = runtime
-        .block_on(SSTableReader::open_cancellable(path, config, platform, cancel))
+        .block_on(SSTableReader::open_cancellable(
+            path, config, platform, cancel,
+        ))
         .map_err(|source| match source {
             Error::Cancelled => WarmError::Cancelled,
             source => WarmError::Open {

@@ -225,7 +225,10 @@ impl IndexReader {
                 // `WarmError::Cancelled` rather than a fail-closed retain.
                 Err(e @ Error::Cancelled) => return Err(e),
                 Err(e) => {
-                    return Err(Error::corruption(format!("Failed to parse Index.db: {:?}", e)));
+                    return Err(Error::corruption(format!(
+                        "Failed to parse Index.db: {:?}",
+                        e
+                    )));
                 }
             };
 

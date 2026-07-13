@@ -56,7 +56,7 @@ pub(super) fn parse_index_data_cancellable<'a>(
     // Coarse pre-parse cancel check (covers a pre-cancelled open).
     cancel.check()?;
 
-    let (remaining, header) = parse_index_header_prefix(input);
+    let (remaining, header) = parse_index_header_prefix(input)?;
 
     // Parse partition entries (cancel-polled) from the post-header data.
     let (remaining, partition_entries) =
@@ -86,11 +86,12 @@ pub(super) fn parse_index_data_cancellable<'a>(
 }
 
 /// Parse (or synthesize, for the headerless format) the `Index.db` header prefix,
-/// returning the post-header remainder. Infallible: an unparseable header falls
-/// back to the headerless layout exactly as before (issue #28, no heuristics —
-/// the spec-driven registry is the authority, the headerless case is the
-/// documented Cassandra 5.0 shape).
-fn parse_index_header_prefix(input: &[u8]) -> (&[u8], IndexHeader) {
+/// returning the post-header remainder. An unparseable header falls back to the
+/// headerless layout exactly as before (issue #28, no heuristics — the spec-driven
+/// registry is the authority, the headerless case is the documented Cassandra 5.0
+/// shape). A header that DECLARES more bytes than the file holds is a truncation
+/// error (preserves the pre-refactor `Eof`→corruption behavior).
+fn parse_index_header_prefix(input: &[u8]) -> Result<(&[u8], IndexHeader)> {
     let registry = get_global_registry();
     match registry.parse_index_header(input) {
         Ok(parsed_header) => {
@@ -119,11 +120,11 @@ fn parse_index_header_prefix(input: &[u8]) -> (&[u8], IndexHeader) {
             };
             let header_size = parsed_header.header_size;
             if input.len() < header_size {
-                // Truncated below the declared header: no post-header data.
-                (&[], header)
-            } else {
-                (&input[header_size..], header)
+                return Err(crate::Error::corruption(
+                    "Index.db header declares more bytes than the file holds",
+                ));
             }
+            Ok((&input[header_size..], header))
         }
         Err(_) => {
             tracing::debug!("Spec-driven header parsing failed, assuming headerless format");
@@ -133,7 +134,7 @@ fn parse_index_header_prefix(input: &[u8]) -> (&[u8], IndexHeader) {
                 data_size: input.len() as u64,
                 checksum: 0,
             };
-            (input, header)
+            Ok((input, header))
         }
     }
 }

@@ -184,8 +184,7 @@ impl SSTableReader {
                 // Extract keyspace/table from SSTable path (authoritative source)
                 // Directory structure: {keyspace}/{table_name}-{uuid}/Data.db
                 let file_path = self.file_path();
-                let (keyspace, table_name) = match extract_keyspace_table_from_path(&file_path)
-                {
+                let (keyspace, table_name) = match extract_keyspace_table_from_path(&file_path) {
                     Ok(names) => names,
                     Err(e) => {
                         debug!(
