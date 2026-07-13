@@ -158,6 +158,18 @@ fn phase_active_and_in_flight_read_true_concurrent_count_then_settle() {
             );
 
         // THE read-back: both gauges must reflect the true concurrent count N.
+        //
+        // Exact `== baseline + N` is sound, NOT flaky (roborev job 1658 MEDIUM,
+        // declined with evidence). `PhaseTimer::transition` briefly dec-old-then-
+        // inc-new, so the phase.active SUM can transiently dip during a phase
+        // change — but that window exists ONLY across resolve→merge_setup→stream.
+        // Every holder above read a batch (proving it reached the TERMINAL `stream`
+        // phase — `stream` has no successor, so `transition` is never called again)
+        // and then PARKS: with batch_size 1 + the 4-slot bounded channel, each
+        // producer fills the channel and backpressures mid-`stream`, keeping its
+        // PhaseTimer alive at +1 without completing. The barrier confirms ALL N are
+        // in this steady terminal state before we sample, so no transition is in
+        // flight at the sample instant → the sum is stably N (no dip, no spike).
         let if_level = poll_until_at_least(baseline_if + N as i64, GAUGE_TIMEOUT, || {
             cqlite_flight::obs::in_flight_level("do_get")
         })

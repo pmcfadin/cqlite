@@ -119,6 +119,13 @@ async fn run_shape(
                 "concurrent LIMIT {n} over {total} rows must return exactly {n} rows, got {rows}"
             );
             // The capped result must genuinely span both interleaved generations.
+            // This is deterministic, NOT token-distribution-flaky (roborev job 1658
+            // LOW, declined with evidence): the fixture keys are the fixed set
+            // `k000000..k0000NN`, and Murmur3 tokens are a deterministic function of
+            // the key bytes, so the scan (token) order — and thus which parities
+            // fall in the first `n` rows — is identical on every run and machine.
+            // The assertion is stably green by construction and proves LIMIT push-
+            // down reconciles ACROSS both flushes, not merely within one.
             let keys = support::column_strings(&batches, "key");
             let from_flush1 = keys.iter().any(|k| support::key_index(k) % 2 == 0);
             let from_flush2 = keys.iter().any(|k| support::key_index(k) % 2 == 1);
