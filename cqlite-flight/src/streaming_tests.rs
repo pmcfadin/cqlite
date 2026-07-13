@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::producer::DirSource;
-use crate::testutil::{build_sstables, simple_schema, write_row};
+use crate::testutil::{build_sstables, delete_row, simple_schema, write_row};
 use cqlite_core::schema::TableSchema;
 
 /// Build a fixture with `n` single-row partitions across two SSTables so the
@@ -463,14 +463,12 @@ fn stream_collect_parity_limit_mid_batch() {
     assert_stream_collect_parity(spec, &dir);
 }
 
-/// Issue #2361: pushing the ticket LIMIT into EACH producer of a multi-SSTable
-/// k-way merge (`new_cancellable_with_partition_limit`) must return the SAME
-/// result set as the collect path (which caps only at the consumer) — the
-/// per-producer partition budget must NOT under-return. Two overlapping-key
-/// SSTables force a real multi-producer merge with cross-generation
-/// reconciliation. Also asserts the streamed row count equals the cap
-/// (non-vacuity), proving the limit is wired end-to-end through the streaming
-/// egress, not silently dropped.
+/// Issue #2361: `LIMIT` over a multi-SSTable k-way merge (two overlapping-key
+/// SSTables, forcing real cross-generation reconciliation) must return the SAME
+/// result set as the collect path, and the streamed row count must equal the
+/// cap exactly (non-vacuity) — proving `LIMIT` is enforced correctly end-to-end
+/// through the streaming egress purely via the consumer's post-reconciliation
+/// break (there is no producer-side budget, roborev round 2).
 #[test]
 fn stream_collect_parity_limit_multi_sstable() {
     let schema = simple_schema();
@@ -498,6 +496,137 @@ fn stream_collect_parity_limit_multi_sstable() {
     assert_eq!(
         rows, 6,
         "LIMIT-6 streaming scan over two overlapping SSTables must return exactly 6 rows"
+    );
+}
+
+/// Regression pin (issue #2361, roborev round 2, BLOCKER 1): a sparse predicate
+/// combined with `LIMIT k` must return exactly `k` MATCHING rows even when every
+/// match sits in the token-ORDER TAIL of the SSTable. A per-producer
+/// PARTITION budget (the removed design) would let the producer stop after the
+/// first `k` (non-matching) partitions, the consumer's filter would then reject
+/// all of them, and the split would return FEWER rows than exist — violating
+/// `drive_merge`'s own doc and `ScanSpec::limit`'s doc (`limitGuaranteed = false`
+/// permits MORE rows than the cap, never fewer). With no producer-side budget
+/// (current design) this passes by construction: the producer scans until
+/// genuinely cancelled, so the consumer sees every candidate row regardless of
+/// where the matches physically sit in token order.
+#[test]
+fn stream_limit_returns_k_matches_even_when_concentrated_past_limit_index() {
+    use crate::ticket::{FlightTicket, Predicate, PredicateOp};
+    use cqlite_core::storage::write_engine::mutation::Mutation;
+
+    const N: i32 = 20;
+    const MATCHES: usize = 3;
+    let schema = simple_schema();
+
+    // Determine the ACTUAL token order for ids 1..=N (token order need not match
+    // numeric id order — Murmur3 hashes the encoded partition key).
+    let mut by_token: Vec<(i64, i32)> = (1..=N)
+        .map(|id| {
+            let m: Mutation = write_row(id, &format!("n{id}"), 1, 100);
+            let token = m.decorated_key(&schema).unwrap().token;
+            (token, id)
+        })
+        .collect();
+    by_token.sort_by_key(|(t, _)| *t);
+
+    // The matching ids are the LAST `MATCHES` in token order — i.e. strictly
+    // AFTER where a partition-budget of `MATCHES` would have already stopped.
+    let matching_ids: std::collections::HashSet<i32> = by_token[by_token.len() - MATCHES..]
+        .iter()
+        .map(|(_, id)| *id)
+        .collect();
+    assert_eq!(
+        matching_ids.len(),
+        MATCHES,
+        "test precondition: exactly {MATCHES} distinct matching ids"
+    );
+
+    // score = 999 for the matching (token-tail) ids, 1 for everyone else.
+    let rows: Vec<Mutation> = (1..=N)
+        .map(|id| {
+            let score = if matching_ids.contains(&id) { 999 } else { 1 };
+            write_row(id, &format!("n{id}"), score, 100)
+        })
+        .collect();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+    let ticket = FlightTicket {
+        predicates: vec![Predicate {
+            column: "score".into(),
+            op: PredicateOp::Gte,
+            value: serde_json::json!(500),
+        }],
+        limit: Some(MATCHES as u64),
+        ..Default::default()
+    };
+    let spec = crate::filter::ScanSpec::from_ticket(&ticket, &schema).unwrap();
+
+    let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+    let paths = resolved(&producer, &dir);
+    let streamed = stream_batches_raw(producer, paths);
+    let total: usize = streamed.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, MATCHES,
+        "LIMIT-{MATCHES} with a sparse predicate whose matches sit in the token-order \
+         tail must return all {MATCHES} matching rows, got {total} \
+         (a producer-side partition budget would under-return here)"
+    );
+}
+
+/// Regression pin (issue #2361, roborev round 2): `LIMIT k` over an UNFILTERED
+/// scan where surviving rows sit behind SHADOWED (tombstoned) partitions in
+/// token order must still return `k` surviving rows — a partition consumed by a
+/// tombstone contributes ZERO rows but would still have counted against a
+/// producer-side partition budget (the removed design). Two SSTables: gen1
+/// writes every id, gen2 (newer) row-tombstones the ids that sort FIRST in
+/// token order, leaving only later-token ids alive.
+#[test]
+fn stream_limit_over_shadowed_data_returns_k_surviving_rows() {
+    use cqlite_core::storage::write_engine::mutation::Mutation;
+
+    const N: i32 = 20;
+    const SHADOWED: usize = 12;
+    const LIMIT: usize = 5;
+    let schema = simple_schema();
+
+    let mut by_token: Vec<(i64, i32)> = (1..=N)
+        .map(|id| {
+            let m: Mutation = write_row(id, &format!("n{id}"), 1, 100);
+            let token = m.decorated_key(&schema).unwrap().token;
+            (token, id)
+        })
+        .collect();
+    by_token.sort_by_key(|(t, _)| *t);
+
+    // Shadow the FIRST `SHADOWED` ids in token order — LIMIT walking in token
+    // order encounters them before any surviving row.
+    let shadowed_ids: Vec<i32> = by_token[..SHADOWED].iter().map(|(_, id)| *id).collect();
+    let surviving_count = N as usize - SHADOWED;
+    assert!(
+        surviving_count >= LIMIT,
+        "test precondition: at least {LIMIT} surviving rows exist beyond the shadowed prefix"
+    );
+
+    let gen1: Vec<Mutation> = (1..=N)
+        .map(|id| write_row(id, &format!("n{id}"), 1, 100))
+        .collect();
+    let gen2: Vec<Mutation> = shadowed_ids.iter().map(|&id| delete_row(id, 200)).collect();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![gen1, gen2]);
+
+    let spec = crate::filter::ScanSpec {
+        limit: Some(LIMIT as u64),
+        ..Default::default()
+    };
+    let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+    let paths = resolved(&producer, &dir);
+    let streamed = stream_batches_raw(producer, paths);
+    let total: usize = streamed.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, LIMIT,
+        "LIMIT-{LIMIT} over data with {SHADOWED} tombstoned partitions ahead (in token \
+         order) of the surviving rows must still return {LIMIT} surviving rows, got {total} \
+         (a producer-side partition budget would under-return here)"
     );
 }
 

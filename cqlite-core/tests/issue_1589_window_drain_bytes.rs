@@ -239,7 +239,7 @@ async fn scan_and_compaction_windows_move_bytes_bounded_by_appended() {
 
     probe::arm();
     reader
-        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), None, move |_row| {
+        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), move |_row| {
             *sink.lock().expect("count lock") += 1;
             Ok(std::ops::ControlFlow::Continue(()))
         })

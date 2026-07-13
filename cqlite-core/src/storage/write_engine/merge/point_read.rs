@@ -229,9 +229,6 @@ pub fn build_single_partition_merger(
                     schema,
                     None,
                     scan_cancel.clone(),
-                    // Point read targets specific partition(s), not a bounded scan
-                    // egress — no per-producer LIMIT push-down (issue #2361).
-                    None,
                 )?;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,
@@ -315,8 +312,6 @@ pub fn build_single_partition_merger_from_readers(
                     run_index,
                     schema,
                     scan_cancel.clone(),
-                    // Point read targets specific partition(s) — no LIMIT push-down.
-                    None,
                 )?;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,

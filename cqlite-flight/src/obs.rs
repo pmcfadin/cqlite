@@ -22,6 +22,7 @@
 //! keys, queries, or payloads.
 
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use cqlite_core::observability::{self as obs, catalog, AttrValue};
@@ -207,6 +208,33 @@ fn phase_slot(phase: &str) -> &'static str {
         .unwrap_or(PHASE_RESOLVE)
 }
 
+/// Resolve a phase label to its index in [`RPC_PHASES`]. Unknown values map to
+/// index 0 (`resolve`), mirroring [`phase_slot`]'s fallback — never panics.
+fn phase_index(phase: &str) -> usize {
+    RPC_PHASES.iter().position(|p| *p == phase).unwrap_or(0)
+}
+
+/// Index into [`phase_active_counters`] for a given `(method, phase)` pair.
+fn phase_active_index(method_idx: usize, phase_idx: usize) -> usize {
+    method_idx * RPC_PHASES.len() + phase_idx
+}
+
+/// Process-wide, per-`(method, phase)` in-flight counters backing
+/// `cqlite.rpc.phase.active` (issue #2361, hardening A/roborev round 2): an
+/// up/down counter, NOT a set-to-0/1 flag, so concurrent `do_get`s sharing a
+/// phase never clobber each other's level (see [`PhaseTimer::bump_active`]'s
+/// doc). Sized `RPC_METHODS.len() * RPC_PHASES.len()`; lazily initialised
+/// (matches [`IN_FLIGHT`]'s intent, but `AtomicI64` array-repeat-init needs a
+/// runtime loop rather than a hand-written const list at this size).
+fn phase_active_counters() -> &'static [AtomicI64] {
+    static COUNTERS: OnceLock<Vec<AtomicI64>> = OnceLock::new();
+    COUNTERS.get_or_init(|| {
+        (0..RPC_METHODS.len() * RPC_PHASES.len())
+            .map(|_| AtomicI64::new(0))
+            .collect()
+    })
+}
+
 /// Records the wall time a `do_get` spends in each bounded execution phase
 /// (issue #2162): `resolve` → `merge_setup` → `stream`.
 ///
@@ -239,31 +267,46 @@ impl PhaseTimer {
             started: Instant::now(),
             span: tracing::Span::current(),
         };
-        // Issue #2361: mark the opening phase ACTIVE so a `do_get` that never
-        // completes a phase (a wedged merge in `stream`) is still visible as a
-        // level, not only via the completion-time duration histogram.
-        timer.set_active(1);
+        // Issue #2361: bump the opening phase's in-flight counter so a `do_get`
+        // that never completes a phase (a wedged merge in `stream`) is still
+        // visible as a level, not only via the completion-time duration
+        // histogram.
+        timer.bump_active(1);
         timer
     }
 
     /// Close the current phase (record its duration) and open `next`.
     pub fn transition(&mut self, next: &'static str) {
         self.record_current();
-        // Issue #2361: the closing phase is no longer active; the opening one is.
-        self.set_active(0);
+        // Issue #2361: the closing phase's count drops by one; the opening
+        // phase's count rises by one.
+        self.bump_active(-1);
         self.phase = phase_slot(next);
         self.started = Instant::now();
-        self.set_active(1);
+        self.bump_active(1);
     }
 
-    /// Set the in-flight phase-active gauge (issue #2361) to `value` (1 = the
-    /// phase is currently executing, 0 = it has exited), tagged with the bounded
-    /// method + phase attributes.
-    fn set_active(&self, value: i64) {
+    /// Adjust the in-flight phase-active gauge (issue #2361, hardening A/roborev
+    /// round 2) by `delta` (+1 on phase entry, -1 on exit) and record the
+    /// RESULTING level, tagged with the bounded method + phase attributes.
+    ///
+    /// This is an up/down COUNTER, not a set-to-0/1 flag: a set-style gauge is
+    /// unsound under concurrent `do_get`s sharing a (method, phase) pair (the
+    /// field case: 8 in flight) — one call's exit would zero the gauge for every
+    /// OTHER call still mid-phase. The shared per-(method, phase) atomic mirrors
+    /// [`RPC_IN_FLIGHT`]'s pattern so the reported level is a true concurrent
+    /// in-flight count. Label cardinality is unchanged (still exactly
+    /// `RPC_METHODS.len() * RPC_PHASES.len()` combinations).
+    fn bump_active(&self, delta: i64) {
+        let idx = phase_active_index(method_index(self.method), phase_index(self.phase));
+        let level = phase_active_counters()[idx].fetch_add(delta, Ordering::Relaxed) + delta;
         let _entered = self.span.enter();
         obs::record_gauge(
             catalog::RPC_PHASE_ACTIVE,
-            value,
+            // A floor of 0 guards against ever recording a negative gauge from an
+            // unexpected imbalance, matching `RpcMetrics::finish`'s identical
+            // `max(0)` floor on `RPC_IN_FLIGHT`.
+            level.max(0),
             &[
                 method_attr(self.method),
                 (
@@ -304,8 +347,9 @@ impl Drop for PhaseTimer {
         // AND an error/cancel/panic exit that never transitioned further, so a
         // stall that emits zero rows still records the phase it died in.
         self.record_current();
-        // Issue #2361: clear the in-flight phase-active gauge on every exit path.
-        self.set_active(0);
+        // Issue #2361: decrement the in-flight phase-active counter on every exit
+        // path (normal completion, error, cancel, panic).
+        self.bump_active(-1);
     }
 }
 
@@ -561,6 +605,91 @@ mod tests {
             IN_FLIGHT[idx].load(Ordering::Relaxed),
             base,
             "drop decrements the shared per-method counter back to base"
+        );
+    }
+
+    /// Hardening A (issue #2361, roborev round 2): `cqlite.rpc.phase.active`
+    /// must be a TRUE concurrent in-flight COUNT, not a set-to-0/1 flag. Two
+    /// overlapping `PhaseTimer`s in the SAME phase must both be reflected — the
+    /// first's exit must NOT zero the level while the second is still active.
+    /// A set-style gauge (the pre-hardening implementation) would fail this: the
+    /// first timer's `Drop`/`transition` would set the gauge to 0 even though
+    /// the second timer is still mid-phase.
+    #[test]
+    fn phase_active_counter_reflects_concurrent_overlap_not_a_flag() {
+        // Dedicated method slot so no other test's PhaseTimer perturbs the count.
+        let midx = method_index("list_actions");
+        let pidx = phase_index(PHASE_RESOLVE);
+        let idx = phase_active_index(midx, pidx);
+        let base = phase_active_counters()[idx].load(Ordering::Relaxed);
+
+        let first = PhaseTimer::start("list_actions");
+        assert_eq!(
+            phase_active_counters()[idx].load(Ordering::Relaxed),
+            base + 1,
+            "first timer's entry bumps the count to base + 1"
+        );
+
+        let second = PhaseTimer::start("list_actions");
+        assert_eq!(
+            phase_active_counters()[idx].load(Ordering::Relaxed),
+            base + 2,
+            "a SECOND overlapping timer in the same phase must ADD to the count \
+             (base + 2), not clobber it back to 1 — the set-to-1 flag bug this \
+             hardening fixes"
+        );
+
+        drop(first);
+        assert_eq!(
+            phase_active_counters()[idx].load(Ordering::Relaxed),
+            base + 1,
+            "the first timer's exit must decrement by exactly one, leaving the \
+             second timer's contribution intact (base + 1, NOT 0 — the set-to-0 \
+             flag bug this hardening fixes)"
+        );
+
+        drop(second);
+        assert_eq!(
+            phase_active_counters()[idx].load(Ordering::Relaxed),
+            base,
+            "both timers exited: the count returns to its pre-test baseline"
+        );
+    }
+
+    /// A `transition` must move the count from the OLD phase to the NEW phase —
+    /// decrementing the old, incrementing the new — never double-counting or
+    /// leaking a stale increment on the old phase (issue #2361).
+    #[test]
+    fn phase_active_counter_moves_on_transition() {
+        let midx = method_index("do_action");
+        let resolve_idx = phase_active_index(midx, phase_index(PHASE_RESOLVE));
+        let stream_idx = phase_active_index(midx, phase_index(PHASE_STREAM));
+        let resolve_base = phase_active_counters()[resolve_idx].load(Ordering::Relaxed);
+        let stream_base = phase_active_counters()[stream_idx].load(Ordering::Relaxed);
+
+        let mut timer = PhaseTimer::start("do_action");
+        assert_eq!(
+            phase_active_counters()[resolve_idx].load(Ordering::Relaxed),
+            resolve_base + 1
+        );
+
+        timer.transition(PHASE_STREAM);
+        assert_eq!(
+            phase_active_counters()[resolve_idx].load(Ordering::Relaxed),
+            resolve_base,
+            "transition must decrement the OLD phase's count back to baseline"
+        );
+        assert_eq!(
+            phase_active_counters()[stream_idx].load(Ordering::Relaxed),
+            stream_base + 1,
+            "transition must increment the NEW phase's count"
+        );
+
+        drop(timer);
+        assert_eq!(
+            phase_active_counters()[stream_idx].load(Ordering::Relaxed),
+            stream_base,
+            "Drop decrements whichever phase was open at exit"
         );
     }
 

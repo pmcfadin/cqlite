@@ -240,7 +240,7 @@ async fn mid_scan_cancel_aborts_on_compressed_stitching_path() {
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, None, |_row| {
+        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, |_row| {
             count += 1;
             if count == TRIP_AT {
                 cancel.cancel();
@@ -271,15 +271,10 @@ async fn uncancelled_scan_streams_all_partitions() {
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(
-            Some(&schema()),
-            &ScanCancel::default(),
-            None,
-            |_row| {
-                count += 1;
-                Ok(std::ops::ControlFlow::Continue(()))
-            },
-        )
+        .stream_all_partitions_for_compaction(Some(&schema()), &ScanCancel::default(), |_row| {
+            count += 1;
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
         .await;
 
     assert!(result.is_ok(), "uncancelled scan must succeed: {result:?}");
@@ -305,7 +300,7 @@ async fn pre_cancelled_scan_aborts_at_first_poll() {
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, None, |_row| {
+        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, |_row| {
             count += 1;
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -344,7 +339,7 @@ async fn mid_scan_cancel_aborts_before_finishing() {
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, None, |_row| {
+        .stream_all_partitions_for_compaction(Some(&schema()), &cancel, |_row| {
             count += 1;
             if count == TRIP_AT {
                 cancel.cancel();
@@ -497,7 +492,7 @@ async fn two_concurrent_scans_on_shared_reader_cancel_independently() {
     let handle_a = tokio::spawn(async move {
         let mut count = 0usize;
         let result = reader_a
-            .stream_all_partitions_for_compaction(Some(&schema()), &cancel_a_task, None, |_row| {
+            .stream_all_partitions_for_compaction(Some(&schema()), &cancel_a_task, |_row| {
                 count += 1;
                 if count == TRIP_AT {
                     // Wait until B is demonstrably parked mid-scan, THEN cancel —
@@ -521,7 +516,7 @@ async fn two_concurrent_scans_on_shared_reader_cancel_independently() {
     let handle_b = tokio::spawn(async move {
         let mut count = 0usize;
         let result = reader_b
-            .stream_all_partitions_for_compaction(Some(&schema()), &cancel_b_task, None, |_row| {
+            .stream_all_partitions_for_compaction(Some(&schema()), &cancel_b_task, |_row| {
                 count += 1;
                 if count == PARK_AT {
                     // Announce we are mid-scan, then hold here until A has

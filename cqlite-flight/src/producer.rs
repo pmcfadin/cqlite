@@ -606,22 +606,21 @@ impl MergeProducer {
         // each run's producer thread abandons promptly on client disconnect,
         // instead of the ~1–2 min transport backstop.
         //
-        // Issue #2361: push the ticket's `LIMIT` into the merge as a per-producer
-        // PARTITION budget so a bounded scan over a huge (e.g. 1.13M-partition)
-        // uncompressed SSTable stops each producer after ~`limit` partitions
-        // instead of streaming to completion. Best-effort under
-        // `limitGuaranteed = false` (the consumer's post-reconciliation LIMIT
-        // break + bounded-channel backpressure remain the correctness bound).
-        let mut merger = KWayMerger::new_cancellable_with_partition_limit(
-            paths,
-            &self.schema,
-            cancel.scan_cancel(),
-            // `spec.limit` is `Option<u64>`; a value exceeding `usize::MAX` (only
-            // possible on a 32-bit target) is treated as unbounded (`None`) — the
-            // backpressure + LIMIT-break bound still applies. No truncation.
-            self.spec.limit.and_then(|l| usize::try_from(l).ok()),
-        )
-        .map_err(ProducerError::Merge)?;
+        // No producer-side `LIMIT` budget (issue #2361, roborev round 2): a
+        // per-producer PARTITION cap is not a safe proxy for a row-level `LIMIT`
+        // — the predicate filter runs at the CONSUMER (`drive_merge`, below), and
+        // even without a filter a tombstoned/cross-generation-shadowed partition
+        // contributes zero surviving rows while still consuming a "budget" slot.
+        // Either shape risks a producer stopping before enough SURVIVING rows
+        // exist, which `limitGuaranteed = false` never permits (it allows MORE
+        // rows than the cap, never fewer). `LIMIT` is enforced purely downstream:
+        // the consumer's post-reconciliation early break (below) plus the
+        // cancel-aware Drop teardown (cancel → drop receiver → join) stopping the
+        // producer promptly once the consumer stops pulling — see
+        // `SSTableReader::stream_all_partitions_cancellable`'s doc for the full
+        // reasoning.
+        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
+            .map_err(ProducerError::Merge)?;
         on_merger_built();
         self.drive_merge(
             &mut merger,

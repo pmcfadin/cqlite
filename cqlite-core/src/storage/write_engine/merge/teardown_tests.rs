@@ -8,9 +8,16 @@
 //! waits for a thread that is itself waiting for channel space that will never
 //! come. `SSTableRowIteratorAdapter::drop` therefore drops the receiver (waking
 //! the blocked send with `Err`) and trips `scan_cancel` BEFORE joining. If this
-//! test hangs, that teardown ordering regressed. It references
-//! `new_cancellable_with_partition_limit`, which does not exist on pre-#2361
-//! `main` (compile-red there).
+//! test hangs, that teardown ordering regressed.
+//!
+//! No producer-side `LIMIT` budget exists (removed in roborev round 2 — see
+//! `stream_all_partitions_cancellable`'s doc): `new_cancellable` never lets a
+//! producer exit early on its own, so the fixture (`>
+//! STREAMING_CHANNEL_CAPACITY` partitions, unstepped) is what forces the
+//! producer to genuinely park in `send` — the scenario this test exists to
+//! prove doesn't deadlock. This is also the "doesn't scan a 1.13M-partition
+//! table to completion" proof: since the channel is never drained, the producer
+//! structurally cannot proceed past its backpressure point before teardown.
 
 use super::KWayMerger;
 use crate::schema::{Column, KeyColumn, TableSchema};
@@ -105,17 +112,15 @@ fn dropping_backpressured_merger_does_not_deadlock() {
     let (_temp, data_path) = write_fixture(400);
     let schema = schema();
 
-    let merger = KWayMerger::new_cancellable_with_partition_limit(
-        vec![data_path],
-        &schema,
-        ScanCancel::default(),
-        Some(2),
-    )
-    .expect("merger constructs");
-    // Intentionally do NOT step: let the producer fill the bounded channel and
-    // park in `send`, then drop the merger (join-on-drop teardown). RETURNING from
-    // this test (no hang) is the proof — a regressed, deadlocking teardown would
-    // never reach the end of the function.
+    let merger = KWayMerger::new_cancellable(vec![data_path], &schema, ScanCancel::default())
+        .expect("merger constructs");
+    // Intentionally do NOT step: with no producer-side budget, the ONLY thing
+    // that can stop the producer from filling the channel is genuine
+    // backpressure — it parks in `send` once the channel (256 entries) plus its
+    // one in-flight item are full, well short of the fixture's 400 partitions.
+    // Dropping the merger here (join-on-drop teardown) must not hang; RETURNING
+    // from this test (no hang) is the proof — a regressed, deadlocking teardown
+    // would never reach the end of the function.
     drop(merger);
 }
 
@@ -127,13 +132,8 @@ fn dropping_merger_after_partial_consumption_joins() {
     let schema = schema();
     let cancel = ScanCancel::default();
 
-    let mut merger = KWayMerger::new_cancellable_with_partition_limit(
-        vec![data_path],
-        &schema,
-        cancel.clone(),
-        Some(1000),
-    )
-    .expect("merger constructs");
+    let mut merger = KWayMerger::new_cancellable(vec![data_path], &schema, cancel.clone())
+        .expect("merger constructs");
 
     // Consume a couple of partitions so the producer is actively streaming.
     let _ = merger.step().expect("first step");

@@ -1,7 +1,10 @@
-//! Issue #2361 — the non-stitching scan path must TRUE-stream each partition and
-//! honour a per-producer partition LIMIT, instead of materialising the whole
-//! SSTable into one `Vec` before the first emit (the 1.13M-partition hang /
-//! unbounded memory).
+//! Issue #2361 — the non-stitching scan path must TRUE-stream each partition
+//! instead of materialising the whole SSTable into one `Vec` before the first
+//! emit (the 1.13M-partition hang / unbounded memory). No producer-side `LIMIT`
+//! budget exists here (removed in roborev round 2 — a partition count is not a
+//! safe proxy for a row-level `LIMIT`; see `stream_all_partitions_cancellable`'s
+//! doc) — `LIMIT` bounding is proven at the flight level instead
+//! (`streaming_tests.rs`'s backpressured-teardown + sparse-predicate tests).
 //!
 //! These tests drive [`SSTableReader::stream_all_partitions_cancellable`] and
 //! [`SSTableReader::stream_all_partitions_via_full_index`] DIRECTLY over a
@@ -99,22 +102,18 @@ async fn open_reader(data_path: &std::path::Path) -> SSTableReader {
         .unwrap()
 }
 
-/// LIMIT bound (issue #2361): `stream_all_partitions_cancellable` with a
-/// per-producer partition budget of `k` must emit at most `k` partitions over an
-/// `N`-partition SSTable (`N > k`) — NOT all `N`. With `None` it emits every
-/// partition (non-vacuity: proves the fixture really has `N` partitions).
+/// Non-vacuity + full enumeration (issue #2361): `stream_all_partitions_cancellable`
+/// (no `limit` parameter) emits every one of the fixture's `N` partitions.
 #[tokio::test]
-async fn stream_all_partitions_cancellable_respects_partition_limit() {
+async fn stream_all_partitions_cancellable_emits_every_partition() {
     const N: i32 = 24;
-    const K: usize = 6;
     let (_temp, data_path) = write_fixture(N).await;
     let reader = open_reader(&data_path).await;
     let cancel = ScanCancel::default();
 
-    // Unbounded: every partition is emitted.
     let mut all = 0usize;
     reader
-        .stream_all_partitions_cancellable(&cancel, None, |_row| {
+        .stream_all_partitions_cancellable(&cancel, |_row| {
             all += 1;
             Ok(ControlFlow::Continue(()))
         })
@@ -122,28 +121,8 @@ async fn stream_all_partitions_cancellable_respects_partition_limit() {
         .unwrap();
     assert_eq!(
         all, N as usize,
-        "unbounded streaming scan must emit every one of the {N} partitions \
+        "streaming scan must emit every one of the {N} partitions \
          (non-vacuity guard: the fixture actually holds {N} partitions)"
-    );
-
-    // Bounded to K: the producer stops after ~K partitions (one row per
-    // partition), never walking all N — the anti-hang property.
-    let mut bounded = 0usize;
-    reader
-        .stream_all_partitions_cancellable(&cancel, Some(K), |_row| {
-            bounded += 1;
-            Ok(ControlFlow::Continue(()))
-        })
-        .await
-        .unwrap();
-    assert!(
-        bounded <= K,
-        "a LIMIT-{K} streaming scan must emit at most {K} partitions, got {bounded} \
-         (LIMIT must bound the producer, not run to completion over {N})"
-    );
-    assert!(
-        bounded > 0,
-        "a LIMIT-{K} scan over {N} partitions must still emit rows"
     );
 }
 
@@ -160,7 +139,7 @@ async fn stream_via_full_index_streams_every_partition_in_order() {
 
     let mut streamed_keys: Vec<crate::RowKey> = Vec::new();
     let outcome = reader
-        .stream_all_partitions_via_full_index(&cancel, None, &mut |(key, _value)| {
+        .stream_all_partitions_via_full_index(&cancel, &mut |(key, _value)| {
             streamed_keys.push(key);
             Ok(ControlFlow::Continue(()))
         })
@@ -209,7 +188,7 @@ async fn stream_all_partitions_cancellable_stops_on_break() {
 
     let mut emitted = 0usize;
     reader
-        .stream_all_partitions_cancellable(&cancel, None, |_row| {
+        .stream_all_partitions_cancellable(&cancel, |_row| {
             emitted += 1;
             Ok(ControlFlow::Break(()))
         })
@@ -235,7 +214,7 @@ async fn stream_all_partitions_cancellable_pre_cancel_emits_nothing() {
 
     let mut emitted = 0usize;
     let result = reader
-        .stream_all_partitions_cancellable(&cancel, None, |_row| {
+        .stream_all_partitions_cancellable(&cancel, |_row| {
             emitted += 1;
             Ok(ControlFlow::Continue(()))
         })

@@ -38,13 +38,44 @@ use super::super::SSTableReader;
 use crate::schema::TableSchema;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::types::ScanRow;
+use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
 use std::ops::ControlFlow;
 
+/// Hardening B (issue #2361, roborev round 2): the streaming walk EMITS each
+/// partition to the k-way merger as it resolves it, unlike the materialising
+/// sibling ([`SSTableReader::iterate_all_partitions_via_full_index`]), which
+/// defensively re-sorts its whole result via `sort_by_token_order` before
+/// returning — a post-hoc corrective the streaming path cannot apply (it has
+/// already emitted). This is the O(1)-per-partition guard that stands in for
+/// that sort: `Index.db` entries are ASSUMED token-ordered (matching Data.db's
+/// physical layout), but that assumption is never re-verified anywhere else on
+/// this path. A violation would silently hand the merger inputs it requires to
+/// be sorted, corrupting cross-SSTable reconciliation — so this fails CLOSED
+/// (`Error::corruption`) rather than emit out of order (issue #28: authoritative
+/// structure only, never a silent best-effort).
+///
+/// Equal tokens (a real Murmur3 collision between distinct keys) are NOT a
+/// violation — only a STRICT decrease is. Factored out as a pure function
+/// (`prev`/`token`/`index` in, `Result<()>` out) so it is unit-testable without
+/// a full `SSTableReader` fixture.
+fn check_token_monotonic(prev: Option<i64>, token: i64, index: usize) -> Result<()> {
+    if let Some(prev) = prev {
+        if token < prev {
+            return Err(Error::corruption(format!(
+                "stream_all_partitions_via_full_index: partition {index} token {token} is out \
+                 of order (< previous {prev}) — Index.db entries are not token-ordered \
+                 (issue #2361)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Outcome of [`SSTableReader::stream_all_partitions_via_full_index`].
 pub(in crate::storage::sstable::reader) enum FullIndexStreamOutcome {
-    /// Every partition was streamed (the walk ran to completion, hit the
-    /// `limit`, or the consumer returned `ControlFlow::Break`).
+    /// Every partition was streamed (the walk ran to completion, or the
+    /// consumer returned `ControlFlow::Break`).
     Streamed,
     /// An up-front structural gate failed BEFORE any partition was emitted. The
     /// caller must fall back to a (materialising) `sequential_scan`; nothing was
@@ -60,14 +91,21 @@ impl SSTableReader {
     ///
     /// `emit` receives `(row_key, value)` per surviving (tombstone-filtered) row,
     /// in index (token) order, and returns `ControlFlow::Break` to stop early
-    /// (consumer dropped / satisfied). `limit`, when set, is a PER-PRODUCER
-    /// PARTITION budget: the walk stops after emitting `limit` partitions. See the
-    /// caller ([`stream_all_partitions_cancellable`](Self::stream_all_partitions_cancellable))
-    /// for the k-way-merge reasoning behind a partition-granular budget.
+    /// (consumer dropped / satisfied).
+    ///
+    /// No `limit`/budget parameter (issue #2361, roborev round 2): a per-producer
+    /// PARTITION count is not a safe proxy for a row-level `LIMIT` — a producer
+    /// cannot know how many of its partitions the k-way merger will keep (a
+    /// predicate filter runs at the consumer, and shadowed/tombstoned partitions
+    /// contribute zero surviving rows), so any producer-side cap risks
+    /// under-returning. `LIMIT` is enforced purely downstream: the consumer's
+    /// post-reconciliation early break (`drive_merge`) plus this crate's
+    /// cancel-aware Drop teardown (cancel → drop receiver → join) stopping the
+    /// producer promptly once the consumer stops pulling — see
+    /// [`stream_all_partitions_cancellable`](Self::stream_all_partitions_cancellable).
     pub(in crate::storage::sstable::reader) async fn stream_all_partitions_via_full_index<F>(
         &self,
         scan_cancel: &ScanCancel,
-        limit: Option<usize>,
         emit: &mut F,
     ) -> Result<FullIndexStreamOutcome>
     where
@@ -118,6 +156,10 @@ impl SSTableReader {
         let parser = self.build_v5_parser(true);
         let reader_schema = self.get_table_schema(None);
         let schema = reader_schema.as_ref();
+        // Hardening B (issue #2361): O(1)-per-partition token-monotonicity guard —
+        // see `check_token_monotonic`'s doc for why this stands in for the
+        // materialising sibling's defensive `sort_by_token_order`.
+        let mut prev_token: Option<i64> = None;
 
         for i in 0..entries.len() {
             // Cooperative cancellation: one real index-random-read + Data.db parse
@@ -125,17 +167,11 @@ impl SSTableReader {
             // walk promptly (issue #2264, PER-CALL token issue #2346).
             scan_cancel.check()?;
 
-            // Per-producer partition budget (issue #2361): stop after emitting
-            // `limit` partitions. Every prior iteration ran to completion (the only
-            // early exits `return` out of the loop), so at the top of iteration `i`
-            // exactly `i` partitions have been fully emitted — `i` IS the count.
-            if let Some(cap) = limit {
-                if i >= cap {
-                    return Ok(FullIndexStreamOutcome::Streamed);
-                }
-            }
-
             let partition_key = entries[i].raw_key.as_deref().unwrap_or(&[]);
+            let token = cassandra_murmur3_token(partition_key);
+            check_token_monotonic(prev_token, token, i)?;
+            prev_token = Some(token);
+
             let Some((data_offset, _size)) =
                 self.lookup_partition_with_index(partition_key).await?
             else {
@@ -209,32 +245,27 @@ impl SSTableReader {
     /// (bounded memory, index/token order). Only when that up-front-bails (no
     /// usable/complete index) does it fall back to the MATERIALISING
     /// `sequential_scan` — which cannot stream in token order without collecting +
-    /// sorting first, so it stays materialising, bounded instead by `limit`
-    /// truncation. The #2361 field table has a valid `Index.db`, so it takes the
-    /// streaming branch; the sequential fallback is the rare degenerate path
+    /// sorting first. The #2361 field table has a valid `Index.db`, so it takes
+    /// the streaming branch; the sequential fallback is the rare degenerate path
     /// (missing/malformed index) and is documented, not fixed, here.
     ///
-    /// ## `limit` and the k-way merge (partition-granular budget)
+    /// ## No producer-side `LIMIT` budget (issue #2361, roborev round 2)
     ///
-    /// `limit` is a PER-PRODUCER PARTITION budget, not a global row limit. In the
-    /// Flight scan each input SSTable is one producer feeding a k-way merger that
-    /// interleaves and reconciles across producers, and the consumer breaks at
-    /// `limit` POST-reconciliation rows. A producer that has emitted `limit`
-    /// partitions has, in the normal case (at least one live row per partition),
-    /// already supplied at least `limit` rows on its own (more than the merge can
-    /// need), so stopping there is a sound best-effort push-down under the
-    /// connector's `limitGuaranteed = false` contract (Trino keeps a global
-    /// `Limit` above). The PRIMARY, always-correct bound is still the
-    /// bounded-channel backpressure plus prompt cancel teardown: when the consumer
-    /// stops pulling, the producer's blocking channel send wakes on receiver-drop
-    /// and the producer exits. Residual caveat (scope-flagged): a producer capped
-    /// at `limit` partitions that ALL reconcile away under cross-generation
-    /// shadowing could under-return; the global Trino `Limit` and the always-on
-    /// backpressure bound cover it in practice.
+    /// Earlier revisions threaded an optional per-producer PARTITION budget here.
+    /// It was REMOVED: `LIMIT` counts surviving, post-reconciliation ROWS, not
+    /// partitions scanned, and a producer cannot know that count in advance — a
+    /// consumer-side predicate filter can thin a partition's rows to zero, and a
+    /// tombstoned/cross-generation-shadowed partition contributes zero surviving
+    /// rows while still consuming a "budget" slot. Either case makes a
+    /// partition-granular producer cap risk returning FEWER rows than exist,
+    /// which no `limitGuaranteed = false` contract permits (it only permits
+    /// MORE). `LIMIT` is therefore enforced purely downstream: the consumer's
+    /// post-reconciliation early break (`drive_merge`) stops pulling, and the
+    /// cancel-aware Drop teardown (cancel → drop receiver → join) then stops the
+    /// producer promptly — bounding work WITHOUT any risk of under-return.
     pub(in crate::storage::sstable::reader) async fn stream_all_partitions_cancellable<F>(
         &self,
         scan_cancel: &ScanCancel,
-        limit: Option<usize>,
         mut emit: F,
     ) -> Result<()>
     where
@@ -242,7 +273,7 @@ impl SSTableReader {
     {
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
             match self
-                .stream_all_partitions_via_full_index(scan_cancel, limit, &mut emit)
+                .stream_all_partitions_via_full_index(scan_cancel, &mut emit)
                 .await?
             {
                 FullIndexStreamOutcome::Streamed => return Ok(()),
@@ -257,12 +288,13 @@ impl SSTableReader {
             }
         }
 
-        // Fallback: materialising sequential scan (rare degenerate path). Bounded
-        // by `limit` truncation inside `sequential_scan` (LIMIT-after-token-sort).
+        // Fallback: materialising sequential scan (rare degenerate path). No
+        // producer-side limit (see this method's doc) — the consumer's
+        // post-reconciliation LIMIT break bounds it downstream instead.
         let table_id = self.scan_table_id();
         let schema = self.schema.as_deref();
         let entries = self
-            .sequential_scan(&table_id, None, None, limit, schema, scan_cancel)
+            .sequential_scan(&table_id, None, None, None, schema, scan_cancel)
             .await?;
         for (key, value) in entries {
             match emit((key, value))? {
@@ -301,5 +333,45 @@ impl SSTableReader {
         let step =
             parser.parse_one_partition_for_compaction(raw, schema, self, false, &mut noop)?;
         Ok(matches!(step, ParseStep::Emitted(consumed) if consumed == raw.len()))
+    }
+}
+
+#[cfg(test)]
+mod check_token_monotonic_tests {
+    use super::check_token_monotonic;
+
+    /// The FIRST partition (`prev = None`) never fails, regardless of its token.
+    #[test]
+    fn first_partition_always_passes() {
+        assert!(check_token_monotonic(None, i64::MIN, 0).is_ok());
+        assert!(check_token_monotonic(None, 0, 0).is_ok());
+        assert!(check_token_monotonic(None, i64::MAX, 0).is_ok());
+    }
+
+    /// Ascending tokens (the well-formed case) pass at every step.
+    #[test]
+    fn ascending_tokens_pass() {
+        assert!(check_token_monotonic(Some(-100), -50, 1).is_ok());
+        assert!(check_token_monotonic(Some(-50), 0, 2).is_ok());
+        assert!(check_token_monotonic(Some(0), 50, 3).is_ok());
+    }
+
+    /// Equal tokens (a genuine Murmur3 collision between distinct keys) are
+    /// explicitly NOT a violation — only a strict decrease is.
+    #[test]
+    fn equal_tokens_pass() {
+        assert!(check_token_monotonic(Some(42), 42, 1).is_ok());
+    }
+
+    /// Hardening B (issue #2361, roborev round 2): a STRICTLY DECREASING token —
+    /// the out-of-order-Index.db shape this guard exists to catch — fails closed
+    /// with `Error::corruption`, never a silent pass-through to the k-way merger.
+    #[test]
+    fn strictly_decreasing_token_fails_closed() {
+        let result = check_token_monotonic(Some(100), 99, 5);
+        assert!(
+            matches!(result, Err(crate::Error::Corruption(_))),
+            "a decreasing token must fail closed as Error::corruption, got {result:?}"
+        );
     }
 }

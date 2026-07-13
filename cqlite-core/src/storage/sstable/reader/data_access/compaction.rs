@@ -560,7 +560,6 @@ impl SSTableReader {
         &self,
         schema: Option<&crate::schema::TableSchema>,
         scan_cancel: &ScanCancel,
-        limit: Option<usize>,
         mut emit: F,
     ) -> Result<()>
     where
@@ -580,11 +579,14 @@ impl SSTableReader {
         // than materialising the whole SSTable into one Vec before the first emit
         // (issue #2361). This is what lets a downstream `LIMIT` early-break and a
         // client-disconnect cancellation take effect promptly and keeps peak
-        // memory bounded on a 1M-partition table. `limit` is threaded through as a
-        // per-producer partition budget (see `stream_all_partitions_cancellable`).
-        // Issue #2346: the PER-CALL `scan_cancel` governs the whole walk.
+        // memory bounded on a 1M-partition table. No producer-side `limit`
+        // parameter (roborev round 2): a partition count is not a safe proxy for
+        // a row-level `LIMIT` (see `stream_all_partitions_cancellable`'s doc) —
+        // `LIMIT` is enforced purely downstream via the consumer's
+        // post-reconciliation break + cancel-aware Drop teardown. Issue #2346:
+        // the PER-CALL `scan_cancel` governs the whole walk.
         if !self.requires_chunk_stitching() {
-            self.stream_all_partitions_cancellable(scan_cancel, limit, |(key, value)| {
+            self.stream_all_partitions_cancellable(scan_cancel, |(key, value)| {
                 let row =
                     super::super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
                 emit(row)

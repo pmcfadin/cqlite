@@ -548,7 +548,6 @@ impl SSTableRowIteratorAdapter {
         schema: &TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
-        limit: Option<usize>,
     ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
@@ -582,7 +581,6 @@ impl SSTableRowIteratorAdapter {
                 schema,
                 udt_registry,
                 scan_cancel,
-                limit,
                 sender,
             );
         }) {
@@ -621,7 +619,6 @@ impl SSTableRowIteratorAdapter {
         schema: TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
-        limit: Option<usize>,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
     ) {
         // Issue #2316: decrement the live producer-thread gauge when this thread
@@ -709,7 +706,6 @@ impl SSTableRowIteratorAdapter {
                     run_index,
                     &schema,
                     &scan_cancel,
-                    limit,
                     &sender,
                 )
                 .await
@@ -2308,35 +2304,6 @@ impl KWayMerger {
         )
     }
 
-    /// Like [`KWayMerger::new_cancellable`], but also pushes a PER-PRODUCER
-    /// PARTITION `limit` into each input's streaming producer so a bounded
-    /// `LIMIT k` `do_get` scan stops each producer after ~`k` partitions instead
-    /// of walking a multi-million-partition SSTable to completion (issue #2361).
-    ///
-    /// `limit` is a best-effort push-down under the connector's
-    /// `limitGuaranteed = false` contract (Trino keeps a global `Limit` above) —
-    /// the always-correct bound is still the bounded-channel backpressure + the
-    /// cancel-aware teardown. `None` is identical to [`Self::new_cancellable`].
-    /// See
-    /// [`SSTableReader::stream_all_partitions_cancellable`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_cancellable)
-    /// for the k-way-merge reasoning (and the cross-generation shadowing caveat).
-    pub fn new_cancellable_with_partition_limit(
-        input_paths: Vec<PathBuf>,
-        schema: &TableSchema,
-        scan_cancel: crate::storage::scan_cancel::ScanCancel,
-        limit: Option<usize>,
-    ) -> Result<Self> {
-        Self::new_with_gc_registry_cancel_limit(
-            input_paths,
-            schema,
-            None,
-            None,
-            None,
-            scan_cancel,
-            limit,
-        )
-    }
-
     /// Create a new k-way merger with explicit purge parameters.
     ///
     /// Identical to [`KWayMerger::new`] but threads an explicit gc_grace cutoff
@@ -2404,37 +2371,6 @@ impl KWayMerger {
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Self> {
-        // Compaction/maintenance/point callers read EVERY partition — no
-        // per-producer LIMIT push-down (issue #2361). The Flight scan egress uses
-        // `new_cancellable_with_partition_limit` to bound each producer.
-        Self::new_with_gc_registry_cancel_limit(
-            input_paths,
-            schema,
-            gc_before_secs,
-            now_secs,
-            udt_registry,
-            scan_cancel,
-            None,
-        )
-    }
-
-    /// Base constructor variant that also threads an optional PER-PRODUCER
-    /// PARTITION `limit` into each input's streaming producer (issue #2361).
-    ///
-    /// Only the Flight `do_get` scan egress supplies a `limit` (via
-    /// [`Self::new_cancellable_with_partition_limit`]); every compaction/point
-    /// caller passes `None`. See
-    /// [`SSTableReader::stream_all_partitions_cancellable`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_cancellable)
-    /// for the partition-granular-budget reasoning.
-    fn new_with_gc_registry_cancel_limit(
-        input_paths: Vec<PathBuf>,
-        schema: &TableSchema,
-        gc_before_secs: Option<i64>,
-        now_secs: Option<i64>,
-        udt_registry: Option<crate::schema::UdtRegistry>,
-        scan_cancel: crate::storage::scan_cancel::ScanCancel,
-        limit: Option<usize>,
-    ) -> Result<Self> {
         if input_paths.is_empty() {
             return Err(Error::InvalidInput(
                 "K-way merge requires at least one input file".to_string(),
@@ -2450,7 +2386,12 @@ impl KWayMerger {
         // Create run readers for each input SSTable (ordered newest to oldest).
         // The registry (when supplied) is cloned onto each reader so a frozen UDT
         // value decodes structurally instead of erroring out and dropping the row
-        // (issue #1234).
+        // (issue #1234). No producer-side `LIMIT` push-down (issue #2361, roborev
+        // round 2): every producer scans until genuinely cancelled — `LIMIT` is
+        // enforced purely downstream (consumer post-reconciliation break +
+        // cancel-aware Drop teardown). See
+        // [`SSTableReader::stream_all_partitions_cancellable`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_cancellable)'s
+        // doc for why a partition-granular producer budget cannot be correct.
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
             let adapter = SSTableRowIteratorAdapter::open(
@@ -2459,7 +2400,6 @@ impl KWayMerger {
                 schema,
                 udt_registry.clone(),
                 scan_cancel.clone(),
-                limit,
             )?;
             runs.push(RunReader::new(Box::new(adapter)));
         }
