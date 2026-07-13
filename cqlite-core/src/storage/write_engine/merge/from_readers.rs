@@ -120,6 +120,8 @@ impl SSTableRowIteratorAdapter {
         scan_cancel: ScanCancel,
     ) -> Result<Self> {
         let schema = schema.clone();
+        // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
+        let adapter_cancel = scan_cancel.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
         // Issue #2316: account this producer on the live-thread gauge BEFORE
@@ -140,8 +142,9 @@ impl SSTableRowIteratorAdapter {
         };
 
         Ok(Self {
-            receiver,
-            _producer: producer,
+            receiver: Some(receiver),
+            producer: Some(producer),
+            scan_cancel: adapter_cancel,
         })
     }
 

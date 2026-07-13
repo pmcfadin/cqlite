@@ -603,9 +603,22 @@ impl MergeProducer {
         }
 
         // Issue #2264: wire the shared synchronous cancel token into the merge so
-        // each run's producer thread (which fully materialises an index-less
-        // SSTable in one uninterruptible pass) abandons promptly on client
-        // disconnect, instead of the ~1–2 min transport backstop.
+        // each run's producer thread abandons promptly on client disconnect,
+        // instead of the ~1–2 min transport backstop.
+        //
+        // No producer-side `LIMIT` budget (issue #2361, roborev round 2): a
+        // per-producer PARTITION cap is not a safe proxy for a row-level `LIMIT`
+        // — the predicate filter runs at the CONSUMER (`drive_merge`, below), and
+        // even without a filter a tombstoned/cross-generation-shadowed partition
+        // contributes zero surviving rows while still consuming a "budget" slot.
+        // Either shape risks a producer stopping before enough SURVIVING rows
+        // exist, which `limitGuaranteed = false` never permits (it allows MORE
+        // rows than the cap, never fewer). `LIMIT` is enforced purely downstream:
+        // the consumer's post-reconciliation early break (below) plus the
+        // cancel-aware Drop teardown (cancel → drop receiver → join) stopping the
+        // producer promptly once the consumer stops pulling — see
+        // `SSTableReader::stream_all_partitions_cancellable`'s doc for the full
+        // reasoning.
         let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
             .map_err(ProducerError::Merge)?;
         on_merger_built();

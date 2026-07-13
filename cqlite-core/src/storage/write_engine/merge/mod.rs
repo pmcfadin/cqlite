@@ -447,11 +447,33 @@ pub(crate) use async_bridge::block_on_async;
 /// `M + M·num_cpus` — killing the context-switch storm under concurrent `do_get`.
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
-    /// Receiving end of the bounded channel fed by the producer thread.
-    receiver: std::sync::mpsc::Receiver<std::result::Result<MergeEntry, MergeProducerError>>,
-    /// JoinHandle for the producer thread (held so the thread is joined on drop).
-    _producer: std::thread::JoinHandle<()>,
+    /// Receiving end of the bounded channel fed by the producer thread. `Option`
+    /// so [`Drop`] can drop it FIRST (issue #2361) — closing the channel wakes a
+    /// producer blocked on a full `SyncSender::send` (its send returns `Err`), so
+    /// the subsequent producer join is bounded and cannot deadlock.
+    receiver:
+        Option<std::sync::mpsc::Receiver<std::result::Result<MergeEntry, MergeProducerError>>>,
+    /// Producer thread handle. `Option` so [`Drop`] can `take()` it and JOIN the
+    /// thread (issue #2361) rather than detach it — the pre-#2361 `_producer`
+    /// field's "joined on drop" doc was WRONG (dropping a `JoinHandle` detaches
+    /// the thread, leaving it to run to completion in the background; a cancelled
+    /// `do_get` over a 1M-partition scan would keep burning CPU/IO). Joining after
+    /// dropping the receiver + tripping `scan_cancel` guarantees prompt teardown.
+    producer: Option<std::thread::JoinHandle<()>>,
+    /// The PER-CALL cancellation token this adapter's producer scan polls (issues
+    /// #2264/#2346). Held so (a) [`Self::next`] can make its blocking channel
+    /// `recv` cancel-aware and (b) [`Drop`] can trip it, waking a producer that is
+    /// mid-scan (not blocked on send) so it exits promptly before the join.
+    scan_cancel: crate::storage::scan_cancel::ScanCancel,
 }
+
+/// Poll interval for the cancel-aware blocking `recv` in
+/// [`SSTableRowIteratorAdapter::next`] (issue #2361). A bounded wait so a
+/// cancellation that lands while the consumer is blocked waiting for the next
+/// producer entry is observed within one interval, without a busy-spin. This is
+/// an INTERNAL cadence only — never asserted against wall-clock in tests.
+#[cfg(feature = "write-support")]
+const RECV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Channel-safe error payload sent from a producer thread to the merge (issue
 /// #2264).
@@ -497,6 +519,11 @@ const STREAMING_CHANNEL_CAPACITY: usize = 256;
 #[cfg(feature = "write-support")]
 mod producer_gauge;
 
+// Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
+// merge adapter.
+#[cfg(all(test, feature = "write-support"))]
+mod teardown_tests;
+
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
     /// Open an SSTable and start a streaming producer thread.
@@ -524,6 +551,8 @@ impl SSTableRowIteratorAdapter {
     ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
+        // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
+        let adapter_cancel = scan_cancel.clone();
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
@@ -566,8 +595,9 @@ impl SSTableRowIteratorAdapter {
         };
 
         Ok(Self {
-            receiver,
-            _producer: producer,
+            receiver: Some(receiver),
+            producer: Some(producer),
+            scan_cancel: adapter_cancel,
         })
     }
 
@@ -1134,19 +1164,65 @@ impl SSTableRowIteratorAdapter {
 #[cfg(feature = "write-support")]
 impl SSTableRowIterator for SSTableRowIteratorAdapter {
     fn next(&mut self) -> Option<Result<MergeEntry>> {
-        match self.receiver.recv() {
-            Ok(Ok(entry)) => Some(Ok(entry)),
-            // Issue #2264: reconstruct `Error::Cancelled` distinctly so a
-            // cancelled scan is never confused with a genuine I/O/corruption
-            // error at the merge/producer boundary — `drive_merge` matches on
-            // the variant, not on a side-channel flag.
-            Ok(Err(MergeProducerError::Cancelled)) => Some(Err(Error::Cancelled)),
-            Ok(Err(MergeProducerError::Other(msg))) => Some(Err(Error::Storage(format!(
-                "streaming merge producer error: {}",
-                msg
-            )))),
-            // Channel closed — producer finished normally.
-            Err(_) => None,
+        use std::sync::mpsc::RecvTimeoutError;
+        // The receiver is only `None` after `Drop` has run — never during a live
+        // merge — so treat a missing receiver as end-of-stream.
+        let receiver = self.receiver.as_ref()?;
+        // Cancel-aware blocking recv (issue #2361): a plain `recv()` blocks
+        // indefinitely inside `KWayMerger::step`, so a `do_get` cancellation that
+        // lands while the consumer is waiting for the next producer entry was NOT
+        // observed until an entry (or channel close) arrived. Poll `scan_cancel`
+        // at a bounded interval so `drive_merge` sees `Error::Cancelled` promptly
+        // even while blocked here.
+        loop {
+            if self.scan_cancel.is_cancelled() {
+                return Some(Err(Error::Cancelled));
+            }
+            match receiver.recv_timeout(RECV_CANCEL_POLL) {
+                Ok(Ok(entry)) => return Some(Ok(entry)),
+                // Issue #2264: reconstruct `Error::Cancelled` distinctly so a
+                // cancelled scan is never confused with a genuine I/O/corruption
+                // error at the merge/producer boundary — `drive_merge` matches on
+                // the variant, not on a side-channel flag.
+                Ok(Err(MergeProducerError::Cancelled)) => return Some(Err(Error::Cancelled)),
+                Ok(Err(MergeProducerError::Other(msg))) => {
+                    return Some(Err(Error::Storage(format!(
+                        "streaming merge producer error: {}",
+                        msg
+                    ))))
+                }
+                // No entry yet: re-poll the cancel flag and keep waiting.
+                Err(RecvTimeoutError::Timeout) => continue,
+                // Channel closed — producer finished normally.
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+}
+
+/// Cancel-aware teardown (issue #2361): trip the scan token, close the channel,
+/// then JOIN the producer thread — so a dropped merger (LIMIT satisfied, client
+/// disconnect, error, panic) does not leave a detached producer streaming a
+/// multi-million-partition scan in the background.
+#[cfg(feature = "write-support")]
+impl Drop for SSTableRowIteratorAdapter {
+    fn drop(&mut self) {
+        // 1. Trip the cooperative token so a producer that is mid-scan (polling
+        //    `scan_cancel`, NOT blocked on a channel send) abandons its walk.
+        self.scan_cancel.cancel();
+        // 2. Drop the receiver so a producer BLOCKED on a full `SyncSender::send`
+        //    wakes immediately (send returns `Err`, and `drive_compaction_stream`
+        //    maps that to `ControlFlow::Break`). Without this the join below could
+        //    block until the channel drained. Dropping it here (before the join)
+        //    rather than relying on field-drop order (which runs AFTER this `Drop`)
+        //    is what makes the join bounded.
+        drop(self.receiver.take());
+        // 3. Join the producer — bounded, because after (1)+(2) the producer
+        //    cannot block indefinitely: it either observes the cancel in its scan
+        //    loop or its next send fails. A failed join (producer panicked) is
+        //    ignored; the panic was already surfaced through the error channel.
+        if let Some(handle) = self.producer.take() {
+            let _ = handle.join();
         }
     }
 }
@@ -2310,7 +2386,12 @@ impl KWayMerger {
         // Create run readers for each input SSTable (ordered newest to oldest).
         // The registry (when supplied) is cloned onto each reader so a frozen UDT
         // value decodes structurally instead of erroring out and dropping the row
-        // (issue #1234).
+        // (issue #1234). No producer-side `LIMIT` push-down (issue #2361, roborev
+        // round 2): every producer scans until genuinely cancelled — `LIMIT` is
+        // enforced purely downstream (consumer post-reconciliation break +
+        // cancel-aware Drop teardown). See
+        // [`SSTableReader::stream_all_partitions_cancellable`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_cancellable)'s
+        // doc for why a partition-granular producer budget cannot be correct.
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
             let adapter = SSTableRowIteratorAdapter::open(
