@@ -79,7 +79,12 @@ fn device_inode(path: &Path) -> Option<(u64, u64)> {
     // Non-unix has no stable inode identity; fall back to "file exists" and let
     // the generation number carry the key. CQLite's supported deployment targets
     // are unix (macOS/Linux); this keeps the crate compiling elsewhere without
-    // claiming inode stability it cannot provide.
+    // claiming inode stability it cannot provide. Consequence (accepted,
+    // unsupported-target degradation): with a constant `(device, inode) = (0, 0)`
+    // here, `GenerationId` identity degrades to `(generation, size)` wherever a
+    // size check accompanies it (e.g. the #2383 rebind-by-inode gate,
+    // `rebuild::rebind_matches`) — never a silent correctness claim on a target
+    // CQLite does not support.
     std::fs::metadata(path).ok().map(|_| (0, 0))
 }
 

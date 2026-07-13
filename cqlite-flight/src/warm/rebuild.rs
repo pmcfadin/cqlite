@@ -12,15 +12,32 @@
 //! AFTER every racer had already paid the parse. [`OpenCoalescer`] moves the
 //! coalescing point EARLIER: concurrent opens of the SAME generation identity
 //! share ONE real open+parse; the leader opens, the followers block on a condvar
-//! and clone the resulting `Arc<SSTableReader>` with zero re-parse. It does NOT
-//! serialise whole rebuilds (each rebuild still runs its own probe/swap), so the
-//! existing swap-time race tests (`concurrent_same_key_rebuild_dedups...`,
+//! (cancel-aware — see [`OpenCoalescer::open`]) and clone the resulting
+//! `Arc<SSTableReader>` with zero re-parse. It does NOT serialise whole rebuilds
+//! (each rebuild still runs its own probe/swap), so the existing swap-time race
+//! tests (`concurrent_same_key_rebuild_dedups...`,
 //! `slow_rebuild_does_not_overwrite_a_faster_newer_swap`) keep exercising their
 //! forced concurrency without deadlocking.
+//!
+//! ## Fix A × Fix B interaction — the Weak-hit path-liveness gate (issue #2383
+//! ## blocker 1, post-review)
+//!
+//! `registry::rebuild`'s rebind pass only walks the CURRENTLY CACHED reader set
+//! for a table (`inner.tables.get(key)`) — an LRU-EVICTED-but-still-alive reader
+//! (kept alive only by an in-flight `WarmSet` `Arc` a prior request is still
+//! streaming) is invisible to it, so rebind can never repoint its path. A
+//! coalesced [`SlotState::Done`] `Weak` hit here therefore CANNOT assume its
+//! reader's path is live just because it upgraded: every `Done` serve is ALSO
+//! gated on [`reader_backing_present`] before being handed out. A dead path
+//! (its per-query snapshot dir was cleared while the reader outlived the
+//! registry's own cache entry) is treated as a miss and falls through to
+//! `do_open` from the live `entry.path` — never re-serving a stale, ENOENT-prone
+//! reader (the #2352 class). See `spin_tests_2383::evicted_but_inflight_reader_is_not_served_with_dead_path`.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::time::Duration;
 
 use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::scan_cancel::ScanCancel;
@@ -40,6 +57,15 @@ use super::WarmError;
 /// coalescer's memory bounded on a long-running server without a background task.
 const COALESCER_PRUNE_THRESHOLD: usize = 1024;
 
+/// How often a waiting FOLLOWER re-checks its request's [`CancelFlag`] (issue
+/// #2383 roborev-1653 Medium): a plain `Condvar::wait` never re-observes
+/// cancellation, so a cancelled follower would otherwise sit behind the leader's
+/// FULL Index.db open and only notice afterwards — exactly the field's
+/// "cancellation doesn't land" symptom. A bounded `wait_timeout` loop keeps this
+/// cheap (one wake per interval, not per entry) while making a follower's cancel
+/// latency roughly this interval, never "whatever the leader's whole parse costs".
+const FOLLOWER_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(75);
+
 /// Per-generation single-flight for reader opens (issue #2383 fix A).
 ///
 /// Keyed on the inode-stable [`GenerationId`], so two per-query snapshot hardlink
@@ -50,8 +76,9 @@ const COALESCER_PRUNE_THRESHOLD: usize = 1024;
 /// FAST in-process opens a test drives, not just a real 1.58M-entry parse. The
 /// `Weak` keeps NO reader alive, so the warm budget's LRU eviction is unaffected;
 /// once a generation's reader is truly gone the slot re-opens on the next miss.
-/// Rebind (fix B) mutates the shared reader in place, so a coalesced reader always
-/// reflects the current live path (no stale-path serve).
+/// A live `Weak` upgrade is NOT sufficient to serve, though — see the module doc
+/// ("Fix A × Fix B interaction") for why every `Done` hit is ALSO gated on
+/// [`reader_backing_present`].
 #[derive(Default)]
 pub(super) struct OpenCoalescer {
     inflight: Mutex<HashMap<GenerationId, Arc<OpenSlot>>>,
@@ -68,47 +95,116 @@ enum SlotState {
     /// The leader is opening; followers wait.
     #[default]
     Pending,
-    /// The reader was opened; followers clone it while the `Weak` is live.
+    /// The reader was opened; followers clone it while the `Weak` is live AND
+    /// its backing path resolves (issue #2383 blocker 1).
     Done(Weak<SSTableReader>),
     /// The last open attempt failed; the next caller re-leads.
     Failed,
 }
 
+/// RAII guard: if the leader's `do_open` PANICS (unwinds) before the guard is
+/// disarmed, transitions the slot to [`SlotState::Failed`] and wakes every
+/// follower on drop — without this, a panicking leader would leave the slot
+/// `Pending` forever, hanging every follower on the condvar (issue #2383,
+/// post-review hardening).
+struct FailSlotOnUnwind<'a> {
+    slot: &'a OpenSlot,
+    armed: bool,
+}
+
+impl Drop for FailSlotOnUnwind<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        {
+            let mut st = self
+                .slot
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if matches!(*st, SlotState::Pending) {
+                *st = SlotState::Failed;
+            }
+        }
+        self.slot.ready.notify_all();
+    }
+}
+
+/// The caller's elected role for one generation-id open (see
+/// [`OpenCoalescer::open`]).
+enum Role {
+    /// A coalesced hit: the reader is alive AND its backing path resolves.
+    Hit(Arc<SSTableReader>),
+    /// Elected leader: run `do_open` and publish the outcome.
+    Lead(Arc<OpenSlot>),
+    /// Elected follower: wait for the leader, cancel-aware.
+    Follow(Arc<OpenSlot>),
+    /// The cached reader is alive but its backing path is DEAD (issue #2383
+    /// blocker 1 — an LRU-evicted-but-in-flight generation whose snapshot dir
+    /// was cleared). Never served; falls through to our own `do_open` exactly
+    /// like a `Failed` slot — NOT a re-election through the slot (NIT 4: this
+    /// intentionally lets M concurrent callers each re-open here rather than
+    /// coalescing; fail-closed correctness beats dedup on this rare path).
+    DeadPathFallThrough,
+}
+
 impl OpenCoalescer {
     /// Coalesce the open of generation `id`: the first caller (leader) runs
-    /// `do_open`; concurrent callers whose reader is still alive clone it. Returns
+    /// `do_open`; concurrent callers whose reader is alive AND whose backing
+    /// path resolves (issue #2383 blocker 1) clone it. Returns
     /// `(reader, real_open)` where `real_open` is `true` iff THIS call performed
     /// the actual open (drives the reader-opens work-done metric — a coalesced
-    /// caller reports `false`). On leader FAILURE (or a since-evicted reader) the
-    /// caller falls through to its own `do_open` (fail-closed).
-    fn open<F>(&self, id: GenerationId, do_open: F) -> Result<(Arc<SSTableReader>, bool), WarmError>
+    /// caller reports `false`).
+    ///
+    /// A FOLLOWER's wait is cancel-aware (issue #2383 roborev-1653 Medium): it
+    /// re-checks `cancel` on a bounded [`FOLLOWER_CANCEL_POLL_INTERVAL`] wake and
+    /// returns [`WarmError::Cancelled`] promptly instead of sitting behind the
+    /// leader's full open — the leader itself is unaffected and still publishes
+    /// its outcome for any other waiter.
+    ///
+    /// On leader FAILURE (including a leader PANIC, via [`FailSlotOnUnwind`]), a
+    /// dead-path `Done` reader, or a since-evicted reader, the caller falls
+    /// through to its own `do_open` (fail-closed: correctness/liveness over
+    /// dedup on these rare paths).
+    fn open<F>(
+        &self,
+        id: GenerationId,
+        cancel: &CancelFlag,
+        do_open: F,
+    ) -> Result<(Arc<SSTableReader>, bool), WarmError>
     where
         F: FnOnce() -> Result<Arc<SSTableReader>, WarmError>,
     {
-        // Elect a role under the map lock. A slot in `Done` with a LIVE reader is a
-        // fast coalesced hit (no wait); a dead/failed/absent slot makes us the
-        // leader (we reset it to `Pending` so concurrent callers wait on us).
-        let (slot, is_leader) = {
+        // Elect a role under the map lock. A slot in `Done` with a LIVE reader
+        // AND a live backing path is a fast coalesced hit (no wait); a
+        // dead-path/failed/absent slot makes us the leader (we reset it to
+        // `Pending` so concurrent callers wait on us) or falls straight through.
+        let role = {
             let mut map = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(slot) = map.get(&id) {
                 let mut st = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
                 match &*st {
-                    SlotState::Done(weak) => {
-                        if let Some(reader) = weak.upgrade() {
-                            return Ok((reader, false));
+                    SlotState::Done(weak) => match weak.upgrade() {
+                        Some(reader) if reader_backing_present(&reader) => Role::Hit(reader),
+                        Some(_dead_path_reader) => {
+                            drop(st);
+                            Role::DeadPathFallThrough
                         }
-                        *st = SlotState::Pending; // reader evicted → re-lead
-                        drop(st);
-                        (Arc::clone(slot), true)
-                    }
+                        None => {
+                            *st = SlotState::Pending; // reader dropped → re-lead
+                            drop(st);
+                            Role::Lead(Arc::clone(slot))
+                        }
+                    },
                     SlotState::Failed => {
                         *st = SlotState::Pending;
                         drop(st);
-                        (Arc::clone(slot), true)
+                        Role::Lead(Arc::clone(slot))
                     }
                     SlotState::Pending => {
                         drop(st);
-                        (Arc::clone(slot), false)
+                        Role::Follow(Arc::clone(slot))
                     }
                 }
             } else {
@@ -120,42 +216,66 @@ impl OpenCoalescer {
                     ready: Condvar::new(),
                 });
                 map.insert(id, Arc::clone(&slot));
-                (slot, true)
+                Role::Lead(slot)
             }
         };
 
-        if is_leader {
-            let result = do_open();
-            {
-                let mut st = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-                *st = match &result {
-                    Ok(reader) => SlotState::Done(Arc::downgrade(reader)),
-                    Err(_) => SlotState::Failed,
+        match role {
+            Role::Hit(reader) => Ok((reader, false)),
+            Role::DeadPathFallThrough => do_open().map(|r| (r, true)),
+            Role::Lead(slot) => {
+                let mut guard = FailSlotOnUnwind {
+                    slot: &slot,
+                    armed: true,
                 };
+                let result = do_open();
+                guard.armed = false;
+                {
+                    let mut st = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    *st = match &result {
+                        Ok(reader) => SlotState::Done(Arc::downgrade(reader)),
+                        Err(_) => SlotState::Failed,
+                    };
+                }
+                slot.ready.notify_all();
+                result.map(|r| (r, true))
             }
-            slot.ready.notify_all();
-            return result.map(|r| (r, true));
-        }
-
-        // Follower: wait for the leader's outcome.
-        let mut st = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-        loop {
-            match &*st {
-                SlotState::Pending => {
-                    st = slot.ready.wait(st).unwrap_or_else(PoisonError::into_inner);
-                }
-                SlotState::Done(weak) => {
-                    if let Some(reader) = weak.upgrade() {
-                        return Ok((reader, false));
+            Role::Follow(slot) => {
+                let mut st = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+                loop {
+                    match &*st {
+                        SlotState::Pending => {
+                            if cancel.is_cancelled() {
+                                return Err(WarmError::Cancelled);
+                            }
+                            let (guard, _timed_out) = slot
+                                .ready
+                                .wait_timeout(st, FOLLOWER_CANCEL_POLL_INTERVAL)
+                                .unwrap_or_else(PoisonError::into_inner);
+                            st = guard;
+                        }
+                        SlotState::Done(weak) => match weak.upgrade() {
+                            Some(reader) if reader_backing_present(&reader) => {
+                                return Ok((reader, false));
+                            }
+                            _ => {
+                                // Evicted, or its backing path is dead (issue
+                                // #2383 blocker 1 / the #2352 ENOENT class):
+                                // never serve a stale/dead reader. Fall through
+                                // to our own `do_open` from the live
+                                // `entry.path` (fail-closed over dedup — NIT 4:
+                                // this intentionally lets M followers re-open
+                                // here, never re-electing a leader through the
+                                // slot).
+                                drop(st);
+                                return do_open().map(|r| (r, true));
+                            }
+                        },
+                        SlotState::Failed => {
+                            drop(st);
+                            return do_open().map(|r| (r, true));
+                        }
                     }
-                    // The reader was evicted between notify and our wake: open it
-                    // ourselves (fail-closed correctness over dedup).
-                    drop(st);
-                    return do_open().map(|r| (r, true));
-                }
-                SlotState::Failed => {
-                    drop(st);
-                    return do_open().map(|r| (r, true));
                 }
             }
         }
@@ -227,7 +347,7 @@ impl WarmTableRegistry {
             if cancel.is_cancelled() {
                 return Err(WarmError::Cancelled);
             }
-            let (reader, real) = self.coalescer.open(entry.id, || {
+            let (reader, real) = self.coalescer.open(entry.id, cancel, || {
                 open_one_reader(
                     &runtime,
                     &entry.path,

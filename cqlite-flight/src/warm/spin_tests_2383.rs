@@ -255,6 +255,19 @@ fn concurrent_misses_single_flight_one_parse_per_generation() {
 /// registry's coarse pre-open cancel check has already passed — trips the flag
 /// mid-parse.
 ///
+/// The margin is CALIBRATED against this host's own just-measured cost of fully
+/// opening+parsing this exact fixture (issue #2383 roborev-1653 NIT 5 — "no
+/// wall-clock races in tests"), not a fixed constant: a hardcoded sleep flakes on
+/// a fast host once the full parse completes faster than the constant, and
+/// raising the entry count to force a structural floor was measured to scale
+/// FAR worse than linearly in `SSTableReader::open` (150k → 1.8s, 2M → 5+min;
+/// not this issue's fix surface), so it is not a viable alternative here. A
+/// small, conservative FRACTION of a just-measured baseline instead scales DOWN
+/// automatically with host speed — comfortably past the microsecond-scale
+/// coarse pre-open check (a same-thread, no-I/O comparison) and comfortably
+/// short of the real run's parse, including under page-cache speedup from the
+/// calibration pass warming the OS cache for the timed run.
+///
 /// RED on current main: neither `parse_all_partition_keys_with_summary` nor
 /// `SSTableReader::open` polls the cancel flag, so once past the coarse
 /// between-open check the parse runs to completion and `warm_readers` returns
@@ -264,13 +277,26 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     let schema = simple_schema();
     let (_temp, table_dir) = build_big_single_gen(&schema, 150_000);
 
+    // Calibrate: fully open+parse the SAME fixture, uncancelled, once — this also
+    // warms the OS page cache ahead of the timed run below (biasing that run
+    // FASTER, never slower, than this baseline).
+    let calib_start = std::time::Instant::now();
+    WarmTableRegistry::new()
+        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &CancelFlag::new())
+        .expect("calibration warm (uncancelled) completes");
+    let baseline = calib_start.elapsed();
+    // 1/20th of the measured baseline: tens of ms on every host we've observed,
+    // dwarfing the coarse check's same-thread gap, and a small enough fraction to
+    // stay comfortably inside the timed run even under real page-cache speedup.
+    let margin = baseline / 20;
+
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
 
     // Signal when the (single) open has started; the open barrier fires at the top
     // of the open loop, immediately BEFORE the registry's coarse pre-open cancel
-    // check — so the canceller waits for it, then adds a margin so that coarse
-    // check has certainly passed and we are now inside the parse.
+    // check — so the canceller waits for it, then adds the calibrated margin so
+    // that coarse check has certainly passed and we are now inside the parse.
     let open_started = Arc::new(AtomicBool::new(false));
     {
         let flag = Arc::clone(&open_started);
@@ -287,7 +313,7 @@ fn cancel_during_large_index_parse_aborts_promptly() {
             // Margin: let the coarse pre-open cancel check run first, so this trip
             // lands strictly DURING the parse (never at the coarse boundary, which
             // the unfixed code already honors).
-            thread::sleep(Duration::from_millis(30));
+            thread::sleep(margin);
             cancel.cancel();
         })
     };
@@ -300,7 +326,106 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     assert!(
         matches!(res, Err(WarmError::Cancelled)),
         "a cancel tripped DURING a large Index.db parse must abort promptly with \
-         Cancelled, got {:?} (issue #2383 fix C)",
+         Cancelled (calibrated margin {margin:?} from baseline {baseline:?}), got \
+         {:?} (issue #2383 fix C)",
         res.map(|w| (w.outcome, w.readers.len()))
     );
+}
+
+/// **Blocker 1 (post-review, roborev job 1653)** — the coalescer's `Weak` hit
+/// must NOT serve a reader whose backing path is DEAD, even when that reader is
+/// kept alive purely by an IN-FLIGHT holder OUTSIDE the registry's own cache.
+///
+/// Scenario (the exact #2352 ENOENT class, one step removed): reader `R` for
+/// table A opens from a per-query snapshot dir; A's generation is then
+/// LRU-EVICTED from the registry's cache under budget pressure while a prior
+/// request still holds `R` alive via its `WarmSet` `Arc` clone (`held` below);
+/// A's snapshot dir is then cleared by the connector. `registry::rebuild`'s
+/// rebind pass (fix B) only walks the CURRENTLY CACHED reader set — since A's
+/// generation is no longer cached, rebind can never see `R`, let alone repoint
+/// its path. The coalescer's OWN `Done(Weak)` slot for `R`'s generation
+/// identity, however, is untouched by cache eviction (it lives in a SEPARATE
+/// map), so the ONLY thing standing between the next query and re-serving `R`'s
+/// dead path is the coalescer's own path-liveness gate.
+///
+/// RED without the blocker-1 fix: the coalescer upgrades its `Weak` to `Some(R)`
+/// and returns it immediately WITHOUT checking `R`'s (now dead) backing path.
+/// GREEN with the fix: the gate rejects the dead-path hit and falls through to
+/// `do_open` from the live `entry.path`, so the served reader always backs a
+/// live inode and decodes correctly.
+#[test]
+fn evicted_but_inflight_reader_is_not_served_with_dead_path() {
+    let schema = simple_schema();
+    let (_t_a, _d_a, dir_a) = build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+    let (_t_b, _d_b, dir_b) = build_sstables(&schema, vec![vec![write_row(2, "b", 2, 100)]]);
+
+    let key_a = TableKey::new(KS, "blocker1_victim");
+    let key_b = TableKey::new(KS, "blocker1_pressure");
+
+    // Budget = exactly ONE generation's footprint, so warming B evicts A.
+    let probe = WarmTableRegistry::new();
+    probe
+        .warm_readers(&key_a, ddl(), &schema, &dir_a, None, &CancelFlag::new())
+        .expect("probe warm");
+    let one_gen = probe.debug_used_bytes();
+    assert!(one_gen > 0, "a generation's footprint is non-zero");
+
+    let reg = WarmTableRegistry::with_budget(one_gen);
+    let cancel = CancelFlag::new();
+
+    // Warm A from a per-query snapshot dir: reader R's `file_path` lives inside
+    // snap1. Keep the returned `Arc` alive for the WHOLE test — the "in-flight
+    // holder outside the registry's cache" this bug depends on.
+    let snap1 = make_snapshot(&dir_a, "snap1");
+    let w1 = reg
+        .warm_readers(&key_a, ddl(), &schema, &snap1, Some("snap1"), &cancel)
+        .expect("warm A from snap1");
+    assert_eq!(w1.readers.len(), 1, "table A is a single generation");
+    let held: Vec<Arc<SSTableReader>> = w1.readers.clone();
+    let held_ptr = Arc::as_ptr(&held[0]);
+
+    // Warm B: pushes `used_bytes` over budget, evicting A's generation from the
+    // registry's OWN cache — but R stays alive via `held` above.
+    reg.warm_readers(&key_b, ddl(), &schema, &dir_b, None, &cancel)
+        .expect("warm B evicts A");
+    assert_eq!(
+        reg.debug_reader_count(&key_a),
+        0,
+        "A's generation was evicted from the registry's own cache (bug precondition)"
+    );
+
+    // The connector clears query N's snapshot; R's (no-longer-cached-by-the-
+    // registry) `file_path` is now dead. R itself stays alive only via `held`.
+    std::fs::remove_dir_all(&snap1).expect("clear query-N snapshot dir");
+
+    // Query N+1: a NEW snapshot dir over the SAME inodes. Since A was evicted,
+    // this is a genuine registry miss — `rebuild`'s rebind pass never sees R (it
+    // isn't in the cached set), so the ONLY protection against re-serving R's
+    // dead path is the coalescer's own path-liveness gate (blocker 1).
+    let snap2 = make_snapshot(&dir_a, "snap2");
+    let w2 = reg
+        .warm_readers(&key_a, ddl(), &schema, &snap2, Some("snap2"), &cancel)
+        .expect("re-warm A after eviction + snapshot teardown");
+    assert_eq!(w2.readers.len(), 1, "table A is still a single generation");
+
+    // The served reader must back a LIVE path — never R's stale snap1 path.
+    assert!(
+        std::fs::metadata(w2.readers[0].file_path()).is_ok(),
+        "must never serve a dead-path reader from the coalescer, got {}",
+        w2.readers[0].file_path().display()
+    );
+    // Must NOT be R itself (the stale-path reader) — the coalescer must have
+    // fallen through to a fresh open from the live path.
+    assert_ne!(
+        Arc::as_ptr(&w2.readers[0]) as *const (),
+        held_ptr as *const (),
+        "the coalescer must not hand back R's dead-path reader (issue #2383 blocker 1)"
+    );
+    // Row correctness through the same merge path do_get drives.
+    assert_eq!(
+        decode_names(&schema, w2.readers),
+        vec!["a".to_string()],
+        "the re-warmed set decodes correctly from the live inodes (no ENOENT)"
+    );
+    drop(held);
 }
