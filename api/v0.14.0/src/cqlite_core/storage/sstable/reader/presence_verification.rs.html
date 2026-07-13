@@ -1,0 +1,133 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/presence_verification.rs`."><title>presence_verification.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>presence_verification.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Opt-in, default-OFF presence-oracle false-negative verification switch
+<a href=#2 id=2 data-nosnippet>2</a>//! (issue #2163).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! A presence oracle (the BIG bloom filter / BTI Partitions.db trie) must NEVER
+<a href=#5 id=5 data-nosnippet>5</a>//! report a false negative: a "definitely absent" verdict for a key that is
+<a href=#6 id=6 data-nosnippet>6</a>//! actually present would silently drop data. This switch turns on an
+<a href=#7 id=7 data-nosnippet>7</a>//! AUTHORITATIVE confirmation scan of an SSTable whenever its oracle reports a
+<a href=#8 id=8 data-nosnippet>8</a>//! key absent; a contradiction increments `cqlite.read.bloom.false_negatives`
+<a href=#9 id=9 data-nosnippet>9</a>//! (see [`crate::observability::catalog::READ_BLOOM_FALSE_NEGATIVES`]). Under a
+<a href=#10 id=10 data-nosnippet>10</a>//! correct oracle the counter stays 0 — a non-zero value is a corruption alarm.
+<a href=#11 id=11 data-nosnippet>11</a>//!
+<a href=#12 id=12 data-nosnippet>12</a>//! It is **off by default** and gated by an explicit runtime switch, because the
+<a href=#13 id=13 data-nosnippet>13</a>//! confirmation scan is the one presence-oracle counter that costs real work. The
+<a href=#14 id=14 data-nosnippet>14</a>//! switch is read once from the `CQLITE_VERIFY_PRESENCE_ORACLE` environment
+<a href=#15 id=15 data-nosnippet>15</a>//! variable (booleans: `1/0`, `true/false`, `yes/no`, `on/off`), then cached. The
+<a href=#16 id=16 data-nosnippet>16</a>//! `observability-testing`-gated [`set_enabled_for_testing`] lets the correctness
+<a href=#17 id=17 data-nosnippet>17</a>//! tests toggle it deterministically without touching process env.
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! # Config plumbing + precedence (issue #2163, roborev r4)
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! [`crate::observability::ObservabilityConfig::verify_presence_oracle`] is a
+<a href=#22 id=22 data-nosnippet>22</a>//! PROGRAMMATIC way to set this switch (e.g. `ObservabilityConfig::builder()
+<a href=#23 id=23 data-nosnippet>23</a>//! .verify_presence_oracle(true).build()`), for callers that construct config in
+<a href=#24 id=24 data-nosnippet>24</a>//! code rather than through the environment. [`crate::observability::init`] calls
+<a href=#25 id=25 data-nosnippet>25</a>//! [`apply_config`] with that field so the config value actually reaches this
+<a href=#26 id=26 data-nosnippet>26</a>//! switch — it is not merely decorative. Precedence (conventional
+<a href=#27 id=27 data-nosnippet>27</a>//! env-overrides-config, matching every other `ObservabilityConfig` field's own
+<a href=#28 id=28 data-nosnippet>28</a>//! `from_env` behaviour): if [`ENV_VAR`] is explicitly set to a parseable boolean,
+<a href=#29 id=29 data-nosnippet>29</a>//! it ALWAYS wins over the config value; otherwise the config value applies.
+<a href=#30 id=30 data-nosnippet>30</a>
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">use </span>std::sync::atomic::{AtomicU8, Ordering};
+<a href=#32 id=32 data-nosnippet>32</a>
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">const </span>UNINIT: u8 = <span class="number">0</span>;
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">const </span>OFF: u8 = <span class="number">1</span>;
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">const </span>ON: u8 = <span class="number">2</span>;
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="doccomment">/// Tri-state cache: `UNINIT` until first resolved from the environment, then
+<a href=#38 id=38 data-nosnippet>38</a>/// pinned to `OFF`/`ON`. Test overrides store `OFF`/`ON` directly.
+<a href=#39 id=39 data-nosnippet>39</a></span><span class="kw">static </span>STATE: AtomicU8 = AtomicU8::new(UNINIT);
+<a href=#40 id=40 data-nosnippet>40</a>
+<a href=#41 id=41 data-nosnippet>41</a><span class="doccomment">/// Environment variable that enables the opt-in verification when truthy.
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">pub const </span>ENV_VAR: <span class="kw-2">&amp;</span>str = <span class="string">"CQLITE_VERIFY_PRESENCE_ORACLE"</span>;
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">fn </span>parse_bool(s: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;bool&gt; {
+<a href=#45 id=45 data-nosnippet>45</a>    <span class="kw">match </span>s.trim().to_ascii_lowercase().as_str() {
+<a href=#46 id=46 data-nosnippet>46</a>        <span class="string">"1" </span>| <span class="string">"true" </span>| <span class="string">"yes" </span>| <span class="string">"on" </span>=&gt; <span class="prelude-val">Some</span>(<span class="bool-val">true</span>),
+<a href=#47 id=47 data-nosnippet>47</a>        <span class="string">"0" </span>| <span class="string">"false" </span>| <span class="string">"no" </span>| <span class="string">"off" </span>=&gt; <span class="prelude-val">Some</span>(<span class="bool-val">false</span>),
+<a href=#48 id=48 data-nosnippet>48</a>        <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#49 id=49 data-nosnippet>49</a>    }
+<a href=#50 id=50 data-nosnippet>50</a>}
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a><span class="doccomment">/// Whether presence-oracle false-negative verification is enabled.
+<a href=#53 id=53 data-nosnippet>53</a>///
+<a href=#54 id=54 data-nosnippet>54</a>/// Resolves lazily from [`ENV_VAR`] on first call (default `false` when unset or
+<a href=#55 id=55 data-nosnippet>55</a>/// unparseable), caching the result so subsequent reads are a single relaxed
+<a href=#56 id=56 data-nosnippet>56</a>/// atomic load. Always `false` unless explicitly turned on — so the default
+<a href=#57 id=57 data-nosnippet>57</a>/// production read path performs no confirmation scan and costs nothing beyond
+<a href=#58 id=58 data-nosnippet>58</a>/// the existing presence check.
+<a href=#59 id=59 data-nosnippet>59</a></span><span class="kw">pub fn </span>enabled() -&gt; bool {
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="kw">match </span>STATE.load(Ordering::Acquire) {
+<a href=#61 id=61 data-nosnippet>61</a>        OFF =&gt; <span class="bool-val">false</span>,
+<a href=#62 id=62 data-nosnippet>62</a>        ON =&gt; <span class="bool-val">true</span>,
+<a href=#63 id=63 data-nosnippet>63</a>        <span class="kw">_ </span>=&gt; {
+<a href=#64 id=64 data-nosnippet>64</a>            <span class="kw">let </span>value = std::env::var(ENV_VAR)
+<a href=#65 id=65 data-nosnippet>65</a>                .ok()
+<a href=#66 id=66 data-nosnippet>66</a>                .and_then(|v| parse_bool(<span class="kw-2">&amp;</span>v))
+<a href=#67 id=67 data-nosnippet>67</a>                .unwrap_or(<span class="bool-val">false</span>);
+<a href=#68 id=68 data-nosnippet>68</a>            <span class="kw">let </span>encoded = <span class="kw">if </span>value { ON } <span class="kw">else </span>{ OFF };
+<a href=#69 id=69 data-nosnippet>69</a>            <span class="comment">// Only the first resolver wins; a concurrent test override that already
+<a href=#70 id=70 data-nosnippet>70</a>            // pinned the state is respected (compare_exchange fails, we re-read).
+<a href=#71 id=71 data-nosnippet>71</a>            </span><span class="kw">match </span>STATE.compare_exchange(UNINIT, encoded, Ordering::AcqRel, Ordering::Acquire) {
+<a href=#72 id=72 data-nosnippet>72</a>                <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; value,
+<a href=#73 id=73 data-nosnippet>73</a>                <span class="prelude-val">Err</span>(existing) =&gt; existing == ON,
+<a href=#74 id=74 data-nosnippet>74</a>            }
+<a href=#75 id=75 data-nosnippet>75</a>        }
+<a href=#76 id=76 data-nosnippet>76</a>    }
+<a href=#77 id=77 data-nosnippet>77</a>}
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a><span class="doccomment">/// Apply an [`ObservabilityConfig`](crate::observability::ObservabilityConfig)-
+<a href=#80 id=80 data-nosnippet>80</a>/// sourced enablement value to this runtime switch (issue #2163, roborev r4 —
+<a href=#81 id=81 data-nosnippet>81</a>/// closes the "config field is decorative" gap).
+<a href=#82 id=82 data-nosnippet>82</a>///
+<a href=#83 id=83 data-nosnippet>83</a>/// [`ENV_VAR`], when explicitly set to a parseable boolean, ALWAYS takes
+<a href=#84 id=84 data-nosnippet>84</a>/// precedence over `config_value` — the conventional env-overrides-config rule
+<a href=#85 id=85 data-nosnippet>85</a>/// [`crate::observability::ObservabilityConfig::from_env`] already applies to
+<a href=#86 id=86 data-nosnippet>86</a>/// every other field. Otherwise `config_value` becomes the switch's state. Called
+<a href=#87 id=87 data-nosnippet>87</a>/// from [`crate::observability::init`] (both the `observability`-feature-enabled
+<a href=#88 id=88 data-nosnippet>88</a>/// and inert builds) so a programmatic
+<a href=#89 id=89 data-nosnippet>89</a>/// `ObservabilityConfig::builder().verify_presence_oracle(true).build()` actually
+<a href=#90 id=90 data-nosnippet>90</a>/// flips the switch the read path consults. Idempotent and safe to call multiple
+<a href=#91 id=91 data-nosnippet>91</a>/// times (e.g. across repeated `init` calls in a test process) — it always
+<a href=#92 id=92 data-nosnippet>92</a>/// recomputes from scratch and FORCES the result into the shared state, so a
+<a href=#93 id=93 data-nosnippet>93</a>/// later `init` call can still correct an earlier one.
+<a href=#94 id=94 data-nosnippet>94</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>apply_config(config_value: bool) {
+<a href=#95 id=95 data-nosnippet>95</a>    <span class="kw">let </span>env_value = std::env::var(ENV_VAR).ok().and_then(|v| parse_bool(<span class="kw-2">&amp;</span>v));
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="kw">let </span>effective = env_value.unwrap_or(config_value);
+<a href=#97 id=97 data-nosnippet>97</a>    STATE.store(<span class="kw">if </span>effective { ON } <span class="kw">else </span>{ OFF }, Ordering::Release);
+<a href=#98 id=98 data-nosnippet>98</a>}
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a><span class="doccomment">/// Force the switch on/off for tests (issue #2163). Gated behind
+<a href=#101 id=101 data-nosnippet>101</a>/// `observability-testing` so production builds never expose a runtime mutator;
+<a href=#102 id=102 data-nosnippet>102</a>/// integration tests compile the library with that feature and toggle the switch
+<a href=#103 id=103 data-nosnippet>103</a>/// deterministically around a flow.
+<a href=#104 id=104 data-nosnippet>104</a></span><span class="attr">#[cfg(feature = <span class="string">"observability-testing"</span>)]
+<a href=#105 id=105 data-nosnippet>105</a></span><span class="kw">pub fn </span>set_enabled_for_testing(enabled: bool) {
+<a href=#106 id=106 data-nosnippet>106</a>    STATE.store(<span class="kw">if </span>enabled { ON } <span class="kw">else </span>{ OFF }, Ordering::Release);
+<a href=#107 id=107 data-nosnippet>107</a>}
+<a href=#108 id=108 data-nosnippet>108</a>
+<a href=#109 id=109 data-nosnippet>109</a><span class="attr">#[cfg(test)]
+<a href=#110 id=110 data-nosnippet>110</a></span><span class="kw">mod </span>tests {
+<a href=#111 id=111 data-nosnippet>111</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#112 id=112 data-nosnippet>112</a>
+<a href=#113 id=113 data-nosnippet>113</a>    <span class="attr">#[test]
+<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">fn </span>parse_bool_recognizes_bounded_forms() {
+<a href=#115 id=115 data-nosnippet>115</a>        <span class="kw">for </span>t <span class="kw">in </span>[<span class="string">"1"</span>, <span class="string">"true"</span>, <span class="string">"TRUE"</span>, <span class="string">"yes"</span>, <span class="string">"on"</span>] {
+<a href=#116 id=116 data-nosnippet>116</a>            <span class="macro">assert_eq!</span>(parse_bool(t), <span class="prelude-val">Some</span>(<span class="bool-val">true</span>), <span class="string">"{t}"</span>);
+<a href=#117 id=117 data-nosnippet>117</a>        }
+<a href=#118 id=118 data-nosnippet>118</a>        <span class="kw">for </span>f <span class="kw">in </span>[<span class="string">"0"</span>, <span class="string">"false"</span>, <span class="string">"no"</span>, <span class="string">"off"</span>] {
+<a href=#119 id=119 data-nosnippet>119</a>            <span class="macro">assert_eq!</span>(parse_bool(f), <span class="prelude-val">Some</span>(<span class="bool-val">false</span>), <span class="string">"{f}"</span>);
+<a href=#120 id=120 data-nosnippet>120</a>        }
+<a href=#121 id=121 data-nosnippet>121</a>        <span class="macro">assert_eq!</span>(parse_bool(<span class="string">"maybe"</span>), <span class="prelude-val">None</span>);
+<a href=#122 id=122 data-nosnippet>122</a>    }
+<a href=#123 id=123 data-nosnippet>123</a>
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="attr">#[cfg(feature = <span class="string">"observability-testing"</span>)]
+<a href=#125 id=125 data-nosnippet>125</a>    #[test]
+<a href=#126 id=126 data-nosnippet>126</a>    </span><span class="kw">fn </span>test_override_toggles_state() {
+<a href=#127 id=127 data-nosnippet>127</a>        set_enabled_for_testing(<span class="bool-val">true</span>);
+<a href=#128 id=128 data-nosnippet>128</a>        <span class="macro">assert!</span>(enabled());
+<a href=#129 id=129 data-nosnippet>129</a>        set_enabled_for_testing(<span class="bool-val">false</span>);
+<a href=#130 id=130 data-nosnippet>130</a>        <span class="macro">assert!</span>(!enabled());
+<a href=#131 id=131 data-nosnippet>131</a>    }
+<a href=#132 id=132 data-nosnippet>132</a>}
+</code></pre></div></section></main></body></html>

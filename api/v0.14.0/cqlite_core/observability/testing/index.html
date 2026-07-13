@@ -1,0 +1,66 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Shared in-memory OTLP capture harness for observability tests (issue #1043)."><title>cqlite_core::observability::testing - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module testing</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module testing</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-a-single-process-global-meter-provider" title="Why a single process-global meter provider">Why a single process-global meter provider</a><ul><li><a href="#metric-isolation-guarantee" title="Metric isolation guarantee">Metric isolation guarantee</a></li></ul></li><li><a href="#typical-use" title="Typical use">Typical use</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>observability</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">observability</a></div><h1>Module <span>testing</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/observability/testing.rs.html#1-491">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Shared in-memory OTLP capture harness for observability tests (issue #1043).</p>
+<p>Gated behind the <code>observability-testing</code> feature, which pulls in the OTel
+SDK’s in-memory exporters (<code>InMemorySpanExporter</code> / <code>InMemoryMetricExporter</code>)
+via <code>opentelemetry_sdk/testing</code>. Public so integration tests and future child
+issues can reuse the same fixture API to assert span trees and metric
+names/units/attributes. Production <code>observability</code> builds never compile this,
+so they never link the SDK’s testing surface.
+Shared in-memory OpenTelemetry capture harness for observability tests
+(epic #1031, issue #1043).</p>
+<p>This module is the <strong>single shared fixture</strong> every observability-correctness
+test (and future child issue) reuses. It installs in-memory OTLP exporters,
+runs a flow, force-flushes, and hands back the captured spans and metrics so a
+test can assert the expected span tree, metric names/units, and bounded
+attribute sets — all deterministically, with no collector, network, or timing
+dependence.</p>
+<p>It is gated behind the <code>observability</code> feature (it needs the OTel SDK) and is
+intended for tests, so it lives under <code>#[cfg(feature = "observability")]</code> and
+depends on <code>opentelemetry_sdk</code>’s in-memory exporters (available because the
+crate enables the SDK’s <code>testing</code> feature as a dev-dependency; the
+library/default build links no OTel at all).</p>
+<h2 id="why-a-single-process-global-meter-provider"><a class="doc-anchor" href="#why-a-single-process-global-meter-provider">§</a>Why a single process-global meter provider</h2>
+<p>The metric helpers in <a href="../index.html" title="mod cqlite_core::observability"><code>crate::observability</code></a> record through
+<code>opentelemetry::global::meter("cqlite")</code>, and the concrete <code>Meter</code> is cached
+in a <code>OnceLock</code> the first time any metric is recorded in the process. So the
+global meter provider must be installed <strong>once, before the first metric
+record</strong>, and cannot be swapped per-test. [<code>metrics_capture</code>] therefore
+returns a handle to a single process-wide [<code>InMemoryMetricExporter</code>]; tests
+call [<code>MetricsCapture::reset</code>] + [<code>MetricsCapture::flush_and_collect</code>] around
+their own flow rather than installing a fresh provider each time.</p>
+<h3 id="metric-isolation-guarantee"><a class="doc-anchor" href="#metric-isolation-guarantee">§</a>Metric isolation guarantee</h3>
+<p>The shared exporter is configured with <strong>DELTA</strong> temporality
+([<code>Temporality::Delta</code>]). Each [<code>MetricsCapture::flush_and_collect</code>] therefore
+reports only the values aggregated <em>since the previous collect</em>, not a
+running cumulative total. [<code>MetricsCapture::reset</code>] force-flushes (draining and
+discarding any prior deltas) and clears the exporter buffer, so a subsequent
+<code>flush_and_collect</code> reflects <strong>only the work done between <code>reset</code> and
+<code>flush_and_collect</code></strong> — never metrics accumulated by an earlier flow or test.
+This holds even under parallel test execution: although the meter provider is
+process-global, all metric assertions run inside a single serial test (see
+<code>tests/observability_correctness.rs</code>), and DELTA temporality means that test
+never re-observes another flow’s already-collected counters.</p>
+<p>Spans, by contrast, flow through <code>tracing</code>, so a test can install its own
+tracer + subscriber for the duration of a flow via [<code>capture_spans</code>] and get
+perfectly isolated span trees with no global state.</p>
+<h2 id="typical-use"><a class="doc-anchor" href="#typical-use">§</a>Typical use</h2>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>cqlite_core::observability::{<span class="self">self </span><span class="kw">as </span>obs, catalog};
+<span class="kw">use </span>cqlite_core::observability::testing;
+
+<span class="comment">// Spans: scoped, isolated per call.
+</span><span class="kw">let </span>spans = testing::capture_spans(|| {
+    obs::record_histogram(catalog::QUERY_DURATION, <span class="number">0.001</span>, <span class="kw-2">&amp;</span>[]);
+    <span class="comment">// ... run an instrumented flow inside a `tracing` span ...
+</span>});
+<span class="macro">assert!</span>(spans.iter().any(|s| s.name == <span class="string">"query.execute"</span>));
+
+<span class="comment">// Metrics: process-global, reset around the flow.
+</span><span class="kw">let </span>mc = testing::metrics_capture();
+mc.reset();
+obs::add_counter(catalog::READ_ROWS, <span class="number">7</span>, <span class="kw-2">&amp;</span>[]);
+<span class="kw">let </span>metrics = mc.flush_and_collect();
+<span class="macro">assert_eq!</span>(metrics.counter_sum(catalog::READ_ROWS), <span class="number">7</span>);</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CapturedMetrics.html" title="struct cqlite_core::observability::testing::CapturedMetrics">Captured<wbr>Metrics</a></dt><dd>A snapshot of metrics collected by <a href="struct.MetricsCapture.html#method.flush_and_collect" title="method cqlite_core::observability::testing::MetricsCapture::flush_and_collect"><code>MetricsCapture::flush_and_collect</code></a>,
+with name/unit/value accessors for assertions.</dd><dt><a class="struct" href="struct.CapturedSpan.html" title="struct cqlite_core::observability::testing::CapturedSpan">Captured<wbr>Span</a></dt><dd>A captured, simplified view of an exported span. Wraps the SDK [<code>SpanData</code>]
+with ergonomic accessors so tests read span trees without depending on the
+SDK’s exact field layout.</dd><dt><a class="struct" href="struct.CapturedSpans.html" title="struct cqlite_core::observability::testing::CapturedSpans">Captured<wbr>Spans</a></dt><dd>A captured set of spans from one <a href="fn.capture_spans.html" title="fn cqlite_core::observability::testing::capture_spans"><code>capture_spans</code></a> call, with tree helpers.</dd><dt><a class="struct" href="struct.MetricEntry.html" title="struct cqlite_core::observability::testing::MetricEntry">Metric<wbr>Entry</a></dt><dd>A single collected metric: its name, unit, kind, and aggregated value(s).</dd><dt><a class="struct" href="struct.MetricPoint.html" title="struct cqlite_core::observability::testing::MetricPoint">Metric<wbr>Point</a></dt><dd>One aggregated data point: its numeric value (as f64) and bounded attributes.</dd><dt><a class="struct" href="struct.MetricsCapture.html" title="struct cqlite_core::observability::testing::MetricsCapture">Metrics<wbr>Capture</a></dt><dd>Process-wide in-memory metric exporter handle.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.capture_spans.html" title="fn cqlite_core::observability::testing::capture_spans">capture_<wbr>spans</a></dt><dd>Run <code>flow</code> with an isolated in-memory tracer installed as the default
+<code>tracing</code> subscriber, then return every span it produced.</dd><dt><a class="fn" href="fn.metrics_capture.html" title="fn cqlite_core::observability::testing::metrics_capture">metrics_<wbr>capture</a></dt><dd>The process-wide <a href="struct.MetricsCapture.html" title="struct cqlite_core::observability::testing::MetricsCapture"><code>MetricsCapture</code></a>, installing the global in-memory meter
+provider exactly once on first call.</dd></dl></section></div></main></body></html>

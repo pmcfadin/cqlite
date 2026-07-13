@@ -1,0 +1,187 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/reconcile_rules.rs`."><title>reconcile_rules.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/</div>reconcile_rules.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Shared reconcile rule layer (issue #947).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! The Cassandra `Cells#reconcile` cell tie-break and the complex-deletion
+<a href=#4 id=4 data-nosnippet>4</a>//! strict-supersede + shadow-before-purge boundaries used to be implemented
+<a href=#5 id=5 data-nosnippet>5</a>//! TWICE and hand-synced:
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! * the COMPACTION/merge path (`merge/mod.rs` + `merge/reconcile.rs`),
+<a href=#8 id=8 data-nosnippet>8</a>//!   reconciling [`CellData`](super::merge::CellData);
+<a href=#9 id=9 data-nosnippet>9</a>//! * the FLUSH/write path
+<a href=#10 id=10 data-nosnippet>10</a>//!   (`sstable::writer::data_writer::rows::DataWriter::merge_row_group`),
+<a href=#11 id=11 data-nosnippet>11</a>//!   reconciling `MergedOp`.
+<a href=#12 id=12 data-nosnippet>12</a>//!
+<a href=#13 id=13 data-nosnippet>13</a>//! Both paths now adapt their concrete cell type into the minimal common
+<a href=#14 id=14 data-nosnippet>14</a>//! [`ReconcileCell`] view and call the pure decision functions below, so the
+<a href=#15 id=15 data-nosnippet>15</a>//! load-bearing comparisons live in ONE place and consistency is structural —
+<a href=#16 id=16 data-nosnippet>16</a>//! not a comment promising two copies were kept in sync.
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! These are pure scalar predicates (no allocation, no I/O). The per-container
+<a href=#19 id=19 data-nosnippet>19</a>//! iteration (a `HashMap` of `CellData` winners vs. a `Vec` of `MergedOp`)
+<a href=#20 id=20 data-nosnippet>20</a>//! differs between the two call sites and stays at each site; only the
+<a href=#21 id=21 data-nosnippet>21</a>//! decision rules are shared.
+<a href=#22 id=22 data-nosnippet>22</a>//!
+<a href=#23 id=23 data-nosnippet>23</a>//! ## Parity anchors (do not change without a Cassandra reference)
+<a href=#24 id=24 data-nosnippet>24</a>//!
+<a href=#25 id=25 data-nosnippet>25</a>//! * [`cell_wins`] — `Cells#reconcile` (commit `a62c749`; issues #848/#498).
+<a href=#26 id=26 data-nosnippet>26</a>//! * [`complex_deletion_supersedes`] — strict-supersede (commit `bd244649`).
+<a href=#27 id=27 data-nosnippet>27</a>//! * [`element_survives_complex_deletion`] — shadow-before-purge boundary
+<a href=#28 id=28 data-nosnippet>28</a>//!   (commit `f66fa14f`; the `&lt;=` element-vs-marker rule, #498).
+<a href=#29 id=29 data-nosnippet>29</a>
+<a href=#30 id=30 data-nosnippet>30</a>/// Minimal common view of a reconcilable cell.
+<a href=#31 id=31 data-nosnippet>31</a>///
+<a href=#32 id=32 data-nosnippet>32</a>/// The only two accessors BOTH write paths share for the `Cells#reconcile`
+<a href=#33 id=33 data-nosnippet>33</a>/// tie-break: the cell's write timestamp and whether it is a deletion
+<a href=#34 id=34 data-nosnippet>34</a>/// (tombstone). Each call site implements this over its concrete type
+<a href=#35 id=35 data-nosnippet>35</a>/// ([`CellData`](super::merge::CellData) on the merge path, `MergedOp` on the
+<a href=#36 id=36 data-nosnippet>36</a>/// writer path) and how it RECOGNIZES a tombstone — a `Value::Tombstone`
+<a href=#37 id=37 data-nosnippet>37</a>/// payload vs. a `CellOperation::Delete` op — stays with the type, since that
+<a href=#38 id=38 data-nosnippet>38</a>/// recognition is genuinely type-specific.
+<a href=#39 id=39 data-nosnippet>39</a>///
+<a href=#40 id=40 data-nosnippet>40</a>/// The on-disk `localDeletionTime` is intentionally NOT part of this view: it
+<a href=#41 id=41 data-nosnippet>41</a>/// is consulted only by the merge path's gc-grace purge stage (which the flush
+<a href=#42 id=42 data-nosnippet>42</a>/// path has no analogue for), so sharing it here would force a meaningless
+<a href=#43 id=43 data-nosnippet>43</a>/// accessor on the writer type. The tie-break itself never consults LDT — a
+<a href=#44 id=44 data-nosnippet>44</a>/// same-timestamp tombstone wins BEFORE any LDT compare.
+<a href=#45 id=45 data-nosnippet>45</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">trait </span>ReconcileCell {
+<a href=#46 id=46 data-nosnippet>46</a>    <span class="doccomment">/// Cell write timestamp in microseconds (`markedForDeleteAt` for a deletion).
+<a href=#47 id=47 data-nosnippet>47</a>    </span><span class="kw">fn </span>timestamp(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; i64;
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="doccomment">/// Whether this cell is a deletion (tombstone) rather than a live/expiring
+<a href=#49 id=49 data-nosnippet>49</a>    /// value.
+<a href=#50 id=50 data-nosnippet>50</a>    </span><span class="kw">fn </span>is_tombstone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool;
+<a href=#51 id=51 data-nosnippet>51</a>}
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a><span class="doccomment">/// Cassandra `Cells#reconcile` replace decision (parity commit `a62c749`):
+<a href=#54 id=54 data-nosnippet>54</a>/// returns `true` when `candidate` should replace the current `existing` winner.
+<a href=#55 id=55 data-nosnippet>55</a>///
+<a href=#56 id=56 data-nosnippet>56</a>/// Decided IN THIS ORDER, short-circuiting:
+<a href=#57 id=57 data-nosnippet>57</a>/// 1. **timestamp** — a strictly higher write timestamp always wins.
+<a href=#58 id=58 data-nosnippet>58</a>/// 2. **deletion vs live/expiring at EQUAL timestamp** — a cell DELETION
+<a href=#59 id=59 data-nosnippet>59</a>///    (tombstone) beats a LIVE or EXPIRING (TTL) cell, decided BEFORE any
+<a href=#60 id=60 data-nosnippet>60</a>///    `localDeletionTime` compare, so an expiring cell can never resurrect data
+<a href=#61 id=61 data-nosnippet>61</a>///    over a same-timestamp tombstone (issues #848 / #498). An expiring cell is
+<a href=#62 id=62 data-nosnippet>62</a>///    treated as LIVE (it carries a real value + a TTL, not a tombstone), so
+<a href=#63 id=63 data-nosnippet>63</a>///    this one rule subsumes both tombstone-beats-live and
+<a href=#64 id=64 data-nosnippet>64</a>///    tombstone-beats-expiring.
+<a href=#65 id=65 data-nosnippet>65</a>/// 3. **equal timestamp + equal liveness** — returns `false`. Cassandra's
+<a href=#66 id=66 data-nosnippet>66</a>///    reconcile is order-independent and equivalent here, so the caller keeps
+<a href=#67 id=67 data-nosnippet>67</a>///    its first-seen winner. (The writer path overlays an order-dependent
+<a href=#68 id=68 data-nosnippet>68</a>///    last-write-wins tie-break for this single case at its call site; that
+<a href=#69 id=69 data-nosnippet>69</a>///    overlay is writer-only and NOT part of this shared rule.)
+<a href=#70 id=70 data-nosnippet>70</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>cell_wins&lt;C: ReconcileCell + <span class="question-mark">?</span>Sized&gt;(candidate: <span class="kw-2">&amp;</span>C, existing: <span class="kw-2">&amp;</span>C) -&gt; bool {
+<a href=#71 id=71 data-nosnippet>71</a>    <span class="kw">if </span>candidate.timestamp() != existing.timestamp() {
+<a href=#72 id=72 data-nosnippet>72</a>        <span class="kw">return </span>candidate.timestamp() &gt; existing.timestamp();
+<a href=#73 id=73 data-nosnippet>73</a>    }
+<a href=#74 id=74 data-nosnippet>74</a>    <span class="comment">// Equal timestamp: a deletion wins over a live/expiring cell, BEFORE any
+<a href=#75 id=75 data-nosnippet>75</a>    // localDeletionTime compare (parity `a62c749`).
+<a href=#76 id=76 data-nosnippet>76</a>    </span>candidate.is_tombstone() &amp;&amp; !existing.is_tombstone()
+<a href=#77 id=77 data-nosnippet>77</a>}
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a><span class="doccomment">/// Strict-supersede predicate for complex (collection / UDT) deletion markers
+<a href=#80 id=80 data-nosnippet>80</a>/// (parity commit `bd244649`): a candidate marker supersedes the active one for
+<a href=#81 id=81 data-nosnippet>81</a>/// the SAME column ONLY when its `markedForDeleteAt` is STRICTLY GREATER. Equal
+<a href=#82 id=82 data-nosnippet>82</a>/// (or lesser) timestamps do NOT supersede.
+<a href=#83 id=83 data-nosnippet>83</a>///
+<a href=#84 id=84 data-nosnippet>84</a>/// Both call sites reduce their carried markers to one active deletion per
+<a href=#85 id=85 data-nosnippet>85</a>/// column NAME using this predicate; the per-column iteration differs but the
+<a href=#86 id=86 data-nosnippet>86</a>/// strictly-greater comparison is shared here.
+<a href=#87 id=87 data-nosnippet>87</a></span><span class="attr">#[inline]
+<a href=#88 id=88 data-nosnippet>88</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>complex_deletion_supersedes(candidate_mfda: i64, active_mfda: i64) -&gt; bool {
+<a href=#89 id=89 data-nosnippet>89</a>    candidate_mfda &gt; active_mfda
+<a href=#90 id=90 data-nosnippet>90</a>}
+<a href=#91 id=91 data-nosnippet>91</a>
+<a href=#92 id=92 data-nosnippet>92</a><span class="doccomment">/// Shadow-before-purge boundary (parity commit `f66fa14f`; the element-vs-marker
+<a href=#93 id=93 data-nosnippet>93</a>/// `&lt;=` rule, #498): a complex ELEMENT survives the active complex deletion on
+<a href=#94 id=94 data-nosnippet>94</a>/// its column only when the element's own timestamp is STRICTLY GREATER than the
+<a href=#95 id=95 data-nosnippet>95</a>/// marker's `markedForDeleteAt`. An element with `ts &lt;= mfda` is shadowed
+<a href=#96 id=96 data-nosnippet>96</a>/// (covered) and dropped before the marker can be purged.
+<a href=#97 id=97 data-nosnippet>97</a>///
+<a href=#98 id=98 data-nosnippet>98</a>/// Returns `true` when the element SURVIVES.
+<a href=#99 id=99 data-nosnippet>99</a></span><span class="attr">#[inline]
+<a href=#100 id=100 data-nosnippet>100</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>element_survives_complex_deletion(element_ts: i64, mfda: i64) -&gt; bool {
+<a href=#101 id=101 data-nosnippet>101</a>    element_ts &gt; mfda
+<a href=#102 id=102 data-nosnippet>102</a>}
+<a href=#103 id=103 data-nosnippet>103</a>
+<a href=#104 id=104 data-nosnippet>104</a><span class="attr">#[cfg(test)]
+<a href=#105 id=105 data-nosnippet>105</a></span><span class="kw">mod </span>tests {
+<a href=#106 id=106 data-nosnippet>106</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#107 id=107 data-nosnippet>107</a>
+<a href=#108 id=108 data-nosnippet>108</a>    <span class="doccomment">/// Tiny test double for the [`ReconcileCell`] view.
+<a href=#109 id=109 data-nosnippet>109</a>    </span><span class="kw">struct </span>Cell {
+<a href=#110 id=110 data-nosnippet>110</a>        ts: i64,
+<a href=#111 id=111 data-nosnippet>111</a>        tomb: bool,
+<a href=#112 id=112 data-nosnippet>112</a>    }
+<a href=#113 id=113 data-nosnippet>113</a>    <span class="kw">impl </span>ReconcileCell <span class="kw">for </span>Cell {
+<a href=#114 id=114 data-nosnippet>114</a>        <span class="kw">fn </span>timestamp(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; i64 {
+<a href=#115 id=115 data-nosnippet>115</a>            <span class="self">self</span>.ts
+<a href=#116 id=116 data-nosnippet>116</a>        }
+<a href=#117 id=117 data-nosnippet>117</a>        <span class="kw">fn </span>is_tombstone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#118 id=118 data-nosnippet>118</a>            <span class="self">self</span>.tomb
+<a href=#119 id=119 data-nosnippet>119</a>        }
+<a href=#120 id=120 data-nosnippet>120</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">fn </span>live(ts: i64) -&gt; Cell {
+<a href=#122 id=122 data-nosnippet>122</a>        Cell { ts, tomb: <span class="bool-val">false </span>}
+<a href=#123 id=123 data-nosnippet>123</a>    }
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="kw">fn </span>tomb(ts: i64) -&gt; Cell {
+<a href=#125 id=125 data-nosnippet>125</a>        Cell { ts, tomb: <span class="bool-val">true </span>}
+<a href=#126 id=126 data-nosnippet>126</a>    }
+<a href=#127 id=127 data-nosnippet>127</a>
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="comment">// ── cell_wins: timestamp axis ───────────────────────────────────────────
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a>    </span><span class="attr">#[test]
+<a href=#131 id=131 data-nosnippet>131</a>    </span><span class="kw">fn </span>strictly_greater_timestamp_wins() {
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="macro">assert!</span>(cell_wins(<span class="kw-2">&amp;</span>live(<span class="number">200</span>), <span class="kw-2">&amp;</span>live(<span class="number">100</span>)));
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="macro">assert!</span>(!cell_wins(<span class="kw-2">&amp;</span>live(<span class="number">100</span>), <span class="kw-2">&amp;</span>live(<span class="number">200</span>)));
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="comment">// A live cell at a strictly-greater ts beats an older tombstone.
+<a href=#135 id=135 data-nosnippet>135</a>        </span><span class="macro">assert!</span>(cell_wins(<span class="kw-2">&amp;</span>live(<span class="number">200</span>), <span class="kw-2">&amp;</span>tomb(<span class="number">100</span>)));
+<a href=#136 id=136 data-nosnippet>136</a>        <span class="comment">// An older live cell does not beat a newer tombstone.
+<a href=#137 id=137 data-nosnippet>137</a>        </span><span class="macro">assert!</span>(!cell_wins(<span class="kw-2">&amp;</span>live(<span class="number">100</span>), <span class="kw-2">&amp;</span>tomb(<span class="number">200</span>)));
+<a href=#138 id=138 data-nosnippet>138</a>    }
+<a href=#139 id=139 data-nosnippet>139</a>
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="comment">// ── cell_wins: EQUAL-ts deletion-vs-live/expiring (the #848/#498 axis) ───
+<a href=#141 id=141 data-nosnippet>141</a>
+<a href=#142 id=142 data-nosnippet>142</a>    </span><span class="attr">#[test]
+<a href=#143 id=143 data-nosnippet>143</a>    </span><span class="kw">fn </span>equal_ts_tombstone_beats_live() {
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="comment">// A same-ts tombstone candidate replaces a live existing winner.
+<a href=#145 id=145 data-nosnippet>145</a>        </span><span class="macro">assert!</span>(cell_wins(<span class="kw-2">&amp;</span>tomb(<span class="number">100</span>), <span class="kw-2">&amp;</span>live(<span class="number">100</span>)));
+<a href=#146 id=146 data-nosnippet>146</a>        <span class="comment">// A same-ts live candidate does NOT replace a tombstone winner.
+<a href=#147 id=147 data-nosnippet>147</a>        </span><span class="macro">assert!</span>(!cell_wins(<span class="kw-2">&amp;</span>live(<span class="number">100</span>), <span class="kw-2">&amp;</span>tomb(<span class="number">100</span>)));
+<a href=#148 id=148 data-nosnippet>148</a>    }
+<a href=#149 id=149 data-nosnippet>149</a>
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="attr">#[test]
+<a href=#151 id=151 data-nosnippet>151</a>    </span><span class="kw">fn </span>equal_ts_tombstone_beats_expiring() {
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="comment">// An expiring (TTL) cell is modeled as LIVE here (it is not a tombstone):
+<a href=#153 id=153 data-nosnippet>153</a>        // the deletion still wins, BEFORE any localDeletionTime/expiry compare.
+<a href=#154 id=154 data-nosnippet>154</a>        </span><span class="kw">let </span>expiring = live(<span class="number">100</span>); <span class="comment">// carries a value + TTL → not a tombstone
+<a href=#155 id=155 data-nosnippet>155</a>        </span><span class="macro">assert!</span>(cell_wins(<span class="kw-2">&amp;</span>tomb(<span class="number">100</span>), <span class="kw-2">&amp;</span>expiring));
+<a href=#156 id=156 data-nosnippet>156</a>        <span class="macro">assert!</span>(!cell_wins(<span class="kw-2">&amp;</span>expiring, <span class="kw-2">&amp;</span>tomb(<span class="number">100</span>)));
+<a href=#157 id=157 data-nosnippet>157</a>    }
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="attr">#[test]
+<a href=#160 id=160 data-nosnippet>160</a>    </span><span class="kw">fn </span>equal_ts_equal_liveness_keeps_first_seen() {
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="comment">// Equal ts + equal liveness =&gt; no replacement (caller keeps first-seen).
+<a href=#162 id=162 data-nosnippet>162</a>        </span><span class="macro">assert!</span>(!cell_wins(<span class="kw-2">&amp;</span>live(<span class="number">100</span>), <span class="kw-2">&amp;</span>live(<span class="number">100</span>)));
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="macro">assert!</span>(!cell_wins(<span class="kw-2">&amp;</span>tomb(<span class="number">100</span>), <span class="kw-2">&amp;</span>tomb(<span class="number">100</span>)));
+<a href=#164 id=164 data-nosnippet>164</a>    }
+<a href=#165 id=165 data-nosnippet>165</a>
+<a href=#166 id=166 data-nosnippet>166</a>    <span class="comment">// ── complex_deletion_supersedes: STRICT-greater, EQUAL does not ──────────
+<a href=#167 id=167 data-nosnippet>167</a>
+<a href=#168 id=168 data-nosnippet>168</a>    </span><span class="attr">#[test]
+<a href=#169 id=169 data-nosnippet>169</a>    </span><span class="kw">fn </span>complex_deletion_strict_supersede_boundary() {
+<a href=#170 id=170 data-nosnippet>170</a>        <span class="macro">assert!</span>(complex_deletion_supersedes(<span class="number">300</span>, <span class="number">200</span>)); <span class="comment">// strictly greater supersedes
+<a href=#171 id=171 data-nosnippet>171</a>        </span><span class="macro">assert!</span>(!complex_deletion_supersedes(<span class="number">200</span>, <span class="number">200</span>)); <span class="comment">// EQUAL does NOT supersede
+<a href=#172 id=172 data-nosnippet>172</a>        </span><span class="macro">assert!</span>(!complex_deletion_supersedes(<span class="number">100</span>, <span class="number">200</span>)); <span class="comment">// lesser does not supersede
+<a href=#173 id=173 data-nosnippet>173</a>    </span>}
+<a href=#174 id=174 data-nosnippet>174</a>
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="comment">// ── element_survives_complex_deletion: the `&lt;=` shadow boundary ──────────
+<a href=#176 id=176 data-nosnippet>176</a>
+<a href=#177 id=177 data-nosnippet>177</a>    </span><span class="attr">#[test]
+<a href=#178 id=178 data-nosnippet>178</a>    </span><span class="kw">fn </span>element_shadow_before_purge_boundary() {
+<a href=#179 id=179 data-nosnippet>179</a>        <span class="comment">// ts STRICTLY GREATER than mfda survives.
+<a href=#180 id=180 data-nosnippet>180</a>        </span><span class="macro">assert!</span>(element_survives_complex_deletion(<span class="number">201</span>, <span class="number">200</span>));
+<a href=#181 id=181 data-nosnippet>181</a>        <span class="comment">// ts EQUAL to mfda is shadowed (the `&lt;=` boundary, #498).
+<a href=#182 id=182 data-nosnippet>182</a>        </span><span class="macro">assert!</span>(!element_survives_complex_deletion(<span class="number">200</span>, <span class="number">200</span>));
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="comment">// ts LESS than mfda is shadowed.
+<a href=#184 id=184 data-nosnippet>184</a>        </span><span class="macro">assert!</span>(!element_survives_complex_deletion(<span class="number">199</span>, <span class="number">200</span>));
+<a href=#185 id=185 data-nosnippet>185</a>    }
+<a href=#186 id=186 data-nosnippet>186</a>}
+</code></pre></div></section></main></body></html>

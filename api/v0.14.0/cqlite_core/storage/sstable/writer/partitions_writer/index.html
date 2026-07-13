@@ -1,0 +1,63 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="BTI `Partitions.db` trie writer (issue #766, epic #762 writer fidelity D4)."><title>cqlite_core::storage::sstable::writer::partitions_writer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module partitions_writer</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module partitions_<wbr>writer</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-this-produces" title="What this produces">What this produces</a></li><li><a href="#trie-key" title="Trie key">Trie key</a></li><li><a href="#node-types-emitted" title="Node types emitted">Node types emitted</a></li><li><a href="#rowsdb-within-partition-row-index-trie--issue-910" title="Rows.db (within-partition row-index trie) — issue #910">Rows.db (within-partition row-index trie) — issue #910</a></li><li><a href="#out-of-scope-recorded-for-the-epic" title="Out of scope (recorded for the epic)">Out of scope (recorded for the epic)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable::<wbr>writer</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../../index.html">cqlite_core</a>::<wbr><a href="../../../index.html">storage</a>::<wbr><a href="../../index.html">sstable</a>::<wbr><a href="../index.html">writer</a></div><h1>Module <span>partitions_<wbr>writer</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../../src/cqlite_core/storage/sstable/writer/partitions_writer.rs.html#1-1667">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>BTI <code>Partitions.db</code> trie writer (issue #766, epic #762 writer fidelity D4).</p>
+<p>Phase 1 of BTI write support: emit a valid <code>Partitions.db</code> partition trie
+that our own BTI reader
+(<a href="../../bti/parser/fn.lookup_raw_key_in_bti_partitions_db.html" title="fn cqlite_core::storage::sstable::bti::parser::lookup_raw_key_in_bti_partitions_db"><code>crate::storage::sstable::bti::lookup_raw_key_in_bti_partitions_db</code></a>)
+reads back to resolve <code>Data.db</code> byte offsets for each partition.</p>
+<h3 id="what-this-produces"><a class="doc-anchor" href="#what-this-produces">§</a>What this produces</h3>
+<p>A compact, header-less trie identical in layout to Cassandra 5.0’s
+<code>Partitions.db</code> (read by <code>parser.rs</code>):</p>
+<ul>
+<li>Nodes are written <strong>bottom-up</strong>: every child appears at a <em>lower</em> file
+offset than its parent, so child pointers are stored as <strong>backward
+deltas</strong> (<code>child_pos = parent_pos − delta</code>). This matches
+<code>parser::parse_bti_node</code>’s sign convention.</li>
+<li>The root node’s absolute byte offset is stored as the <strong>last 8 bytes</strong> of
+the file (big-endian <code>u64</code>), which is exactly what
+<code>lookup_partition_in_bti_file</code> reads from the footer.</li>
+<li>Every partition leaf is a <code>PayloadOnly</code> node (ordinal 0) whose payload is
+<code>[hash_byte] ++ SizedInts(position)</code> with
+<code>payloadBits = FLAG_HAS_HASH_BYTE + (position_bytes − 1)</code> and
+<code>position = !data_offset</code> (negative ⇒ direct <code>Data.db</code> offset, per
+<code>PartitionIndex.java</code> sign convention mirrored in
+<a href="../../bti/parser/fn.decode_bti_partition_payload.html" title="fn cqlite_core::storage::sstable::bti::parser::decode_bti_partition_payload"><code>crate::storage::sstable::bti::decode_bti_partition_payload</code></a>).</li>
+</ul>
+<h3 id="trie-key"><a class="doc-anchor" href="#trie-key">§</a>Trie key</h3>
+<p>The byte-comparable lookup key for <code>Murmur3Partitioner</code> is produced by
+<a href="../../bti/parser/fn.encode_partition_key_for_bti_trie.html" title="fn cqlite_core::storage::sstable::bti::parser::encode_partition_key_for_bti_trie"><code>crate::storage::sstable::bti::encode_partition_key_for_bti_trie</code></a>:</p>
+<div class="example-wrap"><pre class="language-text"><code>key = [0x40] ++ be8(murmur3_token(raw_key) ^ 0x8000_0000_0000_0000)</code></pre></div>
+<p>The writer builds the trie from these 9-byte keys. Because the leading
+<code>0x40</code> byte is shared by every partition, the trie root has a single child
+and the discriminating bytes are the 8 token bytes.</p>
+<h3 id="node-types-emitted"><a class="doc-anchor" href="#node-types-emitted">§</a>Node types emitted</h3>
+<p>The writer uses three of the reader’s node categories:</p>
+<ul>
+<li><code>PayloadOnly</code> (ordinal 0) for leaves.</li>
+<li><code>Sparse</code> (ordinals 5/7/8/9, sized by the largest backward delta among the
+node’s children) for internal nodes with 1..=255 children, so it subsumes
+the single-child case too.</li>
+<li><code>Dense</code> for an internal node with full 256-byte fan-out (which <code>Sparse</code>
+cannot encode — its child count is a single byte). The reader’s
+<code>parse_bti_node</code> + <code>find_child</code> handle exactly these encodings.</li>
+</ul>
+<h3 id="rowsdb-within-partition-row-index-trie--issue-910"><a class="doc-anchor" href="#rowsdb-within-partition-row-index-trie--issue-910">§</a>Rows.db (within-partition row-index trie) — issue #910</h3>
+<p><a href="struct.RowsTrieWriter.html" title="struct cqlite_core::storage::sstable::writer::partitions_writer::RowsTrieWriter"><code>RowsTrieWriter</code></a> (this module) serializes <code>Rows.db</code>: one independent
+per-partition row-index trie + <code>TrieIndexEntry</code> for each WIDE partition
+(<code>&gt;= 2</code> column-index blocks). A wide partition’s <code>Partitions.db</code> leaf then
+stores a <strong>positive</strong> <code>RowsOffset</code> (<a href="enum.PartitionPayload.html#variant.RowsOffset" title="variant cqlite_core::storage::sstable::writer::partitions_writer::PartitionPayload::RowsOffset"><code>PartitionPayload::RowsOffset</code></a>)
+pointing at its <code>TrieIndexEntry</code>; narrow partitions keep the <strong>negative</strong>
+direct <code>Data.db</code> offset (<a href="enum.PartitionPayload.html#variant.DataOffset" title="variant cqlite_core::storage::sstable::writer::partitions_writer::PartitionPayload::DataOffset"><code>PartitionPayload::DataOffset</code></a>). The leaf payloads
+and entry layout match the reader exactly
+(<a href="../../bti/parser/fn.decode_bti_row_payload.html" title="fn cqlite_core::storage::sstable::bti::parser::decode_bti_row_payload"><code>crate::storage::sstable::bti::parser::decode_bti_row_payload</code></a> /
+<a href="../../bti/parser/fn.resolve_rows_db_entry.html" title="fn cqlite_core::storage::sstable::bti::parser::resolve_rows_db_entry"><code>resolve_rows_db_entry</code></a>).</p>
+<h3 id="out-of-scope-recorded-for-the-epic"><a class="doc-anchor" href="#out-of-scope-recorded-for-the-epic">§</a>Out of scope (recorded for the epic)</h3>
+<ul>
+<li><code>Single*</code> and 12-bit packed node variants are not emitted. They are valid
+and the reader parses them, but <code>PayloadOnly</code>/<code>Sparse</code>/<code>Dense</code> cover every
+trie this writer produces.</li>
+<li>Per-block <strong>open range-tombstone markers</strong> are supported on the wire
+(<a href="struct.RowIndexBlock.html#structfield.open_marker" title="field cqlite_core::storage::sstable::writer::partitions_writer::RowIndexBlock::open_marker"><code>RowIndexBlock::open_marker</code></a>) but the <code>SSTableWriter</code> BTI path does not
+yet derive them from Data.db range-tombstone state; it passes <code>None</code>
+(the common case). Partition-level deletions ARE wired through.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.PartitionTrieEntry.html" title="struct cqlite_core::storage::sstable::writer::partitions_writer::PartitionTrieEntry">Partition<wbr>Trie<wbr>Entry</a></dt><dd>One partition’s entry in the partition trie.</dd><dt><a class="struct" href="struct.PartitionsTrieWriter.html" title="struct cqlite_core::storage::sstable::writer::partitions_writer::PartitionsTrieWriter">Partitions<wbr>Trie<wbr>Writer</a></dt><dd>Builder that accumulates partition entries and serializes the BTI
+<code>Partitions.db</code> trie.</dd><dt><a class="struct" href="struct.RowIndexBlock.html" title="struct cqlite_core::storage::sstable::writer::partitions_writer::RowIndexBlock">RowIndex<wbr>Block</a></dt><dd>One row-index block separator for a wide partition’s <code>Rows.db</code> trie.</dd><dt><a class="struct" href="struct.RowsTrieWriter.html" title="struct cqlite_core::storage::sstable::writer::partitions_writer::RowsTrieWriter">Rows<wbr>Trie<wbr>Writer</a></dt><dd>Builder that accumulates wide-partition row indexes and serializes <code>Rows.db</code>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PartitionPayload.html" title="enum cqlite_core::storage::sstable::writer::partitions_writer::PartitionPayload">Partition<wbr>Payload</a></dt><dd>Where a partition leaf payload points (issue #910).</dd></dl></section></div></main></body></html>

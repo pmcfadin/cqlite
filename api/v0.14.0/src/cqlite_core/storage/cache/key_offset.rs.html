@@ -1,0 +1,686 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/cache/key_offset.rs`."><title>key_offset.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/cache/</div>key_offset.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Bounded, sharded key→partition-offset cache (issue #1570, Epic B/B4).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! The Cassandra **key-cache** analogue: a small LRU that maps a partition key to
+<a href=#4 id=4 data-nosnippet>4</a>//! the location the index/trie descent produces, so a repeated hot point read can
+<a href=#5 id=5 data-nosnippet>5</a>//! seek straight to the partition and skip re-walking `Index.db` (BIG) or the
+<a href=#6 id=6 data-nosnippet>6</a>//! `Partitions.db` trie (BTI). B1's [`DecompressedChunkCache`] caches decompressed
+<a href=#7 id=7 data-nosnippet>7</a>//! *chunk bytes*; this caches *locations* — immutable facts about an immutable
+<a href=#8 id=8 data-nosnippet>8</a>//! SSTable, never row data (rows change shape under projection).
+<a href=#9 id=9 data-nosnippet>9</a>//!
+<a href=#10 id=10 data-nosnippet>10</a>//! # Design (see `openspec/changes/key-partition-offset-cache/design.md`)
+<a href=#11 id=11 data-nosnippet>11</a>//!
+<a href=#12 id=12 data-nosnippet>12</a>//! - **Keyed on the FULL raw partition-key bytes** (D1): the correctness guardrail
+<a href=#13 id=13 data-nosnippet>13</a>//!   is "a cache hit returns the SAME location a fresh lookup would." Hashing the
+<a href=#14 id=14 data-nosnippet>14</a>//!   key to a `u64` would admit collisions → a hit could return a *different* key's
+<a href=#15 id=15 data-nosnippet>15</a>//!   offset, so the LRU is keyed on the owned key bytes (`Box&lt;[u8]&gt;`), collision-free
+<a href=#16 id=16 data-nosnippet>16</a>//!   by construction.
+<a href=#17 id=17 data-nosnippet>17</a>//! - **Per-reader** (D2): a location is meaningful only within one SSTable's offset
+<a href=#18 id=18 data-nosnippet>18</a>//!   domain, so each reader owns its cache. Invalidation is trivial — the cache dies
+<a href=#19 id=19 data-nosnippet>19</a>//!   with the reader on remove/reload (the audit's "SSTables are immutable, evict by
+<a href=#20 id=20 data-nosnippet>20</a>//!   sstable identity" rule), so there is never a stale-location hazard.
+<a href=#21 id=21 data-nosnippet>21</a>//! - **Sharded `Mutex&lt;Shard&gt;`, APPROXIMATE-BYTE bounded** (D3): `LruCache::get`
+<a href=#22 id=22 data-nosnippet>22</a>//!   mutates recency (hence a `Mutex`, not an `RwLock`), hand-sharded (power-of-two,
+<a href=#23 id=23 data-nosnippet>23</a>//!   masked) so the hit path locks exactly ONE shard, never a process-wide lock —
+<a href=#24 id=24 data-nosnippet>24</a>//!   B1's concurrency rule. Each shard is an `LruCache::unbounded()` whose resident
+<a href=#25 id=25 data-nosnippet>25</a>//!   footprint is bounded MANUALLY by an approximate-BYTE budget (not a raw entry
+<a href=#26 id=26 data-nosnippet>26</a>//!   count), mirroring B1's [`DecompressedChunkCache`]. Partition keys are
+<a href=#27 id=27 data-nosnippet>27</a>//!   variable-length (composite/text, up to Cassandra's ~64 KB), so bounding by
+<a href=#28 id=28 data-nosnippet>28</a>//!   entry *count* would NOT bound resident *bytes* — a count cap of 4096 with
+<a href=#29 id=29 data-nosnippet>29</a>//!   worst-case ~1 KB keys across ~40 readers is ~160 MB, breaching the `&lt;128MB`
+<a href=#30 id=30 data-nosnippet>30</a>//!   budget. Bounding by bytes makes the aggregate footprint independent of key
+<a href=#31 id=31 data-nosnippet>31</a>//!   size (see [`DEFAULT_KEY_CACHE_BYTES`]). Each shard's bucket array still grows
+<a href=#32 id=32 data-nosnippet>32</a>//!   only with actual occupancy, so an idle/empty reader's cache costs ~nothing.
+<a href=#33 id=33 data-nosnippet>33</a>//! - **Resolution-hit only, never a MISS** (D4): the cache stores only a location a
+<a href=#34 id=34 data-nosnippet>34</a>//!   lookup actually resolved, never a definitive MISS, so it can never fabricate a
+<a href=#35 id=35 data-nosnippet>35</a>//!   hit for a key the underlying structure did not resolve. Both read paths preserve
+<a href=#36 id=36 data-nosnippet>36</a>//!   the correctness guardrail (a cache hit returns the SAME location a fresh lookup
+<a href=#37 id=37 data-nosnippet>37</a>//!   would, so any downstream check reaches the identical conclusion), but "resolved"
+<a href=#38 id=38 data-nosnippet>38</a>//!   means something slightly different for each:
+<a href=#39 id=39 data-nosnippet>39</a>//!     - **BIG = confirmed-resolution-only**: only a confirmed `Some` from the
+<a href=#40 id=40 data-nosnippet>40</a>//!       `Index.db` raw-key lookup is inserted, so an absent key is never cached and
+<a href=#41 id=41 data-nosnippet>41</a>//!       the cache simply misses (authoritative absence).
+<a href=#42 id=42 data-nosnippet>42</a>//!     - **BTI = trie-hit-including-candidates**: any trie HIT is cached, which
+<a href=#43 id=43 data-nosnippet>43</a>//!       includes prefix-collision candidates — an offset that may belong to a
+<a href=#44 id=44 data-nosnippet>44</a>//!       different or even absent key — so an absent key CAN receive a cache entry
+<a href=#45 id=45 data-nosnippet>45</a>//!       pointing at its candidate offset. This is not a correctness bug: the caller
+<a href=#46 id=46 data-nosnippet>46</a>//!       (`bti_point_lookup`) re-verifies the key bytes at the resolved offset, and a
+<a href=#47 id=47 data-nosnippet>47</a>//!       cache hit returns the SAME candidate offset a fresh descent returns, so
+<a href=#48 id=48 data-nosnippet>48</a>//!       re-verification reaches the identical conclusion (mirrors the C3
+<a href=#49 id=49 data-nosnippet>49</a>//!       `bti_lookup_memo`, which likewise stores `Some(offset)` for a candidate). A
+<a href=#50 id=50 data-nosnippet>50</a>//!       trie MISS is never cached.
+<a href=#51 id=51 data-nosnippet>51</a>//! - **Poison-tolerant** (D3): every lock uses `lock().unwrap_or_else(|e|
+<a href=#52 id=52 data-nosnippet>52</a>//!   e.into_inner())` so one panicking thread cannot wedge the cache. No
+<a href=#53 id=53 data-nosnippet>53</a>//!   `unwrap()`/`expect()`.
+<a href=#54 id=54 data-nosnippet>54</a>//! - **No-heuristics** (mandate #28): the key is the authoritative partition-key
+<a href=#55 id=55 data-nosnippet>55</a>//!   bytes the index/trie is itself keyed on — never inferred from byte content.
+<a href=#56 id=56 data-nosnippet>56</a>
+<a href=#57 id=57 data-nosnippet>57</a></span><span class="kw">use </span>lru::LruCache;
+<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span>std::hash::{Hash, Hasher};
+<a href=#59 id=59 data-nosnippet>59</a><span class="kw">use </span>std::sync::atomic::{AtomicU64, Ordering};
+<a href=#60 id=60 data-nosnippet>60</a><span class="kw">use </span>std::sync::Mutex;
+<a href=#61 id=61 data-nosnippet>61</a>
+<a href=#62 id=62 data-nosnippet>62</a><span class="doccomment">/// Approximate per-entry byte overhead ON TOP OF the key's own `len()` bytes.
+<a href=#63 id=63 data-nosnippet>63</a>///
+<a href=#64 id=64 data-nosnippet>64</a>/// An entry is a `Box&lt;[u8]&gt;` key plus its [`PartitionLoc`] value, held in an
+<a href=#65 id=65 data-nosnippet>65</a>/// `LruCache` intrusive-list node. This const covers everything except the key's
+<a href=#66 id=66 data-nosnippet>66</a>/// payload bytes (which are charged separately via `key.len()`):
+<a href=#67 id=67 data-nosnippet>67</a>/// - the `Box&lt;[u8]&gt;` fat pointer (16 B) + heap-allocation header/rounding for the
+<a href=#68 id=68 data-nosnippet>68</a>///   key's own allocation,
+<a href=#69 id=69 data-nosnippet>69</a>/// - the [`PartitionLoc`] value stored inline in the node (12 B),
+<a href=#70 id=70 data-nosnippet>70</a>/// - the `LruCache` node itself (a `HashMap` bucket slot + two `NonNull` sibling
+<a href=#71 id=71 data-nosnippet>71</a>///   links) and the map's load-factor slack.
+<a href=#72 id=72 data-nosnippet>72</a>///
+<a href=#73 id=73 data-nosnippet>73</a>/// Rounded generously to 64 B so the byte accounting OVER-estimates rather than
+<a href=#74 id=74 data-nosnippet>74</a>/// under-estimates true resident memory (the budget must never be silently
+<a href=#75 id=75 data-nosnippet>75</a>/// exceeded). This makes [`entry_cost`] a conservative upper bound.
+<a href=#76 id=76 data-nosnippet>76</a></span><span class="kw">const </span>PER_ENTRY_OVERHEAD: usize = <span class="number">64</span>;
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a><span class="doccomment">/// Approximate resident cost of caching one entry whose key is `key_len` bytes:
+<a href=#79 id=79 data-nosnippet>79</a>/// the key's own payload plus the fixed [`PER_ENTRY_OVERHEAD`]. This is the unit
+<a href=#80 id=80 data-nosnippet>80</a>/// the per-shard byte budget is enforced against, so a shard holds fewer large-key
+<a href=#81 id=81 data-nosnippet>81</a>/// entries and more small-key entries — the resident BYTES stay bounded regardless
+<a href=#82 id=82 data-nosnippet>82</a>/// of key size, which is the whole point of a byte budget over a count cap.
+<a href=#83 id=83 data-nosnippet>83</a></span><span class="attr">#[inline]
+<a href=#84 id=84 data-nosnippet>84</a></span><span class="kw">const fn </span>entry_cost(key_len: usize) -&gt; usize {
+<a href=#85 id=85 data-nosnippet>85</a>    key_len.saturating_add(PER_ENTRY_OVERHEAD)
+<a href=#86 id=86 data-nosnippet>86</a>}
+<a href=#87 id=87 data-nosnippet>87</a>
+<a href=#88 id=88 data-nosnippet>88</a><span class="doccomment">/// Default **per-reader** key-cache BYTE budget.
+<a href=#89 id=89 data-nosnippet>89</a>///
+<a href=#90 id=90 data-nosnippet>90</a>/// This cache is per-reader (design D2): each open SSTable reader owns one, so the
+<a href=#91 id=91 data-nosnippet>91</a>/// resident memory that matters for the `&lt;128MB` budget is the **aggregate** across
+<a href=#92 id=92 data-nosnippet>92</a>/// every concurrently-open reader. There is no global ceiling across readers, so
+<a href=#93 id=93 data-nosnippet>93</a>/// this per-reader budget must be chosen so a generous open-reader count stays
+<a href=#94 id=94 data-nosnippet>94</a>/// comfortably within budget.
+<a href=#95 id=95 data-nosnippet>95</a>///
+<a href=#96 id=96 data-nosnippet>96</a>/// # Why bytes, not an entry count (the #1570 roborev fix)
+<a href=#97 id=97 data-nosnippet>97</a>///
+<a href=#98 id=98 data-nosnippet>98</a>/// The previous bound was an entry *count* (`4096`/reader). Partition keys are
+<a href=#99 id=99 data-nosnippet>99</a>/// variable-length (composite/text keys run to Cassandra's ~64 KB limit), so a
+<a href=#100 id=100 data-nosnippet>100</a>/// count cap does NOT bound resident *bytes*: worst case `~40 readers × 4096
+<a href=#101 id=101 data-nosnippet>101</a>/// entries × ~1 KB keys ≈ 160 MB` — over the hard `&lt;128MB` budget. The `~80 B/entry`
+<a href=#102 id=102 data-nosnippet>102</a>/// math the count cap assumed only holds for small (UUID-sized) keys. Bounding by
+<a href=#103 id=103 data-nosnippet>103</a>/// bytes makes the aggregate footprint **independent of key size**.
+<a href=#104 id=104 data-nosnippet>104</a>///
+<a href=#105 id=105 data-nosnippet>105</a>/// # Aggregate-footprint math (byte-bounded, key-size-independent)
+<a href=#106 id=106 data-nosnippet>106</a>///
+<a href=#107 id=107 data-nosnippet>107</a>/// With a per-reader budget `B` and `N` concurrently-open readers the aggregate
+<a href=#108 id=108 data-nosnippet>108</a>/// resident footprint is `≈ N × B` for typical (small) keys, because each reader's
+<a href=#109 id=109 data-nosnippet>109</a>/// cache evicts to stay within `B` bytes. This is an approximation, not an exact
+<a href=#110 id=110 data-nosnippet>110</a>/// cap: the eviction guard never evicts the just-resolved entry (the `lru.len() &gt; 1`
+<a href=#111 id=111 data-nosnippet>111</a>/// condition), so a shard may exceed its per-shard budget by at most **one**
+<a href=#112 id=112 data-nosnippet>112</a>/// oversized entry. With `shard_count = 16` per reader and a Cassandra partition key
+<a href=#113 id=113 data-nosnippet>113</a>/// up to ~64 KB, each of the 16 shards can retain one ~64 KB entry beyond its 32 KiB
+<a href=#114 id=114 data-nosnippet>114</a>/// per-shard budget, so a single reader's true worst case is ~1 MB (~2× the nominal
+<a href=#115 id=115 data-nosnippet>115</a>/// 512 KiB). The exact upper bound is therefore
+<a href=#116 id=116 data-nosnippet>116</a>/// `N × (B + shard_count × max_key_bytes)`; the figures below are the **typical**
+<a href=#117 id=117 data-nosnippet>117</a>/// small-key case, which dominates in practice.
+<a href=#118 id=118 data-nosnippet>118</a>///
+<a href=#119 id=119 data-nosnippet>119</a>/// - `B = 512 KiB` per reader.
+<a href=#120 id=120 data-nosnippet>120</a>/// - A point-read-heavy workload with ~40 open generations (typical keys):
+<a href=#121 id=121 data-nosnippet>121</a>///   `40 × 512 KiB ≈ 20 MB` — well within `&lt;128MB`, leaving the majority for B1's
+<a href=#122 id=122 data-nosnippet>122</a>///   decompressed-chunk cache and the working set.
+<a href=#123 id=123 data-nosnippet>123</a>/// - Even a very generous ~128 open readers is `≈ 128 × 512 KiB = 64 MB` for typical
+<a href=#124 id=124 data-nosnippet>124</a>///   keys, still within budget. The typical footprint no longer depends on whether
+<a href=#125 id=125 data-nosnippet>125</a>///   keys are 16 B UUIDs or 1 KB composites — the byte budget bounds it either way,
+<a href=#126 id=126 data-nosnippet>126</a>///   with the bounded oversized-entry slack above as the only exception.
+<a href=#127 id=127 data-nosnippet>127</a>///
+<a href=#128 id=128 data-nosnippet>128</a>/// Each shard's bucket array still grows only with actual occupancy (unbounded
+<a href=#129 id=129 data-nosnippet>129</a>/// `LruCache` + manual byte-budget eviction), so an idle/empty reader's cache costs
+<a href=#130 id=130 data-nosnippet>130</a>/// ~nothing; the budget bounds only the fully-occupied worst case.
+<a href=#131 id=131 data-nosnippet>131</a>///
+<a href=#132 id=132 data-nosnippet>132</a>/// A single **global bounded cache** keyed on `(sstable_id, key)` (Cassandra's
+<a href=#133 id=133 data-nosnippet>133</a>/// key-cache model) would bound the aggregate regardless of reader count and is
+<a href=#134 id=134 data-nosnippet>134</a>/// noted as a deferred future optimization (see `design.md` "Deferred"); it is a
+<a href=#135 id=135 data-nosnippet>135</a>/// larger architectural change beyond B4's audit-approved per-reader scope.
+<a href=#136 id=136 data-nosnippet>136</a></span><span class="kw">pub const </span>DEFAULT_KEY_CACHE_BYTES: usize = <span class="number">512 </span>* <span class="number">1024</span>;
+<a href=#137 id=137 data-nosnippet>137</a>
+<a href=#138 id=138 data-nosnippet>138</a><span class="doccomment">/// Default shard count (power of two), mirroring [`DecompressedChunkCache`]'s
+<a href=#139 id=139 data-nosnippet>139</a>/// `DEFAULT_SHARDS`.
+<a href=#140 id=140 data-nosnippet>140</a>///
+<a href=#141 id=141 data-nosnippet>141</a>/// [`DecompressedChunkCache`]: super::DecompressedChunkCache
+<a href=#142 id=142 data-nosnippet>142</a></span><span class="kw">pub const </span>DEFAULT_KEY_CACHE_SHARDS: usize = <span class="number">16</span>;
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a><span class="doccomment">/// The resolved location of a partition, exactly what the index/trie descent
+<a href=#145 id=145 data-nosnippet>145</a>/// produces.
+<a href=#146 id=146 data-nosnippet>146</a>///
+<a href=#147 id=147 data-nosnippet>147</a>/// BIG (`Index.db`) resolves both fields. BTI resolves only `data_offset` (the
+<a href=#148 id=148 data-nosnippet>148</a>/// partition's size is bounded later via the successor offset), so a BTI wiring
+<a href=#149 id=149 data-nosnippet>149</a>/// site stores `data_size = 0` and reads back only `data_offset`. A reader is
+<a href=#150 id=150 data-nosnippet>150</a>/// exactly one format, so the two never mix within one cache.
+<a href=#151 id=151 data-nosnippet>151</a></span><span class="attr">#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+<a href=#152 id=152 data-nosnippet>152</a></span><span class="kw">pub struct </span>PartitionLoc {
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="doccomment">/// Uncompressed `Data.db` offset the descent resolved.
+<a href=#154 id=154 data-nosnippet>154</a>    </span><span class="kw">pub </span>data_offset: u64,
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="doccomment">/// Partition byte size (BIG only; `0` for BTI, which bounds size elsewhere).
+<a href=#156 id=156 data-nosnippet>156</a>    </span><span class="kw">pub </span>data_size: u32,
+<a href=#157 id=157 data-nosnippet>157</a>}
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a><span class="kw">impl </span>PartitionLoc {
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="doccomment">/// Location with a known size (BIG `Index.db` resolution).
+<a href=#161 id=161 data-nosnippet>161</a>    </span><span class="attr">#[inline]
+<a href=#162 id=162 data-nosnippet>162</a>    </span><span class="kw">pub fn </span>new(data_offset: u64, data_size: u32) -&gt; <span class="self">Self </span>{
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="self">Self </span>{
+<a href=#164 id=164 data-nosnippet>164</a>            data_offset,
+<a href=#165 id=165 data-nosnippet>165</a>            data_size,
+<a href=#166 id=166 data-nosnippet>166</a>        }
+<a href=#167 id=167 data-nosnippet>167</a>    }
+<a href=#168 id=168 data-nosnippet>168</a>
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="doccomment">/// Location with only an offset (BTI trie resolution; `data_size = 0`).
+<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="attr">#[inline]
+<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="kw">pub fn </span>offset_only(data_offset: u64) -&gt; <span class="self">Self </span>{
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="self">Self </span>{
+<a href=#173 id=173 data-nosnippet>173</a>            data_offset,
+<a href=#174 id=174 data-nosnippet>174</a>            data_size: <span class="number">0</span>,
+<a href=#175 id=175 data-nosnippet>175</a>        }
+<a href=#176 id=176 data-nosnippet>176</a>    }
+<a href=#177 id=177 data-nosnippet>177</a>}
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a><span class="doccomment">/// One cache shard: an `unbounded` `LruCache` mapping the raw partition-key bytes
+<a href=#180 id=180 data-nosnippet>180</a>/// to the resolved [`PartitionLoc`], plus a running resident-byte counter. The
+<a href=#181 id=181 data-nosnippet>181</a>/// byte budget is enforced manually on insert (`pop_lru` while over budget) so the
+<a href=#182 id=182 data-nosnippet>182</a>/// bucket array grows only with occupancy.
+<a href=#183 id=183 data-nosnippet>183</a></span><span class="kw">struct </span>Shard {
+<a href=#184 id=184 data-nosnippet>184</a>    lru: LruCache&lt;Box&lt;[u8]&gt;, PartitionLoc&gt;,
+<a href=#185 id=185 data-nosnippet>185</a>    <span class="doccomment">/// Sum of [`entry_cost`] over the shard's resident entries. Maintained on every
+<a href=#186 id=186 data-nosnippet>186</a>    /// insert, in-place replacement, and eviction.
+<a href=#187 id=187 data-nosnippet>187</a>    </span>current_bytes: usize,
+<a href=#188 id=188 data-nosnippet>188</a>}
+<a href=#189 id=189 data-nosnippet>189</a>
+<a href=#190 id=190 data-nosnippet>190</a><span class="kw">impl </span>Shard {
+<a href=#191 id=191 data-nosnippet>191</a>    <span class="kw">fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="self">Self </span>{
+<a href=#193 id=193 data-nosnippet>193</a>            <span class="comment">// Used UNBOUNDED by count; the byte budget is enforced explicitly in
+<a href=#194 id=194 data-nosnippet>194</a>            // `insert` via `pop_lru`. `LruCache::unbounded` never evicts on its own.
+<a href=#195 id=195 data-nosnippet>195</a>            </span>lru: LruCache::unbounded(),
+<a href=#196 id=196 data-nosnippet>196</a>            current_bytes: <span class="number">0</span>,
+<a href=#197 id=197 data-nosnippet>197</a>        }
+<a href=#198 id=198 data-nosnippet>198</a>    }
+<a href=#199 id=199 data-nosnippet>199</a>}
+<a href=#200 id=200 data-nosnippet>200</a>
+<a href=#201 id=201 data-nosnippet>201</a><span class="doccomment">/// A bounded, sharded key→partition-offset cache.
+<a href=#202 id=202 data-nosnippet>202</a></span><span class="kw">pub struct </span>KeyOffsetCache {
+<a href=#203 id=203 data-nosnippet>203</a>    shards: Box&lt;[Mutex&lt;Shard&gt;]&gt;,
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="doccomment">/// Approximate BYTE budget PER shard. Enforced manually in
+<a href=#205 id=205 data-nosnippet>205</a>    /// [`insert`](Self::insert) (`pop_lru` while over budget) since each shard is an
+<a href=#206 id=206 data-nosnippet>206</a>    /// `unbounded` `LruCache`. Always `&gt;= entry_cost(0)` for an enabled cache so a
+<a href=#207 id=207 data-nosnippet>207</a>    /// shard can always retain one just-resolved entry; `0` when
+<a href=#208 id=208 data-nosnippet>208</a>    /// [`disabled`](Self::disabled).
+<a href=#209 id=209 data-nosnippet>209</a>    </span>per_shard_bytes: usize,
+<a href=#210 id=210 data-nosnippet>210</a>    <span class="doccomment">/// `shards.len() - 1`; `shards.len()` is always a power of two.
+<a href=#211 id=211 data-nosnippet>211</a>    </span>mask: usize,
+<a href=#212 id=212 data-nosnippet>212</a>    <span class="doccomment">/// When `true` this is a genuine no-op cache (honoring
+<a href=#213 id=213 data-nosnippet>213</a>    /// `config.memory.block_cache.enabled == false`): `get` always misses and
+<a href=#214 id=214 data-nosnippet>214</a>    /// `insert` never retains, so reads bypass the cache entirely.
+<a href=#215 id=215 data-nosnippet>215</a>    </span>disabled: bool,
+<a href=#216 id=216 data-nosnippet>216</a>    hits: AtomicU64,
+<a href=#217 id=217 data-nosnippet>217</a>    misses: AtomicU64,
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="doccomment">/// Cumulative count of entries evicted to stay within the byte budget
+<a href=#219 id=219 data-nosnippet>219</a>    /// (issue #1571, B5). Relaxed atomic — advisory observability only.
+<a href=#220 id=220 data-nosnippet>220</a>    </span>evictions: AtomicU64,
+<a href=#221 id=221 data-nosnippet>221</a>}
+<a href=#222 id=222 data-nosnippet>222</a>
+<a href=#223 id=223 data-nosnippet>223</a><span class="kw">impl </span>std::fmt::Debug <span class="kw">for </span>KeyOffsetCache {
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#225 id=225 data-nosnippet>225</a>        f.debug_struct(<span class="string">"KeyOffsetCache"</span>)
+<a href=#226 id=226 data-nosnippet>226</a>            .field(<span class="string">"shards"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.shards.len())
+<a href=#227 id=227 data-nosnippet>227</a>            .field(<span class="string">"per_shard_bytes"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.per_shard_bytes)
+<a href=#228 id=228 data-nosnippet>228</a>            .field(<span class="string">"disabled"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.disabled)
+<a href=#229 id=229 data-nosnippet>229</a>            .field(<span class="string">"len"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.len())
+<a href=#230 id=230 data-nosnippet>230</a>            .field(<span class="string">"resident_bytes"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.resident_bytes())
+<a href=#231 id=231 data-nosnippet>231</a>            .field(<span class="string">"hits"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.hits.load(Ordering::Relaxed))
+<a href=#232 id=232 data-nosnippet>232</a>            .field(<span class="string">"misses"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.misses.load(Ordering::Relaxed))
+<a href=#233 id=233 data-nosnippet>233</a>            .field(<span class="string">"evictions"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.evictions.load(Ordering::Relaxed))
+<a href=#234 id=234 data-nosnippet>234</a>            .finish()
+<a href=#235 id=235 data-nosnippet>235</a>    }
+<a href=#236 id=236 data-nosnippet>236</a>}
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a><span class="doccomment">/// A point-in-time snapshot of one key cache's real observability counters
+<a href=#239 id=239 data-nosnippet>239</a>/// (issue #1571, B5). Summed across live readers to build the process-level
+<a href=#240 id=240 data-nosnippet>240</a>/// key-cache aggregate reported through `Database::stats().memory_stats`. Every
+<a href=#241 id=241 data-nosnippet>241</a>/// field is a real counter/aggregate read from the live cache — never a
+<a href=#242 id=242 data-nosnippet>242</a>/// fabricated placeholder.
+<a href=#243 id=243 data-nosnippet>243</a></span><span class="attr">#[derive(Debug, Clone, Copy, Default)]
+<a href=#244 id=244 data-nosnippet>244</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>KeyCacheSnapshot {
+<a href=#245 id=245 data-nosnippet>245</a>    <span class="kw">pub </span>hits: u64,
+<a href=#246 id=246 data-nosnippet>246</a>    <span class="kw">pub </span>misses: u64,
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="kw">pub </span>evictions: u64,
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="kw">pub </span>resident_bytes: usize,
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="kw">pub </span>capacity_bytes: usize,
+<a href=#250 id=250 data-nosnippet>250</a>}
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a><span class="kw">impl </span>KeyOffsetCache {
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="doccomment">/// Create a cache with `total_budget_bytes` split across
+<a href=#254 id=254 data-nosnippet>254</a>    /// [`DEFAULT_KEY_CACHE_SHARDS`] shards.
+<a href=#255 id=255 data-nosnippet>255</a>    </span><span class="kw">pub fn </span>with_budget_bytes(total_budget_bytes: usize) -&gt; <span class="self">Self </span>{
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="self">Self</span>::with_budget_and_shards(total_budget_bytes, DEFAULT_KEY_CACHE_SHARDS)
+<a href=#257 id=257 data-nosnippet>257</a>    }
+<a href=#258 id=258 data-nosnippet>258</a>
+<a href=#259 id=259 data-nosnippet>259</a>    <span class="doccomment">/// Create a cache with `total_budget_bytes` split across `shard_count` shards.
+<a href=#260 id=260 data-nosnippet>260</a>    ///
+<a href=#261 id=261 data-nosnippet>261</a>    /// `shard_count` is rounded UP to the next power of two (min 1) so shard
+<a href=#262 id=262 data-nosnippet>262</a>    /// selection can mask instead of modulo. Unit tests use `shard_count = 1` for
+<a href=#263 id=263 data-nosnippet>263</a>    /// deterministic eviction ordering; production uses [`DEFAULT_KEY_CACHE_SHARDS`].
+<a href=#264 id=264 data-nosnippet>264</a>    </span><span class="kw">pub fn </span>with_budget_and_shards(total_budget_bytes: usize, shard_count: usize) -&gt; <span class="self">Self </span>{
+<a href=#265 id=265 data-nosnippet>265</a>        <span class="kw">let </span>shard_count = shard_count.max(<span class="number">1</span>).next_power_of_two();
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="comment">// At least one minimal entry per shard so the cache can always retain the
+<a href=#267 id=267 data-nosnippet>267</a>        // entry it just resolved. Each shard is an `unbounded` `LruCache` whose
+<a href=#268 id=268 data-nosnippet>268</a>        // bucket array grows with actual occupancy; the budget is enforced manually
+<a href=#269 id=269 data-nosnippet>269</a>        // on insert.
+<a href=#270 id=270 data-nosnippet>270</a>        </span><span class="kw">let </span>per_shard_bytes = (total_budget_bytes / shard_count).max(entry_cost(<span class="number">0</span>));
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">let </span><span class="kw-2">mut </span>shards = Vec::with_capacity(shard_count);
+<a href=#272 id=272 data-nosnippet>272</a>        <span class="kw">for _ in </span><span class="number">0</span>..shard_count {
+<a href=#273 id=273 data-nosnippet>273</a>            shards.push(Mutex::new(Shard::new()));
+<a href=#274 id=274 data-nosnippet>274</a>        }
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="self">Self </span>{
+<a href=#276 id=276 data-nosnippet>276</a>            shards: shards.into_boxed_slice(),
+<a href=#277 id=277 data-nosnippet>277</a>            per_shard_bytes,
+<a href=#278 id=278 data-nosnippet>278</a>            mask: shard_count - <span class="number">1</span>,
+<a href=#279 id=279 data-nosnippet>279</a>            disabled: <span class="bool-val">false</span>,
+<a href=#280 id=280 data-nosnippet>280</a>            hits: AtomicU64::new(<span class="number">0</span>),
+<a href=#281 id=281 data-nosnippet>281</a>            misses: AtomicU64::new(<span class="number">0</span>),
+<a href=#282 id=282 data-nosnippet>282</a>            evictions: AtomicU64::new(<span class="number">0</span>),
+<a href=#283 id=283 data-nosnippet>283</a>        }
+<a href=#284 id=284 data-nosnippet>284</a>    }
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a>    <span class="doccomment">/// Create a genuine no-op cache (honoring `block_cache.enabled == false`):
+<a href=#287 id=287 data-nosnippet>287</a>    /// reads bypass it entirely. [`get`](Self::get) always returns `None` (no
+<a href=#288 id=288 data-nosnippet>288</a>    /// counters touched), [`insert`](Self::insert) retains nothing, and
+<a href=#289 id=289 data-nosnippet>289</a>    /// `len()`/`budget_bytes()`/`resident_bytes()` all report `0`.
+<a href=#290 id=290 data-nosnippet>290</a>    </span><span class="kw">pub fn </span>disabled() -&gt; <span class="self">Self </span>{
+<a href=#291 id=291 data-nosnippet>291</a>        <span class="self">Self </span>{
+<a href=#292 id=292 data-nosnippet>292</a>            <span class="comment">// One dummy shard so shard indexing stays valid; nothing is ever stored.
+<a href=#293 id=293 data-nosnippet>293</a>            </span>shards: <span class="macro">vec!</span>[Mutex::new(Shard::new())].into_boxed_slice(),
+<a href=#294 id=294 data-nosnippet>294</a>            per_shard_bytes: <span class="number">0</span>,
+<a href=#295 id=295 data-nosnippet>295</a>            mask: <span class="number">0</span>,
+<a href=#296 id=296 data-nosnippet>296</a>            disabled: <span class="bool-val">true</span>,
+<a href=#297 id=297 data-nosnippet>297</a>            hits: AtomicU64::new(<span class="number">0</span>),
+<a href=#298 id=298 data-nosnippet>298</a>            misses: AtomicU64::new(<span class="number">0</span>),
+<a href=#299 id=299 data-nosnippet>299</a>            evictions: AtomicU64::new(<span class="number">0</span>),
+<a href=#300 id=300 data-nosnippet>300</a>        }
+<a href=#301 id=301 data-nosnippet>301</a>    }
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a>    <span class="doccomment">/// Poison-tolerant lock: recover the guard if a prior holder panicked, so a
+<a href=#304 id=304 data-nosnippet>304</a>    /// single panic cannot turn the cache into a panic-for-everyone (design D3).
+<a href=#305 id=305 data-nosnippet>305</a>    </span><span class="attr">#[inline]
+<a href=#306 id=306 data-nosnippet>306</a>    </span><span class="kw">fn </span>lock(m: <span class="kw-2">&amp;</span>Mutex&lt;Shard&gt;) -&gt; std::sync::MutexGuard&lt;<span class="lifetime">'_</span>, Shard&gt; {
+<a href=#307 id=307 data-nosnippet>307</a>        m.lock().unwrap_or_else(|e| e.into_inner())
+<a href=#308 id=308 data-nosnippet>308</a>    }
+<a href=#309 id=309 data-nosnippet>309</a>
+<a href=#310 id=310 data-nosnippet>310</a>    <span class="attr">#[inline]
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">fn </span>shard_for(<span class="kw-2">&amp;</span><span class="self">self</span>, key: <span class="kw-2">&amp;</span>[u8]) -&gt; <span class="kw-2">&amp;</span>Mutex&lt;Shard&gt; {
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="kw">let </span><span class="kw-2">mut </span>h = std::collections::hash_map::DefaultHasher::new();
+<a href=#313 id=313 data-nosnippet>313</a>        key.hash(<span class="kw-2">&amp;mut </span>h);
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="kw">let </span>idx = (h.finish() <span class="kw">as </span>usize) &amp; <span class="self">self</span>.mask;
+<a href=#315 id=315 data-nosnippet>315</a>        <span class="comment">// `idx &lt;= mask &lt; shards.len()`, so this index is always in bounds.
+<a href=#316 id=316 data-nosnippet>316</a>        </span><span class="kw-2">&amp;</span><span class="self">self</span>.shards[idx]
+<a href=#317 id=317 data-nosnippet>317</a>    }
+<a href=#318 id=318 data-nosnippet>318</a>
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="doccomment">/// Look up a partition location by its raw key bytes. On a hit this bumps
+<a href=#320 id=320 data-nosnippet>320</a>    /// recency and returns the stored [`PartitionLoc`]; on a miss returns `None`.
+<a href=#321 id=321 data-nosnippet>321</a>    </span><span class="kw">pub fn </span>get(<span class="kw-2">&amp;</span><span class="self">self</span>, key: <span class="kw-2">&amp;</span>[u8]) -&gt; <span class="prelude-ty">Option</span>&lt;PartitionLoc&gt; {
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="comment">// A disabled cache never holds anything, so reads bypass it without
+<a href=#323 id=323 data-nosnippet>323</a>        // touching the hit/miss counters.
+<a href=#324 id=324 data-nosnippet>324</a>        </span><span class="kw">if </span><span class="self">self</span>.disabled {
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#326 id=326 data-nosnippet>326</a>        }
+<a href=#327 id=327 data-nosnippet>327</a>        <span class="kw">let </span><span class="kw-2">mut </span>guard = <span class="self">Self</span>::lock(<span class="self">self</span>.shard_for(key));
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">match </span>guard.lru.get(key) {
+<a href=#329 id=329 data-nosnippet>329</a>            <span class="prelude-val">Some</span>(loc) =&gt; {
+<a href=#330 id=330 data-nosnippet>330</a>                <span class="kw">let </span>loc = <span class="kw-2">*</span>loc;
+<a href=#331 id=331 data-nosnippet>331</a>                drop(guard);
+<a href=#332 id=332 data-nosnippet>332</a>                <span class="self">self</span>.hits.fetch_add(<span class="number">1</span>, Ordering::Relaxed);
+<a href=#333 id=333 data-nosnippet>333</a>                <span class="prelude-val">Some</span>(loc)
+<a href=#334 id=334 data-nosnippet>334</a>            }
+<a href=#335 id=335 data-nosnippet>335</a>            <span class="prelude-val">None </span>=&gt; {
+<a href=#336 id=336 data-nosnippet>336</a>                drop(guard);
+<a href=#337 id=337 data-nosnippet>337</a>                <span class="self">self</span>.misses.fetch_add(<span class="number">1</span>, Ordering::Relaxed);
+<a href=#338 id=338 data-nosnippet>338</a>                <span class="prelude-val">None
+<a href=#339 id=339 data-nosnippet>339</a>            </span>}
+<a href=#340 id=340 data-nosnippet>340</a>        }
+<a href=#341 id=341 data-nosnippet>341</a>    }
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="doccomment">/// Insert `loc` under the raw partition-key bytes `key`. On a disabled cache
+<a href=#344 id=344 data-nosnippet>344</a>    /// this is a no-op. The owning shard evicts LRU entries until it is within its
+<a href=#345 id=345 data-nosnippet>345</a>    /// per-shard byte budget (never evicting the just-inserted MRU entry).
+<a href=#346 id=346 data-nosnippet>346</a>    </span><span class="kw">pub fn </span>insert(<span class="kw-2">&amp;</span><span class="self">self</span>, key: <span class="kw-2">&amp;</span>[u8], loc: PartitionLoc) {
+<a href=#347 id=347 data-nosnippet>347</a>        <span class="kw">if </span><span class="self">self</span>.disabled {
+<a href=#348 id=348 data-nosnippet>348</a>            <span class="kw">return</span>;
+<a href=#349 id=349 data-nosnippet>349</a>        }
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="kw">let </span>cost = entry_cost(key.len());
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">let </span><span class="kw-2">mut </span>guard = <span class="self">Self</span>::lock(<span class="self">self</span>.shard_for(key));
+<a href=#352 id=352 data-nosnippet>352</a>
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="comment">// Each shard is an `unbounded` `LruCache`, so `put` never evicts: it inserts
+<a href=#354 id=354 data-nosnippet>354</a>        // (or updates in place) and promotes the key to most-recently-used. Replacing
+<a href=#355 id=355 data-nosnippet>355</a>        // an existing key reclaims the old entry's byte weight first — the key bytes
+<a href=#356 id=356 data-nosnippet>356</a>        // are identical, so `cost` is the same for old and new, but subtract-then-add
+<a href=#357 id=357 data-nosnippet>357</a>        // keeps the counter exact and matches the sibling chunk cache's discipline.
+<a href=#358 id=358 data-nosnippet>358</a>        </span><span class="kw">if </span>guard.lru.put(Box::from(key), loc).is_some() {
+<a href=#359 id=359 data-nosnippet>359</a>            guard.current_bytes = guard.current_bytes.saturating_sub(cost);
+<a href=#360 id=360 data-nosnippet>360</a>        }
+<a href=#361 id=361 data-nosnippet>361</a>        guard.current_bytes = guard.current_bytes.saturating_add(cost);
+<a href=#362 id=362 data-nosnippet>362</a>
+<a href=#363 id=363 data-nosnippet>363</a>        <span class="comment">// Evict LRU entries until within the byte budget. The just-inserted key is
+<a href=#364 id=364 data-nosnippet>364</a>        // now most-recently-used, so `pop_lru` never targets it while other entries
+<a href=#365 id=365 data-nosnippet>365</a>        // remain. The `len() &gt; 1` guard keeps the entry we just resolved resident
+<a href=#366 id=366 data-nosnippet>366</a>        // even if it alone exceeds the budget (documented: single oversized entry).
+<a href=#367 id=367 data-nosnippet>367</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>evicted_here: u64 = <span class="number">0</span>;
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="kw">while </span>guard.current_bytes &gt; <span class="self">self</span>.per_shard_bytes &amp;&amp; guard.lru.len() &gt; <span class="number">1 </span>{
+<a href=#369 id=369 data-nosnippet>369</a>            <span class="kw">match </span>guard.lru.pop_lru() {
+<a href=#370 id=370 data-nosnippet>370</a>                <span class="prelude-val">Some</span>((evicted_key, <span class="kw">_</span>)) =&gt; {
+<a href=#371 id=371 data-nosnippet>371</a>                    <span class="kw">let </span>reclaimed = entry_cost(evicted_key.len());
+<a href=#372 id=372 data-nosnippet>372</a>                    guard.current_bytes = guard.current_bytes.saturating_sub(reclaimed);
+<a href=#373 id=373 data-nosnippet>373</a>                    evicted_here += <span class="number">1</span>;
+<a href=#374 id=374 data-nosnippet>374</a>                }
+<a href=#375 id=375 data-nosnippet>375</a>                <span class="prelude-val">None </span>=&gt; <span class="kw">break</span>,
+<a href=#376 id=376 data-nosnippet>376</a>            }
+<a href=#377 id=377 data-nosnippet>377</a>        }
+<a href=#378 id=378 data-nosnippet>378</a>        drop(guard);
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="kw">if </span>evicted_here &gt; <span class="number">0 </span>{
+<a href=#380 id=380 data-nosnippet>380</a>            <span class="self">self</span>.evictions.fetch_add(evicted_here, Ordering::Relaxed);
+<a href=#381 id=381 data-nosnippet>381</a>        }
+<a href=#382 id=382 data-nosnippet>382</a>    }
+<a href=#383 id=383 data-nosnippet>383</a>
+<a href=#384 id=384 data-nosnippet>384</a>    <span class="doccomment">/// Total resident entry count across all shards.
+<a href=#385 id=385 data-nosnippet>385</a>    </span><span class="kw">pub fn </span>len(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="self">self</span>.shards.iter().map(|m| <span class="self">Self</span>::lock(m).lru.len()).sum()
+<a href=#387 id=387 data-nosnippet>387</a>    }
+<a href=#388 id=388 data-nosnippet>388</a>
+<a href=#389 id=389 data-nosnippet>389</a>    <span class="doccomment">/// Whether the cache currently holds no entries.
+<a href=#390 id=390 data-nosnippet>390</a>    </span><span class="kw">pub fn </span>is_empty(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#391 id=391 data-nosnippet>391</a>        <span class="self">self</span>.len() == <span class="number">0
+<a href=#392 id=392 data-nosnippet>392</a>    </span>}
+<a href=#393 id=393 data-nosnippet>393</a>
+<a href=#394 id=394 data-nosnippet>394</a>    <span class="doccomment">/// Total approximate resident bytes across all shards (sum of [`entry_cost`]
+<a href=#395 id=395 data-nosnippet>395</a>    /// over resident entries). A [`disabled`](Self::disabled) no-op cache reports
+<a href=#396 id=396 data-nosnippet>396</a>    /// `0`.
+<a href=#397 id=397 data-nosnippet>397</a>    </span><span class="kw">pub fn </span>resident_bytes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="self">self</span>.shards
+<a href=#399 id=399 data-nosnippet>399</a>            .iter()
+<a href=#400 id=400 data-nosnippet>400</a>            .map(|m| <span class="self">Self</span>::lock(m).current_bytes)
+<a href=#401 id=401 data-nosnippet>401</a>            .sum()
+<a href=#402 id=402 data-nosnippet>402</a>    }
+<a href=#403 id=403 data-nosnippet>403</a>
+<a href=#404 id=404 data-nosnippet>404</a>    <span class="doccomment">/// The configured total byte budget (`per_shard_bytes × shard count`). A
+<a href=#405 id=405 data-nosnippet>405</a>    /// [`disabled`](Self::disabled) no-op cache reports `0`.
+<a href=#406 id=406 data-nosnippet>406</a>    </span><span class="kw">pub fn </span>budget_bytes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="self">self</span>.per_shard_bytes.saturating_mul(<span class="self">self</span>.shards.len())
+<a href=#408 id=408 data-nosnippet>408</a>    }
+<a href=#409 id=409 data-nosnippet>409</a>
+<a href=#410 id=410 data-nosnippet>410</a>    <span class="doccomment">/// Cumulative cache hits (test/observability instrumentation).
+<a href=#411 id=411 data-nosnippet>411</a>    </span><span class="kw">pub fn </span>hit_count(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; u64 {
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="self">self</span>.hits.load(Ordering::Relaxed)
+<a href=#413 id=413 data-nosnippet>413</a>    }
+<a href=#414 id=414 data-nosnippet>414</a>
+<a href=#415 id=415 data-nosnippet>415</a>    <span class="doccomment">/// Cumulative cache misses (test/observability instrumentation).
+<a href=#416 id=416 data-nosnippet>416</a>    </span><span class="kw">pub fn </span>miss_count(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; u64 {
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="self">self</span>.misses.load(Ordering::Relaxed)
+<a href=#418 id=418 data-nosnippet>418</a>    }
+<a href=#419 id=419 data-nosnippet>419</a>
+<a href=#420 id=420 data-nosnippet>420</a>    <span class="doccomment">/// Cumulative entries evicted to stay within budget (issue #1571, B5).
+<a href=#421 id=421 data-nosnippet>421</a>    ///
+<a href=#422 id=422 data-nosnippet>422</a>    /// Real relaxed-atomic counter; a [`disabled`](Self::disabled) no-op cache
+<a href=#423 id=423 data-nosnippet>423</a>    /// never evicts and reports `0`.
+<a href=#424 id=424 data-nosnippet>424</a>    </span><span class="kw">pub fn </span>eviction_count(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; u64 {
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="self">self</span>.evictions.load(Ordering::Relaxed)
+<a href=#426 id=426 data-nosnippet>426</a>    }
+<a href=#427 id=427 data-nosnippet>427</a>
+<a href=#428 id=428 data-nosnippet>428</a>    <span class="doccomment">/// A point-in-time snapshot of this cache's real observability counters,
+<a href=#429 id=429 data-nosnippet>429</a>    /// summed across readers to build the process-level key-cache aggregate
+<a href=#430 id=430 data-nosnippet>430</a>    /// (issue #1571, B5). Reads only relaxed atomics plus the per-shard locks
+<a href=#431 id=431 data-nosnippet>431</a>    /// occupancy already uses — no new hot-path lock.
+<a href=#432 id=432 data-nosnippet>432</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>snapshot(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; KeyCacheSnapshot {
+<a href=#433 id=433 data-nosnippet>433</a>        KeyCacheSnapshot {
+<a href=#434 id=434 data-nosnippet>434</a>            hits: <span class="self">self</span>.hit_count(),
+<a href=#435 id=435 data-nosnippet>435</a>            misses: <span class="self">self</span>.miss_count(),
+<a href=#436 id=436 data-nosnippet>436</a>            evictions: <span class="self">self</span>.eviction_count(),
+<a href=#437 id=437 data-nosnippet>437</a>            resident_bytes: <span class="self">self</span>.resident_bytes(),
+<a href=#438 id=438 data-nosnippet>438</a>            capacity_bytes: <span class="self">self</span>.budget_bytes(),
+<a href=#439 id=439 data-nosnippet>439</a>        }
+<a href=#440 id=440 data-nosnippet>440</a>    }
+<a href=#441 id=441 data-nosnippet>441</a>}
+<a href=#442 id=442 data-nosnippet>442</a>
+<a href=#443 id=443 data-nosnippet>443</a><span class="kw">impl </span>Default <span class="kw">for </span>KeyOffsetCache {
+<a href=#444 id=444 data-nosnippet>444</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="self">Self</span>::with_budget_bytes(DEFAULT_KEY_CACHE_BYTES)
+<a href=#446 id=446 data-nosnippet>446</a>    }
+<a href=#447 id=447 data-nosnippet>447</a>}
+<a href=#448 id=448 data-nosnippet>448</a>
+<a href=#449 id=449 data-nosnippet>449</a><span class="attr">#[cfg(test)]
+<a href=#450 id=450 data-nosnippet>450</a></span><span class="kw">mod </span>tests {
+<a href=#451 id=451 data-nosnippet>451</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#452 id=452 data-nosnippet>452</a>    <span class="kw">use </span>std::sync::Arc;
+<a href=#453 id=453 data-nosnippet>453</a>
+<a href=#454 id=454 data-nosnippet>454</a>    <span class="doccomment">/// A budget that holds exactly `n` entries whose keys are `key_len` bytes each,
+<a href=#455 id=455 data-nosnippet>455</a>    /// on a single shard (so eviction is deterministic — no wall-clock, no shard
+<a href=#456 id=456 data-nosnippet>456</a>    /// spread). Used to make byte-budget eviction assertions exact.
+<a href=#457 id=457 data-nosnippet>457</a>    </span><span class="kw">fn </span>budget_for(n: usize, key_len: usize) -&gt; usize {
+<a href=#458 id=458 data-nosnippet>458</a>        entry_cost(key_len) * n
+<a href=#459 id=459 data-nosnippet>459</a>    }
+<a href=#460 id=460 data-nosnippet>460</a>
+<a href=#461 id=461 data-nosnippet>461</a>    <span class="doccomment">/// Task 1.1: eviction order — single shard sized for exactly 2 entries; insert
+<a href=#462 id=462 data-nosnippet>462</a>    /// A, insert B, access A, insert C → B (LRU) evicted, A and C survive.
+<a href=#463 id=463 data-nosnippet>463</a>    </span><span class="attr">#[test]
+<a href=#464 id=464 data-nosnippet>464</a>    </span><span class="kw">fn </span>eviction_order_lru_single_shard() {
+<a href=#465 id=465 data-nosnippet>465</a>        <span class="comment">// All keys are 5 bytes ("key-X"), so 2 entries' worth of byte budget holds
+<a href=#466 id=466 data-nosnippet>466</a>        // exactly two of them.
+<a href=#467 id=467 data-nosnippet>467</a>        </span><span class="kw">let </span>cache = KeyOffsetCache::with_budget_and_shards(budget_for(<span class="number">2</span>, <span class="number">5</span>), <span class="number">1</span>);
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="kw">let </span>a = <span class="string">b"key-A"</span>.as_slice();
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">let </span>b = <span class="string">b"key-B"</span>.as_slice();
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="kw">let </span>c = <span class="string">b"key-C"</span>.as_slice();
+<a href=#471 id=471 data-nosnippet>471</a>
+<a href=#472 id=472 data-nosnippet>472</a>        cache.insert(a, PartitionLoc::new(<span class="number">10</span>, <span class="number">100</span>));
+<a href=#473 id=473 data-nosnippet>473</a>        cache.insert(b, PartitionLoc::new(<span class="number">20</span>, <span class="number">200</span>));
+<a href=#474 id=474 data-nosnippet>474</a>        <span class="comment">// Access A so it becomes more-recently-used than B.
+<a href=#475 id=475 data-nosnippet>475</a>        </span><span class="macro">assert_eq!</span>(cache.get(a), <span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">10</span>, <span class="number">100</span>)));
+<a href=#476 id=476 data-nosnippet>476</a>        <span class="comment">// Insert C: over budget → evict the LRU, which is now B.
+<a href=#477 id=477 data-nosnippet>477</a>        </span>cache.insert(c, PartitionLoc::new(<span class="number">30</span>, <span class="number">300</span>));
+<a href=#478 id=478 data-nosnippet>478</a>
+<a href=#479 id=479 data-nosnippet>479</a>        <span class="macro">assert_eq!</span>(
+<a href=#480 id=480 data-nosnippet>480</a>            cache.get(a),
+<a href=#481 id=481 data-nosnippet>481</a>            <span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">10</span>, <span class="number">100</span>)),
+<a href=#482 id=482 data-nosnippet>482</a>            <span class="string">"A (recently used) must survive"
+<a href=#483 id=483 data-nosnippet>483</a>        </span>);
+<a href=#484 id=484 data-nosnippet>484</a>        <span class="macro">assert_eq!</span>(
+<a href=#485 id=485 data-nosnippet>485</a>            cache.get(c),
+<a href=#486 id=486 data-nosnippet>486</a>            <span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">30</span>, <span class="number">300</span>)),
+<a href=#487 id=487 data-nosnippet>487</a>            <span class="string">"C (just inserted) must survive"
+<a href=#488 id=488 data-nosnippet>488</a>        </span>);
+<a href=#489 id=489 data-nosnippet>489</a>        <span class="macro">assert_eq!</span>(
+<a href=#490 id=490 data-nosnippet>490</a>            cache.get(b),
+<a href=#491 id=491 data-nosnippet>491</a>            <span class="prelude-val">None</span>,
+<a href=#492 id=492 data-nosnippet>492</a>            <span class="string">"B (least recently used) must be evicted"
+<a href=#493 id=493 data-nosnippet>493</a>        </span>);
+<a href=#494 id=494 data-nosnippet>494</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">2</span>);
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="macro">assert!</span>(cache.resident_bytes() &lt;= cache.budget_bytes());
+<a href=#496 id=496 data-nosnippet>496</a>    }
+<a href=#497 id=497 data-nosnippet>497</a>
+<a href=#498 id=498 data-nosnippet>498</a>    <span class="doccomment">/// Issue #1571 (B5): the eviction counter reflects the real number of entries
+<a href=#499 id=499 data-nosnippet>499</a>    /// evicted to stay within budget; the snapshot exposes the real numbers, and a
+<a href=#500 id=500 data-nosnippet>500</a>    /// disabled cache reports honest zeros.
+<a href=#501 id=501 data-nosnippet>501</a>    </span><span class="attr">#[test]
+<a href=#502 id=502 data-nosnippet>502</a>    </span><span class="kw">fn </span>eviction_count_and_snapshot_track_real_activity() {
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="comment">// Single shard sized for exactly 2 five-byte keys.
+<a href=#504 id=504 data-nosnippet>504</a>        </span><span class="kw">let </span>cache = KeyOffsetCache::with_budget_and_shards(budget_for(<span class="number">2</span>, <span class="number">5</span>), <span class="number">1</span>);
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="macro">assert_eq!</span>(cache.eviction_count(), <span class="number">0</span>);
+<a href=#506 id=506 data-nosnippet>506</a>
+<a href=#507 id=507 data-nosnippet>507</a>        cache.insert(<span class="string">b"key-A"</span>.as_slice(), PartitionLoc::new(<span class="number">10</span>, <span class="number">100</span>));
+<a href=#508 id=508 data-nosnippet>508</a>        cache.insert(<span class="string">b"key-B"</span>.as_slice(), PartitionLoc::new(<span class="number">20</span>, <span class="number">200</span>));
+<a href=#509 id=509 data-nosnippet>509</a>        <span class="macro">assert_eq!</span>(cache.eviction_count(), <span class="number">0</span>, <span class="string">"still within budget"</span>);
+<a href=#510 id=510 data-nosnippet>510</a>
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="comment">// Each further distinct insert evicts exactly one LRU entry.
+<a href=#512 id=512 data-nosnippet>512</a>        </span>cache.insert(<span class="string">b"key-C"</span>.as_slice(), PartitionLoc::new(<span class="number">30</span>, <span class="number">300</span>));
+<a href=#513 id=513 data-nosnippet>513</a>        <span class="macro">assert_eq!</span>(cache.eviction_count(), <span class="number">1</span>);
+<a href=#514 id=514 data-nosnippet>514</a>        cache.insert(<span class="string">b"key-D"</span>.as_slice(), PartitionLoc::new(<span class="number">40</span>, <span class="number">400</span>));
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="macro">assert_eq!</span>(cache.eviction_count(), <span class="number">2</span>);
+<a href=#516 id=516 data-nosnippet>516</a>
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="comment">// One hit + one miss so the snapshot carries real counter values.
+<a href=#518 id=518 data-nosnippet>518</a>        </span><span class="macro">assert!</span>(cache.get(<span class="string">b"key-D"</span>.as_slice()).is_some());
+<a href=#519 id=519 data-nosnippet>519</a>        <span class="macro">assert!</span>(cache.get(<span class="string">b"absent"</span>.as_slice()).is_none());
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="kw">let </span>snap = cache.snapshot();
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="macro">assert_eq!</span>(snap.evictions, <span class="number">2</span>);
+<a href=#522 id=522 data-nosnippet>522</a>        <span class="macro">assert_eq!</span>(snap.hits, <span class="number">1</span>);
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="macro">assert_eq!</span>(snap.misses, <span class="number">1</span>);
+<a href=#524 id=524 data-nosnippet>524</a>        <span class="macro">assert_eq!</span>(snap.resident_bytes, cache.resident_bytes());
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="macro">assert_eq!</span>(snap.capacity_bytes, cache.budget_bytes());
+<a href=#526 id=526 data-nosnippet>526</a>
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="comment">// A disabled cache never evicts and reports honest zeros.
+<a href=#528 id=528 data-nosnippet>528</a>        </span><span class="kw">let </span>disabled = KeyOffsetCache::disabled();
+<a href=#529 id=529 data-nosnippet>529</a>        disabled.insert(<span class="string">b"k"</span>.as_slice(), PartitionLoc::new(<span class="number">1</span>, <span class="number">1</span>));
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="kw">let </span>dsnap = disabled.snapshot();
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="macro">assert_eq!</span>(dsnap.evictions, <span class="number">0</span>);
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="macro">assert_eq!</span>(dsnap.resident_bytes, <span class="number">0</span>);
+<a href=#533 id=533 data-nosnippet>533</a>        <span class="macro">assert_eq!</span>(dsnap.capacity_bytes, <span class="number">0</span>);
+<a href=#534 id=534 data-nosnippet>534</a>    }
+<a href=#535 id=535 data-nosnippet>535</a>
+<a href=#536 id=536 data-nosnippet>536</a>    <span class="doccomment">/// Task 1.2: BYTE bound — inserting more distinct equal-size keys than the
+<a href=#537 id=537 data-nosnippet>537</a>    /// budget holds keeps resident bytes within the budget after every insert.
+<a href=#538 id=538 data-nosnippet>538</a>    </span><span class="attr">#[test]
+<a href=#539 id=539 data-nosnippet>539</a>    </span><span class="kw">fn </span>resident_bytes_bounded() {
+<a href=#540 id=540 data-nosnippet>540</a>        <span class="comment">// Budget for exactly 4 entries whose keys are 6 bytes ("key-NN").
+<a href=#541 id=541 data-nosnippet>541</a>        </span><span class="kw">let </span>key_len = <span class="number">6</span>;
+<a href=#542 id=542 data-nosnippet>542</a>        <span class="kw">let </span>cache = KeyOffsetCache::with_budget_and_shards(budget_for(<span class="number">4</span>, key_len), <span class="number">1</span>);
+<a href=#543 id=543 data-nosnippet>543</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">50u64 </span>{
+<a href=#544 id=544 data-nosnippet>544</a>            <span class="kw">let </span>key = <span class="macro">format!</span>(<span class="string">"key-{i:02}"</span>);
+<a href=#545 id=545 data-nosnippet>545</a>            <span class="macro">assert_eq!</span>(key.len(), key_len, <span class="string">"test assumes fixed-width keys"</span>);
+<a href=#546 id=546 data-nosnippet>546</a>            cache.insert(key.as_bytes(), PartitionLoc::new(i, i <span class="kw">as </span>u32));
+<a href=#547 id=547 data-nosnippet>547</a>            <span class="macro">assert!</span>(
+<a href=#548 id=548 data-nosnippet>548</a>                cache.resident_bytes() &lt;= cache.budget_bytes(),
+<a href=#549 id=549 data-nosnippet>549</a>                <span class="string">"resident {} exceeded budget {} after insert {}"</span>,
+<a href=#550 id=550 data-nosnippet>550</a>                cache.resident_bytes(),
+<a href=#551 id=551 data-nosnippet>551</a>                cache.budget_bytes(),
+<a href=#552 id=552 data-nosnippet>552</a>                i
+<a href=#553 id=553 data-nosnippet>553</a>            );
+<a href=#554 id=554 data-nosnippet>554</a>            <span class="macro">assert!</span>(
+<a href=#555 id=555 data-nosnippet>555</a>                cache.len() &lt;= <span class="number">4</span>,
+<a href=#556 id=556 data-nosnippet>556</a>                <span class="string">"resident count exceeded 4 after insert {i}"
+<a href=#557 id=557 data-nosnippet>557</a>            </span>);
+<a href=#558 id=558 data-nosnippet>558</a>        }
+<a href=#559 id=559 data-nosnippet>559</a>    }
+<a href=#560 id=560 data-nosnippet>560</a>
+<a href=#561 id=561 data-nosnippet>561</a>    <span class="doccomment">/// Byte-budget eviction is key-SIZE aware: a large key costs more budget, so a
+<a href=#562 id=562 data-nosnippet>562</a>    /// shard sized for a handful of small keys holds fewer large keys. This is the
+<a href=#563 id=563 data-nosnippet>563</a>    /// property the count cap lacked (the #1570 fix).
+<a href=#564 id=564 data-nosnippet>564</a>    </span><span class="attr">#[test]
+<a href=#565 id=565 data-nosnippet>565</a>    </span><span class="kw">fn </span>large_keys_evict_sooner_than_small_keys() {
+<a href=#566 id=566 data-nosnippet>566</a>        <span class="comment">// Budget = room for exactly 4 small (4-byte) keys.
+<a href=#567 id=567 data-nosnippet>567</a>        </span><span class="kw">let </span>small_len = <span class="number">4</span>;
+<a href=#568 id=568 data-nosnippet>568</a>        <span class="kw">let </span>budget = budget_for(<span class="number">4</span>, small_len);
+<a href=#569 id=569 data-nosnippet>569</a>        <span class="kw">let </span>cache = KeyOffsetCache::with_budget_and_shards(budget, <span class="number">1</span>);
+<a href=#570 id=570 data-nosnippet>570</a>
+<a href=#571 id=571 data-nosnippet>571</a>        <span class="comment">// Each large key costs `entry_cost(budget/2) = budget/2 + PER_ENTRY_OVERHEAD`,
+<a href=#572 id=572 data-nosnippet>572</a>        // so any two of them together exceed the shard budget (one fits, two do not).
+<a href=#573 id=573 data-nosnippet>573</a>        </span><span class="kw">let </span>big = <span class="macro">vec!</span>[<span class="string">b'x'</span>; budget / <span class="number">2</span>];
+<a href=#574 id=574 data-nosnippet>574</a>        <span class="kw">let </span><span class="kw-2">mut </span>big1 = big.clone();
+<a href=#575 id=575 data-nosnippet>575</a>        big1[<span class="number">0</span>] = <span class="string">b'a'</span>;
+<a href=#576 id=576 data-nosnippet>576</a>        <span class="kw">let </span><span class="kw-2">mut </span>big2 = big.clone();
+<a href=#577 id=577 data-nosnippet>577</a>        big2[<span class="number">0</span>] = <span class="string">b'b'</span>;
+<a href=#578 id=578 data-nosnippet>578</a>        cache.insert(<span class="kw-2">&amp;</span>big1, PartitionLoc::new(<span class="number">1</span>, <span class="number">1</span>));
+<a href=#579 id=579 data-nosnippet>579</a>        cache.insert(<span class="kw-2">&amp;</span>big2, PartitionLoc::new(<span class="number">2</span>, <span class="number">2</span>));
+<a href=#580 id=580 data-nosnippet>580</a>
+<a href=#581 id=581 data-nosnippet>581</a>        <span class="comment">// Both large keys cannot be resident at once under the byte budget, so the
+<a href=#582 id=582 data-nosnippet>582</a>        // LRU (big1) is evicted — a count cap of 4 would have kept both.
+<a href=#583 id=583 data-nosnippet>583</a>        </span><span class="macro">assert!</span>(cache.resident_bytes() &lt;= cache.budget_bytes());
+<a href=#584 id=584 data-nosnippet>584</a>        <span class="macro">assert_eq!</span>(cache.get(<span class="kw-2">&amp;</span>big1), <span class="prelude-val">None</span>, <span class="string">"LRU large key must be evicted"</span>);
+<a href=#585 id=585 data-nosnippet>585</a>        <span class="macro">assert_eq!</span>(cache.get(<span class="kw-2">&amp;</span>big2), <span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">2</span>, <span class="number">2</span>)));
+<a href=#586 id=586 data-nosnippet>586</a>    }
+<a href=#587 id=587 data-nosnippet>587</a>
+<a href=#588 id=588 data-nosnippet>588</a>    <span class="doccomment">/// Task 1.3: a hit returns the stored location; a different key never aliases;
+<a href=#589 id=589 data-nosnippet>589</a>    /// a never-inserted key misses (parity / no-fabrication).
+<a href=#590 id=590 data-nosnippet>590</a>    </span><span class="attr">#[test]
+<a href=#591 id=591 data-nosnippet>591</a>    </span><span class="kw">fn </span>hit_returns_stored_location_no_alias() {
+<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">let </span>cache = KeyOffsetCache::with_budget_and_shards(DEFAULT_KEY_CACHE_BYTES, <span class="number">1</span>);
+<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">let </span>a = <span class="string">b"partition-A"</span>.as_slice();
+<a href=#594 id=594 data-nosnippet>594</a>        <span class="kw">let </span>b = <span class="string">b"partition-B"</span>.as_slice();
+<a href=#595 id=595 data-nosnippet>595</a>        cache.insert(a, PartitionLoc::new(<span class="number">63</span>, <span class="number">512</span>));
+<a href=#596 id=596 data-nosnippet>596</a>        cache.insert(b, PartitionLoc::new(<span class="number">125</span>, <span class="number">256</span>));
+<a href=#597 id=597 data-nosnippet>597</a>
+<a href=#598 id=598 data-nosnippet>598</a>        <span class="macro">assert_eq!</span>(cache.get(a), <span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">63</span>, <span class="number">512</span>)));
+<a href=#599 id=599 data-nosnippet>599</a>        <span class="macro">assert_eq!</span>(cache.get(b), <span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">125</span>, <span class="number">256</span>)));
+<a href=#600 id=600 data-nosnippet>600</a>        <span class="macro">assert_eq!</span>(
+<a href=#601 id=601 data-nosnippet>601</a>            cache.get(<span class="string">b"never-inserted"</span>.as_slice()),
+<a href=#602 id=602 data-nosnippet>602</a>            <span class="prelude-val">None</span>,
+<a href=#603 id=603 data-nosnippet>603</a>            <span class="string">"a never-inserted key must miss (no fabricated hit)"
+<a href=#604 id=604 data-nosnippet>604</a>        </span>);
+<a href=#605 id=605 data-nosnippet>605</a>    }
+<a href=#606 id=606 data-nosnippet>606</a>
+<a href=#607 id=607 data-nosnippet>607</a>    <span class="doccomment">/// Re-inserting the same key must not double-count its bytes (in-place
+<a href=#608 id=608 data-nosnippet>608</a>    /// replacement subtracts the old cost before adding the new).
+<a href=#609 id=609 data-nosnippet>609</a>    </span><span class="attr">#[test]
+<a href=#610 id=610 data-nosnippet>610</a>    </span><span class="kw">fn </span>reinsert_same_key_does_not_grow_resident_bytes() {
+<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw">let </span>cache = KeyOffsetCache::with_budget_and_shards(DEFAULT_KEY_CACHE_BYTES, <span class="number">1</span>);
+<a href=#612 id=612 data-nosnippet>612</a>        <span class="kw">let </span>k = <span class="string">b"stable-key"</span>.as_slice();
+<a href=#613 id=613 data-nosnippet>613</a>        cache.insert(k, PartitionLoc::new(<span class="number">1</span>, <span class="number">1</span>));
+<a href=#614 id=614 data-nosnippet>614</a>        <span class="kw">let </span>after_first = cache.resident_bytes();
+<a href=#615 id=615 data-nosnippet>615</a>        cache.insert(k, PartitionLoc::new(<span class="number">2</span>, <span class="number">2</span>));
+<a href=#616 id=616 data-nosnippet>616</a>        cache.insert(k, PartitionLoc::new(<span class="number">3</span>, <span class="number">3</span>));
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">1</span>, <span class="string">"re-insert must not add a second entry"</span>);
+<a href=#618 id=618 data-nosnippet>618</a>        <span class="macro">assert_eq!</span>(
+<a href=#619 id=619 data-nosnippet>619</a>            cache.resident_bytes(),
+<a href=#620 id=620 data-nosnippet>620</a>            after_first,
+<a href=#621 id=621 data-nosnippet>621</a>            <span class="string">"re-inserting the same key must not grow resident bytes"
+<a href=#622 id=622 data-nosnippet>622</a>        </span>);
+<a href=#623 id=623 data-nosnippet>623</a>        <span class="macro">assert_eq!</span>(cache.get(k), <span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">3</span>, <span class="number">3</span>)));
+<a href=#624 id=624 data-nosnippet>624</a>    }
+<a href=#625 id=625 data-nosnippet>625</a>
+<a href=#626 id=626 data-nosnippet>626</a>    <span class="doccomment">/// Task 1.4: `disabled()` is a genuine no-op (get misses, insert retains
+<a href=#627 id=627 data-nosnippet>627</a>    /// nothing, occupancy + byte counters report zero).
+<a href=#628 id=628 data-nosnippet>628</a>    </span><span class="attr">#[test]
+<a href=#629 id=629 data-nosnippet>629</a>    </span><span class="kw">fn </span>disabled_cache_is_a_genuine_no_op() {
+<a href=#630 id=630 data-nosnippet>630</a>        <span class="kw">let </span>cache = KeyOffsetCache::disabled();
+<a href=#631 id=631 data-nosnippet>631</a>        <span class="macro">assert_eq!</span>(cache.budget_bytes(), <span class="number">0</span>);
+<a href=#632 id=632 data-nosnippet>632</a>
+<a href=#633 id=633 data-nosnippet>633</a>        cache.insert(<span class="string">b"k"</span>.as_slice(), PartitionLoc::new(<span class="number">1</span>, <span class="number">2</span>));
+<a href=#634 id=634 data-nosnippet>634</a>        <span class="macro">assert_eq!</span>(
+<a href=#635 id=635 data-nosnippet>635</a>            cache.get(<span class="string">b"k"</span>.as_slice()),
+<a href=#636 id=636 data-nosnippet>636</a>            <span class="prelude-val">None</span>,
+<a href=#637 id=637 data-nosnippet>637</a>            <span class="string">"disabled cache never retains"
+<a href=#638 id=638 data-nosnippet>638</a>        </span>);
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="macro">assert_eq!</span>(cache.len(), <span class="number">0</span>);
+<a href=#640 id=640 data-nosnippet>640</a>        <span class="macro">assert_eq!</span>(cache.resident_bytes(), <span class="number">0</span>);
+<a href=#641 id=641 data-nosnippet>641</a>        <span class="macro">assert!</span>(cache.is_empty());
+<a href=#642 id=642 data-nosnippet>642</a>        <span class="macro">assert_eq!</span>(cache.hit_count(), <span class="number">0</span>);
+<a href=#643 id=643 data-nosnippet>643</a>        <span class="macro">assert_eq!</span>(cache.miss_count(), <span class="number">0</span>);
+<a href=#644 id=644 data-nosnippet>644</a>    }
+<a href=#645 id=645 data-nosnippet>645</a>
+<a href=#646 id=646 data-nosnippet>646</a>    <span class="doccomment">/// Task 1.5: poison recovery — a panic while holding a shard lock must not
+<a href=#647 id=647 data-nosnippet>647</a>    /// wedge the cache; subsequent get/insert recover the guard and continue.
+<a href=#648 id=648 data-nosnippet>648</a>    </span><span class="attr">#[test]
+<a href=#649 id=649 data-nosnippet>649</a>    </span><span class="kw">fn </span>poisoned_lock_recovers() {
+<a href=#650 id=650 data-nosnippet>650</a>        <span class="kw">use </span>std::panic::{catch_unwind, AssertUnwindSafe};
+<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">use </span>std::thread;
+<a href=#652 id=652 data-nosnippet>652</a>
+<a href=#653 id=653 data-nosnippet>653</a>        <span class="kw">let </span>cache = Arc::new(KeyOffsetCache::with_budget_and_shards(
+<a href=#654 id=654 data-nosnippet>654</a>            DEFAULT_KEY_CACHE_BYTES,
+<a href=#655 id=655 data-nosnippet>655</a>            <span class="number">1</span>,
+<a href=#656 id=656 data-nosnippet>656</a>        ));
+<a href=#657 id=657 data-nosnippet>657</a>        cache.insert(<span class="string">b"k"</span>.as_slice(), PartitionLoc::new(<span class="number">7</span>, <span class="number">8</span>));
+<a href=#658 id=658 data-nosnippet>658</a>
+<a href=#659 id=659 data-nosnippet>659</a>        <span class="comment">// Poison the single shard's mutex by panicking while holding it.
+<a href=#660 id=660 data-nosnippet>660</a>        </span><span class="kw">let </span>poison_cache = Arc::clone(<span class="kw-2">&amp;</span>cache);
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let _ </span>= thread::spawn(<span class="kw">move </span>|| {
+<a href=#662 id=662 data-nosnippet>662</a>            <span class="kw">let </span>_guard = KeyOffsetCache::lock(<span class="kw-2">&amp;</span>poison_cache.shards[<span class="number">0</span>]);
+<a href=#663 id=663 data-nosnippet>663</a>            <span class="macro">panic!</span>(<span class="string">"intentional poison"</span>);
+<a href=#664 id=664 data-nosnippet>664</a>        })
+<a href=#665 id=665 data-nosnippet>665</a>        .join();
+<a href=#666 id=666 data-nosnippet>666</a>
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="kw">let </span>res = catch_unwind(AssertUnwindSafe(|| {
+<a href=#668 id=668 data-nosnippet>668</a>            <span class="kw">let </span>hit = cache.get(<span class="string">b"k"</span>.as_slice());
+<a href=#669 id=669 data-nosnippet>669</a>            cache.insert(<span class="string">b"k2"</span>.as_slice(), PartitionLoc::new(<span class="number">9</span>, <span class="number">10</span>));
+<a href=#670 id=670 data-nosnippet>670</a>            hit
+<a href=#671 id=671 data-nosnippet>671</a>        }));
+<a href=#672 id=672 data-nosnippet>672</a>        <span class="macro">assert_eq!</span>(
+<a href=#673 id=673 data-nosnippet>673</a>            res.ok(),
+<a href=#674 id=674 data-nosnippet>674</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Some</span>(PartitionLoc::new(<span class="number">7</span>, <span class="number">8</span>))),
+<a href=#675 id=675 data-nosnippet>675</a>            <span class="string">"cache must recover from a poisoned lock"
+<a href=#676 id=676 data-nosnippet>676</a>        </span>);
+<a href=#677 id=677 data-nosnippet>677</a>    }
+<a href=#678 id=678 data-nosnippet>678</a>
+<a href=#679 id=679 data-nosnippet>679</a>    <span class="attr">#[test]
+<a href=#680 id=680 data-nosnippet>680</a>    </span><span class="kw">fn </span>shard_count_rounds_to_power_of_two() {
+<a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">let </span>cache = KeyOffsetCache::with_budget_and_shards(DEFAULT_KEY_CACHE_BYTES, <span class="number">10</span>);
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="macro">assert_eq!</span>(cache.shards.len(), <span class="number">16</span>);
+<a href=#683 id=683 data-nosnippet>683</a>        <span class="macro">assert_eq!</span>(cache.mask, <span class="number">15</span>);
+<a href=#684 id=684 data-nosnippet>684</a>    }
+<a href=#685 id=685 data-nosnippet>685</a>}
+</code></pre></div></section></main></body></html>

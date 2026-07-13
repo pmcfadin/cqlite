@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Explicit directory refresh (issue #1749): re-scan + atomic diff-and-swap of the held reader set. Not `state_machine`-gated — meaningful for minimal builds. Explicit, concurrency-safe SSTable directory refresh (issue #1749)."><title>cqlite_core::storage::sstable::refresh - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module refresh</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module refresh</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">sstable</a></div><h1>Module <span>refresh</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/sstable/refresh.rs.html#1-784">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Explicit directory refresh (issue #1749): re-scan + atomic diff-and-swap of
+the held reader set. Not <code>state_machine</code>-gated — meaningful for minimal builds.
+Explicit, concurrency-safe SSTable directory refresh (issue #1749).</p>
+<p>CQLite opens a data directory once and snapshots the discovered SSTable
+generations. A Cassandra flush/compaction (or a CQLite <code>--flush</code>) may add or
+remove generations underneath a long-lived handle at any time, but a warm
+session never re-scans on its own — that is the documented per-surface
+<em>freshness contract</em>: the library handle is a <strong>snapshot at open</strong>, and
+<a href="../struct.SSTableManager.html#method.refresh_tables" title="method cqlite_core::storage::sstable::SSTableManager::refresh_tables"><code>SSTableManager::refresh_tables</code></a> is the ONLY way its reader set changes.</p>
+<p><code>refresh_tables</code> re-runs the <em>same</em> directory discovery that
+<a href="../../struct.StorageEngine.html#method.open" title="associated function cqlite_core::storage::StorageEngine::open"><code>StorageEngine::open</code></a> used (TOC /
+filename-component based — no content sniffing, no heuristics), diffs the
+discovered canonical <code>Data.db</code> paths against the held reader set, and applies
+the difference:</p>
+<ul>
+<li><strong>added</strong> generations are opened (standard <a href="../reader/struct.SSTableReader.html#method.open" title="associated function cqlite_core::storage::sstable::reader::SSTableReader::open"><code>SSTableReader::open</code></a>:
+bloom/Index/Statistics parsed, the issue #1626 corrupt-<code>Statistics.db</code>
+hard-fail inherited) and become queryable;</li>
+<li><strong>removed</strong> generations are dropped (the underlying reader closes once the
+last in-flight scan’s <code>Arc</code> clone is dropped);</li>
+<li><strong>unchanged</strong> generations keep their existing <code>Arc&lt;SSTableReader&gt;</code> — their
+parsed Index/Statistics/bloom state is <em>not</em> rebuilt (refresh of an
+unchanged directory is ~free).</li>
+</ul>
+<p>Application is <strong>atomic and fail-closed</strong>: every added generation is opened
+<em>before</em> the write guard is taken, so if any open fails the whole refresh
+returns that typed error and mutates nothing — no partial view (Decision 3).</p>
+<p>Concurrency reuses the existing lock discipline (Decision 4): queries resolve
+their reader list once under the <code>RwLock</code> read guard and hold <code>Arc</code> clones, so
+a scan already in flight completes against the pre-refresh set and is never
+affected by a concurrent refresh. Two concurrent <code>refresh_tables</code> calls fully
+serialize on a dedicated refresh mutex held end-to-end (discovery through
+swap): the second cannot start until the first has applied its diff, so its
+discovery set already reflects the first’s changes and it becomes a zero-delta
+no-op — a stale discovery set can never remove a generation a concurrent
+refresh just added. The refresh mutex is NEVER taken on a query path.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.RefreshReport.html" title="struct cqlite_core::storage::sstable::refresh::RefreshReport">Refresh<wbr>Report</a></dt><dd>Outcome of a single <a href="../struct.SSTableManager.html#method.refresh_tables" title="method cqlite_core::storage::sstable::SSTableManager::refresh_tables"><code>SSTableManager::refresh_tables</code></a> call.</dd></dl></section></div></main></body></html>

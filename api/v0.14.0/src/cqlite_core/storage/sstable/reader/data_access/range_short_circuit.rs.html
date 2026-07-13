@@ -1,0 +1,104 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/data_access/range_short_circuit.rs`."><title>range_short_circuit.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/data_access/</div>range_short_circuit.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! First/last-key range short-circuit for point lookups (issue #1576, Epic C / C5).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! An SSTable's partitions occupy a contiguous slice of the token ring: everything
+<a href=#4 id=4 data-nosnippet>4</a>//! sorts between the physically-first partition (`first_key`) and the
+<a href=#5 id=5 data-nosnippet>5</a>//! physically-last (`last_key`). Cassandra persists those two bounds in `Summary.db`
+<a href=#6 id=6 data-nosnippet>6</a>//! (`summary_reader.rs`), and [`SummaryReader::get_first_key`] /
+<a href=#7 id=7 data-nosnippet>7</a>//! [`SummaryReader::get_last_key`] already parse them — but nothing consulted them,
+<a href=#8 id=8 data-nosnippet>8</a>//! so every candidate SSTable paid bloom / `Index.db` / trie work even for a query
+<a href=#9 id=9 data-nosnippet>9</a>//! key that provably cannot live in it.
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! [`SSTableReader::partition_key_out_of_range`] closes that gap. When the query
+<a href=#12 id=12 data-nosnippet>12</a>//! key sorts outside `[first_key, last_key]` the point read
+<a href=#13 id=13 data-nosnippet>13</a>//! ([`SSTableReader::get_with_resolution`]) returns authoritative absence
+<a href=#14 id=14 data-nosnippet>14</a>//! (`Ok(None)`) BEFORE any bloom check, `Index.db` probe, or BTI trie descent,
+<a href=#15 id=15 data-nosnippet>15</a>//! recording one [`record_range_short_circuit`](crate::storage::sstable::read_work_counters::record_range_short_circuit).
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! ## No-heuristics + no-false-miss (the load-bearing correctness property)
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! The bound comes ONLY from authoritative metadata (`Summary.db`), never a guess.
+<a href=#20 id=20 data-nosnippet>20</a>//! The comparison is performed in the index's OWN order domain — ascending Cassandra
+<a href=#21 id=21 data-nosnippet>21</a>//! Murmur3 token, ties broken by unsigned-lexicographic key bytes — the exact
+<a href=#22 id=22 data-nosnippet>22</a>//! ordering the on-disk partitions are sorted by and that
+<a href=#23 id=23 data-nosnippet>23</a>//! [`sort_by_token_order`](super::model::sort_by_token_order) and the write engine's
+<a href=#24 id=24 data-nosnippet>24</a>//! `DecoratedKey::cmp` use (spec §5, Appendix B §313). Comparing raw bytes
+<a href=#25 id=25 data-nosnippet>25</a>//! alone would be WRONG (physical order is token order, not byte order) and could
+<a href=#26 id=26 data-nosnippet>26</a>//! drop a present partition — the exact false-miss footgun the audit warns against.
+<a href=#27 id=27 data-nosnippet>27</a>//! The bound is INCLUSIVE at both ends: a key equal to `first_key` or `last_key` is
+<a href=#28 id=28 data-nosnippet>28</a>//! in range and is NEVER short-circuited.
+<a href=#29 id=29 data-nosnippet>29</a>//!
+<a href=#30 id=30 data-nosnippet>30</a>//! When no authoritative bound is available (no `Summary.db` — e.g. a BTI "da"
+<a href=#31 id=31 data-nosnippet>31</a>//! reader, which has no Summary and whose trie is itself the authoritative presence
+<a href=#32 id=32 data-nosnippet>32</a>//! oracle — or an empty endpoint), the check conservatively reports "cannot rule
+<a href=#33 id=33 data-nosnippet>33</a>//! out" (`false`) and the normal presence path runs unchanged. It can therefore only
+<a href=#34 id=34 data-nosnippet>34</a>//! ever turn a would-be miss into a cheaper miss; it can never manufacture one.
+<a href=#35 id=35 data-nosnippet>35</a>//!
+<a href=#36 id=36 data-nosnippet>36</a>//! ## Precondition: Murmur3 partitioner
+<a href=#37 id=37 data-nosnippet>37</a>//!
+<a href=#38 id=38 data-nosnippet>38</a>//! The token ordering above uses [`cassandra_murmur3_token`], so this short-circuit
+<a href=#39 id=39 data-nosnippet>39</a>//! is correct ONLY for SSTables sorted by Cassandra's `Murmur3Partitioner` — the sole
+<a href=#40 id=40 data-nosnippet>40</a>//! partitioner CQLite targets (Cassandra 5.0; see the version floor in `CLAUDE.md`).
+<a href=#41 id=41 data-nosnippet>41</a>//! Under any other partitioner the on-disk partition order would follow a different
+<a href=#42 id=42 data-nosnippet>42</a>//! token function, so tokenizing the query key and the `Summary.db` endpoints with
+<a href=#43 id=43 data-nosnippet>43</a>//! Murmur3 could place a present key outside `[first_key, last_key]` and manufacture a
+<a href=#44 id=44 data-nosnippet>44</a>//! false miss on this absence fast path. This is NOT a new assumption — it is exactly
+<a href=#45 id=45 data-nosnippet>45</a>//! the invariant that
+<a href=#46 id=46 data-nosnippet>46</a>//! [`sort_by_token_order`](super::model::sort_by_token_order) (and the write engine's
+<a href=#47 id=47 data-nosnippet>47</a>//! `DecoratedKey::cmp`) already rely on; it is documented here because the comparison
+<a href=#48 id=48 data-nosnippet>48</a>//! now gates an authoritative-absence return rather than only ordering results.
+<a href=#49 id=49 data-nosnippet>49</a>
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="kw">use </span><span class="kw">super</span>::<span class="kw">super</span>::SSTableReader;
+<a href=#51 id=51 data-nosnippet>51</a><span class="kw">use </span><span class="kw">crate</span>::util::cassandra_murmur3::cassandra_murmur3_token;
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a><span class="kw">impl </span>SSTableReader {
+<a href=#54 id=54 data-nosnippet>54</a>    <span class="doccomment">/// Return `true` iff `key` provably sorts OUTSIDE this SSTable's authoritative
+<a href=#55 id=55 data-nosnippet>55</a>    /// `[first_key, last_key]` partition-key bound, so the partition is definitely
+<a href=#56 id=56 data-nosnippet>56</a>    /// absent and the caller may skip all presence work.
+<a href=#57 id=57 data-nosnippet>57</a>    ///
+<a href=#58 id=58 data-nosnippet>58</a>    /// Returns `false` (cannot rule out) when no authoritative bound is available
+<a href=#59 id=59 data-nosnippet>59</a>    /// (`Summary.db` absent, e.g. a BTI reader) or an endpoint is empty. See the
+<a href=#60 id=60 data-nosnippet>60</a>    /// module docs for the no-false-miss contract: the comparison is in Cassandra
+<a href=#61 id=61 data-nosnippet>61</a>    /// token order (Murmur3 token, unsigned-byte tiebreak), inclusive at both ends.
+<a href=#62 id=62 data-nosnippet>62</a>    ///
+<a href=#63 id=63 data-nosnippet>63</a>    /// Precondition: the SSTable is sorted by Cassandra's `Murmur3Partitioner` (the
+<a href=#64 id=64 data-nosnippet>64</a>    /// only partitioner CQLite targets — Cassandra 5.0). See the module docs.
+<a href=#65 id=65 data-nosnippet>65</a>    </span><span class="kw">pub fn </span>partition_key_out_of_range(<span class="kw-2">&amp;</span><span class="self">self</span>, key: <span class="kw-2">&amp;</span>[u8]) -&gt; bool {
+<a href=#66 id=66 data-nosnippet>66</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(summary) = <span class="self">self</span>.summary_reader.as_ref() <span class="kw">else </span>{
+<a href=#67 id=67 data-nosnippet>67</a>            <span class="comment">// No Summary.db → no authoritative bound (BTI readers, or a BIG reader
+<a href=#68 id=68 data-nosnippet>68</a>            // whose Summary failed to load). Conservatively cannot rule out.
+<a href=#69 id=69 data-nosnippet>69</a>            </span><span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#70 id=70 data-nosnippet>70</a>        };
+<a href=#71 id=71 data-nosnippet>71</a>
+<a href=#72 id=72 data-nosnippet>72</a>        <span class="kw">let </span>first = summary.get_first_key();
+<a href=#73 id=73 data-nosnippet>73</a>        <span class="kw">let </span>last = summary.get_last_key();
+<a href=#74 id=74 data-nosnippet>74</a>        <span class="kw">if </span>first.is_empty() || last.is_empty() {
+<a href=#75 id=75 data-nosnippet>75</a>            <span class="comment">// A degenerate/absent endpoint cannot bound the ring slice safely.
+<a href=#76 id=76 data-nosnippet>76</a>            </span><span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#77 id=77 data-nosnippet>77</a>        }
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a>        <span class="comment">// Authoritative on-disk partition order: ascending Murmur3 token, ties broken
+<a href=#80 id=80 data-nosnippet>80</a>        // by unsigned-lexicographic key bytes. `key` (the raw serialized partition
+<a href=#81 id=81 data-nosnippet>81</a>        // key) and the Summary endpoints share this domain, so tokenizing each and
+<a href=#82 id=82 data-nosnippet>82</a>        // comparing the (token, bytes) tuple reproduces `DecoratedKey.compareTo`
+<a href=#83 id=83 data-nosnippet>83</a>        // exactly. Inclusive bound: `&lt; first` OR `&gt; last` is out of range; equality
+<a href=#84 id=84 data-nosnippet>84</a>        // with either endpoint is in range.
+<a href=#85 id=85 data-nosnippet>85</a>        //
+<a href=#86 id=86 data-nosnippet>86</a>        // The two endpoint tokens are IMMUTABLE for the reader's lifetime, so they
+<a href=#87 id=87 data-nosnippet>87</a>        // are computed ONCE at open and cached in `endpoint_tokens` (issue #1576,
+<a href=#88 id=88 data-nosnippet>88</a>        // Epic C/C5 perf finding); the hot path only hashes the QUERY key. The
+<a href=#89 id=89 data-nosnippet>89</a>        // cached tokens are byte-identical to `cassandra_murmur3_token(first/last)`.
+<a href=#90 id=90 data-nosnippet>90</a>        // The `unwrap_or_else` is a defensive recompute that never runs on the
+<a href=#91 id=91 data-nosnippet>91</a>        // armed path (`endpoint_tokens` is `Some` exactly when Summary.db is present
+<a href=#92 id=92 data-nosnippet>92</a>        // with two non-empty endpoints, which the guards above already established).
+<a href=#93 id=93 data-nosnippet>93</a>        </span><span class="kw">let </span>(first_token, last_token) = <span class="self">self</span>.endpoint_tokens.unwrap_or_else(|| {
+<a href=#94 id=94 data-nosnippet>94</a>            (
+<a href=#95 id=95 data-nosnippet>95</a>                cassandra_murmur3_token(first),
+<a href=#96 id=96 data-nosnippet>96</a>                cassandra_murmur3_token(last),
+<a href=#97 id=97 data-nosnippet>97</a>            )
+<a href=#98 id=98 data-nosnippet>98</a>        });
+<a href=#99 id=99 data-nosnippet>99</a>        <span class="kw">let </span>key_token = cassandra_murmur3_token(key);
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a>        (key_token, key) &lt; (first_token, first) || (key_token, key) &gt; (last_token, last)
+<a href=#102 id=102 data-nosnippet>102</a>    }
+<a href=#103 id=103 data-nosnippet>103</a>}
+</code></pre></div></section></main></body></html>

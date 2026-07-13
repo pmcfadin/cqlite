@@ -1,0 +1,98 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Process-global read-work counters for partition-targeted lookups (Issue #958, Epic #951)."><title>cqlite_core::storage::sstable::work_counters - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module work_counters</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.14.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module work_<wbr>counters</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-this-exists" title="Why this exists">Why this exists</a></li><li><a href="#what-each-counter-counts" title="What each counter counts">What each counter counts</a></li><li><a href="#cost" title="Cost">Cost</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">sstable</a></div><h1>Module <span>work_<wbr>counters</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/sstable/work_counters.rs.html#1-449">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Process-global read-work counters for partition-targeted lookups
+(Issue #958, Epic #951).</p>
+<h2 id="why-this-exists"><a class="doc-anchor" href="#why-this-exists">§</a>Why this exists</h2>
+<p>#949 added a partition-targeted lookup ([<code>SSTableManager::scan_partition</code>])
+that prunes the SSTable set via the bloom filter / BTI trie before parsing,
+so a <code>WHERE pk = ?</code> over a table backed by <em>N</em> SSTables touches only the
+handful of candidates that can hold the key — not all <em>N</em>. Correct result
+rows do not prove that pruning happened: a regression could quietly revert to
+“open and scan every SSTable, then filter in memory” and still return the
+right answer.</p>
+<p>These counters make the <em>work</em> observable so a CI test can fail the moment a
+single-partition read starts scaling with the total SSTable count. They
+mirror the <a href="../reader/struct.SSTableReader.html#method.scan_for_key_call_count" title="associated function cqlite_core::storage::sstable::reader::SSTableReader::scan_for_key_call_count"><code>scan_for_key_call_count</code></a>
+probe (issue #831) and the access-path probe (issue #960): a process-global
+atomic with <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a>/getter accessors, observable from an integration test
+without parsing logs and from the streaming path’s spawned task.</p>
+<h2 id="what-each-counter-counts"><a class="doc-anchor" href="#what-each-counter-counts">§</a>What each counter counts</h2>
+<ul>
+<li>
+<p><a href="fn.sstables_scanned.html" title="fn cqlite_core::storage::sstable::work_counters::sstables_scanned"><code>sstables_scanned</code></a> — incremented <strong>once per candidate SSTable reader that
+<code>scan_partition</code> actually parses</strong> for a partition-targeted lookup. After
+bloom/BTI pruning drops the SSTables that cannot hold the key, every
+surviving candidate whose <code>Data.db</code> is parsed (whether through the
+cross-generation k-way merge or the per-reader concat fallback) bumps this
+by one. It is the O(candidates) signal: for a key living in one SSTable it
+must stay near 1 (plus any bloom false-positives), never grow to N. It is
+<strong>not</strong> incremented on the full-scan path — only the targeted lookup is
+instrumented, which is exactly the path #949/#958 protect.</p>
+</li>
+<li>
+<p><a href="fn.partitions_parsed.html" title="fn cqlite_core::storage::sstable::work_counters::partitions_parsed"><code>partitions_parsed</code></a> — incremented <strong>once per partition row a
+partition-targeted lookup returns</strong> (after retaining only the target key /
+the merge emits the partition). For a single-partition point lookup this is
+0 (absent key) or the number of rows that partition holds; it never scales
+with the table’s total partition count, which a full scan would.</p>
+</li>
+<li>
+<p><a href="fn.chunks_decompressed.html" title="fn cqlite_core::storage::sstable::work_counters::chunks_decompressed"><code>chunks_decompressed</code></a> — incremented <strong>once per compression chunk the
+single-candidate seek path actually decompresses</strong> while buffering the
+target partition’s bytes (Issue #953 / #951). Where <code>partitions_decoded</code>
+proves we returned only one partition, this proves the seek bounded its
+<em>decompression I/O</em> to that partition’s chunk span rather than reading the
+whole <code>Data.db</code> to EOF. A head-of-file point lookup must NOT decompress the
+tail chunks of a large SSTable: a regression that stitches to EOF (the bug
+the bound replaces) bumps this by the file’s whole chunk count, which the
+<code>issue_953</code> bound test catches even though <code>partitions_decoded</code> stays 1.
+Incremented at the seek’s single decompression site
+(<code>SSTableReader::bti_pull_decompressed_chunk</code>), so every chunk the seek
+materializes — BIG (<code>nb</code>, bounded by the <code>Index.db</code> size) or BTI (<code>da</code>,
+bounded by the next-partition boundary) — is counted exactly once. The
+whole-section <code>stitch_all_chunks</code> fallback does <strong>not</strong> bump it (it is the
+unbounded path the seek avoids when chunk targeting is possible).</p>
+</li>
+<li>
+<p><a href="fn.partitions_decoded.html" title="fn cqlite_core::storage::sstable::work_counters::partitions_decoded"><code>partitions_decoded</code></a> — incremented <strong>once per partition actually decoded
+out of <code>Data.db</code></strong> by the single-candidate <em>seek</em> path (Issue #953). Where
+<code>sstables_scanned</code> proves we touched few SSTables, this proves that <em>within</em>
+a touched SSTable we did not decode every partition: the seek resolves the
+target partition’s <code>Data.db</code> offset (via the BTI trie or <code>Index.db</code>) and
+decodes only that one partition, so this stays O(1) for a point lookup. A
+regression that reverts the single-candidate path to a full parse-then-retain
+would bump this by the SSTable’s whole partition count (~N), failing the
+<code>issue_953</code> bound. It is incremented at the per-partition decode site of the
+seek (<code>SSTableReader::scan_single_partition</code> → the emit closure that captures
+a complete partition), NOT at the result-count boundary. The full-scan +
+retain fallback does <strong>not</strong> bump it (it is the unoptimized path the seek
+replaces); a candidate that cannot be seeked therefore reads 0 here, which is
+why the test asserts a <em>small upper bound</em> (decode happened cheaply) rather
+than an exact equality.</p>
+</li>
+</ul>
+<h2 id="cost"><a class="doc-anchor" href="#cost">§</a>Cost</h2>
+<p>Each increment is a single <code>Relaxed</code> atomic add on the cold per-lookup
+boundary (once per candidate / once per returned partition), never inside an
+inner byte-decoding loop, so the hot path is unaffected. The counters are not
+gated behind <code>cfg(test)</code> because integration tests in <code>tests/</code> compile
+against the library crate without its <code>test</code> cfg (same rationale as
+<code>SCAN_FOR_KEY_CALLS</code>).</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.add_data_db_checksum_full_read.html" title="fn cqlite_core::storage::sstable::work_counters::add_data_db_checksum_full_read">add_<wbr>data_<wbr>db_<wbr>checksum_<wbr>full_<wbr>read</a></dt><dd>Record one full re-read of a finished <code>Data.db</code> performed to compute
+checksums (Issue #1663). Called once at each site that OPENS <code>Data.db</code> to
+checksum it: the re-read CRC oracle (<code>crc_writer::build_crc_bytes</code>) and the
+digest re-read (<code>SSTableWriter::compute_crc32</code>).</dd><dt><a class="fn" href="fn.chunks_decompressed.html" title="fn cqlite_core::storage::sstable::work_counters::chunks_decompressed">chunks_<wbr>decompressed</a></dt><dd>Number of compression chunks DECOMPRESSED by the single-candidate seek path
+since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a> (Issue #953 / #951).</dd><dt><a class="fn" href="fn.data_db_checksum_full_reads.html" title="fn cqlite_core::storage::sstable::work_counters::data_db_checksum_full_reads">data_<wbr>db_<wbr>checksum_<wbr>full_<wbr>reads</a></dt><dd>Number of full <code>Data.db</code> re-reads performed for checksum computation since
+the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a> (Issue #1663).</dd><dt><a class="fn" href="fn.partitions_decoded.html" title="fn cqlite_core::storage::sstable::work_counters::partitions_decoded">partitions_<wbr>decoded</a></dt><dd>Number of partitions DECODED from <code>Data.db</code> by the single-candidate seek path
+since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a> (Issue #953).</dd><dt><a class="fn" href="fn.partitions_parsed.html" title="fn cqlite_core::storage::sstable::work_counters::partitions_parsed">partitions_<wbr>parsed</a></dt><dd>Number of partitions returned by partition-targeted lookups since the last
+<a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a>.</dd><dt><a class="fn" href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset">reset</a></dt><dd>Clear all five process-global counters. Integration tests call this before a
+query so a stale value from an earlier query cannot satisfy a later
+assertion. Because the global is shared, an integration test that asserts on
+it must run without a concurrent query on another thread (the integration
+tests serialize their own setup); the in-crate unit test sidesteps this
+entirely by asserting against a local [<code>Counters</code>] instance (issue #1071).</dd><dt><a class="fn" href="fn.reverse_blocks_decoded.html" title="fn cqlite_core::storage::sstable::work_counters::reverse_blocks_decoded">reverse_<wbr>blocks_<wbr>decoded</a></dt><dd>Number of promoted-index blocks the BIG reverse partition iterator decoded
+back-to-front since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a> (Issue #1184). For a wide partition
+this equals the partition’s block count; a regression to a forward
+full-partition read + in-memory sort leaves it at 0.</dd><dt><a class="fn" href="fn.reverse_peak_block_rows.html" title="fn cqlite_core::storage::sstable::work_counters::reverse_peak_block_rows">reverse_<wbr>peak_<wbr>block_<wbr>rows</a></dt><dd>Peak rows held in a single reverse-iterator block buffer since the last
+<a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a> (Issue #1184). Tests assert this stays bounded to one block’s worth
+of rows — far below the partition total — proving bounded per-iteration memory.</dd><dt><a class="fn" href="fn.rows_decoded.html" title="fn cqlite_core::storage::sstable::work_counters::rows_decoded">rows_<wbr>decoded</a></dt><dd>Number of individual partition rows DECODED from <code>Data.db</code> by the
+single-candidate seek path since the last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a> (Issue #954).</dd><dt><a class="fn" href="fn.sstables_scanned.html" title="fn cqlite_core::storage::sstable::work_counters::sstables_scanned">sstables_<wbr>scanned</a></dt><dd>Number of candidate SSTables parsed by partition-targeted lookups since the
+last <a href="fn.reset.html" title="fn cqlite_core::storage::sstable::work_counters::reset"><code>reset</code></a>.</dd></dl></section></div></main></body></html>

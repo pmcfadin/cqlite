@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_table_references","is_modifying_statement","is_query_statement","is_schema_statement"]};
