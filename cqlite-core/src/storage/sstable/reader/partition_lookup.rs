@@ -717,7 +717,7 @@ impl SSTableReader {
     /// stitching path is used, table_id matching is skipped, so any non-empty value
     /// is accepted; for other formats this returns the qualified `keyspace.table`
     /// form so the scan filter matches.
-    fn scan_table_id(&self) -> TableId {
+    pub(in crate::storage::sstable::reader) fn scan_table_id(&self) -> TableId {
         let keyspace = &self.header.keyspace;
         let table_name = &self.header.table_name;
         if !keyspace.is_empty() && !table_name.is_empty() {

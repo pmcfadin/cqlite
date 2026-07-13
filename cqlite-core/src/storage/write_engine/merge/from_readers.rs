@@ -87,10 +87,11 @@ pub(super) async fn drive_compaction_stream(
     run_index: usize,
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
+    limit: Option<usize>,
     sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
 ) -> Result<()> {
     reader
-        .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |compaction_row| {
+        .stream_all_partitions_for_compaction(Some(schema), scan_cancel, limit, |compaction_row| {
             let msg =
                 SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)
                     .map_err(MergeProducerError::from);
@@ -118,8 +119,11 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: &TableSchema,
         scan_cancel: ScanCancel,
+        limit: Option<usize>,
     ) -> Result<Self> {
         let schema = schema.clone();
+        // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
+        let adapter_cancel = scan_cancel.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
         // Issue #2316: account this producer on the live-thread gauge BEFORE
@@ -127,7 +131,7 @@ impl SSTableRowIteratorAdapter {
         producer_gauge::spawned();
 
         let producer = match std::thread::Builder::new().spawn(move || {
-            Self::producer_thread_from_reader(reader, run_index, schema, scan_cancel, sender);
+            Self::producer_thread_from_reader(reader, run_index, schema, scan_cancel, limit, sender);
         }) {
             Ok(handle) => handle,
             Err(e) => {
@@ -140,8 +144,9 @@ impl SSTableRowIteratorAdapter {
         };
 
         Ok(Self {
-            receiver,
-            _producer: producer,
+            receiver: Some(receiver),
+            producer: Some(producer),
+            scan_cancel: adapter_cancel,
         })
     }
 
@@ -159,6 +164,7 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: TableSchema,
         scan_cancel: ScanCancel,
+        limit: Option<usize>,
         sender: SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
     ) {
         let _thread_guard = producer_gauge::ProducerThreadGuard;
@@ -179,6 +185,7 @@ impl SSTableRowIteratorAdapter {
                 run_index,
                 &schema,
                 &scan_cancel,
+                limit,
                 &sender,
             ))
         })();
@@ -231,6 +238,9 @@ impl KWayMerger {
                 run_index,
                 schema,
                 scan_cancel.clone(),
+                // Warm-handle full-scan merge reads every partition (issue #2361):
+                // no per-producer LIMIT push-down on this seam.
+                None,
             )?;
             runs.push(RunReader::new(
                 Box::new(adapter) as Box<dyn SSTableRowIterator>

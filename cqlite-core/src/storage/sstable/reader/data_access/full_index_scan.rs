@@ -30,8 +30,6 @@
 
 use super::super::SSTableReader;
 use super::model::sort_by_token_order;
-use crate::schema::TableSchema;
-use crate::storage::sstable::reader::parsing::{ParseStep, V5CompressedLegacyParser};
 use crate::types::ScanRow;
 use crate::{Result, RowKey};
 
@@ -277,50 +275,8 @@ impl SSTableReader {
         Ok(Some(results))
     }
 
-    /// Authoritative structural coverage check for ONE index entry's Data.db slice
-    /// (issue #2302, roborev jobs 1606 + 1609): physically decode `raw` (no read
-    /// shadowing — the byte extent a partition occupies is independent of it) as
-    /// exactly one partition, and require the decode to consume the slice in full.
-    ///
-    /// Every BIG `Index.db` entry bounds EXACTLY ONE partition — for a non-final
-    /// entry the successor's offset marks precisely where the next partition
-    /// begins; for the final entry the authoritative data-section end does, but
-    /// (unlike a successor offset) does not itself prove no trailing entries were
-    /// dropped. Either way, a structurally sound, uncorrupted partition consumes
-    /// its ENTIRE bounded slice — no more, no less, AND terminates via a CONFIRMED
-    /// end-of-partition marker, never a bare "ran out of bytes" collapse.
-    ///
-    /// Roborev job 1610 (finding 2): `parse_one_partition_for_compaction(...,
-    /// at_final_chunk=true, ...)` is LENIENT — on the final chunk it collapses
-    /// "consumed every byte but never saw an explicit END_OF_PARTITION marker"
-    /// (`drive_partition_sliding`'s EOF-without-terminator branch), a row-parse
-    /// failure, and a range-marker the policy can't represent ALL into the SAME
-    /// `Emitted(consumed)` as a confirmed, marker-terminated partition — so a slice
-    /// truncated at a parseable row/element boundary (dropping only the trailing
-    /// terminator byte) would still satisfy `consumed == raw.len()`. This method
-    /// therefore drives with **`at_final_chunk = false`** instead: EVERY one of
-    /// those ambiguous "ran out without a confirmed structural signal" cases then
-    /// reports `ParseStep::NeedMore` (never `Emitted`), so `Emitted(consumed)`
-    /// becomes reachable ONLY via the driver's UNCONDITIONAL
-    /// `is_end_of_partition` marker-consumption branch (fires regardless of
-    /// `at_final_chunk`) — i.e. `consumed == raw.len()` now PROVES the terminator
-    /// was structurally confirmed as the slice's very last byte. This is not a
-    /// "there's more data coming" claim (there is no next chunk to append; `raw`
-    /// is the whole bounded slice) — it deliberately repurposes the driver's
-    /// truncation-detection signal as the completeness oracle, authoritative and
-    /// no heuristics (issue #28): the end-of-partition marker is Cassandra's own
-    /// on-disk structural signal for partition completion (CQLite's writer always
-    /// appends it — `data_writer/partition.rs`'s `END_OF_PARTITION` push is
-    /// unconditional), not a guess.
-    fn partition_slice_fully_consumed(
-        &self,
-        parser: &V5CompressedLegacyParser,
-        raw: &[u8],
-        schema: Option<&TableSchema>,
-    ) -> Result<bool> {
-        let mut noop = |_row| Ok(std::ops::ControlFlow::Continue(()));
-        let step =
-            parser.parse_one_partition_for_compaction(raw, schema, self, false, &mut noop)?;
-        Ok(matches!(step, ParseStep::Emitted(consumed) if consumed == raw.len()))
-    }
+    // The structural coverage oracle `partition_slice_fully_consumed` (its full
+    // `at_final_chunk = false` rationale, issue #2302 roborev jobs 1606/1609/1610)
+    // now lives on the sibling `full_index_stream` module (issue #2361) so the
+    // materialising walk above and the streaming walk share ONE implementation.
 }

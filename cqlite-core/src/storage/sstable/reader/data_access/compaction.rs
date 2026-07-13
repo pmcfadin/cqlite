@@ -560,6 +560,7 @@ impl SSTableReader {
         &self,
         schema: Option<&crate::schema::TableSchema>,
         scan_cancel: &ScanCancel,
+        limit: Option<usize>,
         mut emit: F,
     ) -> Result<()>
     where
@@ -574,30 +575,21 @@ impl SSTableReader {
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
 
-        // Non-stitching formats are single-block / small: emit via the
-        // materialising iterator with ts=0 (matches the Vec-variant fallback).
+        // Non-stitching formats (uncompressed / non-nb BIG — the #2361 field
+        // case): TRUE-stream each partition as the index walk resolves it, rather
+        // than materialising the whole SSTable into one Vec before the first emit
+        // (issue #2361). This is what lets a downstream `LIMIT` early-break and a
+        // client-disconnect cancellation take effect promptly and keeps peak
+        // memory bounded on a 1M-partition table. `limit` is threaded through as a
+        // per-producer partition budget (see `stream_all_partitions_cancellable`).
+        // Issue #2346: the PER-CALL `scan_cancel` governs the whole walk.
         if !self.requires_chunk_stitching() {
-            // The heavy, previously-uninterruptible work is inside
-            // `iterate_all_partitions_cancellable` (→ `sequential_scan` → the
-            // block parser), which now polls `scan_cancel` per partition (issue
-            // #2264). Poll again per emitted row so a cancel that lands during the
-            // drain of the already-materialised Vec is also honoured promptly.
-            // Issue #2346: route through the PER-CALL-token sibling (not the
-            // public `iterate_all_partitions`, which always uses the reader's own
-            // field) so this method's caller-supplied `scan_cancel` governs the
-            // whole non-stitching fallback too.
-            let entries = self.iterate_all_partitions_cancellable(scan_cancel).await?;
-            for (i, (key, value)) in entries.into_iter().enumerate() {
-                if i & 0xFF == 0 {
-                    scan_cancel.check()?;
-                }
+            self.stream_all_partitions_cancellable(scan_cancel, limit, |(key, value)| {
                 let row =
                     super::super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
-                match emit(row)? {
-                    std::ops::ControlFlow::Continue(()) => {}
-                    std::ops::ControlFlow::Break(()) => return Ok(()),
-                }
-            }
+                emit(row)
+            })
+            .await?;
             return Ok(());
         }
 

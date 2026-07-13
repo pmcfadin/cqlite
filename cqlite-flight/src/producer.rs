@@ -603,11 +603,25 @@ impl MergeProducer {
         }
 
         // Issue #2264: wire the shared synchronous cancel token into the merge so
-        // each run's producer thread (which fully materialises an index-less
-        // SSTable in one uninterruptible pass) abandons promptly on client
-        // disconnect, instead of the ~1–2 min transport backstop.
-        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
-            .map_err(ProducerError::Merge)?;
+        // each run's producer thread abandons promptly on client disconnect,
+        // instead of the ~1–2 min transport backstop.
+        //
+        // Issue #2361: push the ticket's `LIMIT` into the merge as a per-producer
+        // PARTITION budget so a bounded scan over a huge (e.g. 1.13M-partition)
+        // uncompressed SSTable stops each producer after ~`limit` partitions
+        // instead of streaming to completion. Best-effort under
+        // `limitGuaranteed = false` (the consumer's post-reconciliation LIMIT
+        // break + bounded-channel backpressure remain the correctness bound).
+        let mut merger = KWayMerger::new_cancellable_with_partition_limit(
+            paths,
+            &self.schema,
+            cancel.scan_cancel(),
+            // `spec.limit` is `Option<u64>`; a value exceeding `usize::MAX` (only
+            // possible on a 32-bit target) is treated as unbounded (`None`) — the
+            // backpressure + LIMIT-break bound still applies. No truncation.
+            self.spec.limit.and_then(|l| usize::try_from(l).ok()),
+        )
+        .map_err(ProducerError::Merge)?;
         on_merger_built();
         self.drive_merge(
             &mut merger,

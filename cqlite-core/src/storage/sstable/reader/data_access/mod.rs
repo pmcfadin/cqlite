@@ -50,6 +50,7 @@ mod compaction;
 // CRC-validated compressed offset-read window (issue #1773).
 mod compressed_offset;
 mod full_index_scan; // Full-Index.db partition enumeration (issue #2302)
+mod full_index_stream; // True-streaming full-Index.db enumeration (issue #2361)
 mod model;
 // Single-partition compaction seek (issue #2207): the public point-read primitive
 // composing the presence oracle + BTI/BIG offset resolution into a byte-identical
