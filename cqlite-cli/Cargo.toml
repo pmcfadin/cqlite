@@ -19,7 +19,7 @@ path = "src/main.rs"
 # version is required (alongside path) so the dep resolves when published to
 # crates.io. Keep this literal in sync with [workspace.package].version on every
 # release (see release checklist).
-cqlite-core = { path = "../cqlite-core", version = "0.13.0" }
+cqlite-core = { path = "../cqlite-core", version = "0.14.0" }
 
 # CLI framework
 clap = { workspace = true }
