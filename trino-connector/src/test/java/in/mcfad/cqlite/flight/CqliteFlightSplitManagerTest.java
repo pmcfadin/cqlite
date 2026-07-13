@@ -324,8 +324,11 @@ class CqliteFlightSplitManagerTest {
 
     /**
      * Availability failover (issue #2241): in LIVE mode every other replica owner of a range is
-     * an ordered fallback (primary first). {@code orderedReplicaHosts} sorts by address and
-     * de-dups by host; the primary equals {@link CqliteFlightSplitManager#pickReplica}'s choice.
+     * an ordered fallback (primary first). The primary is a deterministic per-range rotation of
+     * the sorted owner set keyed on the range start token (issue #2397) — NOT the lexicographic
+     * head, which collapsed every RF==N range onto one replica; the remaining owners follow in
+     * sorted order. Updated from the old "primary = smallest address" assertion: that behavior
+     * was the round-9 single-node collapse bug.
      */
     @Test
     void liveModeCarriesAllOtherOwnersAsOrderedFallbacks() {
@@ -336,9 +339,12 @@ class CqliteFlightSplitManagerTest {
 
         var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
         assertEquals(1, splits.size());
-        assertEquals("10.0.0.2", splits.get(0).host(), "primary = smallest address");
-        assertEquals(List.of("10.0.0.3", "10.0.0.4"), splits.get(0).fallbackHosts());
-        assertEquals(List.of("10.0.0.2", "10.0.0.3", "10.0.0.4"), splits.get(0).replicaHosts());
+        // sorted owners = [.2, .3, .4]; head = floorMod(-100, 3) = 2 → primary .4, rest in order.
+        assertEquals("10.0.0.4", splits.get(0).host(), "primary = rotated owner (floorMod start token)");
+        assertEquals(List.of("10.0.0.2", "10.0.0.3"), splits.get(0).fallbackHosts());
+        assertEquals(List.of("10.0.0.4", "10.0.0.2", "10.0.0.3"), splits.get(0).replicaHosts());
+        // Full owner set retained regardless of which owner is primary (failover intact).
+        assertEquals(Set.of("10.0.0.2", "10.0.0.3", "10.0.0.4"), Set.copyOf(splits.get(0).replicaHosts()));
     }
 
     /**
@@ -387,9 +393,10 @@ class CqliteFlightSplitManagerTest {
     }
 
     /**
-     * {@code orderedReplicaHosts} prefers local-DC owners (sorted), then every other DC's owners
-     * (sorted), mapping to bare hosts and de-duplicating in order. The first entry matches
-     * {@link CqliteFlightSplitManager#pickReplica}.
+     * {@code orderedReplicaHosts} prefers local-DC owners (rotated within, then sorted), then
+     * every other DC's owners (sorted) as further fallbacks, mapping to bare hosts and
+     * de-duplicating in order. Rotation applies only to the local-DC set (issue #2397); the
+     * first entry matches {@link CqliteFlightSplitManager#pickReplica}.
      */
     @Test
     void orderedReplicaHostsPrefersLocalDcThenOthers() {
@@ -397,12 +404,23 @@ class CqliteFlightSplitManagerTest {
                 "dc1", List.of("10.0.1.5:7000", "10.0.1.2:7000"),
                 "dc2", List.of("10.0.2.9:7000"));
 
+        // rotationKey 0 → head = sorted local[0] = .2; local .5 then remote dc2 .9 as fallbacks.
         assertEquals(
                 List.of("10.0.1.2", "10.0.1.5", "10.0.2.9"),
-                CqliteFlightSplitManager.orderedReplicaHosts(byDc, "dc1"));
+                CqliteFlightSplitManager.orderedReplicaHosts(byDc, "dc1", 0));
         assertEquals(
                 "10.0.1.2",
-                CqliteFlightSplitManager.pickReplica(byDc, "dc1").split(":")[0],
-                "ordered head equals pickReplica");
+                CqliteFlightSplitManager.pickReplica(byDc, "dc1", 0),
+                "ordered head equals pickReplica (bare host)");
+
+        // rotationKey 1 rotates WITHIN the local DC only: head = sorted local[1] = .5, then .2;
+        // the remote-DC owner stays a trailing fallback (never rotated into primary).
+        assertEquals(
+                List.of("10.0.1.5", "10.0.1.2", "10.0.2.9"),
+                CqliteFlightSplitManager.orderedReplicaHosts(byDc, "dc1", 1));
+        assertEquals(
+                "10.0.1.5",
+                CqliteFlightSplitManager.pickReplica(byDc, "dc1", 1),
+                "rotation stays within the local datacenter");
     }
 }
