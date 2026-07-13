@@ -17,18 +17,12 @@
 //!
 //! The issue's ideal is `index_parses_total == #generations` (each generation's
 //! Index.db parsed once per query — the counter's documented contract in
-//! `catalog::INDEX_PARSES_TOTAL`). On current main it is `2 × #generations`:
-//! `SSTableReader::open` parses the full `Index.db` TWICE per reader open —
-//! `reader/mod.rs` calls BOTH `load_index` (→ legacy `SSTableIndex`) and
-//! `load_index_reader` (→ spec `IndexReader`), each running the O(entries)
-//! `parse_all_partition_keys_*` loop `index_parses_total` counts. That per-OPEN
-//! double-parse is a SEPARATE redundancy (reported with this suite as issue
-//! **#2395** — the reader-open double-parse — independent of concurrency and of
-//! the warm registry) — the single-flight this test pins is that the total does
-//! NOT scale with N. `PER_OPEN_PARSES` documents the current per-open
-//! multiplicity; tighten it to `1` when #2395 is fixed (this test stays green
-//! through that fix — the bound only rejects a per-REQUEST, N-scaling
-//! amplification, never a smaller constant).
+//! `catalog::INDEX_PARSES_TOTAL`). Issue **#2395** (fixed) retired the reader-open
+//! double-parse: `SSTableReader::open` now parses each `Index.db` EXACTLY ONCE
+//! (only `load_index_reader` → spec `IndexReader`; `load_index` no longer reads
+//! the separate component), so `PER_OPEN_PARSES == 1` and the total is
+//! `1 × #generations`. The single-flight this test pins is that the total does NOT
+//! scale with N — the bound only rejects a per-REQUEST, N-scaling amplification.
 //!
 //! ## Separate integration-test process
 //!
@@ -58,13 +52,12 @@ use concurrent_support as support;
 /// Number of simultaneous cold requests. Field runs use 8.
 const N: usize = 8;
 
-/// Current number of full `Index.db` parses `SSTableReader::open` performs PER
-/// reader open (see the module doc: `load_index` + `load_index_reader`). The
-/// ideal is 1; `2` documents issue **#2395** (the reader-open double-parse). The
-/// pin below is that the TOTAL is `PER_OPEN_PARSES × #generations` — a
-/// per-generation constant that does NOT grow with N. Reduce to 1 when #2395 is
-/// fixed.
-const PER_OPEN_PARSES: f64 = 2.0;
+/// Number of full `Index.db` parses `SSTableReader::open` performs PER reader
+/// open. Issue **#2395** (fixed) retired the reader-open double-parse, so this is
+/// now `1` (only `load_index_reader` parses the separate `Index.db`). The pin
+/// below is that the TOTAL is `PER_OPEN_PARSES × #generations` — a per-generation
+/// constant that does NOT grow with N.
+const PER_OPEN_PARSES: f64 = 1.0;
 
 /// Count the `nb-*-big-Data.db` generations under the fixture's table dir.
 fn generation_count(data_dir: &std::path::Path) -> usize {
@@ -173,9 +166,9 @@ fn n_concurrent_cold_do_gets_do_not_amplify_index_parses_with_n() {
     // INDEPENDENT of N. A single-flight failure (the #2383 ×N amplifier through the
     // rpc layer) makes each of the N requests re-parse every generation, so the
     // total climbs toward `#generations × N` (here up to 16–32) — far past this
-    // bound. `PER_OPEN_PARSES` (currently 2, the reported reader-open double-parse
-    // finding) is a per-generation constant; the bound rejects only a per-REQUEST,
-    // N-scaling amplification, and stays green if the double-parse is fixed to 1.
+    // bound. `PER_OPEN_PARSES` (now 1 — the #2395 reader-open double-parse is
+    // fixed) is a per-generation constant; the bound rejects only a per-REQUEST,
+    // N-scaling amplification.
     let bound = PER_OPEN_PARSES * generations as f64;
     assert!(
         parses <= bound,
