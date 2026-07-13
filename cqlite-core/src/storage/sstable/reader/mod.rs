@@ -1318,6 +1318,30 @@ impl SSTableReader {
     /// inode and stay valid across the swap; only [`Self::new_scan_cursor`]'s
     /// per-scan `File::open` reads this path, so pointing it at a LIVE hardlink
     /// restores the #2352 ENOENT protection with zero parse cost.
+    ///
+    /// ## In-flight isolation invariant (roborev-1654 HIGH, adjudicated)
+    ///
+    /// Mutating this shared `Arc<SSTableReader>`'s path while a concurrent request
+    /// scans it does NOT break the in-flight request's isolation, because the
+    /// rebind is byte-transparent and monotone-toward-live:
+    /// 1. **Same immutable inode.** The sole caller (`warm::registry::rebind`)
+    ///    fires only after `rebuild::rebind_matches` proves
+    ///    `(device, inode, generation)` + size equality; every rebind target is a
+    ///    hardlink to the SAME immutable SSTable inode, so any path this reader
+    ///    carries yields byte-identical data (issue #28 no-heuristics).
+    /// 2. **Atomic swap.** `file_path` is an `arc_swap::ArcSwap<PathBuf>`; a
+    ///    concurrent `file_path()` sees either the old or the new whole `PathBuf`,
+    ///    never a torn value.
+    /// 3. **Dead → live only.** A rebind happens only when the current path is
+    ///    dead and an identity-matching LIVE hardlink exists, so an in-flight
+    ///    request's NEXT `new_scan_cursor` `File::open` is strictly MORE likely to
+    ///    succeed after the rebind than before (pre-rebind it would ENOENT).
+    /// 4. **No semantics off the path.** No `file_path()` consumer re-derives
+    ///    keyspace/table/schema from the path after `open`; the scan path uses it
+    ///    ONLY for `File::open` (bytes) and all parsed read state (header,
+    ///    compression info, CRC, index, generation) lives on `&self`, fixed at
+    ///    open — the swapped path changes which hardlink is read, never what the
+    ///    bytes mean.
     pub fn rebind_path(&self, new_path: &Path) {
         self.file_path.store(Arc::new(new_path.to_path_buf()));
     }

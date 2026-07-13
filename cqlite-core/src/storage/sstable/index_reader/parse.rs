@@ -35,8 +35,15 @@ pub(super) fn parse_index_data_with_summary<'a>(
     use nom::error::{Error as NomError, ErrorKind};
     match parse_index_data_cancellable(input, summary_reader, &ScanCancel::default()) {
         Ok(pair) => Ok(pair),
-        // A default (never-cancel) flag cannot yield `Cancelled`; any error here is
-        // a header/structural failure mapped to a nom error for the IResult callers.
+        // Restore the pre-refactor error shape for the IResult callers (roborev-1654):
+        // a header that declares more bytes than the file holds is a TRUNCATION and
+        // must map back to `Eof` (the only `Corruption` this path can emit is that
+        // header-truncation signal from `parse_index_header_prefix`; the entry loop
+        // `break`s rather than erroring). Any other structural failure stays `Fail`.
+        // A default (never-cancel) flag cannot yield `Cancelled`.
+        Err(crate::Error::Corruption(_)) => {
+            Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)))
+        }
         Err(_) => Err(nom::Err::Error(NomError::new(input, ErrorKind::Fail))),
     }
 }
@@ -169,10 +176,17 @@ pub(super) fn parse_all_partition_keys_with_summary<'a>(
     summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], Vec<PartitionIndexEntry>> {
     use nom::error::{Error as NomError, ErrorKind};
-    // Non-cancellable façade: a default flag never trips, so the cancel arm is
-    // unreachable; map it defensively to a nom error for the IResult callers.
+    // Non-cancellable façade over the break-on-error entry loop: it returns the
+    // parsed prefix as `Ok` on a malformed/truncated tail (never a structural
+    // `Err`), and a default flag never trips `Cancelled`, so no `Err` is reachable
+    // here in practice. Map defensively but preserve the shape distinction for
+    // symmetry with `parse_index_data_with_summary` (roborev-1654): a `Corruption`
+    // (truncation) → `Eof`, anything else → `Fail`.
     match parse_all_partition_keys_cancellable(input, summary_reader, &ScanCancel::default()) {
         Ok(pair) => Ok(pair),
+        Err(crate::Error::Corruption(_)) => {
+            Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)))
+        }
         Err(_) => Err(nom::Err::Error(NomError::new(input, ErrorKind::Fail))),
     }
 }
