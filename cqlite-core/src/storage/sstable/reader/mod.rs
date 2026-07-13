@@ -692,9 +692,7 @@ impl SSTableReader {
             }
         }
 
-        // Load the integrated in-Data.db index if the header advertises one. The
-        // separate Index.db component is parsed exactly once by load_index_reader
-        // below (issue #2385 / #2395), not here.
+        // Integrated in-Data.db index only; separate Index.db is parsed once by load_index_reader (#2385/#2395).
         let index = Self::load_index(&file, &header)
             .instrument(tracing::debug_span!("sstable.reader.open.load_index"))
             .await?;

@@ -78,7 +78,10 @@ impl Index {
             } else {
                 table_name.to_string()
             };
-            let qualified_list = index.unqualified_to_qualified.entry(unqualified).or_default();
+            let qualified_list = index
+                .unqualified_to_qualified
+                .entry(unqualified)
+                .or_default();
             if !qualified_list.contains(&table_id) {
                 qualified_list.push(table_id.clone());
             }

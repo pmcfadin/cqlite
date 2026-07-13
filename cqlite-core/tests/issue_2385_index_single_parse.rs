@@ -81,7 +81,9 @@ fn open_parses_index_exactly_once() {
     let mc = testing::metrics_capture();
 
     let Some(data_file) = find_big_data_file("test_basic", "simple_table") else {
-        eprintln!("Skipping (#2385 one-parse-per-open): BIG test_basic/simple_table fixture absent");
+        eprintln!(
+            "Skipping (#2385 one-parse-per-open): BIG test_basic/simple_table fixture absent"
+        );
         return;
     };
 

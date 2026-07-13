@@ -57,7 +57,7 @@ fn time_build(entries: Vec<IndexEntry>) -> f64 {
     let index = Index::from_entries(entries);
     let elapsed = start.elapsed().as_secs_f64();
     // Prevent the optimizer from eliding the build.
-    assert!(index.len() > 0, "build must retain entries");
+    assert!(!index.is_empty(), "build must retain entries");
     elapsed
 }
 
