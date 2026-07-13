@@ -860,6 +860,13 @@ impl SSTableReader {
             // before sorting.  Limit is applied AFTER sort so that LIMIT N returns the N
             // token-smallest partitions, not the first N encountered in parse order.
             // (BLOCKING-1: limit-after-order)
+            // Work-probe (issue #2398, roborev 1692): same-partition rows arrive
+            // consecutively (Data.db is laid out partition-by-partition), so a
+            // changed `RowKey` (the partition key) marks a new partition body
+            // decoded — matching the "once per partition" semantics of the two
+            // index-driven walks. Tracked here, BEFORE the filters below, so it
+            // counts decode work regardless of a later tombstone/range skip.
+            let mut prev_partition_key: Option<RowKey> = None;
             for (idx, (_entry_table_id, entry_key, entry_value)) in
                 all_entries.into_iter().enumerate()
             {
@@ -870,6 +877,10 @@ impl SSTableReader {
                 // huge already-parsed result set to completion.
                 if idx & 0xFF == 0 {
                     scan_cancel.check()?;
+                }
+                if prev_partition_key.as_ref() != Some(&entry_key) {
+                    crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+                    prev_partition_key = Some(entry_key.clone());
                 }
                 if let Some(start) = start_key {
                     if &entry_key < start {
@@ -911,6 +922,10 @@ impl SSTableReader {
 
         // Non-stitching path for other formats
         let mut block_count = 0;
+        // Work-probe (issue #2398, roborev 1692): scoped OUTSIDE the block loop so
+        // a partition split across a block boundary is not double-counted; see the
+        // stitching branch above for the "changed key = new partition" rationale.
+        let mut prev_partition_key: Option<RowKey> = None;
         while let Some(block) = self.read_next_block(&cursor).await? {
             // Cooperative cancellation (issue #2264): an index-less (Summary.db
             // absent) SSTable materialises EVERY partition here in one pass; poll
@@ -951,6 +966,13 @@ impl SSTableReader {
                     entry_table_id,
                     entry_key
                 );
+
+                // Work-probe (issue #2398, roborev 1692): count decode work BEFORE
+                // any table-id/range/tombstone filter, matching the other sites.
+                if prev_partition_key.as_ref() != Some(entry_key) {
+                    crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+                    prev_partition_key = Some(entry_key.clone());
+                }
 
                 // Match table IDs - supports both qualified (keyspace.table) and unqualified (table) formats
                 // This allows queries with either format to match SSTables stored with either format

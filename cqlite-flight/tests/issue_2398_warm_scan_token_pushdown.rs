@@ -156,19 +156,27 @@ fn warm_token_range_scan_reads_the_whole_sstable_for_one_partition() {
     let svc = CqliteFlightService::new(data_dir, 1024);
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    // The lowest-token partition is a single, well-defined target. A half-open
-    // range `(min_token - 1, min_token]` selects EXACTLY that one partition (all
-    // others have a strictly greater token).
+    // Pick an INTERIOR partition (roborev 1692, low): the ring MINIMUM's
+    // predecessor bound (`min_token - 1`) collapses to `min_token` itself when
+    // `min_token == i64::MIN`, and `token_in_half_open_range` treats an equal
+    // `(start, end]` pair as the FULL ring (not empty) — so anchoring on the
+    // lowest token risks silently widening the "one partition" range to a full
+    // scan instead of narrowing it. An interior token's own predecessor in the
+    // SORTED token order is always a strictly smaller, distinct i64 (no
+    // wraparound edge), so `(predecessor, target]` is unconditionally a genuine
+    // one-partition half-open range.
     let mut tokens: Vec<(usize, i64)> = (0..N).map(|i| (i, token_for(i))).collect();
     tokens.sort_by_key(|(_, t)| *t);
-    let (min_idx, min_token) = tokens[0];
+    let mid = tokens.len() / 2;
+    let (target_idx, target_token) = tokens[mid];
+    let predecessor_token = tokens[mid - 1].1;
     assert!(
-        min_token < tokens[1].1,
-        "fixture must have a unique lowest token (got {min_token} == {})",
-        tokens[1].1
+        predecessor_token < target_token,
+        "fixture must have a unique target token (got {target_token} == predecessor \
+         {predecessor_token})"
     );
-    let start = min_token.saturating_sub(1);
-    let end = min_token;
+    let start = predecessor_token;
+    let end = target_token;
 
     rt.block_on(async {
         // Warm the reader (first request opens + parses the index; the #2310 warm
@@ -183,8 +191,8 @@ fn warm_token_range_scan_reads_the_whole_sstable_for_one_partition() {
         // Correctness: exactly the one in-range partition's row is returned.
         assert_eq!(
             rows, 1,
-            "the (min-1, min] range must return exactly the lowest-token partition \
-             (idx {min_idx})"
+            "the (predecessor, target] range must return exactly the target \
+             partition (idx {target_idx})"
         );
 
         // Control: a full scan's whole-SSTable body count, so the comparison below

@@ -315,6 +315,10 @@ impl SSTableReader {
             .sequential_scan(&table_id, None, None, None, schema, scan_cancel)
             .await?;
         for (key, value) in entries {
+            // Work-probe (issue #2398, roborev 1692): the materialising sequential
+            // scan decodes every partition body too — every body-decoding path must
+            // contribute to this counter, not only the two index-driven walks.
+            crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
             match emit((key, value))? {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(()) => return Ok(()),
