@@ -1,4 +1,42 @@
-# Lab Plan: cqlite-flight + Trino Loadtest (3-Node)
+# Lab Plan: cqlite-flight + Trino Loadtest (3-Node) — ROUND 4
+
+## Round-4 context (read first)
+
+Epic [#2103](https://github.com/pmcfadin/cqlite/issues/2103) is **closed**; this is
+the round-4 verification rerun against the fixes shipped after round 3. The delta
+from round 3:
+
+- **Flight image target: `ghcr.io/pmcfadin/cqlite-flight:dev` @
+  `sha256:50557839b0cae157ae9a84b240ec3f48a571f670efbe9fca61459e1b6e28cfec`**
+  (built from cqlite main @ `7082e2dc`, workflow run 28978849847). Adds the
+  #2162/#2163 observability series, #2193's swallowed-egress-error fix, plus #1849
+  (multi-gen read-time TTL/partition-shadow reconciliation) and #1750 (point-read
+  schema-derived columns). **Round 4 pins this digest in the image reference**
+  (`--tag "dev@sha256:5055…"`, Step 4) so it cannot drift like round-3's moving
+  `:dev` did; still **verify the running pods' digest == `50557839…`.**
+- **Connector `0.13.3`** — unchanged from round 3 (Maven Central).
+- **`trino-cqlite` kit now exposes `--read-mode snapshot|live` + `--local-datacenter`
+  install flags** (PR #2197). Phase 3b live mode is now a reinstall flag, **not** a
+  hand-edit of `trino-catalog.properties` (round-3 §13b hand-edit is retired).
+- **New observability series to check** (#2162/#2163): `cqlite_rpc_rows_total` must
+  climb *mid-query*; `cqlite_rpc_phase_duration_seconds` splits time across
+  `resolve|merge_setup|stream`; `cqlite_merge_rows_in/out`,
+  `cqlite_compaction_tombstones_suppressed/emitted`, `cqlite_read_sstables_pruned`,
+  and the opt-in `cqlite_read_bloom_false_negatives` soak.
+
+### Round-4 verdicts this run must produce
+
+- **#2193** (tiny-table read, `Failed to read message`, error swallowed):
+  re-read a 3-row `nb-big` table. **Success → close #2193.** Failure → the egress
+  error now logs at ERROR server-side (`RUST_LOG=info` suffices) — grab the flight
+  pod's `flight rpc failed` line and paste on #2193; it names the real encode/send
+  cause. Either outcome closes the diagnosis.
+- **#2157** (eager-merge; LIMIT/predicate not honored): `SELECT * LIMIT 5` (expect
+  fast SECONDS, not round-3's 190–433s), `EXPLAIN … WHERE key='<pk>'` (expect
+  populated `filterJson`), `count(*)` (full-scan-bound by design — report
+  wall-clock; verify counters *move* mid-query, not dark until completion).
+- **#2116** (Trino worker CrashLoop on `web-ui.*`) — still upstream/open; the
+  round-3 workaround (strip the two `web-ui.*` lines, `helm upgrade`) is unchanged.
 
 ## Goal
 
@@ -169,11 +207,11 @@ Before `easy-db-lab cqlite-flight start`:
 ### 1. Create cluster workspace and provision
 
 ```bash
-CLUSTER_DIR="clusters/cqlite-flight-loadtest-$(date +%Y%m%d-%H%M%S)"
+CLUSTER_DIR="clusters/cqlite-flight-r4-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$CLUSTER_DIR"
 bin/create-easy-db-lab-wrapper "$CLUSTER_DIR"
 EDB="$CLUSTER_DIR/easy-db-lab"
-$EDB init cqlite-flight-loadtest --db 3 --app 1 \
+$EDB init cqlite-flight-r4 --db 3 --app 1 \
   --instance i4i.xlarge --stress-instance m5.xlarge --up
 ```
 
@@ -215,16 +253,30 @@ Coordinator and worker pods must both be Running/Ready.
 
 ### 4. Register the kit source and install cqlite-flight
 
-**[UPDATED for round 3]** Pin the moving **`dev`** image channel
-(`ghcr.io/pmcfadin/cqlite-flight:dev`) — it carries the streaming `do_get`
-producer (#1476 / PR #2176), observability (#2128), and the LIMIT early-stop.
-A tagged release image with these does not exist yet.
+**[UPDATED for round 4]** Pin the moving **`dev`** image channel
+(`ghcr.io/pmcfadin/cqlite-flight:dev`) — round-4 target digest
+**`sha256:50557839b0cae157ae9a84b240ec3f48a571f670efbe9fca61459e1b6e28cfec`**
+(main @ `7082e2dc`). It carries the streaming `do_get` producer (#1476 / PR
+#2176), observability (#2128) plus the new #2162/#2163 series, the LIMIT
+early-stop, and the #2193 swallowed-egress-error fix. A tagged release image
+with these does not exist yet.
+
+**Pin the digest, not the moving `dev` tag.** The daemonset renders
+`ghcr.io/pmcfadin/cqlite-flight:__TAG__`, and OCI accepts the `tag@sha256:` form,
+so passing the digest through `--tag` produces a reference that cannot drift —
+this is the durable fix for round 3's stale-`:dev`-layer regression (no reliance
+on `imagePullPolicy: Always` racing a moving tag):
 
 ```bash
 $EDB kit source add cqlite /path/to/cqlite/easy-db-lab-kits
-$EDB kit install cqlite-flight --tag dev --flight-port 8815
+$EDB kit install cqlite-flight \
+  --tag "dev@sha256:50557839b0cae157ae9a84b240ec3f48a571f670efbe9fca61459e1b6e28cfec" \
+  --flight-port 8815
 $EDB cqlite-flight start
 ```
+
+(If a later round targets a fresh build, swap only the digest here. Plain
+`--tag dev` still works but re-introduces the stale-layer risk — don't use it.)
 
 Expected output ends with:
 
@@ -238,24 +290,37 @@ Verify one pod per db node:
 kubectl get pods -l easydblab.com/kit=cqlite-flight -o wide
 ```
 
-**[UPDATED for round 3 — MANDATORY POD RESTART]** `imagePullPolicy: Always`
-only pulls at pod *creation*. If the `cqlite-flight` DaemonSet pods already
-existed (e.g. from a prior install on this cluster) they keep running the old
-`:dev` layer — the round-2 24-min `LIMIT 5` was almost certainly a stale
-pre-streaming image. Force a fresh pull of the current `:dev` before testing:
+**[UPDATED for round 4 — DIGEST-PINNED, VERIFY ANYWAY]** Because Step 4 pins the
+digest in the image reference, the kubelet resolves exactly
+`sha256:50557839b0ca…` regardless of where `:dev` currently points — the round-3
+stale-layer failure mode is structurally eliminated. Still **verify** the running
+pods carry that digest (a pre-existing DaemonSet from an earlier install on this
+cluster would need recreating to pick up the new reference):
+
+```bash
+kubectl get pods -l easydblab.com/kit=cqlite-flight \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+kubectl logs -l easydblab.com/kit=cqlite-flight --all-containers --prefix | grep -i observability
+```
+
+The `imageID` must end in
+`50557839b0cae157ae9a84b240ec3f48a571f670efbe9fca61459e1b6e28cfec`. If it does
+NOT (stale pods from a prior install), force recreation and re-verify:
 
 ```bash
 kubectl rollout restart daemonset -l easydblab.com/kit=cqlite-flight
 kubectl rollout status  daemonset -l easydblab.com/kit=cqlite-flight --timeout=120s
 ```
 
-Confirm each pod is running the intended image digest and logged
-`observability enabled` at startup:
+Do not attribute any #2193/#2157 result to a pod whose digest isn't `50557839…`.
+
+**Multi-disk detection (#2114, new initContainer):** the round-4 flight kit ships
+a non-fatal `detect-multidisk` initContainer. Confirm each pod's decision — the
+only quiet-OK outcome is "exactly one candidate data dir AND it equals the served
+`--data-dir`"; any warning names an unserved disk (never blocks rollout):
 
 ```bash
-kubectl get pods -l easydblab.com/kit=cqlite-flight \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
-kubectl logs -l easydblab.com/kit=cqlite-flight --all-containers --prefix | grep -i observability
+kubectl logs -l easydblab.com/kit=cqlite-flight -c detect-multidisk --prefix
 ```
 
 ### 5. Install the trino-cqlite overlay (see [0.2](#02-kit-install-path-kit-source-add-not---from) for the naming subtlety)
@@ -316,9 +381,14 @@ see those two entries below, both now fixed:
 ```bash
 DB0_IP=$($EDB ip db0 --private)
 $EDB kit install trino-cqlite --connector-version 0.13.3 --flight-port 8815 \
-  --sidecar-uri "http://${DB0_IP}:9043" --trino-image-tag 481
+  --sidecar-uri "http://${DB0_IP}:9043" --trino-image-tag 481 --read-mode snapshot
 $EDB cqlite start
 ```
+
+**[NEW for round 4]** `--read-mode snapshot|live` is now a real install flag
+(PR #2197) — the round-3 hand-edit of `trino-catalog.properties` is retired.
+Phase 3a runs in `snapshot` (above); Phase 3b flips to `live` by **reinstalling
+this overlay** with `--read-mode live` (see [§13b](#13b-run-b--cqliteread-modelive-the-compaction-stress-weak-spot-hunt)).
 
 This fails closed with a clear message if step 3 didn't pin Trino to 481 (see
 [0.3](#03-trino-must-be-pinned-to-481-not-the-lab-default-474)). On success it
@@ -379,6 +449,30 @@ $EDB cassandra cql "SELECT keyspace_name, table_name FROM system_schema.tables W
 
 Set `KEYSPACE`/`TABLE` shell variables from the result for the rest of this
 plan (e.g. `KEYSPACE=baselines`, `TABLE=keyvalue`).
+
+### 8b. Create the tiny 3-row table (#2193 discriminator) — ROUND 4
+
+Round 3's #2193 was found on a 3-row `nb-big` table that read cleanly at the
+SSTable layer but failed `Failed to read message` at the Arrow-encode/Flight-send
+stage, with the server swallowing the error. Round 4 must re-read exactly this
+shape to reach a verdict. Create it in the **same keyspace** the stress workload
+generated (so it shares the served data dir), write 3 rows, and flush so Flight
+sees a single `nb-big` SSTable:
+
+```bash
+$EDB cassandra cql "CREATE TABLE IF NOT EXISTS ${KEYSPACE}.tiny (key text PRIMARY KEY, value text)"
+$EDB cassandra cql "INSERT INTO ${KEYSPACE}.tiny (key, value) VALUES ('1','1')"
+$EDB cassandra cql "INSERT INTO ${KEYSPACE}.tiny (key, value) VALUES ('2','2')"
+$EDB cassandra cql "INSERT INTO ${KEYSPACE}.tiny (key, value) VALUES ('3','3')"
+$EDB cassandra nt flush "$KEYSPACE"
+```
+
+Confirm exactly one `nb-*-big` generation landed for `tiny` (format sanity — the
+#2193 repro is `nb-big` + LZ4, NOT BTI/`da-`):
+
+```bash
+$EDB cassandra cql "SELECT count(*) FROM ${KEYSPACE}.tiny"   # must be 3
+```
 
 ### 9. Force multiple SSTable generations during the write
 
@@ -446,31 +540,72 @@ Compare the Cassandra-side CQL count against the `cqlite.${KEYSPACE}.${TABLE}`
 count Trino returns. They must match exactly; a mismatch here is Phase 5's
 "wrong row counts" class before you've even started the concurrent runs.
 
-**[UPDATED for round 3 — interactive-latency regression checks].** The round-2
-run (flight pre-streaming image + connector 0.13.2) found every read shape did a
-full eager merge before emitting row 1: `LIMIT 5` = 24 min, `count(*)` = 358s+,
-point read = full scan with no predicate pushdown (#2157). Round 3 ships the
-streaming `do_get` producer (#1476/#2176, flight `:dev`) and predicate pushdown
-(#2166, connector 0.13.3). Before the two loadtest runs, capture these three
-datapoints against the round-2 baselines:
+### 12a. #2193 verdict — tiny-table read (ROUND 4)
+
+Before the latency checks, settle #2193. Round 3: this 3-row `nb-big` read
+succeeded at the SSTable layer then died `Failed to read message` at
+Arrow-encode/Flight-send, **error swallowed server-side**. Round 4's image fixes
+the swallow (errors now log ERROR + count in metrics + propagate as gRPC status)
+and could not reproduce the malformed stream from Rust over real transport — so
+this read either now succeeds or the pod log names the true cause. Either closes
+the diagnosis.
 
 ```bash
-# 1) LIMIT 5 — was 24 min; expect low SECONDS (streaming + limit early-stop)
+# Confirm the tiny table is visible through the connector first
+"$CLUSTER_DIR/cqlite/bin/verify.sh" "$KEYSPACE" tiny
+# The #2193 read itself
+$EDB trino sql "SELECT * FROM cqlite.${KEYSPACE}.tiny"
+```
+
+- **3 rows returned → close #2193** (note it in the findings log with the round-4
+  digest).
+- **Still fails** → `RUST_LOG=info` suffices now; grab the flight pod's ERROR line
+  and paste on #2193 — it names the real encode/send cause:
+  ```bash
+  kubectl logs -l easydblab.com/kit=cqlite-flight --all-containers --prefix --since=5m \
+    | grep -iE "flight rpc failed|error|encode|arrow"
+  ```
+
+### 12b. Sanity check row count before either run
+
+```bash
+$EDB cassandra cql "SELECT count(*) FROM ${KEYSPACE}.${TABLE}"
+"$CLUSTER_DIR/cqlite/bin/verify.sh" "$KEYSPACE" "$TABLE"
+$EDB trino sql "SELECT count(*) FROM cqlite.${KEYSPACE}.${TABLE}"
+```
+
+Compare the Cassandra-side CQL count against the `cqlite.${KEYSPACE}.${TABLE}`
+count Trino returns. They must match exactly; a mismatch here is Phase 5's
+"wrong row counts" class before you've even started the concurrent runs.
+
+**[UPDATED for round 4 — #2157 verdict checks].** Round 3 (streaming `:dev` +
+0.13.3) still measured `LIMIT 5` at **190–433s** with `cqlite_rpc_rows_total`
+never leaving 0 and 100% of time in `do_get` — #2157 was **reopened**. Round 4
+ships the observability that localizes where the time goes (#2162/#2163) and the
+image at digest `50557839…`. Capture these three datapoints and reach the #2157
+verdict:
+
+```bash
+# 1) LIMIT 5 — round 3 was 190–433s; expect low SECONDS (streaming + limit early-stop).
+#    While it runs, in another shell confirm cqlite_rpc_rows_total CLIMBS (Step 14).
 time $EDB trino sql "SELECT * FROM cqlite.${KEYSPACE}.${TABLE} LIMIT 5"
 
 # 2) point read — EXPLAIN must show a NON-EMPTY filterJson on the table handle
 #    (round 2: filterJson=Optional.empty → full scan + Trino ScanFilter)
 $EDB trino sql "EXPLAIN SELECT * FROM cqlite.${KEYSPACE}.${TABLE} WHERE key = '<a-real-key>'"
 
-# 3) count(*) — still a full scan by nature, but do_get duration metrics must
-#    MOVE during the query (streaming) instead of going dark until completion
+# 3) count(*) — full-scan-bound BY DESIGN (report wall-clock, not pass/fail). The
+#    verdict is behavioral: cqlite_rpc_rows_total climbs mid-query and
+#    cqlite_rpc_phase_duration_seconds splits time across resolve|merge_setup|stream,
+#    instead of going dark until completion.
 time $EDB trino sql "SELECT count(*) FROM cqlite.${KEYSPACE}.${TABLE}"
 ```
 
-If `LIMIT 5` still takes minutes, confirm the flight pods actually restarted
-onto the current `:dev` digest (Step 4 mandatory pod restart) before filing —
-the round-2 hang was traced to a stale image. If it's fast, that regression is
-cleared; proceed to the loadtest runs.
+If `LIMIT 5` still takes minutes, **first** confirm the flight pods are on digest
+`50557839…` (Step 4) — round 3's regressions repeatedly traced to a stale `:dev`
+layer. If confirmed on the right image and still slow, that is a live #2157
+finding: capture the `cqlite_rpc_phase_duration_seconds` split (which phase holds
+the time) and file per Phase 5. If fast, #2157 is cleared — record the wall-clock.
 
 **[UPDATED after the first live run]** The first run of this plan hit two
 `trino-loadtest` driver bugs before any query was ever issued, both now fixed
@@ -525,18 +660,15 @@ $EDB trino-loadtest-trino stop
 
 ### 13b. Run (b) — `cqlite.read-mode=live`: the compaction-stress weak-spot hunt
 
-`cqlite.read-mode` **is** a `trino-cqlite` install-time flag (`--read-mode`,
-default `snapshot`; issue #2113), threaded straight into the rendered
-`trino-catalog.properties`. The cleanest way to run Phase 3b is to install the
-overlay with `--read-mode live` (see the overlay README's "Install order"), so
-no catalog hand-edit is needed at all.
-
-If the overlay is already installed in `snapshot` mode and you don't want to
-reinstall, you can still flip the rendered catalog by hand for this one run:
+**[UPDATED for round 4]** `--read-mode` is now a real install flag (PR #2197).
+Flip to `live` by **reinstalling the overlay** — no catalog hand-edit:
 
 ```bash
-echo "cqlite.read-mode=live" >> "$CLUSTER_DIR/cqlite/trino-catalog.properties"
-"$CLUSTER_DIR/trino/bin/update-catalogs.sh"
+$EDB kit install trino-cqlite --connector-version 0.13.3 --flight-port 8815 \
+  --sidecar-uri "http://${DB0_IP}:9043" --trino-image-tag 481 --read-mode live
+$EDB cqlite start
+# confirm the rendered catalog took the flag
+grep cqlite.read-mode "$CLUSTER_DIR/cqlite/trino-catalog.properties"   # → cqlite.read-mode=live
 ```
 
 Now start a **second, concurrent** write load — the actual point of `live`
@@ -562,11 +694,13 @@ $EDB trino-loadtest-trino stop
 $EDB cassandra stress stop cqlite-live-churn --force
 ```
 
-Revert to `snapshot` mode afterward if you plan to re-run Phase 3a:
+Revert to `snapshot` mode afterward if you plan to re-run Phase 3a — reinstall
+with `--read-mode snapshot` (the round-3 `sed` hand-edit is retired):
 
 ```bash
-sed -i.bak '/cqlite.read-mode=live/d' "$CLUSTER_DIR/cqlite/trino-catalog.properties"
-"$CLUSTER_DIR/trino/bin/update-catalogs.sh"
+$EDB kit install trino-cqlite --connector-version 0.13.3 --flight-port 8815 \
+  --sidecar-uri "http://${DB0_IP}:9043" --trino-image-tag 481 --read-mode snapshot
+$EDB cqlite start
 ```
 
 ---
@@ -611,6 +745,67 @@ queries): `cqlite_rpc_requests_total`, `cqlite_rpc_duration_seconds_bucket` (+
 `_sum`/`_count`), `cqlite_rpc_rows_total`, `cqlite_rpc_bytes_total`,
 `cqlite_rpc_in_flight`, and `cqlite_errors_total` (label
 `cqlite_subsystem="flight"`).
+
+### 14b. Confirm the NEW #2162/#2163 series and mid-query movement (ROUND 4)
+
+Round 3's core finding was that during a 190–433s `do_get`, `cqlite_rpc_rows_total`
+never left 0 and no internal series moved — the query was dark until completion.
+Round 4 adds series that must **move mid-query** and localize where time goes.
+Confirm the names exist, then watch them during a long scan (e.g. the `count(*)`
+from Step 12b) in a second shell:
+
+```bash
+source "$CLUSTER_DIR/env.sh"
+# #2162 — per-record-batch rows/bytes + phase timer
+with-proxy curl -s "http://control0:8428/api/v1/label/__name__/values" \
+  | grep -E "cqlite_rpc_rows_total|cqlite_rpc_bytes_total|cqlite_rpc_phase_duration_seconds"
+# #2163 — reconciliation / prune / degraded-path correctness signals
+with-proxy curl -s "http://control0:8428/api/v1/label/__name__/values" \
+  | grep -E "cqlite_merge_rows_(in|out)|cqlite_compaction_tombstones_(suppressed|emitted)|cqlite_read_sstables_pruned|cqlite_query_degraded_path_total"
+```
+
+During the Step 12b `count(*)`, in a second shell watch these climb (proves
+streaming, not dark-until-done) and localize the time:
+
+```bash
+watch -n2 'source "$CLUSTER_DIR/env.sh"; \
+  with-proxy curl -s "http://control0:8428/api/v1/query?query=cqlite_rpc_rows_total" | jq -r ".data.result[].value[1]"; \
+  echo "--- phase durations ---"; \
+  with-proxy curl -s "http://control0:8428/api/v1/query?query=cqlite_rpc_phase_duration_seconds_sum" | jq -r ".data.result[] | \"\(.metric.phase)=\(.value[1])\""'
+```
+
+Verdict: `cqlite_rpc_rows_total` **must be non-zero and climbing** while the query
+is in flight, and `cqlite_rpc_phase_duration_seconds` must attribute the time to
+`resolve|merge_setup|stream`. A stall with all time in one phase and zero rows is
+the round-3 symptom persisting — capture and file per Phase 5.
+
+Post-compaction (after Phase 3b's forced flushes/compaction), check the
+reconciliation deltas are sane:
+
+```bash
+source "$CLUSTER_DIR/env.sh"
+with-proxy curl -s "http://control0:8428/api/v1/query?query=cqlite_merge_rows_in" | jq -r ".data.result[].value[1]"
+with-proxy curl -s "http://control0:8428/api/v1/query?query=cqlite_merge_rows_out" | jq -r ".data.result[].value[1]"
+with-proxy curl -s "http://control0:8428/api/v1/query?query=cqlite_compaction_tombstones_suppressed" | jq -r ".data.result[].value[1]"
+```
+
+### 14c. Presence-oracle soak (OPT-IN, P0-if-nonzero) — ROUND 4
+
+`cqlite_read_bloom_false_negatives` is off by default. To run the correctness
+soak, set `CQLITE_VERIFY_PRESENCE_ORACLE=1` on **one** flight pod (authoritative
+re-scan of every presence-oracle negative incl. prune + reverse paths — expensive,
+one pod only) and drive read load against it:
+
+```bash
+POD=$(kubectl get pods -l easydblab.com/kit=cqlite-flight -o name | head -1)
+kubectl set env "$POD" CQLITE_VERIFY_PRESENCE_ORACLE=1   # restarts that one pod
+# ... drive a Phase 3 read run, then:
+with-proxy curl -s "http://control0:8428/api/v1/query?query=cqlite_read_bloom_false_negatives" | jq -r ".data.result[].value[1]"
+```
+
+**Any `cqlite_read_bloom_false_negatives` > 0 is a P0 finding — report on the
+epic immediately** (a presence oracle returning a false negative means a live row
+was silently skipped). Zero across the soak is the pass condition.
 
 ### 15. Confirm the Grafana dashboard populates
 
@@ -727,13 +922,18 @@ as a plain GitHub issue + a pinned reproduction (the captured artifacts below),
 - [ ] Maven Central has `in.mcfad:cqlite-trino` at the version under test (0.1)
 - [ ] `easy-db-lab kit source add` + named `kit install` used for all three kits, not `--from` (0.2)
 - [ ] `trino` kit installed with `--version 481`; `trino-cqlite/bin/start.sh`'s SPI check passes (0.3)
-- [ ] `cqlite-flight` DaemonSet: one Running pod per db node
+- [ ] `cqlite-flight` DaemonSet: one Running pod per db node, **image digest == `50557839…`** (Step 4)
+- [ ] `detect-multidisk` initContainer decision reviewed on every pod (Step 4)
 - [ ] `cqlite` catalog visible via `$CLUSTER_DIR/cqlite/bin/verify.sh` with no keyspace/table args
+- [ ] **#2193 verdict reached**: `SELECT * FROM cqlite.<ks>.tiny` either returns 3 rows (close #2193) or the flight pod ERROR line is captured and pasted on #2193 (Step 12a)
 - [ ] Phase 1 write produces ≥5 flushed SSTables and at least one compaction (`nt compactionstats` shows activity)
 - [ ] Phase 2 final flush leaves 0 pending `FlushWriter`/`MemtablePostFlush` tasks
+- [ ] **#2157 verdict reached**: `LIMIT 5` wall-clock recorded (fast = cleared, slow-on-`50557839…` = filed), `EXPLAIN` shows non-empty `filterJson`, `count(*)` wall-clock recorded (Step 12b)
 - [ ] Phase 3a (snapshot) row count matches Cassandra's own `SELECT count(*)` exactly
-- [ ] Phase 3b (live) completes without a fail-closed connector error (or, if it errors, it's filed per Phase 5)
+- [ ] Phase 3b (live) installed via `--read-mode live` reinstall; completes without a fail-closed connector error (or, if it errors, it's filed per Phase 5)
 - [ ] `cqlite_rpc_*` / `cqlite_errors_total` metric names confirmed live in VictoriaMetrics
+- [ ] **NEW #2162/#2163 series confirmed** and `cqlite_rpc_rows_total` climbs mid-query; `cqlite_rpc_phase_duration_seconds` splits `resolve/merge_setup/stream` (Step 14b)
+- [ ] Presence-oracle soak (opt-in): `cqlite_read_bloom_false_negatives == 0` (any >0 reported P0 immediately) (Step 14c)
 - [ ] CQLite Flight — RPC Metrics dashboard panels populate for both Phase 3 runs
 - [ ] A Tempo trace exists spanning client → flight → core for at least one traced query
 - [ ] Trino CPU/alloc visible in Pyroscope under `service_name=trino`
