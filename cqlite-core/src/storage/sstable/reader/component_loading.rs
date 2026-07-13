@@ -9,7 +9,7 @@ use crate::storage::sstable::{
     bloom::BloomFilter, index::SSTableIndex, index_reader::IndexReader,
     statistics_reader::StatisticsReader, summary_reader::SummaryReader,
 };
-use crate::{Error, Result, RowKey};
+use crate::{Error, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,13 +31,30 @@ pub(super) enum IndexLoadOutcome {
 }
 
 impl SSTableReader {
-    /// Load index from integrated or component-based format
+    /// Load the integrated in-Data.db index, if the header advertises one.
+    ///
+    /// Issue #2385 / #2395: the separate `Index.db` component is NO LONGER read
+    /// here. It is parsed exactly once by [`Self::load_index_reader`] into the
+    /// raw-key `IndexReader` that actually serves point lookups (`big_get`) and
+    /// full-index scans. The legacy digest/raw-key `SSTableIndex` this used to
+    /// build (via `convert_index_reader_to_sstable_index`) was a REDUNDANT second
+    /// parse of the same file (#2395's double parse) whose per-entry
+    /// `binary_search` + `Vec::insert` build was the O(N²) cold-open cost (#2385) —
+    /// and whose only consumers already fall through to the same authoritative
+    /// fallbacks when it is `None`:
+    /// - `big_get` reaches its `self.index` branch only after the `index_reader`
+    ///   fast path (present) soft-misses or is absent; both cases already end at
+    ///   the whole-file `scan_for_key` oracle (`data_access/big_point.rs`).
+    /// - the range scan's `self.index` path builds entries with `size == 0` (the
+    ///   BIG `Index.db` parser stores no partition size), so its `has_zero_size`
+    ///   guard ALWAYS degrades it to `sequential_scan` — identical to the `None`
+    ///   fallback (`data_access/sequential.rs`).
+    ///
+    /// The integrated-format Strategy 1 below is retained unchanged (real
+    /// Cassandra 5.0 SSTables never set `index_offset`, so it is inert for them).
     pub(super) async fn load_index(
         file: &Arc<tokio::sync::Mutex<BlockSource>>,
         header: &crate::parser::SSTableHeader,
-        platform: &Arc<Platform>,
-        data_file_path: &Path,
-        cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Option<SSTableIndex>> {
         // Strategy 1: Check if index information is available in header (for integrated formats)
         if let Some(index_offset) = header.properties.get("index_offset") {
@@ -55,73 +72,11 @@ impl SSTableReader {
             }
         }
 
-        // Strategy 2: Check for separate Index.db component file (Cassandra 5+ standard)
-        if let Some(base_name) = extract_sstable_base_name(data_file_path) {
-            let index_path = data_file_path
-                .parent()
-                .ok_or_else(|| {
-                    Error::invalid_operation("Cannot determine parent directory for Index.db")
-                })?
-                .join(format!("{}-Index.db", base_name));
-
-            if tokio::fs::metadata(&index_path).await.is_ok() {
-                match IndexReader::open_with_summary_cancellable(
-                    &index_path,
-                    platform.clone(),
-                    None,
-                    cancel,
-                )
-                .await
-                {
-                    Ok(index_reader) => {
-                        tracing::debug!(
-                            "Found separate Index.db component at {}",
-                            index_path.display()
-                        );
-
-                        // Convert IndexReader to SSTableIndex by extracting partition entries
-                        match Self::convert_index_reader_to_sstable_index(
-                            index_reader,
-                            data_file_path,
-                        )
-                        .await
-                        {
-                            Ok(sstable_index) => {
-                                tracing::debug!(
-                                    "Successfully converted Index.db component to SSTableIndex"
-                                );
-                                return Ok(Some(sstable_index));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to convert Index.db component to SSTableIndex: {}. This may indicate an incompatible Index.db format or corruption.",
-                                    e
-                                );
-                                // Continue to fallback strategies
-                            }
-                        }
-                    }
-                    // A mid-parse cancellation (issue #2383) must ABORT, never fall
-                    // through to a fallback strategy (that would ignore the cancel
-                    // and keep the worker spinning). Surfaced by variant.
-                    Err(e @ Error::Cancelled) => return Err(e),
-                    Err(e) => {
-                        tracing::debug!(
-                            "Failed to load Index.db component: {}. This may indicate file corruption, permission issues, or format incompatibility.",
-                            e
-                        );
-                        // Continue to fallback strategies
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    "No Index.db component file found at {}",
-                    index_path.display()
-                );
-            }
-        }
-
-        tracing::debug!("No index source available (neither header offset nor Index.db component)");
+        // Strategy 2 (separate Index.db component) retired — parsed once by
+        // load_index_reader (issue #2385 / #2395). See the doc comment above.
+        tracing::debug!(
+            "No integrated index in header; separate Index.db is served by index_reader"
+        );
         Ok(None)
     }
 
@@ -333,8 +288,14 @@ impl SSTableReader {
     /// `/var/lib/cassandra/data/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db`
     /// → keyspace: "test_basic", table: "simple_table"
     ///
+    /// Issue #2385: the production caller (the retired `SSTableIndex` conversion)
+    /// is gone; the equivalent public helper is
+    /// `crate::storage::sstable::extract_keyspace_and_table_name`. Retained under
+    /// `cfg(test)` for the path-parsing unit tests below.
+    ///
     /// # Errors
     /// Returns error if path doesn't match expected structure.
+    #[cfg(test)]
     fn extract_keyspace_and_table(sstable_path: &Path) -> Result<(String, String)> {
         // Extract table name (already handles UUID stripping)
         let table_name =
@@ -370,51 +331,6 @@ impl SSTableReader {
         );
 
         Ok((keyspace, table_name))
-    }
-
-    /// Convert IndexReader to SSTableIndex for backward compatibility
-    pub(super) async fn convert_index_reader_to_sstable_index(
-        index_reader: IndexReader,
-        data_file_path: &Path,
-    ) -> Result<SSTableIndex> {
-        use crate::storage::sstable::index::{Index, IndexEntry};
-
-        // Extract keyspace and table name from SSTable directory path
-        // Issue #188: Must use fully-qualified table ID (keyspace.table) to match
-        // query executor expectations, not just table name alone
-        let (keyspace, table_name) = Self::extract_keyspace_and_table(data_file_path)?;
-
-        // Create fully-qualified table ID: "keyspace.table"
-        let table_id = crate::types::TableId::new(format!("{}.{}", keyspace, table_name));
-
-        let mut index = Index::new();
-
-        // Extract partition entries from IndexReader and convert to IndexEntry format
-        let partition_entries = index_reader.get_partition_entries();
-
-        for partition_entry in partition_entries {
-            // Convert partition entry to our internal IndexEntry format
-            let index_entry = IndexEntry {
-                table_id: table_id.clone(),
-                key: RowKey::new(partition_entry.key_digest.to_vec()),
-                offset: partition_entry.data_offset,
-                size: partition_entry.data_size,
-                compressed: false,
-            };
-
-            // Add to index using extracted table ID
-            index.add_entry(index_entry);
-        }
-
-        tracing::debug!(
-            "Converted {} partition entries from IndexReader to SSTableIndex for table '{}' (keyspace: {}, table: {})",
-            partition_entries.len(),
-            table_id.name(),
-            keyspace,
-            table_name
-        );
-
-        Ok(index)
     }
 
     /// Detect and construct paths for SSTable component files

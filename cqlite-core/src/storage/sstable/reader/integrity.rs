@@ -49,7 +49,11 @@ impl SSTableReader {
             compression_enabled: self.compression_reader.is_some(),
             compression_algorithm: self.header.compression.algorithm.clone(),
             bloom_filter_enabled: self.bloom_filter.is_some(),
-            index_available: self.index.is_some(),
+            // Issue #2385: the raw-key `index_reader` is THE partition index for a
+            // BIG SSTable now that the redundant `self.index` build is retired; the
+            // integrated `self.index` only ever populates for the (inert) in-Data.db
+            // format. Either being present means index-based lookups are available.
+            index_available: self.index_reader.is_some() || self.index.is_some(),
             generation: self.generation,
             last_error: None,
         })
