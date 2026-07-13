@@ -271,10 +271,15 @@ async fn uncancelled_scan_streams_all_partitions() {
 
     let mut count = 0usize;
     let result = reader
-        .stream_all_partitions_for_compaction(Some(&schema()), &ScanCancel::default(), None, |_row| {
-            count += 1;
-            Ok(std::ops::ControlFlow::Continue(()))
-        })
+        .stream_all_partitions_for_compaction(
+            Some(&schema()),
+            &ScanCancel::default(),
+            None,
+            |_row| {
+                count += 1;
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
         .await;
 
     assert!(result.is_ok(), "uncancelled scan must succeed: {result:?}");

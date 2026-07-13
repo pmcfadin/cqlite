@@ -154,7 +154,7 @@ async fn collect_vec(reader: &SSTableReader, schema: &TableSchema) -> Vec<EntryS
 async fn collect_stream(reader: &SSTableReader, schema: &TableSchema) -> Vec<EntrySnapshot> {
     let mut out: Vec<EntrySnapshot> = Vec::new();
     reader
-        .stream_all_partitions_for_compaction(Some(schema), &ScanCancel::default(), |row| {
+        .stream_all_partitions_for_compaction(Some(schema), &ScanCancel::default(), None, |row| {
             out.push(row);
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -510,7 +510,7 @@ async fn test_streaming_break_stops_early() {
 
     let mut collected: Vec<Vec<u8>> = Vec::new();
     reader
-        .stream_all_partitions_for_compaction(Some(&schema), &ScanCancel::default(), |row| {
+        .stream_all_partitions_for_compaction(Some(&schema), &ScanCancel::default(), None, |row| {
             collected.push(row.key.as_bytes().to_vec());
             if collected.len() >= 5 {
                 Ok(std::ops::ControlFlow::Break(()))

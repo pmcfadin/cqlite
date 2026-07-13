@@ -451,7 +451,8 @@ struct SSTableRowIteratorAdapter {
     /// so [`Drop`] can drop it FIRST (issue #2361) — closing the channel wakes a
     /// producer blocked on a full `SyncSender::send` (its send returns `Err`), so
     /// the subsequent producer join is bounded and cannot deadlock.
-    receiver: Option<std::sync::mpsc::Receiver<std::result::Result<MergeEntry, MergeProducerError>>>,
+    receiver:
+        Option<std::sync::mpsc::Receiver<std::result::Result<MergeEntry, MergeProducerError>>>,
     /// Producer thread handle. `Option` so [`Drop`] can `take()` it and JOIN the
     /// thread (issue #2361) rather than detach it — the pre-#2361 `_producer`
     /// field's "joined on drop" doc was WRONG (dropping a `JoinHandle` detaches

@@ -131,7 +131,14 @@ impl SSTableRowIteratorAdapter {
         producer_gauge::spawned();
 
         let producer = match std::thread::Builder::new().spawn(move || {
-            Self::producer_thread_from_reader(reader, run_index, schema, scan_cancel, limit, sender);
+            Self::producer_thread_from_reader(
+                reader,
+                run_index,
+                schema,
+                scan_cancel,
+                limit,
+                sender,
+            );
         }) {
             Ok(handle) => handle,
             Err(e) => {

@@ -206,7 +206,7 @@ async fn issue_1104_stream_compaction_over_incompressible_chunks() {
     let collected: Arc<Mutex<Vec<CompactionRow>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&collected);
     reader
-        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), move |row| {
+        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), None, move |row| {
             sink.lock().unwrap().push(row);
             Ok(std::ops::ControlFlow::Continue(()))
         })
