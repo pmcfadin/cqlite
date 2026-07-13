@@ -42,30 +42,44 @@ use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
 use std::ops::ControlFlow;
 
-/// Hardening B (issue #2361, roborev round 2): the streaming walk EMITS each
+/// Hardening B (issue #2361, roborev rounds 2/3): the streaming walk EMITS each
 /// partition to the k-way merger as it resolves it, unlike the materialising
 /// sibling ([`SSTableReader::iterate_all_partitions_via_full_index`]), which
 /// defensively re-sorts its whole result via `sort_by_token_order` before
 /// returning — a post-hoc corrective the streaming path cannot apply (it has
 /// already emitted). This is the O(1)-per-partition guard that stands in for
-/// that sort: `Index.db` entries are ASSUMED token-ordered (matching Data.db's
-/// physical layout), but that assumption is never re-verified anywhere else on
-/// this path. A violation would silently hand the merger inputs it requires to
-/// be sorted, corrupting cross-SSTable reconciliation — so this fails CLOSED
-/// (`Error::corruption`) rather than emit out of order (issue #28: authoritative
-/// structure only, never a silent best-effort).
+/// that sort: `Index.db` entries are ASSUMED to be in the same total order the
+/// materialising sibling produces (matching Data.db's physical layout), but that
+/// assumption is never re-verified anywhere else on this path. A violation would
+/// silently hand the merger inputs it requires to be sorted, corrupting
+/// cross-SSTable reconciliation — so this fails CLOSED (`Error::corruption`)
+/// rather than emit out of order (issue #28: authoritative structure only, never
+/// a silent best-effort).
 ///
-/// Equal tokens (a real Murmur3 collision between distinct keys) are NOT a
-/// violation — only a STRICT decrease is. Factored out as a pure function
-/// (`prev`/`token`/`index` in, `Result<()>` out) so it is unit-testable without
-/// a full `SSTableReader` fixture.
-fn check_token_monotonic(prev: Option<i64>, token: i64, index: usize) -> Result<()> {
-    if let Some(prev) = prev {
-        if token < prev {
+/// The order compared is EXACTLY `sort_by_token_order`'s: Murmur3 `token`, then
+/// (on a token TIE) the raw partition-key bytes, unsigned-lexicographic —
+/// `RowKey`/`&[u8]` `cmp` matches Cassandra's on-disk `DecoratedKey`
+/// (`ByteBuffer.compareTo`) order. Checking token alone (roborev round 2) missed
+/// the tie-break: two distinct keys colliding on one token could be emitted in
+/// the wrong relative order — legal per a token-only check but NOT what the
+/// materialising sibling (or the merger) requires. A genuine token collision
+/// with keys still in ascending byte order is NOT a violation; only a STRICT
+/// decrease of the `(token, key)` pair is. Factored out as a pure function
+/// (`prev`/`token`/`key`/`index` in, `Result<()>` out) so it is unit-testable
+/// without a full `SSTableReader` fixture.
+fn check_token_order(
+    prev: Option<(i64, &[u8])>,
+    token: i64,
+    key: &[u8],
+    index: usize,
+) -> Result<()> {
+    if let Some((prev_token, prev_key)) = prev {
+        // Same total order as the materialising sibling's `sort_by_token_order`.
+        if prev_token.cmp(&token).then_with(|| prev_key.cmp(key)) == std::cmp::Ordering::Greater {
             return Err(Error::corruption(format!(
-                "stream_all_partitions_via_full_index: partition {index} token {token} is out \
-                 of order (< previous {prev}) — Index.db entries are not token-ordered \
-                 (issue #2361)"
+                "stream_all_partitions_via_full_index: partition {index} (token {token}) is out \
+                 of order (< previous token {prev_token}) — Index.db entries are not in \
+                 (token, key) order (issue #2361)"
             )));
         }
     }
@@ -156,10 +170,10 @@ impl SSTableReader {
         let parser = self.build_v5_parser(true);
         let reader_schema = self.get_table_schema(None);
         let schema = reader_schema.as_ref();
-        // Hardening B (issue #2361): O(1)-per-partition token-monotonicity guard —
-        // see `check_token_monotonic`'s doc for why this stands in for the
+        // Hardening B (issue #2361): O(1)-per-partition (token, key)-order guard —
+        // see `check_token_order`'s doc for why this stands in for the
         // materialising sibling's defensive `sort_by_token_order`.
-        let mut prev_token: Option<i64> = None;
+        let mut prev_key: Option<(i64, &[u8])> = None;
 
         for i in 0..entries.len() {
             // Cooperative cancellation: one real index-random-read + Data.db parse
@@ -169,8 +183,8 @@ impl SSTableReader {
 
             let partition_key = entries[i].raw_key.as_deref().unwrap_or(&[]);
             let token = cassandra_murmur3_token(partition_key);
-            check_token_monotonic(prev_token, token, i)?;
-            prev_token = Some(token);
+            check_token_order(prev_key, token, partition_key, i)?;
+            prev_key = Some((token, partition_key));
 
             let Some((data_offset, _size)) =
                 self.lookup_partition_with_index(partition_key).await?
@@ -337,30 +351,35 @@ impl SSTableReader {
 }
 
 #[cfg(test)]
-mod check_token_monotonic_tests {
-    use super::check_token_monotonic;
+mod check_token_order_tests {
+    use super::check_token_order;
 
     /// The FIRST partition (`prev = None`) never fails, regardless of its token.
     #[test]
     fn first_partition_always_passes() {
-        assert!(check_token_monotonic(None, i64::MIN, 0).is_ok());
-        assert!(check_token_monotonic(None, 0, 0).is_ok());
-        assert!(check_token_monotonic(None, i64::MAX, 0).is_ok());
+        assert!(check_token_order(None, i64::MIN, b"a", 0).is_ok());
+        assert!(check_token_order(None, 0, b"a", 0).is_ok());
+        assert!(check_token_order(None, i64::MAX, b"a", 0).is_ok());
     }
 
-    /// Ascending tokens (the well-formed case) pass at every step.
+    /// Ascending tokens (the well-formed case) pass at every step, whatever the
+    /// key bytes are (token strictly dominates the order).
     #[test]
     fn ascending_tokens_pass() {
-        assert!(check_token_monotonic(Some(-100), -50, 1).is_ok());
-        assert!(check_token_monotonic(Some(-50), 0, 2).is_ok());
-        assert!(check_token_monotonic(Some(0), 50, 3).is_ok());
+        assert!(check_token_order(Some((-100, b"z")), -50, b"a", 1).is_ok());
+        assert!(check_token_order(Some((-50, b"z")), 0, b"a", 2).is_ok());
+        assert!(check_token_order(Some((0, b"z")), 50, b"a", 3).is_ok());
     }
 
-    /// Equal tokens (a genuine Murmur3 collision between distinct keys) are
-    /// explicitly NOT a violation — only a strict decrease is.
+    /// Equal tokens with ASCENDING (or equal) key bytes — a genuine Murmur3
+    /// collision between distinct keys stored in the correct on-disk order — are
+    /// NOT a violation.
     #[test]
-    fn equal_tokens_pass() {
-        assert!(check_token_monotonic(Some(42), 42, 1).is_ok());
+    fn equal_tokens_ascending_keys_pass() {
+        assert!(check_token_order(Some((42, b"aaa")), 42, b"aab", 1).is_ok());
+        assert!(check_token_order(Some((42, b"aaa")), 42, b"aaa", 1).is_ok());
+        // Unsigned-lexicographic: a high byte is GREATER than a low byte.
+        assert!(check_token_order(Some((42, &[0x01])), 42, &[0xff], 1).is_ok());
     }
 
     /// Hardening B (issue #2361, roborev round 2): a STRICTLY DECREASING token —
@@ -368,10 +387,30 @@ mod check_token_monotonic_tests {
     /// with `Error::corruption`, never a silent pass-through to the k-way merger.
     #[test]
     fn strictly_decreasing_token_fails_closed() {
-        let result = check_token_monotonic(Some(100), 99, 5);
+        let result = check_token_order(Some((100, b"a")), 99, b"z", 5);
         assert!(
             matches!(result, Err(crate::Error::Corruption(_))),
             "a decreasing token must fail closed as Error::corruption, got {result:?}"
+        );
+    }
+
+    /// Hardening B (issue #2361, roborev round 3): on a token TIE, a DECREASING
+    /// raw-key byte sequence is also out of order relative to the materialising
+    /// sibling's `sort_by_token_order` (`token`, then key bytes) and the merger's
+    /// required order — so it too must fail closed, not slip through a token-only
+    /// check.
+    #[test]
+    fn equal_token_decreasing_key_fails_closed() {
+        let result = check_token_order(Some((42, b"aab")), 42, b"aaa", 7);
+        assert!(
+            matches!(result, Err(crate::Error::Corruption(_))),
+            "a decreasing key on a token tie must fail closed, got {result:?}"
+        );
+        // Unsigned-lexicographic: 0xff (prev) then 0x01 (curr) is a decrease.
+        let result = check_token_order(Some((42, &[0xff])), 42, &[0x01], 7);
+        assert!(
+            matches!(result, Err(crate::Error::Corruption(_))),
+            "0xff -> 0x01 on a token tie must fail closed (unsigned), got {result:?}"
         );
     }
 }
