@@ -118,7 +118,6 @@ impl SSTableReader {
         let parser = self.build_v5_parser(true);
         let reader_schema = self.get_table_schema(None);
         let schema = reader_schema.as_ref();
-        let mut emitted_partitions = 0usize;
 
         for i in 0..entries.len() {
             // Cooperative cancellation: one real index-random-read + Data.db parse
@@ -127,9 +126,11 @@ impl SSTableReader {
             scan_cancel.check()?;
 
             // Per-producer partition budget (issue #2361): stop after emitting
-            // `limit` partitions.
+            // `limit` partitions. Every prior iteration ran to completion (the only
+            // early exits `return` out of the loop), so at the top of iteration `i`
+            // exactly `i` partitions have been fully emitted — `i` IS the count.
             if let Some(cap) = limit {
-                if emitted_partitions >= cap {
+                if i >= cap {
                     return Ok(FullIndexStreamOutcome::Streamed);
                 }
             }
@@ -192,7 +193,6 @@ impl SSTableReader {
                     }
                 }
             }
-            emitted_partitions += 1;
         }
 
         Ok(FullIndexStreamOutcome::Streamed)
@@ -220,15 +220,17 @@ impl SSTableReader {
     /// Flight scan each input SSTable is one producer feeding a k-way merger that
     /// interleaves and reconciles across producers, and the consumer breaks at
     /// `limit` POST-reconciliation rows. A producer that has emitted `limit`
-    /// partitions has, in the normal case (≥1 live row per partition), already
-    /// supplied ≥ `limit` rows on its own — more than the merge can need — so
-    /// stopping there is a sound best-effort push-down under the connector's
-    /// `limitGuaranteed = false` contract (Trino keeps a global `Limit` above).
-    /// The PRIMARY, always-correct bound is still the bounded-channel backpressure
-    /// + prompt cancel teardown: when the consumer stops pulling, the producer's
-    /// blocking channel send wakes on receiver-drop and the producer exits. See
-    /// the report's scope note on the residual cross-generation full-shadowing
-    /// edge (a producer capped at `limit` partitions that all reconcile away).
+    /// partitions has, in the normal case (at least one live row per partition),
+    /// already supplied at least `limit` rows on its own (more than the merge can
+    /// need), so stopping there is a sound best-effort push-down under the
+    /// connector's `limitGuaranteed = false` contract (Trino keeps a global
+    /// `Limit` above). The PRIMARY, always-correct bound is still the
+    /// bounded-channel backpressure plus prompt cancel teardown: when the consumer
+    /// stops pulling, the producer's blocking channel send wakes on receiver-drop
+    /// and the producer exits. Residual caveat (scope-flagged): a producer capped
+    /// at `limit` partitions that ALL reconcile away under cross-generation
+    /// shadowing could under-return; the global Trino `Limit` and the always-on
+    /// backpressure bound cover it in practice.
     pub(in crate::storage::sstable::reader) async fn stream_all_partitions_cancellable<F>(
         &self,
         scan_cancel: &ScanCancel,
