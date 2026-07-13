@@ -164,21 +164,25 @@ no gRPC, `cqlite-flight/src/*_tests.rs`); **L2** = real gRPC transport
 
 | Cell | Core | Flight | Verdict |
 |---|---|---|---|
-| BIG nb × LZ4 / Snappy / Zstd / Deflate | COVERED (`issue_1082` full-scan vs goldens over `test_comp/*`; `issue_1104` stitch stream) — fixture-presence-gated (SKIP when `test_comp` binaries absent) | **UNCOVERED** — no compressed fixture ever reaches the Flight producer | PARTIAL |
+| BIG nb × LZ4 / Snappy / Zstd / Deflate | COVERED (`issue_1082` full-scan vs goldens over `test_comp/*`; `issue_1104` stitch stream) — fixture-presence-gated (SKIP when `test_comp` binaries absent) | **POINT-READ COVERED / SCAN UNCOVERED** — `do_get_over_transport_real_compressed_fixture` (`do_get_transport_test.rs:289+`) and `point_read_corpus_parity_test` dual-path tests decode a REAL compressed `nb-big` fixture over the real transport (point lookup); but no compressed **scan/stitch** fixture ever reaches the Flight producer | PARTIAL |
 | BIG nb × UNCOMPRESSED (#2361 arm) | COVERED (`full_index_stream_tests.rs` asserts Streamed branch; `issue_592`, `reader_compression_tests`) | COVERED (`do_get_transport_test.rs:176` + `streaming_tests` writer fixtures — all uncompressed by construction) | COVERED |
 | BTI da × LZ4 | COVERED (`issue_1580_scan_token_order_oracle.rs:140` + BTI suites over `test_da`) | UNCOVERED | PARTIAL |
 | BTI da × Snappy / Zstd / Deflate / UNCOMPRESSED | **UNCOVERED — zero fixtures exist** (whole BTI compression axis rests on one LZ4 corpus) | UNCOVERED | UNCOVERED |
 
 ### Field-testbed inversion (key finding)
 The LIVE testbed (cassandra-easy-stress, no compression override) writes **BIG nb × LZ4 → the
-STITCH path** through Flight; the IN-REPO Flight fixtures (WriteEngine) are all **UNCOMPRESSED →
-the #2361 arm**. So the two E2E surfaces cover **opposite branches with no overlap**: the live kit
-cannot reproduce #2361-class bugs, and the in-repo Flight tests have no net under the stitch path
-the field actually runs.
+STITCH path** through Flight. In-repo, a real compressed `nb-big` fixture IS decoded over the Flight
+transport — but only as a **point read** (`do_get_over_transport_real_compressed_fixture`,
+`point_read_corpus_parity_test`); every in-repo Flight **scan/streaming** fixture (WriteEngine) is
+**UNCOMPRESSED → the #2361 arm**. So on the SCAN path the two E2E surfaces cover **opposite branches
+with no overlap**: the live kit cannot reproduce #2361-class bugs, and the in-repo Flight tests have
+no scan/stitch net under the compressed path the field actually runs.
 
 ### Candidate holes (verify/file)
-- **HOLE-FMT-1**: compressed (stitching) BIG-nb corpus fixtures through Flight do_get — the live
-  testbed's actual path has no in-repo E2E net.
+- **HOLE-FMT-1**: compressed (stitching) BIG-nb corpus fixtures through Flight do_get **on the
+  scan/stitch path** — compressed *point-read* transport coverage already exists
+  (`do_get_over_transport_real_compressed_fixture`), but the live testbed's actual compressed-SCAN
+  path has no in-repo E2E net.
 - **HOLE-FMT-2**: BTI compression-axis fixtures missing (Snappy/Zstd/Deflate/uncompressed-BTI) —
   fixture commissioning; constrained by corpus-regen freeze (#2222) / fixture epic #2303.
 - **HOLE-FMT-3** (adjudication, P3): Branch C compressed offset-window arm is dead-defensive for
