@@ -46,11 +46,7 @@
 
 use std::sync::Arc;
 
-use arrow_flight::flight_service_server::FlightService;
-use arrow_flight::Ticket;
-use futures::StreamExt;
 use tokio::sync::Barrier;
-use tonic::Request;
 
 use cqlite_core::observability::{catalog, testing};
 use cqlite_flight::service::CqliteFlightService;
@@ -84,21 +80,6 @@ fn generation_count(data_dir: &std::path::Path) -> usize {
         .count()
 }
 
-/// Drive one in-process `do_get` and fully drain its stream so every parse fires.
-async fn do_get_drain(svc: &CqliteFlightService, ticket: Vec<u8>) -> usize {
-    let resp = svc
-        .do_get(Request::new(Ticket::new(ticket)))
-        .await
-        .expect("do_get");
-    let mut stream = resp.into_inner();
-    let mut msgs = 0usize;
-    while let Some(item) = stream.next().await {
-        item.expect("stream item ok");
-        msgs += 1;
-    }
-    msgs
-}
-
 #[test]
 fn n_concurrent_cold_do_gets_do_not_amplify_index_parses_with_n() {
     // Install the process-global in-memory meter BEFORE any parse in this process.
@@ -128,39 +109,57 @@ fn n_concurrent_cold_do_gets_do_not_amplify_index_parses_with_n() {
         .build()
         .unwrap();
 
-    mc.reset();
-    rt.block_on(async {
-        // Fire N COLD do_gets concurrently at the SAME (cold) service. Cloning the
-        // service shares the same warm registry via its `Arc`, so a working
-        // single-flight coalesces the concurrent opens per generation.
-        //
+    let parses = rt.block_on(async move {
+        // Serve the ONE cold service over real loopback gRPC (roborev job 1659
+        // MEDIUM): all N concurrent cold requests traverse the actual tonic
+        // transport + server-side handler before we sample the parse counter, so
+        // the single-flight coalescing is proven through the REAL rpc path (a
+        // per-connection registry regression would amplify here but be invisible to
+        // a direct in-process `svc.do_get()` that hand-shares one `Arc`). The one
+        // `FlightServiceServer` instance shares its reader registry across every
+        // connection, exactly as production does.
+        let running = support::start_server(svc).await;
+        let addr = running.addr;
+
+        // Reset AFTER the server binds but BEFORE any request: `start_server` opens
+        // no readers (they open lazily on first `do_get`) and `connect` performs no
+        // parse, so only the cold-open parses from the N concurrent do_gets below
+        // are counted. metrics_capture is process-global, so the server-side parses
+        // (same process, spawned task) are captured.
+        mc.reset();
+
         // Shared start barrier (roborev job 1656 MEDIUM): without a rendezvous the
         // first request can warm the registry before the rest overlap, so a broken
-        // (un-coalesced) implementation could still pass. Every task blocks here
-        // until all N are spawned, then they issue their cold `do_get` together —
-        // making the concurrent cold-open coalescing this test asserts genuine.
+        // (un-coalesced) implementation could still pass. Every client connects,
+        // then blocks here until all N are ready, then they issue their cold
+        // `do_get` together — making the concurrent cold-open coalescing genuine.
         let start = Arc::new(Barrier::new(N));
         let mut handles = Vec::new();
         for _ in 0..N {
-            let svc = svc.clone();
             let start = start.clone();
             handles.push(tokio::spawn(async move {
+                let mut client = support::connect(addr).await;
                 start.wait().await;
-                do_get_drain(&svc, support::scan_ticket()).await
+                let batches = support::do_get_batches(&mut client, support::scan_ticket()).await;
+                batches.iter().map(|b| b.num_rows()).sum::<usize>()
             }));
         }
         for h in handles {
-            let msgs = h.await.expect("concurrent do_get task panicked");
+            let rows = h.await.expect("concurrent do_get task panicked");
             assert!(
-                msgs > 0,
-                "each concurrent cold do_get must stream at least a schema message"
+                rows > 0,
+                "each concurrent cold do_get must stream its rows over transport"
             );
         }
-    });
 
-    let parses = mc
-        .flush_and_collect()
-        .counter_sum(catalog::INDEX_PARSES_TOTAL);
+        running.server.abort();
+
+        // Sample the parse counter INSIDE the block (metrics_capture is moved in so
+        // the moved-in `svc` and the meter share one process): the total cold-open
+        // parses across all N concurrent requests over real transport.
+        mc.flush_and_collect()
+            .counter_sum(catalog::INDEX_PARSES_TOTAL)
+    });
 
     // Lower bound: a cold read really parses every generation at least once (never
     // a 0-parse skip that would mean a generation went unread).
