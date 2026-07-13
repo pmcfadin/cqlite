@@ -213,3 +213,38 @@ pub fn key_index(key: &str) -> usize {
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("fixture key {key:?} must be of the form kNNNNNN"))
 }
+
+/// Find the real compressed corpus fixture's `nb-*-big-Data.db` binary under
+/// `data_dir/<keyspace>/<table>-<uuid>/`, by GLOB rather than a hardcoded uuid +
+/// generation number: scans `data_dir/<keyspace>` for a `<table>-*` directory
+/// entry, then that directory for an `nb-*-big-Data.db` file. This is what keeps
+/// the real-corpus concurrency arm from silently skipping forever after a
+/// dataset regen changes the table's uuid or generation number (it would
+/// instead just find the regenerated file under the same table-name prefix).
+/// Returns `None` (never panics) when the keyspace dir, table dir, or Data.db
+/// binary is absent — the caller treats that as "fixture not fetched, skip".
+pub fn find_real_compressed_fixture(
+    data_dir: &std::path::Path,
+    keyspace: &str,
+    table: &str,
+) -> Option<PathBuf> {
+    let ks_dir = data_dir.join(keyspace);
+    let table_prefix = format!("{table}-");
+    let table_dir = std::fs::read_dir(&ks_dir)
+        .ok()?
+        .flatten()
+        .find(|e| {
+            e.file_type().is_ok_and(|t| t.is_dir())
+                && e.file_name().to_string_lossy().starts_with(&table_prefix)
+        })?
+        .path();
+    std::fs::read_dir(&table_dir)
+        .ok()?
+        .flatten()
+        .find(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("nb-") && name.ends_with("-big-Data.db")
+        })
+        .map(|e| e.path())
+}

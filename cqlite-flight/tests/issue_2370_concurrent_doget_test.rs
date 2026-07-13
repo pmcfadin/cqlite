@@ -202,11 +202,14 @@ fn concurrent_full_scans_over_real_compressed_corpus() {
         return;
     };
     let data_dir = std::path::PathBuf::from(&root).join("sstables");
-    let data_db = data_dir
-        .join("test_basic")
-        .join("simple_table-6aa08200a25111f0a3fef1a551383fb9")
-        .join("nb-1-big-Data.db");
-    if !data_db.is_file() {
+    // Discover the `simple_table-<uuid>/nb-*-big-Data.db` binary by GLOB rather
+    // than a hardcoded uuid + generation, so a future dataset regen (a new table
+    // uuid or generation number) can never silently skip this arm forever — it
+    // would instead just find the regenerated file under the same table-name
+    // prefix (see `find_real_compressed_fixture`).
+    // The discovered path only proves the binary's presence; the service itself
+    // is pointed at `data_dir` (it re-resolves the table dir from the ticket).
+    if support::find_real_compressed_fixture(&data_dir, "test_basic", "simple_table").is_none() {
         eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
         return;
     }

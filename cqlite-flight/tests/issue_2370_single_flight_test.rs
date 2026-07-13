@@ -22,12 +22,13 @@
 //! `reader/mod.rs` calls BOTH `load_index` (→ legacy `SSTableIndex`) and
 //! `load_index_reader` (→ spec `IndexReader`), each running the O(entries)
 //! `parse_all_partition_keys_*` loop `index_parses_total` counts. That per-OPEN
-//! double-parse is a SEPARATE redundancy (a real finding reported with this suite,
-//! independent of concurrency and of the warm registry) — the single-flight this
-//! test pins is that the total does NOT scale with N. `PER_OPEN_PARSES` documents
-//! the current per-open multiplicity; tighten it to `1` when the reader-open
-//! double-parse is fixed (this test stays green through that fix — the bound only
-//! rejects a per-REQUEST, N-scaling amplification, never a smaller constant).
+//! double-parse is a SEPARATE redundancy (reported with this suite as issue
+//! **#2395** — the reader-open double-parse — independent of concurrency and of
+//! the warm registry) — the single-flight this test pins is that the total does
+//! NOT scale with N. `PER_OPEN_PARSES` documents the current per-open
+//! multiplicity; tighten it to `1` when #2395 is fixed (this test stays green
+//! through that fix — the bound only rejects a per-REQUEST, N-scaling
+//! amplification, never a smaller constant).
 //!
 //! ## Separate integration-test process
 //!
@@ -60,9 +61,10 @@ const N: usize = 8;
 
 /// Current number of full `Index.db` parses `SSTableReader::open` performs PER
 /// reader open (see the module doc: `load_index` + `load_index_reader`). The
-/// ideal is 1; `2` documents the reported per-open double-parse finding. The pin
-/// below is that the TOTAL is `PER_OPEN_PARSES × #generations` — a per-generation
-/// constant that does NOT grow with N. Reduce to 1 when the double-parse is fixed.
+/// ideal is 1; `2` documents issue **#2395** (the reader-open double-parse). The
+/// pin below is that the TOTAL is `PER_OPEN_PARSES × #generations` — a
+/// per-generation constant that does NOT grow with N. Reduce to 1 when #2395 is
+/// fixed.
 const PER_OPEN_PARSES: f64 = 2.0;
 
 /// Count the `nb-*-big-Data.db` generations under the fixture's table dir.
