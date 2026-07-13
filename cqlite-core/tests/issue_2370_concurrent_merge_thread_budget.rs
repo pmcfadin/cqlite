@@ -304,9 +304,7 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
             .expect("SSTableWriter::new");
         writer.pre_seed_encoding_baselines(baseline_ts, baseline_ldt, baseline_ttl);
         let stats = merger.merge(&mut writer).expect("merge into writer");
-        finish_rt
-            .block_on(writer.finish())
-            .expect("writer finish");
+        finish_rt.block_on(writer.finish()).expect("writer finish");
         assert!(
             stats.output_rows >= (NUM_INPUTS as u64 * ROWS_PER_INPUT as u64),
             "merger {i} should emit all input rows; got {}",
