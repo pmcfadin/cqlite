@@ -44,9 +44,12 @@
 
 #![cfg(feature = "observability-testing")]
 
+use std::sync::Arc;
+
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::Ticket;
 use futures::StreamExt;
+use tokio::sync::Barrier;
 use tonic::Request;
 
 use cqlite_core::observability::{catalog, testing};
@@ -120,10 +123,19 @@ fn n_concurrent_cold_do_gets_do_not_amplify_index_parses_with_n() {
         // Fire N COLD do_gets concurrently at the SAME (cold) service. Cloning the
         // service shares the same warm registry via its `Arc`, so a working
         // single-flight coalesces the concurrent opens per generation.
+        //
+        // Shared start barrier (roborev job 1656 MEDIUM): without a rendezvous the
+        // first request can warm the registry before the rest overlap, so a broken
+        // (un-coalesced) implementation could still pass. Every task blocks here
+        // until all N are spawned, then they issue their cold `do_get` together —
+        // making the concurrent cold-open coalescing this test asserts genuine.
+        let start = Arc::new(Barrier::new(N));
         let mut handles = Vec::new();
         for _ in 0..N {
             let svc = svc.clone();
+            let start = start.clone();
             handles.push(tokio::spawn(async move {
+                start.wait().await;
                 do_get_drain(&svc, support::scan_ticket()).await
             }));
         }

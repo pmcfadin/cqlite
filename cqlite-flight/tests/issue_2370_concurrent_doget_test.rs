@@ -264,11 +264,19 @@ fn concurrent_full_scans_over_real_compressed_corpus() {
 
         // Eight concurrent full scans of the SAME compressed table — they share
         // the server + warm registry, exercising the stitching path under load.
+        // Shared start barrier (roborev job 1656 MEDIUM): every client connects,
+        // THEN rendezvous before issuing its `do_get`, so all 8 genuinely fire
+        // together — no scan can serialize ahead of the others on a fast box and
+        // silently miss the concurrency this arm exists to prove.
+        const CONC: usize = 8;
+        let start = Arc::new(Barrier::new(CONC));
         let mut handles = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..CONC {
             let ticket = ticket.clone();
+            let start = start.clone();
             handles.push(tokio::spawn(async move {
                 let mut client = support::connect(addr).await;
+                start.wait().await;
                 let batches = tokio::time::timeout(
                     STREAM_TIMEOUT,
                     support::do_get_batches(&mut client, ticket),

@@ -224,6 +224,18 @@ fn phase_active_and_in_flight_read_true_concurrent_count_then_settle() {
             after_complete <= baseline_if,
             "in_flight must settle to its {baseline_if} baseline after N streams COMPLETE, got {after_complete}"
         );
+        // phase.active must ALSO settle after normal completion (roborev job 1656
+        // LOW): a regression that leaks the new phase-active gauge on the normal
+        // completion path — not just the midstream-drop path checked in Phase 1 —
+        // would otherwise go uncaught.
+        let after_complete_pa = poll_until_at_most(baseline_pa, GAUGE_TIMEOUT, || {
+            cqlite_flight::obs::phase_active_level("do_get")
+        })
+        .await;
+        assert!(
+            after_complete_pa <= baseline_pa,
+            "phase.active must settle to its {baseline_pa} baseline after N streams COMPLETE, got {after_complete_pa}"
+        );
 
         running.server.abort();
     });
