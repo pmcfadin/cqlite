@@ -275,14 +275,21 @@ fn concurrent_full_scans_over_real_compressed_corpus() {
             let ticket = ticket.clone();
             let start = start.clone();
             handles.push(tokio::spawn(async move {
-                let mut client = support::connect(addr).await;
-                start.wait().await;
-                let batches = tokio::time::timeout(
-                    STREAM_TIMEOUT,
-                    support::do_get_batches(&mut client, ticket),
-                )
+                // The ENTIRE task body — connect, barrier rendezvous AND stream —
+                // is bounded by the hang detector (roborev job 1657 MEDIUM): if any
+                // one client wedges before reaching the barrier, the others must
+                // fail loudly here rather than deadlock the whole suite on
+                // `start.wait()`.
+                let batches = tokio::time::timeout(STREAM_TIMEOUT, async move {
+                    let mut client = support::connect(addr).await;
+                    start.wait().await;
+                    support::do_get_batches(&mut client, ticket).await
+                })
                 .await
-                .expect("a concurrent compressed-corpus scan did not complete in time");
+                .expect(
+                    "a concurrent compressed-corpus scan did not complete in time \
+                     (connect / barrier / stream)",
+                );
                 batches.iter().map(|b| b.num_rows()).sum::<usize>()
             }));
         }

@@ -107,6 +107,16 @@ fn n_concurrent_cold_do_gets_do_not_amplify_index_parses_with_n() {
     let total = 40usize;
     let (_temp, data_dir) = support::build_multi_sstable_fixture(total);
     let generations = generation_count(&data_dir);
+    // `>= 2` (not `== 2`) is DELIBERATE (roborev job 1657 LOW, declined with
+    // evidence): the parse bound below is generation-RELATIVE
+    // (`PER_OPEN_PARSES × generations`), and the single-flight property under test
+    // is N-independence — the fail signal is `generations × N`, which stays far
+    // above the bound for any N>2 REGARDLESS of the exact generation count. An
+    // extra generation widens the per-generation-constant bound proportionally but
+    // never weakens the N-scaling rejection, so pinning the count exactly would
+    // only couple this test to `build_multi_sstable_fixture`'s internals for no
+    // gain in discrimination. The `>= 2` floor is the meaningful precondition
+    // (≥2 generations is what makes cold-open coalescing observable at all).
     assert!(
         generations >= 2,
         "fixture must hold ≥2 generations to make single-flight meaningful, got {generations}"
