@@ -21,71 +21,26 @@ pub(crate) use super::header_helpers::{
     calculate_actual_header_size, extract_generation_from_path,
 };
 
-/// Resolve the `{table_name}-{uuid}` directory for a Data.db path.
+/// Extract keyspace name from SSTable file path (snapshot-aware).
 ///
-/// Cassandra lays out SSTables as `.../{keyspace}/{table_name}-{uuid}/...-Data.db`.
-/// For a **snapshot**, the SSTable components live one extra level deep, under
-/// `.../{table_name}-{uuid}/snapshots/{snapshot_name}/...-Data.db` (see
-/// `Directories.SNAPSHOT_SUBDIR` in Cassandra's `Directories.java`). In that case
-/// the Data.db file's parent is the snapshot directory, whose parent is the literal
-/// `snapshots` directory, whose parent is the real `{table_name}-{uuid}` directory.
-///
-/// This is pure directory-segment structure (not a data/byte heuristic): we detect
-/// the fixed `snapshots/{snapshot_name}` layout and walk up past it so keyspace and
-/// table name resolve to the real values rather than `snapshots`/`{snapshot_name}`.
-fn resolve_table_dir(path: &Path) -> Option<&Path> {
-    // Parent of the Data.db file: `{table_name}-{uuid}` (normal) or
-    // `{snapshot_name}` (snapshot layout).
-    let parent = path.parent()?;
-
-    // Snapshot layout: parent's parent is the literal `snapshots` directory.
-    if let Some(maybe_snapshots) = parent.parent() {
-        if maybe_snapshots.file_name().and_then(|n| n.to_str()) == Some("snapshots") {
-            // Walk up past `snapshots` to the real `{table_name}-{uuid}` directory.
-            return maybe_snapshots.parent();
-        }
-    }
-
-    Some(parent)
-}
-
-/// Extract keyspace name from SSTable file path
-///
-/// SSTable paths follow Cassandra convention:
-/// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
-/// (or, for snapshots, `.../{table_name}-{uuid}/snapshots/{snapshot}/nb-1-big-Data.db`).
-///
-/// This function extracts the keyspace directory name (parent of the resolved
-/// `{table_name}-{uuid}` directory), and is snapshot-aware via [`resolve_table_dir`].
+/// Delegates to the authoritative snapshot-aware parser
+/// [`crate::storage::sstable::snapshot_path::extract_keyspace`] so header keyspace
+/// resolution matches schema-registry resolution and `SSTableManager` keying
+/// exactly (issue #2384). Falls back to the `"unknown"` sentinel when the path is
+/// too shallow to contain a keyspace directory.
 fn extract_keyspace_from_path(path: &Path) -> String {
-    resolve_table_dir(path)
-        .and_then(|table_dir| table_dir.parent())
-        .and_then(|keyspace_dir| keyspace_dir.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string()
+    crate::storage::sstable::snapshot_path::extract_keyspace(path)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Extract table name from SSTable file path
+/// Extract table name from SSTable file path (snapshot-aware).
 ///
-/// SSTable paths follow Cassandra convention:
-/// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
-/// (or, for snapshots, `.../{table_name}-{uuid}/snapshots/{snapshot}/nb-1-big-Data.db`).
-///
-/// This function extracts the table name from the resolved `{table_name}-{uuid}`
-/// directory (snapshot-aware via [`resolve_table_dir`]), stripping the UUID suffix.
-/// Format: "table_name-uuid" → "table_name"
+/// Delegates to the authoritative snapshot-aware parser
+/// [`crate::storage::sstable::snapshot_path::extract_table_name`] (issue #2384).
+/// Falls back to the `"unknown"` sentinel when the path has no directory component.
 fn extract_table_name_from_path(path: &Path) -> String {
-    resolve_table_dir(path)
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .and_then(|s| {
-            // Split on last hyphen to handle table names containing hyphens
-            // Format: "table_name-uuid" or "user-profiles-abc123"
-            s.rsplit_once('-').map(|(table_name, _uuid)| table_name)
-        })
-        .unwrap_or("unknown")
-        .to_string()
+    crate::storage::sstable::snapshot_path::extract_table_name(path)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Check if a value appears to be ASCII corruption
@@ -1064,12 +1019,36 @@ mod tests {
         );
     }
 
+    /// BLOCKER 1 regression (issue #2384): an ORDINARY table living in a keyspace
+    /// literally named `snapshots` must NOT be misparsed as a snapshot layout.
+    ///
+    /// `.../data/snapshots/<table>-<32hex>/nb-1-big-Data.db`
+    /// → keyspace=`snapshots`, table=`<table>` (the dir above `snapshots` is the
+    /// data root, NOT a `{table}-{32hex}` dir, so the snapshot walk-up is skipped).
+    #[test]
+    fn test_extract_path_snapshots_named_keyspace_not_a_snapshot() {
+        let path = Path::new(
+            "/var/lib/cassandra/data/snapshots/mytable-9f3a1c2d4e5f6071829304a5b6c7d8e9/\
+             nb-1-big-Data.db",
+        );
+        assert_eq!(
+            extract_keyspace_from_path(path),
+            "snapshots",
+            "keyspace literally named 'snapshots' must be preserved (BLOCKER 1)"
+        );
+        assert_eq!(
+            extract_table_name_from_path(path),
+            "mytable",
+            "table must resolve normally, not be misread as a snapshot tag"
+        );
+    }
+
     /// Snapshot dir named something other than `cqlite-*` (e.g. a Cassandra
     /// nodetool snapshot tag) still resolves the real keyspace/table.
     #[test]
     fn test_extract_path_snapshot_arbitrary_name() {
         let path = Path::new(
-            "/data/analytics/events-0011223344556677889900aabbccddeeff/\
+            "/data/analytics/events-00112233445566778899aabbccddeeff/\
              snapshots/pre-upgrade-2026/nb-5-big-Data.db",
         );
         assert_eq!(extract_keyspace_from_path(path), "analytics");

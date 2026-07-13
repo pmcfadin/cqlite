@@ -61,17 +61,24 @@ use crate::{
 
 use super::types::SSTableReader;
 
-/// Extract keyspace and table name from SSTable directory path
+/// Extract keyspace and table name from SSTable directory path (snapshot-aware).
 ///
 /// SSTable paths follow Cassandra convention:
-/// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
+/// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`, or for a
+/// snapshot `.../{table_name}-{uuid}/snapshots/{tag}/nb-1-big-Data.db`.
+///
+/// This routes through the authoritative snapshot-aware parser
+/// ([`crate::storage::sstable::snapshot_path`], issue #2384) so schema-registry
+/// resolution and the V5CompressedLegacy block parser resolve the REAL
+/// `{keyspace}.{table}` for a snapshot read — never `snapshots`/`{tag}` — matching
+/// header resolution and `SSTableManager` keying exactly.
 ///
 /// # Arguments
 /// * `path` - Path to the SSTable Data.db file
 ///
 /// # Returns
 /// * `Ok((keyspace, table_name))` - Extracted names
-/// * `Err(Error::Schema)` - If path doesn't match expected format
+/// * `Err(Error::Schema)` - If path doesn't contain enough directory components
 ///
 /// # Examples
 /// ```ignore
@@ -83,41 +90,12 @@ use super::types::SSTableReader;
 pub(in crate::storage::sstable::reader) fn extract_keyspace_table_from_path(
     path: &Path,
 ) -> Result<(String, String)> {
-    // Get parent directory containing table_name-uuid
-    let table_dir = path
-        .parent()
-        .ok_or_else(|| Error::schema("SSTable path has no parent directory"))?;
+    use crate::storage::sstable::snapshot_path;
 
-    // Extract table directory name
-    let table_dir_name = table_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| Error::schema("Invalid table directory name"))?;
-
-    // Split on last hyphen to handle table names containing hyphens
-    // Format: "table_name-uuid" or "user-profiles-abc123"
-    let table_name = table_dir_name
-        .rsplit_once('-')
-        .ok_or_else(|| {
-            Error::schema(format!(
-                "Table directory '{}' does not match 'tablename-uuid' format",
-                table_dir_name
-            ))
-        })?
-        .0
-        .to_string();
-
-    // Get keyspace directory (parent of table directory)
-    let keyspace_dir = table_dir
-        .parent()
-        .ok_or_else(|| Error::schema("Table directory has no parent (keyspace) directory"))?;
-
-    // Extract keyspace name
-    let keyspace = keyspace_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| Error::schema("Invalid keyspace directory name"))?
-        .to_string();
+    let keyspace = snapshot_path::extract_keyspace(path)
+        .ok_or_else(|| Error::schema("SSTable path has no keyspace directory (too shallow)"))?;
+    let table_name = snapshot_path::extract_table_name(path)
+        .ok_or_else(|| Error::schema("SSTable path has no table directory"))?;
 
     Ok((keyspace, table_name))
 }
@@ -279,11 +257,38 @@ mod tests {
 
     #[test]
     fn test_extract_keyspace_table_with_hyphens() {
-        // Table name contains hyphens
-        let path = Path::new("/data/sstables/my_keyspace/user-profiles-xyz789/nb-1-big-Data.db");
+        // Table name contains hyphens; only the trailing 32-hex table id is stripped.
+        let path = Path::new(
+            "/data/sstables/my_keyspace/user-profiles-00112233445566778899aabbccddeeff/nb-1-big-Data.db",
+        );
         let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
         assert_eq!(keyspace, "my_keyspace");
         assert_eq!(table, "user-profiles");
+    }
+
+    /// Snapshot layout (issue #2384): schema-registry / block-parser identity
+    /// resolution must yield the REAL keyspace/table, not `snapshots`/`{tag}`.
+    #[test]
+    fn test_extract_keyspace_table_snapshot_layout() {
+        let path = Path::new(
+            "/data/sstables/myks/mytable-9f3a1c2d4e5f6071829304a5b6c7d8e9/\
+             snapshots/cqlite-3b1e7f90/nb-1-big-Data.db",
+        );
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "myks");
+        assert_eq!(table, "mytable");
+    }
+
+    /// BLOCKER 1 regression: a keyspace literally named `snapshots` must not be
+    /// misparsed as a snapshot layout in the schema-resolution path either.
+    #[test]
+    fn test_extract_keyspace_table_snapshots_named_keyspace() {
+        let path = Path::new(
+            "/data/sstables/snapshots/mytable-9f3a1c2d4e5f6071829304a5b6c7d8e9/nb-1-big-Data.db",
+        );
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "snapshots");
+        assert_eq!(table, "mytable");
     }
 
     #[test]
@@ -313,17 +318,20 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_keyspace_table_invalid_format() {
-        // Invalid format - no hyphen in table directory
+    fn test_extract_keyspace_table_no_id_suffix() {
+        // A table directory with no trailing 32-hex id: the whole directory name is
+        // the table name (no hyphen split), keyspace resolves normally.
         let path = Path::new("/data/keyspace/tablename/Data.db");
-        let result = extract_keyspace_table_from_path(path);
-        assert!(result.is_err());
+        let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
+        assert_eq!(keyspace, "keyspace");
+        assert_eq!(table, "tablename");
     }
 
     #[test]
     fn test_extract_keyspace_table_relative_path() {
-        // Relative path (should work)
-        let path = Path::new("test_basic/simple_table-abc123/nb-1-big-Data.db");
+        // Relative path (should work) with a real 32-hex table id.
+        let path =
+            Path::new("test_basic/simple_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db");
         let (keyspace, table) = extract_keyspace_table_from_path(path).unwrap();
         assert_eq!(keyspace, "test_basic");
         assert_eq!(table, "simple_table");
