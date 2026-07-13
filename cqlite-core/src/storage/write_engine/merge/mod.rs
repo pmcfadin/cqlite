@@ -518,6 +518,11 @@ const STREAMING_CHANNEL_CAPACITY: usize = 256;
 #[cfg(feature = "write-support")]
 mod producer_gauge;
 
+// Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
+// merge adapter.
+#[cfg(all(test, feature = "write-support"))]
+mod teardown_tests;
+
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
     /// Open an SSTable and start a streaming producer thread.

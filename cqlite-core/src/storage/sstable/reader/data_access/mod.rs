@@ -51,6 +51,8 @@ mod compaction;
 mod compressed_offset;
 mod full_index_scan; // Full-Index.db partition enumeration (issue #2302)
 mod full_index_stream; // True-streaming full-Index.db enumeration (issue #2361)
+#[cfg(test)]
+mod full_index_stream_tests; // Streaming + LIMIT + cancel coverage (issue #2361)
 mod model;
 // Single-partition compaction seek (issue #2207): the public point-read primitive
 // composing the presence oracle + BTI/BIG offset resolution into a byte-identical

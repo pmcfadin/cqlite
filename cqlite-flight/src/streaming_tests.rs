@@ -463,6 +463,44 @@ fn stream_collect_parity_limit_mid_batch() {
     assert_stream_collect_parity(spec, &dir);
 }
 
+/// Issue #2361: pushing the ticket LIMIT into EACH producer of a multi-SSTable
+/// k-way merge (`new_cancellable_with_partition_limit`) must return the SAME
+/// result set as the collect path (which caps only at the consumer) — the
+/// per-producer partition budget must NOT under-return. Two overlapping-key
+/// SSTables force a real multi-producer merge with cross-generation
+/// reconciliation. Also asserts the streamed row count equals the cap
+/// (non-vacuity), proving the limit is wired end-to-end through the streaming
+/// egress, not silently dropped.
+#[test]
+fn stream_collect_parity_limit_multi_sstable() {
+    let schema = simple_schema();
+    let a = (1..=10)
+        .map(|i| write_row(i, &format!("a{i}"), i * 10, 100))
+        .collect::<Vec<_>>();
+    let b = (5..=15)
+        .map(|i| write_row(i, &format!("b{i}"), i * 10, 200))
+        .collect::<Vec<_>>();
+    let (_temp, _data, dir) = build_sstables(&schema, vec![a, b]);
+
+    let spec = crate::filter::ScanSpec {
+        limit: Some(6),
+        ..Default::default()
+    };
+    // Streamed == collect over a real multi-producer merge.
+    assert_stream_collect_parity(spec.clone(), &dir);
+
+    // Non-vacuity: the streaming egress returns EXACTLY the cap (6), not fewer
+    // (under-return) nor all 15 distinct partitions.
+    let producer = MergeProducer::with_spec(schema, 4, spec).unwrap();
+    let paths = resolved(&producer, &dir);
+    let streamed = stream_batches_raw(producer, paths);
+    let rows: usize = streamed.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        rows, 6,
+        "LIMIT-6 streaming scan over two overlapping SSTables must return exactly 6 rows"
+    );
+}
+
 #[test]
 fn stream_collect_parity_predicate() {
     use crate::ticket::{FlightTicket, Predicate, PredicateOp};
