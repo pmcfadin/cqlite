@@ -9,73 +9,58 @@
 
 use super::{IndexData, IndexHeader, PartitionIndexEntry, PromotedIndexData};
 use crate::parser::vint::parse_vuint;
+use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::header_spec::get_global_registry;
 use crate::storage::sstable::summary_reader::SummaryReader;
+use crate::Result;
 use nom::{bytes::complete::take, number::complete::be_u16, IResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Parse Index.db file data with optional Summary.db correlation using spec-driven approach
+/// How often the O(entries) `Index.db` parse loop polls the cancel flag
+/// (issue #2383 fix C): once per this many entries, NOT per entry — a single
+/// relaxed atomic load amortised over ~64k `memcmp`/vint decodes is free, yet a
+/// client-disconnect cancel still aborts a 1.58M-entry parse within one interval
+/// instead of pinning a worker to completion.
+const CANCEL_POLL_INTERVAL: usize = 1 << 16;
+
+/// Parse Index.db file data with optional Summary.db correlation using spec-driven approach.
+///
+/// Non-cancellable façade over [`parse_index_data_cancellable`] (issue #2383): the
+/// default [`ScanCancel`] never trips, so the cancel arm is unreachable here.
 pub(super) fn parse_index_data_with_summary<'a>(
     input: &'a [u8],
     summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], IndexData> {
     use nom::error::{Error as NomError, ErrorKind};
+    match parse_index_data_cancellable(input, summary_reader, &ScanCancel::default()) {
+        Ok(pair) => Ok(pair),
+        // A default (never-cancel) flag cannot yield `Cancelled`; any error here is
+        // a header/structural failure mapped to a nom error for the IResult callers.
+        Err(_) => Err(nom::Err::Error(NomError::new(input, ErrorKind::Fail))),
+    }
+}
 
-    // First try spec-driven header parsing
-    let registry = get_global_registry();
-    let (remaining, header) = match registry.parse_index_header(input) {
-        Ok(parsed_header) => {
-            tracing::debug!("Successfully parsed Index.db header using spec-driven approach");
+/// Cancel-aware Index.db parse (issue #2383 fix C).
+///
+/// Polls `cancel` before the header and roughly every [`CANCEL_POLL_INTERVAL`]
+/// entries inside the O(entries) loop, returning [`crate::Error::Cancelled`]
+/// promptly instead of running a 1.58M-entry parse to completion after a client
+/// disconnect. This is the SINGLE site that emits `index_parses_total`, so both
+/// the cancellable and non-cancellable façades count a full parse exactly once.
+pub(super) fn parse_index_data_cancellable<'a>(
+    input: &'a [u8],
+    summary_reader: Option<&SummaryReader>,
+    cancel: &ScanCancel,
+) -> Result<(&'a [u8], IndexData)> {
+    // Coarse pre-parse cancel check (covers a pre-cancelled open).
+    cancel.check()?;
 
-            // Convert ParsedHeader to IndexHeader
-            let header = IndexHeader {
-                version: parsed_header
-                    .fields
-                    .get("version")
-                    .and_then(|v| v.as_u32().ok())
-                    .unwrap_or(1),
-                entry_count: parsed_header
-                    .fields
-                    .get("entry_count")
-                    .and_then(|v| v.as_u32().ok())
-                    .unwrap_or(0),
-                data_size: parsed_header
-                    .fields
-                    .get("data_size")
-                    .and_then(|v| v.as_u64().ok())
-                    .unwrap_or(input.len() as u64),
-                checksum: parsed_header
-                    .fields
-                    .get("checksum")
-                    .and_then(|v| v.as_u32().ok())
-                    .unwrap_or(0),
-            };
+    let (remaining, header) = parse_index_header_prefix(input);
 
-            // Skip header bytes for data parsing
-            let header_size = parsed_header.header_size;
-            if input.len() < header_size {
-                return Err(nom::Err::Error(NomError::new(input, ErrorKind::Eof)));
-            }
-            (&input[header_size..], header)
-        }
-        Err(_) => {
-            tracing::debug!("Spec-driven header parsing failed, assuming headerless format");
-
-            // Parse all partition key digests - no header in some formats
-            let header = IndexHeader {
-                version: 1,
-                entry_count: 0, // Will be updated after parsing entries
-                data_size: input.len() as u64,
-                checksum: 0,
-            };
-            (input, header)
-        }
-    };
-
-    // Parse partition entries from remaining data
+    // Parse partition entries (cancel-polled) from the post-header data.
     let (remaining, partition_entries) =
-        parse_all_partition_keys_with_summary(remaining, summary_reader)?;
+        parse_all_partition_keys_cancellable(remaining, summary_reader, cancel)?;
 
     // Build lookup table with zero-copy approach using Arc::clone (reference counting only)
     // This eliminates the memory explosion from cloning Vec<u8> key digests
@@ -98,6 +83,59 @@ pub(super) fn parse_index_data_with_summary<'a>(
             key_lookup,
         },
     ))
+}
+
+/// Parse (or synthesize, for the headerless format) the `Index.db` header prefix,
+/// returning the post-header remainder. Infallible: an unparseable header falls
+/// back to the headerless layout exactly as before (issue #28, no heuristics —
+/// the spec-driven registry is the authority, the headerless case is the
+/// documented Cassandra 5.0 shape).
+fn parse_index_header_prefix(input: &[u8]) -> (&[u8], IndexHeader) {
+    let registry = get_global_registry();
+    match registry.parse_index_header(input) {
+        Ok(parsed_header) => {
+            tracing::debug!("Successfully parsed Index.db header using spec-driven approach");
+            let header = IndexHeader {
+                version: parsed_header
+                    .fields
+                    .get("version")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(1),
+                entry_count: parsed_header
+                    .fields
+                    .get("entry_count")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(0),
+                data_size: parsed_header
+                    .fields
+                    .get("data_size")
+                    .and_then(|v| v.as_u64().ok())
+                    .unwrap_or(input.len() as u64),
+                checksum: parsed_header
+                    .fields
+                    .get("checksum")
+                    .and_then(|v| v.as_u32().ok())
+                    .unwrap_or(0),
+            };
+            let header_size = parsed_header.header_size;
+            if input.len() < header_size {
+                // Truncated below the declared header: no post-header data.
+                (&[], header)
+            } else {
+                (&input[header_size..], header)
+            }
+        }
+        Err(_) => {
+            tracing::debug!("Spec-driven header parsing failed, assuming headerless format");
+            let header = IndexHeader {
+                version: 1,
+                entry_count: 0, // Will be updated after parsing entries
+                data_size: input.len() as u64,
+                checksum: 0,
+            };
+            (input, header)
+        }
+    }
 }
 
 /// Parse all partition entries from the Index.db file.
@@ -127,13 +165,35 @@ pub(super) fn parse_index_data_with_summary<'a>(
 /// inline so Summary.db correlation is no longer needed for parsing.
 pub(super) fn parse_all_partition_keys_with_summary<'a>(
     input: &'a [u8],
-    _summary_reader: Option<&SummaryReader>,
+    summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], Vec<PartitionIndexEntry>> {
+    use nom::error::{Error as NomError, ErrorKind};
+    // Non-cancellable façade: a default flag never trips, so the cancel arm is
+    // unreachable; map it defensively to a nom error for the IResult callers.
+    match parse_all_partition_keys_cancellable(input, summary_reader, &ScanCancel::default()) {
+        Ok(pair) => Ok(pair),
+        Err(_) => Err(nom::Err::Error(NomError::new(input, ErrorKind::Fail))),
+    }
+}
+
+/// Cancel-aware entry loop (issue #2383 fix C). Polls `cancel` once per
+/// [`CANCEL_POLL_INTERVAL`] entries; on a trip returns [`crate::Error::Cancelled`]
+/// promptly. Emits the `index_parses_total` counter exactly once on a full pass —
+/// the SINGLE full-parse site (both façades route here).
+pub(super) fn parse_all_partition_keys_cancellable<'a>(
+    input: &'a [u8],
+    _summary_reader: Option<&SummaryReader>,
+    cancel: &ScanCancel,
+) -> Result<(&'a [u8], Vec<PartitionIndexEntry>)> {
     let mut entries = Vec::new();
     let mut remaining = input;
 
-    let mut entry_index = 0;
+    let mut entry_index = 0usize;
     while !remaining.is_empty() {
+        // #2383 fix C: bounded-interval cooperative cancel (not per entry).
+        if entry_index % CANCEL_POLL_INTERVAL == 0 {
+            cancel.check()?;
+        }
         match parse_big_index_entry(remaining) {
             Ok((rest, entry)) => {
                 debug_assert!(

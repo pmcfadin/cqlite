@@ -37,6 +37,7 @@ impl SSTableReader {
         header: &crate::parser::SSTableHeader,
         platform: &Arc<Platform>,
         data_file_path: &Path,
+        cancel: &crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Option<SSTableIndex>> {
         // Strategy 1: Check if index information is available in header (for integrated formats)
         if let Some(index_offset) = header.properties.get("index_offset") {
@@ -64,7 +65,14 @@ impl SSTableReader {
                 .join(format!("{}-Index.db", base_name));
 
             if tokio::fs::metadata(&index_path).await.is_ok() {
-                match IndexReader::open(&index_path, platform.clone()).await {
+                match IndexReader::open_with_summary_cancellable(
+                    &index_path,
+                    platform.clone(),
+                    None,
+                    cancel,
+                )
+                .await
+                {
                     Ok(index_reader) => {
                         tracing::debug!(
                             "Found separate Index.db component at {}",
@@ -93,6 +101,10 @@ impl SSTableReader {
                             }
                         }
                     }
+                    // A mid-parse cancellation (issue #2383) must ABORT, never fall
+                    // through to a fallback strategy (that would ignore the cancel
+                    // and keep the worker spinning). Surfaced by variant.
+                    Err(e @ Error::Cancelled) => return Err(e),
                     Err(e) => {
                         tracing::debug!(
                             "Failed to load Index.db component: {}. This may indicate file corruption, permission issues, or format incompatibility.",
@@ -193,19 +205,22 @@ impl SSTableReader {
     pub(super) async fn load_index_reader(
         path: &Path,
         platform: &Arc<Platform>,
-    ) -> IndexLoadOutcome {
+        cancel: &crate::storage::scan_cancel::ScanCancel,
+    ) -> Result<IndexLoadOutcome> {
         let Some(base_name) = extract_sstable_base_name(path) else {
-            return IndexLoadOutcome::Absent;
+            return Ok(IndexLoadOutcome::Absent);
         };
         let Some(parent) = path.parent() else {
-            return IndexLoadOutcome::Absent;
+            return Ok(IndexLoadOutcome::Absent);
         };
         let index_path = parent.join(format!("{}-Index.db", base_name));
 
-        match IndexReader::open(&index_path, platform.clone()).await {
+        match IndexReader::open_with_summary_cancellable(&index_path, platform.clone(), None, cancel)
+            .await
+        {
             Ok(reader) => {
                 tracing::debug!("Loaded Index.db reader for {}", index_path.display());
-                IndexLoadOutcome::Loaded(Box::new(reader))
+                Ok(IndexLoadOutcome::Loaded(Box::new(reader)))
             }
             // A genuinely absent Index.db (some shapes legitimately ship without one)
             // is quiet & expected. A PRESENT-but-unloadable Index.db (open/parse
@@ -215,15 +230,18 @@ impl SSTableReader {
             // is absent, so the error kind is the authoritative discriminator.
             Err(Error::NotFound(_)) => {
                 tracing::debug!("No Index.db present at {}", index_path.display());
-                IndexLoadOutcome::Absent
+                Ok(IndexLoadOutcome::Absent)
             }
+            // A mid-parse cancellation (issue #2383) aborts the open, never masked
+            // as a present-but-unloadable degradation.
+            Err(e @ Error::Cancelled) => Err(e),
             Err(e) => {
                 tracing::debug!(
                     "Index.db present at {} but failed to load: {}",
                     index_path.display(),
                     e
                 );
-                IndexLoadOutcome::PresentButUnloadable
+                Ok(IndexLoadOutcome::PresentButUnloadable)
             }
         }
     }

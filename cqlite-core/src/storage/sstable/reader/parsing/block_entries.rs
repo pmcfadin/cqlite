@@ -193,7 +193,8 @@ impl SSTableReader {
         ) {
             // Extract keyspace/table from path (most reliable for V5CompressedLegacy)
             // SSTable path format: {keyspace}/{table_name}-{uuid}/nb-1-big-Data.db
-            let (keyspace, table_name) = super::extract_keyspace_table_from_path(&self.file_path)
+            let file_path = self.file_path();
+            let (keyspace, table_name) = super::extract_keyspace_table_from_path(&file_path)
                 .unwrap_or_else(|_| {
                     // Fallback to header values if path extraction fails
                     (self.header.keyspace.clone(), self.header.table_name.clone())
@@ -213,7 +214,7 @@ impl SSTableReader {
                      but got keyspace='{}', table_name='{}' from path {:?}. \
                      Cannot fall back to VInt parser (format uses u8 length prefixes, not VInt). \
                      This indicates a path parsing bug or malformed SSTable directory structure.",
-                    keyspace, table_name, self.file_path
+                    keyspace, table_name, file_path
                 )));
             }
 

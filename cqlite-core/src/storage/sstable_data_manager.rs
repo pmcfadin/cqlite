@@ -668,7 +668,7 @@ impl SSTableDataManager {
             };
 
             let metadata = RowMetadata {
-                source_file: reader.file_path.clone(),
+                source_file: reader.file_path(),
                 write_time: None,
                 ttl: None,
                 generation: reader.generation,
@@ -839,7 +839,7 @@ impl SSTableDataManager {
         // TODO(Issue #190): SSTableReader integrity checking API differs
         // For now, perform basic file accessibility check
         // Future: use reader.check_integrity() when available
-        if reader.file_path.exists() {
+        if reader.file_path().exists() {
             FileHealthStatus::Healthy
         } else {
             FileHealthStatus::AccessDenied

@@ -863,9 +863,10 @@ impl SSTableReader {
     /// so concurrent scans on this reader never share a mutable file position —
     /// they run in parallel without the per-scan serialization #805 required.
     pub(in crate::storage::sstable::reader) async fn new_scan_cursor(&self) -> Result<ScanCursor> {
-        Ok(ScanCursor::new(
-            self.scan_source.open(&self.file_path).await?,
-        ))
+        // Load the (interior-mutable, #2383-rebindable) path once per scan; a
+        // rebind swaps this to a live same-inode hardlink without re-parsing.
+        let file_path = self.file_path();
+        Ok(ScanCursor::new(self.scan_source.open(&file_path).await?))
     }
 
     /// Read the next block from a scan-local `cursor` (its own file position and

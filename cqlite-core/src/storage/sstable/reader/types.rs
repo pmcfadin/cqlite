@@ -220,8 +220,16 @@ type BtiLookupMemo = std::sync::Mutex<Option<(Box<[u8]>, Option<u64>)>>;
 /// SSTable reader for efficient data access
 #[allow(dead_code)]
 pub struct SSTableReader {
-    /// Path to the SSTable file
-    pub(crate) file_path: PathBuf,
+    /// Path to the SSTable file.
+    ///
+    /// Interior-mutable (issue #2383 / #2356, "rebind-by-inode"): a warm reader
+    /// whose backing snapshot dir the Trino connector cleared can be REBOUND to a
+    /// fresh same-inode hardlink path WITHOUT re-opening/re-parsing the whole
+    /// Index.db — see [`Self::rebind_path`]. The already-open point/scan handles
+    /// stay valid (the inode outlives the cleared dir via the surviving
+    /// hardlinks); only [`Self::new_scan_cursor`]'s lazy `File::open`-by-path
+    /// needs the live path, so a lock-free `ArcSwap` swap is all a rebind costs.
+    pub(crate) file_path: arc_swap::ArcSwap<PathBuf>,
     /// Backing byte source for point reads (buffered file I/O or memory map).
     ///
     /// Used only by positioned point-read helpers (`get_cached_data`,

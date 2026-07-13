@@ -51,11 +51,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use cqlite_core::schema::TableSchema;
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::{Config, Platform};
+use cqlite_core::Platform;
 
 use crate::cancel::CancelFlag;
 
-use super::budget::{account_footprint, DEFAULT_WARM_BUDGET_BYTES};
+use super::budget::DEFAULT_WARM_BUDGET_BYTES;
 use super::identity::{GenerationId, GenerationSet};
 use super::metrics::{RefreshOutcome, WarmMetrics};
 use super::probe::{self, GenerationEntry, ProbeOutcome};
@@ -81,11 +81,14 @@ impl TableKey {
 }
 
 /// One warm generation: its identity, the open reader, and byte accounting.
-struct WarmReader {
-    id: GenerationId,
-    reader: Arc<SSTableReader>,
-    footprint: u64,
-    last_access: u64,
+///
+/// `pub(super)` so the rebuild's expensive half (single-flight opens + rebind,
+/// [`super::rebuild`]) can construct these (issue #2383, campsite split).
+pub(super) struct WarmReader {
+    pub(super) id: GenerationId,
+    pub(super) reader: Arc<SSTableReader>,
+    pub(super) footprint: u64,
+    pub(super) last_access: u64,
 }
 
 /// Warm state for one logical table.
@@ -122,22 +125,27 @@ impl Inner {
 /// identity.
 pub struct WarmTableRegistry {
     inner: Mutex<Inner>,
-    /// Lazily-built shared platform for reader opens.
-    platform: Mutex<Option<Arc<Platform>>>,
+    /// Lazily-built shared platform for reader opens. `pub(super)` for
+    /// [`super::rebuild`] (campsite split, issue #2383).
+    pub(super) platform: Mutex<Option<Arc<Platform>>>,
     budget_bytes: u64,
     metrics: Arc<WarmMetrics>,
+    /// Per-generation single-flight for reader opens (issue #2383 fix A): M
+    /// concurrent misses for one table coalesce onto ONE real open+parse per
+    /// generation instead of opening ×M. See [`super::rebuild::OpenCoalescer`].
+    pub(super) coalescer: super::rebuild::OpenCoalescer,
     /// Test-only rendezvous invoked inside [`Self::rebuild`] AFTER the added
     /// generations are opened but BEFORE the swap lock is taken — lets the
     /// concurrent-same-key-rebuild race test hold two threads "past the probe,
     /// before either swaps" deterministically. `None` (a no-op) in production.
     #[cfg(test)]
     swap_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// Test-only hook invoked at the TOP of each [`Self::open_added`] loop
+    /// Test-only hook invoked at the TOP of each `open_added` loop
     /// iteration (before its cancel check) — lets the mid-rebuild cancellation
     /// test trip the cancel flag BETWEEN two added-generation opens. `None` in
-    /// production.
+    /// production. `pub(super)` for [`super::rebuild`] (campsite split).
     #[cfg(test)]
-    open_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pub(super) open_barrier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Default for WarmTableRegistry {
@@ -160,6 +168,7 @@ impl WarmTableRegistry {
             platform: Mutex::new(None),
             budget_bytes: budget_bytes.max(1),
             metrics: Arc::new(WarmMetrics::default()),
+            coalescer: super::rebuild::OpenCoalescer::default(),
             #[cfg(test)]
             swap_barrier: Mutex::new(None),
             #[cfg(test)]
@@ -345,10 +354,13 @@ impl WarmTableRegistry {
         // OUTSIDE the lock (slow I/O). `probe_start_set` is what THIS rebuild's
         // delta was computed against — the epoch guard below re-checks it hasn't
         // moved by the time we reach the swap (roborev 1639).
-        // Snapshot each cached generation's identity AND its reader's backing
-        // path under the brief lock; the path-liveness `stat`s run OUTSIDE the
-        // lock (no filesystem I/O under the registry mutex).
-        let cached: Vec<(GenerationId, std::path::PathBuf)> = {
+        // Snapshot each cached generation's identity AND a CLONE of its reader
+        // `Arc` under the brief lock; the path-liveness `stat`s and any rebind run
+        // OUTSIDE the lock (no filesystem I/O under the registry mutex). Cloning
+        // the `Arc` lets us rebind the cached reader in place (#2383) — the same
+        // reader is shared with the live cache entry, so a rebind is observed at
+        // the swap without a re-open.
+        let cached: Vec<(GenerationId, Arc<SSTableReader>)> = {
             let inner = self.lock_inner();
             inner
                 .tables
@@ -357,7 +369,7 @@ impl WarmTableRegistry {
                 .map(|t| {
                     t.readers
                         .iter()
-                        .map(|r| (r.id, r.reader.file_path().to_path_buf()))
+                        .map(|r| (r.id, Arc::clone(&r.reader)))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -365,28 +377,45 @@ impl WarmTableRegistry {
         // `probe_start_set` is the FULL cached generation SET (by identity) this
         // delta was computed against — the epoch guard below compares the LIVE
         // entry's set to it to detect a concurrent fresher install. Path-liveness
-        // never changes the identity set, so the guard uses ALL cached ids.
+        // / rebind never change the identity set, so the guard uses ALL cached ids.
         let probe_start_set = GenerationSet::from_ids(cached.iter().map(|(id, _)| *id).collect());
 
-        // Path-liveness (issue #2352): a cached generation counts as "already
-        // warm" ONLY when its backing `Data.db` still resolves. A dead-path
-        // generation (its per-query snapshot dir was cleared by the connector) is
-        // NOT kept — it lands in `added` and is RE-OPENED from the current live
-        // `entries` path, so a subsequent lazy scan re-open cannot ENOENT.
-        let alive_ids: HashSet<GenerationId> = cached
-            .iter()
-            .filter(|(_, p)| std::fs::metadata(p).is_ok())
-            .map(|(id, _)| *id)
-            .collect();
+        // Live entries by identity, for the rebind match (issue #2383 fix B).
+        let live_by_id: HashMap<GenerationId, &GenerationEntry> =
+            entries.iter().map(|e| (e.id, e)).collect();
 
-        // ADDED = present now, not already warm on a LIVE path. Open them
-        // (fail-closed) — this includes both genuinely-new generations and
-        // dead-path ones being refreshed from the current live dir (#2352).
+        // Path-liveness (#2352) + rebind-by-inode (#2383/#2356). A cached
+        // generation counts as "already warm" (kept, ZERO re-parse) when EITHER:
+        //  (a) its current backing `Data.db` path still resolves, OR
+        //  (b) its path is dead (its per-query snapshot dir was cleared) but the
+        //      SAME generation is present in the current live dir — an
+        //      AUTHORITATIVE `(device, inode, generation)` + size match (Cassandra
+        //      snapshot files are hardlinks to the immutable SSTable; #28
+        //      no-heuristics). We REBIND the reader's lazy-scan path to that live
+        //      hardlink instead of re-opening + re-parsing the whole Index.db.
+        // A dead-path generation with NO identity-matching live entry fails CLOSED:
+        // it lands in `added` and is fully re-opened from the live dir.
+        let mut alive_ids: HashSet<GenerationId> = HashSet::new();
+        for (id, reader) in &cached {
+            let current_path = reader.file_path();
+            if std::fs::metadata(&current_path).is_ok() {
+                alive_ids.insert(*id);
+            } else if let Some(live) = live_by_id.get(id) {
+                if super::rebuild::rebind_matches(*id, reader.file_size(), &live.path) {
+                    reader.rebind_path(&live.path);
+                    alive_ids.insert(*id);
+                }
+            }
+        }
+
+        // ADDED = present now, not already warm/rebound on a LIVE path. Open them
+        // (fail-closed) — genuinely-new generations and dead-path ones with no
+        // identity-matching live hardlink to rebind onto.
         let added: Vec<&GenerationEntry> = entries
             .iter()
             .filter(|e| !alive_ids.contains(&e.id))
             .collect();
-        let opened = match self.open_added(&added, schema, cancel) {
+        let (opened, reader_opens) = match self.open_added(&added, schema, cancel) {
             Ok(opened) => opened,
             Err(e) => {
                 // The previously warm set is untouched. Record the fail-closed
@@ -398,7 +427,6 @@ impl WarmTableRegistry {
                 return Err(e);
             }
         };
-        let reader_opens = opened.len() as u64;
 
         // Test-only rendezvous: hold here (past the probe + open, before the swap)
         // so a concurrent same-key rebuild can be driven deterministically.
@@ -581,60 +609,8 @@ impl WarmTableRegistry {
         evicted
     }
 
-    /// Open the ADDED generations. Fail-closed: any open error (or a
-    /// cancellation) returns immediately WITHOUT partial state. Readers are opened
-    /// with the SAME UDT-registry posture as the cold path (none — see the module
-    /// doc; #2349 wires a real registry into both paths together).
-    fn open_added(
-        &self,
-        added: &[&GenerationEntry],
-        _schema: &TableSchema,
-        cancel: &CancelFlag,
-    ) -> Result<Vec<WarmReader>, WarmError> {
-        if added.is_empty() {
-            return Ok(Vec::new());
-        }
-        // One current-thread runtime per rebuild (reader open is async); reused
-        // across every added generation in this rebuild, like `PruneRuntime`.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| WarmError::Runtime(format!("build runtime: {e}")))?;
-        let platform = self.platform(&runtime)?;
-        let config = Config::default();
-
-        let mut opened = Vec::with_capacity(added.len());
-        for entry in added {
-            #[cfg(test)]
-            self.run_open_barrier();
-            if cancel.is_cancelled() {
-                return Err(WarmError::Cancelled);
-            }
-            let reader = open_one_reader(&runtime, &entry.path, &config, Arc::clone(&platform))?;
-            let footprint = account_footprint(&entry.path);
-            opened.push(WarmReader {
-                id: entry.id,
-                reader: Arc::new(reader),
-                footprint,
-                last_access: 0,
-            });
-        }
-        Ok(opened)
-    }
-
-    /// Lazily build + cache the shared [`Platform`] used to open readers.
-    fn platform(&self, runtime: &tokio::runtime::Runtime) -> Result<Arc<Platform>, WarmError> {
-        let mut guard = self.platform.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(p) = guard.as_ref() {
-            return Ok(Arc::clone(p));
-        }
-        let platform = runtime
-            .block_on(Platform::new(&Config::default()))
-            .map_err(|e| WarmError::Runtime(format!("build platform: {e}")))?;
-        let platform = Arc::new(platform);
-        *guard = Some(Arc::clone(&platform));
-        Ok(platform)
-    }
+    // `open_added` (single-flight coalesced, cancel-aware) + `platform` live in
+    // [`super::rebuild`] (issue #2383, campsite split).
 
     fn lock_inner(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
@@ -667,7 +643,9 @@ impl WarmTableRegistry {
                 None => return true,
             }
         };
-        readers.iter().all(|r| reader_backing_present(r))
+        readers
+            .iter()
+            .all(|r| super::rebuild::reader_backing_present(r))
     }
 
     /// Install the test-only swap rendezvous (see the field doc).
@@ -702,9 +680,10 @@ impl WarmTableRegistry {
             .unwrap_or_else(PoisonError::into_inner) = Some(f);
     }
 
-    /// Invoke the per-open rendezvous if one is installed.
+    /// Invoke the per-open rendezvous if one is installed. `pub(super)` for
+    /// [`super::rebuild::WarmTableRegistry::open_added`] (campsite split).
     #[cfg(test)]
-    fn run_open_barrier(&self) {
+    pub(super) fn run_open_barrier(&self) {
         let hook = self
             .open_barrier
             .lock()
@@ -743,41 +722,8 @@ impl WarmTableRegistry {
     }
 }
 
-/// Open ONE reader with the SAME UDT-registry posture as the cold path.
-///
-/// The cold Flight path (`KWayMerger::new_cancellable`) opens readers with
-/// `udt_registry = None`, so — to keep warm a parse-cost-only change with no
-/// read-semantics divergence — this does NOT set a registry either. Wiring a real
-/// registry into BOTH paths together is issue #2349; see the module doc.
-/// Whether a cached reader's backing `Data.db` still resolves on disk (issue
-/// #2352). A cheap `metadata` stat on the reader's `file_path` — the path is
-/// almost always dentry-cached, and this runs only on the per-request warm probe
-/// path, never a hot inner loop. Returning `false` (an ENOENT/`stat` failure)
-/// means the reader was opened from a path that has since been cleared (a
-/// per-query snapshot dir), so it must be re-opened from the current live dir
-/// rather than served (which would ENOENT on its next lazy scan re-open).
-fn reader_backing_present(reader: &SSTableReader) -> bool {
-    std::fs::metadata(reader.file_path()).is_ok()
-}
-
-fn open_one_reader(
-    runtime: &tokio::runtime::Runtime,
-    path: &Path,
-    config: &Config,
-    platform: Arc<Platform>,
-) -> Result<SSTableReader, WarmError> {
-    let reader = runtime
-        .block_on(SSTableReader::open(path, config, platform))
-        .map_err(|source| WarmError::Open {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    debug_assert!(
-        !reader.has_udt_registry(),
-        "warm reader must match the cold path's no-UDT-registry posture (#2349)"
-    );
-    Ok(reader)
-}
+// `reader_backing_present` + `open_one_reader` moved to [`super::rebuild`]
+// (issue #2383, campsite split).
 
 // Registry integration tests over real in-process SSTables (issue #2310), in a
 // separate file (campsite rule) loaded here.

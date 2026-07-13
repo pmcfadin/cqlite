@@ -37,9 +37,10 @@ impl SSTableReader {
         };
         let memory_usage = std::mem::size_of::<Self>() + cache.resident_bytes();
 
+        let file_path = self.file_path();
         Ok(SSTableReaderHealthMetrics {
-            file_path: self.file_path.clone(),
-            file_accessible: self.file_path.exists(),
+            file_accessible: file_path.exists(),
+            file_path,
             header_version: self.header.cassandra_version,
             total_file_size: stats.file_size,
             estimated_memory_usage: memory_usage,
@@ -66,7 +67,8 @@ impl SSTableReader {
     /// its parent directory — roborev #1283) and map its `VerifyReport` onto the
     /// legacy `IntegrityCheckResult` shape the (test-only) consumers expect.
     pub async fn perform_integrity_check(&self) -> Result<IntegrityCheckResult> {
-        debug!("Starting integrity check for {:?}", self.file_path);
+        let file_path = self.file_path();
+        debug!("Starting integrity check for {:?}", file_path);
 
         // Delegate to the authoritative engine, verifying the EXACT generation this
         // reader is opened on (issue #1283, roborev). The directory may hold several
@@ -77,7 +79,7 @@ impl SSTableReader {
         // Data corruption is reported as findings inside an Ok(report); only
         // environmental problems return Err.
         let report = verify::verify_sstable_generation(
-            &self.file_path,
+            &file_path,
             VerifyMode::Full,
             &self.open_config,
             self.platform.clone(),
@@ -103,7 +105,7 @@ impl SSTableReader {
         // clippy `-D warnings` clean while the dead computation stays removed.
         #[allow(deprecated)]
         let result = IntegrityCheckResult {
-            file_path: self.file_path.clone(),
+            file_path: file_path.clone(),
             total_blocks_checked: 0,
             corrupted_blocks: Vec::new(),
             checksum_mismatches: 0,
@@ -115,7 +117,7 @@ impl SSTableReader {
 
         info!(
             "Integrity check completed for {:?}: {:?}, {} findings, {} rows scanned",
-            self.file_path,
+            file_path,
             result.overall_status,
             result.parsing_errors.len(),
             result.total_entries

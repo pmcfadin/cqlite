@@ -261,9 +261,10 @@ impl SSTableManager {
             let readers = self.readers.read().await;
             let table_readers = self.table_readers.read().await;
             for r in readers.values().chain(table_readers.values().flatten()) {
+                let fp = r.file_path();
                 let c = canon_cache
-                    .entry(r.file_path.clone())
-                    .or_insert_with(|| canon(&r.file_path))
+                    .entry(fp.clone())
+                    .or_insert_with(|| canon(&fp))
                     .clone();
                 held_canon.insert(c);
             }
@@ -316,29 +317,29 @@ impl SSTableManager {
         //     guarded section performs zero filesystem syscalls.
         let before_canon: HashSet<PathBuf> = readers
             .values()
-            .map(|r| canon_of(&r.file_path))
+            .map(|r| canon_of(&r.file_path()))
             .chain(
                 table_readers
                     .values()
                     .flatten()
-                    .map(|r| canon_of(&r.file_path)),
+                    .map(|r| canon_of(&r.file_path())),
             )
             .collect();
 
-        readers.retain(|_id, r| discovered_canon.contains(&canon_of(&r.file_path)));
+        readers.retain(|_id, r| discovered_canon.contains(&canon_of(&r.file_path())));
         for list in table_readers.values_mut() {
-            list.retain(|r| discovered_canon.contains(&canon_of(&r.file_path)));
+            list.retain(|r| discovered_canon.contains(&canon_of(&r.file_path())));
         }
         table_readers.retain(|_key, list| !list.is_empty());
 
         let after_removal_canon: HashSet<PathBuf> = readers
             .values()
-            .map(|r| canon_of(&r.file_path))
+            .map(|r| canon_of(&r.file_path()))
             .chain(
                 table_readers
                     .values()
                     .flatten()
-                    .map(|r| canon_of(&r.file_path)),
+                    .map(|r| canon_of(&r.file_path())),
             )
             .collect();
         let readers_removed = before_canon.difference(&after_removal_canon).count();
@@ -352,7 +353,7 @@ impl SSTableManager {
             }
             // Guard against inserting the same freshly-opened path twice if the
             // discovery listed a duplicate (defensive; discovery does not).
-            if readers.values().any(|r| canon_of(&r.file_path) == cpath) {
+            if readers.values().any(|r| canon_of(&r.file_path()) == cpath) {
                 continue;
             }
             readers.insert(sstable_id, Arc::clone(&reader_arc));

@@ -585,7 +585,7 @@ pub(super) async fn stream_generations_for_read(
 fn ordered_generation_paths(reader_list: &[Arc<reader::SSTableReader>]) -> Vec<PathBuf> {
     let mut ordered: Vec<&Arc<reader::SSTableReader>> = reader_list.iter().collect();
     ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
-    ordered.iter().map(|r| r.file_path.clone()).collect()
+    ordered.iter().map(|r| r.file_path()).collect()
 }
 
 #[cfg(test)]

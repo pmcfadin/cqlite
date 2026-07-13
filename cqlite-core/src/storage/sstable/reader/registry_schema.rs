@@ -39,12 +39,13 @@ impl SSTableReader {
         // Keyspace/table from the SSTable path (authoritative), with the header
         // names as the documented fallback — same resolution the old block_on
         // path used.
-        let (keyspace, table_name) = match extract_keyspace_table_from_path(&self.file_path) {
+        let file_path = self.file_path();
+        let (keyspace, table_name) = match extract_keyspace_table_from_path(&file_path) {
             Ok(names) => names,
             Err(e) => {
                 tracing::debug!(
                     "resolve_registry_schema: path parse failed for {}: {}. Using header names.",
-                    self.file_path.display(),
+                    file_path.display(),
                     e
                 );
                 (self.header.keyspace.clone(), self.header.table_name.clone())
