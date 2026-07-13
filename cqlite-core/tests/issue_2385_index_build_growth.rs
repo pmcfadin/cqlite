@@ -50,15 +50,23 @@ fn descending_entries(table_id: &TableId, n: u64) -> Vec<IndexEntry> {
     entries
 }
 
-/// Time `Index::from_entries` for a prebuilt entry vector (build cost only; the
-/// vector is constructed outside the timed region).
-fn time_build(entries: Vec<IndexEntry>) -> f64 {
-    let start = Instant::now();
-    let index = Index::from_entries(entries);
-    let elapsed = start.elapsed().as_secs_f64();
-    // Prevent the optimizer from eliding the build.
-    assert!(!index.is_empty(), "build must retain entries");
-    elapsed
+/// Fastest `Index::from_entries` build over `runs` attempts (the entry vector is
+/// cloned OUTSIDE each timed region). Taking the MIN filters transient scheduler
+/// stalls on a loaded box: a single preemption can only inflate an individual
+/// sample, and the min discards it — so the growth ratio never false-REDs on a
+/// one-off hiccup while still capturing the true O(N²) vs O(N log N) signal.
+fn time_build_min(entries: &[IndexEntry], runs: usize) -> f64 {
+    let mut best = f64::INFINITY;
+    for _ in 0..runs {
+        let cloned = entries.to_vec();
+        let start = Instant::now();
+        let index = Index::from_entries(cloned);
+        let elapsed = start.elapsed().as_secs_f64();
+        // Prevent the optimizer from eliding the build.
+        assert!(!index.is_empty(), "build must retain entries");
+        best = best.min(elapsed);
+    }
+    best
 }
 
 #[test]
@@ -76,8 +84,9 @@ fn index_build_is_not_quadratic() {
     let v1 = descending_entries(&table_id, N1);
     let v2 = descending_entries(&table_id, N2);
 
-    let t1 = time_build(v1);
-    let t2 = time_build(v2);
+    // Min-of-3 to filter transient scheduler stalls (loaded-box safe).
+    let t1 = time_build_min(&v1, 3);
+    let t2 = time_build_min(&v2, 3);
 
     // Guard against a degenerate near-zero t1 that would inflate the ratio into a
     // false RED on an absurdly fast machine: require a floor before dividing.
