@@ -423,6 +423,17 @@ pub fn in_flight_level(method: &str) -> i64 {
     IN_FLIGHT[method_index(method)].load(Ordering::Relaxed)
 }
 
+/// Read the process-wide `cqlite.rpc.phase.active` level for `method`, summed
+/// across all phases (issue #2370). Any in-flight RPC occupies exactly one phase,
+/// so the sum is that method's true in-flight count (the #2361 gauge as a LEVEL).
+pub fn phase_active_level(method: &str) -> i64 {
+    let midx = method_index(method);
+    let c = phase_active_counters();
+    (0..RPC_PHASES.len())
+        .map(|p| c[phase_active_index(midx, p)].load(Ordering::Relaxed))
+        .sum()
+}
+
 /// Record an RPC failure into the error-rate signal (`cqlite.errors.total`,
 /// subsystem `flight`), emit a `tracing` log line, and mark the active span
 /// errored.
