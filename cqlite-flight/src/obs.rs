@@ -233,19 +233,45 @@ impl PhaseTimer {
     /// bounded `FlightService` method set).
     pub fn start(method: &'static str) -> Self {
         let method = RPC_METHODS[method_index(method)];
-        Self {
+        let timer = Self {
             method,
             phase: PHASE_RESOLVE,
             started: Instant::now(),
             span: tracing::Span::current(),
-        }
+        };
+        // Issue #2361: mark the opening phase ACTIVE so a `do_get` that never
+        // completes a phase (a wedged merge in `stream`) is still visible as a
+        // level, not only via the completion-time duration histogram.
+        timer.set_active(1);
+        timer
     }
 
     /// Close the current phase (record its duration) and open `next`.
     pub fn transition(&mut self, next: &'static str) {
         self.record_current();
+        // Issue #2361: the closing phase is no longer active; the opening one is.
+        self.set_active(0);
         self.phase = phase_slot(next);
         self.started = Instant::now();
+        self.set_active(1);
+    }
+
+    /// Set the in-flight phase-active gauge (issue #2361) to `value` (1 = the
+    /// phase is currently executing, 0 = it has exited), tagged with the bounded
+    /// method + phase attributes.
+    fn set_active(&self, value: i64) {
+        let _entered = self.span.enter();
+        obs::record_gauge(
+            catalog::RPC_PHASE_ACTIVE,
+            value,
+            &[
+                method_attr(self.method),
+                (
+                    catalog::attr::RPC_PHASE,
+                    AttrValue::StaticStr(phase_slot(self.phase)),
+                ),
+            ],
+        );
     }
 
     /// Emit the histogram sample + span event for the phase currently open.
@@ -278,6 +304,8 @@ impl Drop for PhaseTimer {
         // AND an error/cancel/panic exit that never transitioned further, so a
         // stall that emits zero rows still records the phase it died in.
         self.record_current();
+        // Issue #2361: clear the in-flight phase-active gauge on every exit path.
+        self.set_active(0);
     }
 }
 

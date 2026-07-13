@@ -522,6 +522,18 @@ pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
 /// carries a ticket, key, token range, or query-text attribute.
 pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
 
+/// `cqlite.rpc.phase.active` — gauge `1` (issue #2361).
+///
+/// In-flight visibility of the phase a `do_get` is CURRENTLY executing, set to 1
+/// on phase entry and back to 0 on exit (via [`super::super`]'s `PhaseTimer`
+/// transition/`Drop`). [`RPC_PHASE_DURATION`] only records a sample once a phase
+/// COMPLETES, so a `do_get` wedged forever in `stream` (the #2361 hang: a merge
+/// that never returns a batch) recorded NOTHING — this gauge shows `stream = 1`
+/// for the entire hang, so a stall is observable BEFORE completion. Bounded
+/// attributes: [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed three-value
+/// set) — low cardinality (methods × 3 phases). NEVER a ticket/key/query value.
+pub const RPC_PHASE_ACTIVE: &str = "cqlite.rpc.phase.active";
+
 /// `cqlite.warm.cache.hits` — counter `{1}` (issue #2310).
 ///
 /// Flight warm-handle cache hits: a request whose probed SSTable generation set
@@ -604,6 +616,8 @@ pub const ALL_METRICS: &[&str] = &[
     RPC_BYTES,
     // In-progress read/query metrics (#2162)
     RPC_PHASE_DURATION,
+    // In-flight phase gauge (#2361)
+    RPC_PHASE_ACTIVE,
     // Flight warm-handle cache (#2310)
     WARM_CACHE_HITS,
     WARM_CACHE_MISSES,
@@ -674,6 +688,15 @@ mod tests {
         assert!(ALL_METRICS.contains(&RPC_PHASE_DURATION));
         assert!(RPC_PHASE_DURATION.starts_with("cqlite."));
         assert!(attr::RPC_PHASE.starts_with("cqlite."));
+    }
+
+    #[test]
+    fn rpc_phase_active_gauge_is_registered_and_namespaced() {
+        // Issue #2361: the in-flight phase gauge must be catalogued (so the
+        // registration/uniqueness checks cover it) and namespaced like the rest.
+        assert!(ALL_METRICS.contains(&RPC_PHASE_ACTIVE));
+        assert_eq!(RPC_PHASE_ACTIVE, "cqlite.rpc.phase.active");
+        assert!(RPC_PHASE_ACTIVE.starts_with("cqlite."));
     }
 
     #[test]
