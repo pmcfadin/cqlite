@@ -21,19 +21,45 @@ pub(crate) use super::header_helpers::{
     calculate_actual_header_size, extract_generation_from_path,
 };
 
+/// Resolve the `{table_name}-{uuid}` directory for a Data.db path.
+///
+/// Cassandra lays out SSTables as `.../{keyspace}/{table_name}-{uuid}/...-Data.db`.
+/// For a **snapshot**, the SSTable components live one extra level deep, under
+/// `.../{table_name}-{uuid}/snapshots/{snapshot_name}/...-Data.db` (see
+/// `Directories.SNAPSHOT_SUBDIR` in Cassandra's `Directories.java`). In that case
+/// the Data.db file's parent is the snapshot directory, whose parent is the literal
+/// `snapshots` directory, whose parent is the real `{table_name}-{uuid}` directory.
+///
+/// This is pure directory-segment structure (not a data/byte heuristic): we detect
+/// the fixed `snapshots/{snapshot_name}` layout and walk up past it so keyspace and
+/// table name resolve to the real values rather than `snapshots`/`{snapshot_name}`.
+fn resolve_table_dir(path: &Path) -> Option<&Path> {
+    // Parent of the Data.db file: `{table_name}-{uuid}` (normal) or
+    // `{snapshot_name}` (snapshot layout).
+    let parent = path.parent()?;
+
+    // Snapshot layout: parent's parent is the literal `snapshots` directory.
+    if let Some(maybe_snapshots) = parent.parent() {
+        if maybe_snapshots.file_name().and_then(|n| n.to_str()) == Some("snapshots") {
+            // Walk up past `snapshots` to the real `{table_name}-{uuid}` directory.
+            return maybe_snapshots.parent();
+        }
+    }
+
+    Some(parent)
+}
+
 /// Extract keyspace name from SSTable file path
 ///
 /// SSTable paths follow Cassandra convention:
 /// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
+/// (or, for snapshots, `.../{table_name}-{uuid}/snapshots/{snapshot}/nb-1-big-Data.db`).
 ///
-/// This function extracts the keyspace directory name (grandparent of the Data.db file).
+/// This function extracts the keyspace directory name (parent of the resolved
+/// `{table_name}-{uuid}` directory), and is snapshot-aware via [`resolve_table_dir`].
 fn extract_keyspace_from_path(path: &Path) -> String {
-    // Get parent directory containing table_name-uuid
-    path.parent()
-        .and_then(|table_dir| {
-            // Get keyspace directory (parent of table directory)
-            table_dir.parent()
-        })
+    resolve_table_dir(path)
+        .and_then(|table_dir| table_dir.parent())
         .and_then(|keyspace_dir| keyspace_dir.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
@@ -44,11 +70,13 @@ fn extract_keyspace_from_path(path: &Path) -> String {
 ///
 /// SSTable paths follow Cassandra convention:
 /// `/path/to/sstables/{keyspace}/{table_name}-{uuid}/nb-1-big-Data.db`
+/// (or, for snapshots, `.../{table_name}-{uuid}/snapshots/{snapshot}/nb-1-big-Data.db`).
 ///
-/// This function extracts the table name from the parent directory, stripping the UUID suffix.
+/// This function extracts the table name from the resolved `{table_name}-{uuid}`
+/// directory (snapshot-aware via [`resolve_table_dir`]), stripping the UUID suffix.
 /// Format: "table_name-uuid" → "table_name"
 fn extract_table_name_from_path(path: &Path) -> String {
-    path.parent()
+    resolve_table_dir(path)
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .and_then(|s| {
@@ -999,6 +1027,77 @@ mod tests {
             !is_collision,
             "V5_0ComplexTypes should not be flagged as collision"
         );
+    }
+
+    /// Normal (non-snapshot) path resolves keyspace + table correctly.
+    ///
+    /// `.../myks/mytable-<uuid32hex>/nb-2-big-Data.db` → keyspace=`myks`, table=`mytable`.
+    #[test]
+    fn test_extract_path_normal_layout() {
+        let path = Path::new(
+            "/var/lib/cassandra/data/myks/mytable-9f3a1c2d4e5f6071829304a5b6c7d8e9/nb-2-big-Data.db",
+        );
+        assert_eq!(extract_keyspace_from_path(path), "myks");
+        assert_eq!(extract_table_name_from_path(path), "mytable");
+    }
+
+    /// Snapshot path (issue #2384) must resolve to the REAL keyspace/table, not
+    /// `snapshots`/`{snapshot_name}`.
+    ///
+    /// `.../myks/mytable-<uuid>/snapshots/cqlite-<qid>/nb-2-big-Data.db`
+    /// → keyspace=`myks`, table=`mytable` (NOT `snapshots`/`cqlite`).
+    #[test]
+    fn test_extract_path_snapshot_layout() {
+        let path = Path::new(
+            "/var/lib/cassandra/data/myks/mytable-9f3a1c2d4e5f6071829304a5b6c7d8e9/\
+             snapshots/cqlite-3b1e7f90/nb-2-big-Data.db",
+        );
+        assert_eq!(
+            extract_keyspace_from_path(path),
+            "myks",
+            "snapshot path must not misparse keyspace as 'snapshots'"
+        );
+        assert_eq!(
+            extract_table_name_from_path(path),
+            "mytable",
+            "snapshot path must not misparse table as 'cqlite'"
+        );
+    }
+
+    /// Snapshot dir named something other than `cqlite-*` (e.g. a Cassandra
+    /// nodetool snapshot tag) still resolves the real keyspace/table.
+    #[test]
+    fn test_extract_path_snapshot_arbitrary_name() {
+        let path = Path::new(
+            "/data/analytics/events-0011223344556677889900aabbccddeeff/\
+             snapshots/pre-upgrade-2026/nb-5-big-Data.db",
+        );
+        assert_eq!(extract_keyspace_from_path(path), "analytics");
+        // Table name contains no hyphen after uuid strip → "events".
+        assert_eq!(extract_table_name_from_path(path), "events");
+    }
+
+    /// Deeper absolute nesting: the keyspace/table pair is resolved relative to
+    /// the SSTable dir regardless of how deep the data root is.
+    #[test]
+    fn test_extract_path_deep_nesting_normal() {
+        let path = Path::new(
+            "/mnt/disk3/cassandra/data/ks_ts/sensor-readings-abcdef0123456789abcdef0123456789/\
+             da-11-bti-Data.db",
+        );
+        assert_eq!(extract_keyspace_from_path(path), "ks_ts");
+        // Table name with an internal hyphen: only the trailing uuid is stripped.
+        assert_eq!(extract_table_name_from_path(path), "sensor-readings");
+    }
+
+    /// Malformed / too-shallow paths fall back to the "unknown" sentinel without
+    /// panicking (preserves prior no-error-path behaviour).
+    #[test]
+    fn test_extract_path_malformed_fallback() {
+        let path = Path::new("nb-1-big-Data.db");
+        assert_eq!(extract_keyspace_from_path(path), "unknown");
+        // No hyphen-then-suffix in the (missing) parent → "unknown".
+        assert_eq!(extract_table_name_from_path(path), "unknown");
     }
 
     /// Test that unrecognized bytes are not flagged as collisions.
