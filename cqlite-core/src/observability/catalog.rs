@@ -578,6 +578,48 @@ pub const WARM_CACHE_EVICTS: &str = "cqlite.warm.cache.evicts";
 /// retention in metrics alone (spec Requirement 6).
 pub const WARM_CACHE_REFRESH: &str = "cqlite.warm.cache.refresh";
 
+/// `cqlite.flight.admission.limit` — gauge `1` (issue #2420, WS4).
+///
+/// The configured `do_get` admission ceiling `K` (the `--max-concurrent-scans`
+/// value). A constant level while the server runs; recorded on startup so a
+/// dashboard can chart `in_use` against the limit. No attributes (bounded).
+/// DISTINCT from [`RPC_IN_FLIGHT`]: this is the CONFIGURED ceiling, not a live
+/// count.
+pub const FLIGHT_ADMISSION_LIMIT: &str = "cqlite.flight.admission.limit";
+
+/// `cqlite.flight.admission.in_use` — gauge `1` (issue #2420, WS4).
+///
+/// `do_get` admission permits currently held — the number of scans ADMITTED and
+/// in-flight (an up/down level like [`RPC_IN_FLIGHT`], but counting only admitted
+/// scans, not every accepted RPC incl. the ones parked waiting for a permit).
+/// Returns to zero when every admitted scan completes/cancels/disconnects (the
+/// RAII permit release). No attributes (bounded). DISTINCT from [`RPC_IN_FLIGHT`].
+pub const FLIGHT_ADMISSION_IN_USE: &str = "cqlite.flight.admission.in_use";
+
+/// `cqlite.flight.admission.waiting` — gauge `1` (issue #2420, WS4).
+///
+/// `do_get` requests currently parked on `acquire`, waiting for an admission
+/// permit to free within the permit-wait timeout. A non-zero value is the
+/// backpressure signal: offered concurrency has exceeded the ceiling and requests
+/// are queuing rather than degrading together. No attributes (bounded).
+pub const FLIGHT_ADMISSION_WAITING: &str = "cqlite.flight.admission.waiting";
+
+/// `cqlite.flight.admission.rejected_total` — counter `{1}` (issue #2420, WS4).
+///
+/// `do_get` requests rejected because no admission permit freed within the
+/// permit-wait timeout — each returned to the client as gRPC `UNAVAILABLE` (so the
+/// connector's #2241 replica-failover treats it as retry-safe), before any record
+/// batch was delivered. A monotonic total; scale-free. No attributes (bounded).
+pub const FLIGHT_ADMISSION_REJECTED_TOTAL: &str = "cqlite.flight.admission.rejected_total";
+
+/// `cqlite.flight.admission.wait_seconds` — histogram `s` (issue #2420, WS4).
+///
+/// Distribution of how long a `do_get` waited on `acquire` before it was admitted
+/// (a permit freed) OR rejected (the wait timeout elapsed). Localizes admission
+/// pressure: a rising tail means requests are increasingly queuing for permits.
+/// No attributes (bounded).
+pub const FLIGHT_ADMISSION_WAIT_SECONDS: &str = "cqlite.flight.admission.wait_seconds";
+
 /// All catalog metric names, for tests and registration sanity checks.
 pub const ALL_METRICS: &[&str] = &[
     READ_ROWS,
@@ -641,6 +683,12 @@ pub const ALL_METRICS: &[&str] = &[
     WARM_CACHE_MISSES,
     WARM_CACHE_EVICTS,
     WARM_CACHE_REFRESH,
+    // Flight do_get admission control (#2420, WS4)
+    FLIGHT_ADMISSION_LIMIT,
+    FLIGHT_ADMISSION_IN_USE,
+    FLIGHT_ADMISSION_WAITING,
+    FLIGHT_ADMISSION_REJECTED_TOTAL,
+    FLIGHT_ADMISSION_WAIT_SECONDS,
 ];
 
 #[cfg(test)]

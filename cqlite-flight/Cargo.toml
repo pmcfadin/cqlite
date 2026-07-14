@@ -78,6 +78,11 @@ dhat-heap = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `test-util` enables the paused/auto-advancing Tokio clock (`tokio::time::pause`)
+# so the #2420 admission-control tests drive the permit-wait timeout
+# deterministically (no wall-clock sleep). Dev-only: never compiled into the
+# production `cqlite-flight` binary.
+tokio = { workspace = true, features = ["test-util"] }
 # Criterion for the end-to-end `flight_do_get` throughput bench (issue #1494,
 # AD5). ADVISORY perf-gate entry — its wall time is Tokio-runtime + tonic-
 # transport dominated (the `write/ingest_wal_on` precedent), so it is reported

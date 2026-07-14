@@ -34,6 +34,7 @@ use tracing::Instrument;
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
 
+use crate::admission::{Admission, AdmissionConfig};
 use crate::cancel::CancelFlag;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, RpcMetrics};
@@ -208,17 +209,42 @@ pub struct CqliteFlightService {
     warm: Arc<WarmTableRegistry>,
     /// Cross-request schema-parse + directory-resolve caches (spec Req 8).
     caches: Arc<SetupCaches>,
+    /// `do_get` admission ceiling (issue #2420, WS4): bounds concurrently
+    /// admitted scans to a configured `K`, acquired before any SSTable open.
+    /// Shared (`Arc` inside [`Admission`]) across the `Clone`d per-RPC handles so
+    /// every request throttles against the same permit pool.
+    admission: Admission,
 }
 
 impl CqliteFlightService {
-    /// Create a service serving SSTables under `data_dir`.
+    /// Create a service serving SSTables under `data_dir`, with admission control
+    /// configured from the environment (see [`AdmissionConfig::from_env`]).
     pub fn new(data_dir: impl Into<PathBuf>, batch_size: usize) -> Self {
+        Self::with_admission(data_dir, batch_size, Admission::new(AdmissionConfig::from_env()))
+    }
+
+    /// Create a service with an explicit [`Admission`] ceiling — the wiring point
+    /// for the `--max-concurrent-scans` CLI knob (`main`) and the deterministic
+    /// admission tests (which supply a tiny `K` + injectable wait timeout).
+    pub fn with_admission(
+        data_dir: impl Into<PathBuf>,
+        batch_size: usize,
+        admission: Admission,
+    ) -> Self {
         Self {
             data_dir: data_dir.into(),
             batch_size: batch_size.max(1),
             warm: Arc::new(WarmTableRegistry::new()),
             caches: Arc::new(SetupCaches::default()),
+            admission,
         }
+    }
+
+    /// The service's admission ceiling (issue #2420) — for `main` (to log the
+    /// configured limit) and the admission tests (to hold permits / read the
+    /// counters).
+    pub fn admission(&self) -> &Admission {
+        &self.admission
     }
 
     /// A point-in-time read of the warm-cache counters (hit/miss/evict/
@@ -549,6 +575,19 @@ impl CqliteFlightService {
         // and the SAME flag hands off to the merge stage under a fresh guard
         // (`spawn_streaming`/`build_aggregate_response`) covering the stream's
         // lifetime, exactly as before this fix.
+        // Admission control (issue #2420, WS4): acquire a permit BEFORE any
+        // SSTable is opened or any batch produced, so `K` bounds concurrent scans
+        // ahead of blocking-pool/fd/memory pressure. On saturation this waits a
+        // bounded timeout, then sheds with `UNAVAILABLE` (retry-safe for the #2241
+        // connector failover) — never `RESOURCE_EXHAUSTED`, and always before the
+        // first batch. A request cancelled WHILE waiting drops this future and
+        // never acquires a permit. The returned permit is held for the scan's
+        // lifetime and moved into the response stream below (`admitted_stream`), so
+        // completion/disconnect/cancel all release it via one RAII drop.
+        let permit = match self.admission.acquire().await {
+            Ok(permit) => permit,
+            Err(status) => return Err((status, metrics)),
+        };
         let cancel = CancelFlag::new();
         let mut setup_guard = cancel.drop_guard();
         // Phase timing (issue #2162): begin in the `resolve` phase. The timer
@@ -575,15 +614,15 @@ impl CqliteFlightService {
             input,
         } = setup;
 
-        match input {
+        let stream: <Self as FlightService>::DoGetStream = match input {
             // Aggregate output is bounded (one row per group): keep materializing
             // and serve it as a stream, unchanged in content (issue #1476).
-            DoGetInput::Aggregate(paths) => Ok(Response::new(
+            DoGetInput::Aggregate(paths) => {
                 crate::streaming::build_aggregate_response(
                     producer, paths, schema_ref, metrics, cancel, timer,
                 )
-                .await?,
-            )),
+                .await?
+            }
             // Row/point path (issue #2310): drive the merge over the WARM,
             // already-open reader set. The merge runs on the blocking pool and
             // sends each batch into a bounded channel; peak resident payload is
@@ -601,9 +640,13 @@ impl CqliteFlightService {
                     cancel,
                     timer,
                 );
-                Ok(Response::new(stream))
+                stream
             }
-        }
+        };
+        // Hold the admission permit for the scan's lifetime: the wrapper is a
+        // transparent pass-through that drops the permit (releasing admission) when
+        // the stream completes or the client disconnects (issue #2420).
+        Ok(Response::new(crate::admission::admitted_stream(stream, permit)))
     }
 
     /// Eager, fallible `do_get` setup shared by the row and aggregate paths: parse

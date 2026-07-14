@@ -8,6 +8,7 @@
 //! See `docs/flight-trino/PLAN.md` for the full design and `JOURNAL.md` for the
 //! change log.
 
+pub mod admission;
 pub mod agg;
 pub mod cancel;
 pub mod filter;

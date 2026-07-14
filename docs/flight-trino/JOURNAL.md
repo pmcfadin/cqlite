@@ -351,3 +351,39 @@ Format:
     - `flight-trino-e2e.yml` — runs `e2e-test.sh` (both sides, full docker-compose integration) on PR/main.
 - **Artifacts published:** flight binary + GHCR container image (Rust side); Trino plugin dir (Java side).
 - **Next:** commit; push.
+
+## 2026-07-13 — do_get admission control (issue #2420, WS4)
+
+- **What:** Added an application-level admission ceiling on `do_get`. An owned
+  `tokio::sync::Semaphore` with `K` permits (`--max-concurrent-scans`, env
+  `CQLITE_MAX_CONCURRENT_SCANS`, default **64**) gates entry to the merge: a
+  request acquires a permit BEFORE any SSTable is opened or any batch produced,
+  holds it (RAII, moved into the response stream) for the scan's lifetime, and
+  releases it on completion/disconnect/cancel. On saturation a request waits up to
+  `--admission-wait-timeout-ms` (env `CQLITE_ADMISSION_WAIT_TIMEOUT_MS`, default
+  30000); if no permit frees it is shed with gRPC **`UNAVAILABLE`** (never
+  `RESOURCE_EXHAUSTED`) BEFORE any batch. A coarse tonic `max_concurrent_streams`
+  (≥ `max(K·4, 1024)`) backstops the HTTP/2 accept loop — the Semaphore, not the
+  transport cap, is the real throttle. New `cqlite.flight.admission.*` instruments
+  (limit/in_use/waiting/rejected_total/wait_seconds), distinct from
+  `cqlite.rpc.in_flight`.
+- **Overload contract:** short bursts under the wait budget are absorbed
+  transparently (no client-visible error, no connector change); sustained overload
+  sheds to another replica via the connector's #2241 `ReplicaFailoverStream`
+  (retry-safe: the reject provably precedes the first batch, and failover triggers
+  ONLY on `UNAVAILABLE`); only when EVERY replica saturates does the query fail
+  loudly. Admission is transparent to results — byte-identical rows/order/schema/
+  batch boundaries.
+- **Default `K` sizing:** from the binding constraints, NOT `num_cpus`: blocking
+  pool 512 ÷ ~2 threads/scan ≈ 256 ceiling; fd ~1024 ÷ M SSTables. 64 sits well
+  below both. Conservative pending WS1-ramp (WS8) validation before the default is
+  locked.
+- **Files:** `cqlite-flight/src/admission.rs` (+ `admission_tests.rs`),
+  `service.rs` (acquire before setup; permit into the response stream),
+  `main.rs` (CLI/env knobs + `max_concurrent_streams`), `lib.rs`, `Cargo.toml`
+  (dev `tokio` `test-util`); `cqlite-core/.../observability/catalog.rs` (5
+  instruments).
+- **Verified:** 11 deterministic tests (paused Tokio clock, injected barriers —
+  no wall-clock) covering all 6 spec requirements; the excess-do_get gate reds when
+  the acquire-before-setup wiring is removed (setup `resolves` counter jumps).
+- **Next:** WS1-ramp validation of the default `K` (WS8); record on #2420.
