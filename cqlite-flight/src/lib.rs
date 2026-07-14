@@ -16,6 +16,7 @@ pub mod pathsafe;
 pub mod point_read;
 pub mod producer;
 mod producer_point;
+mod producer_stream;
 mod producer_warm;
 pub mod scan_progress;
 pub mod service;

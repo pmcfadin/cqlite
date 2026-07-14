@@ -324,8 +324,8 @@ pub struct MergeProducer {
     // can live in the sibling `producer_point` module (campsite rule: producer.rs
     // is over the file-size threshold, epic #1116).
     pub(crate) schema: TableSchema,
-    columns: Vec<ColumnInfo>,
-    batch_size: usize,
+    pub(crate) columns: Vec<ColumnInfo>,
+    pub(crate) batch_size: usize,
     pub(crate) spec: ScanSpec,
     /// Aggregation pushdown plan (issue #841). When `Some`, the producer emits
     /// PARTIAL aggregate rows under [`Self::partial_columns`] instead of full
@@ -622,7 +622,7 @@ impl MergeProducer {
         let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
             .map_err(ProducerError::Merge)?;
         on_merger_built();
-        self.drive_merge(
+        self.drive_merge_over(
             &mut merger,
             cancel,
             sink,
@@ -964,7 +964,7 @@ impl MergeProducer {
     /// corruption (e.g. a map key whose `cell_path` bytes do not decode under the
     /// declared key type). Such a failure is propagated as a `Merge` error rather
     /// than silently dropping the row (issue #2324, no-heuristics / no-silent-loss).
-    fn entry_to_row(
+    pub(crate) fn entry_to_row(
         &self,
         partition_key: &[u8],
         row_data: RowData,
@@ -1017,7 +1017,7 @@ impl MergeProducer {
     /// [`assemble_read_cells`] to scope the composite-keyed-collection fail-closed
     /// error (#2339) to columns a query projects/references (issue #2324, roborev
     /// 1633) and to skip reassembling collections the query never emits.
-    fn assemble_columns(&self) -> Option<std::collections::HashSet<String>> {
+    pub(crate) fn assemble_columns(&self) -> Option<std::collections::HashSet<String>> {
         use std::collections::HashSet;
         match &self.agg {
             // Aggregation: the reassembled row feeds ONLY the aggregation (group-by
