@@ -568,3 +568,43 @@ Format:
   before ticket parse), `admission_tests.rs`, `tests/metrics_capture_test.rs`
   (Stage 5 + closed-set update), `cqlite-core/.../observability/catalog.rs`
   (doc updates for the 5-phase set).
+
+## 2026-07-13 — admission-control roborev round 8 (job 1703)
+
+- **What:** `Admission::unconstrained()` (used by `CqliteFlightService::new`,
+  the library-embedding constructor) represented "no timeout" as
+  `wait_timeout: Duration::MAX` flowing through `tokio::time::timeout` — an
+  overflow/panic hazard in library code (`timeout()` computes `Instant::now() +
+  duration` internally). Fixed by introducing an explicit `WaitBudget` enum
+  (`Unbounded` | `Timeout(Duration)`) replacing the bare `Duration` field on
+  `AdmissionConfig`/the internal `AdmissionInner`. `Admission::acquire`'s slow
+  path now branches: `Timeout(d)` keeps the existing `tokio::time::timeout(d,
+  ...)` wrapper; `Unbounded` awaits `acquire_owned()` DIRECTLY with no
+  `timeout()` wrapper at all — no deadline computed, so nothing can overflow. A
+  small `SlowAcquireOutcome` enum (`Admitted`/`Closed`/`TimedOut`) unifies the
+  two arms' await results into one post-await `match` so the gauge/counter
+  bookkeeping (unchanged from round 7's ordering fix) is written exactly once.
+  `Admission::wait_timeout() -> Duration` renamed to `wait_budget() ->
+  WaitBudget` (no callers existed). Clamp/knob semantics (the `[1,
+  Semaphore::MAX_PERMITS]` ceiling clamp, the CLI/env `--admission-wait-
+  timeout-ms` knob) are unchanged — `main.rs` now constructs
+  `WaitBudget::Timeout(Duration::from_millis(...))` explicitly.
+- **Test:** `req4_unbounded_wait_budget_never_times_out_even_under_extreme_advance`
+  — a saturated `Unbounded` admission parks a waiter, then the paused Tokio
+  clock is advanced by `u32::MAX` seconds (`tokio::time::advance`, far beyond
+  any real timeout budget this crate configures); the test process does not
+  panic, the waiter stays `Pending` (never spuriously times out — there is no
+  timeout arm to fire), and `rejected_total` stays 0. Releasing the held permit
+  then admits the waiter normally, proving `Unbounded` still resolves correctly
+  via a genuine permit free (the ONLY way it resolves).
+- **Verified:** admission target 19/19 (was 18), stable across 3 repeated runs;
+  `metrics_capture_test` still passes; full 255-test lib suite passes; clippy
+  clean; red-on-main re-confirmed (still 6 tests red).
+- **Ops note:** the shared machine's disk hit 100% capacity (119Mi free)
+  mid-round, failing the first rebuild with `No space left on device`; freed
+  ~5.8Gi by removing this worktree's own stale `target/debug/incremental`
+  (5.7G) — did not touch any other worktree's `target/` (shared box, #2412
+  co-resident).
+- **Files:** `cqlite-flight/src/admission.rs` (`WaitBudget` enum,
+  `SlowAcquireOutcome`), `admission_tests.rs` (`cfg()` + new test),
+  `main.rs` (explicit `WaitBudget::Timeout` construction).

@@ -9,7 +9,7 @@ use clap::Parser;
 use tonic::transport::Server;
 
 use cqlite_flight::admission::{
-    Admission, AdmissionConfig, DEFAULT_MAX_CONCURRENT_SCANS, DEFAULT_WAIT_TIMEOUT_MS,
+    Admission, AdmissionConfig, WaitBudget, DEFAULT_MAX_CONCURRENT_SCANS, DEFAULT_WAIT_TIMEOUT_MS,
     ENV_MAX_CONCURRENT_SCANS, ENV_WAIT_TIMEOUT_MS,
 };
 use cqlite_flight::service::CqliteFlightService;
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // observable, cancel-releasable ceiling.
     let admission = Admission::new(AdmissionConfig {
         max_concurrent_scans: args.max_concurrent_scans,
-        wait_timeout: Duration::from_millis(args.admission_wait_timeout_ms),
+        wait_budget: WaitBudget::Timeout(Duration::from_millis(args.admission_wait_timeout_ms)),
     });
     let admission_limit = admission.limit();
     let service = CqliteFlightService::with_admission(args.data_dir, args.batch_size, admission);

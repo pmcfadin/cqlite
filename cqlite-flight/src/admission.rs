@@ -53,7 +53,37 @@ pub const ENV_MAX_CONCURRENT_SCANS: &str = "CQLITE_MAX_CONCURRENT_SCANS";
 /// Environment variable backing `--admission-wait-timeout-ms`.
 pub const ENV_WAIT_TIMEOUT_MS: &str = "CQLITE_ADMISSION_WAIT_TIMEOUT_MS";
 
-/// Configuration for [`Admission`]: the ceiling and the permit-wait timeout. Both
+/// The permit-wait budget: how long a saturated `do_get` may wait for an
+/// admission permit before it is rejected with `UNAVAILABLE`.
+///
+/// Deliberately NOT represented as a bare `Duration` with a `Duration::MAX`
+/// sentinel for "unbounded" (roborev-1703): `tokio::time::timeout` computes an
+/// absolute deadline (`Instant::now() + duration`) internally, and
+/// `Instant::now() + Duration::MAX` is an overflow/panic hazard that must never
+/// depend on how far in the future "now" happens to be — library code must
+/// never carry that hazard, even latently. [`WaitBudget::Unbounded`] instead
+/// skips the `timeout()` wrapper entirely in [`Admission::acquire`], awaiting
+/// `acquire_owned()` directly — no deadline math at all, so there is nothing to
+/// overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitBudget {
+    /// Wait as long as it takes for a permit to free (or the semaphore to
+    /// close, on shutdown). Used by [`Admission::unconstrained`] — a caller
+    /// that never opted into a configured ceiling gets a `do_get` that never
+    /// sheds on a wait timeout (the semaphore is effectively uncontended at
+    /// [`Semaphore::MAX_PERMITS`] anyway).
+    Unbounded,
+    /// Wait up to `Duration`, then reject with `UNAVAILABLE`.
+    Timeout(Duration),
+}
+
+impl From<Duration> for WaitBudget {
+    fn from(d: Duration) -> Self {
+        WaitBudget::Timeout(d)
+    }
+}
+
+/// Configuration for [`Admission`]: the ceiling and the permit-wait budget. Both
 /// are real, wired knobs (CLI flag + env; see [`crate`]'s `main`).
 #[derive(Debug, Clone, Copy)]
 pub struct AdmissionConfig {
@@ -61,16 +91,17 @@ pub struct AdmissionConfig {
     /// `do_get` scans. Clamped to a minimum of 1 by [`Admission::new`].
     pub max_concurrent_scans: usize,
     /// How long a request waits on `acquire` for a permit before it is rejected
-    /// with `UNAVAILABLE`. Injectable so tests drive it deterministically under a
+    /// with `UNAVAILABLE` — see [`WaitBudget`] for why this is an enum, not a
+    /// bare `Duration`. Injectable so tests drive it deterministically under a
     /// paused Tokio clock (no wall-clock sleep).
-    pub wait_timeout: Duration,
+    pub wait_budget: WaitBudget,
 }
 
 impl Default for AdmissionConfig {
     fn default() -> Self {
         Self {
             max_concurrent_scans: DEFAULT_MAX_CONCURRENT_SCANS,
-            wait_timeout: Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
+            wait_budget: WaitBudget::Timeout(Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS)),
         }
     }
 }
@@ -93,7 +124,7 @@ impl AdmissionConfig {
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
         {
-            cfg.wait_timeout = Duration::from_millis(ms);
+            cfg.wait_budget = WaitBudget::Timeout(Duration::from_millis(ms));
         }
         cfg
     }
@@ -125,7 +156,7 @@ struct AdmissionInner {
     /// hand out `'static` [`OwnedSemaphorePermit`]s moved into response streams.
     sem: Arc<Semaphore>,
     limit: usize,
-    wait_timeout: Duration,
+    wait_budget: WaitBudget,
     in_use: AtomicI64,
     waiting: AtomicI64,
     rejected: AtomicU64,
@@ -178,7 +209,7 @@ impl Admission {
             inner: Arc::new(AdmissionInner {
                 sem: Arc::new(Semaphore::new(limit)),
                 limit,
-                wait_timeout: config.wait_timeout,
+                wait_budget: config.wait_budget,
                 in_use: AtomicI64::new(0),
                 waiting: AtomicI64::new(0),
                 rejected: AtomicU64::new(0),
@@ -188,9 +219,10 @@ impl Admission {
     }
 
     /// An admission ceiling that is, for all practical purposes, unconstrained
-    /// (issue #2420, roborev-1699): `Semaphore::MAX_PERMITS` permits and an
-    /// effectively-infinite wait timeout, so this can never meaningfully gate a
-    /// `do_get`. This is what
+    /// (issue #2420, roborev-1699): `Semaphore::MAX_PERMITS` permits and
+    /// [`WaitBudget::Unbounded`] (never a `Duration::MAX` sentinel — see
+    /// [`WaitBudget`]'s doc for why that would be an overflow hazard), so this
+    /// can never meaningfully gate a `do_get`. This is what
     /// [`crate::service::CqliteFlightService::new`] uses so a library caller
     /// embedding `cqlite-flight` keeps EXACTLY today's (pre-#2420) behavior — no
     /// environment read, no ceiling on concurrent scans. Admission becomes a
@@ -200,7 +232,7 @@ impl Admission {
     pub fn unconstrained() -> Self {
         Self::new(AdmissionConfig {
             max_concurrent_scans: Semaphore::MAX_PERMITS,
-            wait_timeout: Duration::MAX,
+            wait_budget: WaitBudget::Unbounded,
         })
     }
 
@@ -209,9 +241,9 @@ impl Admission {
         self.inner.limit
     }
 
-    /// The configured permit-wait timeout.
-    pub fn wait_timeout(&self) -> Duration {
-        self.inner.wait_timeout
+    /// The configured permit-wait budget.
+    pub fn wait_budget(&self) -> WaitBudget {
+        self.inner.wait_budget
     }
 
     /// A point-in-time read of the admission counters.
@@ -225,8 +257,8 @@ impl Admission {
         }
     }
 
-    /// Acquire an admission permit, waiting up to [`AdmissionConfig::wait_timeout`]
-    /// only if the ceiling is currently saturated.
+    /// Acquire an admission permit, waiting up to the configured
+    /// [`WaitBudget`] only if the ceiling is currently saturated.
     ///
     /// **Fast path (roborev-1696):** an UNCONTENDED acquire (a permit is
     /// immediately available) is served by [`Semaphore::try_acquire_owned`] and
@@ -240,18 +272,22 @@ impl Admission {
     /// non-events.
     ///
     /// **Slow path:** only entered on [`tokio::sync::TryAcquireError::NoPermits`]
-    /// — the ceiling is saturated. Bumps `waiting`, then waits up to the
-    /// configured timeout. On success returns an [`AdmissionPermit`] RAII guard
-    /// that holds the semaphore permit AND the `in_use` gauge until dropped
-    /// (moved into the response stream so every exit path — completion,
-    /// disconnect, cancel — releases it) and records the genuine wait sample. On
-    /// timeout returns a gRPC **`UNAVAILABLE`** [`Status`] (never
-    /// `RESOURCE_EXHAUSTED`) and increments `rejected_total`.
+    /// — the ceiling is saturated. Bumps `waiting`, then waits per the configured
+    /// [`WaitBudget`] — [`WaitBudget::Timeout`] wraps the acquire in
+    /// `tokio::time::timeout`; [`WaitBudget::Unbounded`] (roborev-1703) awaits
+    /// `acquire_owned` DIRECTLY, with no `timeout()` wrapper and therefore no
+    /// deadline computation to overflow. On success returns an
+    /// [`AdmissionPermit`] RAII guard that holds the semaphore permit AND the
+    /// `in_use` gauge until dropped (moved into the response stream so every
+    /// exit path — completion, disconnect, cancel — releases it) and records the
+    /// genuine wait sample. On a `Timeout` budget's deadline elapsing, returns a
+    /// gRPC **`UNAVAILABLE`** [`Status`] (never `RESOURCE_EXHAUSTED`) and
+    /// increments `rejected_total`; `Unbounded` can never take this arm.
     ///
     /// A request whose future is dropped while WAITING (client disconnect before
     /// admission) never acquires a permit and its `waiting` count is released by
     /// the [`WaitGuard`] drop — no leak on either the wait or the hold path. The
-    /// semaphore is only ever closed on shutdown; both paths map a closed
+    /// semaphore is only ever closed on shutdown; both budgets map a closed
     /// semaphore to the same retry-safe `UNAVAILABLE` shed.
     pub async fn acquire(&self) -> Result<AdmissionPermit, Status> {
         let inner = Arc::clone(&self.inner);
@@ -273,7 +309,21 @@ impl Admission {
         let waiter = WaitGuard::enter(Arc::clone(&inner));
         let started = tokio::time::Instant::now();
         let sem = Arc::clone(&inner.sem);
-        let result = tokio::time::timeout(inner.wait_timeout, sem.acquire_owned()).await;
+        // roborev-1703: NO `Duration::MAX` sentinel anywhere. `Unbounded` awaits
+        // `acquire_owned` with no `timeout()` wrapper at all — no deadline
+        // computed, so nothing can overflow. Only `Timeout(d)` computes a
+        // (bounded, caller-supplied) deadline.
+        let outcome = match inner.wait_budget {
+            WaitBudget::Unbounded => match sem.acquire_owned().await {
+                Ok(permit) => SlowAcquireOutcome::Admitted(permit),
+                Err(_closed) => SlowAcquireOutcome::Closed,
+            },
+            WaitBudget::Timeout(d) => match tokio::time::timeout(d, sem.acquire_owned()).await {
+                Ok(Ok(permit)) => SlowAcquireOutcome::Admitted(permit),
+                Ok(Err(_closed)) => SlowAcquireOutcome::Closed,
+                Err(_elapsed) => SlowAcquireOutcome::TimedOut,
+            },
+        };
         // roborev-1700 (same gauge-accuracy class as roborev-1696): drop the
         // waiter THE INSTANT the future resolves — before recording the wait
         // sample or constructing the `AdmissionPermit` (which bumps `in_use`) —
@@ -282,13 +332,13 @@ impl Admission {
         // outlive `AdmissionPermit::new` below, overlapping both gauges for the
         // span of that call.
         drop(waiter);
-        match result {
-            Ok(Ok(permit)) => {
+        match outcome {
+            SlowAcquireOutcome::Admitted(permit) => {
                 inner.record_wait(started.elapsed());
                 Ok(AdmissionPermit::new(permit, inner))
             }
-            Ok(Err(_closed)) => Err(reject_status()),
-            Err(_elapsed) => {
+            SlowAcquireOutcome::Closed => Err(reject_status()),
+            SlowAcquireOutcome::TimedOut => {
                 inner.record_wait(started.elapsed());
                 inner.rejected.fetch_add(1, Ordering::Relaxed);
                 obs::add_counter(catalog::FLIGHT_ADMISSION_REJECTED_TOTAL, 1, &[]);
@@ -296,6 +346,16 @@ impl Admission {
             }
         }
     }
+}
+
+/// The three outcomes of the slow-path acquire (roborev-1703): unifies the
+/// `WaitBudget::Unbounded` (no timeout wrapper — cannot time out) and
+/// `WaitBudget::Timeout` (may time out) arms into one `match` below, so the
+/// gauge/counter bookkeeping after the await is written exactly once.
+enum SlowAcquireOutcome {
+    Admitted(OwnedSemaphorePermit),
+    Closed,
+    TimedOut,
 }
 
 /// The rejection status returned when no permit frees within the wait timeout.

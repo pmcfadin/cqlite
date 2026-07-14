@@ -36,7 +36,7 @@ use arrow_flight::Ticket;
 use futures::StreamExt;
 use tonic::{Code, Request};
 
-use crate::admission::{Admission, AdmissionConfig};
+use crate::admission::{Admission, AdmissionConfig, WaitBudget};
 use crate::service::CqliteFlightService;
 use crate::testutil::{build_sstables, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL};
 use crate::ticket::FlightTicket;
@@ -47,7 +47,7 @@ use cqlite_core::observability::catalog;
 fn cfg(k: usize, timeout: Duration) -> AdmissionConfig {
     AdmissionConfig {
         max_concurrent_scans: k,
-        wait_timeout: timeout,
+        wait_budget: WaitBudget::Timeout(timeout),
     }
 }
 
@@ -623,6 +623,58 @@ fn req4_permit_wait_timeout_is_wired() {
         long > short,
         "a longer configured budget yields a later reject point"
     );
+}
+
+/// roborev-1703: `WaitBudget::Unbounded` (used by [`Admission::unconstrained`])
+/// must never compute a deadline — `acquire` awaits `acquire_owned` directly
+/// with NO `timeout()` wrapper, so there is no `Instant::now() + Duration::MAX`
+/// overflow hazard. Proven two ways in one deterministic test: (1) the paused
+/// clock is advanced ARBITRARILY far (far beyond any real timeout budget) while
+/// a request is genuinely contended on an `Unbounded` admission, and the test
+/// process never panics/aborts — the overflow hazard this fix removes would
+/// have panicked inside `tokio::time::timeout`'s internal deadline math; (2)
+/// once a permit frees, the waiting request is admitted (never spuriously
+/// rejected — `Unbounded` has no timeout arm to spuriously fire).
+#[test]
+fn req4_unbounded_wait_budget_never_times_out_even_under_extreme_advance() {
+    block_on_paused(async {
+        let adm = Admission::new(AdmissionConfig {
+            max_concurrent_scans: 1,
+            wait_budget: WaitBudget::Unbounded,
+        });
+        let held = adm.acquire().await.unwrap(); // occupy the only permit
+
+        let mut waiter = Box::pin(adm.acquire());
+        assert!(
+            matches!(futures::poll!(waiter.as_mut()), Poll::Pending),
+            "a saturated Unbounded acquire parks, same as a Timeout budget would"
+        );
+        assert_eq!(adm.snapshot().waiting, 1);
+
+        // Advance the paused clock ARBITRARILY far — far beyond any real
+        // wait-timeout budget this crate configures. An `Unbounded` acquire has
+        // NO deadline to elapse, so this must not panic (the overflow hazard a
+        // `Duration::MAX` sentinel would carry) and must NOT admit/reject the
+        // still-parked waiter on its own.
+        tokio::time::advance(Duration::from_secs(u32::MAX as u64)).await;
+        assert!(
+            matches!(futures::poll!(waiter.as_mut()), Poll::Pending),
+            "advancing the clock arbitrarily far must never time out an \
+             Unbounded acquire — it stays parked until a permit genuinely frees"
+        );
+        assert_eq!(
+            adm.snapshot().rejected_total,
+            0,
+            "Unbounded never rejects on a clock advance — there is no timeout arm"
+        );
+
+        drop(held); // the only way an Unbounded acquire is ever resolved: a free permit
+        match futures::poll!(waiter.as_mut()) {
+            Poll::Ready(Ok(permit)) => drop(permit),
+            other => panic!("Unbounded acquire must admit once a permit frees, got {other:?}"),
+        }
+        assert_eq!(adm.snapshot().waiting, 0);
+    });
 }
 
 // ---- Requirement 5: admission state is exported as observability instruments ----
