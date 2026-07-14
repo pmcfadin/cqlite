@@ -180,36 +180,68 @@ impl Drop for RpcMetrics {
     }
 }
 
-/// `do_get` execution phases (issue #2162), a fixed, bounded, ordered set. Used
-/// as the `cqlite.rpc.phase` attribute value on `cqlite.rpc.phase.duration`; the
-/// values are `&'static str` from this closed table so metric cardinality is
-/// capped exactly like [`RPC_METHODS`] — never a per-query/ticket/key value.
+/// `do_get` execution phases (issue #2162; `admission` added #2420
+/// roborev-1700; `validate` added #2420 roborev-1702), a fixed, bounded,
+/// ordered set. Used as the `cqlite.rpc.phase` attribute value on
+/// `cqlite.rpc.phase.duration`; the values are `&'static str` from this closed
+/// table so metric cardinality is capped exactly like [`RPC_METHODS`] — never a
+/// per-query/ticket/key value.
 ///
-/// - `resolve`: path discovery + token prune (`do_get_setup`).
+/// - `validate`: parsing the ticket bytes (`FlightTicket::from_bytes`) — cheap,
+///   filesystem-free syntax validation, BEFORE the admission-permit acquire. On
+///   `main` (pre-#2420) this same failure mode recorded a `resolve`-phase
+///   sample (the timer was already open in `resolve` when ticket-parsing failed
+///   inside the old `do_get_setup`); `validate` gives it a precise label of its
+///   own instead of folding it into `resolve`'s meaning, while preserving the
+///   invariant that a malformed ticket still records SOME phase sample (never
+///   silently drops phase visibility relative to pre-#2420 behavior).
+/// - `admission`: queued waiting for (or immediately granted) an admission
+///   permit (issue #2420), AFTER validation passes but BEFORE any producer/
+///   schema construction or filesystem access begins. `cqlite.rpc.duration`
+///   already includes this wait in the RPC total, but the per-phase breakdown
+///   is what field triage uses to localize latency (e.g. #2398) — without this
+///   phase, admission queueing time was invisible here even though it
+///   dominates the RPC under saturation.
+/// - `resolve`: producer/schema construction + path discovery/token prune
+///   (`do_get_resolve`).
 /// - `merge_setup`: opening every input SSTable + building the k-way merger
 ///   (`KWayMerger::new`, the #2157 stall suspect) before the first batch.
 /// - `stream`: partitions stepping + batches flowing to the client.
+pub const PHASE_VALIDATE: &str = "validate";
+/// See [`PHASE_VALIDATE`].
+pub const PHASE_ADMISSION: &str = "admission";
+/// See [`PHASE_VALIDATE`].
 pub const PHASE_RESOLVE: &str = "resolve";
-/// See [`PHASE_RESOLVE`].
+/// See [`PHASE_VALIDATE`].
 pub const PHASE_MERGE_SETUP: &str = "merge_setup";
-/// See [`PHASE_RESOLVE`].
+/// See [`PHASE_VALIDATE`].
 pub const PHASE_STREAM: &str = "stream";
 
 /// The closed set of `do_get` phase labels, in transition order.
-const RPC_PHASES: [&str; 3] = [PHASE_RESOLVE, PHASE_MERGE_SETUP, PHASE_STREAM];
+const RPC_PHASES: [&str; 5] = [
+    PHASE_VALIDATE,
+    PHASE_ADMISSION,
+    PHASE_RESOLVE,
+    PHASE_MERGE_SETUP,
+    PHASE_STREAM,
+];
 
 /// Normalise a phase label to its bounded slot, so an unexpected value can never
-/// leak as a metric attribute (it maps to `resolve`, never an arbitrary string).
+/// leak as a metric attribute (it maps to [`RPC_PHASES`]'s first entry, never an
+/// arbitrary string — derived from the table, not a separately hardcoded label,
+/// so it can never silently drift from [`phase_index`]'s matching `unwrap_or(0)`
+/// fallback).
 fn phase_slot(phase: &str) -> &'static str {
     RPC_PHASES
         .iter()
         .find(|p| **p == phase)
         .copied()
-        .unwrap_or(PHASE_RESOLVE)
+        .unwrap_or(RPC_PHASES[0])
 }
 
 /// Resolve a phase label to its index in [`RPC_PHASES`]. Unknown values map to
-/// index 0 (`resolve`), mirroring [`phase_slot`]'s fallback — never panics.
+/// index 0 (`validate`, [`RPC_PHASES`]'s first entry), mirroring
+/// [`phase_slot`]'s fallback — never panics.
 fn phase_index(phase: &str) -> usize {
     RPC_PHASES.iter().position(|p| *p == phase).unwrap_or(0)
 }
@@ -236,14 +268,26 @@ fn phase_active_counters() -> &'static [AtomicI64] {
 }
 
 /// Records the wall time a `do_get` spends in each bounded execution phase
-/// (issue #2162): `resolve` → `merge_setup` → `stream`.
+/// (issue #2162, `admission` phase added #2420 roborev-1700, `validate` phase
+/// added #2420 roborev-1702): `validate` → `admission` → `resolve` →
+/// `merge_setup` → `stream`.
 ///
-/// Constructed at `do_get` entry (phase `resolve`). [`Self::transition`] closes
-/// the current phase — emitting a `cqlite.rpc.phase.duration` histogram sample
-/// tagged with the bounded `cqlite.rpc.phase` attribute plus a `tracing` span
-/// event — and opens the next. [`Drop`] closes whichever phase is still open, so
-/// EVERY entered phase records exactly one sample even on an error/cancel/panic
-/// exit, and a phase never entered records none (never a fabricated zero).
+/// Constructed at `do_get` entry, BEFORE the ticket is even parsed (phase
+/// `validate`) — so a syntactically malformed ticket still records a phase
+/// sample (matching `main`'s pre-#2420 behavior, which recorded a `resolve`
+/// sample for this same failure mode; `validate` now gives it a precise label
+/// instead), and a request queued behind a saturated admission ceiling shows
+/// that wait in the per-phase breakdown, not silently folded into `resolve` or
+/// invisible entirely (RPC_DURATION already includes both in the RPC total,
+/// but the per-phase view is what field triage localizes latency with, e.g.
+/// #2398). [`Self::transition`] closes the current phase — emitting a
+/// `cqlite.rpc.phase.duration` histogram sample tagged with the bounded
+/// `cqlite.rpc.phase` attribute plus a `tracing` span event — and opens the
+/// next. [`Drop`] closes whichever phase is still open, so EVERY entered phase
+/// records exactly one sample even on an error/cancel/panic exit (including a
+/// ticket-validation failure, which never transitions past `validate`, or an
+/// admission timeout/reject, which never transitions past `admission`), and a
+/// phase never entered records none (never a fabricated zero).
 ///
 /// The recorder captures the `do_get` span at construction and re-enters it
 /// around each emission, so the span events attach to the `flight.do_get` span
@@ -257,13 +301,15 @@ pub struct PhaseTimer {
 }
 
 impl PhaseTimer {
-    /// Begin timing at the `resolve` phase for `method` (a `&'static str` from the
-    /// bounded `FlightService` method set).
+    /// Begin timing at the `validate` phase for `method` (a `&'static str` from
+    /// the bounded `FlightService` method set) — see the type doc for why
+    /// ticket validation must be the FIRST phase, not folded into `resolve` (or
+    /// skipped entirely).
     pub fn start(method: &'static str) -> Self {
         let method = RPC_METHODS[method_index(method)];
         let timer = Self {
             method,
-            phase: PHASE_RESOLVE,
+            phase: PHASE_VALIDATE,
             started: Instant::now(),
             span: tracing::Span::current(),
         };
@@ -432,6 +478,27 @@ pub fn phase_active_level(method: &str) -> i64 {
     (0..RPC_PHASES.len())
         .map(|p| c[phase_active_index(midx, p)].load(Ordering::Relaxed))
         .sum()
+}
+
+/// Read the process-wide `cqlite.rpc.phase.active` level for a SPECIFIC
+/// `(method, phase)` pair (issue #2420 roborev-1700) — isolates one phase's
+/// count, unlike [`phase_active_level`] (which sums across all phases). Used to
+/// pin that a `do_get` queued behind a saturated admission ceiling occupies the
+/// `admission` phase specifically (queue time visible in the phase breakdown,
+/// not folded into `resolve`). The underlying atomic is maintained regardless of
+/// the `observability` OTel feature (only the OTel emission itself is gated), so
+/// this is a feature-independent pin, mirroring [`phase_active_level`]. Unknown
+/// method/phase values normalise to their bounded slot (never panics), matching
+/// [`phase_slot`]/[`method_index`].
+///
+/// `#[cfg(test)]`-only (unlike the fully-`pub` [`phase_active_level`], which an
+/// EXTERNAL integration test binary also needs): this helper is consumed only by
+/// in-crate unit tests (`admission_tests.rs`), so it would otherwise be flagged
+/// dead code in a non-test build.
+#[cfg(test)]
+pub(crate) fn phase_active_level_for(method: &str, phase: &str) -> i64 {
+    let idx = phase_active_index(method_index(method), phase_index(phase));
+    phase_active_counters()[idx].load(Ordering::Relaxed)
 }
 
 /// Record an RPC failure into the error-rate signal (`cqlite.errors.total`,
@@ -629,8 +696,9 @@ mod tests {
     #[test]
     fn phase_active_counter_reflects_concurrent_overlap_not_a_flag() {
         // Dedicated method slot so no other test's PhaseTimer perturbs the count.
+        // `PhaseTimer::start` opens `PHASE_VALIDATE` (issue #2420 roborev-1702).
         let midx = method_index("list_actions");
-        let pidx = phase_index(PHASE_RESOLVE);
+        let pidx = phase_index(PHASE_VALIDATE);
         let idx = phase_active_index(midx, pidx);
         let base = phase_active_counters()[idx].load(Ordering::Relaxed);
 
@@ -672,8 +740,10 @@ mod tests {
     /// leaking a stale increment on the old phase (issue #2361).
     #[test]
     fn phase_active_counter_moves_on_transition() {
+        // `PhaseTimer::start` opens `PHASE_VALIDATE` (issue #2420 roborev-1702);
+        // `resolve_idx` names the STARTING phase's slot for this test's purposes.
         let midx = method_index("do_action");
-        let resolve_idx = phase_active_index(midx, phase_index(PHASE_RESOLVE));
+        let resolve_idx = phase_active_index(midx, phase_index(PHASE_VALIDATE));
         let stream_idx = phase_active_index(midx, phase_index(PHASE_STREAM));
         let resolve_base = phase_active_counters()[resolve_idx].load(Ordering::Relaxed);
         let stream_base = phase_active_counters()[stream_idx].load(Ordering::Relaxed);

@@ -162,7 +162,8 @@ fn phase_active_and_in_flight_read_true_concurrent_count_then_settle() {
         // Exact `== baseline + N` is sound, NOT flaky (roborev job 1658 MEDIUM,
         // declined with evidence). `PhaseTimer::transition` briefly dec-old-then-
         // inc-new, so the phase.active SUM can transiently dip during a phase
-        // change — but that window exists ONLY across resolve→merge_setup→stream.
+        // change — but that window exists ONLY across the (issue #2420
+        // roborev-1700) admission→resolve→merge_setup→stream sequence.
         // Every holder above read a batch (proving it reached the TERMINAL `stream`
         // phase — `stream` has no successor, so `transition` is never called again)
         // and then PARKS: with batch_size 1 + the 4-slot bounded channel, each

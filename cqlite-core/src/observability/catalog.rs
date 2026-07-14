@@ -94,12 +94,15 @@ pub mod attr {
     /// Bounded to two values so a single metric series carries both arms for
     /// success/error-rate dashboards.
     pub const RPC_STATUS: &str = "cqlite.rpc.status";
-    /// `do_get` execution phase (issue #2162). Bounded to the closed set
-    /// `"resolve"`, `"merge_setup"`, `"stream"` — a `&'static str` from a fixed
-    /// slot table, never a per-query, per-ticket, key, or query-text value. Used
-    /// as the bounded dimension on [`super::RPC_PHASE_DURATION`] so a stalled
-    /// `do_get` localizes to a phase (time piling up in `merge_setup`) from
-    /// metrics alone.
+    /// `do_get` execution phase (issue #2162; `"admission"` added #2420
+    /// roborev-1700; `"validate"` added #2420 roborev-1702). Bounded to the
+    /// closed set `"validate"`, `"admission"`, `"resolve"`, `"merge_setup"`,
+    /// `"stream"` — a `&'static str` from a fixed slot table, never a
+    /// per-query, per-ticket, key, or query-text value. Used as the bounded
+    /// dimension on [`super::RPC_PHASE_DURATION`] so a stalled `do_get`
+    /// localizes to a phase (time piling up in `merge_setup`, queued behind the
+    /// admission semaphore in `admission`, or stuck parsing/validating a
+    /// malformed ticket in `validate`) from metrics alone.
     pub const RPC_PHASE: &str = "cqlite.rpc.phase";
     /// Reason a `SELECT` fell back to a degraded (full-scan) read path
     /// (issue #2163). Values come from
@@ -526,29 +529,43 @@ pub const RPC_ROWS: &str = "cqlite.rpc.rows";
 /// single end-of-stream emission. Bounded attributes: [`attr::RPC_METHOD`].
 pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
 
-/// `cqlite.rpc.phase.duration` — histogram `s` (issue #2162).
+/// `cqlite.rpc.phase.duration` — histogram `s` (issue #2162; `admission` phase
+/// added #2420 roborev-1700; `validate` phase added #2420 roborev-1702).
 ///
 /// Wall time a `do_get` spends in each of a bounded, closed set of execution
-/// phases — `resolve` (path discovery + token prune), `merge_setup` (opening
-/// input SSTables + building the k-way merger, the #2157 stall suspect), and
-/// `stream` (partitions stepping + batches flowing to the client). Recorded once
-/// per phase transition, so a `do_get` dominated by opening SSTables shows its
-/// wall time accumulating in `merge_setup` BEFORE the first batch — a stall that
-/// emits zero rows still localizes to a phase. Bounded attributes:
-/// [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed three-value set). NEVER
-/// carries a ticket, key, token range, or query-text attribute.
+/// phases — `validate` (parsing the ticket bytes, BEFORE any admission-permit
+/// acquire — a syntactically malformed ticket records ONLY this phase),
+/// `admission` (queued waiting for, or immediately granted, an admission permit
+/// — see #2420 — AFTER validation but BEFORE any producer/schema construction
+/// or filesystem access), `resolve` (producer/schema construction + path
+/// discovery/token prune), `merge_setup` (opening input SSTables + building the
+/// k-way merger, the #2157 stall suspect), and `stream` (partitions stepping +
+/// batches flowing to the client). Recorded once per phase transition, so a
+/// `do_get` dominated by opening SSTables shows its wall time accumulating in
+/// `merge_setup` BEFORE the first batch, and a `do_get` queued behind a
+/// saturated admission ceiling shows it accumulating in `admission` BEFORE
+/// `resolve` even starts — a stall (or queueing delay, or a flood of malformed
+/// tickets) that emits zero rows still localizes to a phase. `cqlite.rpc.duration`
+/// already includes admission wait time in the RPC total; this is the per-phase
+/// breakdown field triage uses to localize WHERE that time went (e.g. #2398).
+/// Bounded attributes: [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed
+/// five-value set). NEVER carries a ticket, key, token range, or query-text
+/// attribute.
 pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
 
-/// `cqlite.rpc.phase.active` — gauge `1` (issue #2361).
+/// `cqlite.rpc.phase.active` — gauge `1` (issue #2361; `admission` phase added
+/// #2420 roborev-1700; `validate` phase added #2420 roborev-1702).
 ///
 /// In-flight visibility of the phase a `do_get` is CURRENTLY executing, set to 1
 /// on phase entry and back to 0 on exit (via [`super::super`]'s `PhaseTimer`
 /// transition/`Drop`). [`RPC_PHASE_DURATION`] only records a sample once a phase
 /// COMPLETES, so a `do_get` wedged forever in `stream` (the #2361 hang: a merge
 /// that never returns a batch) recorded NOTHING — this gauge shows `stream = 1`
-/// for the entire hang, so a stall is observable BEFORE completion. Bounded
-/// attributes: [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed three-value
-/// set) — low cardinality (methods × 3 phases). NEVER a ticket/key/query value.
+/// for the entire hang, so a stall is observable BEFORE completion; likewise a
+/// `do_get` queued behind a saturated admission ceiling shows `admission = 1`
+/// for the whole wait. Bounded attributes: [`attr::RPC_METHOD`],
+/// [`attr::RPC_PHASE`] (the closed five-value set) — low cardinality (methods ×
+/// 5 phases). NEVER a ticket/key/query value.
 pub const RPC_PHASE_ACTIVE: &str = "cqlite.rpc.phase.active";
 
 /// `cqlite.warm.cache.hits` — counter `{1}` (issue #2310).
@@ -577,6 +594,48 @@ pub const WARM_CACHE_EVICTS: &str = "cqlite.warm.cache.evicts";
 /// dimension. Distinguishes a warm hit from a delta rebuild from a fail-closed
 /// retention in metrics alone (spec Requirement 6).
 pub const WARM_CACHE_REFRESH: &str = "cqlite.warm.cache.refresh";
+
+/// `cqlite.flight.admission.limit` — gauge `1` (issue #2420, WS4).
+///
+/// The configured `do_get` admission ceiling `K` (the `--max-concurrent-scans`
+/// value). A constant level while the server runs; recorded on startup so a
+/// dashboard can chart `in_use` against the limit. No attributes (bounded).
+/// DISTINCT from [`RPC_IN_FLIGHT`]: this is the CONFIGURED ceiling, not a live
+/// count.
+pub const FLIGHT_ADMISSION_LIMIT: &str = "cqlite.flight.admission.limit";
+
+/// `cqlite.flight.admission.in_use` — gauge `1` (issue #2420, WS4).
+///
+/// `do_get` admission permits currently held — the number of scans ADMITTED and
+/// in-flight (an up/down level like [`RPC_IN_FLIGHT`], but counting only admitted
+/// scans, not every accepted RPC incl. the ones parked waiting for a permit).
+/// Returns to zero when every admitted scan completes/cancels/disconnects (the
+/// RAII permit release). No attributes (bounded). DISTINCT from [`RPC_IN_FLIGHT`].
+pub const FLIGHT_ADMISSION_IN_USE: &str = "cqlite.flight.admission.in_use";
+
+/// `cqlite.flight.admission.waiting` — gauge `1` (issue #2420, WS4).
+///
+/// `do_get` requests currently parked on `acquire`, waiting for an admission
+/// permit to free within the permit-wait timeout. A non-zero value is the
+/// backpressure signal: offered concurrency has exceeded the ceiling and requests
+/// are queuing rather than degrading together. No attributes (bounded).
+pub const FLIGHT_ADMISSION_WAITING: &str = "cqlite.flight.admission.waiting";
+
+/// `cqlite.flight.admission.rejected_total` — counter `{1}` (issue #2420, WS4).
+///
+/// `do_get` requests rejected because no admission permit freed within the
+/// permit-wait timeout — each returned to the client as gRPC `UNAVAILABLE` (so the
+/// connector's #2241 replica-failover treats it as retry-safe), before any record
+/// batch was delivered. A monotonic total; scale-free. No attributes (bounded).
+pub const FLIGHT_ADMISSION_REJECTED_TOTAL: &str = "cqlite.flight.admission.rejected_total";
+
+/// `cqlite.flight.admission.wait_seconds` — histogram `s` (issue #2420, WS4).
+///
+/// Distribution of how long a `do_get` waited on `acquire` before it was admitted
+/// (a permit freed) OR rejected (the wait timeout elapsed). Localizes admission
+/// pressure: a rising tail means requests are increasingly queuing for permits.
+/// No attributes (bounded).
+pub const FLIGHT_ADMISSION_WAIT_SECONDS: &str = "cqlite.flight.admission.wait_seconds";
 
 /// All catalog metric names, for tests and registration sanity checks.
 pub const ALL_METRICS: &[&str] = &[
@@ -641,6 +700,12 @@ pub const ALL_METRICS: &[&str] = &[
     WARM_CACHE_MISSES,
     WARM_CACHE_EVICTS,
     WARM_CACHE_REFRESH,
+    // Flight do_get admission control (#2420, WS4)
+    FLIGHT_ADMISSION_LIMIT,
+    FLIGHT_ADMISSION_IN_USE,
+    FLIGHT_ADMISSION_WAITING,
+    FLIGHT_ADMISSION_REJECTED_TOTAL,
+    FLIGHT_ADMISSION_WAIT_SECONDS,
 ];
 
 #[cfg(test)]

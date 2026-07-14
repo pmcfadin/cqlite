@@ -8,8 +8,13 @@ use arrow_flight::flight_service_server::FlightServiceServer;
 use clap::Parser;
 use tonic::transport::Server;
 
+use cqlite_flight::admission::{
+    Admission, AdmissionConfig, WaitBudget, DEFAULT_MAX_CONCURRENT_SCANS, DEFAULT_WAIT_TIMEOUT_MS,
+    ENV_MAX_CONCURRENT_SCANS, ENV_WAIT_TIMEOUT_MS,
+};
 use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::shutdown::shutdown_signal;
+use std::time::Duration;
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]
@@ -29,6 +34,20 @@ struct Args {
     /// Maximum rows per Arrow record batch.
     #[arg(long, default_value_t = 8192)]
     batch_size: usize,
+
+    /// Maximum concurrently admitted `do_get` scans (issue #2420, WS4). A `do_get`
+    /// acquires a permit before opening any SSTable; past this ceiling requests
+    /// wait up to `--admission-wait-timeout-ms`, then are shed with gRPC
+    /// `UNAVAILABLE` (retry-safe for the connector's replica failover). Sized from
+    /// the blocking-pool (~256) / fd (~1024÷SSTables) ceilings, not core count.
+    #[arg(long, env = ENV_MAX_CONCURRENT_SCANS, default_value_t = DEFAULT_MAX_CONCURRENT_SCANS)]
+    max_concurrent_scans: usize,
+
+    /// How long a saturated `do_get` waits for an admission permit before it is
+    /// rejected with `UNAVAILABLE` (issue #2420, WS4). Short bursts under this
+    /// budget are absorbed transparently with no client-visible error.
+    #[arg(long, env = ENV_WAIT_TIMEOUT_MS, default_value_t = DEFAULT_WAIT_TIMEOUT_MS)]
+    admission_wait_timeout_ms: u64,
 }
 
 #[tokio::main]
@@ -65,13 +84,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
     let listen = args.listen;
-    let service = CqliteFlightService::new(args.data_dir, args.batch_size);
+    // Admission control (issue #2420, WS4): the owned Semaphore is the real,
+    // observable, cancel-releasable ceiling.
+    let admission = Admission::new(AdmissionConfig {
+        max_concurrent_scans: args.max_concurrent_scans,
+        wait_budget: WaitBudget::Timeout(Duration::from_millis(args.admission_wait_timeout_ms)),
+    });
+    let admission_limit = admission.limit();
+    let service = CqliteFlightService::with_admission(args.data_dir, args.batch_size, admission);
 
-    tracing::info!(%listen, batch_size = args.batch_size, "cqlite-flight starting");
+    // A coarse tonic transport backstop, generously ABOVE the admission ceiling:
+    // it guards the HTTP/2 accept loop / stream table from a client opening far
+    // more streams than `K`, but the Semaphore — not this cap — is the real
+    // admission throttle (issue #2420). `saturating_mul` avoids overflow on an
+    // extreme configured `K`.
+    let max_concurrent_streams: u32 = u32::try_from(admission_limit)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(4)
+        .max(1024);
+
+    tracing::info!(
+        %listen,
+        batch_size = args.batch_size,
+        max_concurrent_scans = admission_limit,
+        admission_wait_timeout_ms = args.admission_wait_timeout_ms,
+        max_concurrent_streams,
+        "cqlite-flight starting"
+    );
     // Graceful shutdown (issue #1473): on ctrl_c / SIGTERM, tonic stops
     // accepting new connections and drains in-flight RPCs rather than tearing
     // every open stream down abruptly.
     Server::builder()
+        .max_concurrent_streams(max_concurrent_streams)
         .add_service(FlightServiceServer::new(service))
         .serve_with_shutdown(listen, shutdown_signal())
         .await?;

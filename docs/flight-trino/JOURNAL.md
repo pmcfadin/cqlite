@@ -351,3 +351,260 @@ Format:
     - `flight-trino-e2e.yml` — runs `e2e-test.sh` (both sides, full docker-compose integration) on PR/main.
 - **Artifacts published:** flight binary + GHCR container image (Rust side); Trino plugin dir (Java side).
 - **Next:** commit; push.
+
+## 2026-07-13 — do_get admission control (issue #2420, WS4)
+
+- **What:** Added an application-level admission ceiling on `do_get`. An owned
+  `tokio::sync::Semaphore` with `K` permits (`--max-concurrent-scans`, env
+  `CQLITE_MAX_CONCURRENT_SCANS`, default **64**) gates entry to the merge: a
+  request acquires a permit BEFORE any SSTable is opened or any batch produced,
+  holds it (RAII, moved into the response stream) for the scan's lifetime, and
+  releases it on completion/disconnect/cancel. On saturation a request waits up to
+  `--admission-wait-timeout-ms` (env `CQLITE_ADMISSION_WAIT_TIMEOUT_MS`, default
+  30000); if no permit frees it is shed with gRPC **`UNAVAILABLE`** (never
+  `RESOURCE_EXHAUSTED`) BEFORE any batch. A coarse tonic `max_concurrent_streams`
+  (≥ `max(K·4, 1024)`) backstops the HTTP/2 accept loop — the Semaphore, not the
+  transport cap, is the real throttle. New `cqlite.flight.admission.*` instruments
+  (limit/in_use/waiting/rejected_total/wait_seconds), distinct from
+  `cqlite.rpc.in_flight`.
+- **Overload contract:** short bursts under the wait budget are absorbed
+  transparently (no client-visible error, no connector change); sustained overload
+  sheds to another replica via the connector's #2241 `ReplicaFailoverStream`
+  (retry-safe: the reject provably precedes the first batch, and failover triggers
+  ONLY on `UNAVAILABLE`); only when EVERY replica saturates does the query fail
+  loudly. Admission is transparent to results — byte-identical rows/order/schema/
+  batch boundaries.
+- **Default `K` sizing:** from the binding constraints, NOT `num_cpus`: blocking
+  pool 512 ÷ ~2 threads/scan ≈ 256 ceiling; fd ~1024 ÷ M SSTables. 64 sits well
+  below both. Conservative pending WS1-ramp (WS8) validation before the default is
+  locked.
+- **Files:** `cqlite-flight/src/admission.rs` (+ `admission_tests.rs`),
+  `service.rs` (acquire before setup; permit into the response stream),
+  `main.rs` (CLI/env knobs + `max_concurrent_streams`), `lib.rs`, `Cargo.toml`
+  (dev `tokio` `test-util`); `cqlite-core/.../observability/catalog.rs` (5
+  instruments).
+- **Verified:** 11 deterministic tests (paused Tokio clock, injected barriers —
+  no wall-clock) covering all 6 spec requirements; the excess-do_get gate reds when
+  the acquire-before-setup wiring is removed (setup `resolves` counter jumps).
+- **Next:** WS1-ramp validation of the default `K` (WS8); record on #2420.
+
+## 2026-07-13 — admission-control roborev fixes (rounds 1696–1699)
+
+- **What (roborev-1696):** Fast-pathed `Semaphore::try_acquire_owned()` first so
+  an UNCONTENDED acquire never touches the `waiting` gauge or records a
+  permit-wait histogram sample (was transiently over-reporting queue depth on
+  every admit, even instant ones). The slow, contended (`NoPermits`) path is
+  unchanged — it still bumps `waiting` and records a genuine wait sample.
+- **What (roborev-1697):** `Admission::new` now clamps `max_concurrent_scans`
+  symmetrically to `[1, Semaphore::MAX_PERMITS]` (was floored at 1 only) —
+  `Semaphore::new` PANICS above `MAX_PERMITS`, so an absurd
+  `--max-concurrent-scans`/env value must be capped, never crash startup. Logs a
+  `warn` when a clamp actually changes the requested value.
+- **What (roborev-1698 → refined by 1699):** `do_get`'s pre-permit validation is
+  now MINIMAL and filesystem-free: `validate_do_get_ticket` parses ONLY the
+  ticket bytes (`FlightTicket::from_bytes`). Producer/schema construction (CQL
+  DDL parse, predicate/projection/aggregation-spec lowering — expensive,
+  attacker-influenced work) moved INTO `do_get_resolve`, run AFTER admission
+  alongside the filesystem resolve (both inside one `spawn_blocking`, exactly as
+  pre-#2420). A syntactically malformed ticket still fails fast with its own
+  status (never `UNAVAILABLE`, never waits, never consumes a permit); a
+  syntactically VALID ticket for a bogus/nonexistent table now also does not
+  reach producer construction until a permit is admitted.
+- **What (roborev-1699, `new()` semantics):** `CqliteFlightService::new()` no
+  longer reads the environment or applies a default admission ceiling — it uses
+  `Admission::unconstrained()` (`Semaphore::MAX_PERMITS`, `Duration::MAX` wait),
+  restoring this constructor's exact pre-#2420 behavior for library callers.
+  `with_admission(data_dir, batch_size, admission)` is the explicit opt-in the
+  `cqlite-flight` SERVER BINARY (`main`) uses to wire a real, CLI/env-configured
+  `K` — the server still gets admission-by-default in deployment even though the
+  library constructor stays unconstrained.
+- **Tests:** 16 deterministic admission tests (was 11), incl. two new
+  roborev-pinned scenarios: `req1_uncontended_acquire_never_touches_waiting_gauge`
+  / `req1_contended_acquire_path_unchanged` (1696),
+  `req4_absurd_configured_k_clamps_instead_of_panicking` (1697),
+  `req_malformed_ticket_bypasses_admission_entirely` /
+  `req_valid_ticket_for_bogus_table_does_not_reach_producer_construction_before_admission`
+  (1698/1699). Re-verified the red-on-main proof after each restructure by
+  moving the acquire back past resolve — the affected tests correctly red.
+- **Files:** `cqlite-flight/src/admission.rs`, `admission_tests.rs`,
+  `service.rs` (`new`/`with_admission`, `validate_do_get_ticket`/
+  `do_get_resolve` split).
+
+## 2026-07-13 — admission-control roborev round 5 (job 1700)
+
+- **What (finding 1, admission is a first-class phase):** Added a new
+  `admission` phase to the `do_get` phase set (`admission` → `resolve` →
+  `merge_setup` → `stream`, was 3 phases, now 4). `PhaseTimer::start` now opens
+  `admission` (was `resolve`) and the timer is constructed BEFORE
+  `Admission::acquire()`, transitioning to `resolve` only once a permit is
+  granted. Previously admission wait was invisible in the
+  `cqlite.rpc.phase.duration`/`cqlite.rpc.phase.active` breakdown (folded into
+  neither phase, since the timer didn't exist yet) even though
+  `cqlite.rpc.duration` already counted it — field triage localizes latency FROM
+  the phase breakdown (that's how #2398 was diagnosed), so queue time is now a
+  first-class, directly observable phase. Updated the catalog doc comments
+  (`RPC_PHASE`, `RPC_PHASE_DURATION`, `RPC_PHASE_ACTIVE`) to register the new
+  label.
+- **What (finding 2, gauge-overlap fix, same class as roborev-1696):**
+  `Admission::acquire`'s slow (contended) path now drops the `WaitGuard`
+  immediately when the timed acquire future resolves — BEFORE recording the
+  wait sample or constructing the `AdmissionPermit` (which bumps `in_use`) — so
+  an admitted/rejected request is never simultaneously counted both `waiting`
+  AND `in_use`.
+- **Tests:** 18 deterministic admission tests (was 16). New:
+  `req_admission_wait_is_visible_as_its_own_phase` /
+  `req_admission_phase_opens_even_on_an_uncontended_admit` (finding 1, via a new
+  `pub(crate) #[cfg(test)] obs::phase_active_level_for` isolating one
+  `(method, phase)` counter — feature-independent, no OTel needed); extended
+  `req1_contended_acquire_path_unchanged` with an explicit no-overlap assertion
+  (finding 2). Updated two pre-existing `obs.rs` unit tests
+  (`phase_active_counter_reflects_concurrent_overlap_not_a_flag`,
+  `phase_active_counter_moves_on_transition`) that hardcoded `PHASE_RESOLVE` as
+  the assumed starting phase — now `PHASE_ADMISSION`. Re-verified red-on-main:
+  moving the acquire back past `do_get_resolve` now reds 6 tests (up from 5 —
+  the new admission-phase pin also reds).
+- **Files:** `cqlite-flight/src/obs.rs` (phase set, `PhaseTimer::start`,
+  `phase_active_level_for`, 2 updated unit tests), `service.rs` (timer starts
+  before `acquire`), `admission.rs` (gauge-overlap fix), `admission_tests.rs`
+  (2 new tests + 1 extended), `cqlite-core/.../observability/catalog.rs`
+  (doc updates for the 4-phase set).
+- **Post-commit self-caught flakiness fix (same round):** the first cut of the
+  two finding-1 phase-visibility tests asserted EXACT deltas on
+  `phase_active_level_for("do_get", ...)` — a PROCESS-WIDE counter keyed only by
+  `(method, phase)`, shared with every OTHER concurrently-running test that
+  drives a real `do_get` (this crate's test suite runs thread-parallel, not
+  process-isolated, for `cargo test -p cqlite-flight --lib`). Standalone re-runs
+  flaked (`cargo test --lib admission` failed ~1/6 runs on the "resolve
+  untouched"/"vacated to exact baseline" assertions). Fixed by splitting into
+  (a) `req_admission_phase_opens_before_resolve` — a fully deterministic
+  `PhaseTimer` mechanics test against a synthetic, otherwise-unused method slot
+  (`"handshake"`, never driven by any test), proving the exact admission→resolve
+  ordering with zero cross-test interference, and (b)
+  `req_admission_wait_is_visible_as_its_own_phase` — wiring evidence on the REAL
+  `do_get` path, loosened to a robust `>= 1` lower bound (always true while our
+  own request is genuinely parked, immune to concurrent noise in either
+  direction). Verified stable across 5 repeated runs of both the admission
+  filter and the full 254-test lib suite; red-on-main re-confirmed after the
+  robustness rewrite (still 6 tests red).
+
+## 2026-07-13 — admission-control roborev round 6 (job 1701)
+
+- **What:** The round-5 `admission` phase addition was correct but escaped the
+  lite-gate blast radius for `cqlite-flight/tests/metrics_capture_test.rs`
+  (feature-gated behind `observability-testing`, not in the default scoped-test
+  set), which still hardcoded the closed 3-phase set `{resolve, merge_setup,
+  stream}` in its phase-value assertion. Fixed:
+  - `metrics_capture_test.rs`: the closed-set match now asserts exactly
+    `{admission, resolve, merge_setup, stream}` (still a CLOSED set — a future
+    5th phase must update this assertion deliberately, not drift past it via a
+    loosened check). Added an `admission`-tagged phase-sample assertion
+    alongside the existing `merge_setup` one, proving even an UNCONTENDED
+    `do_get` (this fixture's default `Admission::unconstrained()`) records one
+    admission-phase OTel sample — the actual emitted histogram series, not just
+    the feature-independent atomic this round's earlier tests pinned.
+  - `issue_2370_gauge_readback_test.rs`: updated a stale prose comment
+    (`resolve→merge_setup→stream`) referencing the old 3-phase transition
+    window to include `admission` — the assertion logic itself (`phase_active_level`
+    sums ALL phases) was already phase-count-agnostic and needed no functional
+    change.
+  - Swept the whole workspace (`rg merge_setup`) for other 3-phase assumptions —
+    none found; `obs.rs`'s own `phase_slot`/`phase_index` fallbacks were already
+    derived generically from `RPC_PHASES[0]`/`.len()` in round 5, not hardcoded.
+- **Verified:** `cargo test -p cqlite-flight --features observability-testing
+  --test metrics_capture_test` PASSES directly (was the test that escaped this
+  round's lite blast radius); `cargo test -p cqlite-flight --lib admission`
+  (18/18) and the full 254-test lib suite both still pass; clippy clean incl.
+  `--features observability-testing`.
+- **Files:** `cqlite-flight/tests/metrics_capture_test.rs`,
+  `cqlite-flight/tests/issue_2370_gauge_readback_test.rs` (comment only).
+
+## 2026-07-13 — admission-control roborev round 7 (job 1702)
+
+- **What (finding 1, mechanical, gauge-vs-availability ordering):**
+  `AdmissionPermit`'s `_permit: OwnedSemaphorePermit` field is now
+  `permit: Option<OwnedSemaphorePermit>`. `Drop::drop` explicitly `take()`s and
+  drops the permit BEFORE decrementing the `in_use` gauge — Rust drops a
+  struct's fields AFTER `Drop::drop` returns, so the bare-field version
+  released real semaphore capacity to a waiter strictly AFTER the gauge already
+  said "one fewer in use," a transient window where the gauge undercounted
+  relative to what a waiter could observe. Gauge and availability now move in
+  the same order.
+- **What (finding 2, ADJUDICATED — real regression, fixed with option (b)):**
+  Verified against `origin/main` (`c2a86299`): pre-#2420, `PhaseTimer::start`
+  opened `resolve` BEFORE `do_get_setup` even ran, and `do_get_setup`'s
+  `FlightTicket::from_bytes(...)?` failure propagated through `do_get_inner`'s
+  `Err(status) => return Err(...)` — the still-open `resolve`-phase timer then
+  dropped at the function return, recording a `resolve`-tagged
+  `cqlite.rpc.phase.duration` sample. So `main` DID give phase visibility for a
+  malformed ticket (a `resolve` sample), and round-6's `validate_do_get_ticket`
+  (run before the `PhaseTimer` even existed) silently dropped that to ZERO
+  phase samples — a real regression, not a non-issue. Fixed per option (b):
+  added a dedicated `validate` phase (`validate` → `admission` → `resolve` →
+  `merge_setup` → `stream`, 5-phase CLOSED set), giving the pre-existing
+  behavior a MORE PRECISE label instead of restoring the imprecise `resolve`
+  one. `PhaseTimer::start` now opens `validate`; `do_get_inner` constructs the
+  timer before `validate_do_get_ticket` and transitions to `admission` only
+  once the ticket parses.
+- **Tests:** `req_validate_then_admission_phase_chain` (replaces
+  `req_admission_phase_opens_before_resolve`) — deterministic mechanics test on
+  the dedicated `"handshake"` slot proving the full `validate → admission →
+  resolve` sequence AND that a malformed-ticket-shaped drop (never
+  transitioning) still records a `validate` sample. New Stage 5 in
+  `metrics_capture_test.rs` (same test fn, sequenced after the happy path via
+  `mc.reset()` — a second `#[test]` fn would risk cross-test OTel contamination
+  per the capture harness's "single serial test" doc invariant): a real
+  malformed `do_get` records EXACTLY ONE phase sample, tagged `validate` (never
+  zero, never admission/resolve/merge_setup/stream). Updated the two obs.rs
+  mechanics tests + the 5-value closed sets in `metrics_capture_test.rs` and
+  the `catalog.rs` doc comments.
+- **Verified:** `cargo test -p cqlite-flight --features observability-testing
+  --test metrics_capture_test` and the admission target (18/18) both pass,
+  stable across 3 repeated runs each; full 254-test lib suite stable across 3
+  runs; clippy clean (incl. `--features observability-testing`); red-on-main
+  re-confirmed (still 6 tests red when the acquire moves back past
+  `do_get_resolve`).
+- **Files:** `cqlite-flight/src/admission.rs` (permit drop ordering),
+  `obs.rs` (5-phase set, 2 updated unit tests), `service.rs` (timer starts
+  before ticket parse), `admission_tests.rs`, `tests/metrics_capture_test.rs`
+  (Stage 5 + closed-set update), `cqlite-core/.../observability/catalog.rs`
+  (doc updates for the 5-phase set).
+
+## 2026-07-13 — admission-control roborev round 8 (job 1703)
+
+- **What:** `Admission::unconstrained()` (used by `CqliteFlightService::new`,
+  the library-embedding constructor) represented "no timeout" as
+  `wait_timeout: Duration::MAX` flowing through `tokio::time::timeout` — an
+  overflow/panic hazard in library code (`timeout()` computes `Instant::now() +
+  duration` internally). Fixed by introducing an explicit `WaitBudget` enum
+  (`Unbounded` | `Timeout(Duration)`) replacing the bare `Duration` field on
+  `AdmissionConfig`/the internal `AdmissionInner`. `Admission::acquire`'s slow
+  path now branches: `Timeout(d)` keeps the existing `tokio::time::timeout(d,
+  ...)` wrapper; `Unbounded` awaits `acquire_owned()` DIRECTLY with no
+  `timeout()` wrapper at all — no deadline computed, so nothing can overflow. A
+  small `SlowAcquireOutcome` enum (`Admitted`/`Closed`/`TimedOut`) unifies the
+  two arms' await results into one post-await `match` so the gauge/counter
+  bookkeeping (unchanged from round 7's ordering fix) is written exactly once.
+  `Admission::wait_timeout() -> Duration` renamed to `wait_budget() ->
+  WaitBudget` (no callers existed). Clamp/knob semantics (the `[1,
+  Semaphore::MAX_PERMITS]` ceiling clamp, the CLI/env `--admission-wait-
+  timeout-ms` knob) are unchanged — `main.rs` now constructs
+  `WaitBudget::Timeout(Duration::from_millis(...))` explicitly.
+- **Test:** `req4_unbounded_wait_budget_never_times_out_even_under_extreme_advance`
+  — a saturated `Unbounded` admission parks a waiter, then the paused Tokio
+  clock is advanced by `u32::MAX` seconds (`tokio::time::advance`, far beyond
+  any real timeout budget this crate configures); the test process does not
+  panic, the waiter stays `Pending` (never spuriously times out — there is no
+  timeout arm to fire), and `rejected_total` stays 0. Releasing the held permit
+  then admits the waiter normally, proving `Unbounded` still resolves correctly
+  via a genuine permit free (the ONLY way it resolves).
+- **Verified:** admission target 19/19 (was 18), stable across 3 repeated runs;
+  `metrics_capture_test` still passes; full 255-test lib suite passes; clippy
+  clean; red-on-main re-confirmed (still 6 tests red).
+- **Ops note:** the shared machine's disk hit 100% capacity (119Mi free)
+  mid-round, failing the first rebuild with `No space left on device`; freed
+  ~5.8Gi by removing this worktree's own stale `target/debug/incremental`
+  (5.7G) — did not touch any other worktree's `target/` (shared box, #2412
+  co-resident).
+- **Files:** `cqlite-flight/src/admission.rs` (`WaitBudget` enum,
+  `SlowAcquireOutcome`), `admission_tests.rs` (`cfg()` + new test),
+  `main.rs` (explicit `WaitBudget::Timeout` construction).
