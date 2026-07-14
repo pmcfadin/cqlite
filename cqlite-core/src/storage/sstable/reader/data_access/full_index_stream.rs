@@ -309,16 +309,19 @@ impl SSTableReader {
         // Fallback: materialising sequential scan (rare degenerate path). No
         // producer-side limit (see this method's doc) — the consumer's
         // post-reconciliation LIMIT break bounds it downstream instead.
+        //
+        // Work-probe (issue #2398, roborev 1693): `sequential_scan` itself owns
+        // the `stream_walk_partitions_parsed` accounting for this path (added at
+        // its per-partition decode boundary, roborev 1692) — do NOT increment
+        // again here. This loop only re-emits `sequential_scan`'s already-decoded
+        // results, one call per RETURNED ROW; a second increment here would
+        // double-count every partition body relative to what was actually decoded.
         let table_id = self.scan_table_id();
         let schema = self.schema.as_deref();
         let entries = self
             .sequential_scan(&table_id, None, None, None, schema, scan_cancel)
             .await?;
         for (key, value) in entries {
-            // Work-probe (issue #2398, roborev 1692): the materialising sequential
-            // scan decodes every partition body too — every body-decoding path must
-            // contribute to this counter, not only the two index-driven walks.
-            crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
             match emit((key, value))? {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(()) => return Ok(()),
