@@ -44,6 +44,14 @@ pub(in crate::storage::sstable::reader) use row_decoder::V5CompressedLegacyParse
 // compaction-read streaming driver in data_access.rs can match on it.
 pub(in crate::storage::sstable::reader) use row_decoder::ParseStep;
 
+// Issue #2299: row-granular resumable compaction streaming — the state carried
+// across a wide partition's chunk-straddling refills and the per-structure step
+// outcome, so `stream_all_partitions_for_compaction` drains a wide partition
+// row-by-row instead of buffering it whole.
+pub(in crate::storage::sstable::reader) use row_decoder::{
+    CompactionPartitionState, PartitionStreamStep,
+};
+
 // Re-export publicly for integration tests (Issue #166 regression tests)
 // Using doc(hidden) to keep it out of public documentation but available for testing
 #[doc(hidden)]

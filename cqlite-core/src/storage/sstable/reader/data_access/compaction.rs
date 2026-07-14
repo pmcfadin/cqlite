@@ -599,11 +599,23 @@ impl SSTableReader {
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
         let parser = self.build_v5_parser(false);
 
-        // Sliding window with a FRONT CURSOR (issue #1589): confirmed partitions are
+        // Sliding window with a FRONT CURSOR (issue #1589): confirmed structures are
         // consumed by advancing the cursor, and the reclaimed prefix is compacted
         // once per refill — not memmoved per partition as the old front-drain did.
         let mut window = WindowCursor::new();
         let mut broke = false;
+
+        // Issue #2299: row-granular resumable partition state. Unlike the buffered
+        // `parse_one_partition_for_compaction` (which drained a WHOLE partition per
+        // step, so a WIDE partition stayed fully resident in both the window and the
+        // parser's `pending` vec), this carries the in-flight partition's decode
+        // context across refills so the drain below advances the window cursor after
+        // EVERY confirmed row — peak memory is bounded by one row + one chunk, not by
+        // `max_partition_size`. This is what keeps a real compaction of CQLite's own
+        // uncompressed output (one wide partition split across the merge inputs)
+        // within the 128 MiB budget.
+        let mut partition_state =
+            crate::storage::sstable::reader::parsing::CompactionPartitionState::new();
 
         use crate::storage::sstable::compression::Compression;
 
@@ -656,7 +668,8 @@ impl SSTableReader {
             chunk_count += 1;
 
             // Not the final chunk yet: NeedMore means "await more bytes". Drain
-            // every confirmed partition from the front of the window.
+            // every confirmed structure (row / marker / partition end) from the
+            // front of the window, advancing the cursor per structure.
             self.drain_compaction_window(
                 &parser,
                 owned_schema.as_ref(),
@@ -664,6 +677,7 @@ impl SSTableReader {
                 false,
                 &mut emit,
                 &mut broke,
+                &mut partition_state,
                 scan_cancel,
             )?;
             if broke {
@@ -681,6 +695,7 @@ impl SSTableReader {
                 true,
                 &mut emit,
                 &mut broke,
+                &mut partition_state,
                 scan_cancel,
             )?;
         }
@@ -694,11 +709,18 @@ impl SSTableReader {
         Ok(())
     }
 
-    /// Drain every confirmed partition from the front of the sliding `window`,
-    /// emitting each row via `emit` (issue #827). After each `Emitted` the
-    /// consumed prefix is removed so the window's peak size stays bounded by
-    /// `max_partition_size + one_chunk`. Stops at `NeedMore` / `Done` (await the
-    /// next chunk / genuine end) or when `emit` returns `Break` (sets `*broke`).
+    /// Drain every confirmed STRUCTURE (row / range marker / partition end) from
+    /// the front of the sliding `window`, emitting each row via `emit` (issue #827,
+    /// row-granular per issue #2299). After each confirmed structure the consumed
+    /// prefix is advanced (the window's peak stays bounded by `one row + one
+    /// chunk` — NOT `max_partition_size` — so a WIDE partition never has to be
+    /// fully resident). Stops at `NeedMore` / `AllDone` (await the next chunk /
+    /// genuine end) or when `emit` returns `Break` (sets `*broke`).
+    ///
+    /// `partition_state` carries the in-flight partition's decode context across
+    /// refills (its key + in-flight range-tombstone start bound), so a partition
+    /// straddling a chunk boundary resumes correctly.
+    #[allow(clippy::too_many_arguments)]
     fn drain_compaction_window<F>(
         &self,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
@@ -707,61 +729,71 @@ impl SSTableReader {
         at_final_chunk: bool,
         emit: &mut F,
         broke: &mut bool,
+        partition_state: &mut crate::storage::sstable::reader::parsing::CompactionPartitionState,
         scan_cancel: &ScanCancel,
     ) -> Result<()>
     where
         F: FnMut(super::super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
     {
-        use crate::storage::sstable::reader::parsing::ParseStep;
+        use crate::storage::sstable::reader::parsing::PartitionStreamStep;
         let mut drained: usize = 0;
         loop {
             if *broke || window.is_empty() {
                 return Ok(());
             }
             // Cooperative cancellation (issue #2264): for a chunk-stitched ('nb')
-            // SSTable this is the per-partition hot loop the compaction stream (and
+            // SSTable this is the per-STRUCTURE hot loop the compaction stream (and
             // thus a Flight `do_get`) spends its time in. Poll the PER-CALL cancel
             // token (issue #2346) at a bounded interval so a disconnected client
             // abandons the walk within milliseconds instead of the coarse ~1–2 min
-            // backstop.
+            // backstop. Per-structure polling (rather than per-partition) also
+            // catches a single partition so wide it spans hundreds of chunks.
             if drained & 0xFF == 0 {
                 scan_cancel.check()?;
             }
             drained += 1;
-            let mut local_break = false;
-            let step = parser.parse_one_partition_for_compaction(
+            let step = parser.stream_partition_body_incremental(
                 window.as_slice(),
                 schema,
                 self,
                 at_final_chunk,
-                &mut |row: super::super::compaction_row::CompactionRow| match emit(row)? {
-                    std::ops::ControlFlow::Continue(()) => Ok(std::ops::ControlFlow::Continue(())),
-                    std::ops::ControlFlow::Break(()) => {
-                        local_break = true;
-                        Ok(std::ops::ControlFlow::Break(()))
-                    }
-                },
+                partition_state,
+                &mut |row: super::super::compaction_row::CompactionRow| emit(row),
             )?;
             match step {
-                ParseStep::Emitted(consumed) => {
+                // A confirmed mid-partition structure: advance the cursor over
+                // exactly the bytes it consumed (issue #1589: NO memmove here —
+                // the reclaimed prefix is compacted once at the next refill).
+                // `consume` clamps to the remaining length. The partition
+                // CONTINUES, so the #2398 per-partition work-probe is NOT bumped
+                // here (it counts partitions, not structures — see PartitionDone).
+                PartitionStreamStep::Consumed(consumed) => {
+                    window.consume(consumed);
+                }
+                // The partition ended. Advance over its final bytes (`consumed ==
+                // 0` for a terminal trailing partition makes no progress, but the
+                // window is then empty so the top-of-loop guard returns).
+                PartitionStreamStep::PartitionDone(consumed) => {
                     // Work-probe (issue #2398): one partition body decoded on the
                     // chunk-stitching ('nb') scan path — the counterpart to the
-                    // streaming full-index walk's increment. A token-range split
-                    // must keep this bounded to its in-range slice, not the
-                    // SSTable's whole partition count.
+                    // streaming full-index walk's per-partition increment. Placed
+                    // on PartitionDone (NOT the mid-partition Consumed) so a wide
+                    // partition drained row-by-row (issue #2299) still counts
+                    // exactly once. A token-range split keeps this bounded to its
+                    // in-range slice, not the SSTable's whole partition count.
                     crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
-                    let take = if consumed == 0 { 1 } else { consumed };
-                    // Advance the cursor over the confirmed partition (issue #1589):
-                    // NO memmove here — the reclaimed prefix is compacted once at the
-                    // next refill. `consume` clamps to the remaining length, matching
-                    // the prior `drain(0..take.min(window.len()))`.
-                    window.consume(take);
-                    if local_break {
-                        *broke = true;
-                        return Ok(());
-                    }
+                    window.consume(consumed);
                 }
-                ParseStep::NeedMore | ParseStep::Done => return Ok(()),
+                // Consumer dropped mid-emit: advance over the breaking structure and
+                // stop the whole scan.
+                PartitionStreamStep::Break(consumed) => {
+                    window.consume(consumed);
+                    *broke = true;
+                    return Ok(());
+                }
+                // Await the next chunk (a structure straddles this boundary) or a
+                // genuine end of data.
+                PartitionStreamStep::NeedMore | PartitionStreamStep::AllDone => return Ok(()),
             }
         }
     }
