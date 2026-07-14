@@ -7,10 +7,14 @@
 //!   for the half-open `Index.db` byte range [`SummaryInterval`] that must contain a
 //!   query key's partition entry (the core new search; [`super::SummaryReader::find_by_key`]
 //!   is the method wrapper).
-//! - [`lookup_key_in_interval`] reads **only that one interval** (≤ `min_index_interval`
-//!   entries) from disk and resolves the exact key, recording exactly one **interval**
-//!   parse (`cqlite.sstable.index_interval_parses_total`) — never a full parse, so a
-//!   lazy-open regression stays visible on `index_parses_total` (design §F).
+//! - [`lookup_key_in_interval`] reads **only that one interval** from disk and
+//!   resolves the exact key, recording exactly one **interval** parse
+//!   (`cqlite.sstable.index_interval_parses_total`) — never a full parse, so a
+//!   lazy-open regression stays visible on `index_parses_total` (design §F). An
+//!   END-BOUNDED interval is scanned in full (its `[start, end)` byte range between
+//!   two real samples is the bound, not an entry count — Cassandra's `Summary.db`
+//!   downsampling can widen it well past `min_index_interval`); only the read-to-EOF
+//!   LAST interval keeps a downsampling-adjusted entry cap (roborev job 1709).
 //!
 //! No-heuristics (issue #28): every seek offset and interval boundary is an
 //! authoritative `Summary.db` sample position; entry framing is the on-disk `Index.db`
@@ -87,21 +91,50 @@ pub struct IntervalLookup {
     /// this interval (an authoritative absence between two summary samples — the
     /// whole-file `scan_for_key` oracle is NOT needed for the common case, design §B).
     pub entry: Option<PartitionIndexEntry>,
-    /// Number of `Index.db` entries actually parsed/touched, bounded by one summary
-    /// interval (≤ `min_index_interval`). The scale-free work-probe for Requirement 2.
+    /// Number of `Index.db` entries actually parsed/touched, bounded by ONE summary
+    /// interval's actual entry count (an end-bounded interval's `[start, end)` byte
+    /// range; a downsampling-adjusted cap for the read-to-EOF last interval). The
+    /// scale-free work-probe for Requirement 2 — bounded by the interval, never by
+    /// the SSTable's total partition count.
     pub entries_touched: usize,
 }
 
-/// Cap on entries scanned in a single interval, derived from `min_index_interval`.
+/// Cassandra's `IndexSummary` base (non-downsampled) sampling level — sample
+/// spacing is `min_index_interval` partitions ONLY at this level; a lower
+/// `sampling_level` widens spacing proportionally (`IndexSummary.java`,
+/// `BASE_SAMPLING_LEVEL = 128`). Duplicated from the (feature-gated,
+/// write-support-only) writer-side constant of the same name and value so this
+/// read-path module never depends on `write-support` being enabled.
+const BASE_SAMPLING_LEVEL: u32 = 128;
+
+/// Cap on entries scanned in the LAST (read-to-EOF) `Index.db` interval —
+/// roborev job 1709 (High, data-loss class): the cap must be DOWNSAMPLING-AWARE.
 ///
-/// One summary interval spans `min_index_interval` partitions by construction, but a
-/// corrupt/rewritten summary could point at a wider run. Bounding the scan at
-/// `min_index_interval` (plus the boundary entry) means a hostile summary cannot turn
-/// a "bounded interval read" into a full-file walk; a genuine miss within the bound is
-/// still authoritative because the interval end is the next authoritative sample.
-fn interval_entry_cap(min_index_interval: u32) -> usize {
-    // +1 covers the boundary entry that sits exactly at the next sample position.
-    (min_index_interval as usize).saturating_add(1)
+/// Cassandra downsamples `Summary.db` under index-summary memory pressure
+/// (`sampling_level < BASE_SAMPLING_LEVEL`), which widens EVERY interval —
+/// including the last — up to `min_index_interval * BASE_SAMPLING_LEVEL /
+/// sampling_level` partitions, not `min_index_interval`. A cap fixed at
+/// `min_index_interval + 1` (the pre-fix behavior) would cut a downsampled last
+/// interval's scan short before reaching a present key that legitimately sits
+/// beyond the un-downsampled baseline. This is the ONLY cap that survives this
+/// fix (see [`scan_interval_bytes`]'s caller): a `Some(end_position)` interval
+/// is bounded by its authoritative `[start, end)` byte range instead, so no
+/// entry-count cap is needed there at all.
+///
+/// `sampling_level` is clamped to Cassandra's documented `[1,
+/// BASE_SAMPLING_LEVEL]` range (`IndexSummary.java`) before dividing: `0`
+/// (corrupt/never-should-happen) clamps to `1` — the MAXIMUM legitimate
+/// widening, the fail-safe direction for a cap (a too-generous cap only costs
+/// extra scan work; a too-small one risks exactly this issue's false-negative).
+/// A value `> BASE_SAMPLING_LEVEL` (equally never-should-happen) clamps to
+/// `BASE_SAMPLING_LEVEL`, i.e. the un-downsampled baseline — never a guess,
+/// always derived from the already-parsed header fields (no-heuristics, #28).
+fn last_interval_entry_cap(min_index_interval: u32, sampling_level: u32) -> usize {
+    let effective_sampling_level = sampling_level.clamp(1, BASE_SAMPLING_LEVEL);
+    let effective_interval = (min_index_interval as u64).saturating_mul(BASE_SAMPLING_LEVEL as u64)
+        / (effective_sampling_level as u64);
+    // +1 covers the boundary entry that sits exactly at EOF.
+    usize::try_from(effective_interval.saturating_add(1)).unwrap_or(usize::MAX)
 }
 
 /// Scan a slice of `Index.db` interval bytes for the entry whose key equals `key`.
@@ -149,31 +182,50 @@ pub(crate) fn scan_interval_bytes(bytes: &[u8], key: &[u8], entry_cap: usize) ->
 /// EOF when `interval.end_position` is `None`), and scans forward for the exact key.
 /// Increments `cqlite.sstable.index_interval_parses_total` exactly once (one bounded
 /// interval parse), never `index_parses_total` (design §F).
+///
+/// Entry-count cap (roborev job 1709, High — downsampling false-negative fix):
+/// an END-BOUNDED interval (`end_position.is_some()`) is NOT entry-capped at all —
+/// its authoritative `[start, end)` byte range, delimited by two REAL adjacent
+/// `Summary.db` samples, already bounds the read; every whole entry the buffer
+/// holds is scanned regardless of Cassandra's downsampling (which can widen an
+/// interval to `min_index_interval * 128 / sampling_level` partitions — a fixed
+/// `min_index_interval`-derived cap could otherwise stop short of a present key
+/// and be (wrongly) treated as an authoritative absence by the caller,
+/// `big_get_with_resolution`'s `covering_interval_is_end_bounded` gate). The
+/// read-to-EOF LAST interval keeps a cap — [`last_interval_entry_cap`], derived
+/// from the SAME downsampling-adjusted formula — because `covering_interval_is_end_bounded`
+/// is `false` for it, so a capped miss there is never promoted to an authoritative
+/// absence (the caller falls back to `scan_for_key` instead, preserving #1572).
 pub async fn lookup_key_in_interval(
     index_path: &Path,
     interval: SummaryInterval,
     key: &[u8],
     min_index_interval: u32,
+    sampling_level: u32,
 ) -> Result<IntervalLookup> {
     let mut file = File::open(index_path).await?;
     file.seek(std::io::SeekFrom::Start(interval.start_position))
         .await?;
 
     let mut buffer = Vec::new();
-    match interval.end_position {
+    let entry_cap = match interval.end_position {
         Some(end) if end > interval.start_position => {
-            // Bounded read of exactly the interval's whole entries.
+            // Bounded read of exactly the interval's whole entries. The byte
+            // range itself is the bound — no entry-count cap needed or applied.
             let len = (end - interval.start_position) as usize;
             buffer.resize(len, 0);
             file.read_exact(&mut buffer).await?;
+            usize::MAX
         }
-        // Last interval (or a degenerate empty/zero-width range): read to EOF. The scan
-        // is still bounded by `interval_entry_cap`, so this can never become a
-        // whole-file walk for a many-partition SSTable.
+        // Last interval (or a degenerate empty/zero-width range): read to EOF.
+        // The scan is bounded by the downsampling-adjusted
+        // `last_interval_entry_cap`, so this can never become a whole-file walk
+        // for a many-partition SSTable.
         _ => {
             file.read_to_end(&mut buffer).await?;
+            last_interval_entry_cap(min_index_interval, sampling_level)
         }
-    }
+    };
 
     // One bounded interval parse (distinct counter — never a full parse, design §F).
     crate::observability::add_counter(
@@ -182,11 +234,7 @@ pub async fn lookup_key_in_interval(
         &[],
     );
 
-    Ok(scan_interval_bytes(
-        &buffer,
-        key,
-        interval_entry_cap(min_index_interval),
-    ))
+    Ok(scan_interval_bytes(&buffer, key, entry_cap))
 }
 
 #[cfg(test)]
@@ -388,7 +436,7 @@ mod tests {
             end_position: Some((prefix.len() + interval.len()) as u64),
             sample_index: 1,
         };
-        let res = lookup_key_in_interval(&path, iv, b"target", 128)
+        let res = lookup_key_in_interval(&path, iv, b"target", 128, 128)
             .await
             .expect("interval read");
         let entry = res.entry.expect("target present in the interval");
@@ -397,7 +445,7 @@ mod tests {
         assert_eq!(res.entries_touched, 1, "matched the first interval entry");
 
         // A key beyond the bounded range is structurally unreachable for this interval.
-        let res2 = lookup_key_in_interval(&path, iv, b"after0", 128)
+        let res2 = lookup_key_in_interval(&path, iv, b"after0", 128, 128)
             .await
             .expect("interval read");
         assert!(
@@ -406,5 +454,189 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Roborev job 1709 (High, data-loss class): downsampled-summary false
+    // authoritative-absence regression ----
+
+    /// Write `n` synthetic entries at strictly increasing offsets, returning the
+    /// bytes plus the byte offset the `target_index`'th entry starts at (so a
+    /// caller can carve out a `[start, target_end)` sub-slice as an end-bounded
+    /// interval whose LAST entry is the target — the exact shape
+    /// `find_interval_for_key` would hand a caller: the interval's `end_position`
+    /// sits at the position of the NEXT summary sample, which is the position
+    /// immediately after the entries this interval covers).
+    fn build_n_entries(n: usize, target_index: usize, target_key: &[u8]) -> (Vec<u8>, u64) {
+        let mut buf = Vec::new();
+        let mut target_end = 0u64;
+        for i in 0..n {
+            let key: Vec<u8> = if i == target_index {
+                target_key.to_vec()
+            } else {
+                format!("k{i:08}").into_bytes()
+            };
+            buf.extend_from_slice(&encode_entry(&key, i as u64));
+            if i == target_index {
+                target_end = buf.len() as u64;
+            }
+        }
+        (buf, target_end)
+    }
+
+    async fn write_temp_index(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "cqlite-2412-ds-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nb-1-big-Index.db");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// THE blocker pin (roborev job 1709): a downsampled `Summary.db`
+    /// (`min_index_interval = 128`, `sampling_level = 32` — 4x downsampled, so a
+    /// real interval can legitimately span up to `128 * 128 / 32 = 512`
+    /// partitions) hands an END-BOUNDED interval (`end_position.is_some()`) that
+    /// spans 200 entries — comfortably past the PRE-FIX cap
+    /// (`min_index_interval + 1 = 129`), comfortably under the true downsampled
+    /// width. The target key sits at index 150 (past the old cap). It MUST
+    /// resolve: the false "authoritative absence" this fix closes would otherwise
+    /// surface as a silent "not found" for a partition that is genuinely present
+    /// on disk (`big_get_with_resolution`'s `covering_interval_is_end_bounded`
+    /// gate treats an end-bounded interval miss as definitive, never falling back
+    /// to `scan_for_key`).
+    #[tokio::test]
+    async fn downsampled_end_bounded_interval_resolves_key_past_the_old_cap() {
+        const MIN_INDEX_INTERVAL: u32 = 128;
+        const SAMPLING_LEVEL: u32 = 32; // 4x downsampled: effective width 512.
+        const N: usize = 200; // > old cap (129), < downsampled width (512).
+        const TARGET_INDEX: usize = 150; // past the old 129-entry cap.
+        let target_key = b"the-present-partition";
+
+        let (bytes, target_end) = build_n_entries(N, TARGET_INDEX, target_key);
+        let path = write_temp_index("bounded-present", &bytes).await;
+
+        let iv = SummaryInterval {
+            start_position: 0,
+            end_position: Some(bytes.len() as u64), // whole buffer is ONE interval
+            sample_index: 0,
+        };
+        let _ = target_end; // (kept for clarity; the interval covers the WHOLE buffer)
+
+        let res = lookup_key_in_interval(&path, iv, target_key, MIN_INDEX_INTERVAL, SAMPLING_LEVEL)
+            .await
+            .expect("interval read");
+        assert!(
+            res.entry.is_some(),
+            "a present key at index {TARGET_INDEX} (past the pre-fix {}-entry cap) in a \
+             downsampled end-bounded interval MUST resolve — a miss here is the false \
+             authoritative-absence data-loss bug (roborev job 1709)",
+            MIN_INDEX_INTERVAL + 1
+        );
+        assert_eq!(res.entry.unwrap().key_digest.as_ref(), target_key);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Mirror case: a key GENUINELY absent from the same downsampled end-bounded
+    /// interval still resolves to an authoritative `None` — the fix must not turn
+    /// "no premature cap" into "never stop" (an unbounded scan or a false hit).
+    /// `entries_touched` must equal the FULL interval's real entry count (every
+    /// whole entry scanned, no premature cap), not the old 129-entry cap.
+    #[tokio::test]
+    async fn downsampled_end_bounded_interval_absent_key_is_still_authoritative() {
+        const MIN_INDEX_INTERVAL: u32 = 128;
+        const SAMPLING_LEVEL: u32 = 32;
+        const N: usize = 200;
+
+        // No entry actually holds this key — build N entries with generated keys
+        // and probe with a key that structurally cannot collide with any of them.
+        let (bytes, _) = build_n_entries(N, usize::MAX, b"unused");
+        let path = write_temp_index("bounded-absent", &bytes).await;
+
+        let iv = SummaryInterval {
+            start_position: 0,
+            end_position: Some(bytes.len() as u64),
+            sample_index: 0,
+        };
+        let res = lookup_key_in_interval(
+            &path,
+            iv,
+            b"zzz-genuinely-absent-key",
+            MIN_INDEX_INTERVAL,
+            SAMPLING_LEVEL,
+        )
+        .await
+        .expect("interval read");
+        assert!(
+            res.entry.is_none(),
+            "a genuinely absent key in a downsampled end-bounded interval must still \
+             resolve to an authoritative absence"
+        );
+        assert_eq!(
+            res.entries_touched, N,
+            "the WHOLE interval's {N} entries must be scanned (no premature cap), \
+             proving the absence is genuinely exhaustive, not cap-truncated"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Last-interval (read-to-EOF) generous-cap bound test: `last_interval_entry_cap`
+    /// must derive the SAME downsampling-adjusted width formula
+    /// (`min_index_interval * 128 / sampling_level + 1`) the module doc promises —
+    /// pinned directly (pure function, no I/O) so the formula itself is load-bearing,
+    /// not just its end-to-end effect.
+    #[test]
+    fn last_interval_entry_cap_is_downsampling_adjusted() {
+        // Full sampling (128): cap is the pre-fix baseline, min_index_interval + 1.
+        assert_eq!(last_interval_entry_cap(128, 128), 129);
+        // 4x downsampled (sampling_level = 32): width widens to 128*128/32 = 512.
+        assert_eq!(last_interval_entry_cap(128, 32), 513);
+        // Maximum downsampling (sampling_level = 1): width widens to 128*128 = 16384.
+        assert_eq!(last_interval_entry_cap(128, 1), 16385);
+        // Corrupt/never-should-happen sampling_level = 0 clamps to 1 (max legitimate
+        // widening — the fail-safe direction for a cap, never a divide-by-zero).
+        assert_eq!(last_interval_entry_cap(128, 0), 16385);
+        // Corrupt/never-should-happen sampling_level > BASE_SAMPLING_LEVEL clamps to
+        // 128 (the un-downsampled baseline).
+        assert_eq!(last_interval_entry_cap(128, 9999), 129);
+    }
+
+    /// End-to-end confirmation that the read-to-EOF LAST interval (not merely the
+    /// pure-formula cap above) actually uses the downsampling-adjusted cap: a key
+    /// past the pre-fix 129-entry cap resolves when the interval is read to EOF
+    /// (`end_position: None`) under downsampling.
+    #[tokio::test]
+    async fn downsampled_last_interval_resolves_key_past_the_old_cap() {
+        const MIN_INDEX_INTERVAL: u32 = 128;
+        const SAMPLING_LEVEL: u32 = 32; // downsampled width 512.
+        const N: usize = 200;
+        const TARGET_INDEX: usize = 150;
+        let target_key = b"present-in-last-interval";
+
+        let (bytes, _) = build_n_entries(N, TARGET_INDEX, target_key);
+        let path = write_temp_index("last-present", &bytes).await;
+
+        let iv = SummaryInterval {
+            start_position: 0,
+            end_position: None, // read-to-EOF: the last interval.
+            sample_index: 0,
+        };
+        let res = lookup_key_in_interval(&path, iv, target_key, MIN_INDEX_INTERVAL, SAMPLING_LEVEL)
+            .await
+            .expect("interval read");
+        assert!(
+            res.entry.is_some(),
+            "a present key past the pre-fix cap in a downsampled LAST interval must \
+             resolve too (the generous, downsampling-adjusted cap applies here)"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

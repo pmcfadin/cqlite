@@ -275,6 +275,7 @@ struct Instruments {
     merge_rows_out: Counter<u64>,
     query_degraded_path: Counter<u64>,
     index_parses_total: Counter<u64>,
+    index_interval_parses_total: Counter<u64>,
     storage_open_sstables: Counter<u64>,
     storage_open_bytes: Counter<u64>,
     storage_open_tables: Counter<u64>,
@@ -387,6 +388,13 @@ fn instruments() -> &'static Instruments {
                 .u64_counter(catalog::INDEX_PARSES_TOTAL)
                 .with_unit(catalog::unit::DIMENSIONLESS)
                 .with_description("Full Index.db partition-index parses (#2383 spin probe).")
+                .build(),
+            index_interval_parses_total: m
+                .u64_counter(catalog::INDEX_INTERVAL_PARSES_TOTAL)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description(
+                    "Bounded Summary-guided Index.db interval parses, per point lookup (issue #2412).",
+                )
                 .build(),
             storage_open_sstables: m
                 .u64_counter(catalog::STORAGE_OPEN_SSTABLES)
@@ -612,6 +620,7 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::MERGE_ROWS_OUT => &i.merge_rows_out,
         catalog::QUERY_DEGRADED_PATH => &i.query_degraded_path,
         catalog::INDEX_PARSES_TOTAL => &i.index_parses_total,
+        catalog::INDEX_INTERVAL_PARSES_TOTAL => &i.index_interval_parses_total,
         catalog::STORAGE_OPEN_SSTABLES => &i.storage_open_sstables,
         catalog::STORAGE_OPEN_BYTES => &i.storage_open_bytes,
         catalog::STORAGE_OPEN_TABLES => &i.storage_open_tables,

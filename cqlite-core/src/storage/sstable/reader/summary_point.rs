@@ -111,7 +111,12 @@ impl SSTableReader {
             // Empty summary — the precondition rules this out, but never fabricate.
             return Ok(None);
         };
-        let min_index_interval = summary.get_header().min_index_interval;
+        let header = summary.get_header();
+        let min_index_interval = header.min_index_interval;
+        // Roborev job 1709 (High): the entry cap for the read-to-EOF LAST interval
+        // must be downsampling-aware, so `sampling_level` is threaded through —
+        // never a guess, the already-parsed header field (design doc §A1/no-heuristics).
+        let sampling_level = header.sampling_level;
 
         // One real bounded interval probe (not a B4 cache hit): mirror the
         // resident-map path's `INDEX_PROBES` accounting so a repeated read served
@@ -124,6 +129,7 @@ impl SSTableReader {
             interval,
             partition_key,
             min_index_interval,
+            sampling_level,
         )
         .await?;
 

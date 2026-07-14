@@ -79,7 +79,7 @@ fn interval_read_counts_one_interval_parse_and_zero_full_parses() {
     // Reset so the whole operation is measured from zero.
     mc.reset();
     let res = rt
-        .block_on(lookup_key_in_interval(&path, iv, b"target", 128))
+        .block_on(lookup_key_in_interval(&path, iv, b"target", 128, 128))
         .expect("interval read");
     assert!(
         res.entry.is_some(),
