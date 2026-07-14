@@ -19,6 +19,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from typing import Callable, List, Optional
 
@@ -655,12 +656,39 @@ def test_make_default_list_snapshots_fn_times_out_and_raises() -> None:
     # driver forever after the workload finishes — it must be bounded and land in
     # the same check-FAILURE path as a nonzero exit (roborev finding, final round).
     fn = driver.make_default_list_snapshots_fn("sleep 5", timeout_s=0.2)
+    start = time.time()
     try:
         fn()
         raise AssertionError("expected RuntimeError when the probe exceeds its timeout")
     except RuntimeError as e:
         assert "timed out" in str(e)
         assert "0.2" in str(e)
+    # The bound must actually fire (not wait out the full `sleep 5`).
+    assert time.time() - start < 3.0
+
+
+def test_make_default_list_snapshots_fn_timeout_kills_child_process_tree() -> None:
+    # shell=True + timeout only kills the shell; a child it spawned (kubectl
+    # exec / nodetool) survives and the hang is merely moved off-driver. Verify
+    # the WHOLE process group dies: a shell that backgrounds a marker-writing
+    # sleep must leave no marker behind after the timeout kill (roborev finding,
+    # final review round).
+    marker = os.path.join(tempfile.gettempdir(), f"d12_killtest_{os.getpid()}_{time.time_ns()}")
+    # Parent sleeps past the timeout; a grandchild would write the marker at 3s
+    # if it were NOT killed with the group.
+    cmd = f"(sleep 3; touch {marker}) & sleep 5"
+    fn = driver.make_default_list_snapshots_fn(cmd, timeout_s=0.3)
+    try:
+        fn()
+        raise AssertionError("expected a timeout RuntimeError")
+    except RuntimeError:
+        pass
+    # Give the (killed) would-be writer well past its 3s mark to prove it's gone.
+    time.sleep(3.5)
+    left_behind = os.path.exists(marker)
+    if left_behind:
+        os.remove(marker)
+    assert not left_behind, "child process survived the timeout kill (process group not reaped)"
 
 
 def test_parse_args_snapshot_check_timeout_default() -> None:
@@ -678,6 +706,18 @@ def test_validate_args_rejects_nonpositive_snapshot_check_timeout() -> None:
         assert driver.validate_args(args) is not None
     args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-timeout-s", "30"])
     assert driver.validate_args(args) is None
+
+
+def test_validate_args_rejects_nonfinite_snapshot_check_timeout() -> None:
+    # `inf` silently removes the bound and reintroduces the indefinite hang;
+    # `nan` compares false against every threshold. Both must be rejected up
+    # front (roborev finding, final review round).
+    # Use the --flag=value form: a bare "-inf" would be parsed as an option by
+    # argparse before validate_args ever sees it (also a rejection, but not the
+    # path under test here).
+    for bad in ("inf", "-inf", "nan"):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b", f"--snapshot-check-timeout-s={bad}"])
+        assert driver.validate_args(args) is not None, f"{bad} timeout should be rejected"
 
 
 def main() -> int:
@@ -769,10 +809,18 @@ def main() -> int:
         "make_default_list_snapshots_fn: bounds a wedged probe and raises on timeout",
         test_make_default_list_snapshots_fn_times_out_and_raises,
     )
+    check(
+        "make_default_list_snapshots_fn: timeout kills the whole child process tree",
+        test_make_default_list_snapshots_fn_timeout_kills_child_process_tree,
+    )
     check("--snapshot-check-timeout-s: default + override parse", test_parse_args_snapshot_check_timeout_default)
     check(
         "validate_args: rejects a non-positive --snapshot-check-timeout-s",
         test_validate_args_rejects_nonpositive_snapshot_check_timeout,
+    )
+    check(
+        "validate_args: rejects a non-finite (inf/nan) --snapshot-check-timeout-s",
+        test_validate_args_rejects_nonfinite_snapshot_check_timeout,
     )
 
     print()

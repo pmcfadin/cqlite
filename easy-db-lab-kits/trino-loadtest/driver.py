@@ -19,6 +19,7 @@ itself — can be imported and exercised by test_driver.py on a machine with no
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import random
 import sys
@@ -432,27 +433,43 @@ def make_default_list_snapshots_fn(
     after the workload finished and never yield a D12 verdict. A timeout also
     raises ``RuntimeError`` so it lands in the same check-FAILURE path as a
     nonzero exit, never a silent hang (roborev finding, final review round).
+
+    The command is launched in its own process group (``start_new_session``)
+    and, on timeout, the WHOLE group is killed — a bare ``subprocess.run(...,
+    shell=True, timeout=...)`` only kills the shell, leaving any child it
+    spawned (``kubectl exec``, ``nodetool``) running and merely moving the hang
+    off-driver instead of closing it (roborev finding, final review round).
     """
+    import signal
     import subprocess
 
     def _run() -> str:
+        proc = subprocess.Popen(  # noqa: S602 - operator-provided, trusted CLI arg
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            result = subprocess.run(  # noqa: S602 - operator-provided, trusted CLI arg
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout_s,
-            )
+            stdout, stderr = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired as exc:
+            # Kill the entire process group (the shell AND any children it
+            # spawned), then reap — so a wedged `kubectl exec`/`nodetool`
+            # cannot outlive the driver after we report the timeout.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait()
             raise RuntimeError(
                 f"snapshot-check-cmd timed out after {timeout_s}s (probe wedged; no D12 verdict)"
             ) from exc
-        if result.returncode != 0:
-            stderr = result.stderr.strip() or "(no stderr)"
-            raise RuntimeError(f"snapshot-check-cmd exited {result.returncode}: {stderr}")
-        return result.stdout
+        if proc.returncode != 0:
+            detail = stderr.strip() or "(no stderr)"
+            raise RuntimeError(f"snapshot-check-cmd exited {proc.returncode}: {detail}")
+        return stdout
 
     return _run
 
@@ -583,11 +600,13 @@ def validate_args(args: argparse.Namespace) -> Optional[str]:
         # front instead of letting it degrade into the exact vacuous pass #2399 exists
         # to prevent (roborev finding, review round 2).
         return "--snapshot-check-cmd must not be blank/whitespace-only"
-    if args.snapshot_check_timeout_s <= 0:
-        # A non-positive timeout would either error at subprocess.run or (for 0)
-        # be interpreted as "expire immediately", defeating the bound; require a
-        # real positive budget so a wedged probe reliably surfaces as a FAIL.
-        return "--snapshot-check-timeout-s must be > 0"
+    if not math.isfinite(args.snapshot_check_timeout_s) or args.snapshot_check_timeout_s <= 0:
+        # A non-positive timeout defeats the bound (0 = expire-immediately,
+        # negative errors); `inf`/`nan` are worse — `inf` silently removes the
+        # timeout entirely and reintroduces the indefinite-hang case the bound
+        # exists to prevent. Require a real, finite, positive budget so a wedged
+        # probe reliably surfaces as a FAIL (roborev finding, final review round).
+        return "--snapshot-check-timeout-s must be a finite value > 0"
     return None
 
 
