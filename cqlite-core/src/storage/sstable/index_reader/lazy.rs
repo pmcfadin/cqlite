@@ -235,4 +235,108 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Encode one BIG `Index.db` entry: `[key_len u16 BE][key][data_offset vint][promoted_len vint=0]`
+    /// (mirrors `index_reader::stream`'s test helper — kept local since this
+    /// module has no shared test-fixture crate to depend on without a cycle).
+    fn encode_entry(key: &[u8], data_offset: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(key.len() as u16).to_be_bytes());
+        out.extend_from_slice(key);
+        out.extend_from_slice(&crate::parser::vint::encode_vuint(data_offset));
+        out.extend_from_slice(&crate::parser::vint::encode_vuint(0));
+        out
+    }
+
+    /// Issue #2412 (coordinator-flagged regression, re-anchor of the #2383 fix-C
+    /// guard): a cancellation tripped DURING [`IndexReader::ensure_materialized`]'s
+    /// deferred full parse must abort promptly with `Error::Cancelled`, not run
+    /// the whole O(entries) parse to completion.
+    ///
+    /// `ensure_materialized` is the SURVIVING big-parse site for a Summary-usable
+    /// BIG reader (design §A/§C): open itself is now O(summary) and performs no
+    /// parse at all, but a consumer that still needs the resident map — a full
+    /// enumeration whose Summary-guided streaming walk `FellBack`, or a
+    /// compaction full-ring scan — calls `ensure_materialized`, which reuses the
+    /// SAME `parse_index_data_cancellable` entry loop the pre-#2412 eager `open`
+    /// always ran (unchanged: `CANCEL_POLL_INTERVAL`-bounded cooperative poll,
+    /// `index_reader/parse.rs`). This test proves that cancel-poll survived the
+    /// move to the deferred/lazy call site.
+    ///
+    /// Same calibrated-margin convention as
+    /// `cqlite-flight::warm::registry::spin_tests_2383::cancel_during_large_index_parse_aborts_promptly`
+    /// (issue #2383 roborev-1653 NIT 5 — no wall-clock races: the margin is a
+    /// small fraction of a JUST-measured baseline for this exact fixture on this
+    /// exact host, not a fixed sleep constant that flakes on a fast host).
+    #[tokio::test]
+    async fn ensure_materialized_cancel_mid_parse_aborts_promptly() {
+        use crate::storage::scan_cancel::ScanCancel;
+
+        // Large enough to span several `CANCEL_POLL_INTERVAL` (65536) windows, so
+        // the parse loop polls cancel multiple times before completing — proving
+        // "aborts DURING the parse", not merely at the coarse pre-check.
+        const N: usize = 400_000;
+        let mut bytes = Vec::new();
+        for i in 0..N {
+            let key = format!("key{i:010}");
+            bytes.extend_from_slice(&encode_entry(key.as_bytes(), i as u64));
+        }
+        let (dir, path) = temp_index_file("ensure-materialized-cancel", &bytes);
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("platform must initialize"),
+        );
+
+        // Calibrate: fully materialize the SAME fixture once, uncancelled — also
+        // warms the OS page cache ahead of the timed run below (biasing it
+        // FASTER, never slower, than this baseline).
+        let calib_start = std::time::Instant::now();
+        let calib_reader = IndexReader::open_lazy(&path, platform.clone())
+            .await
+            .expect("calibration open_lazy");
+        calib_reader
+            .ensure_materialized(&ScanCancel::default())
+            .await
+            .expect("calibration materialize (uncancelled) completes");
+        let baseline = calib_start.elapsed();
+        // 1/20th of the measured baseline (same fraction as the flight-level
+        // sibling test): small enough to land inside the timed run, large enough
+        // to dwarf the coarse pre-parse check's same-thread, no-I/O comparison.
+        let margin = baseline / 20;
+
+        let reader = IndexReader::open_lazy(&path, platform)
+            .await
+            .expect("timed open_lazy");
+        let cancel = ScanCancel::new();
+        let canceller = {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(margin);
+                cancel.cancel();
+            })
+        };
+
+        let result = reader.ensure_materialized(&cancel).await;
+        canceller.join().expect("canceller");
+
+        assert!(
+            matches!(result, Err(Error::Cancelled)),
+            "a cancel tripped DURING ensure_materialized's deferred Index.db parse \
+             must abort promptly with Error::Cancelled (calibrated margin {margin:?} \
+             from baseline {baseline:?}), got {result:?} (issue #2412 re-anchor of \
+             #2383 fix C)"
+        );
+        // The aborted materialize must NOT have left a poisoned "materialized"
+        // state: entries stay empty/not-fully-parsed, matching `open_lazy`'s
+        // pre-materialize contract (never a half-parsed resident map).
+        assert!(
+            reader.get_partition_entries().is_empty(),
+            "a cancelled materialize must not expose a partial resident map"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
