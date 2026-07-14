@@ -635,34 +635,29 @@ mod tests {
         let report = benchmarks.generate_report();
         println!("{}", report);
 
-        // Verify performance requirements
+        // Timing/throughput are RECORDED, never asserted (issue #2369): absolute
+        // wall-clock bounds flake the Required PR Gate under loaded/parallel CI
+        // runners. The perf signal belongs to the bench-regression lane, not this
+        // unit test. Here we only assert functional correctness (benchmarks ran,
+        // results are non-vacuous, each op decoded); the parse/serialize inside
+        // `run_all_benchmarks` already fails closed on any decode error.
         for result in &benchmarks.results {
-            // Parse time should be reasonable (<100ms for even large collections)
+            // Non-vacuity: every recorded op decoded and produced a size.
             assert!(
-                result.parse_time.as_millis() < 100,
-                "Parse time too slow for {}: {}ms",
-                result.collection_type,
-                result.parse_time.as_millis()
+                result.data_size_bytes > 0,
+                "Benchmark produced empty serialized data for {}",
+                result.collection_type
             );
 
-            // Serialize time should be reasonable (<100ms for even large collections)
-            assert!(
-                result.serialize_time.as_millis() < 100,
-                "Serialize time too slow for {}: {}ms",
+            // Recorded metrics only — no pass/fail bound.
+            eprintln!(
+                "perf {} ({}): parse={}ms serialize={}ms throughput={:.2} MB/s",
+                result.operation,
                 result.collection_type,
-                result.serialize_time.as_millis()
+                result.parse_time.as_millis(),
+                result.serialize_time.as_millis(),
+                result.throughput_mb_per_sec
             );
-
-            // Throughput should be reasonable (>1 MB/s for most operations)
-            if result.data_size_bytes > 1000 {
-                // Only check for non-trivial data sizes
-                assert!(
-                    result.throughput_mb_per_sec > 0.1,
-                    "Throughput too low for {}: {:.2} MB/s",
-                    result.collection_type,
-                    result.throughput_mb_per_sec
-                );
-            }
         }
     }
 }
