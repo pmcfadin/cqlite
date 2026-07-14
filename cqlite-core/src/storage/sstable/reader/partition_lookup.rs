@@ -28,14 +28,13 @@ impl SSTableReader {
     ) -> Result<Option<(u64, u32)>> {
         use crate::observability::{self as obs, catalog};
 
-        let _span = tracing::debug_span!("sstable.partition_lookup.index").entered();
         let format = self.sstable_format_label();
 
-        // B4 key→partition-offset cache (issue #1570): a repeated point read of the
-        // same present key returns the cached location without re-probing Index.db,
-        // so `INDEX_PROBES` stays 0 on the hit. Positive-only, so an absent key is
-        // never cached and never fabricates a hit. The cached location is the exact
-        // `(offset,size)` a fresh probe resolved (correctness guardrail).
+        // B4 key→partition-offset cache (issue #1570): a repeated point read of a
+        // present key returns the cached `(offset,size)` without re-probing Index.db
+        // (`INDEX_PROBES` stays 0 on the hit). Positive-only. Checked FIRST — before
+        // any materialize / interval read — so the hit skips ALL probe work on both
+        // the Summary-guided and resident-map paths (issue #2412 §B).
         if let Some(loc) = self.key_offset_cache.get(partition_key) {
             debug!(
                 "B4 key-cache hit for partition (raw key len={}): offset={}, size={}",
@@ -55,10 +54,29 @@ impl SSTableReader {
             return Ok(Some((loc.data_offset, loc.data_size)));
         }
 
+        // Stage 3 (issue #2412 §B): a usable `Summary.db` + a not-yet-materialized
+        // lazy `Index.db` → resolve via ONE bounded Summary-guided interval instead of
+        // materializing the whole map. See `reader::summary_point` for the
+        // authoritative-absence rules the BIG point path applies to a resulting `None`.
+        if self.should_use_summary_interval() {
+            return self
+                .lookup_partition_via_summary_interval(partition_key)
+                .await;
+        }
+
+        // FellBack / already-materialized path: ensure the full resident map, then
+        // probe it. `ensure_materialized` MUST run BEFORE the tracing span — the
+        // non-`Send` `EnteredSpan` held across an await makes callers non-`Send`. A
+        // no-op after the first call, or for an eagerly-opened (FellBack) reader.
+        if let Some(index_reader) = &self.index_reader {
+            index_reader.ensure_materialized(&self.scan_cancel).await?;
+        }
+
+        let _span = tracing::debug_span!("sstable.partition_lookup.index").entered();
+
         if let Some(index_reader) = &self.index_reader {
             // A5/B4 read-work counter (`INDEX_PROBES`; consumer B4): one per real
-            // `Index.db` probe. Counted only when a cache miss forces a real probe,
-            // so a B4 cache hit above records nothing. No-op in release.
+            // `Index.db` probe. A B4 cache hit above records nothing. No-op in release.
             crate::storage::sstable::read_work_counters::record_index_probe();
             // Direct raw-key lookup — O(1) HashMap lookup.
             // Index.db entries are keyed on the raw partition key bytes since #552;

@@ -38,6 +38,12 @@
 //! Unlike all other Cassandra binary formats which use big-endian, the offset
 //! table in Summary.db uses little-endian byte order for historical reasons.
 
+// Lazy Summary-guided Index.db interval accessor + the token-ordered find-by-key
+// search (issue #2412). A submodule so the new responsibility lives in its own file
+// under the campsite line without touching the over-threshold `sstable/mod.rs`.
+pub mod interval;
+pub use interval::SummaryInterval;
+
 use crate::{
     error::{Error, Result},
     platform::Platform,
@@ -184,6 +190,50 @@ impl SummaryReader {
     /// Find the entry at a specific index
     pub fn get_entry_at(&self, index: usize) -> Option<&SummaryEntry> {
         self.summary_data.entries.get(index)
+    }
+
+    /// Binary-search the token-ordered sampled keys for the `Index.db` interval that
+    /// must contain `key`'s partition entry (issue #2412, design §A/§B — the core new
+    /// primitive that makes BIG open Cassandra-lazy).
+    ///
+    /// The `Summary.db` samples are in Cassandra **token order** (murmur3 of the raw
+    /// partition key, ties broken by raw bytes), NOT lexicographic byte order, so the
+    /// search compares with [`cmp_partition_keys_by_token`] — comparing raw bytes would
+    /// be wrong for any non-degenerate ring. Returns the half-open byte range
+    /// `[start, end)` into `Index.db`: `start` is the position of the greatest sample
+    /// whose key is `<= key` (Cassandra's `getPosition` floor); `end` is the next
+    /// sample's position, or `None` (scan to EOF) when the floor is the last sample.
+    ///
+    /// When `key` sorts below the first sample the floor clamps to sample 0 (Cassandra
+    /// begins its walk at the start of the index): the returned first interval is then
+    /// searched and yields an authoritative absence — the out-of-`[first_key,last_key]`
+    /// case is already answered upstream by the C5 range short-circuit with zero probe
+    /// work. Returns `None` only for an empty summary (no samples to bound a walk).
+    ///
+    /// The interval boundary is STRUCTURAL — two adjacent authoritative summary sample
+    /// positions — never a guessed offset (no-heuristics, issue #28).
+    pub fn find_by_key(&self, key: &[u8]) -> Option<SummaryInterval> {
+        interval::find_interval_for_key(&self.summary_data.entries, key)
+    }
+
+    /// The authoritative `Index.db` byte offset from which a token-range scan whose
+    /// exclusive lower bound is `start_excl` should begin its forward walk (issue
+    /// #2412 §C / #2413 Option A). Returns the position of the greatest sample whose
+    /// murmur3 token is `<= start_excl` — the floor sample — so the forward walk
+    /// covers every in-range partition (`token > start_excl`) while skipping the
+    /// wholly-below-range prefix. Clamps to sample 0's position (the index start)
+    /// when every sample sorts above `start_excl`, and returns `0` for an empty
+    /// summary (scan from the beginning). The samples are token-ordered on disk, so
+    /// a token binary search is exact — no key is needed and nothing is guessed
+    /// (no-heuristics, issue #28).
+    pub fn scan_start_position_for_token(&self, start_excl: i64) -> u64 {
+        use crate::util::cassandra_murmur3::cassandra_murmur3_token;
+        let entries = &self.summary_data.entries;
+        // Monotone prefix of samples whose token is <= start_excl (token order).
+        let le =
+            entries.partition_point(|e| cassandra_murmur3_token(&e.partition_key) <= start_excl);
+        let floor = le.saturating_sub(1);
+        entries.get(floor).map(|e| e.position).unwrap_or(0)
     }
 
     /// Get summary statistics

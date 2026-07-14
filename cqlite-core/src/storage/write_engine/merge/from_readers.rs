@@ -91,15 +91,53 @@ pub(super) async fn drive_compaction_stream(
 ) -> Result<()> {
     reader
         .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |compaction_row| {
-            let msg =
-                SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)
-                    .map_err(MergeProducerError::from);
-            match sender.send(msg) {
-                Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
-                Err(_) => Ok(std::ops::ControlFlow::Break(())),
-            }
+            forward_row(run_index, compaction_row, schema, sender)
         })
         .await
+}
+
+/// Warm query-serve sibling of [`drive_compaction_stream`] (issue #2412 §C /
+/// #2413 Option A): drives the reader's Summary-guided query stream
+/// ([`SSTableReader::stream_all_partitions_for_query`]) with an optional token
+/// pushdown, instead of the full-ring compaction stream.
+///
+/// A SEPARATE helper (not a flag on `drive_compaction_stream`) precisely because
+/// the two must NOT drift toward each other: the path-based/compaction thread
+/// (`mod.rs`) keeps its byte-parity full-ring materialising walk unchanged, while
+/// ONLY the warm reader-based producer takes the streaming + token-scoped path.
+/// The per-row conversion/backpressure (`forward_row`) is still shared, so the
+/// emit contract cannot diverge.
+pub(super) async fn drive_query_stream(
+    reader: &SSTableReader,
+    run_index: usize,
+    schema: &TableSchema,
+    scan_cancel: &ScanCancel,
+    token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
+    sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+) -> Result<()> {
+    reader
+        .stream_all_partitions_for_query(Some(schema), scan_cancel, token_bound, |compaction_row| {
+            forward_row(run_index, compaction_row, schema, sender)
+        })
+        .await
+}
+
+/// Convert one streamed row into a [`MergeEntry`] and push it into `sender`,
+/// signalling `Break` when the consumer has dropped the channel. Shared by BOTH
+/// [`drive_compaction_stream`] and [`drive_query_stream`] so their emit
+/// contract is defined in exactly one place.
+fn forward_row(
+    run_index: usize,
+    compaction_row: crate::storage::sstable::reader::CompactionRow,
+    schema: &TableSchema,
+    sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+) -> Result<std::ops::ControlFlow<()>> {
+    let msg = SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)
+        .map_err(MergeProducerError::from);
+    match sender.send(msg) {
+        Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
+        Err(_) => Ok(std::ops::ControlFlow::Break(())),
+    }
 }
 
 impl SSTableRowIteratorAdapter {
@@ -118,6 +156,7 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: &TableSchema,
         scan_cancel: ScanCancel,
+        token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
     ) -> Result<Self> {
         let schema = schema.clone();
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
@@ -129,7 +168,14 @@ impl SSTableRowIteratorAdapter {
         producer_gauge::spawned();
 
         let producer = match std::thread::Builder::new().spawn(move || {
-            Self::producer_thread_from_reader(reader, run_index, schema, scan_cancel, sender);
+            Self::producer_thread_from_reader(
+                reader,
+                run_index,
+                schema,
+                scan_cancel,
+                token_bound,
+                sender,
+            );
         }) {
             Ok(handle) => handle,
             Err(e) => {
@@ -162,6 +208,7 @@ impl SSTableRowIteratorAdapter {
         run_index: usize,
         schema: TableSchema,
         scan_cancel: ScanCancel,
+        token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
         sender: SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
     ) {
         let _thread_guard = producer_gauge::ProducerThreadGuard;
@@ -177,11 +224,12 @@ impl SSTableRowIteratorAdapter {
                         e
                     ))
                 })?;
-            rt.block_on(drive_compaction_stream(
+            rt.block_on(drive_query_stream(
                 &reader,
                 run_index,
                 &schema,
                 &scan_cancel,
+                token_bound,
                 &sender,
             ))
         })();
@@ -206,6 +254,11 @@ impl KWayMerger {
     /// are. Reconciliation is byte-identical to the path-based merge — only WHO
     /// opens/owns the `SSTableReader` differs.
     ///
+    /// `token_bound` (issue #2412 §C / #2413 Option A): when `Some`, each reader's
+    /// Summary-guided walk is scoped to the split's `(start, end]` token range so
+    /// out-of-range partition bodies are never read; `None` walks the full ring.
+    /// Compaction never uses this seam, so it keeps full-ring parity walks.
+    ///
     /// UDT-registry guard (issue #2346, WS1 #2345): this seam takes NO
     /// `udt_registry` parameter (see the module doc — a shared `Arc` reader has
     /// no `&mut self` for `set_udt_registry`). Each caller-supplied reader MUST
@@ -219,6 +272,7 @@ impl KWayMerger {
         readers: Vec<Arc<SSTableReader>>,
         schema: &TableSchema,
         scan_cancel: ScanCancel,
+        token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
     ) -> Result<Self> {
         if readers.is_empty() {
             return Err(Error::InvalidInput(
@@ -234,6 +288,7 @@ impl KWayMerger {
                 run_index,
                 schema,
                 scan_cancel.clone(),
+                token_bound,
             )?;
             runs.push(RunReader::new(
                 Box::new(adapter) as Box<dyn SSTableRowIterator>
@@ -493,7 +548,7 @@ mod tests {
             for path in &paths {
                 readers.push(Arc::new(open_reader(path).await));
             }
-            KWayMerger::new_from_readers(readers, &schema, ScanCancel::default())
+            KWayMerger::new_from_readers(readers, &schema, ScanCancel::default(), None)
                 .expect("reader-based merger constructs")
         });
 
@@ -533,7 +588,7 @@ mod tests {
             for path in &paths {
                 readers.push(Arc::new(open_reader(path).await));
             }
-            KWayMerger::new_from_readers(readers, &schema, ScanCancel::default())
+            KWayMerger::new_from_readers(readers, &schema, ScanCancel::default(), None)
                 .expect("reader-based merger constructs")
         });
 

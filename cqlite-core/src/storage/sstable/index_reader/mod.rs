@@ -134,23 +134,24 @@ pub struct IndexData {
     pub key_lookup: HashMap<Arc<[u8]>, usize>,
 }
 
-/// High-level Index.db file reader
+// Lazy Summary-guided open (`open_lazy`/`ensure_materialized`, #2412 §A): see `lazy.rs`.
+mod lazy;
+use lazy::MaterializedIndex;
+
+// Forward-streaming Index.db entry iterator for the Summary-guided BIG scan
+// (#2412 §C, Stage 4): see `stream.rs`.
+mod stream;
+pub(crate) use stream::IndexEntryStream;
+
+/// High-level Index.db file reader. See `lazy.rs` for the #2412 lazy-open contract.
 #[allow(dead_code)]
 pub struct IndexReader {
     /// Path to the Index.db file
     file_path: PathBuf,
-    /// Parsed index data
-    index_data: IndexData,
+    /// Lazily (or eagerly) materialized full parse result.
+    materialized: tokio::sync::OnceCell<MaterializedIndex>,
     /// Platform abstraction for file operations
     platform: Arc<Platform>,
-    /// Whether the entry parse consumed the ENTIRE Index.db file (issue #2302).
-    /// The parser `break`s on the first unparseable entry and returns the parsed
-    /// PREFIX, so a mid-entry-truncated file opens with leftover bytes. `true` ⟺
-    /// no bytes remained — the authoritative signal the stream was not cut
-    /// mid-entry (WHOLE trailing entries dropped at an exact boundary are caught
-    /// separately at the enumeration site). Only the completeness-sensitive full
-    /// enumeration consults it; point-lookup callers tolerate a partial prefix.
-    fully_parsed: bool,
 }
 
 impl IndexReader {
@@ -238,41 +239,46 @@ impl IndexReader {
         // complete. Structural, no heuristics (issue #28).
         let fully_parsed = remaining.is_empty();
 
+        // Eager: populate the cell immediately (fresh cell, `set` always succeeds).
+        let materialized = tokio::sync::OnceCell::new();
+        let _ = materialized.set(MaterializedIndex {
+            index_data,
+            fully_parsed,
+        });
+
         Ok(Self {
             file_path: path.to_path_buf(),
-            index_data,
+            materialized,
             platform,
-            fully_parsed,
         })
     }
 
-    /// Get all partition entries
+    /// Get all partition entries. Empty until materialized (see `lazy.rs`, #2412).
     pub fn get_partition_entries(&self) -> &[PartitionIndexEntry] {
-        &self.index_data.partition_entries
+        self.materialized
+            .get()
+            .map(|m| m.index_data.partition_entries.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Whether the entry parse consumed the ENTIRE Index.db file (issue #2302).
-    /// `false` ⟺ the file was truncated mid-entry, so the parsed entry set is a
-    /// partial prefix and MUST NOT be treated as a complete partition enumeration.
+    /// `false` ⟺ the file was truncated mid-entry — a partial prefix, not a
+    /// complete enumeration. Also `false` until materialized (`lazy.rs`, #2412).
     pub fn is_fully_parsed(&self) -> bool {
-        self.fully_parsed
+        self.materialized
+            .get()
+            .map(|m| m.fully_parsed)
+            .unwrap_or(false)
     }
 
-    /// Look up a partition by key digest
-    ///
-    /// ## Zero-Allocation Optimization (Issue #107)
-    ///
-    /// This method performs HashMap lookup without heap allocation by leveraging
-    /// the `Borrow` trait. Since `Arc<[u8]>` implements `Borrow<[u8]>`, we can
-    /// lookup using `&[u8]` directly without creating a temporary Arc.
-    ///
-    /// **Before:** `let key_arc: Arc<[u8]> = key_digest.into();` (heap allocation per query)
-    /// **After:** Direct `get(key_digest)` using Borrow trait (zero allocations)
+    /// Look up a partition by key digest (zero-allocation `Borrow` lookup, Issue
+    /// #107). `None` until materialized (`lazy.rs`, #2412).
     pub fn lookup_partition(&self, key_digest: &[u8]) -> Option<&PartitionIndexEntry> {
-        self.index_data
+        let m = self.materialized.get()?;
+        m.index_data
             .key_lookup
             .get(key_digest)
-            .and_then(|&index| self.index_data.partition_entries.get(index))
+            .and_then(|&index| m.index_data.partition_entries.get(index))
     }
 
     /// Get statistics about the index
@@ -280,7 +286,7 @@ impl IndexReader {
         let mut promoted_count = 0;
         let mut total_promoted_entries = 0;
 
-        for entry in &self.index_data.partition_entries {
+        for entry in self.get_partition_entries() {
             if let Some(ref promoted) = entry.promoted_index {
                 promoted_count += 1;
                 total_promoted_entries += promoted.block_count() as usize;
@@ -288,7 +294,7 @@ impl IndexReader {
         }
 
         IndexStatistics {
-            total_partitions: self.index_data.partition_entries.len(),
+            total_partitions: self.get_partition_entries().len(),
             partitions_with_promoted_index: promoted_count,
             total_promoted_entries,
             file_size: self.file_path.metadata().map(|m| m.len()).unwrap_or(0),
@@ -301,8 +307,7 @@ impl IndexReader {
 
         // Check for overlapping offsets
         let mut offsets: Vec<_> = self
-            .index_data
-            .partition_entries
+            .get_partition_entries()
             .iter()
             .map(|e| (e.data_offset, e.data_size))
             .collect();
@@ -342,6 +347,8 @@ pub struct IndexStatistics {
 mod tests {
     use super::*;
     use std::env;
+
+    // #2412 lazy-open pins live in `lazy.rs`'s own test module (campsite #1116).
 
     /// Test stock_prices Index.db parsing (Issue #208)
     ///
@@ -521,6 +528,11 @@ mod tests {
 
                 // Check if index_reader was loaded (it's a public field)
                 if let Some(ref index_reader) = reader.index_reader {
+                    // #2412: BIG open is lazy now; force materialization to assert count.
+                    index_reader
+                        .ensure_materialized(&crate::storage::scan_cancel::ScanCancel::default())
+                        .await
+                        .expect("Index.db must materialize on demand");
                     let entries = index_reader.get_partition_entries();
                     println!("Index loaded with {} partition entries", entries.len());
 

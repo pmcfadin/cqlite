@@ -46,7 +46,10 @@ impl SSTableReader {
     ///   greater than `target_offset`.
     ///
     /// [`bti_partition_offsets`]: Self::bti_partition_offsets
-    pub(crate) fn successor_partition_offset(&self, target_offset: u64) -> Result<Option<u64>> {
+    pub(crate) async fn successor_partition_offset(
+        &self,
+        target_offset: u64,
+    ) -> Result<Option<u64>> {
         if self.bti_partitions_db.is_some() {
             let offsets = self.bti_partition_offsets()?;
             // Smallest offset strictly greater than target_offset.
@@ -59,6 +62,10 @@ impl SSTableReader {
         // key (== Data.db) order, but we take the min over `> target` defensively
         // rather than rely on positional adjacency.
         if let Some(index_reader) = &self.index_reader {
+            // Issue #2412 Stage 2: a lazily-opened reader defers the full parse to
+            // first use — this successor scan IS that first use. No-op for an
+            // eagerly-opened reader.
+            index_reader.ensure_materialized(&self.scan_cancel).await?;
             let successor = index_reader
                 .get_partition_entries()
                 .iter()

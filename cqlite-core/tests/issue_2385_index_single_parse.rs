@@ -7,8 +7,15 @@
 //! `load_index_reader` (the raw-key `IndexReader` that actually serves lookups).
 //! At 1.42M partitions that doubled a multi-minute cold parse (#2385) — the #2395
 //! double-parse. This pins the win via the authoritative
-//! `cqlite.sstable.index_parses_total` counter (#2383): a cold open records
-//! EXACTLY 1 (RED = 2 on the pre-fix tree).
+//! `cqlite.sstable.index_parses_total` counter (#2383): the whole file is full-parsed
+//! AT MOST ONCE (RED = 2 on the pre-fix tree).
+//!
+//! Issue #2412 (lazy Summary-guided open) SUPERSEDES the earlier "exactly once at
+//! OPEN" phrasing: a BIG open with a usable `Summary.db` now full-parses `Index.db`
+//! ZERO times at open (deferred), and the single full parse happens on the first
+//! materializing use (here, a full enumeration). The anti-double-parse guard is
+//! preserved as "open + one full enumeration parses EXACTLY ONCE total, never twice".
+//! The pure open-time laziness is pinned separately by `issue_2412_lazy_big_open`.
 //!
 //! Separate integration-test process: the OTel capture harness installs a
 //! PROCESS-GLOBAL meter provider, so this must not share cqlite-core's parallel
@@ -70,13 +77,16 @@ fn find_big_data_file(keyspace: &str, table: &str) -> Option<PathBuf> {
     None
 }
 
-/// Opening a BIG SSTable must parse `Index.db` exactly once.
+/// Opening a BIG SSTable plus one full enumeration must full-parse `Index.db` at
+/// most once (never the pre-#2395 twice).
 ///
 /// RED on the pre-fix tree: `load_index` (Strategy 2 convert) + `load_index_reader`
-/// each ran a full parse → counter == 2. GREEN after retiring the Strategy 2
-/// `SSTableIndex` build: only `load_index_reader` parses → counter == 1.
+/// each ran a full parse → counter == 2. After retiring the Strategy 2 `SSTableIndex`
+/// build AND the #2412 lazy open, a cold open with a usable `Summary.db` parses ZERO
+/// times, and the first materializing use (the full enumeration here) parses exactly
+/// once → total == 1 (never 2).
 #[test]
-fn open_parses_index_exactly_once() {
+fn open_plus_enumeration_parses_index_exactly_once() {
     // Install the process-global in-memory meter BEFORE any parse in this process.
     let mc = testing::metrics_capture();
 
@@ -94,21 +104,34 @@ fn open_parses_index_exactly_once() {
             .expect("platform must initialize"),
     );
 
-    // Reset BEFORE the open so the entire open path is measured from zero.
+    // Reset BEFORE the open so the entire open + enumeration path is measured from zero.
     mc.reset();
     let reader = rt
         .block_on(SSTableReader::open(&data_file, &config, platform))
         .expect("BIG fixture must open");
-    // Keep the reader alive across the collection so the open work is attributed.
-    let _ = &reader;
 
-    let parses = mc
+    // Open alone (with a usable Summary.db) full-parses ZERO times — the #2412 lazy win.
+    let parses_after_open = mc
         .flush_and_collect()
         .counter_sum(catalog::INDEX_PARSES_TOTAL);
-
     assert_eq!(
-        parses, 1.0,
-        "opening a BIG SSTable must parse Index.db exactly ONCE (got {parses}); \
-         pre-fix this was 2 — load_index (Strategy 2 convert) plus load_index_reader (#2395)"
+        parses_after_open, 0.0,
+        "a BIG open with a usable Summary.db must full-parse Index.db ZERO times (lazy, \
+         issue #2412); got {parses_after_open}"
+    );
+
+    // The first materializing use (a full enumeration) full-parses EXACTLY ONCE — never
+    // the pre-#2395 twice. `flush_and_collect` is delta temporality, so this is the
+    // enumeration's own parse count.
+    let _ = rt
+        .block_on(reader.iterate_all_partitions())
+        .expect("full enumeration must succeed");
+    let parses_after_enum = mc
+        .flush_and_collect()
+        .counter_sum(catalog::INDEX_PARSES_TOTAL);
+    assert_eq!(
+        parses_after_enum, 1.0,
+        "the first full enumeration must full-parse Index.db EXACTLY ONCE (got \
+         {parses_after_enum}); pre-#2395 this whole path parsed twice"
     );
 }

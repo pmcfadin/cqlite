@@ -360,7 +360,12 @@ impl WarmTableRegistry {
             if real {
                 real_opens += 1;
             }
-            let footprint = account_footprint(&entry.path);
+            // Issue #2412 §D: account the footprint from the JUST-OPENED
+            // reader's ACTUAL Index.db residency (lazy-open leaves it `false`
+            // for the common Summary-usable BIG shape), not a blanket
+            // "always resident" assumption — the summary-only accounting spec
+            // Requirement 4 requires.
+            let footprint = account_footprint(&entry.path, reader.index_is_materialized());
             opened.push(WarmReader {
                 id: entry.id,
                 reader,

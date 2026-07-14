@@ -156,7 +156,7 @@ impl SSTableReader {
     /// promoted index (a narrow partition), a variable-width clustering column, an
     /// un-decodable block name, a block carrying an open range-tombstone marker, or
     /// an empty block selection.
-    pub(super) fn big_clustering_row_window(
+    pub(super) async fn big_clustering_row_window(
         &self,
         partition_key: &[u8],
         slice: &ClusteringSlice,
@@ -168,7 +168,10 @@ impl SSTableReader {
         let Some(layout) = fixed_clustering_layout(schema) else {
             return Ok(None);
         };
-        let Some(decoded) = self.decode_partition_promoted_index(partition_key, &layout)? else {
+        let Some(decoded) = self
+            .decode_partition_promoted_index(partition_key, &layout)
+            .await?
+        else {
             return Ok(None);
         };
         if decoded.entries.is_empty() {
@@ -222,7 +225,7 @@ impl SSTableReader {
     /// within-partition `(start, end)` byte window, a tightened decode end bound,
     /// and whether the clustering narrowing engaged.
     #[allow(clippy::type_complexity)]
-    pub(super) fn resolve_clustering_seek_window(
+    pub(super) async fn resolve_clustering_seek_window(
         &self,
         is_bti: bool,
         partition_key: &[u8],
@@ -237,7 +240,8 @@ impl SSTableReader {
         let narrow = if is_bti {
             self.bti_clustering_row_window(partition_key, slice, schema)?
         } else {
-            self.big_clustering_row_window(partition_key, slice, schema)?
+            self.big_clustering_row_window(partition_key, slice, schema)
+                .await?
         };
         let Some(narrow) = narrow else {
             return Ok((None, end_bound, false));
@@ -264,7 +268,7 @@ impl SSTableReader {
     /// the partition has no Index.db entry or no promoted index (a narrow partition).
     /// Decode errors (e.g. a non-`CLUSTERING` block name) surface as `Err` so the
     /// caller can treat them as a non-narrowable fallback.
-    fn decode_partition_promoted_index(
+    async fn decode_partition_promoted_index(
         &self,
         partition_key: &[u8],
         layout: &[(CqlTypeId, usize)],
@@ -272,6 +276,10 @@ impl SSTableReader {
         let Some(index_reader) = self.index_reader.as_ref() else {
             return Ok(None);
         };
+        // Issue #2412 Stage 2: a lazily-opened reader defers the full parse to
+        // first use — this promoted-index lookup IS that first use. No-op for an
+        // eagerly-opened reader.
+        index_reader.ensure_materialized(&self.scan_cancel).await?;
         let Some(entry) = index_reader.lookup_partition(partition_key) else {
             return Ok(None);
         };
@@ -347,7 +355,10 @@ impl SSTableReader {
         let Some(layout) = fixed_clustering_layout(schema) else {
             return Ok(None);
         };
-        let Some(decoded) = self.decode_partition_promoted_index(partition_key, &layout)? else {
+        let Some(decoded) = self
+            .decode_partition_promoted_index(partition_key, &layout)
+            .await?
+        else {
             return Ok(None);
         };
         if decoded.entries.is_empty() {
@@ -362,7 +373,10 @@ impl SSTableReader {
         let Some((offset, _size)) = self.lookup_partition_with_index(partition_key).await? else {
             return Ok(None);
         };
-        let end_bound = self.successor_partition_offset(offset)?.map(|e| e as usize);
+        let end_bound = self
+            .successor_partition_offset(offset)
+            .await?
+            .map(|e| e as usize);
 
         // Decompress exactly the chunks covering the target partition ONCE; block
         // windowing then bounds each per-iteration decode to one block.

@@ -52,7 +52,9 @@ mod compressed_offset;
 // Full-Index.db partition enumeration (issue #2302).
 mod full_index_scan;
 // True-streaming full-Index.db enumeration (issue #2361).
-mod full_index_stream;
+pub(in crate::storage::sstable::reader) mod full_index_stream;
+// Summary-guided streaming enumeration + token pushdown (issue #2412 §C / #2413).
+mod summary_scan;
 // Streaming + LIMIT + cancel coverage (issue #2361). The fixtures use
 // `SSTableWriter` + `write_engine::mutation` (write-support-only APIs) to build
 // a real Index.db-backed SSTable, so — like the sibling `compaction_cancel_tests`
@@ -87,6 +89,10 @@ mod sequential;
 pub use model::ClusteringSlice;
 #[cfg(not(feature = "tombstones"))]
 pub use point_compaction::SinglePartitionCompaction;
+// Token-range bound pushed into the Summary-guided streaming walk (issue #2413
+// Option A). Re-exported to the crate so the flight warm merge can construct one
+// from its `TokenFilter`.
+pub use summary_scan::ScanTokenBound;
 
 // Re-export the decompress-work counter so the sibling `scan_stream_windowed`
 // module (outside `data_access`) can increment it on the windowed-scan miss path

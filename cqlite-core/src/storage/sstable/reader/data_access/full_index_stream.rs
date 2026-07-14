@@ -67,7 +67,7 @@ use std::ops::ControlFlow;
 /// decrease of the `(token, key)` pair is. Factored out as a pure function
 /// (`prev`/`token`/`key`/`index` in, `Result<()>` out) so it is unit-testable
 /// without a full `SSTableReader` fixture.
-fn check_token_order(
+pub(in crate::storage::sstable::reader) fn check_token_order(
     prev: Option<(i64, &[u8])>,
     token: i64,
     key: &[u8],
@@ -128,6 +128,12 @@ impl SSTableReader {
         let Some(index_reader) = &self.index_reader else {
             return Ok(FullIndexStreamOutcome::FellBack);
         };
+        // Issue #2412 Stage 2: a lazily-opened reader defers the full parse to
+        // first use — a full streaming enumeration IS that first use (Stage 4
+        // replaces the SOURCE of entries with a true Summary-guided streaming
+        // walk that never materializes the whole map; the walk CONTRACT below is
+        // unchanged either way). No-op for an eagerly-opened reader.
+        index_reader.ensure_materialized(scan_cancel).await?;
         let entries = index_reader.get_partition_entries();
 
         // Exclusive end of the last partition (uncompressed data-section domain).

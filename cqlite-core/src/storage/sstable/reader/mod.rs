@@ -56,6 +56,7 @@ pub(crate) mod scan_stream_windowed;
 #[cfg(feature = "scan-offload-probe")]
 pub mod scan_stream_windowed;
 mod source;
+mod summary_point; // #2412 §B: Summary-guided bounded-interval BIG point lookup
 #[cfg(test)]
 mod tests;
 mod types;
@@ -74,6 +75,9 @@ pub use types::{
 };
 // Re-export the within-partition clustering-slice push-down spec (Issue #954).
 pub use data_access::ClusteringSlice;
+// Token-range bound pushed into the Summary-guided streaming walk (issue #2413
+// Option A) — used by the flight warm merge to scope a split's scan.
+pub use data_access::ScanTokenBound;
 // Single-partition compaction seek outcome (issue #2207). `not(tombstones)` like
 // the seek path it wraps.
 #[cfg(not(feature = "tombstones"))]
@@ -702,11 +706,23 @@ impl SSTableReader {
             .instrument(tracing::debug_span!("sstable.reader.open.load_bloom"))
             .await?;
 
+        // Issue #2412: load Summary.db FIRST so its usability (present, parsed, at
+        // least one sample entry — the authority a bounded lazy walk needs) can
+        // gate whether `load_index_reader` defers the Index.db parse (lazy, design
+        // §A) or falls back to today's eager parse (§A1's counted FellBack).
+        let summary_reader = Self::load_summary_reader(path, &platform)
+            .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))
+            .await;
+        let summary_usable = summary_reader
+            .as_ref()
+            .map(|s| !s.get_entries().is_empty())
+            .unwrap_or(false);
+
         // Load spec readers for enhanced metadata and lookups. Distinguish an absent
         // Index.db from a present-but-unloadable one (issue #2302) so the full
         // enumeration can WARN loud on the latter instead of silently full-scanning.
         let (index_reader, index_present_but_unloadable) =
-            match Self::load_index_reader(path, &platform, &cancel)
+            match Self::load_index_reader(path, &platform, &cancel, summary_usable)
                 .instrument(tracing::debug_span!(
                     "sstable.reader.open.load_index_reader"
                 ))
@@ -716,9 +732,6 @@ impl SSTableReader {
                 component_loading::IndexLoadOutcome::Absent => (None, false),
                 component_loading::IndexLoadOutcome::PresentButUnloadable => (None, true),
             };
-        let summary_reader = Self::load_summary_reader(path, &platform)
-            .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))
-            .await;
         let statistics_reader = Self::load_statistics_reader(path, &platform)
             .instrument(tracing::debug_span!("sstable.reader.open.load_statistics"))
             .await?;
@@ -1355,6 +1368,26 @@ impl SSTableReader {
     /// first endpoint is the min token and the last the max.
     pub fn endpoint_tokens(&self) -> Option<(i64, i64)> {
         self.endpoint_tokens
+    }
+
+    /// Whether this reader's `Index.db` partition map is CURRENTLY fully
+    /// resident (issue #2412 §D — the Flight warm registry's memory accounting).
+    ///
+    /// A BIG reader opened lazily over a usable `Summary.db` (design §A) reports
+    /// `false` until some consumer's [`ensure_materialized`]-driven full parse
+    /// (a full/compaction scan whose Summary-guided streaming walk `FellBack`)
+    /// actually happens; the Summary-guided point/scan paths (§B/§C) never
+    /// trigger it. An eagerly-opened reader (the `Summary.db`-absent FellBack
+    /// case, §A1) reports `true` immediately — its `Index.db` was fully parsed
+    /// at open. No `Index.db` at all (absent component) reports `true` (there is
+    /// no resident cost to represent either way).
+    ///
+    /// [`ensure_materialized`]: crate::storage::sstable::index_reader::IndexReader
+    pub fn index_is_materialized(&self) -> bool {
+        self.index_reader
+            .as_ref()
+            .map(|ir| ir.is_materialized())
+            .unwrap_or(true)
     }
 
     /// Wire a cooperative-cancellation token into this reader's long-running

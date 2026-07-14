@@ -156,11 +156,21 @@ impl SSTableReader {
         Ok(None)
     }
 
-    /// Load Index.db reader for partition lookup
+    /// Load Index.db reader for partition lookup.
+    ///
+    /// Issue #2412 (design §A): when `summary_usable` (a `Summary.db` loaded with at
+    /// least one sample entry — the authority a bounded lazy walk needs) is `true`,
+    /// this defers the whole-file parse via [`IndexReader::open_lazy`] — BIG open
+    /// then costs O(summary), not O(partitions). When no usable `Summary.db` exists,
+    /// this falls back to today's EAGER parse (§A1's counted FellBack): there is no
+    /// summary to bound a lazy walk against, so the full parse happens immediately,
+    /// surfaced via this debug trace (never silent) and still counted on the
+    /// unchanged `index_parses_total` counter (`parse.rs`'s single full-parse site).
     pub(super) async fn load_index_reader(
         path: &Path,
         platform: &Arc<Platform>,
         cancel: &crate::storage::scan_cancel::ScanCancel,
+        summary_usable: bool,
     ) -> Result<IndexLoadOutcome> {
         let Some(base_name) = extract_sstable_base_name(path) else {
             return Ok(IndexLoadOutcome::Absent);
@@ -170,24 +180,34 @@ impl SSTableReader {
         };
         let index_path = parent.join(format!("{}-Index.db", base_name));
 
-        match IndexReader::open_with_summary_cancellable(
-            &index_path,
-            platform.clone(),
-            None,
-            cancel,
-        )
-        .await
-        {
+        let open_result = if summary_usable {
+            IndexReader::open_lazy(&index_path, platform.clone()).await
+        } else {
+            tracing::debug!(
+                "Index.db FellBack to an eager full parse for {} (issue #2412 §A1): no usable \
+                 Summary.db to bound a lazy Summary-guided walk",
+                index_path.display()
+            );
+            IndexReader::open_with_summary_cancellable(&index_path, platform.clone(), None, cancel)
+                .await
+        };
+
+        match open_result {
             Ok(reader) => {
-                tracing::debug!("Loaded Index.db reader for {}", index_path.display());
+                tracing::debug!(
+                    "Loaded Index.db reader for {} ({})",
+                    index_path.display(),
+                    if summary_usable { "lazy" } else { "eager" }
+                );
                 Ok(IndexLoadOutcome::Loaded(Box::new(reader)))
             }
             // A genuinely absent Index.db (some shapes legitimately ship without one)
             // is quiet & expected. A PRESENT-but-unloadable Index.db (open/parse
             // errored) is the silent-degradation class issue #2302 exists to kill:
             // surface it so `iterate_all_partitions` can WARN loud rather than
-            // silently full-scan. `IndexReader::open` returns `NotFound` iff the file
-            // is absent, so the error kind is the authoritative discriminator.
+            // silently full-scan. `IndexReader::open`/`open_lazy` both return
+            // `NotFound` iff the file is absent, so the error kind is the
+            // authoritative discriminator.
             Err(Error::NotFound(_)) => {
                 tracing::debug!("No Index.db present at {}", index_path.display());
                 Ok(IndexLoadOutcome::Absent)

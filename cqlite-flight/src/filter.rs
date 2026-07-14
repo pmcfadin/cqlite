@@ -65,6 +65,20 @@ impl TokenFilter {
         token_in_half_open_range(token, self.start, self.end, self.wraparound)
     }
 
+    /// Lower this split into the core-side [`ScanTokenBound`](cqlite_core::storage::sstable::reader::ScanTokenBound)
+    /// that the Summary-guided streaming walk pushes into the per-SSTable scan
+    /// (issue #2412 §C / #2413 Option A). The core bound mirrors this filter's
+    /// half-open `(start, end]` membership EXACTLY (including the `start == end`
+    /// FULL-ring convention, #2228); `token_filter_lowering_agrees_with_core` pins
+    /// that agreement so the two never diverge.
+    pub fn to_scan_bound(self) -> cqlite_core::storage::sstable::reader::ScanTokenBound {
+        cqlite_core::storage::sstable::reader::ScanTokenBound {
+            start_excl: self.start,
+            end_incl: self.end,
+            wraparound: self.wraparound,
+        }
+    }
+
     /// True if an SSTable spanning `[min_token, max_token]` (inclusive of both
     /// endpoints, since they are the smallest and largest partition tokens
     /// actually present) could contain any token in this split's `(start, end]`
@@ -586,6 +600,58 @@ mod tests {
         assert!(tf.contains(0));
         assert!(tf.contains(10), "end inclusive");
         assert!(!tf.contains(11));
+    }
+
+    /// Issue #2412 §C / #2413: the core-side `ScanTokenBound` the Summary-guided
+    /// walk uses for token pushdown must agree with this crate's `TokenFilter` on
+    /// EVERY token — the membership rule must live in one place, never diverge.
+    /// Grid across normal, wraparound, and equal-endpoint (full-ring) shapes.
+    #[test]
+    fn token_filter_lowering_agrees_with_core() {
+        let shapes = [
+            (0i64, 100i64, false),
+            (100, -100, true),
+            (42, 42, false),
+            (42, 42, true),
+            (i64::MIN, i64::MAX, false),
+            (-5, 5, false),
+        ];
+        let probes = [
+            i64::MIN,
+            -1000,
+            -101,
+            -100,
+            -99,
+            -5,
+            -1,
+            0,
+            1,
+            5,
+            41,
+            42,
+            43,
+            99,
+            100,
+            101,
+            1000,
+            i64::MAX,
+        ];
+        for (start, end, wraparound) in shapes {
+            let tf = TokenFilter {
+                start,
+                end,
+                wraparound,
+            };
+            let bound = tf.to_scan_bound();
+            for t in probes {
+                assert_eq!(
+                    tf.contains(t),
+                    bound.contains(t),
+                    "TokenFilter and ScanTokenBound must agree for token {t} on \
+                     ({start}, {end}] wrap={wraparound}"
+                );
+            }
+        }
     }
 
     #[test]

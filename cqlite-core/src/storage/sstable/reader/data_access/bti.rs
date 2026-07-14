@@ -146,7 +146,10 @@ impl SSTableReader {
         // `None` means `offset` is the LAST partition (no successor): the callee
         // bounds the end with the authoritative data-section length, or falls back
         // to the safe full-scan path when that length is unknown.
-        let end_bound = self.successor_partition_offset(offset)?.map(|e| e as usize);
+        let end_bound = self
+            .successor_partition_offset(offset)
+            .await?
+            .map(|e| e as usize);
 
         let schema_opt = self.get_table_schema(schema);
 
@@ -162,7 +165,8 @@ impl SSTableReader {
                 clustering,
                 schema_opt.as_ref(),
                 end_bound,
-            )?;
+            )
+            .await?;
 
         // Issue #1184: an engaged BIG clustering narrowing decodes the selected block
         // window via `big_promoted.rs` (partition-key-bytes guard, not the BTI strict

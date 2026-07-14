@@ -307,11 +307,14 @@ pub fn build_single_partition_merger_from_readers(
                 // path-based open (issue #2346's whole point). `reader` (the
                 // ORIGINAL, not the clone `probe_reader` consumed above) is
                 // still available here.
+                // Point-read fail-safe: a specific-key filter, not a range scan —
+                // no token bound is pushed (issue #2412; the key set bounds it).
                 let adapter = SSTableRowIteratorAdapter::open_from_reader(
                     reader,
                     run_index,
                     schema,
                     scan_cancel.clone(),
+                    None,
                 )?;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,

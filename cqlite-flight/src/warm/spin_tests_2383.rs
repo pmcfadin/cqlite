@@ -79,6 +79,20 @@ fn decode_names(schema: &TableSchema, readers: Vec<Arc<SSTableReader>>) -> Vec<S
 /// loop). A large flush threshold keeps all `n` rows in ONE generation — the sync
 /// `write()` path auto-flushes over the default threshold when no runtime is
 /// active, which would otherwise split them across many SSTables.
+///
+/// Strips the sibling `-Summary.db` before returning (issue #2412 re-anchor,
+/// coordinator-flagged regression): `SSTableReader::open` now defers the whole
+/// `Index.db` parse when a usable `Summary.db` is present (`open_lazy`, design
+/// §A) — for that shape `warm_readers`' OPEN call no longer performs the O(N)
+/// synchronous parse this repro targets AT ALL, so a cancel arriving during open
+/// has nothing left to interrupt (the property genuinely improved, not broke).
+/// The counted, cancel-aware FellBack path (`open_with_summary_cancellable`,
+/// §A1) is UNCHANGED and is exactly what fires when `Summary.db` is absent — so
+/// stripping it restores this repro's original at-open eager-parse scenario
+/// exactly, on the surviving code path. See also
+/// `ensure_materialized_cancel_mid_parse_aborts_promptly`
+/// (`index_reader/lazy.rs`) for the OTHER surviving big-parse site (the deferred
+/// materialize a Summary-usable reader's full/compaction scan still triggers).
 fn build_big_single_gen(schema: &TableSchema, n: i32) -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::TempDir::new().unwrap();
     let data_dir = temp.path().join("data");
@@ -98,7 +112,7 @@ fn build_big_single_gen(schema: &TableSchema, n: i32) -> (tempfile::TempDir, Pat
     let table_dir = data_dir.join(&schema.keyspace).join(&schema.table);
     // Prove it really is a SINGLE generation (one -Data.db) so the cancel repro
     // trips DURING one parse, not at a coarse between-generation boundary.
-    let data_files = std::fs::read_dir(&table_dir)
+    let data_files: Vec<_> = std::fs::read_dir(&table_dir)
         .expect("table dir")
         .flatten()
         .filter(|e| {
@@ -106,11 +120,28 @@ fn build_big_single_gen(schema: &TableSchema, n: i32) -> (tempfile::TempDir, Pat
                 .to_str()
                 .is_some_and(|f| f.ends_with("-Data.db"))
         })
-        .count();
+        .collect();
     assert_eq!(
-        data_files, 1,
-        "the cancel repro needs exactly ONE big generation (found {data_files})"
+        data_files.len(),
+        1,
+        "the cancel repro needs exactly ONE big generation (found {})",
+        data_files.len()
     );
+    // Force the FellBack eager-parse-at-open path (issue #2412 §A1): delete the
+    // sibling Summary.db so `summary_usable == false` and `load_index_reader`
+    // takes `open_with_summary_cancellable` (still eager, still cancel-aware
+    // every `CANCEL_POLL_INTERVAL` entries) instead of `open_lazy`.
+    let data_name = data_files[0].file_name();
+    let data_name = data_name.to_str().expect("utf8 filename");
+    let base = data_name
+        .strip_suffix("-Data.db")
+        .expect("writer-produced Data.db filename");
+    let summary_path = table_dir.join(format!("{base}-Summary.db"));
+    assert!(
+        summary_path.exists(),
+        "fixture precondition: the writer must emit a Summary.db to strip"
+    );
+    std::fs::remove_file(&summary_path).expect("strip Summary.db to force the FellBack path");
     (temp, table_dir)
 }
 
@@ -268,10 +299,25 @@ fn concurrent_misses_single_flight_one_parse_per_generation() {
 /// short of the real run's parse, including under page-cache speedup from the
 /// calibration pass warming the OS cache for the timed run.
 ///
-/// RED on current main: neither `parse_all_partition_keys_with_summary` nor
-/// `SSTableReader::open` polls the cancel flag, so once past the coarse
-/// between-open check the parse runs to completion and `warm_readers` returns
+/// RED pre-#2383-fix-C: neither `parse_all_partition_keys_with_summary` nor
+/// `SSTableReader::open` polled the cancel flag, so once past the coarse
+/// between-open check the parse ran to completion and `warm_readers` returned
 /// `Ok`. The field showed workers spinning in this exact loop AFTER a client kill.
+///
+/// Re-anchored (issue #2412, coordinator-flagged regression): this test drove
+/// the OPEN call's eager Index.db parse directly. Since #2412 Stage 2, BIG open
+/// defers that parse (`open_lazy`) whenever a usable `Summary.db` is present —
+/// the common/field shape — so `warm_readers`' open no longer performs the O(N)
+/// synchronous work this repro cancels mid-flight (open is now O(summary), by
+/// design). `build_big_single_gen` now strips the sibling `-Summary.db`, forcing
+/// the STILL-eager, STILL-cancel-aware FellBack path
+/// (`open_with_summary_cancellable`, §A1) — the surviving at-open big-parse site
+/// — so this exact scenario (cancel lands DURING open's Index.db parse, aborts
+/// promptly) is re-verified on the code that still runs it. The lazy
+/// `ensure_materialized` deferred-parse site (the one a Summary-usable reader's
+/// full/compaction scan still triggers) is covered by a companion test,
+/// `ensure_materialized_cancel_mid_parse_aborts_promptly`
+/// (`cqlite-core/src/storage/sstable/index_reader/lazy.rs`).
 #[test]
 fn cancel_during_large_index_parse_aborts_promptly() {
     let schema = simple_schema();
