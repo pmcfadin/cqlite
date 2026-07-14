@@ -703,9 +703,9 @@ impl WriteEngine {
                                     .clone()
                                     .or_else(|| stream.current_partition_key())
                                     .ok_or_else(|| {
-                                        Error::Storage(
-                                            "issue #2299 direct-stream: no partition key to open the writer session".to_string(),
-                                        )
+                                        Error::Storage(format!(
+                                            "issue #2299 direct-stream: no partition key to open the writer session (partition index {partitions_processed} in this merge)"
+                                        ))
                                     })?;
                                 let mut session =
                                     writer_ref.begin_streaming_partition(&open_key, None, &[])?;

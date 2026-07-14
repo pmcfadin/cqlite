@@ -149,28 +149,19 @@ impl V5CompressedLegacyParser {
         }
 
         // (2) Body: parse ONE confirmed structure (row / range marker /
-        //     end-of-partition) from the front (offset 0), emit it, and report its
-        //     consumed bytes so the caller advances the window cursor per structure.
-        //     Rebuild the policy from `state` (it only carries owned pieces: the
-        //     partition key and the in-flight range-tombstone start bound).
-        let offset = 0usize;
+        //     end-of-partition) from the FRONT of the window (offset 0 — this
+        //     driver resumes from 0 each call, reporting its consumed byte count so
+        //     the caller advances the window cursor per structure), emit it, and
+        //     report its consumed bytes. Rebuild the policy from `state` (it only
+        //     carries owned pieces: the partition key and the in-flight
+        //     range-tombstone start bound). `data` is non-empty here (early return
+        //     at the top), so the front byte `data[0]` is always in bounds.
 
         // END_OF_PARTITION (0x01): partition complete; consume the marker byte and
         // signal the caller to reset for the next partition.
-        if offset < data.len() && Self::is_end_of_partition(data[offset]) {
+        if Self::is_end_of_partition(data[0]) {
             state.reset();
             return Ok(PartitionStreamStep::PartitionDone(1));
-        }
-
-        // Consumed everything but never saw END_OF_PARTITION: the partition may
-        // continue in the next chunk.
-        if offset >= data.len() {
-            if at_final_chunk {
-                // Trailing (unterminated) partition is terminal (no bytes to drain).
-                state.reset();
-                return Ok(PartitionStreamStep::PartitionDone(0));
-            }
-            return Ok(PartitionStreamStep::NeedMore);
         }
 
         let mut policy = CompactionPolicy::new(self);
@@ -180,10 +171,10 @@ impl V5CompressedLegacyParser {
         // A range-tombstone marker: pair it via the policy (the surviving marker
         // row, if any, is emitted here). A truncated marker on a non-final chunk
         // requests more bytes.
-        if Self::is_range_tombstone_marker(data[offset]) {
+        if Self::is_range_tombstone_marker(data[0]) {
             let mut emitted: Vec<crate::storage::sstable::reader::compaction_row::CompactionRow> =
                 Vec::new();
-            match policy.on_range_marker(data, offset, schema, &mut emitted) {
+            match policy.on_range_marker(data, 0, schema, &mut emitted) {
                 MarkerOutcome::Advanced(next_offset) => {
                     // Confirm the marker is fully framed within the window.
                     if next_offset > data.len() {
@@ -217,11 +208,24 @@ impl V5CompressedLegacyParser {
         // A data row: decode exactly one, emit it, and report its consumed bytes.
         let mut emitted: Vec<crate::storage::sstable::reader::compaction_row::CompactionRow> =
             Vec::new();
-        match policy.on_data_row(data, offset, schema, reader, &resolution, &mut emitted) {
+        match policy.on_data_row(data, 0, schema, reader, &resolution, &mut emitted) {
             Some(next_offset) => {
                 // Confirm the row is fully framed WITHIN the window: a next_offset
-                // past the buffer end means we may have decoded a truncated row on a
-                // non-final chunk — request more bytes rather than emit a partial row.
+                // STRICTLY PAST the buffer end means we decoded a truncated row on a
+                // non-final chunk — request more bytes rather than emit a partial
+                // row. NB: `>` not `>=` (the buffered `drive_partition_sliding` uses
+                // `>=` on line 240 of partition_driver.rs). The difference is
+                // intentional and load-bearing for this resume-from-0 driver: this
+                // path parses ONE structure from the FRONT (offset 0) and reports
+                // its consumed byte count so the caller advances the window cursor
+                // per-structure, so a row that ends EXACTLY at `data.len()`
+                // (`next_offset == data.len()`) is a fully-framed row whose bytes we
+                // must consume and drain — treating `==` as truncation would stall
+                // the cursor forever (re-parsing the same trailing row every refill).
+                // The buffered driver's `>=` is correct for ITS loop (it keeps
+                // advancing `offset` within one call and uses `offset >= data.len()`
+                // to decide whether to look for the next structure), not for a
+                // per-structure resume cursor. Do not "simplify" `>` to `>=`.
                 if next_offset > data.len() {
                     return Ok(if at_final_chunk {
                         PartitionStreamStep::AllDone
@@ -237,6 +241,21 @@ impl V5CompressedLegacyParser {
                             return Ok(PartitionStreamStep::Break(next_offset));
                         }
                     }
+                }
+                // Partition-boundary defense-in-depth (roborev): mirror the buffered
+                // `drive_partition_sliding` EXACTLY. If the very next bytes are a
+                // partition header (a body NOT terminated by an explicit
+                // END_OF_PARTITION 0x01 — e.g. malformed/corrupt input, or a
+                // producer that elides the marker), the current partition is
+                // complete. Feeding the next partition's header into `on_data_row`
+                // would mis-attribute/desync it. Split here (reset for the next
+                // partition) so the streaming path and the buffered path can never
+                // diverge. Only meaningful when the header is fully framed within
+                // the window; a truncated header on a non-final chunk falls through
+                // to the normal per-structure refill on the next call.
+                if next_offset < data.len() && self.peek_is_partition_header(data, next_offset) {
+                    state.reset();
+                    return Ok(PartitionStreamStep::PartitionDone(next_offset));
                 }
                 Ok(PartitionStreamStep::Consumed(next_offset))
             }
