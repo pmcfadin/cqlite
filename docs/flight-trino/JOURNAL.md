@@ -517,3 +517,54 @@ Format:
   `--features observability-testing`.
 - **Files:** `cqlite-flight/tests/metrics_capture_test.rs`,
   `cqlite-flight/tests/issue_2370_gauge_readback_test.rs` (comment only).
+
+## 2026-07-13 — admission-control roborev round 7 (job 1702)
+
+- **What (finding 1, mechanical, gauge-vs-availability ordering):**
+  `AdmissionPermit`'s `_permit: OwnedSemaphorePermit` field is now
+  `permit: Option<OwnedSemaphorePermit>`. `Drop::drop` explicitly `take()`s and
+  drops the permit BEFORE decrementing the `in_use` gauge — Rust drops a
+  struct's fields AFTER `Drop::drop` returns, so the bare-field version
+  released real semaphore capacity to a waiter strictly AFTER the gauge already
+  said "one fewer in use," a transient window where the gauge undercounted
+  relative to what a waiter could observe. Gauge and availability now move in
+  the same order.
+- **What (finding 2, ADJUDICATED — real regression, fixed with option (b)):**
+  Verified against `origin/main` (`c2a86299`): pre-#2420, `PhaseTimer::start`
+  opened `resolve` BEFORE `do_get_setup` even ran, and `do_get_setup`'s
+  `FlightTicket::from_bytes(...)?` failure propagated through `do_get_inner`'s
+  `Err(status) => return Err(...)` — the still-open `resolve`-phase timer then
+  dropped at the function return, recording a `resolve`-tagged
+  `cqlite.rpc.phase.duration` sample. So `main` DID give phase visibility for a
+  malformed ticket (a `resolve` sample), and round-6's `validate_do_get_ticket`
+  (run before the `PhaseTimer` even existed) silently dropped that to ZERO
+  phase samples — a real regression, not a non-issue. Fixed per option (b):
+  added a dedicated `validate` phase (`validate` → `admission` → `resolve` →
+  `merge_setup` → `stream`, 5-phase CLOSED set), giving the pre-existing
+  behavior a MORE PRECISE label instead of restoring the imprecise `resolve`
+  one. `PhaseTimer::start` now opens `validate`; `do_get_inner` constructs the
+  timer before `validate_do_get_ticket` and transitions to `admission` only
+  once the ticket parses.
+- **Tests:** `req_validate_then_admission_phase_chain` (replaces
+  `req_admission_phase_opens_before_resolve`) — deterministic mechanics test on
+  the dedicated `"handshake"` slot proving the full `validate → admission →
+  resolve` sequence AND that a malformed-ticket-shaped drop (never
+  transitioning) still records a `validate` sample. New Stage 5 in
+  `metrics_capture_test.rs` (same test fn, sequenced after the happy path via
+  `mc.reset()` — a second `#[test]` fn would risk cross-test OTel contamination
+  per the capture harness's "single serial test" doc invariant): a real
+  malformed `do_get` records EXACTLY ONE phase sample, tagged `validate` (never
+  zero, never admission/resolve/merge_setup/stream). Updated the two obs.rs
+  mechanics tests + the 5-value closed sets in `metrics_capture_test.rs` and
+  the `catalog.rs` doc comments.
+- **Verified:** `cargo test -p cqlite-flight --features observability-testing
+  --test metrics_capture_test` and the admission target (18/18) both pass,
+  stable across 3 repeated runs each; full 254-test lib suite stable across 3
+  runs; clippy clean (incl. `--features observability-testing`); red-on-main
+  re-confirmed (still 6 tests red when the acquire moves back past
+  `do_get_resolve`).
+- **Files:** `cqlite-flight/src/admission.rs` (permit drop ordering),
+  `obs.rs` (5-phase set, 2 updated unit tests), `service.rs` (timer starts
+  before ticket parse), `admission_tests.rs`, `tests/metrics_capture_test.rs`
+  (Stage 5 + closed-set update), `cqlite-core/.../observability/catalog.rs`
+  (doc updates for the 5-phase set).

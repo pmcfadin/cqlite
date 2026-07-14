@@ -18,8 +18,10 @@
 //!
 //! * `cqlite.rpc.phase.duration` records bounded `admission` (issue #2420
 //!   roborev-1700) and `merge_setup` phase samples over a completed `do_get`
-//!   (Stage 2), every phase value is in the closed 4-value set, and no phase
+//!   (Stage 2), every phase value is in the closed 5-value set, and no phase
 //!   sample carries an unbounded attribute (Stage 2/4),
+//! * a syntactically malformed ticket records a `validate`-phase sample (issue
+//!   #2420 roborev-1702) instead of no phase sample at all,
 //! * `cqlite.rpc.rows` and `cqlite.query.rows_scanned` are emitted, carrying
 //!   only their bounded attribute keys (Stage 1/3/4).
 //!
@@ -208,15 +210,24 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
         phase_sample_count("merge_setup") >= 1,
         "a merge_setup-tagged phase sample must exist (the #2157 stall localizer)"
     );
-    // Issue #2420 roborev-1700: `do_get_inner` now opens `PhaseTimer` in the
-    // `admission` phase BEFORE acquiring a permit, so even an uncontended
-    // (never-queued) `do_get` — this fixture's `Admission::unconstrained()`
-    // default (see `CqliteFlightService::new`) never saturates — still records
-    // one admission-phase sample: `start()` opens it, the first `transition()`
-    // (to `resolve`) closes it. Without this the queue-time phase would be
-    // invisible in `cqlite.rpc.phase.duration` even though
-    // `cqlite.rpc.duration` already counts it in the RPC total — field triage
-    // localizes latency FROM the per-phase breakdown (e.g. #2398).
+    // Issue #2420 roborev-1700/1702: `do_get_inner` now opens `PhaseTimer` in
+    // the `validate` phase (parsing the ticket), transitions to `admission`
+    // once validated, and to `resolve` once admitted — so even an uncontended
+    // (never-queued), well-formed `do_get` — this fixture's
+    // `Admission::unconstrained()` default (see `CqliteFlightService::new`)
+    // never saturates — still records one sample for EACH of `validate` and
+    // `admission`: `start()` opens `validate`, the first `transition()` (to
+    // `admission`) closes it, the second `transition()` (to `resolve`) closes
+    // `admission`. Without this the queue-time (and validation-time) phases
+    // would be invisible in `cqlite.rpc.phase.duration` even though
+    // `cqlite.rpc.duration` already counts both in the RPC total — field
+    // triage localizes latency FROM the per-phase breakdown (e.g. #2398).
+    assert!(
+        phase_sample_count("validate") >= 1,
+        "a validate-tagged phase sample must exist even for a well-formed \
+         do_get (issue #2420 roborev-1702) — ticket parsing must never be \
+         invisible in the phase breakdown"
+    );
     assert!(
         phase_sample_count("admission") >= 1,
         "an admission-tagged phase sample must exist even on an uncontended \
@@ -224,10 +235,10 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
          invisible in the phase breakdown"
     );
 
-    // Every phase value is one of the CLOSED 4-value set (issue #2420
-    // roborev-1701: this closed-set list is intentionally exhaustive — a future
-    // 5th phase must update this assertion as a deliberate decision, not drift
-    // silently past it); no ticket/key/query attribute.
+    // Every phase value is one of the CLOSED 5-value set (issue #2420
+    // roborev-1701/1702: this closed-set list is intentionally exhaustive — a
+    // future 6th phase must update this assertion as a deliberate decision,
+    // not drift silently past it); no ticket/key/query attribute.
     for p in &phase.points {
         let phase_val = p
             .attributes
@@ -237,7 +248,7 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
         assert!(
             matches!(
                 phase_val,
-                Some("admission" | "resolve" | "merge_setup" | "stream")
+                Some("validate" | "admission" | "resolve" | "merge_setup" | "stream")
             ),
             "phase value must be in the closed set, got {phase_val:?}"
         );
@@ -301,5 +312,57 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
                 p.attributes
             );
         }
+    }
+
+    // --- Stage 5 (issue #2420 roborev-1702): a malformed ticket records a
+    // validate-phase sample, not zero phase samples --------------------------
+    //
+    // Sequenced AFTER the well-formed flow above (reusing the SAME `svc`/`rt`,
+    // resetting the shared capture in between) rather than a second `#[test]`
+    // fn: the capture harness's meter provider is process-global with DELTA
+    // temporality isolated only across SEQUENTIAL `reset`/`flush_and_collect`
+    // pairs within one test — see this module's `testing` doc ("all metric
+    // assertions run inside a single serial test"). A second `#[test]` fn
+    // would risk cross-test contamination under `cargo test`'s default
+    // parallelism.
+    mc.reset();
+    let malformed_err = rt.block_on(async {
+        svc.do_get(Request::new(Ticket::new(
+            b"not a valid flight ticket".to_vec(),
+        )))
+        .await
+        .err()
+        .expect("a malformed ticket must error")
+    });
+    assert_eq!(
+        malformed_err.code(),
+        tonic::Code::InvalidArgument,
+        "a malformed ticket fails validation before any admission/resolve work"
+    );
+
+    let malformed_metrics = mc.flush_and_collect();
+    let malformed_phase = malformed_metrics
+        .find(catalog::RPC_PHASE_DURATION)
+        .expect("a malformed ticket must still record a phase.duration sample");
+    let malformed_phase_values: Vec<&str> = malformed_phase
+        .points
+        .iter()
+        .filter_map(|p| {
+            p.attributes
+                .iter()
+                .find(|(k, _)| k == catalog::attr::RPC_PHASE)
+                .map(|(_, v)| v.as_str())
+        })
+        .collect();
+    assert_eq!(
+        malformed_phase_values,
+        vec!["validate"],
+        "a malformed ticket must record EXACTLY ONE phase sample, tagged \
+         validate — never zero (pre-#2420 main recorded a resolve sample for \
+         this same failure mode) and never admission/resolve/merge_setup/\
+         stream (it must never reach those phases), got {malformed_phase_values:?}"
+    );
+    for p in &malformed_phase.points {
+        assert_bounded_attrs(&p.attributes, catalog::RPC_PHASE_DURATION);
     }
 }

@@ -582,7 +582,19 @@ impl CqliteFlightService {
         // and the SAME flag hands off to the merge stage under a fresh guard
         // (`spawn_streaming`/`build_aggregate_response`) covering the stream's
         // lifetime, exactly as before this fix.
-        // MINIMAL, filesystem-free syntax validation FIRST — BEFORE admission
+        // Phase timing (issue #2162, `admission` phase added #2420
+        // roborev-1700, `validate` phase added #2420 roborev-1702): begin BEFORE
+        // the ticket is even parsed, in the `validate` phase. The timer captures
+        // the `flight.do_get` span (this future runs under it via `.instrument`),
+        // so its per-phase histogram samples + span events attach to that span
+        // even for the phases that run on the blocking merge pool. On `main`
+        // (pre-#2420) a malformed ticket recorded a `resolve`-phase sample (the
+        // timer was already open in `resolve` when parsing failed inside the old
+        // `do_get_setup`); starting the timer here preserves that invariant — a
+        // malformed ticket still records SOME phase sample — with a precise
+        // `validate` label instead of folding it into `resolve`'s meaning.
+        let mut timer = crate::obs::PhaseTimer::start("do_get");
+        // MINIMAL, filesystem-free syntax validation — BEFORE admission
         // (roborev-1699 refining roborev-1698): parse the ticket bytes ONLY.
         // Schema/producer construction (CQL DDL parse, predicate/projection/
         // aggregation-spec lowering) is EXPENSIVE, attacker-influenced work and
@@ -591,25 +603,21 @@ impl CqliteFlightService {
         // succeed no matter how many times it is retried, so it fails with its
         // OWN status (`invalid_argument`) immediately, never waiting behind the
         // admission semaphore and never consuming a permit or surfacing as a
-        // retry-inviting `UNAVAILABLE`.
+        // retry-inviting `UNAVAILABLE`. On failure the timer drops here without
+        // ever transitioning, recording the `validate` phase duration it died in.
         let ticket = match self.validate_do_get_ticket(request) {
             Ok(t) => t,
             Err(status) => return Err((status, metrics)),
         };
-        // Phase timing (issue #2162, `admission` phase added #2420
-        // roborev-1700): begin BEFORE the admission-permit acquire, in the new
-        // `admission` phase. The timer captures the `flight.do_get` span (this
-        // future runs under it via `.instrument`), so its per-phase histogram
-        // samples + span events attach to that span even for the phases that run
-        // on the blocking merge pool. `cqlite.rpc.duration` already includes
-        // admission wait in the RPC total, but the per-phase breakdown is what
-        // field triage localizes latency with (e.g. #2398) — starting the timer
-        // here (rather than after `acquire`, or folding the wait into `resolve`)
-        // makes queueing time a first-class, directly observable phase instead of
+        // Validated: close `validate` and enter `admission`. `cqlite.rpc.duration`
+        // already includes admission wait in the RPC total, but the per-phase
+        // breakdown is what field triage localizes latency with (e.g. #2398) —
+        // giving queueing time its own phase (rather than folding it into
+        // `resolve`) makes it a first-class, directly observable phase instead of
         // vanishing from this breakdown. On an admission timeout/reject the timer
-        // drops here without ever transitioning, recording the `admission` phase
-        // duration it died in.
-        let mut timer = crate::obs::PhaseTimer::start("do_get");
+        // drops here without transitioning further, recording the `admission`
+        // phase duration it died in.
+        timer.transition(crate::obs::PHASE_ADMISSION);
         // Admission control (issue #2420, WS4): acquire a permit immediately
         // after the minimal syntax check, before producer/schema construction,
         // any filesystem access (directory resolve / SSTable open), or batch

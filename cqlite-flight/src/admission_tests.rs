@@ -725,18 +725,19 @@ fn req6_admitted_after_wait_equals_unbounded_result() {
     );
 }
 
-// ---- roborev-1700 (round 5): admission is a first-class phase ----
+// ---- roborev-1700/1702 (rounds 5/7): validate + admission are first-class phases ----
 
-/// roborev-1700 (finding 1): `PhaseTimer` — the SAME type `do_get_inner` drives
-/// — opens `PHASE_ADMISSION` at construction and closes it on the FIRST
-/// `transition`, unconditionally (this is a property of the type itself, not of
-/// whether a permit happened to be free — so it covers both the contended and
-/// uncontended `do_get` cases in one deterministic check). Pre-fix, `start`
-/// opened `resolve` directly, so admission wait was folded into (or, before
-/// admission existed at all, simply absent from) the per-phase breakdown;
-/// `cqlite.rpc.duration` already counted the wait in the RPC total, but field
-/// triage localizes latency FROM the per-phase view (e.g. #2398), so queue time
-/// must be a first-class phase there too.
+/// roborev-1700/1702: `PhaseTimer` — the SAME type `do_get_inner` drives — opens
+/// `PHASE_VALIDATE` at construction, moves to `PHASE_ADMISSION` on the first
+/// `transition`, and to `PHASE_RESOLVE` on the second, unconditionally (this is
+/// a property of the type itself, not of whether the ticket happened to be
+/// valid or a permit happened to be free — so it covers the malformed-ticket,
+/// contended, AND uncontended `do_get` cases in one deterministic check).
+/// Pre-#2420, `start` opened `resolve` directly, so a malformed ticket recorded
+/// a (mislabeled) `resolve` sample and admission wait was folded into it too;
+/// `cqlite.rpc.duration` already counts both in the RPC total, but field triage
+/// localizes latency FROM the per-phase view (e.g. #2398), so both a malformed
+/// ticket AND a queued request must be precisely, separately visible there.
 ///
 /// Verified against a synthetic, otherwise-UNUSED bounded method slot
 /// (`"handshake"` — the real `handshake` RPC handler uses only `RpcMetrics`, not
@@ -746,27 +747,63 @@ fn req6_admitted_after_wait_equals_unbounded_result() {
 /// calls a real `do_get` — asserting an exact delta against the shared `do_get`
 /// slot would be flaky under this crate's parallel test execution (many other
 /// tests drive real `do_get` RPCs concurrently). A dedicated slot sidesteps that
-/// while still proving the exact mechanics `do_get_inner` relies on.
+/// while still proving the exact mechanics `do_get_inner` relies on. The REAL
+/// `do_get` path's OTel-level "a malformed ticket records a validate-phase
+/// sample" evidence lives in `metrics_capture_test.rs` (feature
+/// `observability-testing`), which reads back the actual emitted histogram —
+/// this crate's unit-test binary has no such capture harness (installs a
+/// process-global meter provider unsafe to share with `cargo test --lib`).
 #[test]
-fn req_admission_phase_opens_before_resolve() {
-    use crate::obs::{phase_active_level_for, PhaseTimer, PHASE_ADMISSION, PHASE_RESOLVE};
+fn req_validate_then_admission_phase_chain() {
+    use crate::obs::{
+        phase_active_level_for, PhaseTimer, PHASE_ADMISSION, PHASE_RESOLVE, PHASE_VALIDATE,
+    };
     const METHOD: &str = "handshake";
 
+    let validate_base = phase_active_level_for(METHOD, PHASE_VALIDATE);
     let admission_base = phase_active_level_for(METHOD, PHASE_ADMISSION);
     let resolve_base = phase_active_level_for(METHOD, PHASE_RESOLVE);
 
     let mut timer = PhaseTimer::start(METHOD);
     assert_eq!(
-        phase_active_level_for(METHOD, PHASE_ADMISSION),
-        admission_base + 1,
-        "PhaseTimer::start opens the admission phase, not resolve"
+        phase_active_level_for(METHOD, PHASE_VALIDATE),
+        validate_base + 1,
+        "PhaseTimer::start opens the validate phase, not admission or resolve"
     );
     assert_eq!(
-        phase_active_level_for(METHOD, PHASE_RESOLVE),
-        resolve_base,
-        "resolve is untouched while the timer is in admission"
+        phase_active_level_for(METHOD, PHASE_ADMISSION),
+        admission_base,
+        "admission is untouched while the timer is in validate"
     );
 
+    // Simulates a MALFORMED ticket: the timer drops here without ever
+    // transitioning — proving a validation failure still records a phase
+    // sample, preserving pre-#2420 main's "some phase sample always exists"
+    // invariant (main recorded `resolve`; this now records the precise
+    // `validate`).
+    let malformed_ticket_timer = PhaseTimer::start(METHOD);
+    drop(malformed_ticket_timer);
+    assert_eq!(
+        phase_active_level_for(METHOD, PHASE_VALIDATE),
+        validate_base + 1,
+        "the malformed-ticket timer's drop closed validate again — back to the \
+         one still-open timer from above"
+    );
+
+    // Validated: transition to admission.
+    timer.transition(PHASE_ADMISSION);
+    assert_eq!(
+        phase_active_level_for(METHOD, PHASE_VALIDATE),
+        validate_base,
+        "transitioning out of validate closes it"
+    );
+    assert_eq!(
+        phase_active_level_for(METHOD, PHASE_ADMISSION),
+        admission_base + 1,
+        "and opens admission"
+    );
+
+    // Admitted: transition to resolve.
     timer.transition(PHASE_RESOLVE);
     assert_eq!(
         phase_active_level_for(METHOD, PHASE_ADMISSION),
@@ -777,7 +814,8 @@ fn req_admission_phase_opens_before_resolve() {
         phase_active_level_for(METHOD, PHASE_RESOLVE),
         resolve_base + 1,
         "and opens resolve — this is the exact sequence do_get_inner drives: \
-         start() in admission, then transition(PHASE_RESOLVE) once admitted"
+         start() in validate, transition(PHASE_ADMISSION) once validated, \
+         transition(PHASE_RESOLVE) once admitted"
     );
 
     drop(timer);

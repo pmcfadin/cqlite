@@ -339,9 +339,18 @@ impl Drop for WaitGuard {
 /// permit and decrements `in_use`. Moved into the `do_get` response stream so
 /// every stream-exit path (completion, client disconnect, cancellation) drops it —
 /// one lifetime, structurally leak-free.
+///
+/// The permit field is `Option` (roborev-1702), NOT a bare `OwnedSemaphorePermit`:
+/// Rust drops a struct's fields AFTER `Drop::drop` returns, so a bare field would
+/// release the semaphore permit (making capacity available to a waiter) ONLY
+/// AFTER the `in_use` gauge decrement below had already executed — a transient
+/// window where the gauge undercounts real capacity relative to what a waiter
+/// can actually observe becoming free. `Drop` below explicitly `take()`s and
+/// drops the permit FIRST, so the semaphore's availability and the `in_use`
+/// gauge move in the same order every time.
 #[derive(Debug)]
 pub struct AdmissionPermit {
-    _permit: OwnedSemaphorePermit,
+    permit: Option<OwnedSemaphorePermit>,
     inner: Arc<AdmissionInner>,
 }
 
@@ -350,7 +359,7 @@ impl AdmissionPermit {
         let level = inner.in_use.fetch_add(1, Ordering::Relaxed) + 1;
         obs::record_gauge(catalog::FLIGHT_ADMISSION_IN_USE, level, &[]);
         Self {
-            _permit: permit,
+            permit: Some(permit),
             inner,
         }
     }
@@ -358,6 +367,10 @@ impl AdmissionPermit {
 
 impl Drop for AdmissionPermit {
     fn drop(&mut self) {
+        // Release the semaphore permit FIRST (roborev-1702) — before the `in_use`
+        // gauge decrement, so a waiter that wakes on this release never observes
+        // a gauge still counting this permit as held.
+        drop(self.permit.take());
         let prev = self.inner.in_use.fetch_sub(1, Ordering::Relaxed);
         let level = (prev - 1).max(0);
         obs::record_gauge(catalog::FLIGHT_ADMISSION_IN_USE, level, &[]);
