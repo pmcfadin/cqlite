@@ -1370,6 +1370,26 @@ impl SSTableReader {
         self.endpoint_tokens
     }
 
+    /// Whether this reader's `Index.db` partition map is CURRENTLY fully
+    /// resident (issue #2412 §D — the Flight warm registry's memory accounting).
+    ///
+    /// A BIG reader opened lazily over a usable `Summary.db` (design §A) reports
+    /// `false` until some consumer's [`ensure_materialized`]-driven full parse
+    /// (a full/compaction scan whose Summary-guided streaming walk `FellBack`)
+    /// actually happens; the Summary-guided point/scan paths (§B/§C) never
+    /// trigger it. An eagerly-opened reader (the `Summary.db`-absent FellBack
+    /// case, §A1) reports `true` immediately — its `Index.db` was fully parsed
+    /// at open. No `Index.db` at all (absent component) reports `true` (there is
+    /// no resident cost to represent either way).
+    ///
+    /// [`ensure_materialized`]: crate::storage::sstable::index_reader::IndexReader
+    pub fn index_is_materialized(&self) -> bool {
+        self.index_reader
+            .as_ref()
+            .map(|ir| ir.is_materialized())
+            .unwrap_or(true)
+    }
+
     /// Wire a cooperative-cancellation token into this reader's long-running
     /// scans (issue #2264).
     ///

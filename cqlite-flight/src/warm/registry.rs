@@ -737,6 +737,12 @@ mod registry_tests;
 #[path = "spin_tests_2383.rs"]
 mod spin_tests_2383;
 
+// Issue #2412 §D (Stage 5) — the warm registry pins summary-only index memory,
+// in a separate file (campsite rule) loaded here.
+#[cfg(test)]
+#[path = "summary_only_memory_tests.rs"]
+mod summary_only_memory_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

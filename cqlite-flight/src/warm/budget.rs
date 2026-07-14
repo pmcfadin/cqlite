@@ -38,26 +38,38 @@ const PER_GENERATION_OVERHEAD_BYTES: u64 = 64 * 1024;
 /// sidecars (Index/Summary/Statistics/Filter/Partitions/Rows/CRC/
 /// CompressionInfo/...), this sums the on-disk size of EVERY file in the
 /// generation's directory that shares its filename PREFIX — i.e. every
-/// sibling component — with exactly ONE exclusion: `Data.db` itself.
+/// sibling component — with exactly ONE unconditional exclusion: `Data.db`
+/// itself, plus ONE conditional exclusion (issue #2412 §D): `Index.db` when
+/// `index_resident` is `false`.
 ///
-/// Why exclude only `Data.db`: it is the one component the reader does NOT
-/// keep fully parsed/resident — it is PAGED (mmap'd or positionally read), so
-/// its size does not reflect memory pressure the way a fully-loaded sidecar's
-/// does. Every OTHER component that exists for a generation — whichever
-/// format, whichever compression setting — genuinely gets `stat`ed and (for
-/// the ones the reader actually loads: Index/Summary/Statistics/bloom for
-/// BIG; Partitions/Rows tries for BTI, issue #831/#909) parsed/held resident,
-/// or is at minimum a small, format-agnostic sidecar (CRC.db, which can
-/// DOMINATE on an uncompressed BIG table; CompressionInfo.db; Digest;
-/// TOC.txt) whose bytes are cheap to include and NEVER wrong to over-count
-/// slightly (the byte budget is meant to be a defensible upper bound, not a
-/// razor-thin one). This is honest for BIG, BTI, compressed, and
-/// uncompressed generations alike, and needs no future round when a new
-/// component is added — it is accounted automatically by construction.
+/// Why exclude only `Data.db` unconditionally: it is the one component the
+/// reader does NOT keep fully parsed/resident — it is PAGED (mmap'd or
+/// positionally read), so its size does not reflect memory pressure the way a
+/// fully-loaded sidecar's does. Every OTHER component that exists for a
+/// generation — whichever format, whichever compression setting — genuinely
+/// gets `stat`ed and (for the ones the reader actually loads: Index/Summary/
+/// Statistics/bloom for BIG; Partitions/Rows tries for BTI, issue #831/#909)
+/// parsed/held resident, or is at minimum a small, format-agnostic sidecar
+/// (CRC.db, which can DOMINATE on an uncompressed BIG table;
+/// CompressionInfo.db; Digest; TOC.txt) whose bytes are cheap to include and
+/// NEVER wrong to over-count slightly (the byte budget is meant to be a
+/// defensible upper bound, not a razor-thin one).
+///
+/// `index_resident` (issue #2412 §D, spec Requirement 4): whether the
+/// generation's `Index.db` partition map is CURRENTLY fully resident —
+/// [`SSTableReader::index_is_materialized`](crate)'s value at the moment the
+/// generation was opened. A BIG reader opened lazily over a usable
+/// `Summary.db` (design §A) never materializes the full map on the common
+/// point/scan query paths, so its `Index.db`'s on-disk bytes are NOT resident
+/// memory — counting them would defeat the summary-only accounting spec
+/// Requirement 4 requires and re-introduce an O(partitions) footprint the
+/// lazy-open change was meant to eliminate. `Summary.db` (and every other
+/// sidecar) is unaffected: those are always eagerly parsed regardless of
+/// `Index.db`'s laziness, so their bytes are counted unconditionally as before.
 ///
 /// Computed by `read_dir` + `stat` only (no extra parse) at open time. A
 /// fixed overhead covers the parsed-schema handle and registry bookkeeping.
-pub fn account_footprint(data_path: &Path) -> u64 {
+pub fn account_footprint(data_path: &Path, index_resident: bool) -> u64 {
     let name = match data_path.file_name().and_then(|n| n.to_str()) {
         Some(n) if n.ends_with("-Data.db") => n,
         // A path that is not a `-Data.db` (should not happen) accounts as the
@@ -72,6 +84,7 @@ pub fn account_footprint(data_path: &Path) -> u64 {
         return PER_GENERATION_OVERHEAD_BYTES;
     };
     let prefix = format!("{base}-");
+    let index_name = format!("{base}-Index.db");
     let mut total = PER_GENERATION_OVERHEAD_BYTES;
     for entry in read.flatten() {
         let entry_name = entry.file_name();
@@ -79,7 +92,7 @@ pub fn account_footprint(data_path: &Path) -> u64 {
             continue;
         };
         if entry_name == name {
-            // The single documented exclusion: Data.db is paged, not
+            // The unconditional exclusion: Data.db is paged, not
             // parsed-resident.
             continue;
         }
@@ -88,6 +101,11 @@ pub fn account_footprint(data_path: &Path) -> u64 {
             // generation's files never share this exact byte prefix — the
             // generation-number/format-tag segments always differ before the
             // trailing hyphen).
+            continue;
+        }
+        if !index_resident && entry_name == index_name {
+            // The conditional exclusion (issue #2412 §D): a lazily-opened,
+            // not-yet-materialized Index.db is not resident memory.
             continue;
         }
         if let Ok(md) = std::fs::metadata(entry.path()) {
@@ -117,7 +135,7 @@ mod tests {
         std::fs::write(dir.path().join("nb-1-big-Index.db"), vec![0u8; 100]).unwrap();
         std::fs::write(dir.path().join("nb-1-big-Summary.db"), vec![0u8; 50]).unwrap();
         // Statistics.db / Filter.db absent → contribute 0.
-        let footprint = account_footprint(&data);
+        let footprint = account_footprint(&data, true);
         assert_eq!(footprint, PER_GENERATION_OVERHEAD_BYTES + 150);
     }
 
@@ -136,7 +154,7 @@ mod tests {
         std::fs::write(dir.path().join("da-1-bti-Rows.db"), vec![0u8; 75]).unwrap();
         // Statistics.db / Filter.db absent → contribute 0. No Index.db/Summary.db
         // for BTI (by design, so they must NOT spuriously contribute either).
-        let footprint = account_footprint(&data);
+        let footprint = account_footprint(&data, true);
         assert_eq!(
             footprint,
             PER_GENERATION_OVERHEAD_BYTES + 275,
@@ -162,7 +180,7 @@ mod tests {
             vec![0u8; 40],
         )
         .unwrap();
-        let footprint = account_footprint(&data);
+        let footprint = account_footprint(&data, true);
         assert_eq!(
             footprint,
             PER_GENERATION_OVERHEAD_BYTES + 340,
@@ -179,7 +197,7 @@ mod tests {
         let data = dir.path().join("nb-1-big-Data.db");
         std::fs::write(&data, vec![0u8; 10_000]).unwrap(); // large Data.db
         std::fs::write(dir.path().join("nb-1-big-TOC.txt"), vec![0u8; 10]).unwrap();
-        let footprint = account_footprint(&data);
+        let footprint = account_footprint(&data, true);
         assert_eq!(
             footprint,
             PER_GENERATION_OVERHEAD_BYTES + 10,
@@ -199,7 +217,7 @@ mod tests {
         // A DIFFERENT generation (12) whose components must not leak in.
         std::fs::write(dir.path().join("nb-12-big-Data.db"), b"data").unwrap();
         std::fs::write(dir.path().join("nb-12-big-Index.db"), vec![0u8; 9_999]).unwrap();
-        let footprint = account_footprint(&data);
+        let footprint = account_footprint(&data, true);
         assert_eq!(
             footprint,
             PER_GENERATION_OVERHEAD_BYTES + 50,
@@ -210,8 +228,48 @@ mod tests {
     #[test]
     fn non_data_path_accounts_overhead_only() {
         assert_eq!(
-            account_footprint(Path::new("/tmp/not-an-sstable.txt")),
+            account_footprint(Path::new("/tmp/not-an-sstable.txt"), true),
             PER_GENERATION_OVERHEAD_BYTES
+        );
+    }
+
+    /// Issue #2412 §D (Stage 5): a LAZILY-opened reader (`index_resident = false`
+    /// — the common Summary-usable BIG shape, design §A) must NOT count its
+    /// `Index.db` sibling's on-disk bytes — that component is not actually
+    /// resident, so counting it would over-represent the generation's real
+    /// memory footprint and defeat the summary-only accounting spec Requirement 4
+    /// requires. Every OTHER sibling (Summary.db here) is unaffected: it is
+    /// always eagerly parsed regardless of Index.db's laziness.
+    #[test]
+    fn lazy_index_is_excluded_from_the_footprint() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let data = dir.path().join("nb-1-big-Data.db");
+        std::fs::write(&data, b"data").unwrap();
+        // A LARGE Index.db (as a huge-partition-count generation would produce)
+        // — its bytes must NOT appear in the footprint when not resident.
+        std::fs::write(dir.path().join("nb-1-big-Index.db"), vec![0u8; 1_000_000]).unwrap();
+        std::fs::write(dir.path().join("nb-1-big-Summary.db"), vec![0u8; 50]).unwrap();
+
+        let lazy_footprint = account_footprint(&data, false);
+        assert_eq!(
+            lazy_footprint,
+            PER_GENERATION_OVERHEAD_BYTES + 50,
+            "a lazy (not-yet-materialized) Index.db must contribute ZERO bytes; \
+             only the eagerly-parsed Summary.db sibling counts"
+        );
+
+        // Control: the SAME on-disk shape with `index_resident = true` (the
+        // eager/FellBack or later-materialized case) DOES count Index.db —
+        // proving the exclusion is conditional on residency, not a blanket skip.
+        let resident_footprint = account_footprint(&data, true);
+        assert_eq!(
+            resident_footprint,
+            PER_GENERATION_OVERHEAD_BYTES + 1_000_000 + 50,
+            "a resident (materialized) Index.db's bytes must still be counted"
+        );
+        assert!(
+            resident_footprint > lazy_footprint,
+            "the lazy footprint must be materially smaller than the resident one"
         );
     }
 }
