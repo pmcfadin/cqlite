@@ -176,6 +176,20 @@ pub const READ_DURATION: &str = "cqlite.read.duration";
 /// high-cardinality attributes.
 pub const INDEX_PARSES_TOTAL: &str = "cqlite.sstable.index_parses_total";
 
+/// `cqlite.sstable.index_interval_parses_total` — counter `1` (issue #2412).
+///
+/// Incremented once per **bounded** `Index.db` interval parse performed by the
+/// lazy Summary-guided BIG partition index: a point lookup binary-searches
+/// `Summary.db`, seeks to the covering sample's position, and parses at most one
+/// `min_index_interval` of entries (§B of the #2412 design). This is a DISTINCT
+/// counter from [`INDEX_PARSES_TOTAL`], which continues to count only WHOLE-file
+/// `Index.db` parses (so a lazy-open regression that accidentally full-parses is
+/// still visible there, exactly as the #2367 field rounds check). A cold lazy
+/// open of K generations yields `index_parses_total += 0` and
+/// `index_interval_parses_total += 0`, then `+= 1` per point lookup — the
+/// scale-free work-probe for #2412. No high-cardinality attributes.
+pub const INDEX_INTERVAL_PARSES_TOTAL: &str = "cqlite.sstable.index_interval_parses_total";
+
 /// `cqlite.storage.open.sstables` — counter `{sstable}`.
 ///
 /// SSTables discovered and opened by a single [`StorageEngine`] open, summed
@@ -651,6 +665,7 @@ pub const ALL_METRICS: &[&str] = &[
     MERGE_ROWS_OUT,
     QUERY_DEGRADED_PATH,
     INDEX_PARSES_TOTAL,
+    INDEX_INTERVAL_PARSES_TOTAL,
     STORAGE_OPEN_SSTABLES,
     STORAGE_OPEN_BYTES,
     STORAGE_OPEN_TABLES,
@@ -789,6 +804,22 @@ mod tests {
         assert!(ALL_METRICS.contains(&INDEX_PARSES_TOTAL));
         assert_eq!(INDEX_PARSES_TOTAL, "cqlite.sstable.index_parses_total");
         assert!(INDEX_PARSES_TOTAL.starts_with("cqlite."));
+    }
+
+    #[test]
+    fn index_interval_parses_counter_is_distinct_registered_and_namespaced() {
+        // Issue #2412 spec Requirement 5: the bounded interval-parse counter is a
+        // DISTINCT catalog metric (never conflated with full parses), catalogued so
+        // the registration/uniqueness checks cover it, and rooted under `cqlite.`.
+        assert!(ALL_METRICS.contains(&INDEX_INTERVAL_PARSES_TOTAL));
+        assert_eq!(
+            INDEX_INTERVAL_PARSES_TOTAL,
+            "cqlite.sstable.index_interval_parses_total"
+        );
+        assert!(INDEX_INTERVAL_PARSES_TOTAL.starts_with("cqlite."));
+        // Distinct from the full-parse counter — the two must never collapse to one
+        // name (a lazy-open regression must stay visible on INDEX_PARSES_TOTAL).
+        assert_ne!(INDEX_INTERVAL_PARSES_TOTAL, INDEX_PARSES_TOTAL);
     }
 
     #[test]
