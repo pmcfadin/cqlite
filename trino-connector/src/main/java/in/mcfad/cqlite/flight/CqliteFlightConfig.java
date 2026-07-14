@@ -92,12 +92,22 @@ public record CqliteFlightConfig(
             throw new IllegalArgumentException(
                     "cqlite.snapshot-reuse-window-ms must be >= 0, got " + snapshotReuseWindowMillis);
         }
+        try {
+            // Fail fast on a configured value so large the ms→ns conversion would overflow long
+            // (a partial overflow could otherwise silently wrap to a small positive window).
+            Math.multiplyExact(snapshotReuseWindowMillis, 1_000_000L);
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException(
+                    "cqlite.snapshot-reuse-window-ms is too large (ns overflow), got " + snapshotReuseWindowMillis);
+        }
         requireRootPerNodeBase(sidecarUri);
     }
 
     /** The snapshot-reuse freshness window in nanoseconds (the {@link SnapshotManager} unit). */
     public long snapshotReuseWindowNanos() {
-        return snapshotReuseWindowMillis * 1_000_000L;
+        // Overflow is rejected at construction (see the compact constructor), so this is safe;
+        // multiplyExact keeps it fail-fast rather than silently wrapping if that ever changes.
+        return Math.multiplyExact(snapshotReuseWindowMillis, 1_000_000L);
     }
 
     /**

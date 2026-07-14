@@ -459,10 +459,12 @@ impl WarmTableRegistry {
         // (adjudicated: "the previously-installed — here, concurrently
         // NEWER — set was retained instead of being overwritten by an older
         // probe result") rather than adding a new bounded label.
-        if let Some(live) = inner.tables.get(key) {
-            if live.ddl_hash == ddl_hash && live.generation_set() != probe_start_set {
-                let tick = inner.next_tick();
-                let entry = inner.tables.get_mut(key).expect("checked Some above");
+        let fresher_installed = inner.tables.get(key).is_some_and(|live| {
+            live.ddl_hash == ddl_hash && live.generation_set() != probe_start_set
+        });
+        if fresher_installed {
+            let tick = inner.next_tick();
+            if let Some(entry) = inner.tables.get_mut(key) {
                 for r in &mut entry.readers {
                     r.last_access = tick;
                 }

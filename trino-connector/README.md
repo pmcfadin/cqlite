@@ -266,12 +266,16 @@ scanned `(keyspace, table)` — **reusing** the current one when it is still fre
    exist and fail NotFound.
 2. Names that snapshot in **every** Flight ticket, so all splits read the one immutable
    file set on their host.
-3. **Retires** a snapshot when a fresher window supersedes it (or an explicit refresh /
-   window expiry / observed generation-set change invalidates it), and retires every live
-   snapshot at connector shutdown
-   (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`). A reused snapshot
-   OUTLIVES the query that created it, so cleanup is **not** per-query; the `cqlite.snapshot-ttl`
-   backstop reclaims any snapshot a crash leaves behind.
+3. **Retires** a snapshot ONLY on an explicit refresh (`SnapshotManager.invalidate`) or at
+   connector shutdown (`SnapshotManager.retireAll`)
+   (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`). A window that is merely
+   **superseded** by a fresher one (window expiry / observed generation-set change rolling to a new
+   epoch) is **not** actively deleted (issue #2356): a long-running query may still be reading the
+   superseded snapshot — its splits not yet opened, or a cold remote host — when a later query rolls
+   the window, so deleting it on supersede would break those in-flight reads. Superseded snapshots
+   are instead reclaimed by the `cqlite.snapshot-ttl` backstop. A reused snapshot OUTLIVES the query
+   that created it, so cleanup is **not** per-query; the same TTL backstop also reclaims any snapshot
+   a crash leaves behind.
 
 **Per-host Sidecar addressing.** The connector only ever queries the configured
 `cqlite.sidecar-uri` (db0) for discovery, but the Cassandra Sidecar runs as a `hostNetwork`

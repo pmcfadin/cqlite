@@ -54,9 +54,11 @@ import java.util.regex.Pattern;
  * instance-local, so the snapshot is created on EVERY replica host a split will read, memoized
  * per {@code (window, host)}. {@link #snapshotFor} fails closed on the first host whose create
  * errors (naming host + snapshot); {@link #availableHosts} is best-effort for optional fallback
- * hosts. Superseded windows are retired best-effort ({@link #retire}); a Sidecar-side TTL
- * ({@link CqliteFlightConfig#snapshotTtl}) stays the leak backstop for the live window and crash
- * cases.
+ * hosts. A SUPERSEDED window is NOT actively retired (issue #2356 roborev, retire-race): a
+ * long-running query may still be reading its snapshot when a later query rolls to a fresh window,
+ * so superseded windows are reclaimed solely by the Sidecar-side TTL backstop
+ * ({@link CqliteFlightConfig#snapshotTtl}). Active retirement ({@link #retire}) happens ONLY on
+ * explicit {@link #invalidate} and {@link #retireAll} (shutdown).
  *
  * <p>In {@link ReadMode#LIVE} this manager is inert: {@link #snapshotFor} returns empty
  * (ticket {@code snapshot=null}), no reuse cache entry is created, and no Sidecar calls are made.
@@ -114,7 +116,7 @@ public final class SnapshotManager {
      * injectable clock), the generation fingerprint it was taken over, and the per-host create
      * memoization (create at most once per host for this window's snapshot).
      */
-    private static final class Window {
+    static final class Window {
         final String name;
         final long epoch;
         final long createdNanos;
@@ -126,6 +128,11 @@ public final class SnapshotManager {
             this.epoch = epoch;
             this.createdNanos = createdNanos;
             this.generationFingerprint = generationFingerprint;
+        }
+
+        /** The resolved snapshot name stamped into this window's tickets. */
+        String name() {
+            return name;
         }
     }
 
@@ -185,6 +192,25 @@ public final class SnapshotManager {
      */
     public Optional<String> snapshotFor(
             String keyspace, String table, Collection<String> hosts, long generationFingerprint) {
+        return resolveSnapshot(keyspace, table, hosts, generationFingerprint).map(Window::name);
+    }
+
+    /**
+     * Resolve the reuse window ONCE (reusing the current fresh one or creating a fresh one on the
+     * Sidecar of every replica host in {@code hosts}, fail-closed) and return the resolved
+     * {@link Window}, so the caller can thread the EXACT same window into {@link #availableHosts}
+     * rather than independently re-resolving it (issue #2356 roborev, double-resolve race: if the
+     * freshness window elapsed between a separate {@code snapshotFor} + {@code availableHosts} pair,
+     * the two could resolve DIFFERENT windows, decoupling the tickets from the per-host snapshot
+     * actually ensured). Returns {@link Optional#empty()} in {@link ReadMode#LIVE}.
+     */
+    public Optional<Window> resolveSnapshot(String keyspace, String table, Collection<String> hosts) {
+        return resolveSnapshot(keyspace, table, hosts, NO_GENERATION);
+    }
+
+    /** As {@link #resolveSnapshot(String, String, Collection)} with a generation fingerprint. */
+    public Optional<Window> resolveSnapshot(
+            String keyspace, String table, Collection<String> hosts, long generationFingerprint) {
         if (readMode == ReadMode.LIVE) {
             return Optional.empty();
         }
@@ -192,28 +218,29 @@ public final class SnapshotManager {
         for (String host : hosts) {
             createOnHost(window, host, keyspace, table);
         }
-        return Optional.of(window.name);
+        return Optional.of(window);
     }
 
     /**
      * Best-effort per-host snapshot availability for a candidate host set (#2241): ensures the
-     * CURRENT reused window's snapshot exists on every host in {@code hosts} (the same memoized
-     * per-(window, host) create as {@link #snapshotFor}, so a host already created there resolves
-     * with no duplicate PUT), but — unlike {@link #snapshotFor} — does NOT fail closed on an
-     * individual host's creation failure (a failed host is logged and excluded). Counters are NOT
-     * touched here: this is part of the SAME query's planning as the preceding {@link #snapshotFor}
-     * (which already counted the create/reuse), so it reuses that window without double-counting.
+     * ALREADY-RESOLVED {@code window}'s snapshot exists on every host in {@code hosts} (the same
+     * memoized per-(window, host) create as {@link #resolveSnapshot}, so a host already created
+     * there resolves with no duplicate PUT), but — unlike the fail-closed resolve — does NOT fail
+     * closed on an individual host's creation failure (a failed host is logged and excluded).
+     * Counters are NOT touched here: this is part of the SAME query's planning as the preceding
+     * {@link #resolveSnapshot} (which already counted the create/reuse), so it reuses that window
+     * without double-counting.
      *
-     * <p>In {@link ReadMode#LIVE} this is a no-op returning every candidate host unchanged.
+     * <p>The caller passes the {@link Window} returned by {@link #resolveSnapshot} so both operate
+     * on the EXACT same window even if the freshness window would otherwise have rolled between the
+     * two calls (issue #2356 roborev, double-resolve race).
      *
+     * @param window the window resolved for this query by {@link #resolveSnapshot}
      * @param hosts every candidate replica host to check/create snapshot availability for
      * @return the subset of {@code hosts} that have (or now have) the snapshot
      */
-    public Set<String> availableHosts(String keyspace, String table, Collection<String> hosts) {
-        if (readMode == ReadMode.LIVE) {
-            return Set.copyOf(hosts);
-        }
-        Window window = resolveWindow(new TableRef(keyspace, table), NO_GENERATION, false);
+    public Set<String> availableHosts(
+            Window window, String keyspace, String table, Collection<String> hosts) {
         Set<String> available = new LinkedHashSet<>();
         for (String host : hosts) {
             try {
@@ -257,20 +284,24 @@ public final class SnapshotManager {
     /**
      * Resolve the current reused window for {@code ref}, reusing an existing fresh window or
      * creating a new one (bumping the epoch) atomically. When {@code countStats}, records exactly
-     * one {@link #snapshotReuseHitsTotal} (reuse) or {@link #snapshotCreationsTotal} (create). A
-     * superseded window is retired best-effort OUTSIDE the map-compute critical section.
+     * one {@link #snapshotReuseHitsTotal} (reuse) or {@link #snapshotCreationsTotal} (create).
+     *
+     * <p><b>A superseded window is NOT retired here (issue #2356 roborev, retire-race).</b> A
+     * long-running query A can still be reading a window's snapshot (splits not yet opened, or a
+     * cold remote host) when a later query B rolls to a fresh window; actively deleting A's snapshot
+     * dir on supersede would break A's in-flight reads. Superseded windows are therefore reclaimed
+     * solely by the Sidecar-side TTL backstop ({@link CqliteFlightConfig#snapshotTtl}). Active
+     * retirement ({@link #retire}) happens ONLY on explicit {@link #invalidate} (the
+     * {@code Database::refresh()} analog) and {@link #retireAll} (shutdown), never as a side effect
+     * of rolling to a new window.
      */
     private Window resolveWindow(TableRef ref, long generationFingerprint, boolean countStats) {
         long now = clock.nanoTime();
-        Window[] superseded = {null};
         boolean[] reused = {false};
         Window window = windows.compute(ref, (k, existing) -> {
             if (existing != null && isFresh(existing, generationFingerprint, now)) {
                 reused[0] = true;
                 return existing;
-            }
-            if (existing != null) {
-                superseded[0] = existing;
             }
             long epoch = epochs.computeIfAbsent(k, r -> new AtomicLong()).getAndIncrement();
             return new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
@@ -281,9 +312,6 @@ public final class SnapshotManager {
             } else {
                 snapshotCreationsTotal.incrementAndGet();
             }
-        }
-        if (superseded[0] != null) {
-            retire(superseded[0], ref);
         }
         return window;
     }
@@ -368,9 +396,10 @@ public final class SnapshotManager {
     }
 
     /**
-     * Best-effort delete of every snapshot a superseded/invalidated {@code window} created, on each
-     * host it was created on. Individual delete failures are logged and swallowed — the Sidecar TTL
-     * backstop covers a miss.
+     * Best-effort delete of every snapshot an EXPLICITLY-invalidated {@code window} created (via
+     * {@link #invalidate} or {@link #retireAll} only — never on supersede, see {@link #resolveWindow}),
+     * on each host it was created on. Individual delete failures are logged and swallowed — the
+     * Sidecar TTL backstop covers a miss.
      */
     private void retire(Window window, TableRef ref) {
         for (Map.Entry<String, CompletableFuture<String>> e : window.hostCreates.entrySet()) {

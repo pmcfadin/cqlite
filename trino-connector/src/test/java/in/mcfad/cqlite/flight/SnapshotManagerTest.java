@@ -85,8 +85,9 @@ class SnapshotManagerTest {
 
         for (int i = 0; i < 5; i++) {
             assertEquals(Optional.empty(), mgr.snapshotFor("ks", "t", List.of("h1", "h2")));
+            assertEquals(Optional.empty(), mgr.resolveSnapshot("ks", "t", List.of("h1", "h2")),
+                    "live mode resolves no reuse window");
         }
-        assertEquals(Set.of("h1", "h2"), mgr.availableHosts("ks", "t", List.of("h1", "h2")));
 
         assertTrue(fake.creates.isEmpty(), "live mode creates no snapshot");
         assertTrue(fake.clears.isEmpty(), "live mode clears nothing");
@@ -194,9 +195,48 @@ class SnapshotManagerTest {
         assertEquals("cqlite-ks-t-1", w1, "post-expiry query gets a fresh (next-epoch) snapshot");
         assertEquals(2, mgr.snapshotCreationsTotal(), "one create per window");
         assertEquals(0, mgr.snapshotReuseHitsTotal(), "no reuse across the window boundary");
-        // The superseded window's snapshot is retired.
-        assertTrue(fake.clears.stream().anyMatch(c -> c.contains("cqlite-ks-t-0")),
-                "the superseded snapshot is retired, got clears=" + fake.clears);
+        // The superseded window's snapshot is NOT actively deleted (issue #2356 roborev,
+        // retire-race): a long-running query may still be reading it; the TTL backstop reclaims it.
+        assertTrue(fake.clears.isEmpty(),
+                "a superseded snapshot is NOT retired on supersede, got clears=" + fake.clears);
+    }
+
+    /**
+     * Blocker 1 (issue #2356 roborev, retire-race): superseding a window (window expiry / generation
+     * change) must NOT delete the superseded snapshot's hardlinks — an in-flight query may still be
+     * reading them — while an explicit {@link SnapshotManager#invalidate} and shutdown
+     * {@link SnapshotManager#retireAll} still retire correctly.
+     */
+    @Test
+    void supersedeDoesNotRetireButInvalidateAndRetireAllDo() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        // Query A takes W0 and (conceptually) is still reading it.
+        String w0 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        // Query B, after the window elapses, supersedes W0 with W1 — W0 must NOT be deleted.
+        clock.advance(WINDOW);
+        String w1 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        assertNotEquals(w0, w1);
+        assertTrue(fake.clears.isEmpty(), "supersede must not delete W0, got clears=" + fake.clears);
+
+        // Generation-set change also supersedes without retiring.
+        clock.advance(1);
+        String w2 = mgr.snapshotFor("ks", "t", List.of("h1"), 999L).orElseThrow();
+        assertNotEquals(w1, w2);
+        assertTrue(fake.clears.isEmpty(), "generation-change supersede must not delete W1, got " + fake.clears);
+
+        // Explicit refresh (Database::refresh() analog) DOES retire the current window.
+        mgr.invalidate("ks", "t");
+        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w2)),
+                "invalidate() retires the current window, got clears=" + fake.clears);
+
+        // Shutdown retires every live window.
+        String w3 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        mgr.retireAll();
+        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w3)),
+                "retireAll() retires the live window, got clears=" + fake.clears);
     }
 
     /** Scenario: An explicit refresh forces a fresh snapshot on the next query. */
@@ -264,8 +304,9 @@ class SnapshotManagerTest {
         FakeSidecars fake = new FakeSidecars();
         SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
 
-        mgr.snapshotFor("ks", "t", List.of("10.0.0.2")); // primary (required) create
-        Set<String> available = mgr.availableHosts("ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+        SnapshotManager.Window window =
+                mgr.resolveSnapshot("ks", "t", List.of("10.0.0.2")).orElseThrow(); // primary create
+        Set<String> available = mgr.availableHosts(window, "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
 
         assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
         assertEquals(1, fake.creates.stream().filter(c -> c.startsWith("10.0.0.2|")).count(),
@@ -280,9 +321,40 @@ class SnapshotManagerTest {
         fake.failCreateHosts = Set.of("10.0.0.9");
         SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
 
-        Set<String> available = mgr.availableHosts("ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+        SnapshotManager.Window window =
+                mgr.resolveSnapshot("ks", "t", List.of("10.0.0.2")).orElseThrow();
+        Set<String> available = mgr.availableHosts(window, "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
 
         assertEquals(Set.of("10.0.0.2"), available, "the failed host is excluded, not propagated");
+    }
+
+    /**
+     * Blocker 2 (issue #2356 roborev, double-resolve race): the window resolved for the ticket
+     * (via {@link SnapshotManager#resolveSnapshot}) must be threaded into
+     * {@link SnapshotManager#availableHosts} so both operate on the EXACT same window even if the
+     * freshness window elapses between the two calls — availableHosts must NOT independently roll
+     * to a fresh (new-epoch) window and decouple the tickets from the per-host snapshot ensured.
+     */
+    @Test
+    void availableHostsUsesResolvedWindowEvenIfClockAdvancesPastTheWindow() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        SnapshotManager.Window window =
+                mgr.resolveSnapshot("ks", "t", List.of("10.0.0.2")).orElseThrow();
+        assertEquals("cqlite-ks-t-0", window.name());
+
+        // The freshness window elapses between resolveSnapshot and availableHosts.
+        clock.advance(WINDOW + 1);
+        Set<String> available = mgr.availableHosts(window, "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+
+        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
+        // Every create — primary AND fallback — is against W0, never a rolled-forward W1.
+        assertTrue(fake.creates.stream().allMatch(c -> c.contains("cqlite-ks-t-0")),
+                "availableHosts ensured the SAME resolved window, got creates=" + fake.creates);
+        assertEquals(1, mgr.snapshotCreationsTotal(),
+                "no new window is created by availableHosts despite the elapsed clock");
     }
 
     // ---- Retirement / fail-closed edge cases ---------------------------------------------------

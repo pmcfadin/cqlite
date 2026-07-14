@@ -63,6 +63,16 @@ class CqliteFlightConfigTest {
     }
 
     @Test
+    void rejectsOversizedSnapshotReuseWindowInsteadOfSilentlyWrapping() {
+        // Blocker 3 (issue #2356 roborev, unchecked arithmetic): a ms value so large that ms→ns
+        // (* 1_000_000) overflows long must fail fast at parse time, not silently wrap to a small
+        // positive window. Long.MAX_VALUE / 1_000_000 ≈ 9.22e12, so 1e13 ms overflows.
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-reuse-window-ms", "10000000000000");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
     void parsesReadModeLive() {
         Map<String, String> m = base();
         m.put("cqlite.read-mode", "LIVE");
