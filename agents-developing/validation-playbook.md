@@ -225,3 +225,14 @@ with `cd fuzz && cargo +nightly fuzz run fuzz_vint -- -max_total_time=45 -rss_li
 smoke lane plus a nightly long-run, uploading any crash reproducer as an artifact. A crash
 is a **success** for the net — it is filed as its own bug issue with the reproducer, not
 silently patched.
+
+## Field round validation (live-cluster reporting standard, issue #2399)
+
+The oracles above validate correctness locally/in CI against fixtures. A separate,
+complementary standard covers the **live 3-node field validation round** run against a
+real Cassandra + Flight + Trino deployment (the round tracker channel, e.g. #2367):
+`docs/development/round-validation-metrics.md` — a 14-point checklist (A correctness, B
+hang/liveness — both pass/fail GATE items; C throughput, D hygiene — tracked numbers),
+pre-filled with the round-9 baseline. That round gate is a live-cluster verdict, distinct
+from `scripts/agent-gate.sh` above. New round trackers seed from
+`.github/ISSUE_TEMPLATE/round-tracker.yml`.
