@@ -213,6 +213,17 @@ struct Counters {
     /// once (the pre-L1 window path resolved it twice — once directly, once inside
     /// `iterate_rows_for_partition`).
     rows_db_entry_resolves: AtomicU64,
+    /// Partitions resolved from an already-loaded `Index.db` entry on the
+    /// MATERIALISING full-index walk (`INDEX_BACKED_PARTITIONS_RESOLVED`, Issue
+    /// #2430) — one per partition `iterate_all_partitions_via_full_index` resolves
+    /// directly from `entries[i].data_offset`, WITHOUT a `lookup_partition_with_index`
+    /// re-probe. This is the surviving discriminator for "the index-backed
+    /// materialising path was genuinely taken, not a silent `sequential_scan`
+    /// fallback" (issue #2302's `written_summary_index_pair_resolves_via_index_probes`
+    /// / `fully_shadowed_partition_keeps_index_path`): after #2430 removed the
+    /// redundant per-partition probe, `index_probes` reads 0 on this path even when
+    /// it fully resolves, so those two tests' oracle moved here.
+    index_backed_partitions_resolved: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -235,6 +246,7 @@ impl Counters {
             key_hash_calls: AtomicU64::new(0),
             range_short_circuits: AtomicU64::new(0),
             rows_db_entry_resolves: AtomicU64::new(0),
+            index_backed_partitions_resolved: AtomicU64::new(0),
         }
     }
 
@@ -303,6 +315,11 @@ impl Counters {
         self.rows_db_entry_resolves.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_index_backed_partition_resolved(&self) {
+        self.index_backed_partitions_resolved
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -367,6 +384,11 @@ impl Counters {
         self.rows_db_entry_resolves.load(Ordering::Relaxed)
     }
 
+    fn index_backed_partitions_resolved(&self) -> u64 {
+        self.index_backed_partitions_resolved
+            .load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
@@ -384,6 +406,8 @@ impl Counters {
         self.key_hash_calls.store(0, Ordering::Relaxed);
         self.range_short_circuits.store(0, Ordering::Relaxed);
         self.rows_db_entry_resolves.store(0, Ordering::Relaxed);
+        self.index_backed_partitions_resolved
+            .store(0, Ordering::Relaxed);
     }
 }
 
@@ -602,6 +626,22 @@ pub fn record_rows_db_entry_resolve() {
     COUNTERS.record_rows_db_entry_resolve();
 }
 
+/// Record one partition resolved from an already-loaded `Index.db` entry on the
+/// MATERIALISING full-index walk (`INDEX_BACKED_PARTITIONS_RESOLVED`; issue #2430).
+///
+/// Called unconditionally at the single per-partition offset-resolution site in
+/// [`iterate_all_partitions_via_full_index`](super::reader::SSTableReader::iterate_all_partitions_via_full_index),
+/// once `entries[i].data_offset` is used directly (no `lookup_partition_with_index`
+/// re-probe); the body compiles to a no-op in a release build (design.md Decision 1).
+/// This is the surviving non-vacuous "index path was genuinely taken" signal for
+/// issue #2302's written-index-resolve guards, since #2430 removed the redundant
+/// per-partition `INDEX_PROBES` increment on this specific path.
+#[inline(always)]
+pub fn record_index_backed_partition_resolved() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_index_backed_partition_resolved();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -709,6 +749,14 @@ pub fn range_short_circuits() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn rows_db_entry_resolves() -> u64 {
     COUNTERS.rows_db_entry_resolves()
+}
+
+/// Number of partitions resolved from an already-loaded `Index.db` entry on the
+/// materialising full-index walk since the last [`reset`]
+/// (`INDEX_BACKED_PARTITIONS_RESOLVED`, Issue #2430).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn index_backed_partitions_resolved() -> u64 {
+    COUNTERS.index_backed_partitions_resolved()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
@@ -836,6 +884,11 @@ mod tests {
         for _ in 0..16 {
             c.record_rows_db_entry_resolve();
         }
+        // Issue #2430 index-backed-resolved counter: multiplicity 17, distinct
+        // from every sibling so a mis-wired getter/field cross-up is caught.
+        for _ in 0..17 {
+            c.record_index_backed_partition_resolved();
+        }
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
@@ -853,6 +906,7 @@ mod tests {
         assert_eq!(c.key_hash_calls(), 14);
         assert_eq!(c.range_short_circuits(), 15);
         assert_eq!(c.rows_db_entry_resolves(), 16);
+        assert_eq!(c.index_backed_partitions_resolved(), 17);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
@@ -871,6 +925,7 @@ mod tests {
         assert_eq!(c.key_hash_calls(), 0);
         assert_eq!(c.range_short_circuits(), 0);
         assert_eq!(c.rows_db_entry_resolves(), 0);
+        assert_eq!(c.index_backed_partitions_resolved(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms

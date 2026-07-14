@@ -206,6 +206,12 @@ impl SSTableReader {
             // fresh Summary binary search + interval read (file open + seek + parse),
             // turning a full scan into O(N) redundant index re-resolutions.
             let data_offset = entries[i].data_offset;
+            // Non-vacuity signal (issue #2430): one per partition resolved from an
+            // already-loaded `Index.db` entry — the surviving discriminator for
+            // "the index-backed materialising path was genuinely taken", since this
+            // walk no longer re-probes `lookup_partition_with_index` per partition
+            // (that redundant probe was what `INDEX_PROBES` used to count here).
+            crate::storage::sstable::read_work_counters::record_index_backed_partition_resolved();
 
             // Bound the partition: successor entry's offset, else the data-section
             // end for the final partition. Offsets must ascend (Data.db physical

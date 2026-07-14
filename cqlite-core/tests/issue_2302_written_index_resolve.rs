@@ -11,11 +11,20 @@
 //! each partition by the successor entry's offset (last by the data-section end).
 //!
 //! Wiring evidence (this file, `work-counters` feature):
-//! 1. `index_probes() > 0` (== partition count) after iterating a CQLite-WRITTEN
-//!    uncompressed Summary/Index pair — RED before the fix (probes were the 3
-//!    sparse samples, all resolving to nothing → 0 rows → silent fallback).
+//! 1. `index_backed_partitions_resolved() > 0` (== partition count) after
+//!    iterating a CQLite-WRITTEN uncompressed Summary/Index pair — RED before the
+//!    fix (the pre-#2302 code sparsely walked Summary.db's 3 samples, all
+//!    resolving to nothing → 0 rows → silent fallback).
 //! 2. The index path returns the SAME row set as an explicit `sequential_scan`
 //!    over the same fixture (no data loss, no reordering).
+//!
+//! NOTE (issue #2430): item 1 was originally pinned on `index_probes()` (a
+//! per-partition `lookup_partition_with_index` re-probe). #2430 removed that
+//! re-probe as pure redundant work once the loop already holds every entry's
+//! `data_offset`, so `index_probes()` reads 0 on this path even when it fully
+//! resolves — the oracle moved to `index_backed_partitions_resolved`, which
+//! tracks the exact same "index path genuinely taken, not a silent
+//! `sequential_scan` fallback" property.
 
 // Requires BOTH `work-counters` (the `read_work_counters` probe gauge asserted
 // below) AND `write-support` (the `SSTableWriter` + `write_engine::mutation` API
@@ -364,14 +373,24 @@ fn rewrite_crc_db_for(dir: &std::path::Path, new_data_bytes: &[u8]) {
 }
 
 /// The pinned regression: iterating a CQLite-WRITTEN Summary/Index pair must
-/// probe the Index.db (probes == partition count), not silently full-scan.
+/// resolve every partition through the index-backed materialising walk
+/// (`index_backed_partitions_resolved` == partition count), not silently full-scan.
+///
+/// Issue #2430: this oracle was originally `index_probes() > 0` (a per-partition
+/// `lookup_partition_with_index` re-probe). #2430 removed that re-probe — the
+/// walk now resolves each offset directly from the already-loaded `Index.db`
+/// entry — so `index_probes` reads 0 on this path even on a full resolve. The
+/// discriminating property ("index path genuinely taken, not a silent
+/// `sequential_scan` fallback") is unchanged; only the counter that proves it
+/// moved to `index_backed_partitions_resolved`, incremented once per partition
+/// exactly where the redundant probe used to fire.
 ///
 /// `#[serial]`: `read_work_counters` is a process-global `static`, so a
-/// concurrent counter-reading test in the same binary would perturb the probe
-/// count. Serialize the counter-observing tests.
+/// concurrent counter-reading test in the same binary would perturb the count.
+/// Serialize the counter-observing tests.
 #[tokio::test]
 #[serial_test::serial]
-async fn written_summary_index_pair_resolves_via_index_probes() {
+async fn written_summary_index_pair_resolves_via_index_backed_partitions() {
     let temp = TempDir::new().unwrap();
     let n = 300i32; // > min_index_interval (128) so Summary.db is genuinely sparse
     let data_path = write_fixture(&temp, n).await;
@@ -386,21 +405,49 @@ async fn written_summary_index_pair_resolves_via_index_probes() {
 
     read_work_counters::reset();
     let rows = reader.iterate_all_partitions().await.unwrap();
-    let probes = read_work_counters::index_probes();
+    let resolved = read_work_counters::index_backed_partitions_resolved();
 
-    // RED before the fix: probes were the 3 sparse Summary.db samples (all
-    // resolving to nothing), then a silent sequential_scan → this asserted 0.
+    // RED before the fix (pre-#2302): the walk sparsely sampled Summary.db (3
+    // samples, all resolving to nothing), then a silent sequential_scan — this
+    // counter would read 0.
     assert!(
-        probes > 0,
-        "index-random-read path must probe Index.db (got {probes} probes) — a silent \
-         sequential_scan fallback records zero probes (issue #2302)"
+        resolved > 0,
+        "index-backed materialising path must resolve partitions from the loaded \
+         Index.db (got {resolved}) — a silent sequential_scan fallback resolves \
+         none (issue #2302)"
     );
     assert_eq!(
-        probes, n as u64,
-        "every partition must be resolved through a real Index.db probe"
+        resolved, n as u64,
+        "every partition must be resolved through the index-backed walk"
     );
 
-    // No data loss: all partitions surface.
+    // Discrimination check (issue #2430): a reader with NO usable Index.db
+    // (sibling deleted) falls straight into `sequential_scan`, which does NOT
+    // touch this counter at all — proving `index_backed_partitions_resolved`
+    // genuinely discriminates the index-backed branch from the fallback, not
+    // just "some scan happened".
+    let index_path = find_index_db(data_path.parent().unwrap());
+    std::fs::remove_file(&index_path).unwrap();
+    let fallback_reader = open_reader(&data_path).await;
+    assert!(
+        !fallback_reader.has_partition_index(),
+        "sibling Index.db deleted: the reader must report no usable random-access index"
+    );
+    read_work_counters::reset();
+    let fallback_rows = fallback_reader.iterate_all_partitions().await.unwrap();
+    assert_eq!(
+        read_work_counters::index_backed_partitions_resolved(),
+        0,
+        "a sequential_scan fallback (no Index.db) must record ZERO index-backed \
+         resolutions — this is the discrimination proof for the counter above"
+    );
+    assert_eq!(
+        fallback_rows.len(),
+        n as usize,
+        "the fallback must still recover every partition from an intact Data.db"
+    );
+
+    // No data loss: all partitions surface via the index-backed walk.
     assert_eq!(
         rows.len(),
         n as usize,
@@ -410,12 +457,17 @@ async fn written_summary_index_pair_resolves_via_index_probes() {
 
 /// FIX B (issue #2302): a partition that decodes SUCCESSFULLY to zero LIVE rows
 /// (here a pure partition-delete tombstone) must NOT demote the whole walk to a
-/// sequential scan. The index path stays taken (probes == partition count,
-/// covering the shadowed partition too) and contributes zero rows for it — never
-/// a silent fallback just because one healthy partition happens to be fully
-/// shadowed.
+/// sequential scan. The index path stays taken (`index_backed_partitions_resolved`
+/// == partition count, covering the shadowed partition too) and contributes zero
+/// rows for it — never a silent fallback just because one healthy partition
+/// happens to be fully shadowed.
 ///
-/// `#[serial]`: reads the process-global `read_work_counters` probe gauge.
+/// Issue #2430: migrated off `index_probes` for the same reason as the sibling
+/// test above (the per-partition `lookup_partition_with_index` re-probe this
+/// counted was removed as redundant work; `index_backed_partitions_resolved` is
+/// the surviving discriminator).
+///
+/// `#[serial]`: reads the process-global `read_work_counters` gauge.
 #[tokio::test]
 #[serial_test::serial]
 async fn fully_shadowed_partition_keeps_index_path() {
@@ -432,18 +484,20 @@ async fn fully_shadowed_partition_keeps_index_path() {
 
     read_work_counters::reset();
     let rows = reader.iterate_all_partitions().await.unwrap();
-    let probes = read_work_counters::index_probes();
+    let resolved = read_work_counters::index_backed_partitions_resolved();
 
     // The index path was NOT demoted: every partition (INCLUDING the fully
-    // shadowed one) is resolved through a real Index.db probe.
+    // shadowed one) is resolved through the index-backed walk.
     assert_eq!(
-        probes, total as u64,
+        resolved, total as u64,
         "a fully-shadowed partition must NOT demote the walk to sequential_scan — \
-         every partition (shadowed included) is probed via Index.db (issue #2302 FIX B)"
+         every partition (shadowed included) is resolved via the index-backed walk \
+         (issue #2302 FIX B)"
     );
     assert!(
-        probes > 0,
-        "index path must probe Index.db (silent fallback records zero probes)"
+        resolved > 0,
+        "index path must resolve partitions from the loaded Index.db (silent \
+         fallback resolves none)"
     );
 
     // The shadowed partition contributes zero LIVE rows; the other n survive.
