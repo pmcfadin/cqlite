@@ -14,8 +14,15 @@
 //! This drives that through the REAL `FlightService::do_get` and reads back the
 //! authoritative `cqlite.sstable.index_parses_total` counter (one increment per
 //! full `Index.db` parse, emitted from the core parse loop regardless of call
-//! path). A correct read path rebinds a same-inode generation to its LIVE path
-//! with ZERO re-parse; current main re-parses #generations — the spin.
+//! path) ALONGSIDE the warm registry's `reader_opens` work-done counter. A
+//! correct read path rebinds a same-inode generation to its LIVE path with ZERO
+//! FURTHER reader opens; a broken one re-opens #generations — the spin.
+//!
+//! Re-anchored for issue #2412 (lazy Summary-guided BIG open): a cold `do_get`
+//! over a usable `Summary.db` now performs ZERO full `Index.db` parses at open
+//! (deferred), so `index_parses_total` alone no longer distinguishes "rebound"
+//! from "re-opened" for this fixture shape — see the test's own doc for the
+//! `reader_opens`-based re-anchor.
 //!
 //! Separate integration-test process (roborev #2163 precedent): the OTel capture
 //! harness installs a PROCESS-GLOBAL meter provider, so it must not share
@@ -177,19 +184,33 @@ async fn do_get_drain(svc: &CqliteFlightService, ticket: Vec<u8>) -> usize {
     msgs
 }
 
-/// **Resolve-phase spin pin (issue #2383).** Two `do_get`s against the SAME
-/// underlying generations reached through TWO per-query snapshot dirs (query N's
-/// is cleared before query N+1 stages a fresh same-inode dir, exactly as the
-/// Trino connector's `clearSnapshot` does). The FIRST query legitimately parses
-/// both generations cold. The SECOND must serve the same inodes with ZERO further
-/// full `Index.db` parses (rebind-by-inode) — its cost is the spin the field saw.
+/// **Resolve-phase spin pin (issue #2383), re-anchored for issue #2412.** Two
+/// `do_get`s against the SAME underlying generations reached through TWO
+/// per-query snapshot dirs (query N's is cleared before query N+1 stages a
+/// fresh same-inode dir, exactly as the Trino connector's `clearSnapshot`
+/// does). The SECOND must serve the same inodes via a REBIND — zero further
+/// reader OPENS — not a full re-open of every generation (the field's O(entries
+/// × opens) amplification, seen as 8× re-parses for one logical query).
 ///
-/// RED on current main: the cached readers' snap1 paths are dead after teardown,
-/// so the warm rebuild RE-OPENS both generations from snap2 and the do_get path
-/// re-parses their Index.db → `index_parses_total` for query 2 == 4 (MEASURED:
-/// 2 generations, each parsed twice on this second-query path — the O(entries ×
-/// opens) amplification the field saw as 8× for one logical query). GREEN after
-/// the rebind fix: query 2 re-parses 0.
+/// Re-anchored (issue #2412, coordinator-flagged regression class — same root
+/// cause as `spin_tests_2383::cancel_during_large_index_parse_aborts_promptly`):
+/// this test originally asserted query 1 (cold) full-parses `Index.db` `>= 2`
+/// (once per generation) via `index_parses_total`. Since #2412 Stage 2, BIG
+/// open defers that parse (`open_lazy`) whenever a usable `Summary.db` is
+/// present — the common/field shape this fixture produces — so a cold `do_get`
+/// now performs ZERO full parses at open (spec Requirement 7's "cold = 0 full
+/// Index.db parses", a strict IMPROVEMENT on the pre-#2412 baseline this test
+/// measured). `index_parses_total` therefore no longer distinguishes "rebound
+/// in place" from "fully re-opened" for this shape (both are now cheap/parse-
+/// free) — the REBIND-vs-reopen property #2383 fix B protects is asserted
+/// instead via `reader_opens` (the warm registry's real-open work-done counter,
+/// `#2383`/`#2310`), which is exactly what distinguishes them: a rebind costs
+/// ZERO opens, a full re-open costs one PER generation.
+///
+/// RED pre-#2383-fix-B: the cached readers' snap1 paths were dead after
+/// teardown, so the warm rebuild RE-OPENED both generations from snap2 —
+/// `reader_opens` for query 2 == 2 (one per generation), instead of the
+/// rebind's 0.
 #[test]
 fn do_get_reparses_index_on_every_snapshot_swap() {
     // Install the process-global in-memory meter BEFORE any parse in this process.
@@ -206,10 +227,19 @@ fn do_get_reparses_index_on_every_snapshot_swap() {
     let q1_parses = mc
         .flush_and_collect()
         .counter_sum(catalog::INDEX_PARSES_TOTAL);
+    let opens_after_q1 = svc.warm_metrics().reader_opens;
     assert!(msgs1 > 0, "query 1 must stream at least a schema message");
-    assert!(
-        q1_parses >= 2.0,
-        "cold query 1 parses both generations' Index.db (got {q1_parses})"
+    // Spec Requirement 7 (issue #2412): a cold open over a usable Summary.db
+    // performs ZERO full Index.db parses (open is lazy, deferred to first
+    // materializing use — never triggered on this streaming query path).
+    assert_eq!(
+        q1_parses, 0.0,
+        "cold query 1 must full-parse Index.db ZERO times over a usable \
+         Summary.db (issue #2412 lazy open); got {q1_parses}"
+    );
+    assert_eq!(
+        opens_after_q1, 2,
+        "cold query 1 must open exactly the two generations once each"
     );
 
     // Connector clears query N's snapshot; the live inodes in table_dir persist.
@@ -223,15 +253,24 @@ fn do_get_reparses_index_on_every_snapshot_swap() {
     let q2_parses = mc
         .flush_and_collect()
         .counter_sum(catalog::INDEX_PARSES_TOTAL);
+    let opens_after_q2 = svc.warm_metrics().reader_opens;
     assert!(msgs2 > 0, "query 2 must stream at least a schema message");
 
-    // THE anti-spin assertion: the second query over the same inodes must NOT
-    // re-parse any Index.db (rebind). RED today (a full rebuild re-parses both
-    // generations → 2). GREEN after fix B.
+    // Full parses stay zero (nothing to re-parse either way for this shape).
     assert_eq!(
         q2_parses, 0.0,
+        "a second do_get over the SAME generations must still perform zero \
+         full Index.db parses; got {q2_parses}"
+    );
+    // THE anti-spin assertion (re-anchored): the second query over the same
+    // inodes must REBIND — zero FURTHER reader opens — not fully re-open every
+    // generation. RED pre-#2383-fix-B: `opens_after_q2` would climb by 2 (a
+    // full re-open of both generations from snap2's dead-path fallback).
+    assert_eq!(
+        opens_after_q2, opens_after_q1,
         "a second do_get over the SAME generations (new same-inode snapshot dir) \
-         must REBIND with zero further Index.db parses, not re-parse #generations \
-         (issue #2383 resolve-phase spin); got {q2_parses}"
+         must REBIND with zero further reader opens, not re-open #generations \
+         (issue #2383 resolve-phase spin); opens climbed from {opens_after_q1} \
+         to {opens_after_q2}"
     );
 }
