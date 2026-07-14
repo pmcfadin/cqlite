@@ -484,3 +484,51 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       candidate for a `flow-closer` prompt fix (an explicit poll-loop with a
       hard timeout, not a single background wait) rather than relying on the
       lead's manual nudge as the permanent mitigation.
+  14. **2026-07-14 — Owner standing decision for this delivery run: skip
+      per-decision pings, self-abandon on true blockers.** The owner
+      (pmcfadin) told the lead directly: "All the decisions should have been
+      made. You don't need my approval for things. Keep running with the
+      issues. If you hit any issues you can't move forward with, hand it
+      back with a note you are abandoning it," and separately confirmed
+      merge-on-green explicitly. Scope of this standing decision: for issues
+      already routed/scoped by grooming, the lead makes the Seam-1 design
+      call itself (no `AskUserQuestion` ping for a spec/design that has a
+      clear recommendation) and merges on green per the existing autonomy
+      model — it does NOT license deciding actual product/scope questions,
+      changing an issue's scope/title, or closing an epic (those hard rules
+      are unchanged; they still go on a NEEDS-YOU list). On a genuine
+      blocker a lane can't resolve on its own (ambiguous requirement,
+      conflicting design constraint, missing dependency), the correct move
+      is to abandon that lane with a clear note (what was tried, why it's
+      stuck) rather than stall the session waiting on a question — pick up
+      the next Ready item instead of idling. Treat this as standing for the
+      remainder of this delivery session; re-confirm at the start of a new
+      session rather than assuming it carries forward silently.
+  15. **2026-07-14 — Two concurrent full gates on one machine exhaust DISK,
+      not just CPU; the failure is silent-death-or-spurious-FAIL, not a clean
+      error.** Running two lanes' full `agent-gate.sh` in overlapping windows
+      (issues #2230 and #2399, one lead fanning out two subagent lanes) hit
+      two distinct symptoms from the same root cause. First: a full gate died
+      completely silently mid-`core-tests` — process gone, zero crash trace,
+      log just stopped mid-line, `ps`/`/proc` scan showed nothing running.
+      Re-running it clean (no overlap) got past that point but then FAILed
+      for real, with EVERY failing component (core-tests, tombstones-scan,
+      scan-offload-guard, work-counters-guard, python-bindings, node-bindings)
+      tracing to the identical linker error: `/usr/bin/ld: final link failed:
+      No space left on device`. `df` moments later showed 68G free on `/` —
+      the exhaustion was a transient PEAK during the overlap window (two
+      worktrees' `target/`, node_modules, and Python venvs all growing at
+      once), not a persistent shortage, so `df` checked after the fact looks
+      fine and is misleading. **Standing lesson:** the existing "full gates
+      run serially" rule (#1825/#1930) is not just about CPU contention —
+      disk peak-usage contention is at least as real, and a two-lane full-gate
+      overlap can silently corrupt one gate's run entirely (no error at all)
+      or produce a wall of FAILs that look like real regressions but are
+      pure infrastructure noise. When two lanes are running concurrently from
+      one lead, actually enforce serialization at the full-gate step — check
+      `ps`/`/proc` for a live sibling `agent-gate.sh` (non-lite) before
+      green-lighting another lane's full-gate re-run, hold the second lane's
+      gate explicitly until the first's finishes, and don't trust a FAIL's
+      component-level error text at face value — grep for `No space left on
+      device` / linker failures before accepting a FAIL as a real code defect
+      and sending an agent off to debug non-existent bugs.
