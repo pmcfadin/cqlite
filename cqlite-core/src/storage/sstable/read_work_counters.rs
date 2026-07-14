@@ -1,6 +1,15 @@
 //! Cfg-gated read-work counters for the read-path optimization program
 //! (Issue #1566, Epic A / A5).
 //!
+//! File-size note (issue #2430, campsite rule): this file was already over the
+//! ~800-line source target on `main` (890 lines) before #2430 added
+//! `index_backed_partitions_resolved` (+55 lines) — a single new counter in an
+//! already cohesive, single-responsibility registry (one `Counters` struct +
+//! `record_*`/getter free-function pairs). Splitting this file by counter group
+//! is a larger, out-of-scope refactor tracked under epic #1116 (source-file
+//! campsite backlog); not undertaken here. `CQLITE_ALLOW_FILE_GROWTH=1`
+//! acknowledged for this change.
+//!
 //! # Why this exists
 //!
 //! The July 2026 read-path audit (`docs/reports/read-path-performance-audit-2026-07-01.md`
