@@ -56,6 +56,19 @@ fn is_table_id_dir(name: &str) -> bool {
 /// (`.../data/snapshots/{table}-{id}/...-Data.db`): there the dir above
 /// `snapshots` is the keyspace root (e.g. `data`), which is NOT a table dir, so
 /// the path is correctly treated as a normal (non-snapshot) layout.
+///
+/// # Known limitation — ID-less snapshot dirs (follow-up #2415)
+///
+/// The [`is_table_id_dir`] guard requires the `-{32-hex}` id suffix, so it only
+/// fires for Cassandra-shaped ID-ful snapshots. CQLite's own write engine emits
+/// ID-LESS table dirs `{ks}/{table}/` (no uuid suffix — `writer/mod.rs`); a
+/// snapshot of one (`{ks}/{table}/snapshots/{tag}/...-Data.db`) does NOT match the
+/// guard, so the walk-up is skipped and header identity misparses as
+/// keyspace=`snapshots`, table=`{tag}`. This is inherently unresolvable from the
+/// path alone — an ID-less snapshot and an ordinary table in a keyspace literally
+/// named `snapshots` are structurally identical. The robust fix (threading
+/// authoritative keyspace/table into the reader) is tracked as #2415. See the
+/// `idless_snapshot_currently_unresolved_pending_followup` test below.
 pub(crate) fn resolve_table_dir(path: &Path) -> Option<&Path> {
     // Parent of the Data.db file: `{table_name}-{table_id}` (normal) or
     // `{snapshot_name}` (snapshot layout).
@@ -198,6 +211,36 @@ mod tests {
         // No hyphen / empty table.
         assert!(!is_table_id_dir("snapshots"));
         assert!(!is_table_id_dir("-9f3a1c2d4e5f6071829304a5b6c7d8e9"));
+    }
+
+    /// PINS A KNOWN LIMITATION, NOT DESIRED BEHAVIOR (follow-up #2415).
+    ///
+    /// CQLite's own write engine emits ID-LESS table dirs `{ks}/{table}/` (no
+    /// `-{uuid}` suffix — `writer/mod.rs`). A snapshot of such a table has the
+    /// shape `{ks}/{table}/snapshots/{tag}/...-Data.db`. Because `is_table_id_dir`
+    /// requires a `-{32-hex}` suffix, the walk-up past `snapshots` is NOT taken, so
+    /// header identity currently resolves as keyspace=`snapshots`, table=`{tag}`.
+    ///
+    /// This is inherently unresolvable from the path alone (an ID-less snapshot and
+    /// an ordinary table in a keyspace literally named `snapshots` are structurally
+    /// identical); the robust fix threads authoritative keyspace/table into the
+    /// reader and is tracked as #2415. When #2415 lands this assertion should FLIP
+    /// (to keyspace=`myks`, table=`mytable`) — that visible break is intentional.
+    #[test]
+    fn idless_snapshot_currently_unresolved_pending_followup() {
+        let path = Path::new("/data/myks/mytable/snapshots/cqlite-abc/nb-2-big-Data.db");
+        // CURRENT (limited) behavior: the `snapshots` layer is not walked past
+        // because `mytable` lacks a `-{32-hex}` id suffix.
+        assert_eq!(
+            extract_keyspace(path).as_deref(),
+            Some("snapshots"),
+            "known limitation (#2415): ID-less snapshot keyspace misparses as 'snapshots'"
+        );
+        assert_eq!(
+            extract_table_name(path).as_deref(),
+            Some("cqlite-abc"),
+            "known limitation (#2415): ID-less snapshot table misparses as the snapshot tag"
+        );
     }
 
     #[test]
