@@ -32,6 +32,25 @@ pub(super) struct MaterializedIndex {
 }
 
 impl IndexReader {
+    /// Path to the backing `Index.db` file (issue #2412 §B). The Summary-guided
+    /// point-lookup path (`reader::summary_point`) seeks bounded intervals from this
+    /// path WITHOUT materializing the whole map. Lives here (not the parent module)
+    /// as a lazy-open support accessor, keeping `index_reader/mod.rs` under the
+    /// campsite line (#1116).
+    pub(crate) fn index_path(&self) -> &Path {
+        &self.file_path
+    }
+
+    /// Whether the full `Index.db` parse has already run (issue #2412 §B). A lazily
+    /// opened reader ([`Self::open_lazy`]) reports `false` until the first
+    /// [`Self::ensure_materialized`]; an eagerly opened reader reports `true` from
+    /// construction. The Summary-guided point path uses this to prefer the resident
+    /// map once it is already in memory (e.g. after a full scan) and the bounded
+    /// interval read only while the map is still deferred.
+    pub(crate) fn is_materialized(&self) -> bool {
+        self.materialized.get().is_some()
+    }
+
     /// Lazy Summary-guided open (issue #2412, design §A): checks only that the file
     /// EXISTS and performs ZERO `Index.db` parse work. Used by `SSTableReader`'s BIG
     /// open composition when a usable `Summary.db` is present, so open cost is
