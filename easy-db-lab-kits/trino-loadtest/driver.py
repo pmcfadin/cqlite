@@ -409,11 +409,20 @@ def make_default_list_snapshots_fn(cmd: str) -> Callable[[], str]:
     matching this module's lazy-import discipline for anything that touches
     the outside world (see the module docstring) — ``test_driver.py`` never
     needs it.
+
+    A nonzero exit raises ``RuntimeError`` (never returns as if it were a
+    clean, empty listing) — a probe that failed to run (auth failure,
+    unreachable pod, typo'd command) must surface as a check failure, not as
+    "0 snapshots found." Silently treating that as a pass is exactly the
+    vacuous-pass bug #2399 exists to prevent (roborev finding, round-1 review).
     """
     import subprocess
 
     def _run() -> str:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)  # noqa: S602 - operator-provided, trusted CLI arg
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or "(no stderr)"
+            raise RuntimeError(f"snapshot-check-cmd exited {result.returncode}: {stderr}")
         return result.stdout
 
     return _run
@@ -577,16 +586,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # D12 hygiene check (issue #2399) — local mirror of the field's
     # `nodetool listsnapshots | grep cqlite-` == 0 post-run check.
-    list_snapshots_fn = (
-        make_default_list_snapshots_fn(args.snapshot_check_cmd) if args.snapshot_check_cmd else None
-    )
-    leak_result = run_snapshot_leak_check(list_snapshots_fn)
-    if not leak_result.ran:
+    if not args.snapshot_check_cmd:
         print(
             "snapshot-leak check: SKIPPED (no --snapshot-check-cmd configured; D12, issue #2399)",
             flush=True,
         )
-    elif leak_result.leaked:
+        return 0
+
+    try:
+        leak_result = run_snapshot_leak_check(make_default_list_snapshots_fn(args.snapshot_check_cmd))
+    except Exception as exc:  # noqa: BLE001 - a probe command that FAILED to run (auth, unreachable
+        # pod, typo'd one-liner) must surface as a check FAILURE, never be swallowed into an
+        # empty-stdout "0 leaks" pass (that vacuous-pass gap was a roborev finding on this
+        # change's first review round) or crash main() with a bare traceback.
+        print(f"snapshot-leak check: FAIL - check command errored: {exc}", file=sys.stderr, flush=True)
+        return 3
+
+    if leak_result.leaked:
         print(
             f"snapshot-leak check: FAIL - {len(leak_result.leaked)} leaked snapshot(s): "
             f"{', '.join(leak_result.leaked)}",
@@ -594,9 +610,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             flush=True,
         )
         return 3
-    else:
-        print("snapshot-leak check: PASS (0 cqlite- snapshots remain)", flush=True)
 
+    print("snapshot-leak check: PASS (0 cqlite- snapshots remain)", flush=True)
     return 0
 
 

@@ -91,6 +91,10 @@ exits `3` on a leak. If not configured, it prints `snapshot-leak check:
 SKIPPED` — deliberately never a silent pass, per the requirement that the
 check must not appear green when it did not run
 (`openspec/changes/standard-metrics-template/specs/round-validation-reporting/spec.md`).
+**A configured check command that itself fails to run** (auth failure,
+unreachable pod, typo'd one-liner — nonzero exit) is also `FAIL` (exit `3`,
+with the command's stderr), never treated as "ran cleanly, 0 snapshots
+found" — an empty result from a broken probe must not read as a clean ring.
 See `docs/development/round-validation-metrics.md` for the full 14-point
 standard this is one item of.
 

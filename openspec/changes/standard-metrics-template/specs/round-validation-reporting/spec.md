@@ -93,7 +93,10 @@ reference rather than re-implementing it.
 This change SHALL add exactly one new local mirror: a D12 hygiene assertion in the testbed E2E that,
 after the query workload completes, no leaked `cqlite-`-prefixed snapshots remain — the local mirror of
 the field's `nt listsnapshots | grep cqlite- == 0` check. The assertion SHALL fail the E2E if a
-`cqlite-` snapshot is left behind, and SHALL NOT pass vacuously when the workload did not run.
+`cqlite-` snapshot is left behind, and SHALL NOT pass vacuously when the workload did not run, when the
+check was not configured, **or when the check's own probe command fails to run** (a nonzero exit from
+the operator-provided listing command SHALL be reported as a check failure, never treated as "ran
+cleanly, 0 snapshots found").
 
 #### Scenario: Leaked snapshot fails the testbed E2E
 
@@ -102,6 +105,15 @@ the field's `nt listsnapshots | grep cqlite- == 0` check. The assertion SHALL fa
 - **THEN** the E2E snapshot-leak check FAILS
 - **AND** when zero `cqlite-` snapshots remain the check PASSES
 - **AND** the check does not pass when the workload was skipped or produced no queries (no vacuous pass).
+
+#### Scenario: A failing probe command reports FAIL, never a vacuous PASS
+
+- **GIVEN** the D12 check is configured with a listing command
+- **WHEN** that command exits nonzero (e.g. an unreachable node, an auth failure, or a malformed
+  one-liner) and therefore produces no usable output
+- **THEN** the check reports FAIL with the command's error detail
+- **AND** it does NOT report PASS merely because the empty/partial output happened to contain zero
+  `cqlite-`-prefixed lines.
 
 ### Requirement: The template is offered to the field and cross-linked in doctrine
 

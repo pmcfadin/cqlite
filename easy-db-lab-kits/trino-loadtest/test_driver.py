@@ -600,6 +600,42 @@ def test_make_default_list_snapshots_fn_runs_command_and_captures_stdout() -> No
     assert leaked == ["cqlite-leaked-one"]
 
 
+def test_make_default_list_snapshots_fn_raises_on_nonzero_exit() -> None:
+    # A probe command that FAILED to run (auth failure, unreachable pod, typo'd
+    # one-liner) must never be treated as "ran cleanly, found 0 snapshots" — that
+    # empty-stdout-on-failure gap was a roborev finding on this change's first
+    # review round (#2399). It must raise, not return "".
+    fn = driver.make_default_list_snapshots_fn("echo 'kubectl: connection refused' >&2; exit 7")
+    try:
+        fn()
+        raise AssertionError("expected RuntimeError on nonzero exit")
+    except RuntimeError as e:
+        assert "7" in str(e)
+        assert "connection refused" in str(e)
+
+
+def test_make_default_list_snapshots_fn_raises_with_placeholder_when_no_stderr() -> None:
+    fn = driver.make_default_list_snapshots_fn("exit 1")
+    try:
+        fn()
+        raise AssertionError("expected RuntimeError on nonzero exit")
+    except RuntimeError as e:
+        assert "(no stderr)" in str(e)
+
+
+def test_run_snapshot_leak_check_propagates_probe_command_failure() -> None:
+    # run_snapshot_leak_check itself must not swallow a failing list_snapshots_fn
+    # into a false "ran cleanly, 0 leaked" result.
+    def _failing() -> str:
+        raise RuntimeError("snapshot-check-cmd exited 7: connection refused")
+
+    try:
+        driver.run_snapshot_leak_check(_failing)
+        raise AssertionError("expected the probe failure to propagate")
+    except RuntimeError as e:
+        assert "connection refused" in str(e)
+
+
 def main() -> int:
     check("percentile: empty input", test_percentile_empty)
     check("percentile: single value", test_percentile_single_value)
@@ -668,6 +704,18 @@ def main() -> int:
     check(
         "make_default_list_snapshots_fn: runs command and captures stdout",
         test_make_default_list_snapshots_fn_runs_command_and_captures_stdout,
+    )
+    check(
+        "make_default_list_snapshots_fn: raises (never a silent pass) on nonzero exit",
+        test_make_default_list_snapshots_fn_raises_on_nonzero_exit,
+    )
+    check(
+        "make_default_list_snapshots_fn: raises with a placeholder when stderr is empty",
+        test_make_default_list_snapshots_fn_raises_with_placeholder_when_no_stderr,
+    )
+    check(
+        "run_snapshot_leak_check: propagates a probe command failure (never swallows it)",
+        test_run_snapshot_leak_check_propagates_probe_command_failure,
     )
 
     print()
