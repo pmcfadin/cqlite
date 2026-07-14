@@ -159,7 +159,7 @@ fn test_within_partition_streaming_merge_stays_within_heap_budget() {
         .expect("set merge policy");
 
     // Phase 2 (MEASURED): run the k-way-merge compaction under dhat.
-    let _profiler = dhat::Profiler::builder().testing().build();
+    let _profiler = dhat::Profiler::builder().file_name(std::path::PathBuf::from("/tmp/dhat-2299.json")).build();
 
     let budget = Duration::from_secs(120);
     let mut compaction_completed = false;

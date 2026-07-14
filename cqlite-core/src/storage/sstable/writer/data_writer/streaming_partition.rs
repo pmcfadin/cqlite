@@ -66,14 +66,19 @@ impl OwnedSortableMarker {
 /// replacing it.
 pub(crate) struct StreamingPartitionSession {
     partition_offset: u64,
-    partition_buf_start: usize,
     prev_unfiltered_size: u64,
     partition_floor: Option<i64>,
     range_tombstones: Vec<RangeTombstone>,
     sorted_markers: Vec<OwnedSortableMarker>,
     marker_cursor: usize,
     emit: PartitionEmitCounts,
-    block_start_buf_offset: Option<usize>,
+    /// Promoted-index block start, as a PARTITION-RELATIVE byte offset (issue
+    /// #2299). Absolute, flush-invariant math (`writer.position() -
+    /// partition_offset`) replaced the old `buffer.len() - partition_buf_start`
+    /// buffer-index form so the session can flush its scratch to the sink
+    /// MID-PARTITION (a wide partition no longer stays fully resident in
+    /// `DataWriter::buffer`).
+    block_start_rel_offset: Option<u64>,
     blocks: Vec<PromotedIndexBlock>,
     current_block_first_ck: Option<Vec<u8>>,
     current_block_last_ck: Option<Vec<u8>>,
@@ -95,7 +100,6 @@ impl DataWriter {
         schema: &TableSchema,
     ) -> Result<StreamingPartitionSession> {
         let partition_offset = self.position + self.buffer.len() as u64;
-        let partition_buf_start = self.buffer.len();
         let header_start = self.buffer.len();
         self.write_partition_header(key, partition_tombstone)?;
         let prev_unfiltered_size = (self.buffer.len() - header_start) as u64;
@@ -123,14 +127,13 @@ impl DataWriter {
 
         Ok(StreamingPartitionSession {
             partition_offset,
-            partition_buf_start,
             prev_unfiltered_size,
             partition_floor,
             range_tombstones: range_tombstones.to_vec(),
             sorted_markers,
             marker_cursor: 0,
             emit: PartitionEmitCounts::default(),
-            block_start_buf_offset: None,
+            block_start_rel_offset: None,
             blocks: Vec::new(),
             current_block_first_ck: None,
             current_block_last_ck: None,
@@ -228,14 +231,15 @@ impl StreamingPartitionSession {
             self.current_block_first_ck.take(),
             self.current_block_last_ck.take(),
         ) {
-            let current_buf_offset = writer.buffer.len() - self.partition_buf_start;
-            let block_start = self.block_start_buf_offset.unwrap_or(current_buf_offset);
-            let block_bytes = (current_buf_offset - block_start) as u64;
+            // Partition-relative offset via absolute, flush-invariant math (#2299).
+            let current_rel_offset = writer.position() - self.partition_offset;
+            let block_start = self.block_start_rel_offset.unwrap_or(current_rel_offset);
+            let block_bytes = current_rel_offset - block_start;
             if block_bytes > 0 {
                 self.blocks.push(PromotedIndexBlock {
                     first_name: first,
                     last_name: last,
-                    offset: block_start as u64,
+                    offset: block_start,
                     width: block_bytes,
                     oss50_separator: self.current_block_oss50.take().flatten(),
                 });
@@ -316,7 +320,6 @@ impl StreamingPartitionSession {
                 .unwrap_or_else(|_| boundary_prefix_for_index_fallback(*kind)),
         };
 
-        let partition_buf_start = self.partition_buf_start;
         if self.current_block_first_ck.is_none() {
             self.current_block_first_ck = Some(ck_bytes.clone());
             let ck_values: Option<Vec<Value>> = match &item {
@@ -338,8 +341,9 @@ impl StreamingPartitionSession {
                 )
                 .ok()
             }));
-            self.block_start_buf_offset
-                .get_or_insert(writer.buffer.len() - partition_buf_start);
+            // Partition-relative block start via absolute, flush-invariant math (#2299).
+            self.block_start_rel_offset
+                .get_or_insert(writer.position() - self.partition_offset);
         }
         self.current_block_last_ck = Some(ck_bytes.clone());
 
@@ -386,9 +390,10 @@ impl StreamingPartitionSession {
             )? as u64,
         };
 
-        let current_buf_offset = writer.buffer.len() - partition_buf_start;
-        let block_start = self.block_start_buf_offset.unwrap_or(current_buf_offset);
-        let block_bytes = (current_buf_offset - block_start) as u64;
+        // Partition-relative offset via absolute, flush-invariant math (#2299).
+        let current_rel_offset = writer.position() - self.partition_offset;
+        let block_start = self.block_start_rel_offset.unwrap_or(current_rel_offset);
+        let block_bytes = current_rel_offset - block_start;
 
         if block_bytes >= COLUMN_INDEX_SIZE_BYTES {
             self.blocks.push(PromotedIndexBlock {
@@ -400,14 +405,24 @@ impl StreamingPartitionSession {
                     .current_block_last_ck
                     .take()
                     .unwrap_or_else(empty_clustering_prefix_for_index),
-                offset: block_start as u64,
+                offset: block_start,
                 width: block_bytes,
                 oss50_separator: self.current_block_oss50.take().flatten(),
             });
-            self.block_start_buf_offset = Some(current_buf_offset);
+            self.block_start_rel_offset = Some(current_rel_offset);
             self.current_block_first_ck = None;
             self.current_block_last_ck = None;
             self.current_block_oss50 = None;
+
+            // Issue #2299: a completed promoted-index block is a SAFE mid-partition
+            // flush point — every offset the session tracks is now partition-relative
+            // absolute math (`writer.position() - partition_offset`), which is
+            // invariant across a `DataWriter::buffer` → sink flush. Flushing here
+            // bounds a WIDE partition's resident scratch to ~one promoted-index block
+            // (COLUMN_INDEX_SIZE_BYTES, Cassandra default 64 KiB) instead of the whole
+            // partition, so a real compaction of CQLite's own uncompressed output
+            // stays within the 128 MiB budget. No-op in in-memory mode.
+            writer.flush_buffered_partition_scratch()?;
         }
         Ok(())
     }
