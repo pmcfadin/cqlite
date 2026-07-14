@@ -209,7 +209,8 @@ Catalog properties (`etc/catalog/cqlite.properties`):
 | `cqlite.flight-port` | `8815` | Arrow Flight port on each Cassandra node. |
 | `cqlite.local-datacenter` | *(none)* | Preferred datacenter for split placement. |
 | `cqlite.read-mode` | `snapshot` | `snapshot` (default) reads a consistent, per-query Sidecar snapshot; `live` reads the current data dir (races compaction). See [Read mode](#read-mode-snapshot-vs-live). |
-| `cqlite.snapshot-ttl` | `6h` | `snapshot` mode only: a Cassandra 4.1+ TTL on each per-query snapshot so a coordinator crash between create and cleanup can't leak it (Cassandra auto-drops it). Set blank to disable. |
+| `cqlite.snapshot-ttl` | `6h` | `snapshot` mode only: a Cassandra 4.1+ TTL on each snapshot so a crash (or a reused snapshot outliving its window) can't leak it (Cassandra auto-drops it). Set blank to disable. |
+| `cqlite.snapshot-reuse-window-ms` | `3000` | `snapshot` mode only: reuse a single snapshot per `(keyspace, table)` across queries for this many milliseconds (issue #2356/#2306). Larger ⇒ fewer snapshot creates/flushes and a warmer read path, at the cost of up to one window of staleness. `0` disables reuse (a fresh snapshot per query). See [Snapshot reuse](#snapshot-reuse-and-the-staleness-bound). |
 | `cqlite.aggregation-pushdown-group-by` | `automatic` | GROUP BY aggregation-pushdown policy: `automatic`, `always`, or `never`. Global aggregates (no GROUP BY) are an unconditional win and always push regardless of this setting. |
 | `cqlite.aggregation-pushdown-max-group-ratio` | `0.5` | `automatic` only: decline GROUP BY pushdown once the estimated distinct-groups / rows ratio exceeds this. Must be in `(0.0, 1.0]`. |
 
@@ -249,13 +250,15 @@ a very recent write can become visible through a `snapshot`-mode query even with
 directory directly, with no snapshot and no flush side effect, so memtable rows stay invisible
 until an explicit `nodetool flush`.
 
-### Snapshot lifecycle (per-query, `cqlite-<queryId>`)
+### Snapshot lifecycle (reused per `(keyspace, table)`, `cqlite-<ks>-<table>-<epoch>`)
 
-In `snapshot` mode the connector, at **split-planning time** (once per query, per table):
+In `snapshot` mode the connector, at **split-planning time**, resolves the snapshot for the
+scanned `(keyspace, table)` — **reusing** the current one when it is still fresh (see
+[Snapshot reuse](#snapshot-reuse-and-the-staleness-bound)) and otherwise creating a new one:
 
-1. Creates a Sidecar snapshot named `cqlite-<queryId>` of the scanned table **on every
-   distinct replica host the query's splits will read**
-   (`PUT /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`, with the
+1. Creates a Sidecar snapshot named `cqlite-<ks>-<table>-<epoch>` (the `epoch` identifies the
+   freshness window) of the scanned table **on every distinct replica host the query's splits
+   will read** (`PUT /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`, with the
    configured `?ttl=` backstop). A Sidecar snapshot `PUT` is *instance-local* — it creates
    the snapshot only on the node fronting that one Sidecar (issue #2227). Since a multi-node
    scan fans splits across every replica host, the connector must create the snapshot on
@@ -263,9 +266,12 @@ In `snapshot` mode the connector, at **split-planning time** (once per query, pe
    exist and fail NotFound.
 2. Names that snapshot in **every** Flight ticket, so all splits read the one immutable
    file set on their host.
-3. Best-effort **deletes** the snapshot on each of those hosts when the query finishes —
-   success or failure — via Trino's `cleanupQuery` hook
-   (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`).
+3. **Retires** a snapshot when a fresher window supersedes it (or an explicit refresh /
+   window expiry / observed generation-set change invalidates it), and retires every live
+   snapshot at connector shutdown
+   (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`). A reused snapshot
+   OUTLIVES the query that created it, so cleanup is **not** per-query; the `cqlite.snapshot-ttl`
+   backstop reclaims any snapshot a crash leaves behind.
 
 **Per-host Sidecar addressing.** The connector only ever queries the configured
 `cqlite.sidecar-uri` (db0) for discovery, but the Cassandra Sidecar runs as a `hostNetwork`
@@ -280,10 +286,42 @@ explicit port, and no userinfo/credentials, path, query, or fragment (e.g.
 per-host snapshot PUTs, so it is rejected at config load rather than surfacing later at first
 snapshot use.
 
-Why per-query rather than a long-lived reusable snapshot: it needs no background reaper,
-each query gets an isolated consistent view, and the queryId makes the name collision-free
-and traceable. The `cqlite.snapshot-ttl` backstop means even a coordinator crash between
-create and cleanup can't leak the snapshot — Cassandra auto-drops it.
+### Snapshot reuse and the staleness bound
+
+Reusing one snapshot per `(keyspace, table)` across queries within the
+`cqlite.snapshot-reuse-window-ms` window (issue #2356/#2306) is the keystone that serves two
+otherwise-separate problems:
+
+- **Warm read path (#2356).** A stable, reused snapshot path means the flight server's warm
+  reader set stays valid across queries — a repeat query is a pure warm hit with zero re-parse
+  and zero rebind, instead of the prior per-query behavior where every query cleared the last
+  snapshot dir and forced a full re-open + re-parse. The flight server exposes scale-free work
+  probes (`reader_opens`, `index_parses_total`, `rebind_hits_total`) so a field round can verify
+  the closure: within a window these stay flat.
+- **Fewer memtable flushes (#2306).** Flush-on-snapshot is **by design** (issue #2305; the
+  Sidecar HTTP API has no `skipFlush`, and this connector does not relitigate that). The only
+  lever on flush volume is **fewer snapshot creations**: because each snapshot create triggers
+  one memtable flush per host, reusing a snapshot for *Q* queries spanning *W* windows drops the
+  flush-inducing create rate from *Q* to *W*. This is the `creations ⇒ flushes` derivation used
+  to report the #2306 operational-cost reduction — measured directly from the connector's
+  `snapshot_creations_total` (one create ⇒ one flush per host); `snapshot_reuse_hits_total`
+  counts the queries served by an already-live snapshot.
+
+A reused snapshot is invalidated — forcing a fresh create on the next query — by the FIRST of:
+(1) the freshness window elapsing, (2) an observed change in the table's live SSTable
+generation set (a flush/compaction), or (3) an explicit refresh. A reused snapshot is always a
+valid, immutable Cassandra point-in-time (snapshots are hard-linked), so the only observable
+effect is a bounded, documented **staleness bound**: a read reflects table state no older than
+`min(window, time-since-last-generation-change)`, and never an inconsistent mix of
+point-in-times within one query.
+
+**Zero-churn escape hatch.** A workload that needs no point-in-time isolation can set
+`cqlite.read-mode=live`: no snapshot, no flush, no reuse cache, always the latest flushed data
+(at the cost of racing compaction). That is the zero-snapshot-churn option for callers who
+accept live reads.
+
+The `cqlite.snapshot-ttl` backstop means even a coordinator crash can't leak a snapshot —
+Cassandra auto-drops it.
 
 **Fail-closed:** if snapshot creation fails on **any** replica host in `snapshot` mode, the
 query **fails** with an actionable error naming the host + snapshot — the connector does

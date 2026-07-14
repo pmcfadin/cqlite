@@ -32,6 +32,34 @@ class CqliteFlightConfigTest {
         assertEquals(ReadMode.SNAPSHOT, config.readMode());
         assertEquals(java.util.Optional.of(CqliteFlightConfig.DEFAULT_SNAPSHOT_TTL),
                 config.snapshotTtl());
+        // Snapshot-reuse freshness window defaults (issue #2356/#2306).
+        assertEquals(CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS,
+                config.snapshotReuseWindowMillis());
+        assertEquals(CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_NANOS,
+                config.snapshotReuseWindowNanos());
+    }
+
+    @Test
+    void parsesSnapshotReuseWindow() {
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-reuse-window-ms", "7500");
+        CqliteFlightConfig config = CqliteFlightConfig.fromMap(m);
+        assertEquals(7500L, config.snapshotReuseWindowMillis());
+        assertEquals(7_500_000_000L, config.snapshotReuseWindowNanos());
+    }
+
+    @Test
+    void zeroSnapshotReuseWindowIsAllowedAndDisablesReuse() {
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-reuse-window-ms", "0");
+        assertEquals(0L, CqliteFlightConfig.fromMap(m).snapshotReuseWindowMillis());
+    }
+
+    @Test
+    void rejectsNegativeSnapshotReuseWindow() {
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-reuse-window-ms", "-1");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
     }
 
     @Test

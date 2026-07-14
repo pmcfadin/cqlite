@@ -64,7 +64,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         // and the query fails; that host must have the snapshot, no failover is possible without it.
         Set<String> primaryHosts = distinctReplicaHosts(replicas, config.localDatacenter());
         Optional<String> snapshot =
-                snapshots.snapshotFor(session.getQueryId(), handle.keyspace(), handle.table(), primaryHosts);
+                snapshots.snapshotFor(handle.keyspace(), handle.table(), primaryHosts);
         // Availability failover (issue #2241): a fallback host is only usable if IT ALSO has the
         // snapshot. Roborev on #2241: restricting to `primaryHosts` here would only ever admit a
         // fallback that happens to be some OTHER range's primary — a fallback-only host (never a
@@ -76,7 +76,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         // above (fail-closed); only the EXTRA fallback-only hosts can be silently excluded, and a
         // split simply won't list an excluded host as a fallback — never a silent partial result.
         Set<String> availableHosts = snapshot.isPresent()
-                ? snapshots.availableHosts(session.getQueryId(), handle.keyspace(), handle.table(),
+                ? snapshots.availableHosts(handle.keyspace(), handle.table(),
                         allReplicaHosts(replicas, config.localDatacenter()))
                 : Set.of();
         List<CqliteFlightSplit> ranges = buildSplits(

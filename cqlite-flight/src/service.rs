@@ -1243,8 +1243,7 @@ mod tests {
         assert_eq!(s2.resolves, 2, "resolve stays authoritative per request");
 
         // (3) FRESH SAME-INODE: clear snap1, stage snap2 over the SAME inodes.
-        std::fs::remove_dir_all(table_dir.join("snapshots").join("snap1"))
-            .expect("clear snap1");
+        std::fs::remove_dir_all(table_dir.join("snapshots").join("snap1")).expect("clear snap1");
         make_snapshot(&table_dir, "snap2");
         let vals3 = run(ticket_bytes("snap2"));
         let m3 = svc.warm_metrics();
@@ -1262,8 +1261,7 @@ mod tests {
 
         // (4) FRESH CHANGED-INODE: clear snap2, stage snap3 from the OTHER build
         // (different inodes) → a genuine rebuild, never a rebind.
-        std::fs::remove_dir_all(table_dir.join("snapshots").join("snap2"))
-            .expect("clear snap2");
+        std::fs::remove_dir_all(table_dir.join("snapshots").join("snap2")).expect("clear snap2");
         let snap3 = table_dir.join("snapshots").join("snap3");
         std::fs::create_dir_all(&snap3).unwrap();
         for entry in std::fs::read_dir(&other_dir).unwrap().flatten() {

@@ -12,116 +12,212 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
 /**
- * Owns the per-query Sidecar snapshot lifecycle (issues #2105, #2227). One instance is
- * shared by the split manager (which creates the snapshot at split-planning time and names
- * it in every ticket) and the metadata (whose {@code cleanupQuery} best-effort deletes it
- * at query end).
+ * Owns the Sidecar snapshot lifecycle (issues #2105, #2227, #2356, #2306). One instance is
+ * shared by the split manager (which resolves the snapshot at split-planning time and names
+ * it in every ticket) and the metadata.
  *
- * <h2>Design: per-query snapshot named {@code cqlite-<queryId>}, created on EVERY replica host</h2>
- * <ul>
- *   <li><b>Create</b> at split planning ({@link CqliteFlightSplitManager#getSplits}), once
- *       per (query, host, keyspace, table) — memoized so re-planning never double-PUTs.
- *       A Sidecar snapshot {@code PUT} is instance-local (issue #2227): it only creates the
- *       snapshot on the node fronting that one Sidecar. Because the scan's splits fan out
- *       across every replica host, the snapshot must be created on each host's own Sidecar
- *       (via {@link HostSnapshotApis}); otherwise a split on any other host reads a
- *       non-existent directory and fails NotFound. Every split names the same snapshot, so
- *       the whole scan reads one immutable file set per host while Cassandra compacts
- *       underneath.</li>
- *   <li><b>Fail closed</b> in {@link ReadMode#SNAPSHOT}: if creation errors on ANY host we
- *       propagate an actionable error naming the host + snapshot and the query fails. We
- *       never silently fall back to a live read — a silent fallback would hand back a
- *       compaction-racing result the operator asked to avoid, and a NotFound on a
- *       not-created host would be an opaque failure.</li>
- *   <li><b>Clean up</b> best-effort at query end ({@link #cleanup}) on each host the snapshot
- *       was created on; a failed delete is logged, not fatal. A Sidecar-side TTL (see
- *       {@link CqliteFlightConfig#snapshotTtl}) is the backstop so a coordinator crash
- *       between create and cleanup can't leak the snapshot permanently.</li>
- * </ul>
+ * <h2>Snapshot REUSE per {@code (keyspace, table)} within a freshness window (#2356/#2306)</h2>
+ *
+ * Instead of one snapshot per {@code queryId} — which cleared the prior dir every query and so
+ * defeated the flight warm-handle investment (#2356) and flushed the memtable per query (#2306,
+ * flush-on-snapshot is BY DESIGN per #2305) — a single snapshot is REUSED for a
+ * {@code (keyspace, table)} across queries while it is fresh. The snapshot is named
+ * {@code cqlite-<ks>-<table>-<epoch>} where {@code epoch} identifies the freshness window. N
+ * queries in one window pay ONE create fan-out (→ one flush per host), not N, and the resolved
+ * snapshot PATH stays stable so the flight server's warm readers stay warm with zero rebind
+ * churn within the window (see {@code cqlite-flight}'s warm registry / {@code rebind_hits_total}).
+ *
+ * <p>A reused window is invalidated — forcing a fresh create on the next query — when the FIRST
+ * of these occurs (design §C):
+ * <ol>
+ *   <li><b>Window expiry</b> — the freshness window elapses on the {@link Clock} seam. The clock
+ *       is injectable so tests pin invalidation deterministically (never {@code System
+ *       .currentTimeMillis}, per the #1742 pinned-{@code now} discipline).</li>
+ *   <li><b>Generation-set change</b> — the observed live SSTable generation-set fingerprint for
+ *       the table changed since the snapshot was taken (a flush/compaction). Authoritative, never
+ *       guessed (#28). The fingerprint is passed by the caller; {@link #NO_GENERATION} means
+ *       "not observed" and disables this lever (window + explicit refresh still apply).</li>
+ *   <li><b>Explicit refresh</b> — {@link #invalidate(String, String)} (the {@code
+ *       Database::refresh()} analog).</li>
+ * </ol>
+ * A reused snapshot is ALWAYS a valid immutable Cassandra point-in-time (snapshots are hardlinks);
+ * invalidation is a FRESHNESS lever, not a correctness requirement. The staleness bound is thus
+ * {@code min(window, time-since-last-generation-change)}, documented in the connector docs.
+ *
+ * <p><b>Per-host, fail-closed create model preserved (#2227).</b> A Sidecar snapshot PUT is
+ * instance-local, so the snapshot is created on EVERY replica host a split will read, memoized
+ * per {@code (window, host)}. {@link #snapshotFor} fails closed on the first host whose create
+ * errors (naming host + snapshot); {@link #availableHosts} is best-effort for optional fallback
+ * hosts. Superseded windows are retired best-effort ({@link #retire}); a Sidecar-side TTL
+ * ({@link CqliteFlightConfig#snapshotTtl}) stays the leak backstop for the live window and crash
+ * cases.
  *
  * <p>In {@link ReadMode#LIVE} this manager is inert: {@link #snapshotFor} returns empty
- * (ticket {@code snapshot=null}, the pre-#2105 behavior) and no Sidecar calls are made.
+ * (ticket {@code snapshot=null}), no reuse cache entry is created, and no Sidecar calls are made.
  */
 public final class SnapshotManager {
     private static final Logger LOG = Logger.getLogger(SnapshotManager.class.getName());
 
-    /** Trino query ids are safe already; strip anything outside the Sidecar-safe charset. */
+    /** Strip anything outside the Sidecar-safe charset from a name component. */
     private static final Pattern UNSAFE = Pattern.compile("[^A-Za-z0-9._-]");
+
+    /**
+     * Sentinel generation fingerprint meaning "the caller did not observe the generation set".
+     * When passed, the generation-set-change invalidation lever is disabled (window + explicit
+     * refresh still apply). The flight server does not yet expose a generation fingerprint, so
+     * the split-manager call path uses this; the fingerprint-taking overload exists so a future
+     * server-exposed fingerprint (design §C.2) wires in without an API change.
+     */
+    public static final long NO_GENERATION = Long.MIN_VALUE;
 
     private final HostSnapshotApis sidecars;
     private final ReadMode readMode;
     private final Optional<String> ttl;
+    private final long reuseWindowNanos;
+    private final Clock clock;
 
-    /** queryId → ((host, keyspace, table) → snapshotName) created for that query. */
-    private final Map<String, Map<SnapshotKey, CompletableFuture<String>>> created = new ConcurrentHashMap<>();
+    /** The current reused snapshot window per {@code (keyspace, table)}. */
+    private final Map<TableRef, Window> windows = new ConcurrentHashMap<>();
+    /** Monotonic freshness-window epoch counter per {@code (keyspace, table)}. */
+    private final Map<TableRef, AtomicLong> epochs = new ConcurrentHashMap<>();
 
-    /** One created (or in-flight) snapshot: which Sidecar host, and which table. */
-    private record SnapshotKey(String host, String keyspace, String table) {}
+    /** Snapshot create fan-outs performed (one per freshness window) — the #2306 flush proxy. */
+    private final AtomicLong snapshotCreationsTotal = new AtomicLong();
+    /** Queries served by an already-live (reused) snapshot — the reuse-factor numerator. */
+    private final AtomicLong snapshotReuseHitsTotal = new AtomicLong();
 
-    public SnapshotManager(HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl) {
+    /** A logical clock seam so tests pin window timing deterministically (no wall-clock). */
+    public interface Clock {
+        /** A monotonically non-decreasing nanosecond reading (never wall-clock in tests). */
+        long nanoTime();
+    }
+
+    /** Production clock: {@link System#nanoTime()}. */
+    public static final class SystemClock implements Clock {
+        @Override
+        public long nanoTime() {
+            return System.nanoTime();
+        }
+    }
+
+    /** The logical-table half of the reuse cache key. */
+    private record TableRef(String keyspace, String table) {}
+
+    /**
+     * One reused snapshot window: its name, the freshness epoch, when it was taken (on the
+     * injectable clock), the generation fingerprint it was taken over, and the per-host create
+     * memoization (create at most once per host for this window's snapshot).
+     */
+    private static final class Window {
+        final String name;
+        final long epoch;
+        final long createdNanos;
+        final long generationFingerprint;
+        final Map<String, CompletableFuture<String>> hostCreates = new ConcurrentHashMap<>();
+
+        Window(String name, long epoch, long createdNanos, long generationFingerprint) {
+            this.name = name;
+            this.epoch = epoch;
+            this.createdNanos = createdNanos;
+            this.generationFingerprint = generationFingerprint;
+        }
+    }
+
+    /**
+     * Full constructor (production + tests). {@code reuseWindowNanos <= 0} disables reuse (every
+     * query gets a fresh window — the pre-#2356 per-query cadence, without the queryId naming).
+     */
+    public SnapshotManager(
+            HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
+            long reuseWindowNanos, Clock clock) {
         this.sidecars = sidecars;
         this.readMode = readMode;
         this.ttl = ttl;
+        this.reuseWindowNanos = Math.max(0L, reuseWindowNanos);
+        this.clock = clock;
     }
 
     /**
-     * The snapshot name to put in this scan's tickets, creating the snapshot on the Sidecar
-     * of every replica host a split will read (issue #2227). Fails closed on the first host
-     * whose create errors, naming that host + snapshot.
+     * Convenience constructor: the default freshness window on the production {@link SystemClock}.
+     * Used where a config-driven window is not threaded through (and by tests that do not exercise
+     * window timing).
+     */
+    public SnapshotManager(HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl) {
+        this(sidecars, readMode, ttl,
+                CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_NANOS, new SystemClock());
+    }
+
+    /** Snapshot create fan-outs performed so far (one per freshness window). */
+    public long snapshotCreationsTotal() {
+        return snapshotCreationsTotal.get();
+    }
+
+    /** Queries served by an already-live reused snapshot so far. */
+    public long snapshotReuseHitsTotal() {
+        return snapshotReuseHitsTotal.get();
+    }
+
+    /**
+     * The snapshot name to put in this scan's tickets, reusing the current fresh {@code (keyspace,
+     * table)} snapshot when possible (design §B, #2356/#2306) and otherwise creating a fresh one
+     * on the Sidecar of every replica host a split will read (#2227). Fails closed on the first
+     * host whose create errors, naming that host + snapshot.
      *
      * @param hosts every distinct replica host the scan's splits will read
-     * @return {@link Optional#empty()} in {@link ReadMode#LIVE}; otherwise the created
-     *         snapshot's name ({@code cqlite-<queryId>}).
+     * @return {@link Optional#empty()} in {@link ReadMode#LIVE}; otherwise the reused/created
+     *         snapshot's name ({@code cqlite-<ks>-<table>-<epoch>}).
      * @throws SidecarClient.SidecarException if creation fails on any host (fail closed)
      */
-    public Optional<String> snapshotFor(String queryId, String keyspace, String table, Collection<String> hosts) {
+    public Optional<String> snapshotFor(String keyspace, String table, Collection<String> hosts) {
+        return snapshotFor(keyspace, table, hosts, NO_GENERATION);
+    }
+
+    /**
+     * As {@link #snapshotFor(String, String, Collection)}, additionally invalidating a reused
+     * snapshot whose {@code generationFingerprint} differs from the current live generation set
+     * (design §C.2). {@link #NO_GENERATION} disables that lever.
+     */
+    public Optional<String> snapshotFor(
+            String keyspace, String table, Collection<String> hosts, long generationFingerprint) {
         if (readMode == ReadMode.LIVE) {
             return Optional.empty();
         }
-        String name = snapshotName(queryId);
-        Map<SnapshotKey, CompletableFuture<String>> forQuery =
-                created.computeIfAbsent(queryId, q -> new ConcurrentHashMap<>());
+        Window window = resolveWindow(new TableRef(keyspace, table), generationFingerprint, true);
         for (String host : hosts) {
-            createOnHost(forQuery, new SnapshotKey(host, keyspace, table), name);
+            createOnHost(window, host, keyspace, table);
         }
-        return Optional.of(name);
+        return Optional.of(window.name);
     }
 
     /**
-     * Best-effort per-host snapshot availability for a candidate host set (issue #2241):
-     * attempts creation (the same memoized per-(query, host, keyspace, table) fan-out as
-     * {@link #snapshotFor}, so a host already created there — e.g. a split's primary — resolves
-     * instantly with no duplicate PUT) on every host in {@code hosts}, but — unlike {@link
-     * #snapshotFor} — does NOT fail closed on an individual host's creation failure. A host
-     * whose creation fails is logged and excluded from the returned set; the caller ({@link
-     * CqliteFlightSplitManager#getSplits}) uses this to restrict availability-failover fallback
-     * lists to hosts that actually have the snapshot, without failing the whole query over an
-     * optional fallback host (a required PRIMARY host still fails closed via {@link
-     * #snapshotFor}).
+     * Best-effort per-host snapshot availability for a candidate host set (#2241): ensures the
+     * CURRENT reused window's snapshot exists on every host in {@code hosts} (the same memoized
+     * per-(window, host) create as {@link #snapshotFor}, so a host already created there resolves
+     * with no duplicate PUT), but — unlike {@link #snapshotFor} — does NOT fail closed on an
+     * individual host's creation failure (a failed host is logged and excluded). Counters are NOT
+     * touched here: this is part of the SAME query's planning as the preceding {@link #snapshotFor}
+     * (which already counted the create/reuse), so it reuses that window without double-counting.
      *
-     * <p>In {@link ReadMode#LIVE} this is a no-op returning every candidate host unchanged
-     * (fallback restriction is meaningful only in snapshot mode).
+     * <p>In {@link ReadMode#LIVE} this is a no-op returning every candidate host unchanged.
      *
      * @param hosts every candidate replica host to check/create snapshot availability for
      * @return the subset of {@code hosts} that have (or now have) the snapshot
      */
-    public Set<String> availableHosts(String queryId, String keyspace, String table, Collection<String> hosts) {
+    public Set<String> availableHosts(String keyspace, String table, Collection<String> hosts) {
         if (readMode == ReadMode.LIVE) {
             return Set.copyOf(hosts);
         }
-        String name = snapshotName(queryId);
-        Map<SnapshotKey, CompletableFuture<String>> forQuery =
-                created.computeIfAbsent(queryId, q -> new ConcurrentHashMap<>());
+        Window window = resolveWindow(new TableRef(keyspace, table), NO_GENERATION, false);
         Set<String> available = new LinkedHashSet<>();
         for (String host : hosts) {
-            SnapshotKey key = new SnapshotKey(host, keyspace, table);
             try {
-                createOnHost(forQuery, key, name);
+                createOnHost(window, host, keyspace, table);
                 available.add(host);
             } catch (RuntimeException e) {
                 LOG.log(Level.WARNING,
@@ -134,31 +230,102 @@ public final class SnapshotManager {
     }
 
     /**
-     * Create the snapshot on one host, once per (query, host, keyspace, table).
-     *
-     * <p>Per-key-future memoization: the PUT happens at most once even if Trino re-plans the
-     * same scan — WITHOUT ever holding a ConcurrentHashMap bin lock across the (up to 30s)
-     * network call. We insert an empty future under the bin lock (cheap); only the thread
-     * that won the insert performs the Sidecar PUT OUTSIDE the lock, then completes the
-     * future. Every other caller joins that future's result.
+     * Force a fresh snapshot for {@code (keyspace, table)} on the next query (design §C.3, the
+     * {@code Database::refresh()} analog): drop the current reused window and retire its snapshots.
      */
-    private void createOnHost(Map<SnapshotKey, CompletableFuture<String>> forQuery, SnapshotKey key, String name) {
+    public void invalidate(String keyspace, String table) {
+        TableRef ref = new TableRef(keyspace, table);
+        Window removed = windows.remove(ref);
+        if (removed != null) {
+            retire(removed, ref);
+        }
+    }
+
+    /**
+     * Retire every live reused window (connector shutdown): best-effort clear of each window's
+     * snapshots on every host it was created on. The Sidecar TTL backstop covers any miss.
+     */
+    public void retireAll() {
+        for (Map.Entry<TableRef, Window> e : windows.entrySet()) {
+            Window w = windows.remove(e.getKey());
+            if (w != null) {
+                retire(w, e.getKey());
+            }
+        }
+    }
+
+    /**
+     * Resolve the current reused window for {@code ref}, reusing an existing fresh window or
+     * creating a new one (bumping the epoch) atomically. When {@code countStats}, records exactly
+     * one {@link #snapshotReuseHitsTotal} (reuse) or {@link #snapshotCreationsTotal} (create). A
+     * superseded window is retired best-effort OUTSIDE the map-compute critical section.
+     */
+    private Window resolveWindow(TableRef ref, long generationFingerprint, boolean countStats) {
+        long now = clock.nanoTime();
+        Window[] superseded = {null};
+        boolean[] reused = {false};
+        Window window = windows.compute(ref, (k, existing) -> {
+            if (existing != null && isFresh(existing, generationFingerprint, now)) {
+                reused[0] = true;
+                return existing;
+            }
+            if (existing != null) {
+                superseded[0] = existing;
+            }
+            long epoch = epochs.computeIfAbsent(k, r -> new AtomicLong()).getAndIncrement();
+            return new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
+        });
+        if (countStats) {
+            if (reused[0]) {
+                snapshotReuseHitsTotal.incrementAndGet();
+            } else {
+                snapshotCreationsTotal.incrementAndGet();
+            }
+        }
+        if (superseded[0] != null) {
+            retire(superseded[0], ref);
+        }
+        return window;
+    }
+
+    /**
+     * Whether {@code w} is still reusable at {@code now}: within the freshness window AND (when a
+     * generation fingerprint was observed) taken over the same generation set. {@code now -
+     * createdNanos} uses long subtraction so a {@link System#nanoTime()} origin never trips it.
+     */
+    private boolean isFresh(Window w, long generationFingerprint, long now) {
+        if (now - w.createdNanos >= reuseWindowNanos) {
+            return false;
+        }
+        return generationFingerprint == NO_GENERATION || w.generationFingerprint == generationFingerprint;
+    }
+
+    /**
+     * Create the snapshot on one host, once per {@code (window, host)}.
+     *
+     * <p>Per-host-future memoization: the PUT happens at most once per window even if Trino
+     * re-plans the same scan — WITHOUT ever holding a ConcurrentHashMap bin lock across the (up to
+     * 30s) network call. We insert an empty future under the bin lock (cheap); only the thread that
+     * won the insert performs the Sidecar PUT OUTSIDE the lock, then completes the future. Every
+     * other caller joins that future's result.
+     */
+    private void createOnHost(Window window, String host, String keyspace, String table) {
         CompletableFuture<String> mine = new CompletableFuture<>();
-        CompletableFuture<String> winner = forQuery.putIfAbsent(key, mine);
+        CompletableFuture<String> winner = window.hostCreates.putIfAbsent(host, mine);
         if (winner == null) {
             // We won: do the network I/O off-lock, then publish the result.
             try {
-                sidecars.forHost(key.host()).createSnapshot(key.keyspace(), key.table(), name, ttl);
+                sidecars.forHost(host).createSnapshot(keyspace, table, window.name, ttl);
             } catch (Throwable t) {
-                // Fail closed AND never leave an incomplete future behind (roborev, #2113):
-                // on ANY throw drop the future so a retry can recompute, and fail it so
-                // concurrent joiners unblock with the same error instead of blocking forever.
-                // cleanup therefore never sees (and never tries to delete) a snapshot that was
-                // never made. RuntimeExceptions are wrapped into an actionable error naming the
-                // host + snapshot (issue #2227); Errors and sneaky checked throwables keep their
-                // identity so liveness/error-propagation invariants hold (see SnapshotManagerTest).
-                forQuery.remove(key, mine);
-                Throwable toThrow = (t instanceof RuntimeException re) ? actionable(key, name, re) : t;
+                // Fail closed AND never leave an incomplete future behind (roborev, #2113): on ANY
+                // throw drop the future so a retry can recompute, and fail it so concurrent joiners
+                // unblock with the same error instead of blocking forever. RuntimeExceptions are
+                // wrapped into an actionable error naming the host + snapshot (#2227); Errors and
+                // sneaky checked throwables keep their identity so liveness/error-propagation
+                // invariants hold (see SnapshotManagerTest).
+                window.hostCreates.remove(host, mine);
+                Throwable toThrow = (t instanceof RuntimeException re)
+                        ? actionable(host, keyspace, table, window.name, re) : t;
                 mine.completeExceptionally(toThrow);
                 if (toThrow instanceof RuntimeException re) {
                     throw re;
@@ -168,12 +335,12 @@ public final class SnapshotManager {
                 }
                 throw new IllegalStateException("Unexpected checked throwable from createSnapshot", toThrow);
             }
-            mine.complete(name);
+            mine.complete(window.name);
             return;
         }
-        // Someone else is creating (or already created) it — adopt their result. If their
-        // create failed, join() rethrows the same failure here (still fail-closed), and the
-        // failing thread already removed the future so the next call recomputes.
+        // Someone else is creating (or already created) it — adopt their result. If their create
+        // failed, join() rethrows the same failure here (still fail-closed), and the failing thread
+        // already removed the future so the next call recomputes.
         try {
             winner.join();
         } catch (CompletionException e) {
@@ -189,55 +356,55 @@ public final class SnapshotManager {
     }
 
     /** Wrap a per-host create failure into a fail-closed error naming host + snapshot. */
-    private static SidecarClient.SidecarException actionable(SnapshotKey key, String name, RuntimeException cause) {
+    private static SidecarClient.SidecarException actionable(
+            String host, String keyspace, String table, String name, RuntimeException cause) {
         int status = (cause instanceof SidecarClient.SidecarException se) ? se.statusCode() : -1;
         return new SidecarClient.SidecarException(
-                "Failed to create snapshot '" + name + "' on replica host " + key.host()
-                        + " for " + key.keyspace() + "." + key.table()
+                "Failed to create snapshot '" + name + "' on replica host " + host
+                        + " for " + keyspace + "." + table
                         + " — snapshot read-mode fails closed: every replica host a split reads must have "
                         + "the snapshot (per-host creation, issue #2227). Cause: " + cause.getMessage(),
                 status, cause);
     }
 
     /**
-     * Best-effort delete of every snapshot created for {@code queryId}, on each host it was
-     * created on. Called from {@code ConnectorMetadata.cleanupQuery} at query teardown
-     * (success or failure). Individual delete failures are logged and swallowed — the TTL
-     * backstop covers a miss — but every (host, table) is attempted regardless of earlier
-     * failures.
+     * Best-effort delete of every snapshot a superseded/invalidated {@code window} created, on each
+     * host it was created on. Individual delete failures are logged and swallowed — the Sidecar TTL
+     * backstop covers a miss.
      */
-    public void cleanup(String queryId) {
-        Map<SnapshotKey, CompletableFuture<String>> forQuery = created.remove(queryId);
-        if (forQuery == null) {
-            return;
-        }
-        for (Map.Entry<SnapshotKey, CompletableFuture<String>> e : forQuery.entrySet()) {
-            SnapshotKey key = e.getKey();
+    private void retire(Window window, TableRef ref) {
+        for (Map.Entry<String, CompletableFuture<String>> e : window.hostCreates.entrySet()) {
+            String host = e.getKey();
             String name;
             try {
-                // Successful creates leave a completed future here; a create that failed
-                // already removed its own future, so anything still present resolves to a
-                // real snapshot name (join blocks only for a rare concurrent in-flight
-                // create, then returns it).
+                // Successful creates leave a completed future; a create that failed already removed
+                // its own future, so anything still present resolves to a real snapshot name.
                 name = e.getValue().join();
             } catch (RuntimeException ex) {
-                // A create that raced to failure: nothing was made, nothing to delete.
-                continue;
+                continue; // a create that raced to failure: nothing was made, nothing to delete.
             }
             try {
-                sidecars.forHost(key.host()).clearSnapshot(key.keyspace(), key.table(), name);
+                sidecars.forHost(host).clearSnapshot(ref.keyspace(), ref.table(), name);
             } catch (RuntimeException ex) {
                 LOG.log(Level.WARNING,
-                        () -> "Best-effort snapshot cleanup failed for " + key.keyspace() + "." + key.table()
-                                + " on host " + key.host() + " snapshot=" + name
+                        () -> "Best-effort snapshot retirement failed for " + ref.keyspace() + "." + ref.table()
+                                + " on host " + host + " snapshot=" + name
                                 + " (TTL backstop will reclaim it): " + ex.getMessage());
             }
         }
     }
 
-    /** The deterministic per-query snapshot name. */
-    static String snapshotName(String queryId) {
-        String safe = UNSAFE.matcher(queryId).replaceAll("_").toLowerCase(Locale.ROOT);
-        return "cqlite-" + safe;
+    /** The reused-window snapshot name {@code cqlite-<ks>-<table>-<epoch>}. */
+    static String nameFor(String keyspace, String table, long epoch) {
+        return "cqlite-" + sanitize(keyspace) + "-" + sanitize(table) + "-" + epoch;
+    }
+
+    private static String nameFor(TableRef ref, long epoch) {
+        return nameFor(ref.keyspace(), ref.table(), epoch);
+    }
+
+    /** Strip unsafe chars and lowercase a name component for the Sidecar-safe charset. */
+    static String sanitize(String component) {
+        return UNSAFE.matcher(component).replaceAll("_").toLowerCase(Locale.ROOT);
     }
 }

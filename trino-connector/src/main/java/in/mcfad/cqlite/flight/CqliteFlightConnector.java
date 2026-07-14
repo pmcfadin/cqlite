@@ -28,7 +28,8 @@ public class CqliteFlightConnector implements Connector {
         // the same registry. Each host's Sidecar is derived from the configured URI's scheme
         // + port (uniform across the hostNetwork Sidecar DaemonSet) and the split host.
         this.snapshots = new SnapshotManager(
-                HostSnapshotApis.fromBaseUri(config.sidecarUri()), config.readMode(), config.snapshotTtl());
+                HostSnapshotApis.fromBaseUri(config.sidecarUri()), config.readMode(), config.snapshotTtl(),
+                config.snapshotReuseWindowNanos(), new SnapshotManager.SystemClock());
         // Fail fast at catalog load if arrow-java's off-heap memory init is broken by a missing JVM
         // flag (issues #2193, #2290) — otherwise every do_get dies far downstream with a cryptic
         // "Failed to read message". Runs before the first RootAllocator (the earliest Arrow touch)
@@ -46,7 +47,7 @@ public class CqliteFlightConnector implements Connector {
 
     @Override
     public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle) {
-        return new CqliteFlightMetadata(config, sidecar, flight, snapshots);
+        return new CqliteFlightMetadata(config, sidecar, flight);
     }
 
     @Override
@@ -61,6 +62,10 @@ public class CqliteFlightConnector implements Connector {
 
     @Override
     public void shutdown() {
+        // Retire every live reused snapshot (issue #2356): a reused snapshot outlives the query
+        // that created it, so retirement is not per-query — the connector releases them at
+        // shutdown (the Sidecar TTL backstop covers a crash/miss).
+        snapshots.retireAll();
         allocator.close();
     }
 }

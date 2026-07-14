@@ -55,19 +55,20 @@ class ReadModeWiringTest {
     @Test
     void snapshotModeNamesSnapshotInTicket() throws Exception {
         SnapshotManager mgr = new SnapshotManager(noopSidecar(), ReadMode.SNAPSHOT, Optional.of("6h"));
-        Optional<String> snapshot = mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.2"));
+        Optional<String> snapshot = mgr.snapshotFor("ks", "t", List.of("10.0.0.2"));
 
         List<CqliteFlightSplit> splits =
                 CqliteFlightSplitManager.buildSplits(TABLE, REPLICAS, "dc1", 8815, snapshot);
 
-        assertEquals(Optional.of("cqlite-q1"), splits.get(0).snapshot());
-        assertEquals("cqlite-q1", ticketFor(splits.get(0)).get("snapshot").asText());
+        // Reuse names snapshots per (ks, table, epoch), not per queryId (issue #2356).
+        assertEquals(Optional.of("cqlite-ks-t-0"), splits.get(0).snapshot());
+        assertEquals("cqlite-ks-t-0", ticketFor(splits.get(0)).get("snapshot").asText());
     }
 
     @Test
     void liveModeLeavesSnapshotNullInTicket() throws Exception {
         SnapshotManager mgr = new SnapshotManager(noopSidecar(), ReadMode.LIVE, Optional.of("6h"));
-        Optional<String> snapshot = mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.2"));
+        Optional<String> snapshot = mgr.snapshotFor("ks", "t", List.of("10.0.0.2"));
 
         List<CqliteFlightSplit> splits =
                 CqliteFlightSplitManager.buildSplits(TABLE, REPLICAS, "dc1", 8815, snapshot);

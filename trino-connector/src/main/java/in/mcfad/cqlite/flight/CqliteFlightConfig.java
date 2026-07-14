@@ -34,7 +34,8 @@ public record CqliteFlightConfig(
         double maxGroupRatio,
         long tableStatsTimeoutMillis,
         ReadMode readMode,
-        Optional<String> snapshotTtl) {
+        Optional<String> snapshotTtl,
+        long snapshotReuseWindowMillis) {
 
     public static final int DEFAULT_FLIGHT_PORT = 8815;
 
@@ -64,6 +65,20 @@ public record CqliteFlightConfig(
      */
     public static final double DEFAULT_MAX_GROUP_RATIO = 0.5;
 
+    /**
+     * Default snapshot-reuse freshness window (issue #2356/#2306). Within this window a single
+     * Sidecar snapshot is REUSED per {@code (keyspace, table)} across queries — one create
+     * fan-out (→ one memtable flush per host, #2305/#2306) and a stable resolved path that keeps
+     * the flight warm readers warm (#2356). The window is the staleness a Trino/analytics read
+     * tolerates: a read may reflect table state up to {@code min(window, time-since-last-
+     * generation-change)} old. {@code 0} disables reuse (every query takes a fresh snapshot).
+     */
+    public static final long DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS = 3_000L;
+
+    /** {@link #DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS} in nanoseconds (the {@link SnapshotManager} unit). */
+    public static final long DEFAULT_SNAPSHOT_REUSE_WINDOW_NANOS =
+            DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS * 1_000_000L;
+
     public CqliteFlightConfig {
         if (maxGroupRatio <= 0.0 || maxGroupRatio > 1.0) {
             throw new IllegalArgumentException(
@@ -73,7 +88,16 @@ public record CqliteFlightConfig(
             throw new IllegalArgumentException(
                     "cqlite.table-stats-timeout-ms must be > 0, got " + tableStatsTimeoutMillis);
         }
+        if (snapshotReuseWindowMillis < 0) {
+            throw new IllegalArgumentException(
+                    "cqlite.snapshot-reuse-window-ms must be >= 0, got " + snapshotReuseWindowMillis);
+        }
         requireRootPerNodeBase(sidecarUri);
+    }
+
+    /** The snapshot-reuse freshness window in nanoseconds (the {@link SnapshotManager} unit). */
+    public long snapshotReuseWindowNanos() {
+        return snapshotReuseWindowMillis * 1_000_000L;
     }
 
     /**
@@ -165,8 +189,12 @@ public record CqliteFlightConfig(
                 : DEFAULT_TABLE_STATS_TIMEOUT_MILLIS;
         ReadMode readMode = ReadMode.fromConfig(config.get("cqlite.read-mode"));
         Optional<String> snapshotTtl = parseSnapshotTtl(config.get("cqlite.snapshot-ttl"));
+        long reuseWindowMs = config.containsKey("cqlite.snapshot-reuse-window-ms")
+                ? Long.parseLong(config.get("cqlite.snapshot-reuse-window-ms"))
+                : DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS;
         return new CqliteFlightConfig(
-                URI.create(sidecar), port, dc, policy, ratio, statsTimeoutMs, readMode, snapshotTtl);
+                URI.create(sidecar), port, dc, policy, ratio, statsTimeoutMs, readMode, snapshotTtl,
+                reuseWindowMs);
     }
 
     /**
