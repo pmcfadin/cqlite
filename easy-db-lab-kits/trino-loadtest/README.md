@@ -45,6 +45,7 @@ easy-db-lab trino-loadtest-trino stop
 | `--interval` | `INTERVAL` | `10` | Interval stats reporting period in seconds |
 | `--traceparent` | `TRACEPARENT` | `false` | Attach a random W3C `traceparent` header to every query (off by default) |
 | `--snapshot-check-cmd` | `TRINO_LOADTEST_SNAPSHOT_CHECK_CMD` | (unset) | Shell command printing `nodetool listsnapshots`-style output for every target node; if set, the driver asserts zero `cqlite-` snapshots remain after the run and exits nonzero on a leak (D12 hygiene, issue #2399). Unset: SKIPPED and reported as such, never a silent pass. |
+| `--snapshot-check-timeout-s` | `TRINO_LOADTEST_SNAPSHOT_CHECK_TIMEOUT_S` | `60` | Seconds the `--snapshot-check-cmd` probe may run before it is treated as a check FAILURE — a wedged probe (unreachable pod, hung `kubectl exec`) must not hang the driver indefinitely with no D12 verdict. Must be `> 0`. |
 
 Either `--ks`/`--tbl` or `--queries-file` is required (`--ks`/`--tbl` if you
 want the built-in default query set; `--queries-file` for anything custom).
@@ -98,7 +99,10 @@ found" — an empty result from a broken probe must not read as a clean ring.
 A blank/whitespace-only `--snapshot-check-cmd` is rejected as a config error
 (`--threads`/`--interval`-style `validate_args` check, exit `2`) rather than
 silently accepted — it would otherwise shell-execute as a no-op and produce
-the exact same false-clean result.
+the exact same false-clean result. The probe is bounded by
+`--snapshot-check-timeout-s` (default 60s): a wedged one-liner that never
+returns is reported as `FAIL` (exit `3`) on timeout rather than hanging the
+driver forever after the workload finished with no D12 verdict.
 See `docs/development/round-validation-metrics.md` for the full 14-point
 standard this is one item of.
 

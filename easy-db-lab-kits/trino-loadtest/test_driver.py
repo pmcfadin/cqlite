@@ -650,6 +650,36 @@ def test_run_snapshot_leak_check_propagates_probe_command_failure() -> None:
         assert "connection refused" in str(e)
 
 
+def test_make_default_list_snapshots_fn_times_out_and_raises() -> None:
+    # A wedged probe (unreachable pod / hung `kubectl exec`) must NOT hang the
+    # driver forever after the workload finishes — it must be bounded and land in
+    # the same check-FAILURE path as a nonzero exit (roborev finding, final round).
+    fn = driver.make_default_list_snapshots_fn("sleep 5", timeout_s=0.2)
+    try:
+        fn()
+        raise AssertionError("expected RuntimeError when the probe exceeds its timeout")
+    except RuntimeError as e:
+        assert "timed out" in str(e)
+        assert "0.2" in str(e)
+
+
+def test_parse_args_snapshot_check_timeout_default() -> None:
+    args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+    assert args.snapshot_check_timeout_s == float(driver.DEFAULT_SNAPSHOT_CHECK_TIMEOUT_S)
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-timeout-s", "12.5"])
+    assert args.snapshot_check_timeout_s == 12.5
+
+
+def test_validate_args_rejects_nonpositive_snapshot_check_timeout() -> None:
+    # A non-positive timeout would defeat the bound (0 = expire-immediately,
+    # negative = error), so a wedged probe could no longer reliably FAIL.
+    for bad in ("0", "-1"):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-timeout-s", bad])
+        assert driver.validate_args(args) is not None
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-timeout-s", "30"])
+    assert driver.validate_args(args) is None
+
+
 def main() -> int:
     check("percentile: empty input", test_percentile_empty)
     check("percentile: single value", test_percentile_single_value)
@@ -734,6 +764,15 @@ def main() -> int:
     check(
         "run_snapshot_leak_check: propagates a probe command failure (never swallows it)",
         test_run_snapshot_leak_check_propagates_probe_command_failure,
+    )
+    check(
+        "make_default_list_snapshots_fn: bounds a wedged probe and raises on timeout",
+        test_make_default_list_snapshots_fn_times_out_and_raises,
+    )
+    check("--snapshot-check-timeout-s: default + override parse", test_parse_args_snapshot_check_timeout_default)
+    check(
+        "validate_args: rejects a non-positive --snapshot-check-timeout-s",
+        test_validate_args_rejects_nonpositive_snapshot_check_timeout,
     )
 
     print()

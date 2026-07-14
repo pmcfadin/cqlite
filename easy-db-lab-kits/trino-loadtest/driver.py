@@ -349,6 +349,13 @@ def default_exec_fn(conn: object, sql: str, headers: Optional[dict]) -> int:
 # "SHALL NOT pass vacuously").
 
 DEFAULT_SNAPSHOT_PREFIX = "cqlite-"
+# The operator-injected probe (a kubectl-exec/nodetool one-liner spanning the
+# ring) can wedge — an unreachable pod, a hung `kubectl exec`, a stuck pipe —
+# and without a bound it would hang the driver forever AFTER the workload
+# finished, so the D12 verdict would never be produced. Bound it and surface a
+# timeout as a check FAILURE (same "no verdict" class as a nonzero exit),
+# never a silent hang (roborev finding, final review round).
+DEFAULT_SNAPSHOT_CHECK_TIMEOUT_S = 60
 
 
 def find_leaked_snapshots(listsnapshots_output: str, prefix: str = DEFAULT_SNAPSHOT_PREFIX) -> List[str]:
@@ -400,7 +407,10 @@ def run_snapshot_leak_check(
     return SnapshotLeakResult(ran=True, leaked=find_leaked_snapshots(output, prefix))
 
 
-def make_default_list_snapshots_fn(cmd: str) -> Callable[[], str]:
+def make_default_list_snapshots_fn(
+    cmd: str,
+    timeout_s: float = DEFAULT_SNAPSHOT_CHECK_TIMEOUT_S,
+) -> Callable[[], str]:
     """Build a ``list_snapshots_fn`` that runs the operator-provided shell ``cmd``.
 
     ``cmd`` is expected to print ``nodetool listsnapshots``-style output for
@@ -415,11 +425,30 @@ def make_default_list_snapshots_fn(cmd: str) -> Callable[[], str]:
     unreachable pod, typo'd command) must surface as a check failure, not as
     "0 snapshots found." Silently treating that as a pass is exactly the
     vacuous-pass bug #2399 exists to prevent (roborev finding, round-1 review).
+
+    The probe is bounded by ``timeout_s`` (default
+    :data:`DEFAULT_SNAPSHOT_CHECK_TIMEOUT_S`): a wedged one-liner (unreachable
+    pod, hung ``kubectl exec``) would otherwise hang the driver indefinitely
+    after the workload finished and never yield a D12 verdict. A timeout also
+    raises ``RuntimeError`` so it lands in the same check-FAILURE path as a
+    nonzero exit, never a silent hang (roborev finding, final review round).
     """
     import subprocess
 
     def _run() -> str:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)  # noqa: S602 - operator-provided, trusted CLI arg
+        try:
+            result = subprocess.run(  # noqa: S602 - operator-provided, trusted CLI arg
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"snapshot-check-cmd timed out after {timeout_s}s (probe wedged; no D12 verdict)"
+            ) from exc
         if result.returncode != 0:
             stderr = result.stderr.strip() or "(no stderr)"
             raise RuntimeError(f"snapshot-check-cmd exited {result.returncode}: {stderr}")
@@ -517,6 +546,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "such, never a silent pass."
         ),
     )
+    parser.add_argument(
+        "--snapshot-check-timeout-s",
+        dest="snapshot_check_timeout_s",
+        type=float,
+        default=_float_env_default(
+            "TRINO_LOADTEST_SNAPSHOT_CHECK_TIMEOUT_S", float(DEFAULT_SNAPSHOT_CHECK_TIMEOUT_S)
+        ),
+        help=(
+            "seconds to allow the --snapshot-check-cmd probe to run before it is "
+            "treated as a check FAILURE (a wedged probe must not hang the driver; "
+            f"default {DEFAULT_SNAPSHOT_CHECK_TIMEOUT_S}s, D12 hygiene, issue #2399)."
+        ),
+    )
     return parser
 
 
@@ -541,6 +583,11 @@ def validate_args(args: argparse.Namespace) -> Optional[str]:
         # front instead of letting it degrade into the exact vacuous pass #2399 exists
         # to prevent (roborev finding, review round 2).
         return "--snapshot-check-cmd must not be blank/whitespace-only"
+    if args.snapshot_check_timeout_s <= 0:
+        # A non-positive timeout would either error at subprocess.run or (for 0)
+        # be interpreted as "expire immediately", defeating the bound; require a
+        # real positive budget so a wedged probe reliably surfaces as a FAIL.
+        return "--snapshot-check-timeout-s must be > 0"
     return None
 
 
@@ -601,7 +648,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     try:
-        leak_result = run_snapshot_leak_check(make_default_list_snapshots_fn(args.snapshot_check_cmd))
+        leak_result = run_snapshot_leak_check(
+            make_default_list_snapshots_fn(args.snapshot_check_cmd, args.snapshot_check_timeout_s)
+        )
     except Exception as exc:  # noqa: BLE001 - a probe command that FAILED to run (auth, unreachable
         # pod, typo'd one-liner) must surface as a check FAILURE, never be swallowed into an
         # empty-stdout "0 leaks" pass (that vacuous-pass gap was a roborev finding on this
