@@ -5850,6 +5850,27 @@ The `StatisticsWriter` produces a full Cassandra 5.0 compatible Statistics.db wi
 
 [Section titled “Parsing Limitations”](#parsing-limitations)
 
+### Snapshot header-identity extraction — ID-less snapshot dirs (Issue #2384)
+
+[Section titled “Snapshot header-identity extraction — ID-less snapshot dirs (Issue #2384)”](#snapshot-header-identity-extraction--id-less-snapshot-dirs-issue-2384)
+
+**Status**: ⚠️ **Partial** — ID-ful (Cassandra-shaped) snapshots fully resolved; ID-less snapshots pending follow-up (#2415) **Impact**: Logging + sync schema-fallback identity only (does NOT affect the ticket-derived warm-cache key)
+
+Snapshot-aware path parsing (`cqlite-core/src/storage/sstable/snapshot_path.rs`) resolves the real `{keyspace}.{table}` identity from a Data.db path by walking up past a `snapshots/{tag}/` layer. Detection is guarded by the structural `{table_name}-{32-hex}` shape (`is_table_id_dir`) so it triggers ONLY for Cassandra-shaped, ID-ful snapshot directories (`.../{ks}/{table}-{id}/snapshots/{tag}/...-Data.db`). This correctly:
+
+* resolves the real `{keyspace}.{table}` for ID-ful Cassandra snapshots, and
+* avoids the false-trigger for an ordinary table living in a keyspace literally named `snapshots` (`.../data/snapshots/{table}-{id}/...-Data.db`).
+
+**Residual limitation**: CQLite’s own write engine emits **ID-less** table directories `{keyspace}/{table}/` (no `-{uuid}` suffix — `writer/mod.rs`). When those are snapshotted (e.g. the flight producer’s `reads_from_snapshot_directory` path), the read path is `{ks}/{table}/snapshots/{tag}/...-Data.db`. Because `is_table_id_dir` requires a `-{32-hex}` suffix, an ID-less snapshot dir does NOT match the guard, the walk-up is skipped, and the header-identity misparse persists: keyspace resolves to `snapshots` and table to `{tag}`.
+
+This is **inherently unresolvable from the path alone** — an ID-less snapshot `{ks}/{table}/snapshots/{tag}/` and an ordinary table in a keyspace literally named `snapshots` (`{data}/snapshots/{table}/`) are structurally identical. Only external authoritative keyspace/table context can disambiguate them, and threading that context is the scope of the follow-up.
+
+**Blast radius**: header keyspace/table are used for logging and the sync schema-fallback path; the ID-less misparse does NOT corrupt the ticket-derived warm-cache key. The robust fix (authoritative keyspace/table threaded into the reader) is tracked as **#2415**.
+
+**Tracking**: Issue #2384 (structural fix, shipped) → follow-up #2415 (robust fix)
+
+***
+
 ### ~~Static Column Support (Exit Code 3)~~ - FIXED
 
 [Section titled “Static Column Support (Exit Code 3) - FIXED”](#static-column-support-exit-code-3---fixed)
