@@ -579,10 +579,25 @@ impl CqliteFlightService {
         // and the SAME flag hands off to the merge stage under a fresh guard
         // (`spawn_streaming`/`build_aggregate_response`) covering the stream's
         // lifetime, exactly as before this fix.
-        // Admission control (issue #2420, WS4): acquire a permit BEFORE any
-        // SSTable is opened or any batch produced, so `K` bounds concurrent scans
-        // ahead of blocking-pool/fd/memory pressure. On saturation this waits a
-        // bounded timeout, then sheds with `UNAVAILABLE` (retry-safe for the #2241
+        // Cheap, filesystem-free request validation FIRST — BEFORE admission
+        // (roborev-1698): parse the ticket bytes and build the producer + Arrow
+        // schema (schema-cache lookup, predicate/projection/aggregation-spec
+        // construction). None of this touches the filesystem, so it must not wait
+        // behind the admission semaphore and must not consume a permit — an
+        // invalid ticket can never succeed no matter how many times it is
+        // retried, so it fails with its OWN status (`invalid_argument` /
+        // `not_found` from ticket/schema/predicate parsing) immediately, never a
+        // permit-consuming `UNAVAILABLE` that would make the connector
+        // failover-retry an unsatisfiable request into a poison retry storm.
+        let (ticket, producer, schema_ref) = match self.validate_do_get_ticket(request) {
+            Ok(v) => v,
+            Err(status) => return Err((status, metrics)),
+        };
+        // Admission control (issue #2420, WS4): acquire a permit immediately
+        // before any filesystem access (directory resolve / SSTable open) or
+        // batch production, so `K` bounds concurrent scans ahead of
+        // blocking-pool/fd/memory pressure. On saturation this waits a bounded
+        // timeout, then sheds with `UNAVAILABLE` (retry-safe for the #2241
         // connector failover) — never `RESOURCE_EXHAUSTED`, and always before the
         // first batch. A request cancelled WHILE waiting drops this future and
         // never acquires a permit. The returned permit is held for the scan's
@@ -601,10 +616,14 @@ impl CqliteFlightService {
         // the setup-error path below the timer drops here, recording the `resolve`
         // phase it died in — so a stall that never produces a row still localizes.
         let mut timer = crate::obs::PhaseTimer::start("do_get");
-        // Fallible eager setup: parse the ticket, build the producer + schema, and
-        // resolve/token-prune the SSTable paths off the reactor. A missing table
-        // surfaces here as a clean `not_found` BEFORE the stream opens.
-        let setup = match self.do_get_setup(request, &cancel).await {
+        // Fallible eager resolve: resolve the table's on-disk directory and
+        // token-prune the SSTable paths off the reactor (the ticket/producer/
+        // schema are already validated above). A missing table surfaces here as a
+        // clean `not_found` BEFORE the stream opens.
+        let setup = match self
+            .do_get_resolve(ticket, producer, schema_ref, &cancel)
+            .await
+        {
             Ok(setup) => setup,
             Err(status) => return Err((status, metrics)),
         };
@@ -655,34 +674,51 @@ impl CqliteFlightService {
         )))
     }
 
-    /// Eager, fallible `do_get` setup shared by the row and aggregate paths: parse
-    /// the ticket, build the producer + Arrow schema, resolve the table's on-disk
-    /// directory, and token-prune the SSTable paths. A missing table surfaces as
-    /// `not_found` here, before any stream opens.
-    ///
-    /// The ENTIRE fallible sequence — schema/producer construction,
-    /// `DirSource::resolve` (filesystem `is_dir`/`read_dir`, including the
-    /// Cassandra `<table>-<uuid>` layout scan), and the token-prune (reads a
-    /// sibling `Summary.db` per SSTable) — runs in ONE `spawn_blocking` closure
-    /// (issue #1476, roborev round 3). Pre-change, ALL filesystem access for
-    /// `do_get` ran inside the blocking task; letting any of it run on the async
-    /// request task instead would stall the gRPC reactor for unrelated RPCs under
-    /// slow/busy storage. `cancel` is polled inside this same closure (issue
-    /// #1476, roborev F1) so a client disconnect during setup stops it instead of
-    /// running to completion; `do_get_inner`'s `CancelGuard` still covers this
-    /// whole `.await` for the future-drop case.
-    async fn do_get_setup(
+    /// Cheap, filesystem-free `do_get` request validation (roborev-1698): parse
+    /// the ticket bytes and build the producer + Arrow schema (schema-cache
+    /// lookup, predicate/projection/aggregation-spec construction). Touches NO
+    /// filesystem, so [`Self::do_get_inner`] runs this BEFORE acquiring an
+    /// admission permit — an invalid ticket can never succeed regardless of how
+    /// many times it is retried, so it must fail with its own status
+    /// immediately: never wait behind the admission semaphore, never consume a
+    /// permit, never surface as a retry-inviting `UNAVAILABLE`.
+    fn validate_do_get_ticket(
         &self,
         request: Request<Ticket>,
+    ) -> Result<(FlightTicket, MergeProducer, Arc<ArrowSchema>), Status> {
+        let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
+        let producer = self.build_producer(&ticket)?;
+        let schema_ref = Arc::new(producer.arrow_schema()?);
+        Ok((ticket, producer, schema_ref))
+    }
+
+    /// Eager, fallible `do_get` filesystem resolve shared by the row and
+    /// aggregate paths, run AFTER admission (issue #2420): resolve the table's
+    /// on-disk directory and token-prune the SSTable paths for an already
+    /// validated `ticket`/`producer`/`schema_ref` (see
+    /// [`Self::validate_do_get_ticket`]). A missing table surfaces as `not_found`
+    /// here, before any stream opens.
+    ///
+    /// `DirSource::resolve` (filesystem `is_dir`/`read_dir`, including the
+    /// Cassandra `<table>-<uuid>` layout scan) and the token-prune (reads a
+    /// sibling `Summary.db` per SSTable) run in ONE `spawn_blocking` closure
+    /// (issue #1476, roborev round 3) — letting filesystem access run on the
+    /// async request task instead would stall the gRPC reactor for unrelated
+    /// RPCs under slow/busy storage. `cancel` is polled inside this same closure
+    /// (issue #1476, roborev F1) so a client disconnect during resolve stops it
+    /// instead of running to completion; `do_get_inner`'s `CancelGuard` still
+    /// covers this whole `.await` for the future-drop case.
+    async fn do_get_resolve(
+        &self,
+        ticket: FlightTicket,
+        producer: MergeProducer,
+        schema_ref: Arc<ArrowSchema>,
         cancel: &CancelFlag,
     ) -> Result<DoGetSetup, Status> {
-        let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
         let svc = self.clone();
         let resolve_cancel = cancel.clone();
 
         tokio::task::spawn_blocking(move || -> Result<DoGetSetup, Status> {
-            let producer = svc.build_producer(&ticket)?;
-            let schema_ref = Arc::new(producer.arrow_schema()?);
             // Spec Req 8: reuse a cached LIVE-mode resolution on a warm hit instead
             // of re-running `DirSource::resolve` every request.
             let dir = svc.resolve_dir(&ticket)?;
@@ -1172,10 +1208,10 @@ mod tests {
             let cancel = CancelFlag::new();
             cancel.cancel();
             let bytes = ticket(KS, TBL).to_bytes().unwrap();
-            match svc
-                .do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
-                .await
-            {
+            let (t, producer, schema_ref) = svc
+                .validate_do_get_ticket(Request::new(Ticket::new(bytes)))
+                .expect("ticket validates");
+            match svc.do_get_resolve(t, producer, schema_ref, &cancel).await {
                 Ok(_) => panic!("a pre-cancelled setup must abort, not resolve"),
                 Err(e) => e,
             }
@@ -1315,8 +1351,10 @@ mod tests {
             let cancel = CancelFlag::new();
             cancel.cancel();
             let bytes = t.to_bytes().unwrap();
-            svc.do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
-                .await
+            let (t, producer, schema_ref) = svc
+                .validate_do_get_ticket(Request::new(Ticket::new(bytes)))
+                .expect("ticket validates");
+            svc.do_get_resolve(t, producer, schema_ref, &cancel).await
         });
         let err = match result {
             Ok(_) => panic!("a cancelled setup must not resolve/return paths"),
@@ -1353,8 +1391,10 @@ mod tests {
         let setup = rt.block_on(async {
             let cancel = CancelFlag::new();
             let bytes = t.to_bytes().unwrap();
-            svc.do_get_setup(Request::new(Ticket::new(bytes)), &cancel)
-                .await
+            let (t, producer, schema_ref) = svc
+                .validate_do_get_ticket(Request::new(Ticket::new(bytes)))
+                .expect("ticket validates");
+            svc.do_get_resolve(t, producer, schema_ref, &cancel).await
         });
         let setup = setup.expect("uncancelled setup resolves");
         // The warm path (issue #2310) hands over the open reader set; a full-ring

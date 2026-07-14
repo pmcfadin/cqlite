@@ -9,9 +9,14 @@
 //! surface, proving the ceiling engages on the real path.
 //!
 //! Red-on-main proof: `excess_do_gets_never_reach_setup` asserts the excess
-//! requests never run `do_get_setup` (the `resolves` work counter stays flat)
-//! while all permits are held — with the acquire-before-setup wiring removed,
-//! every offered request runs setup and the counter jumps, reding the test.
+//! requests never run `do_get_resolve` (the `resolves` work counter, bumped only
+//! by the filesystem-touching `resolve_dir` call inside it, stays flat) while all
+//! permits are held — with the acquire-before-resolve wiring removed, every
+//! offered request runs the filesystem resolve and the counter jumps, reding the
+//! test. Ticket VALIDATION (parse + schema/predicate build, roborev-1698) is
+//! deliberately excluded from this gate: it is cheap and filesystem-free, so it
+//! runs BEFORE admission and must not wait behind the semaphore — see
+//! `req_malformed_ticket_bypasses_admission_entirely` below.
 
 use std::task::Poll;
 use std::time::Duration;
@@ -245,9 +250,12 @@ fn req1_releasing_one_permit_admits_exactly_one_waiter() {
 }
 
 /// Red-on-main proof (Scenario 1's do_get clause): with all `K` permits held, the
-/// `K + M` offered `do_get`s never reach `do_get_setup` — the `resolves` work
-/// counter stays flat. Remove the acquire-before-setup wiring and every request
-/// runs setup, jumping the counter: the test reds.
+/// `K + M` offered `do_get`s never reach the filesystem resolve (`do_get_resolve`)
+/// — the `resolves` work counter, bumped only inside `resolve_dir`, stays flat.
+/// Remove the acquire-before-resolve wiring and every request runs the resolve,
+/// jumping the counter: the test reds. (Ticket validation itself — parse +
+/// schema/predicate build — deliberately runs BEFORE this gate; see
+/// `req_malformed_ticket_bypasses_admission_entirely`.)
 #[test]
 fn req1_excess_do_gets_never_reach_setup() {
     let adm = Admission::new(cfg(2, BIG_TIMEOUT));
@@ -271,7 +279,7 @@ fn req1_excess_do_gets_never_reach_setup() {
         assert_eq!(
             svc.setup_work().resolves,
             baseline,
-            "no excess request reached do_get_setup while all K permits are held"
+            "no excess request reached the filesystem resolve while all K permits are held"
         );
         let s = adm.snapshot();
         assert_eq!(s.in_use, 2, "only the K barrier permits are held");
@@ -284,6 +292,57 @@ fn req1_excess_do_gets_never_reach_setup() {
             t.abort();
         }
         drop((h1, h2));
+    });
+}
+
+/// roborev-1698: a MALFORMED ticket (fails validation with no filesystem access)
+/// must bypass admission entirely — it can never succeed no matter how many times
+/// it is retried, so it must fail with its OWN status (`INVALID_ARGUMENT`)
+/// immediately: never wait behind the admission semaphore (even with every permit
+/// held), never `UNAVAILABLE` (which would make the connector failover-retry an
+/// unsatisfiable request into a poison retry storm), and never consume/contend
+/// for a permit (`rejected_total` and the waiting gauge stay exactly where they
+/// started).
+#[test]
+fn req_malformed_ticket_bypasses_admission_entirely() {
+    let adm = Admission::new(cfg(1, BIG_TIMEOUT));
+    let (_temp, svc) = build_service(adm.clone(), 8);
+    block_on_paused(async move {
+        // Hold the ONLY permit — every real do_get would have to wait for it.
+        let held = adm.acquire().await.unwrap();
+        let before = adm.snapshot();
+
+        // Malformed ticket bytes: not even valid JSON, so `FlightTicket::from_bytes`
+        // fails before admission is ever consulted.
+        let malformed = Request::new(Ticket::new(b"not a valid flight ticket".to_vec()));
+        let err = svc
+            .do_get(malformed)
+            .await
+            .err()
+            .expect("a malformed ticket must error");
+
+        assert_eq!(
+            err.code(),
+            Code::InvalidArgument,
+            "a malformed ticket fails validation, never waits for admission, got: {err:?}"
+        );
+        assert_ne!(
+            err.code(),
+            Code::Unavailable,
+            "validation failures are not shed as UNAVAILABLE — they can never succeed on retry"
+        );
+
+        let after = adm.snapshot();
+        assert_eq!(
+            after.waiting, before.waiting,
+            "the malformed ticket never registered as waiting"
+        );
+        assert_eq!(
+            after.rejected_total, before.rejected_total,
+            "the malformed ticket never contended for (or was shed by) admission"
+        );
+        assert_eq!(after.in_use, before.in_use, "the held permit is untouched");
+        drop(held);
     });
 }
 
