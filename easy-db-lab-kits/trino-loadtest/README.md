@@ -44,6 +44,7 @@ easy-db-lab trino-loadtest-trino stop
 | `--duration` | `DURATION` | `60` | Load duration in seconds |
 | `--interval` | `INTERVAL` | `10` | Interval stats reporting period in seconds |
 | `--traceparent` | `TRACEPARENT` | `false` | Attach a random W3C `traceparent` header to every query (off by default) |
+| `--snapshot-check-cmd` | `TRINO_LOADTEST_SNAPSHOT_CHECK_CMD` | (unset) | Shell command printing `nodetool listsnapshots`-style output for every target node; if set, the driver asserts zero `cqlite-` snapshots remain after the run and exits nonzero on a leak (D12 hygiene, issue #2399). Unset: SKIPPED and reported as such, never a silent pass. |
 
 Either `--ks`/`--tbl` or `--queries-file` is required (`--ks`/`--tbl` if you
 want the built-in default query set; `--queries-file` for anything custom).
@@ -74,6 +75,24 @@ query. This uses the trino-python-client's lower-level
 DBAPI `Cursor.execute()` does not expose a way to set per-request headers —
 see `driver.py`'s `default_exec_fn` docstring. Off by default; the read load
 otherwise produces no client-side trace context.
+
+### Snapshot-leak check (D12 hygiene, issue #2399)
+
+The field's round-9 report (#2367) added a post-round hygiene check: after a
+run, `nodetool listsnapshots | grep cqlite-` must be empty on every node — a
+cqlite snapshot-mode read takes a transient per-query Cassandra snapshot and
+must clean it up; anything still present after the run is a leak. This driver
+runs in a plain Python pod with no direct cluster/`nodetool` access, so the
+check is only performed when `--snapshot-check-cmd` names an operator-provided
+shell command that prints `nodetool listsnapshots`-style output across every
+node (a `kubectl exec` one-liner, typically). If configured, the driver prints
+`snapshot-leak check: PASS`/`FAIL` (with the leaked names) after the run and
+exits `3` on a leak. If not configured, it prints `snapshot-leak check:
+SKIPPED` — deliberately never a silent pass, per the requirement that the
+check must not appear green when it did not run
+(`openspec/changes/standard-metrics-template/specs/round-validation-reporting/spec.md`).
+See `docs/development/round-validation-metrics.md` for the full 14-point
+standard this is one item of.
 
 ## Metrics
 

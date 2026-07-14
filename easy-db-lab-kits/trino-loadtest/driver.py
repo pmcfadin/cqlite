@@ -333,6 +333,93 @@ def default_exec_fn(conn: object, sql: str, headers: Optional[dict]) -> int:
 
 
 # --------------------------------------------------------------------------
+# Snapshot leak check (D12 hygiene, issue #2399)
+# --------------------------------------------------------------------------
+#
+# Local mirror of the field's post-round hygiene check (#2367 round-9
+# "Proposed standard metrics", D12): ``nodetool listsnapshots | grep cqlite-``
+# must be empty on every node after a run — a cqlite snapshot-mode read takes
+# a transient per-query Cassandra snapshot and must clean it up. This driver
+# has no direct cluster/nodetool access (it runs in a plain Python pod that
+# only talks to Trino), so the actual ``nodetool listsnapshots`` invocation is
+# always operator-injected via ``--snapshot-check-cmd`` / the
+# ``TRINO_LOADTEST_SNAPSHOT_CHECK_CMD`` env var (e.g. a ``kubectl exec``
+# one-liner spanning every Cassandra pod). When it is not configured the
+# check is reported as SKIPPED, never as a silent pass (issue #2399,
+# "SHALL NOT pass vacuously").
+
+DEFAULT_SNAPSHOT_PREFIX = "cqlite-"
+
+
+def find_leaked_snapshots(listsnapshots_output: str, prefix: str = DEFAULT_SNAPSHOT_PREFIX) -> List[str]:
+    """Return the snapshot names in ``listsnapshots_output`` starting with ``prefix``.
+
+    Mirrors ``nodetool listsnapshots | grep cqlite-`` against that command's
+    tabular output: each line's first whitespace-separated token is treated
+    as a candidate snapshot name. Header/footer lines (``Snapshot Details:``,
+    column headers, ``Total ...`` summary lines, blank lines) never start
+    with ``prefix`` so they are excluded without any special-casing.
+    """
+    leaked = []
+    for line in listsnapshots_output.splitlines():
+        fields = line.split()
+        if fields and fields[0].startswith(prefix):
+            leaked.append(fields[0])
+    return leaked
+
+
+@dataclass
+class SnapshotLeakResult:
+    """Outcome of the D12 check. ``ran=False`` means "no verdict" — a caller
+    MUST NOT treat an unrun check as a pass (see :func:`run_snapshot_leak_check`).
+    """
+
+    ran: bool
+    leaked: List[str] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return self.ran and not self.leaked
+
+
+def run_snapshot_leak_check(
+    list_snapshots_fn: Optional[Callable[[], str]],
+    prefix: str = DEFAULT_SNAPSHOT_PREFIX,
+) -> SnapshotLeakResult:
+    """Run the D12 hygiene check by calling the injected ``list_snapshots_fn``.
+
+    ``list_snapshots_fn`` is injected (never a hardcoded ``nodetool`` call) so
+    this is unit-testable without a live cluster and so operators can point
+    it at whatever cross-node listing mechanism their environment provides.
+    ``None`` means unconfigured: the check has NOT run, and the result's
+    ``ran`` flag is ``False`` so callers report a SKIP, not a pass.
+    """
+    if list_snapshots_fn is None:
+        return SnapshotLeakResult(ran=False)
+    output = list_snapshots_fn()
+    return SnapshotLeakResult(ran=True, leaked=find_leaked_snapshots(output, prefix))
+
+
+def make_default_list_snapshots_fn(cmd: str) -> Callable[[], str]:
+    """Build a ``list_snapshots_fn`` that runs the operator-provided shell ``cmd``.
+
+    ``cmd`` is expected to print ``nodetool listsnapshots``-style output for
+    every target node (e.g. a ``kubectl exec ... nodetool listsnapshots``
+    one-liner covering the whole ring). Import ``subprocess`` lazily here,
+    matching this module's lazy-import discipline for anything that touches
+    the outside world (see the module docstring) — ``test_driver.py`` never
+    needs it.
+    """
+    import subprocess
+
+    def _run() -> str:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)  # noqa: S602 - operator-provided, trusted CLI arg
+        return result.stdout
+
+    return _run
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -409,6 +496,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=_env_flag("TRINO_LOADTEST_TRACEPARENT"),
         help="attach a random W3C traceparent header to every query (default: off)",
     )
+    parser.add_argument(
+        "--snapshot-check-cmd",
+        dest="snapshot_check_cmd",
+        default=_env_default("TRINO_LOADTEST_SNAPSHOT_CHECK_CMD"),
+        help=(
+            "shell command printing `nodetool listsnapshots`-style output for every "
+            "target node (e.g. a kubectl-exec one-liner); if set, asserts zero "
+            "cqlite- snapshots remain after the run (D12 hygiene, issue #2399) and "
+            "exits nonzero on a leak. Unset: the check is SKIPPED and reported as "
+            "such, never a silent pass."
+        ),
+    )
     return parser
 
 
@@ -475,6 +574,29 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     final = stats.cumulative_snapshot()
     print(format_final_line(args.threads, final), flush=True)
+
+    # D12 hygiene check (issue #2399) — local mirror of the field's
+    # `nodetool listsnapshots | grep cqlite-` == 0 post-run check.
+    list_snapshots_fn = (
+        make_default_list_snapshots_fn(args.snapshot_check_cmd) if args.snapshot_check_cmd else None
+    )
+    leak_result = run_snapshot_leak_check(list_snapshots_fn)
+    if not leak_result.ran:
+        print(
+            "snapshot-leak check: SKIPPED (no --snapshot-check-cmd configured; D12, issue #2399)",
+            flush=True,
+        )
+    elif leak_result.leaked:
+        print(
+            f"snapshot-leak check: FAIL - {len(leak_result.leaked)} leaked snapshot(s): "
+            f"{', '.join(leak_result.leaked)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 3
+    else:
+        print("snapshot-leak check: PASS (0 cqlite- snapshots remain)", flush=True)
+
     return 0
 
 

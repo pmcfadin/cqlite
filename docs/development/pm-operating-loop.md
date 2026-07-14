@@ -189,3 +189,13 @@ worktree (the manager never rebases someone else's branch).
   flags). Pass explicit `--agent`/`--model` ONLY as a per-machine troubleshooting override when the local
   config is broken; never pin a specific agent as doctrine. See `docs/development/agent-machine-setup.md`.
 - Every GitHub write gets a short traceable comment.
+
+## Field round validation (separate from the agent gate, issue #2399)
+
+The live 3-node field validation cycle (round tracker channel, e.g. #2367) reports
+against its own standard: `docs/development/round-validation-metrics.md` — 14 metrics,
+A/B baked into a pass/fail round gate, C/D tracked as numbers, pre-filled with the
+round-9 baseline. That round gate is a **live-cluster field-validation verdict**, not
+`scripts/agent-gate.sh` — a delivery cycle's agent-gate PASS says nothing about whether
+that build survives a live round, and vice versa. New round trackers seed from
+`.github/ISSUE_TEMPLATE/round-tracker.yml`.

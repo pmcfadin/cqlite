@@ -522,6 +522,84 @@ def test_run_worker_traceparent_disabled_passes_no_headers() -> None:
     assert seen_headers == [None]
 
 
+# --------------------------------------------------------------------------
+# find_leaked_snapshots() / run_snapshot_leak_check() (D12 hygiene, #2399)
+# --------------------------------------------------------------------------
+
+
+def test_find_leaked_snapshots_extracts_matching_prefix() -> None:
+    output = (
+        "Snapshot Details: \n"
+        "Snapshot name Keyspace name Column family name True size Size on disk\n"
+        "cqlite-abc123 test_basic keyvalue 1.2 MiB 1.2 MiB\n"
+        "cqlite-def456 test_basic keyvalue 800 KiB 800 KiB\n"
+        "\n"
+        "Total TrueDiskSpaceUsed: 2.0 MiB\n"
+    )
+    leaked = driver.find_leaked_snapshots(output)
+    assert leaked == ["cqlite-abc123", "cqlite-def456"]
+
+
+def test_find_leaked_snapshots_empty_when_none_match() -> None:
+    output = (
+        "Snapshot Details: \n"
+        "Snapshot name Keyspace name Column family name True size Size on disk\n"
+        "\n"
+        "Total TrueDiskSpaceUsed: 0 bytes\n"
+    )
+    assert driver.find_leaked_snapshots(output) == []
+
+
+def test_find_leaked_snapshots_ignores_non_matching_prefixes() -> None:
+    output = "manual-backup-20260101 test_basic keyvalue 1.0 MiB 1.0 MiB\n"
+    assert driver.find_leaked_snapshots(output) == []
+
+
+def test_find_leaked_snapshots_honours_custom_prefix() -> None:
+    output = "other-prefix-xyz ks tbl 1.0 MiB 1.0 MiB\ncqlite-abc ks tbl 1.0 MiB 1.0 MiB\n"
+    assert driver.find_leaked_snapshots(output, prefix="other-prefix-") == ["other-prefix-xyz"]
+
+
+def test_run_snapshot_leak_check_unconfigured_reports_not_ran() -> None:
+    result = driver.run_snapshot_leak_check(None)
+    assert result.ran is False
+    assert result.leaked == []
+    # An unrun check is NOT a pass — callers must never treat it as green (#2399).
+    assert result.passed is False
+
+
+def test_run_snapshot_leak_check_passes_when_clean() -> None:
+    result = driver.run_snapshot_leak_check(lambda: "Snapshot Details: \nno rows\n")
+    assert result.ran is True
+    assert result.leaked == []
+    assert result.passed is True
+
+
+def test_run_snapshot_leak_check_fails_when_leaked() -> None:
+    result = driver.run_snapshot_leak_check(lambda: "cqlite-abc123 ks tbl 1.0 MiB 1.0 MiB\n")
+    assert result.ran is True
+    assert result.leaked == ["cqlite-abc123"]
+    assert result.passed is False
+
+
+def test_snapshot_leak_check_wired_into_cli_flag() -> None:
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-cmd", "echo hi"])
+    assert args.snapshot_check_cmd == "echo hi"
+
+
+def test_snapshot_leak_check_cli_flag_defaults_to_none() -> None:
+    args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+    assert args.snapshot_check_cmd is None
+
+
+def test_make_default_list_snapshots_fn_runs_command_and_captures_stdout() -> None:
+    fn = driver.make_default_list_snapshots_fn("echo cqlite-leaked-one ks tbl 1.0MiB 1.0MiB")
+    output = fn()
+    assert "cqlite-leaked-one" in output
+    leaked = driver.find_leaked_snapshots(output)
+    assert leaked == ["cqlite-leaked-one"]
+
+
 def main() -> int:
     check("percentile: empty input", test_percentile_empty)
     check("percentile: single value", test_percentile_single_value)
@@ -572,6 +650,25 @@ def main() -> int:
     check("run_worker: closes the connection on exit", test_run_worker_closes_connection)
     check("run_worker: traceparent header set and varies per query", test_run_worker_generates_traceparent_header_when_enabled)
     check("run_worker: no headers when traceparent disabled", test_run_worker_traceparent_disabled_passes_no_headers)
+    check("find_leaked_snapshots: extracts matching prefix", test_find_leaked_snapshots_extracts_matching_prefix)
+    check("find_leaked_snapshots: empty when none match", test_find_leaked_snapshots_empty_when_none_match)
+    check(
+        "find_leaked_snapshots: ignores non-matching prefixes",
+        test_find_leaked_snapshots_ignores_non_matching_prefixes,
+    )
+    check("find_leaked_snapshots: honours custom prefix", test_find_leaked_snapshots_honours_custom_prefix)
+    check(
+        "run_snapshot_leak_check: unconfigured reports not-ran (never a silent pass)",
+        test_run_snapshot_leak_check_unconfigured_reports_not_ran,
+    )
+    check("run_snapshot_leak_check: passes when clean", test_run_snapshot_leak_check_passes_when_clean)
+    check("run_snapshot_leak_check: fails when leaked", test_run_snapshot_leak_check_fails_when_leaked)
+    check("--snapshot-check-cmd: wired into parsed args", test_snapshot_leak_check_wired_into_cli_flag)
+    check("--snapshot-check-cmd: defaults to None", test_snapshot_leak_check_cli_flag_defaults_to_none)
+    check(
+        "make_default_list_snapshots_fn: runs command and captures stdout",
+        test_make_default_list_snapshots_fn_runs_command_and_captures_stdout,
+    )
 
     print()
     if _FAILURES:

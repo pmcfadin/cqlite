@@ -1,0 +1,90 @@
+name: Field validation round tracker
+description: Open a new round-N field validation tracker, pre-populated with the 14-point standard metrics checklist
+title: "Round-N field validation tracker — <one-line focus>"
+labels: ["testing"]
+projects: ["cqlite-development"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Standard per-round report (issue #2399, adopted from the field's round-9
+        proposal on #2367). Full rationale, local-mirror wiring, and the round-9
+        baseline live in `docs/development/round-validation-metrics.md` — this
+        form only seeds the checklist; **the doc, not this template, is the
+        source of truth for the baseline** (do not duplicate baseline numbers
+        here beyond this round's own measurements).
+
+        **A** (correctness) and **B** (hang/liveness) are the pass/fail round
+        gate — ANY unchecked GATE item makes this round a FAIL. **C**
+        (throughput) and **D** (hygiene) are tracked numbers — always record
+        them, but they never block the verdict.
+
+        This round gate is a *live-cluster field-validation* verdict, distinct
+        from `scripts/agent-gate.sh` (the pre-PR gate of record for code
+        changes).
+
+  - type: input
+    id: build
+    attributes:
+      label: Build under test
+      description: Flight image digest (INDEX, multi-arch) + connector version + Trino version
+      placeholder: "ghcr.io/pmcfadin/cqlite-flight:roundN@sha256:... ; connector 0.13.5 ; Trino 481"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: gate-a
+    attributes:
+      label: "A. Correctness (GATE)"
+      options:
+        - label: "A1 — Per-scenario completes + rows correct (LIMIT, count, SELECT *, point-read, tiny, mixed/TIME) in BOTH snapshot and live mode"
+        - label: "A2 — Row-count parity: Trino count(*) vs Cassandra nodetool tablestats partition estimate"
+        - label: "A3 — Access path per query shape bounded (PK-equality never a full scan) — cqlite_read_partition_lookup_total{route,result} + rows_scanned_total"
+
+  - type: checkboxes
+    id: gate-b
+    attributes:
+      label: "B. Hang / liveness (GATE)"
+      options:
+        - label: "B4 — Query wall time captured cold vs warm, per shape"
+        - label: "B5 — cqlite_sstable_index_parses_total delta per query ≤ #generations and flat on warm"
+        - label: "B6 — cqlite_rpc_phase_active_ratio{phase} clears (no phase stays standing)"
+        - label: "B7 — Cancellation reclaims: kill → pod CPU/memory back to baseline WITHOUT a restart"
+        - label: "B8 — Flight pod CPU + memory trajectory flat during a scan (no unbounded growth)"
+
+  - type: textarea
+    id: tracked-c
+    attributes:
+      label: "C. Throughput / scale (TRACKED numbers)"
+      description: Record the measured values — never blocks the verdict, but must be present for comparability.
+      placeholder: |
+        C9  qps / rows-s / p50 / p99 / error-rate (fixed loadtest, same query set as last round):
+        C10 Cross-node work distribution (CPU per flight pod under load):
+        C11 Cold-parse cost (first-query-per-table wall time + index_parses):
+    validations:
+      required: true
+
+  - type: textarea
+    id: tracked-d
+    attributes:
+      label: "D. Hygiene (TRACKED, binary)"
+      description: Record pass/fail — never blocks the verdict, but must be present.
+      placeholder: |
+        D12 nodetool listsnapshots | grep cqlite- == 0 on ALL nodes after queries:
+        D13 cqlite_errors_total by category (expect 0):
+        D14 Digest pin verified — every flight pod's imageID == this round's INDEX digest:
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / anomalies / links
+      description: Anything that doesn't fit the checklist above — root-cause links, follow-up issues filed this round, etc.
+
+  - type: markdown
+    attributes:
+      value: |
+        Full 14-point rationale + round-9 baseline: `docs/development/round-validation-metrics.md`.
