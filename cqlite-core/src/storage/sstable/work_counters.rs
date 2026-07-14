@@ -346,8 +346,10 @@ pub fn add_data_db_checksum_full_read() {
 }
 
 /// Record that a `do_get` compaction-merge scan read + parsed one partition body
-/// (issue #2361 / #2398). Called once per partition whose `Data.db` slice is
-/// decoded, on BOTH the streaming full-index walk and the chunk-stitching walk.
+/// (issue #2361 / #2398 / #2430). Called once per partition whose `Data.db` slice
+/// is decoded, on the streaming full-index walk, the chunk-stitching walk, AND the
+/// MATERIALISING full-index walk
+/// ([`iterate_all_partitions_via_full_index`](crate::storage::sstable::reader::SSTableReader::iterate_all_partitions_via_full_index)).
 ///
 /// Not gated behind any feature: these walks run on the default read path (BIG
 /// SSTable, no BTI), and integration/flight tests compile against the library

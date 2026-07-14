@@ -261,6 +261,15 @@ impl SSTableReader {
                 return Ok(None);
             }
 
+            // Work-probe (issue #2398/#2430): one partition body read + parsed on
+            // the MATERIALISING full-index walk, the same per-partition decode the
+            // streaming sibling counts. This is the non-probe signal the cancel
+            // oracle (`compaction_cancel_tests`) bounds on after issue #2430 dropped
+            // the redundant per-partition `lookup_partition_with_index` re-probe:
+            // a pre-cancelled scan aborts BEFORE reaching this decode, so it records
+            // zero here.
+            crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+
             // `parsed.is_empty()` here is UNAMBIGUOUS: the check above already
             // proved `raw` decodes to exactly one structurally complete partition,
             // so zero rows means legitimately zero LIVE rows (all-shadowed /
