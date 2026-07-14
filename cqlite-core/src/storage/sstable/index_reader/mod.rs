@@ -248,6 +248,23 @@ impl IndexReader {
         })
     }
 
+    /// Path to the backing `Index.db` file (issue #2412 §B). The Summary-guided
+    /// point-lookup path (`reader::summary_point`) seeks bounded intervals from this
+    /// path WITHOUT materializing the whole map.
+    pub(crate) fn index_path(&self) -> &Path {
+        &self.file_path
+    }
+
+    /// Whether the full `Index.db` parse has already run (issue #2412 §B). A lazily
+    /// opened reader (`open_lazy`) reports `false` until the first
+    /// [`Self::ensure_materialized`]; an eagerly opened reader reports `true` from
+    /// construction. The Summary-guided point path uses this to prefer the resident
+    /// map once it is already in memory (e.g. after a full scan) and the bounded
+    /// interval read only while the map is still deferred.
+    pub(crate) fn is_materialized(&self) -> bool {
+        self.materialized.get().is_some()
+    }
+
     /// Get all partition entries. Empty until materialized (see `lazy.rs`, #2412).
     pub fn get_partition_entries(&self) -> &[PartitionIndexEntry] {
         self.materialized

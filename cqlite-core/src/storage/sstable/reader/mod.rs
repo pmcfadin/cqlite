@@ -56,6 +56,7 @@ pub(crate) mod scan_stream_windowed;
 #[cfg(feature = "scan-offload-probe")]
 pub mod scan_stream_windowed;
 mod source;
+mod summary_point; // #2412 §B: Summary-guided bounded-interval BIG point lookup
 #[cfg(test)]
 mod tests;
 mod types;

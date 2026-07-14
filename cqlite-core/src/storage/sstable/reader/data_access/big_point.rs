@@ -138,21 +138,37 @@ impl SSTableReader {
                     // safe scan_for_key oracle to preserve the pre-#1572 result.
                 }
                 None => {
-                    // Index.db map miss. An index miss is NOT treated as a
-                    // definitive absent (issue #1572 correctness): `IndexReader::open`
-                    // opens a truncated / partially-corrupt Index.db with a PARTIAL
-                    // prefix map, and truncation aligned to an EXACT entry boundary
-                    // (whole trailing entries dropped) leaves the surviving prefix
-                    // parsing cleanly to EOF — indistinguishable from a complete map
-                    // at parse time, with no cleanly-available authoritative partition
-                    // count at this layer to detect the loss. A partition whose entry
-                    // was dropped would then miss the map yet still be present in
-                    // Data.db — a silent get/scan divergence. So conservatively fall
-                    // back to the whole-file `scan_for_key` oracle, which keeps
-                    // `get()`/`scan()` in agreement and keeps the SCAN_FOR_KEY_CALLS
-                    // counter observable. The fast definitive-absent path for the
-                    // common (non-degraded) case is the bloom pre-check above; this
-                    // fallback fires only on a bloom false-positive (rare, acceptable).
+                    // Index.db map miss.
+                    //
+                    // Stage 3 (issue #2412 §B): when the miss came from an END-BOUNDED
+                    // Summary-guided interval (a usable `Summary.db` bounds a not-yet-
+                    // materialized `Index.db`, AND the key's covering interval is
+                    // delimited above by a NEXT summary sample), the interval lies
+                    // BETWEEN two adjacent authoritative `Summary.db` sample positions,
+                    // so the absence is authoritative — the whole-file `scan_for_key`
+                    // oracle is NOT needed. The LAST interval (read to EOF) is
+                    // deliberately EXCLUDED: a tail-truncated `Index.db` (the #1572
+                    // degraded-input class) can only drop the highest-token partitions,
+                    // which live in that last interval, so a miss there keeps the
+                    // conservative scan below and preserves the #1572 get/scan
+                    // agreement. See `covering_interval_is_end_bounded`.
+                    if self.should_use_summary_interval()
+                        && self.covering_interval_is_end_bounded(key.as_bytes())
+                    {
+                        return Ok((None, false));
+                    }
+                    // FellBack / already-materialized path (no usable Summary.db, or a
+                    // resident map): an index miss is NOT a definitive absent (issue
+                    // #1572). `IndexReader::open` opens a truncated / partially-corrupt
+                    // Index.db with a PARTIAL prefix map, and truncation aligned to an
+                    // EXACT entry boundary (whole trailing entries dropped) leaves the
+                    // surviving prefix parsing cleanly to EOF — indistinguishable from a
+                    // complete map at parse time, with no cleanly-available authoritative
+                    // partition count at this layer to detect the loss. A partition whose
+                    // entry was dropped would then miss the map yet still be present in
+                    // Data.db — a silent get/scan divergence. So conservatively fall back
+                    // to the whole-file `scan_for_key` oracle, which keeps `get()`/`scan()`
+                    // in agreement and keeps the SCAN_FOR_KEY_CALLS counter observable.
                     // NOT an oracle exclusion: the scan itself is the authority here.
                     return self
                         .scan_for_key(table_id, key)

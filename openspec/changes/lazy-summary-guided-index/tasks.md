@@ -31,11 +31,19 @@ implementation.
   Prove: 0.1 probe green + the counter-semantics scenario. (lazy-big-partition-index)
 
 ## Stage 3 — point lookup (§B)
-- [ ] 3.1 `big_get_with_resolution` (`data_access/big_point.rs`): after the C5 short-circuit, binary-
+- [x] 3.1 `big_get_with_resolution` (`data_access/big_point.rs`): after the C5 short-circuit, binary-
   search the summary → read ONE `Index.db` interval → resolve. Within-range absent = authoritative (no
   whole-file `scan_for_key`). Interval-parse counter increments once/lookup. (lazy-big-partition-index)
-- [ ] 3.2 Prove: present-key + within-range-absent + interval-boundary point reads match physical-dump
-  goldens with `Index.db` entries touched ≤ one interval. (lazy-big-partition-index)
+  Routed via `lookup_partition_with_index` → new `reader/summary_point.rs`
+  (`should_use_summary_interval` + `lookup_partition_via_summary_interval`); the authoritative-absence
+  claim is gated on an END-BOUNDED interval (`covering_interval_is_end_bounded`) so a tail-truncated
+  `Index.db` (the #1572 class, whose dropped entries live in the last read-to-EOF interval) keeps the
+  scan fallback.
+- [x] 3.2 Prove: present-key + within-range-absent + interval-boundary point reads with `Index.db`
+  entries touched ≤ one interval — `tests/issue_2412_point_interval.rs` (public `get()` surface, work
+  probes: interval-parse == 1, full-parse == 0, no `scan_for_key` on the authoritative-absent path).
+  Byte-identical goldens covered by the query-semantics + sstabledump parity oracles.
+  (lazy-big-partition-index)
 
 ## Stage 4 — scans (§C) + #2413 posture (per Seam-1 choice)
 - [ ] 4.1 Summary-guided forward iteration feeding the #2361 streaming walk (`full_index_stream`);
