@@ -396,6 +396,7 @@ impl WarmTableRegistry {
         // A dead-path generation with NO identity-matching live entry fails CLOSED:
         // it lands in `added` and is fully re-opened from the live dir.
         let mut alive_ids: HashSet<GenerationId> = HashSet::new();
+        let mut rebind_hits: u64 = 0;
         for (id, reader) in &cached {
             let current_path = reader.file_path();
             if std::fs::metadata(&current_path).is_ok() {
@@ -404,9 +405,16 @@ impl WarmTableRegistry {
                 if super::rebuild::rebind_matches(*id, reader.file_size(), &live.path) {
                     reader.rebind_path(&live.path);
                     alive_ids.insert(*id);
+                    rebind_hits += 1;
                 }
             }
         }
+        // Record the rebinds NOW (not gated on the swap outcome): a rebind
+        // mutates the shared `Arc<SSTableReader>` in place (ArcSwap `file_path`),
+        // so the repoint is already observed by the live cache entry — the
+        // snapshot-lifecycle-closure work probe (flight-warm-snapshot-closure §D:
+        // distinguishes a warm-hit-with-rebind from a full rebuild).
+        self.metrics.record_rebind_hits(rebind_hits);
 
         // ADDED = present now, not already warm/rebound on a LIVE path. Open them
         // (fail-closed) — genuinely-new generations and dead-path ones with no

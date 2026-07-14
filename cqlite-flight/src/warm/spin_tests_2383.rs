@@ -211,6 +211,14 @@ fn rebind_across_snapshot_teardown_does_not_reparse() {
         "a snapshot teardown + same-inode restage must REBIND (zero further \
          Index.db parses), not re-open every generation (issue #2383 / #2356)"
     );
+    // The rebind is COUNTED (issue #2356 §D closure probe): both generations
+    // were rebound to the fresh snap2 hardlinks, distinguishing this from a
+    // pure warm hit (which would leave `rebind_hits` at 0).
+    assert!(
+        reg.metrics().snapshot().rebind_hits >= 2,
+        "both generations must be counted as rebinds, got {}",
+        reg.metrics().snapshot().rebind_hits
+    );
 }
 
 /// **Fix A — single-flight rebuild.** M concurrent misses for ONE fresh table key

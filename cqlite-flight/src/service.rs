@@ -1168,6 +1168,129 @@ mod tests {
         );
     }
 
+    /// Snapshot-lifecycle-closure counters distinguish a pure warm hit, a
+    /// rebind, and a rebuild over a four-request `do_get` sequence
+    /// (flight-warm-snapshot-closure spec — "Counters distinguish pure warm hit,
+    /// rebind, and rebuild over a query sequence"; issue #2356). THE wiring
+    /// evidence that the rebind path is reached through the flight `do_get`
+    /// surface, not just the registry helper:
+    ///
+    /// 1. cold (snap1)               → `reader_opens` climbs, `rebind_hits` 0
+    /// 2. stable repeat (snap1)      → pure warm hit: BOTH deltas 0
+    /// 3. fresh same-inode (snap2)   → rebind: `rebind_hits` climbs, `reader_opens` 0
+    /// 4. fresh changed-inode (snap3)→ rebuild: `reader_opens` climbs
+    ///
+    /// The `resolves` counter increments exactly once per request throughout
+    /// (the authoritative per-request resolve stays UNCHANGED, #2341/#1430).
+    /// Fails on pre-#2356 `main` (no `rebind_hits` counter).
+    #[test]
+    fn do_get_snapshot_lifecycle_counters_distinguish_hit_rebind_rebuild() {
+        let schema = simple_schema();
+        // Two generations so a rebind/rebuild moves a non-trivial reader set.
+        let (_temp, data_dir, table_dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 1, 100)],
+                vec![write_row(2, "b", 2, 100)],
+            ],
+        );
+        // An INDEPENDENT build of the same table with DIFFERENT on-disk inodes,
+        // to stage request 4's changed-inode dir (a genuine rebuild, never a
+        // rebind — the authoritative (device, inode, generation) match fails).
+        let (_temp2, _data2, other_dir) =
+            build_sstables(&schema, vec![vec![write_row(3, "c", 3, 100)]]);
+
+        make_snapshot(&table_dir, "snap1");
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let ticket_bytes = |snap: &str| {
+            let mut t = ticket(KS, TBL);
+            t.snapshot = Some(snap.into());
+            t.to_bytes().unwrap()
+        };
+        let run = |snap: Vec<u8>| {
+            rt.block_on(async {
+                let r = svc
+                    .do_get(Request::new(Ticket::new(snap)))
+                    .await
+                    .expect("do_get");
+                sorted_name_values(&decode(r.into_inner()).await)
+            })
+        };
+
+        // (1) COLD: warms from snap1 — reader opens climb, no rebind.
+        let vals1 = run(ticket_bytes("snap1"));
+        let m1 = svc.warm_metrics();
+        let s1 = svc.setup_work();
+        assert!(m1.reader_opens >= 2, "cold build opens both generations");
+        assert_eq!(m1.rebind_hits, 0, "cold build performs no rebind");
+        assert_eq!(s1.resolves, 1, "one resolve per request");
+
+        // (2) STABLE REPEAT: same snap1 dir, same inodes → pure warm hit.
+        let vals2 = run(ticket_bytes("snap1"));
+        let m2 = svc.warm_metrics();
+        let s2 = svc.setup_work();
+        assert_eq!(vals2, vals1, "stable warm hit is value-identical");
+        assert_eq!(
+            m2.reader_opens, m1.reader_opens,
+            "pure warm hit opens ZERO further readers"
+        );
+        assert_eq!(
+            m2.rebind_hits, m1.rebind_hits,
+            "pure warm hit performs ZERO rebinds (path unchanged)"
+        );
+        assert_eq!(s2.resolves, 2, "resolve stays authoritative per request");
+
+        // (3) FRESH SAME-INODE: clear snap1, stage snap2 over the SAME inodes.
+        std::fs::remove_dir_all(table_dir.join("snapshots").join("snap1"))
+            .expect("clear snap1");
+        make_snapshot(&table_dir, "snap2");
+        let vals3 = run(ticket_bytes("snap2"));
+        let m3 = svc.warm_metrics();
+        let s3 = svc.setup_work();
+        assert_eq!(vals3, vals1, "rebound warm set reads the live inodes");
+        assert_eq!(
+            m3.reader_opens, m1.reader_opens,
+            "same-inode rebind opens ZERO further readers (no re-parse)"
+        );
+        assert!(
+            m3.rebind_hits > m2.rebind_hits,
+            "same-inode snapshot rollover REBINDS the cached readers"
+        );
+        assert_eq!(s3.resolves, 3, "resolve stays authoritative per request");
+
+        // (4) FRESH CHANGED-INODE: clear snap2, stage snap3 from the OTHER build
+        // (different inodes) → a genuine rebuild, never a rebind.
+        std::fs::remove_dir_all(table_dir.join("snapshots").join("snap2"))
+            .expect("clear snap2");
+        let snap3 = table_dir.join("snapshots").join("snap3");
+        std::fs::create_dir_all(&snap3).unwrap();
+        for entry in std::fs::read_dir(&other_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let dest = snap3.join(entry.file_name());
+                std::fs::hard_link(&path, &dest)
+                    .or_else(|_| std::fs::copy(&path, &dest).map(|_| ()))
+                    .unwrap();
+            }
+        }
+        let opens_before_4 = m3.reader_opens;
+        let vals4 = run(ticket_bytes("snap3"));
+        let m4 = svc.warm_metrics();
+        let s4 = svc.setup_work();
+        assert_eq!(vals4, vec!["c".to_string()], "rebuilt set reads snap3");
+        assert!(
+            m4.reader_opens > opens_before_4,
+            "a changed-inode dir REBUILDS (opens a fresh reader), never rebinds"
+        );
+        assert_eq!(
+            m4.rebind_hits, m3.rebind_hits,
+            "a changed-inode generation fails closed to a rebuild, never a rebind"
+        );
+        assert_eq!(s4.resolves, 4, "resolve stays authoritative per request");
+    }
+
     /// A flush that ADDS a generation between requests is visible on the next
     /// request with zero staleness window (spec Requirement 2): the probe reports
     /// "changed", the rebuild adds exactly the new generation, and the new data
