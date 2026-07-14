@@ -54,12 +54,29 @@ impl V5CompressedLegacyParser {
     /// ([`PartitionStreamStep::PartitionDone`]), exactly as the sliding driver's
     /// `NeedMore`/`Done` distinction does.
     ///
+    /// `resolution` is the column resolution built ONCE per scan by the caller
+    /// ([`SSTableReader::stream_all_partitions_for_compaction`]) and threaded in
+    /// (the same way `schema` / `state` are). It is derived purely from the
+    /// SSTable serialization header (`reader.header`) + `schema`, both INVARIANT
+    /// across every partition of a single SSTable, so a single build is
+    /// semantically identical to the buffered `drive_partition_sliding`'s
+    /// per-partition build (`partition_driver.rs:179`) — only without that path's
+    /// per-partition (and, for this per-structure driver, once-PER-ROW) allocation
+    /// churn: `RowColumnResolution::build` allocates a `HashMap` over
+    /// `schema.columns` plus a fresh `Arc<str>` per header/clustering column, so
+    /// rebuilding it per drain step turned an O(partitions) cost into
+    /// O(rows × header_cols) on exactly the wide-partition workload issue #2299
+    /// optimizes. Threading the once-built resolution restores per-scan
+    /// (≤ per-partition) allocation. `None` only when `schema` is `None`, which
+    /// this method rejects before any row decode.
+    ///
     /// [`SSTableReader::stream_all_partitions_for_compaction`]: crate::storage::sstable::SSTableReader
     pub fn stream_partition_body_incremental<F>(
         &self,
         data: &[u8],
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
+        resolution: Option<&RowColumnResolution>,
         at_final_chunk: bool,
         state: &mut CompactionPartitionState,
         emit: &mut F,
@@ -84,9 +101,17 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
-        // Every row-body offset arithmetic below reuses the SAME primitives the
-        // buffered `drive_partition_sliding` uses, so decode is byte-identical.
-        let resolution = RowColumnResolution::build(schema, reader);
+        // The column resolution is built ONCE per scan by the caller and threaded
+        // in (see the doc comment). It is required whenever `schema` is present
+        // (the caller builds it from the same schema); a missing resolution here
+        // is an internal wiring bug, not a data condition.
+        let resolution = resolution.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (compaction) streaming requires a prebuilt column \
+                 resolution for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
 
         // (1) Parse the partition header ONCE per partition. When the header has
         //     already been parsed for this partition (a resumed body call after a
@@ -208,7 +233,7 @@ impl V5CompressedLegacyParser {
         // A data row: decode exactly one, emit it, and report its consumed bytes.
         let mut emitted: Vec<crate::storage::sstable::reader::compaction_row::CompactionRow> =
             Vec::new();
-        match policy.on_data_row(data, 0, schema, reader, &resolution, &mut emitted) {
+        match policy.on_data_row(data, 0, schema, reader, resolution, &mut emitted) {
             Some(next_offset) => {
                 // Confirm the row is fully framed WITHIN the window: a next_offset
                 // STRICTLY PAST the buffer end means we decoded a truncated row on a

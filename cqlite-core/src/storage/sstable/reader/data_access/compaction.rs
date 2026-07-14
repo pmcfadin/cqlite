@@ -599,6 +599,24 @@ impl SSTableReader {
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
         let parser = self.build_v5_parser(false);
 
+        // Issue #2299 (roborev blocker): build the column resolution ONCE for the
+        // whole scan and thread it into every drain step. `RowColumnResolution`
+        // is derived purely from the SSTable serialization header
+        // (`self.header`) + `schema`, both INVARIANT across every partition of a
+        // single SSTable, so one build is semantically identical to the buffered
+        // `drive_partition_sliding`'s per-PARTITION build
+        // (`partition_driver.rs:179`) — but WITHOUT the per-structure rebuild the
+        // row-granular driver would otherwise incur. `build` allocates a HashMap
+        // over `schema.columns` plus a fresh `Arc<str>` per header/clustering
+        // column; rebuilding it per drain step (once per row on a wide partition)
+        // turned an O(partitions) alloc cost into O(rows × header_cols) on exactly
+        // the wide-partition workload this issue optimizes. Both `owned_schema`
+        // (a local) and `self` (the reader) outlive the drain loop below, so the
+        // borrow is sound for the whole scan.
+        let resolution = owned_schema
+            .as_ref()
+            .map(|s| crate::storage::sstable::reader::parsing::RowColumnResolution::build(s, self));
+
         // Sliding window with a FRONT CURSOR (issue #1589): confirmed structures are
         // consumed by advancing the cursor, and the reclaimed prefix is compacted
         // once per refill — not memmoved per partition as the old front-drain did.
@@ -673,6 +691,7 @@ impl SSTableReader {
             self.drain_compaction_window(
                 &parser,
                 owned_schema.as_ref(),
+                resolution.as_ref(),
                 &mut window,
                 false,
                 &mut emit,
@@ -691,6 +710,7 @@ impl SSTableReader {
             self.drain_compaction_window(
                 &parser,
                 owned_schema.as_ref(),
+                resolution.as_ref(),
                 &mut window,
                 true,
                 &mut emit,
@@ -725,6 +745,7 @@ impl SSTableReader {
         &self,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
         schema: Option<&crate::schema::TableSchema>,
+        resolution: Option<&crate::storage::sstable::reader::parsing::RowColumnResolution>,
         window: &mut WindowCursor,
         at_final_chunk: bool,
         emit: &mut F,
@@ -756,6 +777,7 @@ impl SSTableReader {
                 window.as_slice(),
                 schema,
                 self,
+                resolution,
                 at_final_chunk,
                 partition_state,
                 &mut |row: super::super::compaction_row::CompactionRow| emit(row),

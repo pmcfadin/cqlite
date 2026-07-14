@@ -164,7 +164,7 @@ pub(super) struct ColumnToParse<'a> {
 /// (resolution is built at the top of each `parse_block_emit*` / per-partition
 /// driver, where `reader` and `schema` are in scope). This is a per-BLOCK hoist —
 /// allocations scale with block count, not row count.
-pub(super) struct RowColumnResolution<'a> {
+pub(in crate::storage::sstable::reader) struct RowColumnResolution<'a> {
     /// On-disk regular (non-static) columns in serialization-header order.
     regular: Vec<ColumnToParse<'a>>,
     /// On-disk static columns in serialization-header order.
@@ -186,7 +186,7 @@ impl<'a> RowColumnResolution<'a> {
     /// semantics). On the header-empty fallback path (synthetic SSTables) the
     /// supplied schema order is used directly, every column schema-present by
     /// construction.
-    pub(super) fn build(
+    pub(in crate::storage::sstable::reader) fn build(
         schema: &'a TableSchema,
         reader: &'a crate::storage::sstable::reader::types::SSTableReader,
     ) -> Self {
