@@ -29,10 +29,20 @@
 //! index fully parsed, all keys non-empty, offsets strictly ascending, spans fit
 //! `u32`) is checked UP-FRONT: a failure returns [`FullIndexStreamOutcome::FellBack`]
 //! with nothing emitted, so the caller's `sequential_scan` fallback is still
-//! safe. The remaining per-partition checks (index-probe miss, a partition slice
-//! that does not fully consume) require reading the partition body, so they can
-//! only surface mid-walk — and there they are a hard `Error` (fail-closed), never
-//! a silent fallback. For a well-formed BIG SSTable none of them fire.
+//! safe. The remaining per-partition check (a partition slice that does not fully
+//! consume) requires reading the partition body, so it can only surface mid-walk
+//! — and there it is a hard `Error` (fail-closed), never a silent fallback. For a
+//! well-formed BIG SSTable it never fires.
+//!
+//! ## Sequential read window (issue #2366)
+//!
+//! The uncompressed walk resolves each partition's `data_offset` DIRECTLY from
+//! the `Index.db` offset table (no per-partition random `Index.db` probe) and
+//! serves its bytes from a bounded, forward-only sequential read window over
+//! Data.db rather than one positioned `seek`+`read_exact`+CRC per partition —
+//! turning ~O(partitions) random reads into O(data_section_len / window)
+//! sequential reads with bounded peak memory. See
+//! [`SEQUENTIAL_WINDOW_TARGET_BYTES`].
 
 use super::super::SSTableReader;
 use crate::schema::TableSchema;
@@ -41,6 +51,21 @@ use crate::types::ScanRow;
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
 use std::ops::ControlFlow;
+
+/// Target size (bytes) of the sequential Data.db read window used by the
+/// uncompressed non-stitching streaming walk (issue #2366).
+///
+/// The walk visits partitions in ascending `data_offset` order (== token order
+/// == Data.db physical order), so instead of one positioned `seek`+`read_exact`
+/// +CRC per partition (~1.13M small random reads at field scale) it fills a
+/// bounded in-memory window covering many consecutive partitions with ONE
+/// sequential `read_uncompressed_verified` call, then serves each partition's
+/// slice from that window. A partition larger than the target still reads in a
+/// single window sized to exactly its span (never smaller than one partition),
+/// so peak memory is bounded by `max(TARGET, largest_partition_span)`. 4 MiB is
+/// large enough to amortise the per-read + CRC overhead across ~hundreds of
+/// typical partitions yet small enough to keep the memory target (<128 MiB).
+const SEQUENTIAL_WINDOW_TARGET_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Hardening B (issue #2361, roborev rounds 2/3): the streaming walk EMITS each
 /// partition to the k-way merger as it resolves it, unlike the materialising
@@ -175,10 +200,21 @@ impl SSTableReader {
         // materialising sibling's defensive `sort_by_token_order`.
         let mut prev_key: Option<(i64, &[u8])> = None;
 
+        // Sequential read window over the UNCOMPRESSED data section (issue #2366):
+        // instead of one positioned read + CRC per partition, `window` holds the
+        // bytes of `[window_start, window_start + window.len())` (data-section
+        // domain, i.e. the `data_offset` domain) and each partition's slice is
+        // served from it. Because entries are ascending, `window_start` only ever
+        // advances forward — the read pattern is O(data_section_len / TARGET)
+        // sequential reads, not O(partitions) random reads. Unused (never filled)
+        // on the compressed-offset branch.
+        let mut window: Vec<u8> = Vec::new();
+        let mut window_start: u64 = 0;
+        let mut window_filled = false;
+
         for i in 0..entries.len() {
-            // Cooperative cancellation: one real index-random-read + Data.db parse
-            // per partition — poll every entry so a cancelled scan abandons the
-            // walk promptly (issue #2264, PER-CALL token issue #2346).
+            // Cooperative cancellation: poll every entry so a cancelled scan
+            // abandons the walk promptly (issue #2264, PER-CALL token issue #2346).
             scan_cancel.check()?;
 
             let partition_key = entries[i].raw_key.as_deref().unwrap_or(&[]);
@@ -186,17 +222,14 @@ impl SSTableReader {
             check_token_order(prev_key, token, partition_key, i)?;
             prev_key = Some((token, partition_key));
 
-            let Some((data_offset, _size)) =
-                self.lookup_partition_with_index(partition_key).await?
-            else {
-                // Proven present in the offset table up-front, so a probe miss now
-                // is an index/data inconsistency — fail closed (may have emitted).
-                return Err(Error::corruption(format!(
-                    "stream_all_partitions_via_full_index: index probe missed entry {i} \
-                     listed in the offset table (index/data inconsistency, issue #2361)"
-                )));
-            };
-
+            // The partition's data offset comes DIRECTLY from the offset table
+            // entry already validated up-front (issue #2366): the former
+            // `lookup_partition_with_index` probe returned this identical value via
+            // a HashMap lookup that also incremented `INDEX_PROBES` — dropping it
+            // removes O(partitions) index probes without weakening any check (the
+            // up-front gate already proved every offset present, ascending, and
+            // span-representable).
+            let data_offset = entries[i].data_offset;
             let next_offset = if i + 1 < entries.len() {
                 entries[i + 1].data_offset
             } else {
@@ -205,7 +238,7 @@ impl SSTableReader {
             if next_offset <= data_offset {
                 return Err(Error::corruption(format!(
                     "stream_all_partitions_via_full_index: non-ascending offset at entry {i} \
-                     (probe offset {data_offset} >= successor {next_offset}, issue #2361)"
+                     (offset {data_offset} >= successor {next_offset}, issue #2361)"
                 )));
             }
             let span = next_offset - data_offset;
@@ -216,40 +249,99 @@ impl SSTableReader {
                 )));
             };
 
-            let raw = if let Some(ci) = self.compression_info.as_deref() {
-                self.read_compressed_offset_window(ci, data_offset, size)
-                    .await?
+            let control = if let Some(ci) = self.compression_info.as_deref() {
+                // Rare non-nb compressed non-stitching branch: unchanged per-partition
+                // windowed read (issue #2366 targets the uncompressed field case only).
+                let raw = self
+                    .read_compressed_offset_window(ci, data_offset, size)
+                    .await?;
+                self.emit_partition_slice(i, &raw, &parser, schema, emit)?
             } else {
-                let absolute_offset = data_offset + self.actual_header_size as u64;
-                self.read_uncompressed_verified(&self.file, absolute_offset, size as usize)
-                    .await?
+                // Uncompressed sequential window (issue #2366). Refill when the
+                // partition's slice is not fully covered by the current window.
+                if !window_filled
+                    || data_offset < window_start
+                    || next_offset > window_start + window.len() as u64
+                {
+                    window_start = data_offset;
+                    // One read per window: at least this partition's whole span,
+                    // at most the target, clamped to the data section end so we
+                    // never read past the last partition.
+                    let remaining = data_section_end - window_start;
+                    let want = span.max(SEQUENTIAL_WINDOW_TARGET_BYTES).min(remaining);
+                    let absolute_offset = window_start + self.actual_header_size as u64;
+                    // Count the window refill as one production read-path seek
+                    // (`SEEK_CALLS`) — the single positioned read stands in for the
+                    // per-partition seeks it replaces, matching the windowed-read
+                    // convention in `scan_stream_windowed_read.rs`. This is the
+                    // O(N/window) read-pattern evidence for issue #2366.
+                    crate::storage::sstable::read_work_counters::record_seek();
+                    window = self
+                        .read_uncompressed_verified(
+                            &self.file,
+                            absolute_offset,
+                            want as usize,
+                        )
+                        .await?;
+                    window_filled = true;
+                }
+                let lo = (data_offset - window_start) as usize;
+                let hi = (next_offset - window_start) as usize;
+                let raw = &window[lo..hi];
+                self.emit_partition_slice(i, raw, &parser, schema, emit)?
             };
 
-            // Structural coverage: the slice must decode as exactly one complete
-            // partition (issue #2302 Signal B). Mid-walk failure = fail-closed.
-            if !self.partition_slice_fully_consumed(&parser, &raw, schema)? {
-                return Err(Error::corruption(format!(
-                    "stream_all_partitions_via_full_index: partition {i} slice not fully \
-                     consumed (truncated/corrupt body, issue #2361)"
-                )));
-            }
-
-            // Work-probe (issue #2398): one partition body read + parsed. A
-            // token-range split must keep this bounded to its in-range slice, not
-            // the SSTable's whole partition count.
-            crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
-            let parsed = parser.parse_block(&raw, schema, self)?;
-            for (_table_id, row_key, value) in parsed {
-                if self.filter_tombstone(&value) {
-                    match emit((row_key, value))? {
-                        ControlFlow::Continue(()) => {}
-                        ControlFlow::Break(()) => return Ok(FullIndexStreamOutcome::Streamed),
-                    }
-                }
+            if control.is_break() {
+                return Ok(FullIndexStreamOutcome::Streamed);
             }
         }
 
         Ok(FullIndexStreamOutcome::Streamed)
+    }
+
+    /// Per-partition body of the streaming full-index walk (issue #2361/#2366):
+    /// verify the slice decodes as exactly one complete partition, record the
+    /// work-probe, parse it, and `emit` each surviving (tombstone-filtered) row.
+    /// Returns `ControlFlow::Break` if the consumer asked to stop.
+    ///
+    /// Factored out of [`Self::stream_all_partitions_via_full_index`] so the
+    /// compressed-offset branch and the uncompressed sequential-window branch
+    /// share identical decode/emit semantics — only how the `raw` bytes are
+    /// obtained differs (issue #2366).
+    fn emit_partition_slice<F>(
+        &self,
+        index: usize,
+        raw: &[u8],
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+        schema: Option<&TableSchema>,
+        emit: &mut F,
+    ) -> Result<ControlFlow<()>>
+    where
+        F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
+    {
+        // Structural coverage: the slice must decode as exactly one complete
+        // partition (issue #2302 Signal B). Mid-walk failure = fail-closed.
+        if !self.partition_slice_fully_consumed(parser, raw, schema)? {
+            return Err(Error::corruption(format!(
+                "stream_all_partitions_via_full_index: partition {index} slice not fully \
+                 consumed (truncated/corrupt body, issue #2361)"
+            )));
+        }
+
+        // Work-probe (issue #2398): one partition body read + parsed. A
+        // token-range split must keep this bounded to its in-range slice, not
+        // the SSTable's whole partition count.
+        crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+        let parsed = parser.parse_block(raw, schema, self)?;
+        for (_table_id, row_key, value) in parsed {
+            if self.filter_tombstone(&value) {
+                match emit((row_key, value))? {
+                    ControlFlow::Continue(()) => {}
+                    ControlFlow::Break(()) => return Ok(ControlFlow::Break(())),
+                }
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Streaming sibling of
