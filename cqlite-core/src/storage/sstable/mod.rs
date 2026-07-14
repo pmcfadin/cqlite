@@ -41,6 +41,10 @@ mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tomb
 pub mod row_cell_state_machine;
 /// Cross-SSTable scan ordering: k-way merge in Cassandra token order (issue #1580).
 mod scan_merge;
+/// Authoritative snapshot-aware SSTable path parsing (issue #2384): the single
+/// source of truth for deriving `{keyspace}.{table}` identity from a Data.db path,
+/// transparently resolving Cassandra `snapshots/{tag}` layouts.
+pub(crate) mod snapshot_path;
 pub mod statistics_reader;
 pub mod stream_merge_probe; // Multi-generation streaming-merge resident-rows probe (issue #1579, D3).
 #[cfg(feature = "tombstones")]
@@ -324,24 +328,13 @@ impl SSTableId {
 ///
 /// Note: Table names can contain hyphens, so we need to be careful to only remove the UUID.
 /// UUIDs in Cassandra directory names are 32 hex chars without hyphens (e.g., 6aa08200a25111f0a3fef1a551383fb9).
+///
+/// Snapshot-aware (issue #2384): routes through the authoritative
+/// [`snapshot_path`] parser so a snapshot read
+/// (`.../{table}-{uuid}/snapshots/{tag}/...-Data.db`) keys the `SSTableManager`
+/// under the REAL table name, never the snapshot tag.
 pub(crate) fn extract_table_name(sstable_path: &Path) -> Option<String> {
-    // Get the parent directory name
-    let dir_name = sstable_path.parent()?.file_name()?.to_str()?;
-
-    // Find the last occurrence of '-' followed by 32 hex characters (UUID without hyphens)
-    // Cassandra UUIDs in directory names are formatted as: tablename-<32-hex-chars>
-    if let Some(uuid_start) = dir_name.rfind('-') {
-        let potential_uuid = &dir_name[uuid_start + 1..];
-
-        // Check if this looks like a UUID (32 hex characters)
-        if potential_uuid.len() == 32 && potential_uuid.chars().all(|c| c.is_ascii_hexdigit()) {
-            // Extract everything before the UUID
-            return Some(dir_name[..uuid_start].to_string());
-        }
-    }
-
-    // If we couldn't find a UUID pattern, return the whole directory name
-    Some(dir_name.to_string())
+    snapshot_path::extract_table_name(sstable_path)
 }
 
 /// Extract the fully-qualified table key (`"keyspace.table"`) from an SSTable path.
@@ -375,18 +368,14 @@ pub(crate) fn extract_table_name(sstable_path: &Path) -> Option<String> {
 /// "nb-1-big-Data.db"   (flat, no parent dirs)
 ///   → None
 /// ```
+///
+/// Snapshot-aware (issue #2384): both the keyspace and the table name are derived
+/// through the authoritative [`snapshot_path`] parser, so a snapshot read resolves
+/// the REAL `{keyspace}.{table}` for `SSTableManager` keying rather than
+/// `snapshots`/`{tag}`.
 pub fn extract_keyspace_and_table_name(sstable_path: &Path) -> Option<(String, String)> {
-    let table_name = extract_table_name(sstable_path)?;
-
-    // The keyspace directory is the grandparent of the SSTable file:
-    //   <keyspace>/<table-uuid>/<sstable_file>
-    let keyspace = sstable_path
-        .parent() // table-uuid dir
-        .and_then(|p| p.parent()) // keyspace dir
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())?;
-
+    let table_name = snapshot_path::extract_table_name(sstable_path)?;
+    let keyspace = snapshot_path::extract_keyspace(sstable_path)?;
     Some((keyspace, table_name))
 }
 
