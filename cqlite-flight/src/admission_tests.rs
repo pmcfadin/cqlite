@@ -26,7 +26,7 @@ use tonic::{Code, Request};
 
 use crate::admission::{Admission, AdmissionConfig};
 use crate::service::CqliteFlightService;
-use crate::testutil::{build_sstables, simple_schema, total_rows, write_row, SIMPLE_DDL, KS, TBL};
+use crate::testutil::{build_sstables, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL};
 use crate::ticket::FlightTicket;
 use cqlite_core::observability::catalog;
 
@@ -126,11 +126,18 @@ fn req1_bounded_admission_holds_in_flight_at_k() {
             assert!(matches!(futures::poll!(f.as_mut()), Poll::Pending));
         }
         let s = adm.snapshot();
-        assert_eq!(s.in_use, 2, "in-use never exceeds K while the barrier is held");
+        assert_eq!(
+            s.in_use, 2,
+            "in-use never exceeds K while the barrier is held"
+        );
         assert_eq!(s.waiting, 3, "all M excess are parked waiting");
 
         drop(excess);
-        assert_eq!(adm.snapshot().waiting, 0, "dropping waiters clears the gauge");
+        assert_eq!(
+            adm.snapshot().waiting,
+            0,
+            "dropping waiters clears the gauge"
+        );
         drop((p1, p2));
     });
 }
@@ -187,7 +194,9 @@ fn req1_excess_do_gets_never_reach_setup() {
         let mut tasks = Vec::new();
         for _ in 0..4 {
             let svc = svc.clone();
-            tasks.push(tokio::spawn(async move { svc.do_get(do_get_request()).await }));
+            tasks.push(tokio::spawn(
+                async move { svc.do_get(do_get_request()).await },
+            ));
         }
         settle().await;
 
@@ -198,7 +207,10 @@ fn req1_excess_do_gets_never_reach_setup() {
         );
         let s = adm.snapshot();
         assert_eq!(s.in_use, 2, "only the K barrier permits are held");
-        assert_eq!(s.waiting, 4, "all K + M offered requests are parked in admission");
+        assert_eq!(
+            s.waiting, 4,
+            "all K + M offered requests are parked in admission"
+        );
 
         for t in tasks {
             t.abort();
@@ -227,7 +239,11 @@ fn req2_overload_rejects_unavailable_after_timeout() {
             .await
             .err()
             .expect("saturated do_get must be rejected, not admitted");
-        assert_eq!(err.code(), Code::Unavailable, "reject status must be UNAVAILABLE");
+        assert_eq!(
+            err.code(),
+            Code::Unavailable,
+            "reject status must be UNAVAILABLE"
+        );
         assert_ne!(
             err.code(),
             Code::ResourceExhausted,
@@ -394,7 +410,10 @@ fn req4_permit_wait_timeout_is_wired() {
         long >= Duration::from_secs(30) && long < Duration::from_secs(30) + slack,
         "reject point tracks the configured 30s budget, got {long:?}"
     );
-    assert!(long > short, "a longer configured budget yields a later reject point");
+    assert!(
+        long > short,
+        "a longer configured budget yields a later reject point"
+    );
 }
 
 // ---- Requirement 5: admission state is exported as observability instruments ----
@@ -411,8 +430,15 @@ fn req5_admission_instruments_track_engagement() {
         catalog::FLIGHT_ADMISSION_REJECTED_TOTAL,
         catalog::FLIGHT_ADMISSION_WAIT_SECONDS,
     ] {
-        assert_ne!(name, catalog::RPC_IN_FLIGHT, "distinct from the RPC in-flight gauge");
-        assert!(catalog::ALL_METRICS.contains(&name), "{name} registered in the catalog");
+        assert_ne!(
+            name,
+            catalog::RPC_IN_FLIGHT,
+            "distinct from the RPC in-flight gauge"
+        );
+        assert!(
+            catalog::ALL_METRICS.contains(&name),
+            "{name} registered in the catalog"
+        );
     }
 
     block_on_paused(async {
@@ -424,7 +450,11 @@ fn req5_admission_instruments_track_engagement() {
         // A waiting reading (M made to wait), then release it.
         let mut waiter = Box::pin(adm.acquire());
         assert!(matches!(futures::poll!(waiter.as_mut()), Poll::Pending));
-        assert_eq!(adm.snapshot().waiting, 1, "waiting reads the current wait count");
+        assert_eq!(
+            adm.snapshot().waiting,
+            1,
+            "waiting reads the current wait count"
+        );
         drop(waiter);
 
         // One wait times out: rejection counter increments by one and a
@@ -433,9 +463,16 @@ fn req5_admission_instruments_track_engagement() {
         let err = adm.acquire().await.unwrap_err();
         assert_eq!(err.code(), Code::Unavailable);
         let after = adm.snapshot();
-        assert_eq!(after.in_use, 2, "the timeout admitted nothing — in-use still K");
+        assert_eq!(
+            after.in_use, 2,
+            "the timeout admitted nothing — in-use still K"
+        );
         assert_eq!(after.waiting, 0, "the timed-out waiter released its slot");
-        assert_eq!(after.rejected_total, before.rejected_total + 1, "one rejection");
+        assert_eq!(
+            after.rejected_total,
+            before.rejected_total + 1,
+            "one rejection"
+        );
         assert!(
             after.wait_samples > before.wait_samples,
             "the permit-wait histogram recorded a sample"

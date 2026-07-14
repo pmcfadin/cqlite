@@ -220,7 +220,11 @@ impl CqliteFlightService {
     /// Create a service serving SSTables under `data_dir`, with admission control
     /// configured from the environment (see [`AdmissionConfig::from_env`]).
     pub fn new(data_dir: impl Into<PathBuf>, batch_size: usize) -> Self {
-        Self::with_admission(data_dir, batch_size, Admission::new(AdmissionConfig::from_env()))
+        Self::with_admission(
+            data_dir,
+            batch_size,
+            Admission::new(AdmissionConfig::from_env()),
+        )
     }
 
     /// Create a service with an explicit [`Admission`] ceiling — the wiring point
@@ -646,7 +650,9 @@ impl CqliteFlightService {
         // Hold the admission permit for the scan's lifetime: the wrapper is a
         // transparent pass-through that drops the permit (releasing admission) when
         // the stream completes or the client disconnects (issue #2420).
-        Ok(Response::new(crate::admission::admitted_stream(stream, permit)))
+        Ok(Response::new(crate::admission::admitted_stream(
+            stream, permit,
+        )))
     }
 
     /// Eager, fallible `do_get` setup shared by the row and aggregate paths: parse
