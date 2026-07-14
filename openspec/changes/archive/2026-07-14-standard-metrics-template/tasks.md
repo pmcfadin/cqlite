@@ -37,7 +37,7 @@
 ## 4. Offer-back + doctrine cross-links
 - [x] 4.1 Cross-link the template from `docs/development/pm-operating-loop.md` and the
       validation-playbook page. (Requirement: offered back and discoverable)
-- [ ] 4.2 Post the finalized template as a comment on #2367 for round-10 adoption — done at
+- [x] 4.2 Post the finalized template as a comment on #2367 for round-10 adoption — done at
       merge/finalize time (the requirement's scenario is keyed off "the merged change"). (Requirement:
       offered back)
 - [x] 4.3 Keep doctrine current in the same change — the website `agents-developing/` validation-playbook
@@ -45,6 +45,6 @@
       already linked from CLAUDE.md, carries the new cross-link).
 
 ## 5. Quality gates
-- [ ] 5.1 `scripts/agent-gate.sh` (full) PASS — inside flow-closer (covers the new D12 test + docs).
-- [ ] 5.2 C intent audit (spec-auditor) PASS — every requirement satisfied with evidence.
-- [ ] 5.3 roborev clean on the branch diff.
+- [x] 5.1 `scripts/agent-gate.sh` (full) PASS — inside flow-closer (covers the new D12 test + docs).
+- [x] 5.2 C intent audit (spec-auditor) PASS — every requirement satisfied with evidence.
+- [x] 5.3 roborev clean on the branch diff.
