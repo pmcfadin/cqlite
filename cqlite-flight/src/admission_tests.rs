@@ -109,6 +109,74 @@ async fn decode(stream: <CqliteFlightService as FlightService>::DoGetStream) -> 
 
 // ---- Requirement 1: do_get concurrency is bounded by the configured limit ----
 
+/// roborev-1696: an UNCONTENDED acquire (a permit is immediately available) must
+/// NOT be counted as waiting even transiently — the `waiting` gauge is a genuine
+/// backpressure signal (requests parked in the wait queue), not an artifact of
+/// how `acquire` is implemented. Also asserts an instant admit records no
+/// permit-wait histogram sample (the fast path is a distinct, zero-noise path
+/// from the slow/contended one).
+#[test]
+fn req1_uncontended_acquire_never_touches_waiting_gauge() {
+    block_on_paused(async {
+        let adm = Admission::new(cfg(4, BIG_TIMEOUT));
+        let before = adm.snapshot();
+        assert_eq!(before.waiting, 0);
+        assert_eq!(before.in_use, 0);
+
+        // Four uncontended acquires — the ceiling is never saturated.
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(adm.acquire().await.unwrap());
+        }
+
+        let after = adm.snapshot();
+        assert_eq!(after.in_use, 4, "all four admitted");
+        assert_eq!(
+            after.waiting, 0,
+            "an uncontended acquire must never register as waiting, even transiently"
+        );
+        assert_eq!(
+            after.wait_samples, before.wait_samples,
+            "an instant admit records no permit-wait histogram sample"
+        );
+        drop(held);
+    });
+}
+
+/// roborev-1696: the CONTENDED path is unchanged — a request that genuinely waits
+/// (the ceiling is saturated) still shows up in the `waiting` gauge and still
+/// records a permit-wait sample once admitted.
+#[test]
+fn req1_contended_acquire_path_unchanged() {
+    block_on_paused(async {
+        let adm = Admission::new(cfg(1, BIG_TIMEOUT));
+        let held = adm.acquire().await.unwrap(); // uncontended — fast path
+        assert_eq!(adm.snapshot().waiting, 0, "the first acquire never waits");
+
+        let before = adm.snapshot();
+        let mut waiter = Box::pin(adm.acquire());
+        assert!(matches!(futures::poll!(waiter.as_mut()), Poll::Pending));
+        assert_eq!(
+            adm.snapshot().waiting,
+            1,
+            "the contended acquire IS counted as waiting"
+        );
+
+        drop(held); // free the only permit — admits the waiter
+        let admitted = match futures::poll!(waiter.as_mut()) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("the waiter should be admitted once the permit frees, got {other:?}"),
+        };
+        let after = adm.snapshot();
+        assert_eq!(after.waiting, 0, "admission clears the waiting gauge");
+        assert!(
+            after.wait_samples > before.wait_samples,
+            "a genuinely-contended acquire still records a permit-wait sample"
+        );
+        drop(admitted);
+    });
+}
+
 /// Scenario: offering more than `K` concurrent acquires holds in-flight at `K`.
 /// Primitive-level: all `K` permits held, `M` excess futures polled once each stay
 /// Pending; the in-use gauge never exceeds `K` and waiting reads `M`.

@@ -195,22 +195,51 @@ impl Admission {
         }
     }
 
-    /// Acquire an admission permit, waiting up to [`AdmissionConfig::wait_timeout`].
+    /// Acquire an admission permit, waiting up to [`AdmissionConfig::wait_timeout`]
+    /// only if the ceiling is currently saturated.
     ///
-    /// On success returns an [`AdmissionPermit`] RAII guard that holds the
-    /// semaphore permit AND the `in_use` gauge until dropped (moved into the
-    /// response stream so every exit path — completion, disconnect, cancel —
-    /// releases it). On timeout returns a gRPC **`UNAVAILABLE`** [`Status`] (never
+    /// **Fast path (roborev-1696):** an UNCONTENDED acquire (a permit is
+    /// immediately available) is served by [`Semaphore::try_acquire_owned`] and
+    /// never touches the `waiting` gauge or records a permit-wait histogram
+    /// sample — the gauge is a genuine backpressure signal (requests parked in
+    /// the wait queue), so an instant admit must not transiently over-report
+    /// queue depth. An instant admit is deliberately zero-sample in the
+    /// histogram too (not a `0.0` sample): `cqlite.flight.admission.wait_seconds`
+    /// measures how long a request that DID contend waited, so mixing in a flood
+    /// of zero-duration instant admits would dilute that distribution with
+    /// non-events.
+    ///
+    /// **Slow path:** only entered on [`tokio::sync::TryAcquireError::NoPermits`]
+    /// — the ceiling is saturated. Bumps `waiting`, then waits up to the
+    /// configured timeout. On success returns an [`AdmissionPermit`] RAII guard
+    /// that holds the semaphore permit AND the `in_use` gauge until dropped
+    /// (moved into the response stream so every exit path — completion,
+    /// disconnect, cancel — releases it) and records the genuine wait sample. On
+    /// timeout returns a gRPC **`UNAVAILABLE`** [`Status`] (never
     /// `RESOURCE_EXHAUSTED`) and increments `rejected_total`.
     ///
     /// A request whose future is dropped while WAITING (client disconnect before
     /// admission) never acquires a permit and its `waiting` count is released by
-    /// the [`WaitGuard`] drop — no leak on either the wait or the hold path.
+    /// the [`WaitGuard`] drop — no leak on either the wait or the hold path. The
+    /// semaphore is only ever closed on shutdown; both paths map a closed
+    /// semaphore to the same retry-safe `UNAVAILABLE` shed.
     pub async fn acquire(&self) -> Result<AdmissionPermit, Status> {
         let inner = Arc::clone(&self.inner);
-        // RAII: the `waiting` gauge is released on EVERY exit, including a
-        // cancellation that drops this future mid-`.await` (a request cancelled
-        // while waiting never held a permit and must not leak the waiting count).
+
+        // Fast path: try to admit without ever registering as "waiting". Covers
+        // the common uncontended case with zero gauge/histogram noise.
+        match inner.sem.clone().try_acquire_owned() {
+            Ok(permit) => return Ok(AdmissionPermit::new(permit, inner)),
+            Err(tokio::sync::TryAcquireError::Closed) => return Err(reject_status()),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                // Fall through to the slow, timed wait path below.
+            }
+        }
+
+        // Slow path: the ceiling is saturated. RAII: the `waiting` gauge is
+        // released on EVERY exit, including a cancellation that drops this
+        // future mid-`.await` (a request cancelled while waiting never held a
+        // permit and must not leak the waiting count).
         let _waiter = WaitGuard::enter(Arc::clone(&inner));
         let started = tokio::time::Instant::now();
         let sem = Arc::clone(&inner.sem);
@@ -219,8 +248,6 @@ impl Admission {
                 inner.record_wait(started.elapsed());
                 Ok(AdmissionPermit::new(permit, inner))
             }
-            // The semaphore is only ever closed on shutdown; surface it as the same
-            // retry-safe status so an in-flight acquire during drain sheds cleanly.
             Ok(Err(_closed)) => Err(reject_status()),
             Err(_elapsed) => {
                 inner.record_wait(started.elapsed());
