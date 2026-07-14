@@ -3,8 +3,9 @@
 //! Extends [`MergeProducer`] with the `do_get` point path: detect a full-PK
 //! equality route, resolve concrete partition keys (token-excluded before any
 //! seek), build a k-way merger over ONLY the target partition(s), then reconcile
-//! and stream through the SAME [`MergeProducer::drive_merge`] loop the scan path
-//! uses — reporting the access-path label of the ROUTE VARIANT the router chose
+//! and stream through the SAME row-granular [`MergeProducer::drive_merge_over`]
+//! loop the full-scan path uses (issue #2423, over #2230's `StreamingMerger`) —
+//! reporting the access-path label of the ROUTE VARIANT the router chose
 //! (`streaming_partition_lookup` for a single-PK route, `multi_partition_lookup`
 //! for an `IN`/`Or` list, independent of the surviving-key count).
 //!
@@ -141,10 +142,10 @@ impl MergeProducer {
     /// Drive the partition point-read path (issue #2207): build a k-way merger over
     /// ONLY the target partition(s) across the candidate SSTables (seek where the
     /// index resolves, scan-fallback where it does not, prune on a definite bloom
-    /// negative), then reconcile + stream through the SAME
-    /// [`MergeProducer::drive_merge`] loop the scan path uses — reporting the
-    /// `access_path` label the router already fixed (route variant, not the
-    /// surviving-key count; roborev job 1623).
+    /// negative), then reconcile + stream through the SAME row-granular
+    /// [`MergeProducer::drive_merge_over`] loop the full-scan path uses (issue
+    /// #2423) — reporting the `access_path` label the router already fixed (route
+    /// variant, not the surviving-key count; roborev job 1623).
     pub(crate) fn produce_point(
         &self,
         plan: PointReadPlan,
@@ -186,7 +187,14 @@ impl MergeProducer {
             // No candidate SSTable holds any target key → zero rows examined, so
             // nothing to stream (and no rows-scanned emission either — no work).
             None => Ok(()),
-            Some(mut merger) => self.drive_merge(&mut merger, cancel, sink, progress, label),
+            // Issue #2423: drive the point merger ROW-GRANULARLY through the same
+            // #2230 streaming drive the full-scan path uses, so a `LIMIT`/cancel
+            // over a multi-million-row wide target partition materialises only one
+            // clustering-key group at a time (peak memory ~= one group + batch) and
+            // a cancel takes effect mid-partition — not after buffering the whole
+            // partition. Output stays byte-identical (same reconciliation, same
+            // order, same batching) to the buffered `drive_merge`.
+            Some(mut merger) => self.drive_merge_over(&mut merger, cancel, sink, progress, label),
         }
     }
 }
