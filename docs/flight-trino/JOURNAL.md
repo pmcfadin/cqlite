@@ -468,3 +468,21 @@ Format:
   before `acquire`), `admission.rs` (gauge-overlap fix), `admission_tests.rs`
   (2 new tests + 1 extended), `cqlite-core/.../observability/catalog.rs`
   (doc updates for the 4-phase set).
+- **Post-commit self-caught flakiness fix (same round):** the first cut of the
+  two finding-1 phase-visibility tests asserted EXACT deltas on
+  `phase_active_level_for("do_get", ...)` — a PROCESS-WIDE counter keyed only by
+  `(method, phase)`, shared with every OTHER concurrently-running test that
+  drives a real `do_get` (this crate's test suite runs thread-parallel, not
+  process-isolated, for `cargo test -p cqlite-flight --lib`). Standalone re-runs
+  flaked (`cargo test --lib admission` failed ~1/6 runs on the "resolve
+  untouched"/"vacated to exact baseline" assertions). Fixed by splitting into
+  (a) `req_admission_phase_opens_before_resolve` — a fully deterministic
+  `PhaseTimer` mechanics test against a synthetic, otherwise-unused method slot
+  (`"handshake"`, never driven by any test), proving the exact admission→resolve
+  ordering with zero cross-test interference, and (b)
+  `req_admission_wait_is_visible_as_its_own_phase` — wiring evidence on the REAL
+  `do_get` path, loosened to a robust `>= 1` lower bound (always true while our
+  own request is genuinely parked, immune to concurrent noise in either
+  direction). Verified stable across 5 repeated runs of both the admission
+  filter and the full 254-test lib suite; red-on-main re-confirmed after the
+  robustness rewrite (still 6 tests red).
