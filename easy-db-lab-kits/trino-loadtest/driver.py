@@ -452,14 +452,23 @@ def make_default_list_snapshots_fn(
             text=True,
             start_new_session=True,
         )
+        # start_new_session makes the shell its own session/process-group leader,
+        # so its PGID == its PID. Capture it NOW, while the process is known
+        # alive — resolving it later inside the timeout handler races with the
+        # shell exiting first (which would raise ProcessLookupError and skip the
+        # kill, leaving a live grandchild). Using the captured pgid closes that
+        # ordering race structurally (roborev finding, final review round).
+        pgid = proc.pid
         try:
             stdout, stderr = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired as exc:
             # Kill the entire process group (the shell AND any children it
             # spawned), then reap — so a wedged `kubectl exec`/`nodetool`
-            # cannot outlive the driver after we report the timeout.
+            # cannot outlive the driver after we report the timeout. The
+            # except is a defensive backstop (harmless if the group is already
+            # gone), no longer the primary mechanism.
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
             proc.wait()
