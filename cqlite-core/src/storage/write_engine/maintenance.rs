@@ -5,6 +5,14 @@
 //! (`maintenance_step`), candidate scanning, startup orphan sweeps, atomic
 //! input deletion, and the public `MaintenanceReport` type. `WriteEngine`'s
 //! fields are reachable here because this is a sibling module in the same crate.
+//!
+//! File-size note (campsite rule, epic #1116): this file was already over the
+//! ~800-line source threshold before issue #2299's direct-stream compaction
+//! read-path fix (row-granular within-partition streaming + the writer-session
+//! absolute-offset / mid-partition-flush changes) grew it further. Splitting it
+//! was judged out of scope for that fix (owner-approved,
+//! `CQLITE_ALLOW_FILE_GROWTH=1`); a follow-up split by responsibility remains
+//! tracked under #1116.
 
 use super::merge;
 // `Mutation` is named in production again (issue #1383 fix): a partition's

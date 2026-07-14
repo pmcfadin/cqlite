@@ -789,8 +789,26 @@ impl SSTableReader {
                 // `consume` clamps to the remaining length. The partition
                 // CONTINUES, so the #2398 per-partition work-probe is NOT bumped
                 // here (it counts partitions, not structures — see PartitionDone).
+                //
+                // Forward-progress guard (roborev blocker, issue #2299): the
+                // pre-#2299 buffered driver clamped a zero-length "confirmed"
+                // step to 1 (`let take = if consumed == 0 { 1 } else { consumed
+                // };`) — this row-granular rewrite dropped that clamp. A
+                // `Consumed(0)` here would leave `window` unchanged AND
+                // `state.header_parsed` still `true`, so the NEXT call re-parses
+                // the IDENTICAL front byte and can return the SAME step forever:
+                // a live `do_get` consumer would spin, since `scan_cancel` is
+                // only polled every 256 iterations and escapes on client
+                // DISCONNECT, never on lack of forward progress. Every decode
+                // path in `stream_partition_body_incremental` currently
+                // guarantees `consumed >= 1` on a genuine `Ok` (the row-flags /
+                // marker-flags / partition-key-length byte is always >= 1 on
+                // success — see that function's doc comment), so this clamp is
+                // defense-in-depth against a FUTURE decoder change silently
+                // reintroducing the pre-#2299 hang, restoring the invariant the
+                // type signature alone does not enforce.
                 PartitionStreamStep::Consumed(consumed) => {
-                    window.consume(consumed);
+                    window.consume(clamp_forward_progress(consumed));
                 }
                 // The partition ended. Advance over its final bytes (`consumed ==
                 // 0` for a terminal trailing partition makes no progress, but the
@@ -818,5 +836,83 @@ impl SSTableReader {
                 PartitionStreamStep::NeedMore | PartitionStreamStep::AllDone => return Ok(()),
             }
         }
+    }
+}
+
+/// Forward-progress clamp for [`SSTableReader::drain_compaction_window`]'s
+/// `PartitionStreamStep::Consumed` arm (roborev blocker, issue #2299): a
+/// `consumed == 0` step must still advance the window by at least one byte, or
+/// the drain loop can spin on a stalled decoder forever (see the call site's
+/// doc comment for the full hang mechanism this restores protection against).
+#[inline]
+fn clamp_forward_progress(consumed: usize) -> usize {
+    if consumed == 0 {
+        1
+    } else {
+        consumed
+    }
+}
+
+#[cfg(test)]
+mod forward_progress_guard_tests {
+    use super::clamp_forward_progress;
+    use crate::storage::sstable::reader::window_cursor::WindowCursor;
+
+    /// The clamp forces a zero-length step to advance by exactly one byte.
+    #[test]
+    fn zero_consumed_is_clamped_to_one() {
+        assert_eq!(clamp_forward_progress(0), 1);
+    }
+
+    /// A genuinely nonzero consumed count is passed through unchanged.
+    #[test]
+    fn nonzero_consumed_is_unaffected() {
+        for n in [1usize, 2, 64, 4096] {
+            assert_eq!(clamp_forward_progress(n), n);
+        }
+    }
+
+    /// RED-then-GREEN, deterministic bounded-iteration simulation (roborev
+    /// blocker, issue #2299): NOT a live-hang repro through the real parser —
+    /// every current decode path in `stream_partition_body_incremental`
+    /// provably reports `consumed >= 1` on a genuine `Ok` (the row-flags /
+    /// marker-flags / partition-key-length byte is always >= 1 on success), so
+    /// no byte sequence drives today's parser to a `Consumed(0)` on a
+    /// non-empty window. This test instead pins the CLAMP's own behavior: a
+    /// hypothetical decoder that always reports 0 consumed bytes (exactly the
+    /// pre-#2299-regression shape) must still drain a finite window in
+    /// bounded steps, never an unbounded loop. The iteration bound is derived
+    /// from the buffer length (deterministic), never a wall-clock timeout —
+    /// pre-fix (no clamp) this loop would spin forever and the `iterations <=
+    /// bound` assertion would be the only thing standing between a passing
+    /// test and a hung test process.
+    #[test]
+    fn simulated_stalled_decoder_terminates_within_window_len_iterations() {
+        let mut window = WindowCursor::new();
+        let payload = vec![0xFFu8; 32];
+        window.refill(&payload);
+
+        let bound = payload.len() + 1;
+        let mut iterations = 0usize;
+        while !window.is_empty() {
+            iterations += 1;
+            assert!(
+                iterations <= bound,
+                "forward-progress guard failed to terminate within {bound} iterations \
+                 (issue #2299 roborev blocker: a stalled decoder that always reports \
+                 0 consumed bytes must still drain the window in bounded steps, never \
+                 spin unboundedly)"
+            );
+            // Simulate a decoder that ALWAYS reports it consumed 0 bytes (the
+            // hypothetical pre-#2299-regression behavior) — the clamp must
+            // still force progress.
+            let consumed = clamp_forward_progress(0);
+            window.consume(consumed);
+        }
+        assert_eq!(
+            iterations,
+            payload.len(),
+            "each iteration must advance by exactly 1 clamped byte"
+        );
     }
 }
