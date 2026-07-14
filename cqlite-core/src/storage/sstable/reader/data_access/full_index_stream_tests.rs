@@ -425,7 +425,10 @@ async fn windowed_stream_read_pattern_is_sequential() {
         matches!(outcome, FullIndexStreamOutcome::Streamed),
         "the large fixture must stream via the index walk"
     );
-    assert_eq!(emitted, N as usize, "must emit every one of the {N} partitions");
+    assert_eq!(
+        emitted, N as usize,
+        "must emit every one of the {N} partitions"
+    );
 
     // AC #3: zero per-partition index probes (was N before #2366).
     assert_eq!(

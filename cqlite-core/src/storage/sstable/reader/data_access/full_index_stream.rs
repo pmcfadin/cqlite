@@ -277,11 +277,7 @@ impl SSTableReader {
                     // O(N/window) read-pattern evidence for issue #2366.
                     crate::storage::sstable::read_work_counters::record_seek();
                     window = self
-                        .read_uncompressed_verified(
-                            &self.file,
-                            absolute_offset,
-                            want as usize,
-                        )
+                        .read_uncompressed_verified(&self.file, absolute_offset, want as usize)
                         .await?;
                     window_filled = true;
                 }
