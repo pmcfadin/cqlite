@@ -302,3 +302,150 @@ async fn sequential_scan_fallback_counts_each_partition_exactly_once() {
          in stream_all_partitions_cancellable must not increment again"
     );
 }
+
+/// Issue #2366 (AC #1 parity, larger fixture): over an N ≥ 50 uncompressed
+/// fixture the sequential-window streaming walk emits EVERY partition, in the
+/// SAME token order, with IDENTICAL keys to the materialising sibling
+/// `iterate_all_partitions` — the parity pin proving the window-served slices
+/// decode to exactly the same partitions as the old per-partition positioned
+/// reads. Larger than the smoke fixtures so several partitions share one window.
+///
+/// `#[serial(work_counters)]`: see
+/// `stream_all_partitions_cancellable_emits_every_partition`.
+#[tokio::test]
+#[serial(work_counters)]
+async fn windowed_stream_matches_materialising_over_larger_fixture() {
+    const N: i32 = 60;
+    let (_temp, data_path) = write_fixture(N).await;
+    let reader = open_reader(&data_path).await;
+    let cancel = ScanCancel::default();
+
+    let mut streamed_keys: Vec<crate::RowKey> = Vec::new();
+    let outcome = reader
+        .stream_all_partitions_via_full_index(&cancel, &mut |(key, _value)| {
+            streamed_keys.push(key);
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, FullIndexStreamOutcome::Streamed),
+        "a full-Index.db fixture must stream via the index walk, not fall back"
+    );
+
+    let materialised: Vec<crate::RowKey> = reader
+        .iterate_all_partitions()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(
+        streamed_keys.len(),
+        N as usize,
+        "the windowed streaming walk must emit every one of the {N} partitions"
+    );
+    assert_eq!(
+        streamed_keys, materialised,
+        "windowed streaming emission must be key-for-key IDENTICAL (order + \
+         content) to the materialising sibling — the merge-input parity pin (#2366)"
+    );
+}
+
+/// Issue #2366 (AC #1 wiring): the SAME parity holds end-to-end through the real
+/// flight full-scan producer surface `stream_all_partitions_for_compaction` (the
+/// non-stitching branch routes to the windowed streaming walk). Proves the fix
+/// is exercised by the public producer seam, not just the private helper.
+///
+/// `#[serial(work_counters)]`: see
+/// `stream_all_partitions_cancellable_emits_every_partition`.
+#[tokio::test]
+#[serial(work_counters)]
+async fn stream_for_compaction_emits_every_partition_windowed() {
+    const N: i32 = 50;
+    let (_temp, data_path) = write_fixture(N).await;
+    let reader = open_reader(&data_path).await;
+    let cancel = ScanCancel::default();
+
+    let mut emitted = 0usize;
+    reader
+        .stream_all_partitions_for_compaction(None, &cancel, |_row| {
+            emitted += 1;
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        emitted, N as usize,
+        "the flight full-scan producer surface must emit every one of the {N} \
+         partitions through the windowed non-stitching branch"
+    );
+}
+
+/// Issue #2366 (AC #3 read-pattern benchmark, work-counters): after the windowed
+/// streaming walk over a LARGE uncompressed fixture (N = 500) the read pattern is
+/// O(N/window), not O(N):
+///
+/// - `INDEX_PROBES == 0` (was `== N` before this change — one HashMap probe per
+///   partition via the dropped `lookup_partition_with_index`); the offset now
+///   comes straight from the in-memory offset table.
+/// - `seek_calls()` (one per sequential window refill) is DRAMATICALLY fewer than
+///   the partition count — the O(N)→O(N/window) reduction. The tiny single-row
+///   partitions here pack many per 4 MiB window, so in practice this is a handful
+///   of refills for 500 partitions.
+///
+/// MEASURED (this fixture, 500 single-row int/text partitions):
+///   before: INDEX_PROBES == 500, positioned reads == 500 (one per partition)
+///   after:  INDEX_PROBES == 0,   seek_calls (window refills) == 1
+/// The field ideal (a 1.13M-partition table's wall-time on the #2362/#2157/#2264
+/// live testbed) is NOT reproducible locally; this probe/seek count reduction is
+/// the acceptable substitute the issue permits.
+///
+/// `#[serial(work_counters)]`: `INDEX_PROBES`/`SEEK_CALLS` are process-global.
+#[tokio::test]
+#[serial(work_counters)]
+async fn windowed_stream_read_pattern_is_sequential() {
+    use crate::storage::sstable::read_work_counters as rwc;
+    const N: i32 = 500;
+    let (_temp, data_path) = write_fixture(N).await;
+    let reader = open_reader(&data_path).await;
+    let cancel = ScanCancel::default();
+
+    rwc::reset();
+    let mut emitted = 0usize;
+    let outcome = reader
+        .stream_all_partitions_via_full_index(&cancel, &mut |_row| {
+            emitted += 1;
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, FullIndexStreamOutcome::Streamed),
+        "the large fixture must stream via the index walk"
+    );
+    assert_eq!(emitted, N as usize, "must emit every one of the {N} partitions");
+
+    // AC #3: zero per-partition index probes (was N before #2366).
+    assert_eq!(
+        rwc::index_probes(),
+        0,
+        "the windowed walk must perform ZERO Index.db probes (offset read \
+         directly from the in-memory offset table) — was {N} before #2366"
+    );
+    // AC #3: sequential window refills, not one read per partition. Assert well
+    // below the partition count (the O(N)→O(N/window) reduction). It is exactly 1
+    // for this tiny-partition fixture, but pin the invariant loosely so the
+    // benchmark stays robust to fixture-size / window-target tweaks.
+    let seeks = rwc::seek_calls();
+    assert!(
+        seeks < N as u64 / 4,
+        "window refills ({seeks}) must be dramatically fewer than the {N} \
+         partitions (O(N/window) sequential reads, not O(N) random reads — #2366)"
+    );
+    assert!(
+        seeks >= 1,
+        "a non-empty scan must perform at least one window read ({seeks})"
+    );
+}
