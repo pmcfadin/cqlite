@@ -115,6 +115,14 @@ cleanly, 0 snapshots found").
 - **AND** it does NOT report PASS merely because the empty/partial output happened to contain zero
   `cqlite-`-prefixed lines.
 
+#### Scenario: A blank/whitespace-only probe command is rejected, not silently accepted as clean
+
+- **GIVEN** the D12 check is configured with a listing command that is empty or whitespace-only
+- **WHEN** the driver validates its arguments
+- **THEN** it rejects the configuration as an error before running (a whitespace-only command would
+  otherwise shell-execute as a silent no-op — exit 0, empty output — and read as "0 leaks found")
+- **AND** it never reaches a state where such a no-op command reports PASS.
+
 ### Requirement: The template is offered to the field and cross-linked in doctrine
 
 The finalized template SHALL be posted on the round tracker (#2367 round channel) for round-10 adoption,

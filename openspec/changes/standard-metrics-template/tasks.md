@@ -27,6 +27,12 @@
       `run_snapshot_leak_check`, CLI wiring, `make_default_list_snapshots_fn`) that a leaked snapshot
       fails, a clean run passes, and unconfigured reports not-ran. Surface exercised: `driver.py main()`
       wiring via the CLI flag → `run_snapshot_leak_check` → exit code 3 on leak. (Requirement: D12 mirror)
+- [x] 3.3 (roborev round 1) A probe command that exits nonzero must FAIL, never a vacuous PASS from
+      empty stdout — `make_default_list_snapshots_fn` now raises `RuntimeError` on nonzero exit;
+      `main()` catches it and reports FAIL/exit 3. (Requirement: D12 mirror — probe-failure scenario)
+- [x] 3.4 (roborev round 2) A blank/whitespace-only `--snapshot-check-cmd` shell-executes as a silent
+      no-op (exit 0, empty output) and would also read as a false PASS — `validate_args` now rejects
+      it up front. (Requirement: D12 mirror — blank-command scenario)
 
 ## 4. Offer-back + doctrine cross-links
 - [x] 4.1 Cross-link the template from `docs/development/pm-operating-loop.md` and the

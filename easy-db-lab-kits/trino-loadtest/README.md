@@ -95,6 +95,10 @@ check must not appear green when it did not run
 unreachable pod, typo'd one-liner — nonzero exit) is also `FAIL` (exit `3`,
 with the command's stderr), never treated as "ran cleanly, 0 snapshots
 found" — an empty result from a broken probe must not read as a clean ring.
+A blank/whitespace-only `--snapshot-check-cmd` is rejected as a config error
+(`--threads`/`--interval`-style `validate_args` check, exit `2`) rather than
+silently accepted — it would otherwise shell-execute as a no-op and produce
+the exact same false-clean result.
 See `docs/development/round-validation-metrics.md` for the full 14-point
 standard this is one item of.
 

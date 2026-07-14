@@ -534,6 +534,13 @@ def validate_args(args: argparse.Namespace) -> Optional[str]:
         return "--duration must be >= 1"
     if args.interval <= 0:
         return "--interval must be > 0"
+    if args.snapshot_check_cmd is not None and not args.snapshot_check_cmd.strip():
+        # A whitespace-only command shell-executes as a silent no-op (exit 0, empty
+        # stdout) — that would read as "ran cleanly, 0 leaks found" (PASS) despite the
+        # D12 probe never actually touching a node. Reject it as a config error up
+        # front instead of letting it degrade into the exact vacuous pass #2399 exists
+        # to prevent (roborev finding, review round 2).
+        return "--snapshot-check-cmd must not be blank/whitespace-only"
     return None
 
 

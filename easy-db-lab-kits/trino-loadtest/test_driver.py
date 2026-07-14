@@ -312,6 +312,20 @@ def test_validate_args_rejects_bad_numbers() -> None:
     assert driver.validate_args(args) is not None
 
 
+def test_validate_args_rejects_blank_snapshot_check_cmd() -> None:
+    # A whitespace-only command would shell-execute as a silent no-op (exit 0,
+    # empty stdout) and read as "0 leaks found" — a vacuous PASS the D12 check
+    # exists to prevent (#2399, roborev finding round 2). Reject it up front.
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-cmd", "   "])
+    assert driver.validate_args(args) is not None
+
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-cmd", "echo hi"])
+    assert driver.validate_args(args) is None
+
+    args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+    assert driver.validate_args(args) is None
+
+
 def test_parse_args_defaults() -> None:
     args = driver.parse_args(["--ks", "a", "--tbl", "b"])
     assert args.host == "localhost"
@@ -662,6 +676,10 @@ def main() -> int:
     check("validate_args: passes with queries-file", test_validate_args_passes_with_queries_file)
     check("validate_args: passes with ks and tbl", test_validate_args_passes_with_ks_and_tbl)
     check("validate_args: rejects bad numeric args", test_validate_args_rejects_bad_numbers)
+    check(
+        "validate_args: rejects a blank/whitespace-only --snapshot-check-cmd",
+        test_validate_args_rejects_blank_snapshot_check_cmd,
+    )
     check("parse_args: defaults", test_parse_args_defaults)
     check(
         "parse_args: --port default ignores K8s-injected bare TRINO_PORT",
