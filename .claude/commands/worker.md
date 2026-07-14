@@ -106,7 +106,7 @@ onto its own branch). Rules, non-negotiable:
       `==== AGENT-GATE LITE SUMMARY ====` block + **≤5 lines** of prose (#2080) — never raw logs/diffs.
       Iterate on lite until PASS and the change is complete.
    2. **Review-first is DEFAULT (#2086):** on the lite-green diff, spawn `rust-reviewer` (model: opus) AND
-      run roborev (this machine's configured agent — commonly `codex` via `.roborev.toml`; no flags)
+      run roborev (this machine's configured agent — commonly `claude-code` via `.roborev.toml`; no flags)
       **before any full gate**. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
       call site AND no new surface). Triage findings per `docs/development/roborev-severity.md`: **blockers**
       fixed now (each re-triggers `fix → --lite re-cert (+ diff-relevant parity/integration target) →

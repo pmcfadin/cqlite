@@ -59,7 +59,7 @@ sequence workers with **signed issue comments**. That's it.
   as a stalled worker.
 - Never close an epic, change scope/title, or make a product call → put it on a short **NEEDS-YOU** list.
 - Doctrine: `docs/development/pm-operating-loop.md`. (Workers run roborev with **this machine's configured
-  agent** — commonly `codex` via `.roborev.toml`, no flags; explicit `--agent`/`--model` is a per-machine
+  agent** — commonly `claude-code` via `.roborev.toml`, no flags; explicit `--agent`/`--model` is a per-machine
   troubleshooting override only. See `docs/development/agent-machine-setup.md`.)
 
 Start now: one reconcile sweep, then report what you fed to Ready, the tempo, and the one thing that needs me. Go.
