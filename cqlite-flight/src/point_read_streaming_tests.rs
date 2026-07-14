@@ -143,7 +143,8 @@ fn warm_readers(dir: &std::path::Path) -> Vec<Arc<SSTableReader>> {
 fn point_read_materialises_bounded_rows_not_whole_partition() {
     let (_temp, dir) = wide_partition();
     let schema = clustering_schema();
-    let producer = MergeProducer::with_spec(schema, BATCH, point_spec(&clustering_schema())).unwrap();
+    let producer =
+        MergeProducer::with_spec(schema, BATCH, point_spec(&clustering_schema())).unwrap();
     let paths = producer.resolve_paths(&DirSource::new(&dir)).unwrap();
 
     let cancel = CancelFlag::new();
@@ -175,7 +176,8 @@ fn point_read_materialises_bounded_rows_not_whole_partition() {
 fn point_read_cancel_takes_effect_mid_partition() {
     let (_temp, dir) = wide_partition();
     let schema = clustering_schema();
-    let producer = MergeProducer::with_spec(schema, BATCH, point_spec(&clustering_schema())).unwrap();
+    let producer =
+        MergeProducer::with_spec(schema, BATCH, point_spec(&clustering_schema())).unwrap();
     let paths = producer.resolve_paths(&DirSource::new(&dir)).unwrap();
 
     let cancel = CancelFlag::new();
@@ -211,7 +213,8 @@ fn warm_point_read_materialises_bounded_rows_not_whole_partition() {
     let schema = clustering_schema();
     let readers = warm_readers(&dir);
     assert!(!readers.is_empty(), "the fixture must ship a warm reader");
-    let producer = MergeProducer::with_spec(schema, BATCH, point_spec(&clustering_schema())).unwrap();
+    let producer =
+        MergeProducer::with_spec(schema, BATCH, point_spec(&clustering_schema())).unwrap();
 
     let cancel = CancelFlag::new();
     let mut sink = CancelAfterFirstBatchSink {
@@ -287,14 +290,24 @@ fn point_read_streaming_is_byte_identical_to_buffered() {
     let label = AccessPath::StreamingPartitionLookup.label();
 
     let buffered = {
-        let mut merger =
-            build_single_partition_merger(paths.clone(), &[key.clone()], &schema, ScanCancel::default())
-                .expect("build merger")
-                .expect("a candidate holds the key");
+        let mut merger = build_single_partition_merger(
+            paths.clone(),
+            &[key.clone()],
+            &schema,
+            ScanCancel::default(),
+        )
+        .expect("build merger")
+        .expect("a candidate holds the key");
         let mut batches = Vec::new();
         let mut sink = CollectSink(&mut batches);
         producer
-            .drive_merge(&mut merger, &CancelFlag::new(), &mut sink, &ScanProgress::default(), label)
+            .drive_merge(
+                &mut merger,
+                &CancelFlag::new(),
+                &mut sink,
+                &ScanProgress::default(),
+                label,
+            )
             .expect("buffered drive");
         batches
     };
@@ -306,7 +319,13 @@ fn point_read_streaming_is_byte_identical_to_buffered() {
         let mut batches = Vec::new();
         let mut sink = CollectSink(&mut batches);
         producer
-            .drive_merge_over(&mut merger, &CancelFlag::new(), &mut sink, &ScanProgress::default(), label)
+            .drive_merge_over(
+                &mut merger,
+                &CancelFlag::new(),
+                &mut sink,
+                &ScanProgress::default(),
+                label,
+            )
             .expect("streaming drive");
         batches
     };

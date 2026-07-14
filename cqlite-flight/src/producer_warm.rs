@@ -92,7 +92,9 @@ impl MergeProducer {
                 // Issue #2423: row-granular streaming drive (see `produce_point`) —
                 // bounds a warm wide-partition point read to one clustering group +
                 // batch and makes cancellation mid-partition, byte-identically.
-                Some(mut merger) => self.drive_merge_over(&mut merger, cancel, sink, progress, label),
+                Some(mut merger) => {
+                    self.drive_merge_over(&mut merger, cancel, sink, progress, label)
+                }
             };
         }
 
