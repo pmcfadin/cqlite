@@ -18,6 +18,13 @@ import java.util.Optional;
  * # Backstop TTL for per-query snapshots so a coordinator crash can't leak them
  * # (Cassandra auto-drops after this). Blank disables the TTL. Cassandra 4.1+ syntax.
  * cqlite.snapshot-ttl=6h
+ * # Snapshot REUSE freshness window (ms): one snapshot is reused per (keyspace, table) across
+ * # queries within this window (issue #2356/#2306). 0 disables reuse (a snapshot per query).
+ * cqlite.snapshot-reuse-window-ms=3000
+ * # Grace (ms) before a SUPERSEDED reuse window is actively retired (issue #2356). MUST exceed
+ * # your longest query so an in-flight read never loses its snapshot; retained superseded dirs
+ * # per table per host ≈ retire-grace / reuse-window (bounded well under snapshot-ttl / window).
+ * cqlite.snapshot-retire-grace-ms=600000
  * # Aggregation-pushdown gate (issue #893); GROUP BY only — globals always push.
  * cqlite.aggregation-pushdown-group-by=automatic   # automatic | always | never
  * cqlite.aggregation-pushdown-max-group-ratio=0.5   # decline above this groups/rows ratio
@@ -35,7 +42,8 @@ public record CqliteFlightConfig(
         long tableStatsTimeoutMillis,
         ReadMode readMode,
         Optional<String> snapshotTtl,
-        long snapshotReuseWindowMillis) {
+        long snapshotReuseWindowMillis,
+        long snapshotRetireGraceMillis) {
 
     public static final int DEFAULT_FLIGHT_PORT = 8815;
 
@@ -79,6 +87,27 @@ public record CqliteFlightConfig(
     public static final long DEFAULT_SNAPSHOT_REUSE_WINDOW_NANOS =
             DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS * 1_000_000L;
 
+    /**
+     * Default grace period (milliseconds) before a SUPERSEDED reuse window is actively retired
+     * (issue #2356 roborev, bounded retention). When a query rolls to a fresh window the old window
+     * is not deleted immediately — a still-running query may be reading its snapshot (the
+     * retire-race) — but leaving it to the ~6h {@link #DEFAULT_SNAPSHOT_TTL} backstop would let a
+     * hot table with a short {@code snapshot-reuse-window-ms} accumulate on the order of
+     * {@code snapshot-ttl / window} live snapshot dirs (each a full hardlink set) per table per
+     * host. So a superseded window is retired once this grace elapses, which MUST safely exceed the
+     * longest-running Trino query so no in-flight read loses its snapshot mid-scan; 10 minutes covers
+     * typical analytical queries with margin. Operators running longer queries SHOULD raise this to
+     * exceed their {@code query.max-run-time}. Sizing: worst-case retained superseded dirs per table
+     * per host ≈ {@code snapshot-retire-grace-ms / snapshot-reuse-window-ms} (bounded well under
+     * {@code snapshot-ttl / snapshot-reuse-window-ms}). {@code 0} retires a superseded window on the
+     * very next resolve (only safe when queries never outlive a window).
+     */
+    public static final long DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS = 600_000L;
+
+    /** {@link #DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS} in nanoseconds (the {@link SnapshotManager} unit). */
+    public static final long DEFAULT_SNAPSHOT_RETIRE_GRACE_NANOS =
+            DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS * 1_000_000L;
+
     public CqliteFlightConfig {
         if (maxGroupRatio <= 0.0 || maxGroupRatio > 1.0) {
             throw new IllegalArgumentException(
@@ -92,13 +121,19 @@ public record CqliteFlightConfig(
             throw new IllegalArgumentException(
                     "cqlite.snapshot-reuse-window-ms must be >= 0, got " + snapshotReuseWindowMillis);
         }
+        if (snapshotRetireGraceMillis < 0) {
+            throw new IllegalArgumentException(
+                    "cqlite.snapshot-retire-grace-ms must be >= 0, got " + snapshotRetireGraceMillis);
+        }
         try {
             // Fail fast on a configured value so large the ms→ns conversion would overflow long
             // (a partial overflow could otherwise silently wrap to a small positive window).
             Math.multiplyExact(snapshotReuseWindowMillis, 1_000_000L);
+            Math.multiplyExact(snapshotRetireGraceMillis, 1_000_000L);
         } catch (ArithmeticException e) {
             throw new IllegalArgumentException(
-                    "cqlite.snapshot-reuse-window-ms is too large (ns overflow), got " + snapshotReuseWindowMillis);
+                    "cqlite.snapshot-reuse-window-ms / snapshot-retire-grace-ms is too large (ns overflow), got "
+                            + snapshotReuseWindowMillis + " / " + snapshotRetireGraceMillis);
         }
         requireRootPerNodeBase(sidecarUri);
     }
@@ -108,6 +143,12 @@ public record CqliteFlightConfig(
         // Overflow is rejected at construction (see the compact constructor), so this is safe;
         // multiplyExact keeps it fail-fast rather than silently wrapping if that ever changes.
         return Math.multiplyExact(snapshotReuseWindowMillis, 1_000_000L);
+    }
+
+    /** The superseded-window retire grace period in nanoseconds (the {@link SnapshotManager} unit). */
+    public long snapshotRetireGraceNanos() {
+        // Overflow is rejected at construction (see the compact constructor).
+        return Math.multiplyExact(snapshotRetireGraceMillis, 1_000_000L);
     }
 
     /**
@@ -202,9 +243,12 @@ public record CqliteFlightConfig(
         long reuseWindowMs = config.containsKey("cqlite.snapshot-reuse-window-ms")
                 ? Long.parseLong(config.get("cqlite.snapshot-reuse-window-ms"))
                 : DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS;
+        long retireGraceMs = config.containsKey("cqlite.snapshot-retire-grace-ms")
+                ? Long.parseLong(config.get("cqlite.snapshot-retire-grace-ms"))
+                : DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS;
         return new CqliteFlightConfig(
                 URI.create(sidecar), port, dc, policy, ratio, statsTimeoutMs, readMode, snapshotTtl,
-                reuseWindowMs);
+                reuseWindowMs, retireGraceMs);
     }
 
     /**

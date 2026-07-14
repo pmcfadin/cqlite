@@ -211,6 +211,7 @@ Catalog properties (`etc/catalog/cqlite.properties`):
 | `cqlite.read-mode` | `snapshot` | `snapshot` (default) reads a consistent, per-query Sidecar snapshot; `live` reads the current data dir (races compaction). See [Read mode](#read-mode-snapshot-vs-live). |
 | `cqlite.snapshot-ttl` | `6h` | `snapshot` mode only: a Cassandra 4.1+ TTL on each snapshot so a crash (or a reused snapshot outliving its window) can't leak it (Cassandra auto-drops it). Set blank to disable. |
 | `cqlite.snapshot-reuse-window-ms` | `3000` | `snapshot` mode only: reuse a single snapshot per `(keyspace, table)` across queries for this many milliseconds (issue #2356/#2306). Larger ⇒ fewer snapshot creates/flushes and a warmer read path, at the cost of up to one window of staleness. `0` disables reuse (a fresh snapshot per query). See [Snapshot reuse](#snapshot-reuse-and-the-staleness-bound). |
+| `cqlite.snapshot-retire-grace-ms` | `600000` | `snapshot` mode only: how long a **superseded** reuse window is kept before it is actively deleted (issue #2356). Must safely exceed your longest query so an in-flight read never loses its snapshot mid-scan; raise it above your `query.max-run-time` if you run long queries. Worst-case retained superseded snapshot dirs per table per host ≈ `snapshot-retire-grace-ms / snapshot-reuse-window-ms` (bounded well under `snapshot-ttl / snapshot-reuse-window-ms`). See [Snapshot reuse](#snapshot-reuse-and-the-staleness-bound). |
 | `cqlite.aggregation-pushdown-group-by` | `automatic` | GROUP BY aggregation-pushdown policy: `automatic`, `always`, or `never`. Global aggregates (no GROUP BY) are an unconditional win and always push regardless of this setting. |
 | `cqlite.aggregation-pushdown-max-group-ratio` | `0.5` | `automatic` only: decline GROUP BY pushdown once the estimated distinct-groups / rows ratio exceeds this. Must be in `(0.0, 1.0]`. |
 
@@ -266,16 +267,19 @@ scanned `(keyspace, table)` — **reusing** the current one when it is still fre
    exist and fail NotFound.
 2. Names that snapshot in **every** Flight ticket, so all splits read the one immutable
    file set on their host.
-3. **Retires** a snapshot ONLY on an explicit refresh (`SnapshotManager.invalidate`) or at
-   connector shutdown (`SnapshotManager.retireAll`)
-   (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`). A window that is merely
-   **superseded** by a fresher one (window expiry / observed generation-set change rolling to a new
-   epoch) is **not** actively deleted (issue #2356): a long-running query may still be reading the
-   superseded snapshot — its splits not yet opened, or a cold remote host — when a later query rolls
-   the window, so deleting it on supersede would break those in-flight reads. Superseded snapshots
-   are instead reclaimed by the `cqlite.snapshot-ttl` backstop. A reused snapshot OUTLIVES the query
-   that created it, so cleanup is **not** per-query; the same TTL backstop also reclaims any snapshot
-   a crash leaves behind.
+3. **Retires** a snapshot (`DELETE /api/v1/keyspaces/{keyspace}/tables/{table}/snapshots/{name}`)
+   immediately on an explicit refresh (`SnapshotManager.invalidate`) or at connector shutdown
+   (`SnapshotManager.retireAll`), and — for a window that is merely **superseded** by a fresher one
+   (window expiry / observed generation-set change rolling to a new epoch) — after a bounded
+   **retire-grace** (`cqlite.snapshot-retire-grace-ms`, default 10 min). The grace exists because a
+   long-running query may still be reading the superseded snapshot — its splits not yet opened, or a
+   cold remote host — when a later query rolls the window, so deleting it on supersede would break
+   those in-flight reads; once the grace (set to safely exceed the longest query) elapses, no query
+   that resolved that window can still be reading it, so the delete is race-free. This bounds retained
+   superseded snapshot dirs to roughly `snapshot-retire-grace-ms / snapshot-reuse-window-ms` per table
+   per host instead of leaving them to the multi-hour `cqlite.snapshot-ttl` backstop (which still
+   reclaims any snapshot a crash leaves behind between supersede and sweep). A reused snapshot OUTLIVES
+   the query that created it, so cleanup is **not** per-query.
 
 **Per-host Sidecar addressing.** The connector only ever queries the configured
 `cqlite.sidecar-uri` (db0) for discovery, but the Cassandra Sidecar runs as a `hostNetwork`
@@ -324,8 +328,15 @@ point-in-times within one query.
 (at the cost of racing compaction). That is the zero-snapshot-churn option for callers who
 accept live reads.
 
-The `cqlite.snapshot-ttl` backstop means even a coordinator crash can't leak a snapshot —
-Cassandra auto-drops it.
+**Bounded retention of superseded snapshots.** When a query rolls to a fresh window, the previous
+window is not deleted on the spot (an in-flight query may still be reading it) but is retired once
+`cqlite.snapshot-retire-grace-ms` (default 10 min) elapses — set the grace to safely exceed your
+longest query (e.g. above Trino's `query.max-run-time`). Sizing: worst-case retained superseded
+snapshot dirs per table per host ≈ `snapshot-retire-grace-ms / snapshot-reuse-window-ms`, kept well
+under `snapshot-ttl / snapshot-reuse-window-ms`; so a short reuse window plus a long TTL no longer
+accumulates snapshot directories without bound. The `cqlite.snapshot-ttl` backstop remains the
+crash-safety net — even a coordinator crash between supersede and sweep can't leak a snapshot, since
+Cassandra auto-drops it after the TTL.
 
 **Fail-closed:** if snapshot creation fails on **any** replica host in `snapshot` mode, the
 query **fails** with an actionable error naming the host + snapshot — the connector does

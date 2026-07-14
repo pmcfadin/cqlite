@@ -81,7 +81,12 @@ unchanged, zero rebind) from a warm-hit-with-rebind from a full rebuild, so a fi
 snapshot-lifecycle closure round-over-round. At minimum: the per-request directory `resolves` counter
 (unchanged, authoritative per request), `index_parses_total`, `reader_opens`, and a new
 `rebind_hits_total` (rebound generations). These counters SHALL be observable through the existing
-flight stats/metrics surface.
+flight stats/metrics surface. Exposure surface (explicit, so a field probe and the intent audit agree):
+`reader_opens` and `rebind_hits_total` SHALL be exposed via the programmatic `WarmMetricsSnapshot` stats
+surface (the same surface the warm-closure tests and field probes read), which is authoritative for the
+round-over-round verification; unlike the warm cache hit/miss/evict/refresh counters they are NOT also
+mirrored to the OTel counter export (a snapshot-only exposure this change does not expand). `resolves`
+and `index_parses_total` retain their existing surfaces (#2341/#2412).
 
 #### Scenario: Counters distinguish pure warm hit, rebind, and rebuild over a query sequence
 

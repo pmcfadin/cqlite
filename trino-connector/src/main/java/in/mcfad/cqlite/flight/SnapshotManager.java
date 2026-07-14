@@ -8,10 +8,12 @@ import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -54,11 +56,24 @@ import java.util.regex.Pattern;
  * instance-local, so the snapshot is created on EVERY replica host a split will read, memoized
  * per {@code (window, host)}. {@link #snapshotFor} fails closed on the first host whose create
  * errors (naming host + snapshot); {@link #availableHosts} is best-effort for optional fallback
- * hosts. A SUPERSEDED window is NOT actively retired (issue #2356 roborev, retire-race): a
+ * hosts.
+ *
+ * <p><b>Bounded retirement of superseded windows (issue #2356 roborev, resource retention).</b> A
+ * window is NOT deleted the instant it is superseded (window expiry / generation change): a
  * long-running query may still be reading its snapshot when a later query rolls to a fresh window,
- * so superseded windows are reclaimed solely by the Sidecar-side TTL backstop
- * ({@link CqliteFlightConfig#snapshotTtl}). Active retirement ({@link #retire}) happens ONLY on
- * explicit {@link #invalidate} and {@link #retireAll} (shutdown).
+ * and deleting the hardlink set out from under an in-flight read is the retire-race. But it must
+ * ALSO not leak until the ~6h Sidecar TTL backstop — a hot table with a 3s window would then
+ * accumulate on the order of {@code ttl / window} live snapshot dirs (each a full hardlink set) per
+ * table per host. So a superseded window is enqueued and actively retired ({@link #retire}) after a
+ * <b>grace period</b> ({@code retireGraceNanos}) configured to safely exceed the longest Trino query
+ * (see {@link CqliteFlightConfig#DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS}): once the grace elapses no
+ * query that resolved that window can still be planning/reading it, so the delete is race-free.
+ * Retirement is swept lazily on the next {@link #resolveSnapshot} (no background thread) and bounds
+ * steady-state retained superseded dirs to roughly {@code grace / window} per table per host, well
+ * under the TTL. Explicit {@link #invalidate} still retires the current window immediately (the
+ * {@code Database::refresh()} analog) and {@link #retireAll} (shutdown) drains both the live windows
+ * and the pending-retire queue; the Sidecar-side TTL backstop ({@link CqliteFlightConfig#snapshotTtl})
+ * still covers a coordinator crash between supersede and sweep.
  *
  * <p>In {@link ReadMode#LIVE} this manager is inert: {@link #snapshotFor} returns empty
  * (ticket {@code snapshot=null}), no reuse cache entry is created, and no Sidecar calls are made.
@@ -82,12 +97,24 @@ public final class SnapshotManager {
     private final ReadMode readMode;
     private final Optional<String> ttl;
     private final long reuseWindowNanos;
+    private final long retireGraceNanos;
     private final Clock clock;
 
     /** The current reused snapshot window per {@code (keyspace, table)}. */
     private final Map<TableRef, Window> windows = new ConcurrentHashMap<>();
     /** Monotonic freshness-window epoch counter per {@code (keyspace, table)}. */
     private final Map<TableRef, AtomicLong> epochs = new ConcurrentHashMap<>();
+    /**
+     * Superseded windows awaiting grace-period retirement, oldest first (the clock is
+     * non-decreasing and windows are enqueued in supersede order, so peek() is the oldest).
+     */
+    private final Queue<PendingRetire> pendingRetire = new ConcurrentLinkedQueue<>();
+
+    /** A superseded window and the clock reading at which it was superseded (grace starts here). */
+    private record PendingRetire(TableRef ref, Window window, long supersededNanos) {}
+
+    /** The outcome of resolving a reuse window: the window plus whether it was reused (vs created). */
+    private record Resolved(Window window, boolean reused) {}
 
     /** Snapshot create fan-outs performed (one per freshness window) — the #2306 flush proxy. */
     private final AtomicLong snapshotCreationsTotal = new AtomicLong();
@@ -139,25 +166,41 @@ public final class SnapshotManager {
     /**
      * Full constructor (production + tests). {@code reuseWindowNanos <= 0} disables reuse (every
      * query gets a fresh window — the pre-#2356 per-query cadence, without the queryId naming).
+     * {@code retireGraceNanos} is the delay after a window is superseded before it is actively
+     * retired (issue #2356 roborev, bounded retention); it must safely exceed the longest query so
+     * an in-flight read never loses its snapshot.
      */
     public SnapshotManager(
             HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
-            long reuseWindowNanos, Clock clock) {
+            long reuseWindowNanos, long retireGraceNanos, Clock clock) {
         this.sidecars = sidecars;
         this.readMode = readMode;
         this.ttl = ttl;
         this.reuseWindowNanos = Math.max(0L, reuseWindowNanos);
+        this.retireGraceNanos = Math.max(0L, retireGraceNanos);
         this.clock = clock;
     }
 
     /**
-     * Convenience constructor: the default freshness window on the production {@link SystemClock}.
-     * Used where a config-driven window is not threaded through (and by tests that do not exercise
-     * window timing).
+     * Constructor without an explicit retire-grace: uses the default grace
+     * ({@link CqliteFlightConfig#DEFAULT_SNAPSHOT_RETIRE_GRACE_NANOS}). Kept for existing call sites
+     * that do not pin grace-period retirement timing.
+     */
+    public SnapshotManager(
+            HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
+            long reuseWindowNanos, Clock clock) {
+        this(sidecars, readMode, ttl, reuseWindowNanos,
+                CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_NANOS, clock);
+    }
+
+    /**
+     * Convenience constructor: the default freshness window + retire grace on the production
+     * {@link SystemClock}. Used where config-driven timing is not threaded through (and by tests
+     * that do not exercise window/grace timing).
      */
     public SnapshotManager(HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl) {
-        this(sidecars, readMode, ttl,
-                CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_NANOS, new SystemClock());
+        this(sidecars, readMode, ttl, CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_NANOS,
+                CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_NANOS, new SystemClock());
     }
 
     /** Snapshot create fan-outs performed so far (one per freshness window). */
@@ -214,9 +257,30 @@ public final class SnapshotManager {
         if (readMode == ReadMode.LIVE) {
             return Optional.empty();
         }
-        Window window = resolveWindow(new TableRef(keyspace, table), generationFingerprint, true);
-        for (String host : hosts) {
-            createOnHost(window, host, keyspace, table);
+        TableRef ref = new TableRef(keyspace, table);
+        Resolved resolved = resolveWindow(ref, generationFingerprint);
+        Window window = resolved.window();
+        try {
+            for (String host : hosts) {
+                createOnHost(window, host, keyspace, table);
+            }
+        } catch (RuntimeException e) {
+            // Roborev (issue #2356, half-created window): a fail-closed fan-out must not leave a
+            // freshly-created window cached as "fresh" (a later query would reuse a snapshot that
+            // never fully materialized) nor count a create/flush that did not complete. Roll back
+            // the fresh window so the next query recomputes; a REUSED window is left intact (a
+            // transient host error on an added fallback host must not nuke a live shared window).
+            if (!resolved.reused()) {
+                windows.remove(ref, window);
+            }
+            throw e;
+        }
+        // Count (the #2306 flush proxy) only once the full fan-out succeeded: exactly one reuse hit
+        // or one create per resolved window.
+        if (resolved.reused()) {
+            snapshotReuseHitsTotal.incrementAndGet();
+        } else {
+            snapshotCreationsTotal.incrementAndGet();
         }
         return Optional.of(window);
     }
@@ -269,8 +333,9 @@ public final class SnapshotManager {
     }
 
     /**
-     * Retire every live reused window (connector shutdown): best-effort clear of each window's
-     * snapshots on every host it was created on. The Sidecar TTL backstop covers any miss.
+     * Retire every live reused window AND every superseded window still awaiting grace-period
+     * retirement (connector shutdown): best-effort clear of each window's snapshots on every host it
+     * was created on. The Sidecar TTL backstop covers any miss.
      */
     public void retireAll() {
         for (Map.Entry<TableRef, Window> e : windows.entrySet()) {
@@ -279,41 +344,64 @@ public final class SnapshotManager {
                 retire(w, e.getKey());
             }
         }
+        PendingRetire pending;
+        while ((pending = pendingRetire.poll()) != null) {
+            retire(pending.window(), pending.ref());
+        }
     }
 
     /**
      * Resolve the current reused window for {@code ref}, reusing an existing fresh window or
-     * creating a new one (bumping the epoch) atomically. When {@code countStats}, records exactly
-     * one {@link #snapshotReuseHitsTotal} (reuse) or {@link #snapshotCreationsTotal} (create).
+     * creating a new one (bumping the epoch) atomically. Counting is done by the caller AFTER the
+     * per-host fan-out succeeds (issue #2356 roborev), not here.
      *
-     * <p><b>A superseded window is NOT retired here (issue #2356 roborev, retire-race).</b> A
-     * long-running query A can still be reading a window's snapshot (splits not yet opened, or a
-     * cold remote host) when a later query B rolls to a fresh window; actively deleting A's snapshot
-     * dir on supersede would break A's in-flight reads. Superseded windows are therefore reclaimed
-     * solely by the Sidecar-side TTL backstop ({@link CqliteFlightConfig#snapshotTtl}). Active
-     * retirement ({@link #retire}) happens ONLY on explicit {@link #invalidate} (the
-     * {@code Database::refresh()} analog) and {@link #retireAll} (shutdown), never as a side effect
-     * of rolling to a new window.
+     * <p><b>A superseded window is NOT retired on supersede (issue #2356 roborev, retire-race)</b> —
+     * a long-running query A can still be reading a window's snapshot (splits not yet opened, or a
+     * cold remote host) when a later query B rolls to a fresh window; deleting A's snapshot dir on
+     * supersede would break A's in-flight reads. Instead the superseded window is ENQUEUED with the
+     * supersede time and retired later by {@link #sweepRetireDue} once the grace period elapses
+     * (bounded retention, see the class javadoc). Each resolve also sweeps any now-due pending
+     * window. Immediate active retirement ({@link #retire}) still happens on explicit
+     * {@link #invalidate} (the {@code Database::refresh()} analog) and {@link #retireAll} (shutdown).
      */
-    private Window resolveWindow(TableRef ref, long generationFingerprint, boolean countStats) {
+    private Resolved resolveWindow(TableRef ref, long generationFingerprint) {
         long now = clock.nanoTime();
         boolean[] reused = {false};
+        Window[] superseded = {null};
         Window window = windows.compute(ref, (k, existing) -> {
             if (existing != null && isFresh(existing, generationFingerprint, now)) {
                 reused[0] = true;
                 return existing;
             }
+            if (existing != null) {
+                superseded[0] = existing;
+            }
             long epoch = epochs.computeIfAbsent(k, r -> new AtomicLong()).getAndIncrement();
             return new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
         });
-        if (countStats) {
-            if (reused[0]) {
-                snapshotReuseHitsTotal.incrementAndGet();
-            } else {
-                snapshotCreationsTotal.incrementAndGet();
+        if (superseded[0] != null) {
+            pendingRetire.add(new PendingRetire(ref, superseded[0], now));
+        }
+        sweepRetireDue(now);
+        return new Resolved(window, reused[0]);
+    }
+
+    /**
+     * Retire every pending superseded window whose grace period has elapsed at {@code now}. The
+     * queue is ordered oldest-first (non-decreasing clock + supersede-order enqueue), so the first
+     * not-yet-due window ends the sweep. Concurrent sweeps race on {@link Queue#remove}; only the
+     * winner of the atomic remove performs the retire, so each window is retired at most once.
+     */
+    private void sweepRetireDue(long now) {
+        while (true) {
+            PendingRetire head = pendingRetire.peek();
+            if (head == null || now - head.supersededNanos() < retireGraceNanos) {
+                return;
+            }
+            if (pendingRetire.remove(head)) {
+                retire(head.window(), head.ref());
             }
         }
-        return window;
     }
 
     /**
@@ -396,10 +484,11 @@ public final class SnapshotManager {
     }
 
     /**
-     * Best-effort delete of every snapshot an EXPLICITLY-invalidated {@code window} created (via
-     * {@link #invalidate} or {@link #retireAll} only — never on supersede, see {@link #resolveWindow}),
-     * on each host it was created on. Individual delete failures are logged and swallowed — the
-     * Sidecar TTL backstop covers a miss.
+     * Best-effort delete of every snapshot {@code window} created, on each host it was created on.
+     * Called on explicit {@link #invalidate}, on {@link #retireAll} (shutdown), and on
+     * {@link #sweepRetireDue} once a superseded window's grace period elapses (issue #2356 roborev)
+     * — never the instant a window is superseded. Individual delete failures are logged and
+     * swallowed — the Sidecar TTL backstop covers a miss.
      */
     private void retire(Window window, TableRef ref) {
         for (Map.Entry<String, CompletableFuture<String>> e : window.hostCreates.entrySet()) {

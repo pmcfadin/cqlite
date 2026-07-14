@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SnapshotManagerTest {
 
     private static final long WINDOW = 1_000L; // logical nanos
+    private static final long GRACE = 5_000L;  // logical nanos: retire a superseded window after 5 windows
 
     /** A settable logical clock so window timing is pinned deterministically (no wall-clock). */
     private static final class ManualClock implements SnapshotManager.Clock {
@@ -195,10 +196,12 @@ class SnapshotManagerTest {
         assertEquals("cqlite-ks-t-1", w1, "post-expiry query gets a fresh (next-epoch) snapshot");
         assertEquals(2, mgr.snapshotCreationsTotal(), "one create per window");
         assertEquals(0, mgr.snapshotReuseHitsTotal(), "no reuse across the window boundary");
-        // The superseded window's snapshot is NOT actively deleted (issue #2356 roborev,
-        // retire-race): a long-running query may still be reading it; the TTL backstop reclaims it.
+        // The superseded window's snapshot is NOT actively deleted the instant it is superseded
+        // (issue #2356 roborev, retire-race): a long-running query may still be reading it. It is
+        // retired only after the retire-grace elapses (here the default 10-min grace, far beyond
+        // this tiny advance), so within the grace clears stay empty.
         assertTrue(fake.clears.isEmpty(),
-                "a superseded snapshot is NOT retired on supersede, got clears=" + fake.clears);
+                "a superseded snapshot is NOT retired on supersede (within grace), got clears=" + fake.clears);
     }
 
     /**
@@ -237,6 +240,66 @@ class SnapshotManagerTest {
         mgr.retireAll();
         assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w3)),
                 "retireAll() retires the live window, got clears=" + fake.clears);
+    }
+
+    /**
+     * Blocker (issue #2356 roborev, resource retention): a superseded window must be actively
+     * retired once the retire-grace elapses (bounded retention — not left to the ~6h TTL backstop),
+     * while a still-in-grace superseded window survives (its in-flight readers may still be reading).
+     * Deterministic on the injected clock.
+     */
+    @Test
+    void supersededWindowIsRetiredAfterGraceWhileInGraceWindowSurvives() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr =
+                new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"), WINDOW, GRACE, clock);
+
+        // W0 taken at t=0.
+        String w0 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        // At t=WINDOW the window elapses; the next query rolls to W1 and enqueues W0 for retirement.
+        clock.advance(WINDOW);
+        String w1 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        assertNotEquals(w0, w1);
+        // W0 is still within its grace (age 0), so it is NOT yet retired — an in-flight reader is safe.
+        assertTrue(fake.clears.isEmpty(),
+                "a superseded window within its grace is not retired, got clears=" + fake.clears);
+
+        // Advance so W0's grace has fully elapsed (age = WINDOW+GRACE - WINDOW = GRACE) but W1's has
+        // not; the next resolve sweeps and retires ONLY W0.
+        clock.advance(GRACE);
+        String w2 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        assertNotEquals(w1, w2);
+        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w0)),
+                "W0 is retired once its grace elapses, got clears=" + fake.clears);
+        assertTrue(fake.clears.stream().noneMatch(c -> c.contains(w1)),
+                "W1 is still within its grace and must survive, got clears=" + fake.clears);
+        assertTrue(fake.clears.stream().noneMatch(c -> c.contains(w2)),
+                "the current window W2 is never retired, got clears=" + fake.clears);
+    }
+
+    /**
+     * Blocker (issue #2356 roborev, half-created window): a fail-closed per-host fan-out must not
+     * leave a freshly-created window cached as "fresh" nor count a create/flush that never fully
+     * materialized. A later query must therefore NOT reuse the phantom — it must create a real one.
+     */
+    @Test
+    void failedFanOutCachesNoWindowAndCountsNoCreation() {
+        FakeSidecars fake = new FakeSidecars();
+        fake.failCreateHosts = Set.of("h1");
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
+
+        assertThrows(SidecarClient.SidecarException.class, () -> mgr.snapshotFor("ks", "t", List.of("h1")));
+        assertEquals(0, mgr.snapshotCreationsTotal(), "a failed fan-out counts no creation");
+        assertEquals(0, mgr.snapshotReuseHitsTotal(), "a failed fan-out is not a reuse either");
+
+        // Clear the failure: the retry must CREATE (not reuse a cached phantom fresh window).
+        fake.failCreateHosts = Set.of();
+        mgr.snapshotFor("ks", "t", List.of("h1"));
+        assertEquals(1, mgr.snapshotCreationsTotal(),
+                "the retry creates a real snapshot — the failed fan-out cached nothing to reuse");
+        assertEquals(0, mgr.snapshotReuseHitsTotal(),
+                "nothing was reusable from the rolled-back half-created window");
     }
 
     /** Scenario: An explicit refresh forces a fresh snapshot on the next query. */

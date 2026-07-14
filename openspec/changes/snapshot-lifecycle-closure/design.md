@@ -116,6 +116,21 @@ callers who accept live reads.
 B1 is the lever that reduces flush churn without touching flush semantics. B3 is documented as the
 zero-isolation escape hatch. B2 is parked (comment-only + #2305).
 
+### §B addendum — bounded retirement of superseded windows (roborev on the initial impl)
+The first implementation retired a superseded window ONLY on explicit `invalidate`/`retireAll`, leaving
+supersede-on-roll to the ~6h Sidecar TTL alone. Roborev flagged the resource-retention regression: a hot
+table with a 3s window accumulates on the order of `ttl / window` (~7200) live hardlink sets per table
+per host until TTL. Decision: retire a superseded window after a bounded **grace period**
+(`cqlite.snapshot-retire-grace-ms`, default 10 min) — chosen over per-window in-flight-reader
+ref-counting because the connector has no reader-drain hook (the actual reads happen out-of-process on
+the Rust flight server), whereas a grace tied to the max query duration is simple, race-free (once the
+grace elapses no query that resolved the window can still be reading it), and deterministically testable
+on the existing injected clock. Retirement is swept lazily on the next `resolveSnapshot` (no background
+thread); steady-state retained superseded dirs bound to ~`grace / window`, well under the TTL backstop
+which still covers a crash between supersede and sweep. The counters (`snapshot_creations_total`/
+`snapshot_reuse_hits_total`, the #2306 flush proxy) are incremented only after a fan-out fully succeeds,
+and a fail-closed partial fan-out rolls back its half-created window rather than caching it.
+
 ---
 
 ## §C — Interplay: one lever, both problems

@@ -116,6 +116,12 @@ impl WarmMetrics {
     }
 
     /// Record `n` reader opens performed during a (re)build.
+    ///
+    /// Snapshot-only exposure (issue #2356 roborev, spec `flight-warm-snapshot-closure`):
+    /// this work-probe is read via [`WarmMetrics::snapshot`] (the surface the warm-closure
+    /// tests + field probes consume), NOT mirrored to the OTel counter export like the
+    /// cache hit/miss/evict/refresh counters — this change deliberately does not expand
+    /// the OTel surface for it.
     pub fn record_reader_opens(&self, n: u64) {
         if n == 0 {
             return;
@@ -126,6 +132,9 @@ impl WarmMetrics {
     /// Record `n` cached readers rebound in place to a fresh same-inode snapshot
     /// path (the #2383/#2356 rebind pass). A no-op for `n == 0` so a pure warm
     /// hit (path unchanged) never touches the counter.
+    ///
+    /// Snapshot-only exposure, same as [`Self::record_reader_opens`] (spec
+    /// `flight-warm-snapshot-closure`): read via [`WarmMetrics::snapshot`], not OTel.
     pub fn record_rebind_hits(&self, n: u64) {
         if n == 0 {
             return;

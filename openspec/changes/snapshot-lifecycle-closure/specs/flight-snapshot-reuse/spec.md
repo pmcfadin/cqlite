@@ -52,6 +52,41 @@ deterministically.
 - **THEN** a new snapshot is created (the stale-generation snapshot is not reused) and the query receives
   the new name.
 
+### Requirement: A superseded snapshot is actively retired after a bounded grace period
+
+The `SnapshotManager` SHALL NOT delete a superseded reuse window (window expiry or generation-set
+change) the instant it is superseded — an in-flight query may still be reading it (the retire-race) —
+but SHALL actively retire it (delete its per-host hardlink sets) once a bounded, configurable
+retire-grace period elapses on the injectable clock, so retention is NOT left to the multi-hour Sidecar
+TTL backstop alone. The grace period SHALL be
+configurable (`cqlite.snapshot-retire-grace-ms`) with a default that safely exceeds the longest Trino
+query, and the worst-case retained superseded snapshot directories per table per host SHALL be bounded
+by roughly `retire-grace / reuse-window` (well under `snapshot-ttl / reuse-window`). A superseded window
+still WITHIN its grace SHALL survive. Explicit `invalidate` and shutdown `retireAll` SHALL still retire
+immediately (draining any pending-retire queue). The `retire-grace × reuse-window × snapshot-ttl` sizing
+interaction SHALL be documented in the connector config docs. `snapshot_creations_total`/
+`snapshot_reuse_hits_total` SHALL count only a fully materialized fan-out (a fail-closed partial create
+counts neither and caches no reusable window).
+
+#### Scenario: A superseded snapshot is retired once its grace elapses while an in-grace one survives
+
+- **GIVEN** a reused snapshot W0 for a `(keyspace, table)` and an injected logical clock, with a
+  retire-grace configured to several freshness windows
+- **WHEN** a later query supersedes W0 with W1 and the clock is then advanced past W0's retire-grace (but
+  not W1's) and a subsequent query resolves
+- **THEN** W0's per-host snapshots are cleared (actively retired) exactly once, while W1 (still within its
+  grace) and the current window are NOT cleared
+- **AND** before W0's grace elapses, a superseded W0 is not cleared (the in-flight reader is safe).
+
+#### Scenario: A fail-closed partial fan-out caches no window and counts no creation
+
+- **GIVEN** a snapshot-mode `SnapshotManager` where one replica host's snapshot create will fail
+- **WHEN** a query resolves a fresh window and the per-host fan-out fails closed on that host
+- **THEN** `snapshot_creations_total` and `snapshot_reuse_hits_total` are unchanged (the create that
+  never fully materialized is not counted) and the half-created window is not cached
+- **AND** a subsequent successful query CREATES a fresh snapshot (it does not reuse the rolled-back
+  window).
+
 ### Requirement: Reuse reduces memtable-flush churn without changing flush semantics
 
 Reusing snapshots SHALL reduce the flush/SSTable-creation rate on the cluster proportionally to the

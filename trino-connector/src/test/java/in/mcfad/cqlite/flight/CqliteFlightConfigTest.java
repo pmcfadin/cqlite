@@ -37,6 +37,36 @@ class CqliteFlightConfigTest {
                 config.snapshotReuseWindowMillis());
         assertEquals(CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_NANOS,
                 config.snapshotReuseWindowNanos());
+        // Superseded-window retire-grace defaults (issue #2356 roborev, bounded retention).
+        assertEquals(CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS,
+                config.snapshotRetireGraceMillis());
+        assertEquals(CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_NANOS,
+                config.snapshotRetireGraceNanos());
+    }
+
+    @Test
+    void parsesSnapshotRetireGrace() {
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-retire-grace-ms", "90000");
+        CqliteFlightConfig config = CqliteFlightConfig.fromMap(m);
+        assertEquals(90_000L, config.snapshotRetireGraceMillis());
+        assertEquals(90_000_000_000L, config.snapshotRetireGraceNanos());
+    }
+
+    @Test
+    void rejectsNegativeSnapshotRetireGrace() {
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-retire-grace-ms", "-1");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+    }
+
+    @Test
+    void rejectsOversizedSnapshotRetireGraceInsteadOfSilentlyWrapping() {
+        // Same overflow guard as the reuse window: a ms value whose ms→ns (* 1_000_000) overflows
+        // long must fail fast, not silently wrap.
+        Map<String, String> m = base();
+        m.put("cqlite.snapshot-retire-grace-ms", "10000000000000");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
     }
 
     @Test

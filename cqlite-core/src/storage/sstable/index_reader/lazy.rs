@@ -11,7 +11,7 @@ use super::parse::{parse_big_index_entry_framing, parse_index_data_cancellable};
 use super::{IndexData, IndexReader};
 use crate::error::{Error, Result};
 use crate::platform::Platform;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -51,8 +51,24 @@ impl IndexReader {
     /// path WITHOUT materializing the whole map. Lives here (not the parent module)
     /// as a lazy-open support accessor, keeping `index_reader/mod.rs` under the
     /// campsite line (#1116).
-    pub(crate) fn index_path(&self) -> &Path {
-        &self.file_path
+    pub(crate) fn index_path(&self) -> PathBuf {
+        // Owned snapshot of the interior-mutable path (issue #2356 roborev): a
+        // #2383 rebind can repoint it, so we cannot hand out a borrow into the
+        // `ArcSwap`. Cheap relative to the bounded-interval read that consumes it.
+        self.file_path.load().as_ref().clone()
+    }
+
+    /// Repoint this reader's DEFERRED `Index.db` open at `new_path` after a #2383
+    /// warm inode-rebind (issue #2356 roborev). The caller (`SSTableReader::rebind_path`)
+    /// has already proven the new generation is the SAME immutable on-disk generation by
+    /// authoritative `(device, inode, generation)` + size identity, and `new_path` is the
+    /// `Index.db` hardlink SIBLING of the rebound `Data.db`; snapshot components are
+    /// same-inode hardlinks, so the bytes are byte-identical (issue #28 no-heuristics).
+    /// Without this, a LAZY reader that has not yet materialized would `File::open` its
+    /// ORIGINAL (now torn-down) snapshot path on the next `ensure_materialized`/interval
+    /// read and ENOENT — the #2352 class the Data.db-only rebind reintroduced.
+    pub(crate) fn rebind_path(&self, new_path: &Path) {
+        self.file_path.store(Arc::new(new_path.to_path_buf()));
     }
 
     /// Whether the full `Index.db` parse has already run (issue #2412 §B). A lazily
@@ -172,7 +188,7 @@ impl IndexReader {
         // defining module and all its descendants), so no field-access bridge
         // methods are needed on the struct itself.
         Ok(Self {
-            file_path: path.to_path_buf(),
+            file_path: arc_swap::ArcSwap::from_pointee(path.to_path_buf()),
             materialized: tokio::sync::OnceCell::new(),
             platform,
         })
@@ -191,13 +207,17 @@ impl IndexReader {
         self.materialized
             .get_or_try_init(|| async {
                 cancel.check()?;
-                let mut file = File::open(&self.file_path).await?;
+                // Load the CURRENT (possibly #2383-rebound) path so a lazy reader
+                // whose original snapshot dir was torn down opens the live hardlink,
+                // not the dead path (issue #2356 roborev, #2352 class).
+                let path = self.file_path.load_full();
+                let mut file = File::open(path.as_ref()).await?;
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).await?;
                 if buffer.is_empty() {
                     return Err(Error::corruption(format!(
                         "Index.db file is empty: {}",
-                        self.file_path.display()
+                        path.display()
                     )));
                 }
                 let (remaining, index_data) =

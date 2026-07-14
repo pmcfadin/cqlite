@@ -29,7 +29,8 @@ public class CqliteFlightConnector implements Connector {
         // + port (uniform across the hostNetwork Sidecar DaemonSet) and the split host.
         this.snapshots = new SnapshotManager(
                 HostSnapshotApis.fromBaseUri(config.sidecarUri()), config.readMode(), config.snapshotTtl(),
-                config.snapshotReuseWindowNanos(), new SnapshotManager.SystemClock());
+                config.snapshotReuseWindowNanos(), config.snapshotRetireGraceNanos(),
+                new SnapshotManager.SystemClock());
         // Fail fast at catalog load if arrow-java's off-heap memory init is broken by a missing JVM
         // flag (issues #2193, #2290) — otherwise every do_get dies far downstream with a cryptic
         // "Failed to read message". Runs before the first RootAllocator (the earliest Arrow touch)
