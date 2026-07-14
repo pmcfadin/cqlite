@@ -78,6 +78,11 @@ impl SSTableReader {
         let Some(index_reader) = &self.index_reader else {
             return Ok(None);
         };
+        // Issue #2412 Stage 2: a lazily-opened reader defers the full parse to
+        // first use — a full materializing enumeration IS that first use (Stage 4
+        // replaces this consumer with a true streaming walk that never
+        // materializes the whole map). No-op for an eagerly-opened reader.
+        index_reader.ensure_materialized(scan_cancel).await?;
         let entries = index_reader.get_partition_entries();
 
         // Exclusive end of the last partition = the UNCOMPRESSED data-section length.

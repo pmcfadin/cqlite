@@ -167,7 +167,7 @@ impl SSTableReader {
         // 4. Authoritative exclusive end of the target partition: the successor
         //    partition's start (next trie/index entry), or `None` for the last.
         //    Same fail-safe class as step 3 — it reads the same index/trie.
-        let end_bound = match self.successor_partition_offset(offset) {
+        let end_bound = match self.successor_partition_offset(offset).await {
             Ok(bound) => bound,
             Err(e) => {
                 tracing::debug!(

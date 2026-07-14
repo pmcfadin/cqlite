@@ -702,11 +702,23 @@ impl SSTableReader {
             .instrument(tracing::debug_span!("sstable.reader.open.load_bloom"))
             .await?;
 
+        // Issue #2412: load Summary.db FIRST so its usability (present, parsed, at
+        // least one sample entry — the authority a bounded lazy walk needs) can
+        // gate whether `load_index_reader` defers the Index.db parse (lazy, design
+        // §A) or falls back to today's eager parse (§A1's counted FellBack).
+        let summary_reader = Self::load_summary_reader(path, &platform)
+            .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))
+            .await;
+        let summary_usable = summary_reader
+            .as_ref()
+            .map(|s| !s.get_entries().is_empty())
+            .unwrap_or(false);
+
         // Load spec readers for enhanced metadata and lookups. Distinguish an absent
         // Index.db from a present-but-unloadable one (issue #2302) so the full
         // enumeration can WARN loud on the latter instead of silently full-scanning.
         let (index_reader, index_present_but_unloadable) =
-            match Self::load_index_reader(path, &platform, &cancel)
+            match Self::load_index_reader(path, &platform, &cancel, summary_usable)
                 .instrument(tracing::debug_span!(
                     "sstable.reader.open.load_index_reader"
                 ))
@@ -716,9 +728,6 @@ impl SSTableReader {
                 component_loading::IndexLoadOutcome::Absent => (None, false),
                 component_loading::IndexLoadOutcome::PresentButUnloadable => (None, true),
             };
-        let summary_reader = Self::load_summary_reader(path, &platform)
-            .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))
-            .await;
         let statistics_reader = Self::load_statistics_reader(path, &platform)
             .instrument(tracing::debug_span!("sstable.reader.open.load_statistics"))
             .await?;

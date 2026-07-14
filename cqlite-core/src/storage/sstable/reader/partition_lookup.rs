@@ -28,6 +28,15 @@ impl SSTableReader {
     ) -> Result<Option<(u64, u32)>> {
         use crate::observability::{self as obs, catalog};
 
+        // Issue #2412: ensure a lazily-opened reader's Index.db is materialized
+        // BEFORE entering the tracing span below. `EnteredSpan` is not `Send`, so
+        // holding it across this await would make every future `.await`ing this
+        // fn non-Send (`block_on_async`/`tokio::spawn` callers require `Send`
+        // futures). A no-op after the first call, or for an eagerly-opened reader.
+        if let Some(index_reader) = &self.index_reader {
+            index_reader.ensure_materialized(&self.scan_cancel).await?;
+        }
+
         let _span = tracing::debug_span!("sstable.partition_lookup.index").entered();
         let format = self.sstable_format_label();
 
@@ -56,6 +65,7 @@ impl SSTableReader {
         }
 
         if let Some(index_reader) = &self.index_reader {
+            // (materialization already ensured above, before the span was entered)
             // A5/B4 read-work counter (`INDEX_PROBES`; consumer B4): one per real
             // `Index.db` probe. Counted only when a cache miss forces a real probe,
             // so a B4 cache hit above records nothing. No-op in release.
