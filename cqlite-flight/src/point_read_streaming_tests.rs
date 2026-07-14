@@ -35,7 +35,9 @@ use crate::cancel::CancelFlag;
 use crate::filter::ScanSpec;
 use crate::producer::{BatchSink, CollectSink, DirSource, MergeProducer, ProducerError};
 use crate::scan_progress::ScanProgress;
-use crate::testutil::{build_sstables, clustering_schema, total_rows, write_clustered};
+use crate::testutil::{
+    build_sstables, clustering_schema, delete_clustered, total_rows, write_clustered,
+};
 use crate::ticket::{FlightTicket, Predicate, PredicateOp};
 
 use cqlite_core::query::AccessPath;
@@ -105,6 +107,10 @@ fn point_spec(schema: &TableSchema) -> ScanSpec {
 
 /// Open every `-Data.db` under `dir` as a warm `Arc<SSTableReader>` (mirrors the
 /// warm-registry hand-off in `producer_warm.rs`'s own test).
+///
+/// Must only be called from a NON-async test context: it `block_on`s a
+/// freshly-built current-thread `tokio` runtime, which panics if called from
+/// inside an already-running runtime.
 fn warm_readers(dir: &std::path::Path) -> Vec<Arc<SSTableReader>> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -155,7 +161,13 @@ fn point_read_materialises_bounded_rows_not_whole_partition() {
     // The point route drives `produce_point`; after the fix that is the streaming
     // drive, so it stops within ~BATCH rows of the first emit. The drive returns
     // `Cancelled` once it observes the tripped flag at a row/partition boundary.
-    let _ = producer.produce_streaming(paths, &cancel, &mut sink, &ScanProgress::default(), || {});
+    let err = producer
+        .produce_streaming(paths, &cancel, &mut sink, &ScanProgress::default(), || {})
+        .expect_err("the tripped cancel aborts the point read");
+    assert!(
+        matches!(err, ProducerError::Cancelled),
+        "expected ProducerError::Cancelled, got {err:?}"
+    );
 
     assert!(
         sink.rows <= BATCH * 4,
@@ -193,9 +205,13 @@ fn point_read_cancel_takes_effect_mid_partition() {
         matches!(err, ProducerError::Cancelled),
         "mid-partition cancel must surface as Cancelled, got {err:?}"
     );
+    // Tightened to the same ~batch_size bound as AC1/AC3 (roborev job 1707): a
+    // looser `< WIDTH` bound could pass on an unrelated sub-partition stop, not
+    // specifically on the row-granular cancel poll this AC guards.
     assert!(
-        sink.rows < WIDTH,
-        "the point read stopped mid-partition ({} rows), not at partition end ({WIDTH})",
+        sink.rows <= BATCH * 4,
+        "the point read stopped at {} rows — must be bounded to ~batch_size, not \
+         partition-width ({WIDTH})",
         sink.rows
     );
 }
@@ -221,12 +237,18 @@ fn warm_point_read_materialises_bounded_rows_not_whole_partition() {
         cancel: &cancel,
         rows: 0,
     };
-    let _ = producer.produce_streaming_from_readers(
-        readers,
-        &cancel,
-        &mut sink,
-        &ScanProgress::default(),
-        || {},
+    let err = producer
+        .produce_streaming_from_readers(
+            readers,
+            &cancel,
+            &mut sink,
+            &ScanProgress::default(),
+            || {},
+        )
+        .expect_err("the tripped cancel aborts the warm point read");
+    assert!(
+        matches!(err, ProducerError::Cancelled),
+        "expected ProducerError::Cancelled, got {err:?}"
     );
 
     assert!(
@@ -255,12 +277,18 @@ fn warm_full_scan_materialises_bounded_rows_not_whole_partition() {
         cancel: &cancel,
         rows: 0,
     };
-    let _ = producer.produce_streaming_from_readers(
-        readers,
-        &cancel,
-        &mut sink,
-        &ScanProgress::default(),
-        || {},
+    let err = producer
+        .produce_streaming_from_readers(
+            readers,
+            &cancel,
+            &mut sink,
+            &ScanProgress::default(),
+            || {},
+        )
+        .expect_err("the tripped cancel aborts the warm full scan");
+    assert!(
+        matches!(err, ProducerError::Cancelled),
+        "expected ProducerError::Cancelled, got {err:?}"
     );
 
     assert!(
@@ -273,13 +301,82 @@ fn warm_full_scan_materialises_bounded_rows_not_whole_partition() {
 
 // ---- AC4: byte-identity — streaming vs buffered drive over the SAME point merger ----
 
-/// AC4. Driving the SAME point merger through the buffered `drive_merge` and the
-/// streaming `drive_merge_over` must yield byte-identical batches (same row
-/// count, same batch chunking, same contents). This guards that the fix changes
-/// only WHEN rows are materialised, never the output.
+/// The `ck`/`val` rows a `clustering_schema` producer emits, as sorted pairs.
+fn clustered_rows(batches: &[RecordBatch]) -> Vec<(String, i32)> {
+    use arrow::array::{Array, Int32Array, StringArray};
+    let mut out = Vec::new();
+    for b in batches {
+        let cks = b
+            .column_by_name("ck")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let vals = b
+            .column_by_name("val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..b.num_rows() {
+            out.push((cks.value(i).to_string(), vals.value(i)));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Build TWO generations over the SAME target partition (`pk = 1`) — an
+/// overriding cell (LWW winner in gen 2) at `ck0000` AND a shadowing row
+/// tombstone at `ck0001` — mirroring the multi-generation pattern in
+/// `producer_stream.rs`'s `produce_streaming_matches_buffered_collect_path`
+/// (issue #2230), but confined to one partition so `build_single_partition_merger`
+/// (the point-read path) exercises cross-generation reconciliation, not just
+/// single-SSTable pass-through (roborev job 1707 blocker).
+///
+/// Returns the temp dir (kept alive by the caller), the table dir, and the
+/// `(ck, val)` pairs the RECONCILED partition must contain.
+fn multi_gen_wide_partition() -> (tempfile::TempDir, std::path::PathBuf, Vec<(String, i32)>) {
+    let schema = clustering_schema();
+    let gen1: Vec<_> = (0..WIDTH)
+        .map(|i| write_clustered(1, &format!("ck{i:04}"), i as i32, 100))
+        .collect();
+    let gen2 = vec![
+        // LWW winner: overrides gen1's ck0000 (val 0 -> 999) at a newer timestamp.
+        write_clustered(1, "ck0000", 999, 200),
+        // Shadowing row tombstone: removes gen1's ck0001 entirely.
+        delete_clustered(1, "ck0001", 200),
+    ];
+    let (temp, _data, dir) = build_sstables(&schema, vec![gen1, gen2]);
+
+    let mut expected: Vec<(String, i32)> = (0..WIDTH)
+        .map(|i| (format!("ck{i:04}"), i as i32))
+        .collect();
+    expected.retain(|(ck, _)| ck != "ck0001"); // tombstoned away
+    if let Some(entry) = expected.iter_mut().find(|(ck, _)| ck == "ck0000") {
+        entry.1 = 999; // LWW override
+    }
+    expected.sort();
+    (temp, dir, expected)
+}
+
+/// AC4. Driving the SAME point merger — over a MULTI-GENERATION target partition
+/// (an LWW-overridden cell plus a shadowing row tombstone) — through the
+/// buffered `drive_merge` and the streaming `drive_merge_over` must yield
+/// byte-identical batches (same row count, same batch chunking, same contents).
+/// This guards that the fix changes only WHEN rows are materialised, never the
+/// output — and specifically exercises cross-generation LWW/tombstone
+/// reconciliation, since the two drives use DIFFERENT reconcilers
+/// (`KWayMerger::step` whole-partition vs `StreamingMerger` per-`ClusterGroup`).
+/// The single-generation `wide_partition` fixture cannot distinguish this: this
+/// test's expected row set (`multi_gen_wide_partition`'s `expected`) only comes
+/// out right if BOTH drives apply the same LWW-wins-on-timestamp and
+/// tombstone-shadows-write semantics — flipping either generation's timestamp
+/// changes the expected winner, which is how this pin was hand-verified to have
+/// discrimination power (not just a vacuous equality of two empty/no-op runs).
 #[test]
 fn point_read_streaming_is_byte_identical_to_buffered() {
-    let (_temp, dir) = wide_partition();
+    let (_temp, dir, expected) = multi_gen_wide_partition();
     let schema = clustering_schema();
     let producer = MergeProducer::with_spec(schema.clone(), BATCH, point_spec(&schema)).unwrap();
     let paths = producer.resolve_paths(&DirSource::new(&dir)).unwrap();
@@ -330,7 +427,16 @@ fn point_read_streaming_is_byte_identical_to_buffered() {
         batches
     };
 
-    assert_eq!(total_rows(&buffered), WIDTH, "the whole partition survives");
+    assert_eq!(
+        total_rows(&buffered),
+        WIDTH - 1,
+        "the reconciled partition drops exactly the one tombstoned row"
+    );
+    assert_eq!(
+        clustered_rows(&buffered),
+        expected,
+        "buffered drive must reflect the LWW override + tombstone shadow"
+    );
     assert_eq!(
         total_rows(&buffered),
         total_rows(&streamed),
@@ -344,4 +450,19 @@ fn point_read_streaming_is_byte_identical_to_buffered() {
     for (b, s) in buffered.iter().zip(streamed.iter()) {
         assert_eq!(b, s, "streaming batch must be byte-identical to buffered");
     }
+
+    // "Prefer also covering the warm point path with the same multi-gen fixture"
+    // (roborev job 1707): the warm reader-set point route (`producer_warm.rs`)
+    // must reconcile the SAME multi-generation partition identically to the cold
+    // buffered reference above.
+    let readers = warm_readers(&dir);
+    assert_eq!(readers.len(), 2, "the fixture ships two generations");
+    let warm_batches = producer
+        .produce_streaming_from_readers_to_vec(readers, &CancelFlag::new())
+        .expect("warm point read");
+    assert_eq!(
+        clustered_rows(&warm_batches),
+        expected,
+        "warm point path must reflect the same LWW override + tombstone shadow"
+    );
 }
