@@ -735,3 +735,78 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
          check (issue #2264, roborev round 3; oracle migrated in #2430)"
     );
 }
+
+/// Issue #2430: a full MATERIALISING scan must NOT re-probe the `Index.db` once
+/// per partition. The loop already holds every partition's `data_offset` from the
+/// up-front `get_partition_entries()` load, so it resolves each offset directly
+/// from `entries[i]` — a fresh `lookup_partition_with_index` per partition (which,
+/// post-#2412, is a Summary binary search + interval read) is pure redundant work.
+///
+/// The direct on-disk measure of that redundancy is the per-partition index-PROBE
+/// count (`read_work_counters::index_probes`): before the fix it was EXACTLY the
+/// partition count `N` (one probe per entry); after the fix it is `0` — bounded by
+/// a constant, not by `N`. This is the red-then-green pin: it FAILS (records `N`
+/// probes) against the pre-#2430 materialising walk and PASSES (`0`) after.
+///
+/// `#[serial_test::serial]`: `index_probes` is a process-global counter read after
+/// a `reset()`, so this test must not run concurrently with another scan-driving
+/// test in the same binary.
+#[tokio::test]
+#[serial_test::serial]
+async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
+    let Some(data_path) = real_index_backed_fixture() else {
+        eprintln!(
+            "Skipping (materializing reprobe bound): real multi_partition_table \
+             fixture not present (set CQLITE_DATASETS_ROOT)"
+        );
+        return;
+    };
+    let reader = open_reader(&data_path).await;
+
+    // Measure the index-probe work of ONE full materialising index-backed scan.
+    // (The scan internally `ensure_materialized`s the lazily-opened index, so the
+    // partition count below is read AFTER, once entries are resident.)
+    crate::storage::sstable::read_work_counters::reset();
+    let cancel = ScanCancel::new();
+    let result = reader.iterate_all_partitions_via_full_index(&cancel).await;
+    let probes = crate::storage::sstable::read_work_counters::index_probes();
+
+    // The scan must resolve fully through the index branch (not fall through to
+    // sequential_scan), else the probe count would be vacuously 0 for the wrong
+    // reason.
+    let rows = match result {
+        Ok(Some(rows)) => rows,
+        other => panic!(
+            "the materialising index-backed scan must fully resolve this real \
+             fixture (Ok(Some(_))): {other:?}"
+        ),
+    };
+    assert!(
+        !rows.is_empty(),
+        "the fixture's partitions must decode to at least one live row"
+    );
+
+    // Non-vacuity: the fixture must have SEVERAL partitions, or "O(N) probes vs a
+    // constant" cannot bite (N == 0/1 makes both sides trivially equal). Read after
+    // the scan materialised the lazy index (`get_partition_entries()` is empty
+    // before the first `ensure_materialized`).
+    let partition_count = reader
+        .index_reader
+        .as_ref()
+        .map(|ir| ir.get_partition_entries().len())
+        .unwrap_or(0);
+    assert!(
+        partition_count > 1,
+        "fixture must expose several Index.db partitions for the O(N)-vs-constant \
+         reprobe distinction to be meaningful (got {partition_count})"
+    );
+
+    // The fix: each partition's offset comes from the already-loaded entry, so the
+    // walk performs ZERO redundant per-partition Index.db probes — bounded by a
+    // constant, NOT by the partition count. Before #2430 this was == partition_count.
+    assert_eq!(
+        probes, 0,
+        "a full materialising scan must not re-probe the index per partition — got \
+         {probes} probes for {partition_count} partitions (pre-#2430 this equalled N)"
+    );
+}

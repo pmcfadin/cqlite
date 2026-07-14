@@ -22,7 +22,6 @@
 //! | entries non-empty + data section empty | structurally inconsistent | incomplete `Ok(None)` | loud |
 //! | `!index_reader.is_fully_parsed()` | mid-entry-truncated Index.db (Signal A) | incomplete `Ok(None)` | loud |
 //! | `partition_key.is_empty()` | entry carries a present-but-zero-length key — legal Cassandra shape, but `key_len == 0` is unsafe to read back through the shared row/partition scanner on EITHER path (job 1610, see the call-site comment) | incomplete `Ok(None)` | loud |
-//! | `lookup_partition_with_index` misses | index/probe disagreement | incomplete `Ok(None)` | loud |
 //! | `next_offset <= data_offset` | non-ascending offsets | incomplete `Ok(None)` | loud |
 //! | `u32::try_from(span)` fails | partition span overflows `u32` | incomplete `Ok(None)` | loud |
 //! | `partition_slice_fully_consumed` false (Signal B) | dropped trailing entries, a corrupt/truncated partition body (any entry, empty or non-empty result), OR (job 1610) a slice truncated exactly at a parseable row boundary with no CONFIRMED end-of-partition terminator | incomplete `Ok(None)` | loud |
@@ -40,9 +39,12 @@ impl SSTableReader {
     /// Each `Index.db` entry stores a partition's start offset (relative to the data
     /// section) but NOT its byte size. The exclusive end of partition `i` is the
     /// start of partition `i+1` (entries are token-ordered, matching Data.db physical
-    /// order); the LAST partition ends at the data-section end. Every real probe
-    /// increments `INDEX_PROBES` via
-    /// [`lookup_partition_with_index`](SSTableReader::lookup_partition_with_index).
+    /// order); the LAST partition ends at the data-section end. Each partition's
+    /// start offset is read DIRECTLY from its already-loaded `Index.db` entry
+    /// (`entries[i].data_offset`) — the walk does NOT re-probe
+    /// [`lookup_partition_with_index`](SSTableReader::lookup_partition_with_index)
+    /// per partition (issue #2430: a redundant Summary binary search + interval read
+    /// on every entry, O(N) on a full scan).
     ///
     /// Both compression modes are handled: the offsets are in the uncompressed
     /// data-section domain, so an uncompressed reader reads the raw file slice
@@ -195,13 +197,15 @@ impl SSTableReader {
                 return Ok(None);
             }
 
-            // Resolve through the shared probe so INDEX_PROBES / the B4 key cache /
-            // the observability counters all fire exactly as a point read's would.
-            let Some((data_offset, _size)) =
-                self.lookup_partition_with_index(partition_key).await?
-            else {
-                return Ok(None);
-            };
+            // Resolve the partition's start offset DIRECTLY from the already-loaded
+            // entry (issue #2430). `get_partition_entries()` above returned the
+            // fully-materialised offset table, so `entries[i].data_offset` IS this
+            // partition's start — the same value a `lookup_partition_with_index`
+            // probe would recover, since both read the one resident index. Re-probing
+            // per partition was pure redundant work: after #2412 it routes through a
+            // fresh Summary binary search + interval read (file open + seek + parse),
+            // turning a full scan into O(N) redundant index re-resolutions.
+            let data_offset = entries[i].data_offset;
 
             // Bound the partition: successor entry's offset, else the data-section
             // end for the final partition. Offsets must ascend (Data.db physical
