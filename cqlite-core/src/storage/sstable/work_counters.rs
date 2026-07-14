@@ -355,6 +355,8 @@ pub fn add_data_db_checksum_full_read() {
 /// (same rationale as the other read-work counters).
 pub(crate) fn add_stream_walk_partition_parsed() {
     COUNTERS.add_stream_walk_partition_parsed();
+    #[cfg(test)]
+    stream_walk_scope::record();
 }
 
 /// Number of partition bodies a `do_get` scan read + parsed since the last
@@ -366,8 +368,119 @@ pub(crate) fn add_stream_walk_partition_parsed() {
 /// today this reads the full count for any overlapping SSTable — the fixed
 /// warm-scan setup cost independent of the split range and of `LIMIT` that issue
 /// #2398 tracks.
+///
+/// This global getter is for CROSS-THREAD / integration observability (a
+/// detached compaction producer thread bumping the counter, read from the test
+/// thread). A same-thread *delta* assertion — "this scan drove EXACTLY N
+/// partition parses" — must NOT use it: the counter is process-global, so a
+/// concurrent test on another thread contaminates the delta under thread-parallel
+/// `cargo test` (issue #2428). Such assertions use [`stream_walk_scope`]'s
+/// thread-local [`StreamWalkScope`](stream_walk_scope::StreamWalkScope) instead,
+/// which is immune by construction.
 pub fn stream_walk_partitions_parsed() -> u64 {
     COUNTERS.stream_walk_partitions_parsed()
+}
+
+/// Thread-local scoping for [`stream_walk_partitions_parsed`] delta assertions
+/// (issue #2428).
+///
+/// # Why this exists
+///
+/// [`stream_walk_partitions_parsed`] is a process-global `AtomicU64` shared by
+/// every read-path scan and every test that drives one. A test that asserts a
+/// *delta* — "my scan drove EXACTLY N partition parses" — by
+/// `reset()`-ing the global, scanning, then reading the global back is
+/// contaminated the moment ANY other test in the same test binary drives a scan
+/// concurrently between the reset and the read: under thread-parallel
+/// `cargo test --lib --all-features` (the CI "Required PR Gate" invocation, which
+/// does NOT use nextest's per-process isolation) the observed delta jumps to an
+/// arbitrary inflated value. `#[serial(work_counters)]` only serialises tests
+/// that BOTH carry the tag, so a single untagged scan-driving test anywhere in
+/// the crate reintroduces the flake — a fragile, easy-to-miss invariant across a
+/// large and growing set of reachable tests.
+///
+/// # The structural fix
+///
+/// cargo runs each `#[test]` on its own OS thread, and a default (current-thread)
+/// `#[tokio::test]` drives all of its `.await`s on that one thread. So a
+/// thread-local counter, activated for the duration of one test's scan, records
+/// ONLY the increments that execute on that test's own thread — structurally
+/// immune to any concurrent test on another thread mutating the process-global
+/// counter. A delta assertion opens a [`StreamWalkScope`] before its scan and
+/// reads [`StreamWalkScope::count`] after; no `reset()`, no global read, no
+/// serial tag, and no way for a future scan-driving test to contaminate it.
+///
+/// # Boundaries
+///
+/// The scope only sees increments on THE THREAD that opened it, so it is for
+/// same-thread delta assertions of an inline (non-`spawn`) scan. A scan that
+/// fans work onto detached producer threads (the compaction merge path) would
+/// bump the global on those threads without touching the scope — such tests keep
+/// using the global [`stream_walk_partitions_parsed`] getter. This module is
+/// `#[cfg(test)]`: it exists only in the library's own test build (the binary
+/// where the contamination occurs); integration tests in `tests/` compile the
+/// library without its `test` cfg and never see it.
+#[cfg(test)]
+pub(crate) mod stream_walk_scope {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `Some(count)` while a [`StreamWalkScope`] is active on this thread,
+        /// `None` otherwise. Only `add_stream_walk_partition_parsed()` calls that
+        /// execute on this thread bump it.
+        static SCOPED: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Bump the active scope on the current thread, if any. A no-op on threads
+    /// (production scans, detached producers, other tests) with no active scope.
+    pub(crate) fn record() {
+        SCOPED.with(|c| {
+            if let Some(v) = c.get() {
+                c.set(Some(v.saturating_add(1)));
+            }
+        });
+    }
+
+    /// A per-thread recording scope for `stream_walk_partitions_parsed`. Open one
+    /// before an inline scan whose partition-parse count you assert, and read
+    /// [`count`](StreamWalkScope::count) after. Immune to concurrent tests on
+    /// other threads (issue #2428). Dropping it clears the scope.
+    ///
+    /// Deliberately `!Send` (holds a `PhantomData<*const ()>`): the scope is
+    /// meaningful only on the thread that opened it, so the type system forbids
+    /// moving it to another thread where its `count()` would be wrong.
+    pub(crate) struct StreamWalkScope {
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    impl StreamWalkScope {
+        /// Begin recording on the current thread. Panics if a scope is already
+        /// active on this thread (one scope per assertion; nesting unsupported).
+        pub(crate) fn new() -> Self {
+            SCOPED.with(|c| {
+                assert!(
+                    c.get().is_none(),
+                    "a StreamWalkScope is already active on this thread (nesting unsupported)"
+                );
+                c.set(Some(0));
+            });
+            Self {
+                _not_send: std::marker::PhantomData,
+            }
+        }
+
+        /// Partition-parse increments recorded on this thread since the scope
+        /// opened.
+        pub(crate) fn count(&self) -> u64 {
+            SCOPED.with(|c| c.get().unwrap_or(0))
+        }
+    }
+
+    impl Drop for StreamWalkScope {
+        fn drop(&mut self) {
+            SCOPED.with(|c| c.set(None));
+        }
+    }
 }
 
 /// Number of full `Data.db` re-reads performed for checksum computation since
@@ -496,5 +609,80 @@ mod tests {
         assert_eq!(c.partitions_decoded(), 0);
         assert_eq!(c.chunks_decompressed(), 0);
         assert_eq!(c.rows_decoded(), 0);
+    }
+}
+
+// NB: this module is gated ONLY on `test` (NOT `not(tombstones)`): the CI
+// Required-PR-Gate invocation this issue exists to fix is
+// `cargo test --lib --all-features`, which enables `tombstones`. The
+// `add_stream_walk_partition_parsed` mutator and the `stream_walk_scope` are both
+// present under every feature set, so this regression must run under all of them.
+#[cfg(test)]
+mod stream_walk_scope_tests {
+    use super::*;
+
+    /// Structural regression for issue #2428: a [`StreamWalkScope`] records ONLY
+    /// the `add_stream_walk_partition_parsed()` increments that execute on its own
+    /// thread, so a *concurrent* thread bumping the same process-global counter
+    /// cannot contaminate a same-thread delta assertion.
+    ///
+    /// This is the mechanism that made
+    /// `sequential_scan_fallback_counts_each_partition_exactly_once` flake under
+    /// thread-parallel `cargo test --lib` (the CI Required-PR-Gate invocation,
+    /// which does NOT isolate tests per-process like nextest): another
+    /// scan-driving test running between that test's `reset()` and its read
+    /// inflated the observed global delta. Here we reproduce that exact shape —
+    /// a foreign thread hammering the global while a scope is open — and prove the
+    /// scoped count stays exactly the number of increments made on THIS thread.
+    #[test]
+    fn stream_walk_scope_is_immune_to_a_concurrent_thread() {
+        use super::stream_walk_scope::StreamWalkScope;
+        use std::sync::mpsc;
+
+        const LOCAL: u64 = 10; // mirrors the flaky test's N
+        const FOREIGN: u64 = 500; // the contaminating "other test" load
+
+        let scope = StreamWalkScope::new();
+
+        // A foreign thread bumps the SAME process-global counter (its own thread
+        // has no active scope, so `record()` is a no-op there). Handshakes force
+        // its increments to interleave DURING this thread's scope, exactly like a
+        // concurrent scan-driving test.
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (proceed_tx, proceed_rx) = mpsc::channel::<()>();
+        let foreign = std::thread::spawn(move || {
+            started_tx.send(()).expect("send started");
+            proceed_rx.recv().expect("recv proceed");
+            for _ in 0..FOREIGN {
+                add_stream_walk_partition_parsed();
+            }
+        });
+
+        started_rx.recv().expect("foreign thread must start");
+        // Bump on THIS thread before, ...
+        for _ in 0..(LOCAL / 2) {
+            add_stream_walk_partition_parsed();
+        }
+        // ... let the foreign thread run its whole contaminating load, ...
+        proceed_tx.send(()).expect("release foreign thread");
+        foreign.join().expect("foreign thread must not panic");
+        // ... and after. The foreign 500 landed squarely between our increments.
+        for _ in 0..(LOCAL - LOCAL / 2) {
+            add_stream_walk_partition_parsed();
+        }
+
+        assert_eq!(
+            scope.count(),
+            LOCAL,
+            "the scope must count only this thread's {LOCAL} increments, never the \
+             foreign thread's {FOREIGN} on the shared global (issue #2428)"
+        );
+        drop(scope);
+        // After drop the scope is cleared: a fresh increment records nowhere.
+        assert_eq!(
+            StreamWalkScope::new().count(),
+            0,
+            "a fresh scope starts at zero (the previous scope's count did not leak)"
+        );
     }
 }

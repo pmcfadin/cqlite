@@ -20,7 +20,6 @@ use crate::storage::sstable::reader::SSTableReader;
 use crate::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
 use crate::types::Value;
 use crate::{Config, Platform};
-use serial_test::serial;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -106,13 +105,13 @@ async fn open_reader(data_path: &std::path::Path) -> SSTableReader {
 /// Non-vacuity + full enumeration (issue #2361): `stream_all_partitions_cancellable`
 /// (no `limit` parameter) emits every one of the fixture's `N` partitions.
 ///
-/// `#[serial(work_counters)]` (issue #2398, roborev 1693): this walk increments
-/// the process-global `stream_walk_partitions_parsed` counter as a side effect;
-/// every test in this file that does so shares the `work_counters` key so none
-/// contaminates `sequential_scan_fallback_counts_each_partition_exactly_once`'s
-/// delta assertion (the established convention, issue #1071).
+/// No `#[serial(work_counters)]` needed (issue #2428): this walk bumps the
+/// process-global `stream_walk_partitions_parsed` counter as a side effect, but
+/// the only test that ASSERTS a delta on it
+/// (`sequential_scan_fallback_counts_each_partition_exactly_once`) measures
+/// through a thread-local scope immune to concurrent increments, so no sibling
+/// serialization is required.
 #[tokio::test]
-#[serial(work_counters)]
 async fn stream_all_partitions_cancellable_emits_every_partition() {
     const N: i32 = 24;
     let (_temp, data_path) = write_fixture(N).await;
@@ -139,10 +138,9 @@ async fn stream_all_partitions_cancellable_emits_every_partition() {
 /// `Streamed`), in index (token) order, emitting each as it is resolved rather
 /// than after a whole-file materialisation. Non-vacuity: all N rows arrive.
 ///
-/// `#[serial(work_counters)]`: see the doc on
+/// No `#[serial(work_counters)]` needed (issue #2428): see the doc on
 /// `stream_all_partitions_cancellable_emits_every_partition` above.
 #[tokio::test]
-#[serial(work_counters)]
 async fn stream_via_full_index_streams_every_partition_in_order() {
     const N: i32 = 16;
     let (_temp, data_path) = write_fixture(N).await;
@@ -192,10 +190,9 @@ async fn stream_via_full_index_streams_every_partition_in_order() {
 /// the pre-#2361 code the whole SSTable was materialised into a `Vec` BEFORE the
 /// first emit, so a break could never save that work; here it does.
 ///
-/// `#[serial(work_counters)]`: see the doc on
+/// No `#[serial(work_counters)]` needed (issue #2428): see the doc on
 /// `stream_all_partitions_cancellable_emits_every_partition` above.
 #[tokio::test]
-#[serial(work_counters)]
 async fn stream_all_partitions_cancellable_stops_on_break() {
     const N: i32 = 20;
     let (_temp, data_path) = write_fixture(N).await;
@@ -220,10 +217,9 @@ async fn stream_all_partitions_cancellable_stops_on_break() {
 /// walk promptly, emitting nothing and returning `Error::Cancelled` — the
 /// cooperative poll at the top of the streaming walk.
 ///
-/// `#[serial(work_counters)]`: see the doc on
+/// No `#[serial(work_counters)]` needed (issue #2428): see the doc on
 /// `stream_all_partitions_cancellable_emits_every_partition` above.
 #[tokio::test]
-#[serial(work_counters)]
 async fn stream_all_partitions_cancellable_pre_cancel_emits_nothing() {
     const N: i32 = 12;
     let (_temp, data_path) = write_fixture(N).await;
@@ -255,13 +251,19 @@ async fn stream_all_partitions_cancellable_pre_cancel_emits_nothing() {
 /// `sequential_scan`'s internal accounting — never `2 * N` (the double-count a
 /// redundant increment in the fallback's re-emit loop would produce).
 ///
-/// `#[serial(work_counters)]`: `stream_walk_partitions_parsed` is a process-global
-/// counter (issue #1071's established convention) — every OTHER test in this file
-/// that touches it shares this key so this delta assertion cannot be contaminated
-/// by a concurrently-running sibling.
+/// Contamination-proof by construction (issue #2428): the assertion measures the
+/// delta through a thread-local
+/// [`StreamWalkScope`](crate::storage::sstable::work_counters::stream_walk_scope::StreamWalkScope),
+/// NOT the process-global `stream_walk_partitions_parsed()` getter. The scope
+/// records only increments that execute on THIS test's own thread, so a
+/// concurrent scan-driving test on another thread (under thread-parallel
+/// `cargo test --lib`, the CI Required-PR-Gate invocation, which does not isolate
+/// tests per-process like nextest) cannot inflate the count. That is why this
+/// test needs no `#[serial(work_counters)]` tag and no global `reset()`. See the
+/// `work_counters::stream_walk_scope` module doc for the full rationale.
 #[tokio::test]
-#[serial(work_counters)]
 async fn sequential_scan_fallback_counts_each_partition_exactly_once() {
+    use crate::storage::sstable::work_counters::stream_walk_scope::StreamWalkScope;
     const N: i32 = 10;
     let (_temp, data_path) = write_fixture(N).await;
     // Force the fallback: delete the sibling Index.db so `index_reader` is `None`
@@ -280,7 +282,13 @@ async fn sequential_scan_fallback_counts_each_partition_exactly_once() {
     );
     let cancel = ScanCancel::default();
 
-    crate::storage::sstable::work_counters::reset();
+    // Open the recording scope BEFORE the inline scan; it counts only this
+    // thread's increments, so a concurrent scan-driving test on another thread
+    // cannot contaminate the delta (issue #2428). No global `reset()` / getter
+    // and no `#[serial(work_counters)]` needed: the fallback runs
+    // `sequential_scan` INLINE (no `spawn`) on the current-thread runtime, so
+    // every increment lands on this thread.
+    let scope = StreamWalkScope::new();
     let mut emitted = 0usize;
     reader
         .stream_all_partitions_cancellable(&cancel, |_row| {
@@ -295,7 +303,7 @@ async fn sequential_scan_fallback_counts_each_partition_exactly_once() {
         "the fallback must emit every partition"
     );
     assert_eq!(
-        crate::storage::sstable::work_counters::stream_walk_partitions_parsed(),
+        scope.count(),
         N as u64,
         "the fallback must count each partition body EXACTLY ONCE (not 2x — \
          roborev 1693): sequential_scan owns the increment, the re-emit loop \
