@@ -447,6 +447,21 @@ fn req4_configured_k_bounds_admitted_concurrency() {
     }
 }
 
+/// roborev-1697: a `--max-concurrent-scans` value ABOVE `Semaphore::MAX_PERMITS`
+/// must construct cleanly with a clamped ceiling, never panic (`Semaphore::new`
+/// panics above that bound) — a bad operator-supplied config must fail
+/// gracefully, never crash startup.
+#[test]
+fn req4_absurd_configured_k_clamps_instead_of_panicking() {
+    let absurd = tokio::sync::Semaphore::MAX_PERMITS + 1_000_000;
+    let adm = Admission::new(cfg(absurd, BIG_TIMEOUT));
+    assert_eq!(
+        adm.limit(),
+        tokio::sync::Semaphore::MAX_PERMITS,
+        "an out-of-range K is clamped to Semaphore::MAX_PERMITS, not honoured verbatim"
+    );
+}
+
 /// Scenario: the permit-wait timeout is honoured as configured — a different
 /// budget yields a correspondingly different reject point (logical time under the
 /// paused clock; no real sleep).

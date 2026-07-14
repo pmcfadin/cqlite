@@ -155,11 +155,24 @@ pub struct Admission {
 }
 
 impl Admission {
-    /// Build an admission ceiling from `config`. The ceiling is clamped to a
-    /// minimum of 1 (a zero-permit semaphore would reject every request). Records
-    /// the configured limit gauge.
+    /// Build an admission ceiling from `config`. The ceiling is clamped
+    /// symmetrically at both ends (roborev-1697): a minimum of 1 (a zero-permit
+    /// semaphore would reject every request) and a maximum of
+    /// [`Semaphore::MAX_PERMITS`] — `Semaphore::new` PANICS above that bound, so
+    /// an absurd `--max-concurrent-scans`/`CQLITE_MAX_CONCURRENT_SCANS` value
+    /// must be capped, never allowed to crash startup. A clamp (at either end) is
+    /// logged so an operator setting an out-of-range value learns it was capped,
+    /// not silently honoured. Records the (post-clamp) configured limit gauge.
     pub fn new(config: AdmissionConfig) -> Self {
-        let limit = config.max_concurrent_scans.max(1);
+        let requested = config.max_concurrent_scans;
+        let limit = requested.clamp(1, Semaphore::MAX_PERMITS);
+        if limit != requested {
+            tracing::warn!(
+                requested,
+                clamped_to = limit,
+                "max-concurrent-scans out of range [1, Semaphore::MAX_PERMITS]; clamped"
+            );
+        }
         obs::record_gauge(catalog::FLIGHT_ADMISSION_LIMIT, limit as i64, &[]);
         Self {
             inner: Arc::new(AdmissionInner {
