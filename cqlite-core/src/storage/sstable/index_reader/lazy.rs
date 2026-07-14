@@ -7,7 +7,7 @@
 //! type, used only by `SSTableReader`'s BIG-open composition
 //! (`reader::component_loading::load_index_reader`).
 
-use super::parse::{parse_big_index_entry, parse_index_data_cancellable};
+use super::parse::{parse_big_index_entry_framing, parse_index_data_cancellable};
 use super::{IndexData, IndexReader};
 use crate::error::{Error, Result};
 use crate::platform::Platform;
@@ -18,10 +18,16 @@ use tokio::io::AsyncReadExt;
 
 /// Cap on the bounded validity-probe prefix [`IndexReader::open_lazy`] reads
 /// (issue #2302 open-time-detection preservation through the lazy-open change).
-/// Large enough to cover the WORST-CASE single `Index.db` entry — a `u16`
-/// key-length prefix (max 65535 bytes) + the raw key + two small vints — so a
-/// legitimately huge partition key can never false-trigger the probe; bounded so
-/// the probe's cost stays O(1) at open time, never O(partition count).
+/// Large enough to cover the WORST-CASE single `Index.db` entry's fixed FRAMING
+/// (`key_len` u16 + up to a 65535-byte key + two small vints — [`parse_big_index_entry_framing`]),
+/// so a legitimately huge partition KEY can never false-trigger the probe; bounded
+/// so the probe's cost stays O(1) at open time, never O(partition count). This
+/// intentionally does NOT need to cover the promoted-index PAYLOAD — that is
+/// UNBOUNDED in principle (see [`parse_big_index_entry_framing`]'s doc) and is
+/// validated structurally instead (declared length vs. the file's actual size),
+/// never by requiring the bytes to be physically present in this probe (roborev
+/// endgame finding, High — a probe requiring the full payload rejected HEALTHY
+/// wide-partition files).
 const VALIDITY_PROBE_PREFIX_CAP: usize = 70_000;
 
 /// The full parse result, materialized either eagerly (at construction, the
@@ -85,15 +91,28 @@ impl IndexReader {
     /// path, exactly as the eager path always has).
     ///
     /// The probe: read a BOUNDED prefix (≤ [`VALIDITY_PROBE_PREFIX_CAP`] bytes, or
-    /// the whole file when smaller) and confirm the file is non-empty AND its FIRST
-    /// entry parses ([`parse_big_index_entry`]) — the SAME authoritative on-disk
-    /// entry framing `ensure_materialized`'s full parse and the eager `open` both
-    /// use (no heuristics, issue #28). This is intentionally NOT a full structural
-    /// guarantee (a corruption deep inside the file, past the first entry, is still
-    /// caught later by `is_fully_parsed()`/Signal A at first materializing use,
-    /// exactly as before this change) — it is the SAME bounded confidence the
-    /// original eager `open` effectively offered before its first byte was even
-    /// consumed, at O(1) cost instead of O(partitions).
+    /// the whole file when smaller), confirm the file is non-empty, and confirm the
+    /// FIRST entry's fixed FRAMING parses ([`parse_big_index_entry_framing`]) —
+    /// the SAME authoritative on-disk framing `ensure_materialized`'s full parse
+    /// and the eager `open` both use (no heuristics, issue #28). Deliberately
+    /// validates ONLY the framing, not the promoted-index payload bytes
+    /// themselves (roborev endgame finding, High): the payload is UNBOUNDED in
+    /// principle (~one `IndexInfo` per 64KiB of partition data), so a probe
+    /// requiring it to be PHYSICALLY PRESENT in a bounded read would reject a
+    /// perfectly healthy `Index.db` whose first partition is simply wide —
+    /// stricter than the eager-parse contract it exists to preserve. Instead the
+    /// declared `promoted_len` is checked STRUCTURALLY against the file's actual
+    /// length (`framing_len + promoted_len <= file_len`): a value that would push
+    /// the entry past EOF is a structural impossibility (corrupt), while any
+    /// value that fits — however large, however far past this probe's read
+    /// window — is accepted as a legitimately wide (not corrupt) partition.
+    ///
+    /// This is intentionally NOT a full structural guarantee (a corruption deep
+    /// inside the file, past the first entry, is still caught later by
+    /// `is_fully_parsed()`/Signal A at first materializing use, exactly as before
+    /// this change) — it is the SAME bounded confidence the original eager `open`
+    /// effectively offered before its first byte was even consumed, at O(1) cost
+    /// instead of O(partitions).
     ///
     /// Not counted on EITHER `index_parses_total` or `index_interval_parses_total`:
     /// this probe is neither a full parse nor a Summary-guided per-lookup interval
@@ -120,11 +139,30 @@ impl IndexReader {
         let probe_len = file_len.min(VALIDITY_PROBE_PREFIX_CAP as u64) as usize;
         let mut probe_buf = vec![0u8; probe_len];
         file.read_exact(&mut probe_buf).await?;
-        if let Err(e) = parse_big_index_entry(&probe_buf) {
+        let (framing_len, promoted_len) = match parse_big_index_entry_framing(&probe_buf) {
+            Ok((_, (framing_len, promoted_len))) => (framing_len, promoted_len),
+            Err(e) => {
+                return Err(Error::corruption(format!(
+                    "Index.db first entry's framing failed to parse (present-but-unloadable) \
+                     at {}: {:?}",
+                    path.display(),
+                    e
+                )));
+            }
+        };
+        // Structural bound (no-heuristics #28): the DECLARED promoted-index
+        // payload length must fit within the file's ACTUAL length — a value that
+        // would push the entry past EOF is a real structural impossibility,
+        // never accepted regardless of how the framing itself parsed. A payload
+        // that legitimately extends past this probe's bounded read window (the
+        // wide-partition field shape) is NOT an error here.
+        let implied_entry_end = (framing_len as u64).saturating_add(promoted_len);
+        if implied_entry_end > file_len {
             return Err(Error::corruption(format!(
-                "Index.db first entry failed to parse (present-but-unloadable) at {}: {:?}",
-                path.display(),
-                e
+                "Index.db first entry's declared promoted-index length ({promoted_len}) \
+                 extends past the file's actual length ({file_len} bytes) at {} — \
+                 structurally impossible, present-but-unloadable",
+                path.display()
             )));
         }
 
@@ -298,6 +336,60 @@ mod tests {
         assert!(
             is_corruption,
             "open_lazy must reject a truncated first entry as Corruption, got {err_display:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// THE roborev endgame false-positive pin (High): a HEALTHY `Index.db` whose
+    /// FIRST partition is wide — a `promoted_len` (promoted-index payload) far
+    /// larger than [`VALIDITY_PROBE_PREFIX_CAP`] — must be ACCEPTED by
+    /// `open_lazy`, not rejected. A probe requiring the whole payload to be
+    /// physically present in its bounded read would silently regress every
+    /// point/range query for this real field shape to an O(file) `scan_for_key`
+    /// scan (the exact cliff issue #2412 exists to remove). The payload bytes
+    /// themselves are irrelevant to the framing-only probe (never inspected), so
+    /// zero-padding is a faithful stand-in for a real promoted-index payload.
+    #[tokio::test]
+    async fn open_lazy_accepts_a_healthy_wide_partition_past_the_probe_cap() {
+        let key = [0xAAu8, 0xBB, 0xCC, 0xDD];
+        let data_offset = 0u64;
+        // Comfortably over VALIDITY_PROBE_PREFIX_CAP (70_000) — the shape a real
+        // wide partition's promoted index (~1 IndexInfo block per 64KiB of
+        // partition data) produces.
+        const PROMOTED_LEN: usize = 100_000;
+
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&(key.len() as u16).to_be_bytes());
+        entry.extend_from_slice(&key);
+        entry.extend_from_slice(&crate::parser::vint::encode_vuint(data_offset));
+        entry.extend_from_slice(&crate::parser::vint::encode_vuint(PROMOTED_LEN as u64));
+        entry.extend(vec![0u8; PROMOTED_LEN]); // the (unread) payload
+
+        let (dir, path) = temp_index_file("wide-partition", &entry);
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("platform must initialize"),
+        );
+        let reader = IndexReader::open_lazy(&path, platform).await;
+        let err_display = reader.as_ref().err().map(|e| e.to_string());
+        assert!(
+            reader.is_ok(),
+            "a HEALTHY Index.db whose first partition's promoted-index payload \
+             ({PROMOTED_LEN} bytes) exceeds the probe's bounded read window must \
+             still open lazily — got Err: {err_display:?} (roborev endgame \
+             finding, High: the probe must not be stricter than the eager-parse \
+             contract it preserves)"
+        );
+        let reader = reader.unwrap();
+        // Still genuinely LAZY: opening did not materialize the resident map
+        // (the whole point — this is an O(1) framing check, not a full parse).
+        assert!(
+            reader.get_partition_entries().is_empty(),
+            "open_lazy must stay lazy even after accepting a wide-partition file"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

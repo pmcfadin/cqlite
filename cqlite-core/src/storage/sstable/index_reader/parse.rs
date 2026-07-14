@@ -314,6 +314,44 @@ pub(crate) fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionInd
     ))
 }
 
+/// Parse ONLY the fixed FRAMING of a single BIG-format `Index.db` entry —
+/// `[key_len: u16 BE][raw key][data_offset: vint][promoted_len: vint]` — WITHOUT
+/// requiring the (potentially large) promoted-index PAYLOAD bytes to be present
+/// in `input` (issue #2412 open-lazy validity probe hardening, roborev endgame
+/// finding, High).
+///
+/// Why this exists (distinct from [`parse_big_index_entry`]): the promoted-index
+/// payload is UNBOUNDED in principle — Cassandra emits roughly one `IndexInfo`
+/// block per 64KiB of partition data, so a single very wide partition's
+/// `promoted_len` can exceed any reasonable BOUNDED validity-probe read. A probe
+/// that required the full payload to be present would reject a perfectly HEALTHY
+/// `Index.db` whose first partition is simply wide — stricter than the eager-parse
+/// contract it exists to preserve, and silently regressing every point/range
+/// query for that (real, field) shape to an O(file) `scan_for_key` scan.
+///
+/// The FRAMING itself — `key_len`, the raw key bytes, `data_offset`, and
+/// `promoted_len` — is bounded (`key_len` is a `u16`, so at most 65535 bytes; the
+/// two vints are a handful of bytes each) and authoritative regardless of how
+/// large the payload turns out to be, so validating JUST the framing is a sound,
+/// no-heuristics (#28) structural check.
+///
+/// Returns `(remaining, framing_len, promoted_len)`: `framing_len` is the number
+/// of bytes consumed by the framing alone (where the promoted payload would
+/// begin — i.e. the entry's TOTAL on-disk length is `framing_len + promoted_len`
+/// once the payload is included); `promoted_len` is the DECLARED payload length
+/// (not validated against `input`'s remaining bytes — the caller cross-checks it
+/// against the file's actual length instead, since the payload may legitimately
+/// extend past `input`).
+pub(crate) fn parse_big_index_entry_framing(input: &[u8]) -> IResult<&[u8], (usize, u64)> {
+    let original_len = input.len();
+    let (input, key_len) = be_u16(input)?;
+    let (input, _key_bytes) = take(key_len)(input)?;
+    let (input, _data_offset) = parse_vuint(input)?;
+    let (remaining, promoted_len) = parse_vuint(input)?;
+    let framing_len = original_len - remaining.len();
+    Ok((remaining, (framing_len, promoted_len)))
+}
+
 // REMOVED: Old heuristic functions that violated Issue #28 no-heuristics mandate
 // - calculate_data_offset_from_summary: Summary.db correlation (now obsolete with inline offsets)
 // - interpolate_data_offset_from_summary_position: Used arbitrary estimates
