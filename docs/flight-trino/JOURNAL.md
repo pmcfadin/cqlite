@@ -387,3 +387,45 @@ Format:
   no wall-clock) covering all 6 spec requirements; the excess-do_get gate reds when
   the acquire-before-setup wiring is removed (setup `resolves` counter jumps).
 - **Next:** WS1-ramp validation of the default `K` (WS8); record on #2420.
+
+## 2026-07-13 — admission-control roborev fixes (rounds 1696–1699)
+
+- **What (roborev-1696):** Fast-pathed `Semaphore::try_acquire_owned()` first so
+  an UNCONTENDED acquire never touches the `waiting` gauge or records a
+  permit-wait histogram sample (was transiently over-reporting queue depth on
+  every admit, even instant ones). The slow, contended (`NoPermits`) path is
+  unchanged — it still bumps `waiting` and records a genuine wait sample.
+- **What (roborev-1697):** `Admission::new` now clamps `max_concurrent_scans`
+  symmetrically to `[1, Semaphore::MAX_PERMITS]` (was floored at 1 only) —
+  `Semaphore::new` PANICS above `MAX_PERMITS`, so an absurd
+  `--max-concurrent-scans`/env value must be capped, never crash startup. Logs a
+  `warn` when a clamp actually changes the requested value.
+- **What (roborev-1698 → refined by 1699):** `do_get`'s pre-permit validation is
+  now MINIMAL and filesystem-free: `validate_do_get_ticket` parses ONLY the
+  ticket bytes (`FlightTicket::from_bytes`). Producer/schema construction (CQL
+  DDL parse, predicate/projection/aggregation-spec lowering — expensive,
+  attacker-influenced work) moved INTO `do_get_resolve`, run AFTER admission
+  alongside the filesystem resolve (both inside one `spawn_blocking`, exactly as
+  pre-#2420). A syntactically malformed ticket still fails fast with its own
+  status (never `UNAVAILABLE`, never waits, never consumes a permit); a
+  syntactically VALID ticket for a bogus/nonexistent table now also does not
+  reach producer construction until a permit is admitted.
+- **What (roborev-1699, `new()` semantics):** `CqliteFlightService::new()` no
+  longer reads the environment or applies a default admission ceiling — it uses
+  `Admission::unconstrained()` (`Semaphore::MAX_PERMITS`, `Duration::MAX` wait),
+  restoring this constructor's exact pre-#2420 behavior for library callers.
+  `with_admission(data_dir, batch_size, admission)` is the explicit opt-in the
+  `cqlite-flight` SERVER BINARY (`main`) uses to wire a real, CLI/env-configured
+  `K` — the server still gets admission-by-default in deployment even though the
+  library constructor stays unconstrained.
+- **Tests:** 16 deterministic admission tests (was 11), incl. two new
+  roborev-pinned scenarios: `req1_uncontended_acquire_never_touches_waiting_gauge`
+  / `req1_contended_acquire_path_unchanged` (1696),
+  `req4_absurd_configured_k_clamps_instead_of_panicking` (1697),
+  `req_malformed_ticket_bypasses_admission_entirely` /
+  `req_valid_ticket_for_bogus_table_does_not_reach_producer_construction_before_admission`
+  (1698/1699). Re-verified the red-on-main proof after each restructure by
+  moving the acquire back past resolve — the affected tests correctly red.
+- **Files:** `cqlite-flight/src/admission.rs`, `admission_tests.rs`,
+  `service.rs` (`new`/`with_admission`, `validate_do_get_ticket`/
+  `do_get_resolve` split).

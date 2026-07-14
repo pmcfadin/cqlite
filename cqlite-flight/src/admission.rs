@@ -187,6 +187,23 @@ impl Admission {
         }
     }
 
+    /// An admission ceiling that is, for all practical purposes, unconstrained
+    /// (issue #2420, roborev-1699): `Semaphore::MAX_PERMITS` permits and an
+    /// effectively-infinite wait timeout, so this can never meaningfully gate a
+    /// `do_get`. This is what
+    /// [`crate::service::CqliteFlightService::new`] uses so a library caller
+    /// embedding `cqlite-flight` keeps EXACTLY today's (pre-#2420) behavior — no
+    /// environment read, no ceiling on concurrent scans. Admission becomes a
+    /// real gate only when a caller explicitly opts in via
+    /// [`crate::service::CqliteFlightService::with_admission`] (the `cqlite-flight`
+    /// SERVER BINARY, `main`, does this with a CLI/env-configured `K`).
+    pub fn unconstrained() -> Self {
+        Self::new(AdmissionConfig {
+            max_concurrent_scans: Semaphore::MAX_PERMITS,
+            wait_timeout: Duration::MAX,
+        })
+    }
+
     /// The configured ceiling `K`.
     pub fn limit(&self) -> usize {
         self.inner.limit

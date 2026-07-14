@@ -13,10 +13,17 @@
 //! by the filesystem-touching `resolve_dir` call inside it, stays flat) while all
 //! permits are held — with the acquire-before-resolve wiring removed, every
 //! offered request runs the filesystem resolve and the counter jumps, reding the
-//! test. Ticket VALIDATION (parse + schema/predicate build, roborev-1698) is
-//! deliberately excluded from this gate: it is cheap and filesystem-free, so it
-//! runs BEFORE admission and must not wait behind the semaphore — see
-//! `req_malformed_ticket_bypasses_admission_entirely` below.
+//! test.
+//!
+//! Pre-permit validation is MINIMAL (roborev-1699): only `FlightTicket::from_bytes`
+//! (ticket syntax) runs before admission. Producer/schema construction (CQL DDL
+//! parse, predicate/projection/aggregation-spec lowering — expensive,
+//! attacker-influenced work) moves INSIDE the gate, alongside the filesystem
+//! resolve — see `req_malformed_ticket_bypasses_admission_entirely` (a
+//! syntactically malformed ticket bypasses admission) and
+//! `req_valid_ticket_for_bogus_table_does_not_reach_producer_construction_before_admission`
+//! (a syntactically VALID ticket still does not reach producer construction
+//! until admitted).
 
 use std::task::Poll;
 use std::time::Duration;
@@ -342,6 +349,51 @@ fn req_malformed_ticket_bypasses_admission_entirely() {
             "the malformed ticket never contended for (or was shed by) admission"
         );
         assert_eq!(after.in_use, before.in_use, "the held permit is untouched");
+        drop(held);
+    });
+}
+
+/// roborev-1699: a SYNTACTICALLY VALID ticket (parses fine — for a table that
+/// simply doesn't exist on disk) must NOT reach producer/schema construction
+/// (the expensive, attacker-influenced CQL DDL parse + predicate/projection
+/// lowering) before a permit is admitted. Probed via `schema_parses` — the
+/// schema-cache-miss counter `build_producer` bumps — which must stay flat while
+/// every permit is held and only climb once the request is actually admitted.
+#[test]
+fn req_valid_ticket_for_bogus_table_does_not_reach_producer_construction_before_admission() {
+    let adm = Admission::new(cfg(1, BIG_TIMEOUT));
+    let (_temp, svc) = build_service(adm.clone(), 8);
+    block_on_paused(async move {
+        let held = adm.acquire().await.unwrap(); // hold the only permit
+        let baseline = svc.setup_work().schema_parses;
+
+        // Syntactically valid ticket, never-before-seen DDL, pointing at a table
+        // that does not exist on disk — proves the schema-cache miss (inside
+        // `build_producer`) does not fire before admission, regardless of
+        // whether the request could ever resolve.
+        let bogus = FlightTicket {
+            keyspace: KS.into(),
+            table: "does_not_exist".into(),
+            ddl: "CREATE TABLE flight_ks.does_not_exist (id int PRIMARY KEY)".into(),
+            ..Default::default()
+        };
+        let bytes = bogus.to_bytes().unwrap();
+        let svc2 = svc.clone();
+        let task = tokio::spawn(async move { svc2.do_get(Request::new(Ticket::new(bytes))).await });
+        settle().await;
+
+        assert_eq!(
+            svc.setup_work().schema_parses,
+            baseline,
+            "producer/schema construction must not run before a permit is admitted"
+        );
+        assert_eq!(
+            adm.snapshot().waiting,
+            1,
+            "the request is waiting on admission, not building the producer"
+        );
+
+        task.abort();
         drop(held);
     });
 }
