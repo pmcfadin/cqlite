@@ -19,6 +19,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from typing import Callable, List, Optional
 
@@ -312,6 +313,20 @@ def test_validate_args_rejects_bad_numbers() -> None:
     assert driver.validate_args(args) is not None
 
 
+def test_validate_args_rejects_blank_snapshot_check_cmd() -> None:
+    # A whitespace-only command would shell-execute as a silent no-op (exit 0,
+    # empty stdout) and read as "0 leaks found" — a vacuous PASS the D12 check
+    # exists to prevent (#2399, roborev finding round 2). Reject it up front.
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-cmd", "   "])
+    assert driver.validate_args(args) is not None
+
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-cmd", "echo hi"])
+    assert driver.validate_args(args) is None
+
+    args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+    assert driver.validate_args(args) is None
+
+
 def test_parse_args_defaults() -> None:
     args = driver.parse_args(["--ks", "a", "--tbl", "b"])
     assert args.host == "localhost"
@@ -522,6 +537,209 @@ def test_run_worker_traceparent_disabled_passes_no_headers() -> None:
     assert seen_headers == [None]
 
 
+# --------------------------------------------------------------------------
+# find_leaked_snapshots() / run_snapshot_leak_check() (D12 hygiene, #2399)
+# --------------------------------------------------------------------------
+
+
+def test_find_leaked_snapshots_extracts_matching_prefix() -> None:
+    output = (
+        "Snapshot Details: \n"
+        "Snapshot name Keyspace name Column family name True size Size on disk\n"
+        "cqlite-abc123 test_basic keyvalue 1.2 MiB 1.2 MiB\n"
+        "cqlite-def456 test_basic keyvalue 800 KiB 800 KiB\n"
+        "\n"
+        "Total TrueDiskSpaceUsed: 2.0 MiB\n"
+    )
+    leaked = driver.find_leaked_snapshots(output)
+    assert leaked == ["cqlite-abc123", "cqlite-def456"]
+
+
+def test_find_leaked_snapshots_empty_when_none_match() -> None:
+    output = (
+        "Snapshot Details: \n"
+        "Snapshot name Keyspace name Column family name True size Size on disk\n"
+        "\n"
+        "Total TrueDiskSpaceUsed: 0 bytes\n"
+    )
+    assert driver.find_leaked_snapshots(output) == []
+
+
+def test_find_leaked_snapshots_ignores_non_matching_prefixes() -> None:
+    output = "manual-backup-20260101 test_basic keyvalue 1.0 MiB 1.0 MiB\n"
+    assert driver.find_leaked_snapshots(output) == []
+
+
+def test_find_leaked_snapshots_honours_custom_prefix() -> None:
+    output = "other-prefix-xyz ks tbl 1.0 MiB 1.0 MiB\ncqlite-abc ks tbl 1.0 MiB 1.0 MiB\n"
+    assert driver.find_leaked_snapshots(output, prefix="other-prefix-") == ["other-prefix-xyz"]
+
+
+def test_run_snapshot_leak_check_unconfigured_reports_not_ran() -> None:
+    result = driver.run_snapshot_leak_check(None)
+    assert result.ran is False
+    assert result.leaked == []
+    # An unrun check is NOT a pass — callers must never treat it as green (#2399).
+    assert result.passed is False
+
+
+def test_run_snapshot_leak_check_passes_when_clean() -> None:
+    result = driver.run_snapshot_leak_check(lambda: "Snapshot Details: \nno rows\n")
+    assert result.ran is True
+    assert result.leaked == []
+    assert result.passed is True
+
+
+def test_run_snapshot_leak_check_fails_when_leaked() -> None:
+    result = driver.run_snapshot_leak_check(lambda: "cqlite-abc123 ks tbl 1.0 MiB 1.0 MiB\n")
+    assert result.ran is True
+    assert result.leaked == ["cqlite-abc123"]
+    assert result.passed is False
+
+
+def test_snapshot_leak_check_wired_into_cli_flag() -> None:
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-cmd", "echo hi"])
+    assert args.snapshot_check_cmd == "echo hi"
+
+
+def test_snapshot_leak_check_cli_flag_defaults_to_none() -> None:
+    args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+    assert args.snapshot_check_cmd is None
+
+
+def test_clean_cluster_raw_listing_reports_pass_through_command_path() -> None:
+    # The scenario the exit-code bug would have shipped broken: a CLEAN cluster.
+    # The documented usage feeds RAW `nodetool listsnapshots` output (which exits
+    # 0 even when there are no cqlite- snapshots) — NOT a `| grep cqlite-`
+    # pipeline (which would exit 1 on a clean ring and, since any nonzero exit is
+    # a check FAILURE per the spec, false-FAIL a healthy cluster). Exercise the
+    # real command-execution path end-to-end and assert PASS.
+    clean_listing = (
+        "Snapshot Details:\n"
+        "Snapshot name Keyspace name Column family name True size Size on disk\n"
+        "backup_20260714 system_schema tables 1.2 MiB 1.2 MiB\n"
+    )
+    # printf emits the raw listing and exits 0 — the shape operators must use.
+    cmd = f"printf '%s' {clean_listing!r}"
+    result = driver.run_snapshot_leak_check(driver.make_default_list_snapshots_fn(cmd))
+    assert result.ran is True
+    assert result.leaked == []
+    assert result.passed is True, "a clean cluster's raw listing (exit 0) must report PASS"
+
+
+def test_make_default_list_snapshots_fn_runs_command_and_captures_stdout() -> None:
+    fn = driver.make_default_list_snapshots_fn("echo cqlite-leaked-one ks tbl 1.0MiB 1.0MiB")
+    output = fn()
+    assert "cqlite-leaked-one" in output
+    leaked = driver.find_leaked_snapshots(output)
+    assert leaked == ["cqlite-leaked-one"]
+
+
+def test_make_default_list_snapshots_fn_raises_on_nonzero_exit() -> None:
+    # A probe command that FAILED to run (auth failure, unreachable pod, typo'd
+    # one-liner) must never be treated as "ran cleanly, found 0 snapshots" — that
+    # empty-stdout-on-failure gap was a roborev finding on this change's first
+    # review round (#2399). It must raise, not return "".
+    fn = driver.make_default_list_snapshots_fn("echo 'kubectl: connection refused' >&2; exit 7")
+    try:
+        fn()
+        raise AssertionError("expected RuntimeError on nonzero exit")
+    except RuntimeError as e:
+        assert "7" in str(e)
+        assert "connection refused" in str(e)
+
+
+def test_make_default_list_snapshots_fn_raises_with_placeholder_when_no_stderr() -> None:
+    fn = driver.make_default_list_snapshots_fn("exit 1")
+    try:
+        fn()
+        raise AssertionError("expected RuntimeError on nonzero exit")
+    except RuntimeError as e:
+        assert "(no stderr)" in str(e)
+
+
+def test_run_snapshot_leak_check_propagates_probe_command_failure() -> None:
+    # run_snapshot_leak_check itself must not swallow a failing list_snapshots_fn
+    # into a false "ran cleanly, 0 leaked" result.
+    def _failing() -> str:
+        raise RuntimeError("snapshot-check-cmd exited 7: connection refused")
+
+    try:
+        driver.run_snapshot_leak_check(_failing)
+        raise AssertionError("expected the probe failure to propagate")
+    except RuntimeError as e:
+        assert "connection refused" in str(e)
+
+
+def test_make_default_list_snapshots_fn_times_out_and_raises() -> None:
+    # A wedged probe (unreachable pod / hung `kubectl exec`) must NOT hang the
+    # driver forever after the workload finishes — it must be bounded and land in
+    # the same check-FAILURE path as a nonzero exit (roborev finding, final round).
+    fn = driver.make_default_list_snapshots_fn("sleep 5", timeout_s=0.2)
+    start = time.time()
+    try:
+        fn()
+        raise AssertionError("expected RuntimeError when the probe exceeds its timeout")
+    except RuntimeError as e:
+        assert "timed out" in str(e)
+        assert "0.2" in str(e)
+    # The bound must actually fire (not wait out the full `sleep 5`).
+    assert time.time() - start < 3.0
+
+
+def test_make_default_list_snapshots_fn_timeout_kills_child_process_tree() -> None:
+    # shell=True + timeout only kills the shell; a child it spawned (kubectl
+    # exec / nodetool) survives and the hang is merely moved off-driver. Verify
+    # the WHOLE process group dies: a shell that backgrounds a marker-writing
+    # sleep must leave no marker behind after the timeout kill (roborev finding,
+    # final review round).
+    marker = os.path.join(tempfile.gettempdir(), f"d12_killtest_{os.getpid()}_{time.time_ns()}")
+    # Parent sleeps past the timeout; a grandchild would write the marker at 3s
+    # if it were NOT killed with the group.
+    cmd = f"(sleep 3; touch {marker}) & sleep 5"
+    fn = driver.make_default_list_snapshots_fn(cmd, timeout_s=0.3)
+    try:
+        fn()
+        raise AssertionError("expected a timeout RuntimeError")
+    except RuntimeError:
+        pass
+    # Give the (killed) would-be writer well past its 3s mark to prove it's gone.
+    time.sleep(3.5)
+    left_behind = os.path.exists(marker)
+    if left_behind:
+        os.remove(marker)
+    assert not left_behind, "child process survived the timeout kill (process group not reaped)"
+
+
+def test_parse_args_snapshot_check_timeout_default() -> None:
+    args = driver.parse_args(["--ks", "a", "--tbl", "b"])
+    assert args.snapshot_check_timeout_s == float(driver.DEFAULT_SNAPSHOT_CHECK_TIMEOUT_S)
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-timeout-s", "12.5"])
+    assert args.snapshot_check_timeout_s == 12.5
+
+
+def test_validate_args_rejects_nonpositive_snapshot_check_timeout() -> None:
+    # A non-positive timeout would defeat the bound (0 = expire-immediately,
+    # negative = error), so a wedged probe could no longer reliably FAIL.
+    for bad in ("0", "-1"):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-timeout-s", bad])
+        assert driver.validate_args(args) is not None
+    args = driver.parse_args(["--ks", "a", "--tbl", "b", "--snapshot-check-timeout-s", "30"])
+    assert driver.validate_args(args) is None
+
+
+def test_validate_args_rejects_nonfinite_snapshot_check_timeout() -> None:
+    # `inf` silently removes the bound and reintroduces the indefinite hang;
+    # `nan` compares false against every threshold. Both must be rejected up
+    # front (roborev finding, final review round).
+    # Use the --flag=value form: a bare "-inf" would be parsed as an option by
+    # argparse before validate_args ever sees it (also a rejection, but not the
+    # path under test here).
+    for bad in ("inf", "-inf", "nan"):
+        args = driver.parse_args(["--ks", "a", "--tbl", "b", f"--snapshot-check-timeout-s={bad}"])
+        assert driver.validate_args(args) is not None, f"{bad} timeout should be rejected"
+
+
 def main() -> int:
     check("percentile: empty input", test_percentile_empty)
     check("percentile: single value", test_percentile_single_value)
@@ -548,6 +766,10 @@ def main() -> int:
     check("validate_args: passes with queries-file", test_validate_args_passes_with_queries_file)
     check("validate_args: passes with ks and tbl", test_validate_args_passes_with_ks_and_tbl)
     check("validate_args: rejects bad numeric args", test_validate_args_rejects_bad_numbers)
+    check(
+        "validate_args: rejects a blank/whitespace-only --snapshot-check-cmd",
+        test_validate_args_rejects_blank_snapshot_check_cmd,
+    )
     check("parse_args: defaults", test_parse_args_defaults)
     check(
         "parse_args: --port default ignores K8s-injected bare TRINO_PORT",
@@ -572,6 +794,58 @@ def main() -> int:
     check("run_worker: closes the connection on exit", test_run_worker_closes_connection)
     check("run_worker: traceparent header set and varies per query", test_run_worker_generates_traceparent_header_when_enabled)
     check("run_worker: no headers when traceparent disabled", test_run_worker_traceparent_disabled_passes_no_headers)
+    check("find_leaked_snapshots: extracts matching prefix", test_find_leaked_snapshots_extracts_matching_prefix)
+    check("find_leaked_snapshots: empty when none match", test_find_leaked_snapshots_empty_when_none_match)
+    check(
+        "find_leaked_snapshots: ignores non-matching prefixes",
+        test_find_leaked_snapshots_ignores_non_matching_prefixes,
+    )
+    check("find_leaked_snapshots: honours custom prefix", test_find_leaked_snapshots_honours_custom_prefix)
+    check(
+        "run_snapshot_leak_check: unconfigured reports not-ran (never a silent pass)",
+        test_run_snapshot_leak_check_unconfigured_reports_not_ran,
+    )
+    check("run_snapshot_leak_check: passes when clean", test_run_snapshot_leak_check_passes_when_clean)
+    check("run_snapshot_leak_check: fails when leaked", test_run_snapshot_leak_check_fails_when_leaked)
+    check("--snapshot-check-cmd: wired into parsed args", test_snapshot_leak_check_wired_into_cli_flag)
+    check("--snapshot-check-cmd: defaults to None", test_snapshot_leak_check_cli_flag_defaults_to_none)
+    check(
+        "clean cluster: raw listing (exit 0) reports PASS via the command path",
+        test_clean_cluster_raw_listing_reports_pass_through_command_path,
+    )
+    check(
+        "make_default_list_snapshots_fn: runs command and captures stdout",
+        test_make_default_list_snapshots_fn_runs_command_and_captures_stdout,
+    )
+    check(
+        "make_default_list_snapshots_fn: raises (never a silent pass) on nonzero exit",
+        test_make_default_list_snapshots_fn_raises_on_nonzero_exit,
+    )
+    check(
+        "make_default_list_snapshots_fn: raises with a placeholder when stderr is empty",
+        test_make_default_list_snapshots_fn_raises_with_placeholder_when_no_stderr,
+    )
+    check(
+        "run_snapshot_leak_check: propagates a probe command failure (never swallows it)",
+        test_run_snapshot_leak_check_propagates_probe_command_failure,
+    )
+    check(
+        "make_default_list_snapshots_fn: bounds a wedged probe and raises on timeout",
+        test_make_default_list_snapshots_fn_times_out_and_raises,
+    )
+    check(
+        "make_default_list_snapshots_fn: timeout kills the whole child process tree",
+        test_make_default_list_snapshots_fn_timeout_kills_child_process_tree,
+    )
+    check("--snapshot-check-timeout-s: default + override parse", test_parse_args_snapshot_check_timeout_default)
+    check(
+        "validate_args: rejects a non-positive --snapshot-check-timeout-s",
+        test_validate_args_rejects_nonpositive_snapshot_check_timeout,
+    )
+    check(
+        "validate_args: rejects a non-finite (inf/nan) --snapshot-check-timeout-s",
+        test_validate_args_rejects_nonfinite_snapshot_check_timeout,
+    )
 
     print()
     if _FAILURES:
