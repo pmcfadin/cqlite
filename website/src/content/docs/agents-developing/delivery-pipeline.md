@@ -70,6 +70,17 @@ required-check set. `flow-finalize` runs on the merge event (not a CI busy-wait)
 valid for genuinely external, harness-untracked state — just not for polling a PR's own CI after the work
 is complete.
 
+### GitHub-enforced merge gate (#2433)
+
+`main` now carries **full branch protection**: the `required` status check (the "Required PR Gate" CI
+workflow) is a required context, with `enforce_admins` on. Merge-on-green is therefore
+**local gate PASS + C (design) + roborev clean *and* the GitHub `required` check green** — the last term
+is machine-enforced, not honor-system. Because `enforce_admins` is enabled, even `gh pr merge --admin`
+is refused while the check is pending or red (proven on probe PR #2441: plain and `--admin` merges both
+rejected with `mergeStateStatus: BLOCKED`), so **there is no bypass**. A red that is a known flake gets
+`gh run rerun --failed` — never an admin override. This is load-bearing: if branch-protection settings
+ever regress (contexts emptied, `enforce_admins` disabled), this doctrine governs catching it.
+
 ## The specialist roster
 
 | Role | Agent / tool |

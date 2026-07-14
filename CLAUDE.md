@@ -345,8 +345,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
 
 - The lead acts as product manager: track epics and issues, prioritize, keep work moving.
 - **Autonomy — auto-merge on green (default)**: workers (and the lead) **merge their own PR** the
-  moment the quality bar is met — gate PASS + **C** PASS (design-driven) + roborev clean — via
-  `gh pr merge --squash --delete-branch`, then `flow-finalize`. Do NOT wait for the owner. Seam 1
+  moment the quality bar is met — local gate PASS + **C** PASS (design-driven) + roborev clean **+ the
+  GitHub `required` CI check green** — via `gh pr merge --squash --delete-branch`, then `flow-finalize`.
+  Branch protection enforces the `required` check for admins too (`enforce_admins`), so bypass is
+  impossible; a known-flake red gets `gh run rerun --failed`, never a bypass. This enforcement is
+  load-bearing: if branch-protection settings change, this doc governs catching it (#2433). Do NOT
+  wait for the owner. Seam 1
   (spec approval) is the only standing human gate. Escalate and **hold the merge** ONLY for: a
   genuine design-call roborev finding, a scope/product question, an unmet/uncovered requirement, or
   work outside the issue — and obey any `HOLD: merge after #N` order.
