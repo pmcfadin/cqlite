@@ -77,7 +77,19 @@ pub(crate) struct PartitionStreamState {
     /// Surviving `Some(ck)` clustering-row mutations, buffered in arrival
     /// (clustering) order and written in one session at partition end (see
     /// the type doc for why buffering is required).
+    ///
+    /// UNUSED on the issue #2299 direct-stream path
+    /// ([`ActiveMerge::stream_rows_directly`]): there each row is fed straight
+    /// into `direct_session` as it arrives, so this stays empty.
     buffered_rows: Vec<Mutation>,
+    /// Issue #2299 direct-stream path only: the OPEN writer session for this
+    /// partition, held across budget pauses (the session is lifetime-free by
+    /// design — see [`StreamingPartitionSession`]). `Some` once the first row
+    /// (or static carrier) of a tombstone-free partition has opened it; each
+    /// subsequent row feeds straight through it, so no whole-partition
+    /// `buffered_rows` accumulation is needed. `None` on the buffered path.
+    direct_session:
+        Option<crate::storage::sstable::writer::data_writer::StreamingPartitionSession>,
 }
 
 impl PartitionStreamState {
@@ -93,6 +105,7 @@ impl PartitionStreamState {
             partition_stats: StatisticsMetadata::new(),
             row_count: 0,
             buffered_rows: Vec::new(),
+            direct_session: None,
         }
     }
 
@@ -224,6 +237,22 @@ pub(crate) struct ActiveMerge {
         merge::PartitionReconcileCheckpoint,
         PartitionStreamState,
     )>,
+    /// Issue #2299: when EVERY input SSTable's authoritative `Statistics.db`
+    /// `min_local_deletion_time` is the `NO_DELETION_TIME` sentinel (`i32::MAX`),
+    /// NO input carries any deletion — no partition/row/cell/range tombstone —
+    /// so the merged output has NO range-tombstone markers to interleave with
+    /// rows. In that (common) case a clustering row can stream STRAIGHT into the
+    /// writer session as it is reconciled, WITHOUT the whole-partition
+    /// `buffered_rows` accumulation that a range-tombstone-bearing partition
+    /// requires (a late marker must shadow already-buffered rows — see
+    /// [`PartitionStreamState`]'s doc). This bounds a WIDE tombstone-free
+    /// partition's write-side peak to one row + one promoted-index block instead
+    /// of the whole partition. Authoritative metadata only (issue #28): derived
+    /// from `Statistics.db`, never guessed. Conservative — a cell tombstone also
+    /// lowers `min_local_deletion_time`, so a partition with cell tombstones but
+    /// no range tombstones falls back to buffering (still correct, just not
+    /// bounded), which is acceptable.
+    pub(crate) stream_rows_directly: bool,
 }
 
 impl WriteEngine {
@@ -544,7 +573,27 @@ impl WriteEngine {
             // see that stage's fix for the full incident writeup.
             let write_schema = merge.writer.schema().clone();
             let schema_has_static = write_schema.columns.iter().any(|c| c.is_static);
-            let mut stream = merge::StreamingMerger::resume(&mut merge.merger, resume_state);
+            // Issue #2299: on the direct-stream path each clustering row is fed
+            // STRAIGHT into the writer session as it arrives (no whole-partition
+            // `buffered_rows`). That needs `&mut merge.writer` INSIDE the drain
+            // loop while `stream` holds `&mut merge.merger`, so split `merge`
+            // into disjoint field borrows here (borrowing `merge` whole would
+            // conflict). `stream_rows_directly` is safe ONLY when no input
+            // carries any deletion, so there is no range-tombstone marker to
+            // interleave: opening the session with an empty marker set and
+            // feeding rows immediately is byte-identical to buffering then
+            // feeding at PartitionEnd.
+            let stream_rows_directly = merge.stream_rows_directly;
+            let key_for_open = resume_state.as_ref().map(|(k, _)| k.clone());
+            let ActiveMerge {
+                merger: merger_ref,
+                writer: writer_ref,
+                ..
+            } = merge;
+            // On the direct path, if a session was already opened for this
+            // partition on a PRIOR (paused) call, `stream_state.direct_session`
+            // still holds it — keep feeding into it.
+            let mut stream = merge::StreamingMerger::resume(merger_ref, resume_state);
             // True once THIS call has popped at least one cluster group —
             // guarantees forward progress within a call even when resuming
             // an already-in-progress `stream_state` from a prior call
@@ -604,6 +653,10 @@ impl WriteEngine {
                             mutation.clustering_key.is_none() && schema_has_static;
 
                         if is_partition_only {
+                            // A partition tombstone only reaches here when an
+                            // input carried a deletion, so `stream_rows_directly`
+                            // was never set (the direct path is gated on NO
+                            // deletion in any input). Buffered path only.
                             stream_state.partition_tombstone = mutation.partition_tombstone;
                             stream_state.saw_carrier_or_static = true;
                             continue;
@@ -632,11 +685,55 @@ impl WriteEngine {
                             continue;
                         }
 
-                        // A real clustering row (or an unclustered table's
-                        // sole `clustering_key: None` row): buffer it for the
-                        // single PartitionEnd write.
-                        stream_state.buffered_rows.push(mutation);
-                        stream_state.row_count += 1;
+                        // A real clustering row (or an unclustered table's sole
+                        // `clustering_key: None` row).
+                        if stream_rows_directly {
+                            // Issue #2299 direct-stream path: feed this row
+                            // STRAIGHT into the writer session (opening it lazily
+                            // on the first row — a tombstone-free partition has no
+                            // partition tombstone and an empty range-tombstone
+                            // set). No whole-partition buffering, so a WIDE
+                            // partition's write-side peak stays bounded to one row
+                            // + one promoted-index block. The static prelude (if
+                            // any) was already fed on the first static carrier
+                            // (which sorts strictly before any `Some(ck)` row), so
+                            // opening here preserves the on-disk header→static→rows
+                            // order byte-for-byte.
+                            if stream_state.direct_session.is_none() {
+                                let open_key = key_for_open
+                                    .clone()
+                                    .or_else(|| stream.current_partition_key())
+                                    .ok_or_else(|| {
+                                        Error::Storage(
+                                            "issue #2299 direct-stream: no partition key to open the writer session".to_string(),
+                                        )
+                                    })?;
+                                let mut session = writer_ref.begin_streaming_partition(
+                                    &open_key,
+                                    None,
+                                    &[],
+                                )?;
+                                if schema_has_static {
+                                    let merged =
+                                        std::mem::take(&mut stream_state.static_tracker).finish();
+                                    writer_ref.feed_streaming_static_row(
+                                        &mut session,
+                                        &merged,
+                                        stream_state.static_first_ts,
+                                    )?;
+                                }
+                                stream_state.direct_session = Some(session);
+                            }
+                            if let Some(session) = stream_state.direct_session.as_mut() {
+                                writer_ref.feed_streaming_row(session, &mutation)?;
+                            }
+                            stream_state.row_count += 1;
+                        } else {
+                            // Buffered path: buffer for the single PartitionEnd
+                            // write (a range tombstone may still arrive later).
+                            stream_state.buffered_rows.push(mutation);
+                            stream_state.row_count += 1;
+                        }
                     }
                     merge::StreamingStep::PartitionEnd { key } => {
                         break DrainOutcome::Ready(
@@ -654,7 +751,34 @@ impl WriteEngine {
             match outcome {
                 DrainOutcome::Ready(key, state) => {
                     partitions_processed += 1;
-                    let state = *state;
+                    let mut state = *state;
+
+                    // Issue #2299 direct-stream path: the session was opened on
+                    // the first `Some(ck)` row and every row fed straight through
+                    // it, so here we ONLY finish it (no re-open, no re-feed). A
+                    // direct-path partition with a static carrier but no `Some(ck)`
+                    // row never opened the session — fall through to the buffered
+                    // path below, which opens + feeds the static prelude. The
+                    // direct path is gated on NO deletion in any input, so
+                    // `partition_tombstone` is always `None` and `range_tombstones`
+                    // always empty here.
+                    if let Some(session) = state.direct_session.take() {
+                        if let Some(merge) = &mut self.active_merge {
+                            let (offset, blocks, emit) =
+                                merge.writer.finish_streaming_partition(session)?;
+                            merge.writer.complete_partition_incremental(
+                                &key,
+                                None,
+                                offset,
+                                &blocks,
+                                emit,
+                                &state.partition_stats,
+                            )?;
+                            merge.rows_merged += state.row_count;
+                        }
+                        report.rows_merged += state.row_count;
+                        continue;
+                    }
 
                     // Truly empty partition (every entry was
                     // metadata-only-no-op, and no carrier/static survived) —
