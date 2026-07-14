@@ -585,16 +585,21 @@ async fn two_concurrent_scans_on_shared_reader_cancel_independently() {
 /// way, so the callback-based "trip at partition N" technique the other tests
 /// use does not apply here.
 ///
-/// This proves the loop's poll instead via the process-global
-/// `read_work_counters::index_probes()` counter (same oracle technique as
-/// `chunk_cache_wiring_tests.rs`): a pre-cancelled call over a REAL fixture with
-/// at least one Summary.db entry must record ZERO Index.db probes — proving the
-/// poll aborts BEFORE the loop attempts even the FIRST lookup. Disabling ONLY
-/// this poll lets `lookup_partition_with_index` run for entry 0 (recording a
-/// probe) before the function falls through to `sequential_scan`'s (unrelated,
-/// pre-existing) poll for the SAME final `Err(Cancelled)` — so the probe-count
-/// assertion, not the `Err` alone, discriminates this specific poll from the
-/// downstream fallback's. `#[serial]`: the counter is process-global.
+/// This proves the loop's poll via the per-partition BODY-DECODE work-probe
+/// (`stream_walk_partitions_parsed`), read through a thread-local
+/// `StreamWalkScope` (issue #2428): a pre-cancelled call over a REAL fixture with
+/// at least one Summary.db entry must decode ZERO partition bodies — proving the
+/// poll aborts BEFORE the loop reaches its first per-partition decode. Disabling
+/// ONLY this poll lets the loop decode partition bodies (a nonzero count) before
+/// the function returns the SAME final `Err(Cancelled)` — so the body-decode
+/// count, not the `Err` alone, discriminates this specific poll.
+///
+/// Issue #2430 migrated this oracle OFF `read_work_counters::index_probes()`: the
+/// materialising walk previously re-probed the index once per partition
+/// (`lookup_partition_with_index`), and that redundant probe was what the old
+/// oracle counted. The fix resolves each partition offset from the already-loaded
+/// `Index.db` entry and never re-probes, so `index_probes` is 0 on the fixed path
+/// — the body-decode work-probe is the surviving non-vacuous signal.
 fn datasets_root() -> Option<std::path::PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -633,9 +638,15 @@ fn real_index_backed_fixture() -> Option<std::path::PathBuf> {
 /// Skip (not fail) when the real fixture binary is absent — matches the
 /// established convention (`issue_1594_fanout_deadlock_test.rs` et al.) for
 /// tests needing `CQLITE_DATASETS_ROOT`'s local-only binaries.
-#[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial]
+// Current-thread runtime (issue #2430): the non-vacuity/cancel oracle now bounds
+// on `stream_walk_partitions_parsed` via a THREAD-LOCAL `StreamWalkScope` (issue
+// #2428), which only observes increments on the thread that opened it. A default
+// (current-thread) `#[tokio::test]` drives every inline `.await` of the scan on the
+// test's own thread, so the scope sees exactly this scan's per-partition decodes and
+// is immune to concurrent scan-driving tests — no `#[serial]`, no global reset.
+#[tokio::test]
 async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
+    use crate::storage::sstable::work_counters::stream_walk_scope::StreamWalkScope;
     let Some(data_path) = real_index_backed_fixture() else {
         eprintln!(
             "Skipping (index-backed cancel poll): real multi_partition_table \
@@ -648,11 +659,10 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
     // ------------------------------------------------------------------
     // Guard 1 (structural): the reader must actually hold BOTH an
     // `index_reader` and a non-empty `summary_reader`, or the index-backed
-    // `if let Some(summary_reader)` loop in `iterate_all_partitions` is never
-    // entered and the whole call falls through to `sequential_scan` — a path
-    // with its OWN (pre-existing, unrelated) poll. Without this, the fixture
-    // could satisfy the test vacuously via the fallback, recording zero probes
-    // whether or not THIS poll exists.
+    // full-index walk in `iterate_all_partitions` is never entered and the whole
+    // call falls through to `sequential_scan` — a path with its OWN (pre-existing,
+    // unrelated) poll. Without this, the fixture could satisfy the test vacuously
+    // via the fallback.
     let entry_count = reader
         .summary_reader
         .as_ref()
@@ -669,49 +679,134 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
     );
 
     // ------------------------------------------------------------------
-    // Guard 2 (behavioural, the real fail-if-vacuous check): an UNCANCELLED
-    // pass over this exact fixture must record index probes > 0. Each iteration
-    // of the index-backed loop calls `lookup_partition_with_index`, which
-    // records exactly one probe per real Index.db lookup. A nonzero count here
-    // proves the per-entry loop body — the one guarded by the poll under test —
-    // is genuinely executed for this fixture (it does not silently resolve via
-    // the sequential-scan fallback with zero probes). If a future fixture/refactor
+    // Guard 2 (behavioural, the real fail-if-vacuous check — migrated off the
+    // per-partition index-PROBE count, issue #2430). Directly exercise the method
+    // under test with a FRESH (uncancelled) token: it must FULLY resolve this real
+    // fixture through the index-backed materialising branch (`Ok(Some(rows))`, not
+    // the sequential fallback's `None`) AND decode > 0 partition bodies — the exact
+    // per-partition work the cancel poll below guards. If a future fixture/refactor
     // stopped exercising the index-backed branch, THIS assertion fails, so the
-    // pre-cancelled assertion below can never pass vacuously.
-    crate::storage::sstable::read_work_counters::reset();
+    // pre-cancelled assertion below can never pass vacuously. The signal is
+    // `stream_walk_partitions_parsed` (partition BODIES decoded), NOT `index_probes`
+    // — after issue #2430 the loop resolves each offset from the already-loaded
+    // entry and never re-probes the index, so `index_probes` is 0 even here.
     let uncancelled = open_reader(&data_path).await;
-    let uncancelled_result = uncancelled.iterate_all_partitions().await;
+    let fresh = ScanCancel::new();
+    let scope = StreamWalkScope::new();
+    let uncancelled_result = uncancelled
+        .iterate_all_partitions_via_full_index(&fresh)
+        .await;
+    let uncancelled_parsed = scope.count();
+    drop(scope);
     assert!(
-        uncancelled_result.is_ok(),
-        "the uncancelled index-backed scan must succeed: {uncancelled_result:?}"
+        matches!(uncancelled_result, Ok(Some(_))),
+        "the index-backed materialising branch must FULLY resolve this real fixture \
+         (Ok(Some(_)), not a fall-through to sequential_scan): {uncancelled_result:?}"
     );
-    let uncancelled_probes = crate::storage::sstable::read_work_counters::index_probes();
     assert!(
-        uncancelled_probes > 0,
-        "the index-backed branch must be exercised — an uncancelled scan over this \
-         fixture recorded zero Index.db probes, meaning the loop this test targets is \
-         never entered (the test would pass vacuously). Got {uncancelled_probes}"
+        uncancelled_parsed > 0,
+        "the index-backed loop must decode > 0 partition bodies — a zero count means \
+         the loop this test targets never ran (the test would pass vacuously). \
+         Got {uncancelled_parsed}"
     );
 
     // ------------------------------------------------------------------
-    // The actual assertion: a pre-cancelled scan must record ZERO probes —
-    // the poll aborts BEFORE the loop attempts even the first Index.db lookup.
-    crate::storage::sstable::read_work_counters::reset();
+    // The actual assertion: a pre-cancelled scan must decode ZERO partition
+    // bodies — the poll aborts BEFORE the loop reaches even the first per-partition
+    // decode. Disabling the poll would let the loop parse partition bodies here,
+    // driving the count nonzero and failing this assertion (it discriminates).
     let cancel = ScanCancel::new();
     cancel.cancel();
     reader.set_scan_cancel(cancel);
 
+    let scope = StreamWalkScope::new();
     let result = reader.iterate_all_partitions().await;
+    let cancelled_parsed = scope.count();
+    drop(scope);
 
     assert!(
         matches!(result, Err(crate::Error::Cancelled)),
         "a pre-cancelled index-backed scan must abort with Error::Cancelled, got {result:?}"
     );
     assert_eq!(
-        crate::storage::sstable::read_work_counters::index_probes(),
-        0,
-        "the index-backed loop's poll must abort BEFORE attempting even the first \
-         Index.db lookup — a nonzero probe count means the loop ran ahead of the \
-         cancel check (issue #2264, roborev round 3)"
+        cancelled_parsed, 0,
+        "the index-backed loop's poll must abort BEFORE decoding even the first \
+         partition body — a nonzero count means the loop ran ahead of the cancel \
+         check (issue #2264, roborev round 3; oracle migrated in #2430)"
+    );
+}
+
+/// Issue #2430: a full MATERIALISING scan must NOT re-probe the `Index.db` once
+/// per partition. The loop already holds every partition's `data_offset` from the
+/// up-front `get_partition_entries()` load, so it resolves each offset directly
+/// from `entries[i]` — a fresh `lookup_partition_with_index` per partition (which,
+/// post-#2412, is a Summary binary search + interval read) is pure redundant work.
+///
+/// The direct on-disk measure of that redundancy is the per-partition index-PROBE
+/// count (`read_work_counters::index_probes`): before the fix it was EXACTLY the
+/// partition count `N` (one probe per entry); after the fix it is `0` — bounded by
+/// a constant, not by `N`. This is the red-then-green pin: it FAILS (records `N`
+/// probes) against the pre-#2430 materialising walk and PASSES (`0`) after.
+///
+/// `#[serial_test::serial]`: `index_probes` is a process-global counter read after
+/// a `reset()`, so this test must not run concurrently with another scan-driving
+/// test in the same binary.
+#[tokio::test]
+#[serial_test::serial]
+async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
+    let Some(data_path) = real_index_backed_fixture() else {
+        eprintln!(
+            "Skipping (materializing reprobe bound): real multi_partition_table \
+             fixture not present (set CQLITE_DATASETS_ROOT)"
+        );
+        return;
+    };
+    let reader = open_reader(&data_path).await;
+
+    // Measure the index-probe work of ONE full materialising index-backed scan.
+    // (The scan internally `ensure_materialized`s the lazily-opened index, so the
+    // partition count below is read AFTER, once entries are resident.)
+    crate::storage::sstable::read_work_counters::reset();
+    let cancel = ScanCancel::new();
+    let result = reader.iterate_all_partitions_via_full_index(&cancel).await;
+    let probes = crate::storage::sstable::read_work_counters::index_probes();
+
+    // The scan must resolve fully through the index branch (not fall through to
+    // sequential_scan), else the probe count would be vacuously 0 for the wrong
+    // reason.
+    let rows = match result {
+        Ok(Some(rows)) => rows,
+        other => panic!(
+            "the materialising index-backed scan must fully resolve this real \
+             fixture (Ok(Some(_))): {other:?}"
+        ),
+    };
+    assert!(
+        !rows.is_empty(),
+        "the fixture's partitions must decode to at least one live row"
+    );
+
+    // Non-vacuity: the fixture must have SEVERAL partitions, or "O(N) probes vs a
+    // constant" cannot bite (N == 0/1 makes both sides trivially equal). Read after
+    // the scan materialised the lazy index (`get_partition_entries()` is empty
+    // before the first `ensure_materialized`).
+    let partition_count = reader
+        .index_reader
+        .as_ref()
+        .map(|ir| ir.get_partition_entries().len())
+        .unwrap_or(0);
+    assert!(
+        partition_count > 1,
+        "fixture must expose several Index.db partitions for the O(N)-vs-constant \
+         reprobe distinction to be meaningful (got {partition_count})"
+    );
+
+    // The fix: each partition's offset comes from the already-loaded entry, so the
+    // walk performs ZERO redundant per-partition Index.db probes — bounded by a
+    // constant, NOT by the partition count. Before #2430 this was == partition_count.
+    assert_eq!(
+        probes, 0,
+        "a full materialising scan must not re-probe the index per partition — got \
+         {probes} probes for {partition_count} partitions (pre-#2430 this equalled N)"
     );
 }
