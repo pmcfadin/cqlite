@@ -270,10 +270,19 @@ impl Admission {
         // released on EVERY exit, including a cancellation that drops this
         // future mid-`.await` (a request cancelled while waiting never held a
         // permit and must not leak the waiting count).
-        let _waiter = WaitGuard::enter(Arc::clone(&inner));
+        let waiter = WaitGuard::enter(Arc::clone(&inner));
         let started = tokio::time::Instant::now();
         let sem = Arc::clone(&inner.sem);
-        match tokio::time::timeout(inner.wait_timeout, sem.acquire_owned()).await {
+        let result = tokio::time::timeout(inner.wait_timeout, sem.acquire_owned()).await;
+        // roborev-1700 (same gauge-accuracy class as roborev-1696): drop the
+        // waiter THE INSTANT the future resolves — before recording the wait
+        // sample or constructing the `AdmissionPermit` (which bumps `in_use`) —
+        // so an admitted (or rejected) request is never simultaneously counted
+        // both waiting AND in_use. `waiter`'s scope-end drop would otherwise
+        // outlive `AdmissionPermit::new` below, overlapping both gauges for the
+        // span of that call.
+        drop(waiter);
+        match result {
             Ok(Ok(permit)) => {
                 inner.record_wait(started.elapsed());
                 Ok(AdmissionPermit::new(permit, inner))

@@ -596,6 +596,20 @@ impl CqliteFlightService {
             Ok(t) => t,
             Err(status) => return Err((status, metrics)),
         };
+        // Phase timing (issue #2162, `admission` phase added #2420
+        // roborev-1700): begin BEFORE the admission-permit acquire, in the new
+        // `admission` phase. The timer captures the `flight.do_get` span (this
+        // future runs under it via `.instrument`), so its per-phase histogram
+        // samples + span events attach to that span even for the phases that run
+        // on the blocking merge pool. `cqlite.rpc.duration` already includes
+        // admission wait in the RPC total, but the per-phase breakdown is what
+        // field triage localizes latency with (e.g. #2398) — starting the timer
+        // here (rather than after `acquire`, or folding the wait into `resolve`)
+        // makes queueing time a first-class, directly observable phase instead of
+        // vanishing from this breakdown. On an admission timeout/reject the timer
+        // drops here without ever transitioning, recording the `admission` phase
+        // duration it died in.
+        let mut timer = crate::obs::PhaseTimer::start("do_get");
         // Admission control (issue #2420, WS4): acquire a permit immediately
         // after the minimal syntax check, before producer/schema construction,
         // any filesystem access (directory resolve / SSTable open), or batch
@@ -613,13 +627,11 @@ impl CqliteFlightService {
         };
         let cancel = CancelFlag::new();
         let mut setup_guard = cancel.drop_guard();
-        // Phase timing (issue #2162): begin in the `resolve` phase. The timer
-        // captures the `flight.do_get` span (this future runs under it via
-        // `.instrument`), so its per-phase histogram samples + span events attach
-        // to that span even for the phases that run on the blocking merge pool. On
-        // the setup-error path below the timer drops here, recording the `resolve`
-        // phase it died in — so a stall that never produces a row still localizes.
-        let mut timer = crate::obs::PhaseTimer::start("do_get");
+        // Admitted: close the `admission` phase and enter `resolve` (producer/
+        // schema construction + path discovery/token prune). On the resolve-error
+        // path below the timer drops here, recording the `resolve` phase it died
+        // in — so a stall that never produces a row still localizes.
+        timer.transition(crate::obs::PHASE_RESOLVE);
         // Fallible eager resolve: build the producer + Arrow schema and resolve/
         // token-prune the SSTable paths off the reactor — ALL post-permit. A
         // missing table (or invalid DDL/predicate/aggregation spec) surfaces here

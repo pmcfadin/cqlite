@@ -429,3 +429,42 @@ Format:
 - **Files:** `cqlite-flight/src/admission.rs`, `admission_tests.rs`,
   `service.rs` (`new`/`with_admission`, `validate_do_get_ticket`/
   `do_get_resolve` split).
+
+## 2026-07-13 — admission-control roborev round 5 (job 1700)
+
+- **What (finding 1, admission is a first-class phase):** Added a new
+  `admission` phase to the `do_get` phase set (`admission` → `resolve` →
+  `merge_setup` → `stream`, was 3 phases, now 4). `PhaseTimer::start` now opens
+  `admission` (was `resolve`) and the timer is constructed BEFORE
+  `Admission::acquire()`, transitioning to `resolve` only once a permit is
+  granted. Previously admission wait was invisible in the
+  `cqlite.rpc.phase.duration`/`cqlite.rpc.phase.active` breakdown (folded into
+  neither phase, since the timer didn't exist yet) even though
+  `cqlite.rpc.duration` already counted it — field triage localizes latency FROM
+  the phase breakdown (that's how #2398 was diagnosed), so queue time is now a
+  first-class, directly observable phase. Updated the catalog doc comments
+  (`RPC_PHASE`, `RPC_PHASE_DURATION`, `RPC_PHASE_ACTIVE`) to register the new
+  label.
+- **What (finding 2, gauge-overlap fix, same class as roborev-1696):**
+  `Admission::acquire`'s slow (contended) path now drops the `WaitGuard`
+  immediately when the timed acquire future resolves — BEFORE recording the
+  wait sample or constructing the `AdmissionPermit` (which bumps `in_use`) — so
+  an admitted/rejected request is never simultaneously counted both `waiting`
+  AND `in_use`.
+- **Tests:** 18 deterministic admission tests (was 16). New:
+  `req_admission_wait_is_visible_as_its_own_phase` /
+  `req_admission_phase_opens_even_on_an_uncontended_admit` (finding 1, via a new
+  `pub(crate) #[cfg(test)] obs::phase_active_level_for` isolating one
+  `(method, phase)` counter — feature-independent, no OTel needed); extended
+  `req1_contended_acquire_path_unchanged` with an explicit no-overlap assertion
+  (finding 2). Updated two pre-existing `obs.rs` unit tests
+  (`phase_active_counter_reflects_concurrent_overlap_not_a_flag`,
+  `phase_active_counter_moves_on_transition`) that hardcoded `PHASE_RESOLVE` as
+  the assumed starting phase — now `PHASE_ADMISSION`. Re-verified red-on-main:
+  moving the acquire back past `do_get_resolve` now reds 6 tests (up from 5 —
+  the new admission-phase pin also reds).
+- **Files:** `cqlite-flight/src/obs.rs` (phase set, `PhaseTimer::start`,
+  `phase_active_level_for`, 2 updated unit tests), `service.rs` (timer starts
+  before `acquire`), `admission.rs` (gauge-overlap fix), `admission_tests.rs`
+  (2 new tests + 1 extended), `cqlite-core/.../observability/catalog.rs`
+  (doc updates for the 4-phase set).

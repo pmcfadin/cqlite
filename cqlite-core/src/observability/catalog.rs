@@ -94,12 +94,13 @@ pub mod attr {
     /// Bounded to two values so a single metric series carries both arms for
     /// success/error-rate dashboards.
     pub const RPC_STATUS: &str = "cqlite.rpc.status";
-    /// `do_get` execution phase (issue #2162). Bounded to the closed set
-    /// `"resolve"`, `"merge_setup"`, `"stream"` — a `&'static str` from a fixed
-    /// slot table, never a per-query, per-ticket, key, or query-text value. Used
-    /// as the bounded dimension on [`super::RPC_PHASE_DURATION`] so a stalled
-    /// `do_get` localizes to a phase (time piling up in `merge_setup`) from
-    /// metrics alone.
+    /// `do_get` execution phase (issue #2162; `"admission"` added #2420
+    /// roborev-1700). Bounded to the closed set `"admission"`, `"resolve"`,
+    /// `"merge_setup"`, `"stream"` — a `&'static str` from a fixed slot table,
+    /// never a per-query, per-ticket, key, or query-text value. Used as the
+    /// bounded dimension on [`super::RPC_PHASE_DURATION`] so a stalled `do_get`
+    /// localizes to a phase (time piling up in `merge_setup`, or queued behind
+    /// the admission semaphore in `admission`) from metrics alone.
     pub const RPC_PHASE: &str = "cqlite.rpc.phase";
     /// Reason a `SELECT` fell back to a degraded (full-scan) read path
     /// (issue #2163). Values come from
@@ -526,29 +527,40 @@ pub const RPC_ROWS: &str = "cqlite.rpc.rows";
 /// single end-of-stream emission. Bounded attributes: [`attr::RPC_METHOD`].
 pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
 
-/// `cqlite.rpc.phase.duration` — histogram `s` (issue #2162).
+/// `cqlite.rpc.phase.duration` — histogram `s` (issue #2162; `admission` phase
+/// added #2420 roborev-1700).
 ///
 /// Wall time a `do_get` spends in each of a bounded, closed set of execution
-/// phases — `resolve` (path discovery + token prune), `merge_setup` (opening
-/// input SSTables + building the k-way merger, the #2157 stall suspect), and
-/// `stream` (partitions stepping + batches flowing to the client). Recorded once
-/// per phase transition, so a `do_get` dominated by opening SSTables shows its
-/// wall time accumulating in `merge_setup` BEFORE the first batch — a stall that
-/// emits zero rows still localizes to a phase. Bounded attributes:
-/// [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed three-value set). NEVER
+/// phases — `admission` (queued waiting for, or immediately granted, an
+/// admission permit — see #2420 — BEFORE any producer/schema construction or
+/// filesystem access), `resolve` (producer/schema construction + path
+/// discovery/token prune), `merge_setup` (opening input SSTables + building the
+/// k-way merger, the #2157 stall suspect), and `stream` (partitions stepping +
+/// batches flowing to the client). Recorded once per phase transition, so a
+/// `do_get` dominated by opening SSTables shows its wall time accumulating in
+/// `merge_setup` BEFORE the first batch, and a `do_get` queued behind a
+/// saturated admission ceiling shows it accumulating in `admission` BEFORE
+/// `resolve` even starts — a stall (or queueing delay) that emits zero rows
+/// still localizes to a phase. `cqlite.rpc.duration` already includes admission
+/// wait time in the RPC total; this is the per-phase breakdown field triage uses
+/// to localize WHERE that time went (e.g. #2398). Bounded attributes:
+/// [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed four-value set). NEVER
 /// carries a ticket, key, token range, or query-text attribute.
 pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
 
-/// `cqlite.rpc.phase.active` — gauge `1` (issue #2361).
+/// `cqlite.rpc.phase.active` — gauge `1` (issue #2361; `admission` phase added
+/// #2420 roborev-1700).
 ///
 /// In-flight visibility of the phase a `do_get` is CURRENTLY executing, set to 1
 /// on phase entry and back to 0 on exit (via [`super::super`]'s `PhaseTimer`
 /// transition/`Drop`). [`RPC_PHASE_DURATION`] only records a sample once a phase
 /// COMPLETES, so a `do_get` wedged forever in `stream` (the #2361 hang: a merge
 /// that never returns a batch) recorded NOTHING — this gauge shows `stream = 1`
-/// for the entire hang, so a stall is observable BEFORE completion. Bounded
-/// attributes: [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed three-value
-/// set) — low cardinality (methods × 3 phases). NEVER a ticket/key/query value.
+/// for the entire hang, so a stall is observable BEFORE completion; likewise a
+/// `do_get` queued behind a saturated admission ceiling shows `admission = 1`
+/// for the whole wait. Bounded attributes: [`attr::RPC_METHOD`],
+/// [`attr::RPC_PHASE`] (the closed four-value set) — low cardinality (methods ×
+/// 4 phases). NEVER a ticket/key/query value.
 pub const RPC_PHASE_ACTIVE: &str = "cqlite.rpc.phase.active";
 
 /// `cqlite.warm.cache.hits` — counter `{1}` (issue #2310).

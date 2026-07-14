@@ -181,6 +181,21 @@ fn req1_contended_acquire_path_unchanged() {
         };
         let after = adm.snapshot();
         assert_eq!(after.waiting, 0, "admission clears the waiting gauge");
+        // roborev-1700: the instant a contended acquire is admitted, `waiting`
+        // and `in_use` must never simultaneously double-count the same request —
+        // `Admission::acquire`'s slow path drops the `WaitGuard` BEFORE
+        // constructing the `AdmissionPermit` that bumps `in_use`, so by the time
+        // this single synchronous continuation returns `Ready`, exactly one of
+        // the two gauges reflects this request, never both at once.
+        assert_eq!(
+            after.in_use, 1,
+            "the admitted request is counted exactly once, as in_use"
+        );
+        assert_eq!(
+            after.waiting + after.in_use,
+            1,
+            "no overlap window: waiting and in_use never both count this one request"
+        );
         assert!(
             after.wait_samples > before.wait_samples,
             "a genuinely-contended acquire still records a permit-wait sample"
@@ -708,4 +723,86 @@ fn req6_admitted_after_wait_equals_unbounded_result() {
         unbounded, admitted,
         "admission is transparent: identical rows, order, schema, and batch boundaries"
     );
+}
+
+// ---- roborev-1700 (round 5): admission is a first-class phase ----
+
+/// roborev-1700 (finding 1): a `do_get` queued behind a saturated admission
+/// ceiling must be visible in the `cqlite.rpc.phase.active` breakdown as the
+/// `admission` phase — not silently folded into `resolve` (which pre-fix this
+/// timer started in even before the permit was granted) and not invisible.
+/// `cqlite.rpc.duration` already includes admission wait in the RPC total, but
+/// the per-phase breakdown is what field triage localizes latency with (e.g.
+/// #2398), so queue time must be first-class there too. Feature-independent:
+/// `PhaseTimer`'s phase-active atomics are always maintained regardless of the
+/// `observability` OTel feature (only the OTel emission itself is gated), so
+/// this pins the wiring without needing that feature on.
+#[test]
+fn req_admission_wait_is_visible_as_its_own_phase() {
+    let adm = Admission::new(cfg(1, BIG_TIMEOUT));
+    let (_temp, svc) = build_service(adm.clone(), 8);
+    block_on_paused(async move {
+        let held = adm.acquire().await.unwrap(); // saturate the only permit
+        let admission_base =
+            crate::obs::phase_active_level_for("do_get", crate::obs::PHASE_ADMISSION);
+        let resolve_base = crate::obs::phase_active_level_for("do_get", crate::obs::PHASE_RESOLVE);
+
+        let svc2 = svc.clone();
+        let task = tokio::spawn(async move { svc2.do_get(do_get_request()).await });
+        settle().await;
+
+        assert_eq!(
+            crate::obs::phase_active_level_for("do_get", crate::obs::PHASE_ADMISSION),
+            admission_base + 1,
+            "a queued do_get occupies the admission phase — queue time is visible \
+             in the phase breakdown, not folded into resolve or invisible"
+        );
+        assert_eq!(
+            crate::obs::phase_active_level_for("do_get", crate::obs::PHASE_RESOLVE),
+            resolve_base,
+            "resolve is untouched while the request is queued in admission — the \
+             other phases' meanings are unchanged"
+        );
+
+        drop(held); // admits the waiter
+        settle().await;
+
+        // Once admitted, the phase moves OUT of admission (into resolve, and
+        // likely on through to completion for this tiny in-process fixture) —
+        // either way, this request no longer occupies `admission`.
+        assert_eq!(
+            crate::obs::phase_active_level_for("do_get", crate::obs::PHASE_ADMISSION),
+            admission_base,
+            "admitted: the admission phase is vacated"
+        );
+
+        let _ = task.await;
+    });
+}
+
+/// roborev-1700: an UNCONTENDED admit (the fast path, no waiting) still opens
+/// and closes the `admission` phase — briefly, but it is never skipped. Proves
+/// the phase machinery is correct for both the contended AND uncontended cases,
+/// not just when the semaphore happens to be saturated.
+#[test]
+fn req_admission_phase_opens_even_on_an_uncontended_admit() {
+    let adm = Admission::new(cfg(4, BIG_TIMEOUT));
+    let (_temp, svc) = build_service(adm, 8);
+    block_on_paused(async move {
+        let admission_base =
+            crate::obs::phase_active_level_for("do_get", crate::obs::PHASE_ADMISSION);
+
+        // An uncontended do_get: never waits, but must still transition THROUGH
+        // the admission phase (start() opens it, the first transition() closes
+        // it) rather than skip straight to resolve.
+        let resp = svc.do_get(do_get_request()).await.unwrap();
+        drop(resp);
+
+        assert_eq!(
+            crate::obs::phase_active_level_for("do_get", crate::obs::PHASE_ADMISSION),
+            admission_base,
+            "a completed uncontended do_get leaves the admission phase vacated, \
+             same as the contended case"
+        );
+    });
 }
