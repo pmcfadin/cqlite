@@ -88,8 +88,7 @@ pub(crate) struct PartitionStreamState {
     /// (or static carrier) of a tombstone-free partition has opened it; each
     /// subsequent row feeds straight through it, so no whole-partition
     /// `buffered_rows` accumulation is needed. `None` on the buffered path.
-    direct_session:
-        Option<crate::storage::sstable::writer::data_writer::StreamingPartitionSession>,
+    direct_session: Option<crate::storage::sstable::writer::data_writer::StreamingPartitionSession>,
 }
 
 impl PartitionStreamState {
@@ -708,11 +707,8 @@ impl WriteEngine {
                                             "issue #2299 direct-stream: no partition key to open the writer session".to_string(),
                                         )
                                     })?;
-                                let mut session = writer_ref.begin_streaming_partition(
-                                    &open_key,
-                                    None,
-                                    &[],
-                                )?;
+                                let mut session =
+                                    writer_ref.begin_streaming_partition(&open_key, None, &[])?;
                                 if schema_has_static {
                                     let merged =
                                         std::mem::take(&mut stream_state.static_tracker).finish();

@@ -855,10 +855,8 @@ mod block_emit_windowed;
 mod cell_kind;
 mod cell_value;
 mod compaction;
-// Issue #2299: row-granular resumable compaction streaming state + step enum,
-// re-exported so the sliding-window compaction driver in `data_access` can drive
-// a wide partition WITHOUT buffering it whole.
-pub(in crate::storage::sstable::reader) use compaction::{
+mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
+pub(in crate::storage::sstable::reader) use compaction_stream::{
     CompactionPartitionState, PartitionStreamStep,
 };
 mod complex_column;
