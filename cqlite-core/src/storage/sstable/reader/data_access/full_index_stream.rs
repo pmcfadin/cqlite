@@ -228,7 +228,14 @@ impl SSTableReader {
             // a HashMap lookup that also incremented `INDEX_PROBES` — dropping it
             // removes O(partitions) index probes without weakening any check (the
             // up-front gate already proved every offset present, ascending, and
-            // span-representable).
+            // span-representable). This intentionally also skips the
+            // `READ_PARTITION_LOOKUP` observability counter and the B4
+            // `key_offset_cache` population that `lookup_partition_with_index`
+            // performs on the point-read path: a full scan is not a point lookup,
+            // so it must not inflate point-read lookup metrics, nor thrash/evict
+            // the bounded B4 cache by pushing ~1M entries through it. This is a
+            // deliberate divergence from the materialising sibling's
+            // `lookup_partition_with_index` call, not an oversight.
             let data_offset = entries[i].data_offset;
             let next_offset = if i + 1 < entries.len() {
                 entries[i + 1].data_offset
