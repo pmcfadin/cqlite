@@ -89,14 +89,21 @@ impl MergeProducer {
             on_merger_built();
             return match built {
                 None => Ok(()),
-                Some(mut merger) => self.drive_merge(&mut merger, cancel, sink, progress, label),
+                // Issue #2423: row-granular streaming drive (see `produce_point`) —
+                // bounds a warm wide-partition point read to one clustering group +
+                // batch and makes cancellation mid-partition, byte-identically.
+                Some(mut merger) => {
+                    self.drive_merge_over(&mut merger, cancel, sink, progress, label)
+                }
             };
         }
 
         let mut merger = KWayMerger::new_from_readers(readers, &self.schema, cancel.scan_cancel())
             .map_err(ProducerError::Merge)?;
         on_merger_built();
-        self.drive_merge(
+        // Issue #2423: the warm full-scan branch streams row-granularly too, matching
+        // the cold full-scan path (#2230) — bounded memory + mid-partition cancel.
+        self.drive_merge_over(
             &mut merger,
             cancel,
             sink,

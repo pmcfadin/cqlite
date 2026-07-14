@@ -158,6 +158,19 @@ pub fn write_clustered(pk: i32, ck: &str, val: i32, ts: i64) -> Mutation {
     )
 }
 
+/// A row (clustering-row) tombstone for `(pk, ck)` — shadows an earlier
+/// `write_clustered` at the same coordinates when its timestamp is newer.
+pub fn delete_clustered(pk: i32, ck: &str, ts: i64) -> Mutation {
+    Mutation::new(
+        TableId::new(KS, WIDE_TBL),
+        PartitionKey::single("pk", Value::Integer(pk)),
+        Some(ClusteringKey::single("ck", Value::Text(ck.into()))),
+        vec![CellOperation::DeleteRow],
+        ts,
+        None,
+    )
+}
+
 /// UUID-keyed table: PK=id(uuid), regular name(text).
 pub const UUID_TBL: &str = "uu";
 
