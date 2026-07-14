@@ -44,7 +44,7 @@ easy-db-lab trino-loadtest-trino stop
 | `--duration` | `DURATION` | `60` | Load duration in seconds |
 | `--interval` | `INTERVAL` | `10` | Interval stats reporting period in seconds |
 | `--traceparent` | `TRACEPARENT` | `false` | Attach a random W3C `traceparent` header to every query (off by default) |
-| `--snapshot-check-cmd` | `TRINO_LOADTEST_SNAPSHOT_CHECK_CMD` | (unset) | Shell command printing `nodetool listsnapshots`-style output for every target node; if set, the driver asserts zero `cqlite-` snapshots remain after the run and exits nonzero on a leak (D12 hygiene, issue #2399). Unset: SKIPPED and reported as such, never a silent pass. |
+| `--snapshot-check-cmd` | `TRINO_LOADTEST_SNAPSHOT_CHECK_CMD` | (unset) | Shell command printing **raw** `nodetool listsnapshots` output for every target node; if set, the driver asserts zero `cqlite-` snapshots remain after the run and exits nonzero on a leak (D12 hygiene, issue #2399). Emit the unfiltered listing — the driver does the `cqlite-` matching itself; **do not** pipe through `grep` (see the note below). Unset: SKIPPED and reported as such, never a silent pass. |
 | `--snapshot-check-timeout-s` | `TRINO_LOADTEST_SNAPSHOT_CHECK_TIMEOUT_S` | `60` | Seconds the `--snapshot-check-cmd` probe may run before it is treated as a check FAILURE — a wedged probe (unreachable pod, hung `kubectl exec`) must not hang the driver indefinitely with no D12 verdict. Must be `> 0`. |
 
 Either `--ks`/`--tbl` or `--queries-file` is required (`--ks`/`--tbl` if you
@@ -85,8 +85,17 @@ cqlite snapshot-mode read takes a transient per-query Cassandra snapshot and
 must clean it up; anything still present after the run is a leak. This driver
 runs in a plain Python pod with no direct cluster/`nodetool` access, so the
 check is only performed when `--snapshot-check-cmd` names an operator-provided
-shell command that prints `nodetool listsnapshots`-style output across every
-node (a `kubectl exec` one-liner, typically). If configured, the driver prints
+shell command that prints **raw** `nodetool listsnapshots` output across every
+node (a `kubectl exec` one-liner, typically). Provide the *unfiltered* listing:
+the driver does the `cqlite-` matching itself, so **do not** bake `| grep
+cqlite-` into the command. A clean cluster makes `grep cqlite-` match nothing
+and exit `1` with empty output, and — per the spec's no-vacuous-pass rule —
+any nonzero probe exit is a check FAILURE (an exit-1-empty grep is
+indistinguishable from an auth failure or unreachable node, so it can't be
+whitelisted as a pass); a grep-style command would therefore *false-FAIL a
+healthy ring*. The metric's canonical `nodetool listsnapshots | grep cqlite-
+== 0` phrasing describes the human check — feed the driver the raw listing and
+let it apply the `cqlite-` filter. If configured, the driver prints
 `snapshot-leak check: PASS`/`FAIL` (with the leaked names) after the run and
 exits `3` on a leak. If not configured, it prints `snapshot-leak check:
 SKIPPED` — deliberately never a silent pass, per the requirement that the

@@ -607,6 +607,26 @@ def test_snapshot_leak_check_cli_flag_defaults_to_none() -> None:
     assert args.snapshot_check_cmd is None
 
 
+def test_clean_cluster_raw_listing_reports_pass_through_command_path() -> None:
+    # The scenario the exit-code bug would have shipped broken: a CLEAN cluster.
+    # The documented usage feeds RAW `nodetool listsnapshots` output (which exits
+    # 0 even when there are no cqlite- snapshots) — NOT a `| grep cqlite-`
+    # pipeline (which would exit 1 on a clean ring and, since any nonzero exit is
+    # a check FAILURE per the spec, false-FAIL a healthy cluster). Exercise the
+    # real command-execution path end-to-end and assert PASS.
+    clean_listing = (
+        "Snapshot Details:\n"
+        "Snapshot name Keyspace name Column family name True size Size on disk\n"
+        "backup_20260714 system_schema tables 1.2 MiB 1.2 MiB\n"
+    )
+    # printf emits the raw listing and exits 0 — the shape operators must use.
+    cmd = f"printf '%s' {clean_listing!r}"
+    result = driver.run_snapshot_leak_check(driver.make_default_list_snapshots_fn(cmd))
+    assert result.ran is True
+    assert result.leaked == []
+    assert result.passed is True, "a clean cluster's raw listing (exit 0) must report PASS"
+
+
 def test_make_default_list_snapshots_fn_runs_command_and_captures_stdout() -> None:
     fn = driver.make_default_list_snapshots_fn("echo cqlite-leaked-one ks tbl 1.0MiB 1.0MiB")
     output = fn()
@@ -789,6 +809,10 @@ def main() -> int:
     check("run_snapshot_leak_check: fails when leaked", test_run_snapshot_leak_check_fails_when_leaked)
     check("--snapshot-check-cmd: wired into parsed args", test_snapshot_leak_check_wired_into_cli_flag)
     check("--snapshot-check-cmd: defaults to None", test_snapshot_leak_check_cli_flag_defaults_to_none)
+    check(
+        "clean cluster: raw listing (exit 0) reports PASS via the command path",
+        test_clean_cluster_raw_listing_reports_pass_through_command_path,
+    )
     check(
         "make_default_list_snapshots_fn: runs command and captures stdout",
         test_make_default_list_snapshots_fn_runs_command_and_captures_stdout,

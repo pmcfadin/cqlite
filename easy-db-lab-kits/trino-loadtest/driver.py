@@ -348,6 +348,20 @@ def default_exec_fn(conn: object, sql: str, headers: Optional[dict]) -> int:
 # one-liner spanning every Cassandra pod). When it is not configured the
 # check is reported as SKIPPED, never as a silent pass (issue #2399,
 # "SHALL NOT pass vacuously").
+#
+# IMPORTANT — the injected command must emit the RAW ``nodetool listsnapshots``
+# output; ``find_leaked_snapshots`` below does the ``grep cqlite-`` matching in
+# Python. Do NOT bake ``| grep cqlite-`` (or any filter) into the command
+# itself: a clean cluster makes ``grep cqlite-`` match nothing and exit 1 with
+# empty output, and this check treats any nonzero exit as a FAILURE (the spec's
+# non-negotiable "a nonzero exit ... SHALL be reported as a check failure,
+# never 'ran cleanly, 0 snapshots found'" — an exit-1-empty grep is
+# indistinguishable from an auth failure / unreachable node, so it cannot be
+# whitelisted as a pass without reopening that vacuous-pass hole). A grep-style
+# command would therefore false-FAIL a healthy ring. The metric's canonical
+# ``| grep cqlite- == 0`` phrasing describes the human check; the driver's
+# ``--snapshot-check-cmd`` wants the un-filtered listing (roborev finding,
+# final branch review).
 
 DEFAULT_SNAPSHOT_PREFIX = "cqlite-"
 # The operator-injected probe (a kubectl-exec/nodetool one-liner spanning the
@@ -565,11 +579,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="snapshot_check_cmd",
         default=_env_default("TRINO_LOADTEST_SNAPSHOT_CHECK_CMD"),
         help=(
-            "shell command printing `nodetool listsnapshots`-style output for every "
+            "shell command printing RAW `nodetool listsnapshots` output for every "
             "target node (e.g. a kubectl-exec one-liner); if set, asserts zero "
             "cqlite- snapshots remain after the run (D12 hygiene, issue #2399) and "
-            "exits nonzero on a leak. Unset: the check is SKIPPED and reported as "
-            "such, never a silent pass."
+            "exits nonzero on a leak. Emit the UNFILTERED listing — the driver does "
+            "the `grep cqlite-` matching itself; do NOT pipe through `grep`, since a "
+            "clean cluster makes grep exit 1 (empty) and any nonzero exit is treated "
+            "as a check FAILURE, which would false-FAIL a healthy ring. Unset: the "
+            "check is SKIPPED and reported as such, never a silent pass."
         ),
     )
     parser.add_argument(
