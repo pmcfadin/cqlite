@@ -64,6 +64,14 @@ pub struct WarmMetrics {
     /// Number of `SSTableReader::open` calls the registry performed — the
     /// "work-done" probe. A warm hit performs ZERO opens (spec Requirement 2).
     reader_opens: AtomicU64,
+    /// Number of cached readers rebound in place to a fresh same-inode snapshot
+    /// path (issue #2383/#2356 rebind-by-inode) — parsed state kept, ZERO
+    /// reader-open/index-parse. Distinguishes a warm-hit-WITH-rebind (path
+    /// rolled over to a fresh snapshot dir) from a pure warm hit (path
+    /// unchanged, `rebind_hits == 0`) and from a full rebuild (`reader_opens`
+    /// climbs). The snapshot-lifecycle-closure work probe (flight-warm-snapshot-
+    /// closure spec, §D).
+    rebind_hits: AtomicU64,
 }
 
 impl WarmMetrics {
@@ -108,11 +116,30 @@ impl WarmMetrics {
     }
 
     /// Record `n` reader opens performed during a (re)build.
+    ///
+    /// Snapshot-only exposure (issue #2356 roborev, spec `flight-warm-snapshot-closure`):
+    /// this work-probe is read via [`WarmMetrics::snapshot`] (the surface the warm-closure
+    /// tests + field probes consume), NOT mirrored to the OTel counter export like the
+    /// cache hit/miss/evict/refresh counters — this change deliberately does not expand
+    /// the OTel surface for it.
     pub fn record_reader_opens(&self, n: u64) {
         if n == 0 {
             return;
         }
         self.reader_opens.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Record `n` cached readers rebound in place to a fresh same-inode snapshot
+    /// path (the #2383/#2356 rebind pass). A no-op for `n == 0` so a pure warm
+    /// hit (path unchanged) never touches the counter.
+    ///
+    /// Snapshot-only exposure, same as [`Self::record_reader_opens`] (spec
+    /// `flight-warm-snapshot-closure`): read via [`WarmMetrics::snapshot`], not OTel.
+    pub fn record_rebind_hits(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        self.rebind_hits.fetch_add(n, Ordering::Relaxed);
     }
 
     /// A consistent-enough snapshot of the counters for tests/benches.
@@ -125,6 +152,7 @@ impl WarmMetrics {
             refresh_rebuilt_delta: self.refresh_rebuilt.load(Ordering::Relaxed),
             refresh_fail_closed_retained: self.refresh_fail_closed.load(Ordering::Relaxed),
             reader_opens: self.reader_opens.load(Ordering::Relaxed),
+            rebind_hits: self.rebind_hits.load(Ordering::Relaxed),
         }
     }
 }
@@ -146,6 +174,11 @@ pub struct WarmMetricsSnapshot {
     pub refresh_fail_closed_retained: u64,
     /// Total `SSTableReader::open` calls — the work-done probe (0 on a warm hit).
     pub reader_opens: u64,
+    /// Total cached readers rebound to a fresh same-inode snapshot path
+    /// (issue #2383/#2356). `0` on a pure warm hit (path unchanged) and on a
+    /// full rebuild; `> 0` only when a fresh snapshot dir rolled over and the
+    /// cached parsed state was repointed to it without re-parse.
+    pub rebind_hits: u64,
 }
 
 #[cfg(test)]
@@ -160,23 +193,27 @@ mod tests {
         m.record_miss();
         m.record_evicts(2);
         m.record_reader_opens(3);
+        m.record_rebind_hits(2);
         m.record_refresh(RefreshOutcome::RebuiltDelta);
         let s = m.snapshot();
         assert_eq!(s.hits, 1);
         assert_eq!(s.misses, 1);
         assert_eq!(s.evicts, 2);
         assert_eq!(s.reader_opens, 3);
+        assert_eq!(s.rebind_hits, 2);
         assert_eq!(s.refresh_rebuilt_delta, 1);
     }
 
     #[test]
-    fn zero_evicts_and_opens_are_noops() {
+    fn zero_evicts_opens_and_rebinds_are_noops() {
         let m = WarmMetrics::default();
         m.record_evicts(0);
         m.record_reader_opens(0);
+        m.record_rebind_hits(0);
         let s = m.snapshot();
         assert_eq!(s.evicts, 0);
         assert_eq!(s.reader_opens, 0);
+        assert_eq!(s.rebind_hits, 0);
     }
 
     impl WarmMetricsSnapshot {
@@ -189,6 +226,7 @@ mod tests {
                 refresh_rebuilt_delta: 0,
                 refresh_fail_closed_retained: 0,
                 reader_opens: 0,
+                rebind_hits: 0,
             }
         }
     }

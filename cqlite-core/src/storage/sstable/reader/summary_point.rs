@@ -124,8 +124,12 @@ impl SSTableReader {
         // `index_interval_parses_total` is emitted inside `lookup_key_in_interval`.
         crate::storage::sstable::read_work_counters::record_index_probe();
 
+        // The reader's CURRENT (possibly #2383-rebound) Index.db path (issue #2356
+        // roborev): a lazy warm reader rebound across a snapshot teardown must open the
+        // live hardlink here, not the dead open-time path (#2352 class).
+        let index_db_path = index_reader.index_path();
         let lookup = lookup_key_in_interval(
-            index_reader.index_path(),
+            &index_db_path,
             interval,
             partition_key,
             min_index_interval,

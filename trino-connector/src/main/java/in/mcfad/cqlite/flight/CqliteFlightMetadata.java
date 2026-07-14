@@ -59,7 +59,6 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     private final CqliteFlightConfig config;
     private final SidecarClient sidecar;
     private final CqliteFlightClient flight;
-    private final SnapshotManager snapshots;
 
     /**
      * Tables for which the "hiding unsupported-type columns" warning has already
@@ -90,28 +89,23 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             new ConcurrentHashMap<>();
 
     public CqliteFlightMetadata(CqliteFlightConfig config, SidecarClient sidecar, CqliteFlightClient flight) {
-        this(config, sidecar, flight, null);
-    }
-
-    public CqliteFlightMetadata(
-            CqliteFlightConfig config, SidecarClient sidecar, CqliteFlightClient flight, SnapshotManager snapshots) {
         this.config = config;
         this.sidecar = sidecar;
         this.flight = flight;
-        this.snapshots = snapshots;
     }
 
     /**
-     * Query teardown (issue #2105): best-effort delete any per-query Sidecar snapshot this
-     * query created. Trino calls this once when the query finishes (success or failure), so
-     * it is the lifecycle counterpart to the split manager's create. A miss is covered by
-     * the snapshot's Sidecar-side TTL backstop.
+     * Query teardown. Under snapshot REUSE (issue #2356/#2306) a snapshot is shared across queries
+     * within a freshness window, so it must OUTLIVE the query that created it — per-query cleanup
+     * would defeat reuse (and re-flush on the next query). Retirement is therefore NOT per-query:
+     * a superseded window is retired when a fresh one replaces it (see {@code SnapshotManager
+     * .resolveWindow}/{@code invalidate}), the connector retires all live windows at shutdown
+     * ({@code SnapshotManager.retireAll}), and a Sidecar-side TTL backstop reclaims any miss. This
+     * hook is intentionally a no-op.
      */
     @Override
     public void cleanupQuery(ConnectorSession session) {
-        if (snapshots != null) {
-            snapshots.cleanup(session.getQueryId());
-        }
+        // Intentionally empty — see javadoc (reuse: snapshots outlive the query, #2356/#2306).
     }
 
     @Override

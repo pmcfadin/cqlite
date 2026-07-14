@@ -17,16 +17,36 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Per-query snapshot lifecycle (issues #2105, #2227): create-at-planning on EVERY replica
- * host, fail-closed (naming host + snapshot), idempotent per (query, host, table),
- * best-effort per-host cleanup. Uses a recording fake {@link HostSnapshotApis} so no live
- * Sidecar / HTTP is needed.
+ * Snapshot lifecycle: per-{@code (keyspace, table)} REUSE within a freshness window (issues
+ * #2356/#2306) — one create fan-out per window (not per query), invalidated by window expiry, an
+ * observed generation-set change, or an explicit refresh — on top of the preserved per-host
+ * fail-closed create model (#2227). Window timing is driven by an injected logical clock (never
+ * {@code System.currentTimeMillis}, per #1742). Uses a recording fake {@link HostSnapshotApis} so
+ * no live Sidecar / HTTP is needed.
  */
 class SnapshotManagerTest {
+
+    private static final long WINDOW = 1_000L; // logical nanos
+    private static final long GRACE = 5_000L;  // logical nanos: retire a superseded window after 5 windows
+
+    /** A settable logical clock so window timing is pinned deterministically (no wall-clock). */
+    private static final class ManualClock implements SnapshotManager.Clock {
+        volatile long nanos;
+
+        @Override
+        public long nanoTime() {
+            return nanos;
+        }
+
+        void advance(long delta) {
+            nanos += delta;
+        }
+    }
 
     /** Records every create/clear (prefixed with the host) and can be armed to throw. */
     private static final class FakeSidecars implements HostSnapshotApis {
@@ -53,105 +73,383 @@ class SnapshotManagerTest {
         }
     }
 
-    @Test
-    void liveModeNeverTouchesSidecar() {
-        FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.LIVE, Optional.of("6h"));
+    private SnapshotManager snapshotMgr(HostSnapshotApis sidecars, ManualClock clock) {
+        return new SnapshotManager(sidecars, ReadMode.SNAPSHOT, Optional.of("6h"), WINDOW, clock);
+    }
 
-        assertEquals(Optional.empty(), mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2")));
-        mgr.cleanup("q1");
+    // ---- LIVE-mode inertness (flight-snapshot-reuse spec) --------------------------------------
+
+    @Test
+    void liveModePerformsNoReuseAndNoSidecarCalls() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.LIVE, Optional.of("6h"), WINDOW, new ManualClock());
+
+        for (int i = 0; i < 5; i++) {
+            assertEquals(Optional.empty(), mgr.snapshotFor("ks", "t", List.of("h1", "h2")));
+            assertEquals(Optional.empty(), mgr.resolveSnapshot("ks", "t", List.of("h1", "h2")),
+                    "live mode resolves no reuse window");
+        }
 
         assertTrue(fake.creates.isEmpty(), "live mode creates no snapshot");
         assertTrue(fake.clears.isEmpty(), "live mode clears nothing");
+        assertEquals(0, mgr.snapshotCreationsTotal(), "live mode never creates");
+        assertEquals(0, mgr.snapshotReuseHitsTotal(), "live mode never reuses");
     }
+
+    // ---- Naming + per-host fail-closed create (#2227) ------------------------------------------
 
     @Test
-    void snapshotModeCreatesNamedSnapshotWithTtl() {
+    void snapshotModeCreatesEpochNamedSnapshotWithTtl() {
         FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
 
-        Optional<String> name =
-                mgr.snapshotFor("20260706_120000_00001_abcde", "ks", "t", List.of("10.0.0.1"));
+        Optional<String> name = mgr.snapshotFor("ks", "t", List.of("10.0.0.1"));
 
-        assertEquals(Optional.of("cqlite-20260706_120000_00001_abcde"), name);
-        assertEquals(List.of("10.0.0.1|ks.t/cqlite-20260706_120000_00001_abcde/ttl=6h"), fake.creates);
+        assertEquals(Optional.of("cqlite-ks-t-0"), name);
+        assertEquals(List.of("10.0.0.1|ks.t/cqlite-ks-t-0/ttl=6h"), fake.creates);
+        assertEquals(1, mgr.snapshotCreationsTotal());
     }
 
-    /**
-     * AC1/AC2 (issue #2227): the snapshot must be created on EVERY replica host a split will
-     * read, not just the configured Sidecar's node — one PUT per distinct host, same name.
-     */
     @Test
     void createsSnapshotOnEveryReplicaHost() {
         FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
 
-        Optional<String> name = mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.1", "10.0.0.2", "10.0.0.3"));
+        Optional<String> name = mgr.snapshotFor("ks", "t", List.of("10.0.0.1", "10.0.0.2", "10.0.0.3"));
 
-        assertEquals(Optional.of("cqlite-q1"), name);
+        assertEquals(Optional.of("cqlite-ks-t-0"), name);
         assertEquals(List.of(
-                        "10.0.0.1|ks.t/cqlite-q1/ttl=6h",
-                        "10.0.0.2|ks.t/cqlite-q1/ttl=6h",
-                        "10.0.0.3|ks.t/cqlite-q1/ttl=6h"),
+                        "10.0.0.1|ks.t/cqlite-ks-t-0/ttl=6h",
+                        "10.0.0.2|ks.t/cqlite-ks-t-0/ttl=6h",
+                        "10.0.0.3|ks.t/cqlite-ks-t-0/ttl=6h"),
                 fake.creates.stream().sorted().toList());
+        assertEquals(1, mgr.snapshotCreationsTotal(), "one window ⇒ one create fan-out");
     }
 
-    /**
-     * AC3 (issue #2227): a create failure on one host fails closed with an actionable error
-     * naming the offending host AND the snapshot — never a bare NotFound / opaque failure.
-     */
     @Test
     void failsClosedNamingHostAndSnapshot() {
         FakeSidecars fake = new FakeSidecars();
         fake.failCreateHosts = Set.of("10.0.0.2");
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
 
         SidecarClient.SidecarException ex = assertThrows(SidecarClient.SidecarException.class,
-                () -> mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.1", "10.0.0.2")));
+                () -> mgr.snapshotFor("ks", "t", List.of("10.0.0.1", "10.0.0.2")));
 
         assertTrue(ex.getMessage().contains("10.0.0.2"), "error names the failing host: " + ex.getMessage());
-        assertTrue(ex.getMessage().contains("cqlite-q1"), "error names the snapshot: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("cqlite-ks-t-0"), "error names the snapshot: " + ex.getMessage());
     }
 
     @Test
-    void createIsIdempotentPerQueryHostTable() {
+    void nameSanitizesUnsafeChars() {
+        assertEquals("cqlite-k_s-t_x-3", SnapshotManager.nameFor("k/s", "t x", 3));
+    }
+
+    // ---- Reuse within one window (flight-snapshot-reuse spec) ----------------------------------
+
+    /** Scenario: N queries within one window create exactly one snapshot. */
+    @Test
+    void nQueriesInOneWindowCreateExactlyOneSnapshot() {
         FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
 
-        mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2"));
-        mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2")); // re-plan same scan
+        int n = 5;
+        String first = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        for (int i = 1; i < n; i++) {
+            clock.advance(1); // still well within WINDOW
+            assertEquals(Optional.of(first), mgr.snapshotFor("ks", "t", List.of("h1")),
+                    "every query in the window receives the SAME snapshot name");
+        }
 
-        assertEquals(2, fake.creates.size(), "at most one PUT per (query, host, keyspace, table)");
+        assertEquals(1, mgr.snapshotCreationsTotal(), "exactly one create fan-out for N queries in one window");
+        assertEquals(n - 1L, mgr.snapshotReuseHitsTotal(), "the other N-1 queries are reuse hits");
+        assertEquals(1, fake.creates.size(), "exactly one Sidecar PUT on the host");
     }
 
     @Test
-    void failsClosedOnCreateError() {
+    void rePlanReusesWindowWithoutDuplicatePut() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
+
+        mgr.snapshotFor("ks", "t", List.of("h1", "h2"));
+        mgr.snapshotFor("ks", "t", List.of("h1", "h2")); // re-plan same scan, same window
+
+        assertEquals(2, fake.creates.size(), "at most one PUT per (window, host)");
+        assertEquals(1, mgr.snapshotCreationsTotal());
+        assertEquals(1, mgr.snapshotReuseHitsTotal());
+    }
+
+    // ---- Invalidation: window expiry / generation change / explicit refresh --------------------
+
+    /** Scenario: A new query after window expiry creates a fresh snapshot. */
+    @Test
+    void newQueryAfterWindowExpiryCreatesFreshSnapshot() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        String w0 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        clock.advance(WINDOW); // window elapses
+        String w1 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+
+        assertEquals("cqlite-ks-t-0", w0);
+        assertEquals("cqlite-ks-t-1", w1, "post-expiry query gets a fresh (next-epoch) snapshot");
+        assertEquals(2, mgr.snapshotCreationsTotal(), "one create per window");
+        assertEquals(0, mgr.snapshotReuseHitsTotal(), "no reuse across the window boundary");
+        // The superseded window's snapshot is NOT actively deleted the instant it is superseded
+        // (issue #2356 roborev, retire-race): a long-running query may still be reading it. It is
+        // retired only after the retire-grace elapses (here the default 10-min grace, far beyond
+        // this tiny advance), so within the grace clears stay empty.
+        assertTrue(fake.clears.isEmpty(),
+                "a superseded snapshot is NOT retired on supersede (within grace), got clears=" + fake.clears);
+    }
+
+    /**
+     * Blocker 1 (issue #2356 roborev, retire-race): superseding a window (window expiry / generation
+     * change) must NOT delete the superseded snapshot's hardlinks — an in-flight query may still be
+     * reading them — while an explicit {@link SnapshotManager#invalidate} and shutdown
+     * {@link SnapshotManager#retireAll} still retire correctly.
+     */
+    @Test
+    void supersedeDoesNotRetireButInvalidateAndRetireAllDo() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        // Query A takes W0 and (conceptually) is still reading it.
+        String w0 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        // Query B, after the window elapses, supersedes W0 with W1 — W0 must NOT be deleted.
+        clock.advance(WINDOW);
+        String w1 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        assertNotEquals(w0, w1);
+        assertTrue(fake.clears.isEmpty(), "supersede must not delete W0, got clears=" + fake.clears);
+
+        // Generation-set change also supersedes without retiring.
+        clock.advance(1);
+        String w2 = mgr.snapshotFor("ks", "t", List.of("h1"), 999L).orElseThrow();
+        assertNotEquals(w1, w2);
+        assertTrue(fake.clears.isEmpty(), "generation-change supersede must not delete W1, got " + fake.clears);
+
+        // Explicit refresh (Database::refresh() analog) DOES retire the current window.
+        mgr.invalidate("ks", "t");
+        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w2)),
+                "invalidate() retires the current window, got clears=" + fake.clears);
+
+        // Shutdown retires every live window.
+        String w3 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        mgr.retireAll();
+        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w3)),
+                "retireAll() retires the live window, got clears=" + fake.clears);
+    }
+
+    /**
+     * Blocker (issue #2356 roborev, resource retention): a superseded window must be actively
+     * retired once the retire-grace elapses (bounded retention — not left to the ~6h TTL backstop),
+     * while a still-in-grace superseded window survives (its in-flight readers may still be reading).
+     * Deterministic on the injected clock.
+     */
+    @Test
+    void supersededWindowIsRetiredAfterGraceWhileInGraceWindowSurvives() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr =
+                new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"), WINDOW, GRACE, clock);
+
+        // W0 taken at t=0.
+        String w0 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        // At t=WINDOW the window elapses; the next query rolls to W1 and enqueues W0 for retirement.
+        clock.advance(WINDOW);
+        String w1 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        assertNotEquals(w0, w1);
+        // W0 is still within its grace (age 0), so it is NOT yet retired — an in-flight reader is safe.
+        assertTrue(fake.clears.isEmpty(),
+                "a superseded window within its grace is not retired, got clears=" + fake.clears);
+
+        // Advance so W0's grace has fully elapsed (age = WINDOW+GRACE - WINDOW = GRACE) but W1's has
+        // not; the next resolve sweeps and retires ONLY W0.
+        clock.advance(GRACE);
+        String w2 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        assertNotEquals(w1, w2);
+        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w0)),
+                "W0 is retired once its grace elapses, got clears=" + fake.clears);
+        assertTrue(fake.clears.stream().noneMatch(c -> c.contains(w1)),
+                "W1 is still within its grace and must survive, got clears=" + fake.clears);
+        assertTrue(fake.clears.stream().noneMatch(c -> c.contains(w2)),
+                "the current window W2 is never retired, got clears=" + fake.clears);
+    }
+
+    /**
+     * Blocker (issue #2356 roborev, half-created window): a fail-closed per-host fan-out must not
+     * leave a freshly-created window cached as "fresh" nor count a create/flush that never fully
+     * materialized. A later query must therefore NOT reuse the phantom — it must create a real one.
+     */
+    @Test
+    void failedFanOutCachesNoWindowAndCountsNoCreation() {
         FakeSidecars fake = new FakeSidecars();
         fake.failCreateHosts = Set.of("h1");
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
 
-        assertThrows(SidecarClient.SidecarException.class, () -> mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
+        assertThrows(SidecarClient.SidecarException.class, () -> mgr.snapshotFor("ks", "t", List.of("h1")));
+        assertEquals(0, mgr.snapshotCreationsTotal(), "a failed fan-out counts no creation");
+        assertEquals(0, mgr.snapshotReuseHitsTotal(), "a failed fan-out is not a reuse either");
 
-        // A failed create is NOT recorded, so cleanup won't try to delete a phantom snapshot.
-        mgr.cleanup("q1");
-        assertTrue(fake.clears.isEmpty());
+        // Clear the failure: the retry must CREATE (not reuse a cached phantom fresh window).
+        fake.failCreateHosts = Set.of();
+        mgr.snapshotFor("ks", "t", List.of("h1"));
+        assertEquals(1, mgr.snapshotCreationsTotal(),
+                "the retry creates a real snapshot — the failed fan-out cached nothing to reuse");
+        assertEquals(0, mgr.snapshotReuseHitsTotal(),
+                "nothing was reusable from the rolled-back half-created window");
+    }
+
+    /** Scenario: An explicit refresh forces a fresh snapshot on the next query. */
+    @Test
+    void explicitRefreshForcesFreshSnapshot() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        String w0 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
+        mgr.invalidate("ks", "t");
+        String w1 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow(); // still within window
+
+        assertNotEquals(w0, w1, "explicit refresh forces a NEW snapshot even within the window");
+        assertEquals(2, mgr.snapshotCreationsTotal());
+        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w0)),
+                "the invalidated snapshot is retired, got clears=" + fake.clears);
+    }
+
+    /** Scenario: An observed generation-set change invalidates reuse. */
+    @Test
+    void observedGenerationSetChangeInvalidatesReuse() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        String overG = mgr.snapshotFor("ks", "t", List.of("h1"), 111L).orElseThrow();
+        // Same generation within the window ⇒ reuse.
+        assertEquals(overG, mgr.snapshotFor("ks", "t", List.of("h1"), 111L).orElseThrow());
+        // A changed generation set within the window ⇒ fresh snapshot.
+        String overGprime = mgr.snapshotFor("ks", "t", List.of("h1"), 222L).orElseThrow();
+
+        assertNotEquals(overG, overGprime, "a generation-set change forces a fresh snapshot");
+        assertEquals(2, mgr.snapshotCreationsTotal(), "one create for G, one for G'");
+        assertEquals(1, mgr.snapshotReuseHitsTotal(), "the same-generation repeat was the only reuse");
+    }
+
+    /** Scenario: Snapshot creation rate over a query-heavy workload drops by the reuse factor. */
+    @Test
+    void snapshotCreationRateOverWorkloadDropsByReuseFactor() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        int windows = 3;
+        int queriesPerWindow = 4;
+        for (int w = 0; w < windows; w++) {
+            for (int q = 0; q < queriesPerWindow; q++) {
+                mgr.snapshotFor("ks", "t", List.of("h1"));
+                clock.advance(1); // stays within the window
+            }
+            clock.advance(WINDOW); // roll to the next window
+        }
+
+        int totalQueries = windows * queriesPerWindow;
+        assertEquals(windows, mgr.snapshotCreationsTotal(),
+                "flush-inducing create rate is W (one per window), not Q (one per query)");
+        assertEquals(totalQueries - windows, mgr.snapshotReuseHitsTotal());
+    }
+
+    // ---- availableHosts reuse (#2241) ----------------------------------------------------------
+
+    @Test
+    void availableHostsReusesCurrentWindowWithoutCountingOrDuplicatePut() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
+
+        SnapshotManager.Window window =
+                mgr.resolveSnapshot("ks", "t", List.of("10.0.0.2")).orElseThrow(); // primary create
+        Set<String> available = mgr.availableHosts(window, "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+
+        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
+        assertEquals(1, fake.creates.stream().filter(c -> c.startsWith("10.0.0.2|")).count(),
+                "the already-created host is not PUT again within the window");
+        assertEquals(1, mgr.snapshotCreationsTotal(), "availableHosts does not re-count the same window");
+        assertEquals(0, mgr.snapshotReuseHitsTotal(), "availableHosts is part of the same query's planning");
     }
 
     @Test
-    void cleanupDeletesEveryCreatedSnapshotOnEveryHost() {
+    void availableHostsExcludesFailedHostWithoutThrowing() {
         FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
+        fake.failCreateHosts = Set.of("10.0.0.9");
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
 
-        mgr.snapshotFor("q1", "ks", "a", List.of("h1", "h2"));
-        mgr.snapshotFor("q1", "ks", "b", List.of("h1"));
-        mgr.cleanup("q1");
+        SnapshotManager.Window window =
+                mgr.resolveSnapshot("ks", "t", List.of("10.0.0.2")).orElseThrow();
+        Set<String> available = mgr.availableHosts(window, "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
 
-        assertEquals(List.of("h1|ks.a/cqlite-q1", "h1|ks.b/cqlite-q1", "h2|ks.a/cqlite-q1"),
+        assertEquals(Set.of("10.0.0.2"), available, "the failed host is excluded, not propagated");
+    }
+
+    /**
+     * Blocker 2 (issue #2356 roborev, double-resolve race): the window resolved for the ticket
+     * (via {@link SnapshotManager#resolveSnapshot}) must be threaded into
+     * {@link SnapshotManager#availableHosts} so both operate on the EXACT same window even if the
+     * freshness window elapses between the two calls — availableHosts must NOT independently roll
+     * to a fresh (new-epoch) window and decouple the tickets from the per-host snapshot ensured.
+     */
+    @Test
+    void availableHostsUsesResolvedWindowEvenIfClockAdvancesPastTheWindow() {
+        FakeSidecars fake = new FakeSidecars();
+        ManualClock clock = new ManualClock();
+        SnapshotManager mgr = snapshotMgr(fake, clock);
+
+        SnapshotManager.Window window =
+                mgr.resolveSnapshot("ks", "t", List.of("10.0.0.2")).orElseThrow();
+        assertEquals("cqlite-ks-t-0", window.name());
+
+        // The freshness window elapses between resolveSnapshot and availableHosts.
+        clock.advance(WINDOW + 1);
+        Set<String> available = mgr.availableHosts(window, "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
+
+        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
+        // Every create — primary AND fallback — is against W0, never a rolled-forward W1.
+        assertTrue(fake.creates.stream().allMatch(c -> c.contains("cqlite-ks-t-0")),
+                "availableHosts ensured the SAME resolved window, got creates=" + fake.creates);
+        assertEquals(1, mgr.snapshotCreationsTotal(),
+                "no new window is created by availableHosts despite the elapsed clock");
+    }
+
+    // ---- Retirement / fail-closed edge cases ---------------------------------------------------
+
+    @Test
+    void retireAllClearsEveryLiveWindow() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
+
+        mgr.snapshotFor("ks", "a", List.of("h1", "h2"));
+        mgr.snapshotFor("ks", "b", List.of("h1"));
+        mgr.retireAll();
+
+        assertEquals(List.of("h1|ks.a/cqlite-ks-a-0", "h1|ks.b/cqlite-ks-b-0", "h2|ks.a/cqlite-ks-a-0"),
                 fake.clears.stream().sorted().toList());
     }
 
     @Test
-    void cleanupSwallowsDeleteFailures() {
+    void failsClosedOnCreateErrorAndRetiresNoPhantom() {
+        FakeSidecars fake = new FakeSidecars();
+        fake.failCreateHosts = Set.of("h1");
+        SnapshotManager mgr = snapshotMgr(fake, new ManualClock());
+
+        assertThrows(SidecarClient.SidecarException.class, () -> mgr.snapshotFor("ks", "t", List.of("h1")));
+
+        // A failed create left no future, so retirement never deletes a phantom snapshot.
+        mgr.retireAll();
+        assertTrue(fake.clears.isEmpty(), "no phantom snapshot is cleared, got " + fake.clears);
+    }
+
+    @Test
+    void retireSwallowsDeleteFailures() {
         HostSnapshotApis throwing = host -> new SnapshotApi() {
             @Override
             public void createSnapshot(String k, String t, String n, Optional<String> ttl) {}
@@ -160,84 +458,18 @@ class SnapshotManagerTest {
                 throw new SidecarClient.SidecarException("delete failed", 500);
             }
         };
-        SnapshotManager mgr = new SnapshotManager(throwing, ReadMode.SNAPSHOT, Optional.empty());
-        mgr.snapshotFor("q1", "ks", "t", List.of("h1", "h2"));
+        SnapshotManager mgr = new SnapshotManager(throwing, ReadMode.SNAPSHOT, Optional.empty(), WINDOW, new ManualClock());
+        mgr.snapshotFor("ks", "t", List.of("h1", "h2"));
         // Best-effort: a delete failure must not propagate (TTL backstop reclaims it).
-        mgr.cleanup("q1");
+        mgr.retireAll();
     }
 
-    @Test
-    void snapshotNameSanitizesUnsafeChars() {
-        assertEquals("cqlite-q_1_x", SnapshotManager.snapshotName("q/1 x"));
-    }
+    // ---- Concurrency (per-host exactly-once, off-lock create) ----------------------------------
 
     /**
-     * {@code availableHosts} (issue #2241): best-effort creates on every candidate host and
-     * returns the subset that succeeded — creating snapshots for hosts that were never
-     * {@code snapshotFor}'s required set (e.g. a fallback-only host that is never any range's
-     * primary), fixing the roborev finding that fallback restriction was primaries-only.
-     */
-    @Test
-    void availableHostsCreatesSnapshotOnEveryCandidateAndReturnsAllOnSuccess() {
-        FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.of("6h"));
-
-        Set<String> available = mgr.availableHosts("q1", "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
-
-        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
-        assertEquals(List.of("10.0.0.2|ks.t/cqlite-q1/ttl=6h", "10.0.0.9|ks.t/cqlite-q1/ttl=6h"),
-                fake.creates.stream().sorted().toList());
-    }
-
-    /**
-     * A host whose creation fails is excluded from the returned set but does NOT propagate —
-     * unlike {@link SnapshotManager#snapshotFor}, this call never fails closed. Loud (fail-closed)
-     * behavior is reserved for REQUIRED (primary) hosts via {@code snapshotFor}.
-     */
-    @Test
-    void availableHostsExcludesFailedHostWithoutThrowing() {
-        FakeSidecars fake = new FakeSidecars();
-        fake.failCreateHosts = Set.of("10.0.0.9");
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
-
-        Set<String> available = mgr.availableHosts("q1", "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
-
-        assertEquals(Set.of("10.0.0.2"), available, "the failed host is excluded, not propagated");
-    }
-
-    /**
-     * A host already created via {@code snapshotFor} (e.g. a range's primary, required and
-     * fail-closed) resolves instantly through {@code availableHosts} without a duplicate PUT —
-     * the memoized per-(query, host, keyspace, table) future is shared between both call paths.
-     */
-    @Test
-    void availableHostsReusesAlreadyCreatedSnapshotWithoutDuplicatePut() {
-        FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.SNAPSHOT, Optional.empty());
-
-        mgr.snapshotFor("q1", "ks", "t", List.of("10.0.0.2")); // required (primary) create
-        Set<String> available = mgr.availableHosts("q1", "ks", "t", List.of("10.0.0.2", "10.0.0.9"));
-
-        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), available);
-        assertEquals(1, fake.creates.stream().filter(c -> c.startsWith("10.0.0.2|")).count(),
-                "the already-created primary host is not PUT again");
-    }
-
-    @Test
-    void liveModeAvailableHostsReturnsAllCandidatesWithoutTouchingSidecar() {
-        FakeSidecars fake = new FakeSidecars();
-        SnapshotManager mgr = new SnapshotManager(fake, ReadMode.LIVE, Optional.empty());
-
-        assertEquals(Set.of("h1", "h2"), mgr.availableHosts("q1", "ks", "t", List.of("h1", "h2")));
-        assertTrue(fake.creates.isEmpty(), "live mode touches no Sidecar");
-    }
-
-    /**
-     * Concurrent callers for the same (query, host, keyspace, table) must PUT exactly once,
-     * even while the (slow) create is in flight. The per-key-future memoization (issue #2113
-     * / N5) moves the network call off the ConcurrentHashMap bin lock but keeps exactly-once
-     * — this test gates the create on a latch so many threads pile up mid-create, then
-     * asserts one PUT and one shared snapshot name.
+     * Concurrent callers for the same {@code (window, host)} must PUT exactly once, even while the
+     * (slow) create is in flight — the per-key-future memoization (#2113) moves the network call
+     * off the ConcurrentHashMap bin lock but keeps exactly-once.
      */
     @Test
     void concurrentCallersPutExactlyOnce() throws Exception {
@@ -248,7 +480,6 @@ class SnapshotManagerTest {
             public void createSnapshot(String k, String t, String n, Optional<String> ttl) {
                 creates.incrementAndGet();
                 try {
-                    // Hold the create open so competing threads reach putIfAbsent while it runs.
                     release.await(5, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -257,7 +488,7 @@ class SnapshotManagerTest {
             @Override
             public void clearSnapshot(String k, String t, String n) {}
         };
-        SnapshotManager mgr = new SnapshotManager(blocking, ReadMode.SNAPSHOT, Optional.empty());
+        SnapshotManager mgr = new SnapshotManager(blocking, ReadMode.SNAPSHOT, Optional.empty(), WINDOW, new ManualClock());
 
         int threads = 16;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -266,27 +497,25 @@ class SnapshotManagerTest {
         for (int i = 0; i < threads; i++) {
             results.add(pool.submit(() -> {
                 start.await();
-                return mgr.snapshotFor("q1", "ks", "t", List.of("h1"));
+                return mgr.snapshotFor("ks", "t", List.of("h1"));
             }));
         }
-        start.countDown();          // fire all callers
-        Thread.sleep(50);           // let them collide on the in-flight create
-        release.countDown();        // let the winning create finish
+        start.countDown();
+        Thread.sleep(50);
+        release.countDown();
 
         for (java.util.concurrent.Future<Optional<String>> f : results) {
-            assertEquals(Optional.of("cqlite-q1"), f.get(5, TimeUnit.SECONDS));
+            assertEquals(Optional.of("cqlite-ks-t-0"), f.get(5, TimeUnit.SECONDS));
         }
         pool.shutdownNow();
 
-        assertEquals(1, creates.get(), "exactly one PUT for concurrent same-key callers");
+        assertEquals(1, creates.get(), "exactly one PUT for concurrent same-(window,host) callers");
     }
 
     /**
-     * A winner that dies with a NON-RuntimeException throwable (an {@link Error}) must never
-     * leave an incomplete future in the map (roborev on issue #2113): a concurrent waiter
-     * must unblock with a failure — not hang on {@code join()} forever — and a subsequent
-     * caller must retry with exactly one new PUT. Uses short get() timeouts so a liveness
-     * regression fails this test fast instead of hanging the suite.
+     * A winner that dies with a NON-RuntimeException throwable (an {@link Error}) must never leave
+     * an incomplete future in the map (roborev on #2113): a concurrent waiter unblocks with a
+     * failure — not hang on {@code join()} — and a subsequent caller retries with one new PUT.
      */
     @Test
     void errorFromCreateNeverLeavesIncompleteFuture() throws Exception {
@@ -299,7 +528,6 @@ class SnapshotManagerTest {
                 if (creates.incrementAndGet() == 1) {
                     winnerInCreate.countDown();
                     try {
-                        // Hold the create open so the waiter joins the in-flight future.
                         release.await(5, TimeUnit.SECONDS);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -311,37 +539,30 @@ class SnapshotManagerTest {
             @Override
             public void clearSnapshot(String k, String t, String n) {}
         };
-        SnapshotManager mgr = new SnapshotManager(api, ReadMode.SNAPSHOT, Optional.empty());
+        SnapshotManager mgr = new SnapshotManager(api, ReadMode.SNAPSHOT, Optional.empty(), WINDOW, new ManualClock());
 
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             java.util.concurrent.Future<Optional<String>> winner =
-                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
+                    pool.submit(() -> mgr.snapshotFor("ks", "t", List.of("h1")));
             assertTrue(winnerInCreate.await(5, TimeUnit.SECONDS), "winner reached the create");
             java.util.concurrent.Future<Optional<String>> waiter =
-                    pool.submit(() -> mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
-            Thread.sleep(50); // let the waiter pile up on the in-flight future
+                    pool.submit(() -> mgr.snapshotFor("ks", "t", List.of("h1")));
+            Thread.sleep(50);
             release.countDown();
 
-            // (a) Both callers FAIL (fail-closed); the waiter does NOT hang on join().
             java.util.concurrent.ExecutionException winnerEx = assertThrows(
-                    java.util.concurrent.ExecutionException.class,
-                    () -> winner.get(5, TimeUnit.SECONDS));
+                    java.util.concurrent.ExecutionException.class, () -> winner.get(5, TimeUnit.SECONDS));
             assertTrue(winnerEx.getCause() instanceof AssertionError,
                     "winner rethrows the original Error, got: " + winnerEx.getCause());
             java.util.concurrent.ExecutionException waiterEx = assertThrows(
-                    java.util.concurrent.ExecutionException.class,
-                    () -> waiter.get(5, TimeUnit.SECONDS));
+                    java.util.concurrent.ExecutionException.class, () -> waiter.get(5, TimeUnit.SECONDS));
             assertTrue(waiterEx.getCause() instanceof AssertionError,
                     "waiter surfaces the winner's Error, got: " + waiterEx.getCause());
 
-            // (b) The failed future was removed, so a retry recomputes and succeeds —
-            // with exactly one NEW PUT.
-            assertEquals(Optional.of("cqlite-q1"), mgr.snapshotFor("q1", "ks", "t", List.of("h1")));
+            // The failed future was removed, so a retry recomputes and succeeds — one NEW PUT.
+            assertEquals(Optional.of("cqlite-ks-t-0"), mgr.snapshotFor("ks", "t", List.of("h1")));
             assertEquals(2, creates.get(), "one failed PUT + one successful retry PUT");
-
-            // cleanup deletes only the successfully created snapshot and must not throw.
-            mgr.cleanup("q1");
         } finally {
             pool.shutdownNow();
         }

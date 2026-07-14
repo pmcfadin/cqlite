@@ -127,6 +127,19 @@ use tracing::debug;
 #[cfg(feature = "tombstones")]
 use super::tombstone_merger::TombstoneMerger;
 
+/// The `Index.db` hardlink SIBLING of a `Data.db` path (issue #2356 roborev),
+/// i.e. the `*-Data.db` name-suffix swapped for `*-Index.db` in the same
+/// directory. `None` when the name is not the expected `*-Data.db` shape. Used
+/// by [`SSTableReader::rebind_path`] to follow a #2383 inode-rebind for the lazy
+/// `Index.db` path, and by the streaming-walk `current_index_db_path` derivation
+/// (same rule) so every `Index.db` consumer stays on the rebound generation.
+pub(crate) fn index_db_sibling(data_path: &Path) -> Option<PathBuf> {
+    let parent = data_path.parent()?;
+    let name = data_path.file_name().and_then(|n| n.to_str())?;
+    let base = name.strip_suffix("-Data.db")?;
+    Some(parent.join(format!("{base}-Index.db")))
+}
+
 /// Returns `true` when memory-mapped reads are force-enabled via the
 /// `CQLITE_USE_MMAP` environment variable.
 ///
@@ -1350,13 +1363,37 @@ impl SSTableReader {
     ///    request's NEXT `new_scan_cursor` `File::open` is strictly MORE likely to
     ///    succeed after the rebind than before (pre-rebind it would ENOENT).
     /// 4. **No semantics off the path.** No `file_path()` consumer re-derives
-    ///    keyspace/table/schema from the path after `open`; the scan path uses it
-    ///    ONLY for `File::open` (bytes) and all parsed read state (header,
-    ///    compression info, CRC, index, generation) lives on `&self`, fixed at
-    ///    open — the swapped path changes which hardlink is read, never what the
-    ///    bytes mean.
+    ///    keyspace/table/schema from the path after `open`; the path is used ONLY
+    ///    for `File::open` (bytes) and all parsed read state (header, compression
+    ///    info, CRC, index, generation) lives on `&self`, fixed at open — the
+    ///    swapped path changes which hardlink is read, never what the bytes mean.
+    ///    This covers BOTH the `Data.db` path AND the lazy `Index.db` path (below):
+    ///    both are same-inode hardlink siblings in the rebound snapshot dir.
+    ///
+    /// ## Rebinding the lazy `Index.db` path too (issue #2356 roborev)
+    ///
+    /// Repointing ONLY the `Data.db` path reintroduced the #2352 ENOENT class for
+    /// the dominant point-read shape: a BIG reader opened lazily over a usable
+    /// `Summary.db` (#2412 §A) keeps its own `Index.db` path, and every DEFERRED
+    /// `Index.db` open (`ensure_materialized`, the Summary-guided bounded-interval
+    /// point probe) reads THAT path. If the original snapshot dir is torn down
+    /// before the reader ever materialized, a not-yet-materialized reader would
+    /// `File::open` the dead path and ENOENT. So the rebind ALSO repoints the
+    /// `IndexReader`'s path to the `Index.db` hardlink sibling of `new_path`,
+    /// keeping every `Index.db` consumer (deferred-materialize, point-interval, and
+    /// the streaming walk's `current_index_db_path` Data.db-sibling derivation) on
+    /// the live generation.
     pub fn rebind_path(&self, new_path: &Path) {
         self.file_path.store(Arc::new(new_path.to_path_buf()));
+        // Follow the rebind for the lazy Index.db path too: derive the Index.db
+        // hardlink sibling of the new Data.db path and repoint the IndexReader, so a
+        // deferred materialize / point-interval read opens the live file, not the
+        // dead open-time snapshot path (issue #2356 roborev, #2352 class).
+        if let Some(index_reader) = self.index_reader.as_ref() {
+            if let Some(index_sibling) = index_db_sibling(new_path) {
+                index_reader.rebind_path(&index_sibling);
+            }
+        }
     }
 
     /// The immutable `[first_key_token, last_key_token]` endpoints cached at open

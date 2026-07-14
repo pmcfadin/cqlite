@@ -89,17 +89,14 @@ impl SSTableReader {
     /// index path when the `Data.db` name is not the expected `*-Data.db` shape.
     fn current_index_db_path(&self) -> std::path::PathBuf {
         let data = self.file_path();
-        if let (Some(parent), Some(name)) =
-            (data.parent(), data.file_name().and_then(|n| n.to_str()))
-        {
-            if let Some(base) = name.strip_suffix("-Data.db") {
-                return parent.join(format!("{base}-Index.db"));
-            }
-        }
-        self.index_reader
-            .as_ref()
-            .map(|ir| ir.index_path().to_path_buf())
-            .unwrap_or(data)
+        // Same `-Data.db` → `-Index.db` sibling rule the #2383 rebind uses to repoint
+        // the lazy IndexReader, so both stay on the rebound generation (issue #2356).
+        crate::storage::sstable::reader::index_db_sibling(&data).unwrap_or_else(|| {
+            self.index_reader
+                .as_ref()
+                .map(|ir| ir.index_path())
+                .unwrap_or(data)
+        })
     }
 
     /// Shared Summary-guided FORWARD `Index.db` walk (issue #2412 §C / #2413
