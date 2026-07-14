@@ -486,3 +486,34 @@ Format:
   direction). Verified stable across 5 repeated runs of both the admission
   filter and the full 254-test lib suite; red-on-main re-confirmed after the
   robustness rewrite (still 6 tests red).
+
+## 2026-07-13 — admission-control roborev round 6 (job 1701)
+
+- **What:** The round-5 `admission` phase addition was correct but escaped the
+  lite-gate blast radius for `cqlite-flight/tests/metrics_capture_test.rs`
+  (feature-gated behind `observability-testing`, not in the default scoped-test
+  set), which still hardcoded the closed 3-phase set `{resolve, merge_setup,
+  stream}` in its phase-value assertion. Fixed:
+  - `metrics_capture_test.rs`: the closed-set match now asserts exactly
+    `{admission, resolve, merge_setup, stream}` (still a CLOSED set — a future
+    5th phase must update this assertion deliberately, not drift past it via a
+    loosened check). Added an `admission`-tagged phase-sample assertion
+    alongside the existing `merge_setup` one, proving even an UNCONTENDED
+    `do_get` (this fixture's default `Admission::unconstrained()`) records one
+    admission-phase OTel sample — the actual emitted histogram series, not just
+    the feature-independent atomic this round's earlier tests pinned.
+  - `issue_2370_gauge_readback_test.rs`: updated a stale prose comment
+    (`resolve→merge_setup→stream`) referencing the old 3-phase transition
+    window to include `admission` — the assertion logic itself (`phase_active_level`
+    sums ALL phases) was already phase-count-agnostic and needed no functional
+    change.
+  - Swept the whole workspace (`rg merge_setup`) for other 3-phase assumptions —
+    none found; `obs.rs`'s own `phase_slot`/`phase_index` fallbacks were already
+    derived generically from `RPC_PHASES[0]`/`.len()` in round 5, not hardcoded.
+- **Verified:** `cargo test -p cqlite-flight --features observability-testing
+  --test metrics_capture_test` PASSES directly (was the test that escaped this
+  round's lite blast radius); `cargo test -p cqlite-flight --lib admission`
+  (18/18) and the full 254-test lib suite both still pass; clippy clean incl.
+  `--features observability-testing`.
+- **Files:** `cqlite-flight/tests/metrics_capture_test.rs`,
+  `cqlite-flight/tests/issue_2370_gauge_readback_test.rs` (comment only).

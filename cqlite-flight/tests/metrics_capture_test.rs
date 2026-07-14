@@ -16,9 +16,10 @@
 //! (feature-off-safe) wiring evidence; THIS file additionally reads back the
 //! actual emitted OTel series to prove:
 //!
-//! * `cqlite.rpc.phase.duration` records a bounded `merge_setup` phase sample
-//!   over a completed `do_get` (Stage 2), every phase value is in the closed
-//!   set, and no phase sample carries an unbounded attribute (Stage 2/4),
+//! * `cqlite.rpc.phase.duration` records bounded `admission` (issue #2420
+//!   roborev-1700) and `merge_setup` phase samples over a completed `do_get`
+//!   (Stage 2), every phase value is in the closed 4-value set, and no phase
+//!   sample carries an unbounded attribute (Stage 2/4),
 //! * `cqlite.rpc.rows` and `cqlite.query.rows_scanned` are emitted, carrying
 //!   only their bounded attribute keys (Stage 1/3/4).
 //!
@@ -184,7 +185,7 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
 
     let metrics = mc.flush_and_collect();
 
-    // --- Stage 2: a bounded merge_setup phase sample is recorded ---------------
+    // --- Stage 2: bounded admission + merge_setup phase samples are recorded ---
     let phase = metrics
         .find(catalog::RPC_PHASE_DURATION)
         .expect("cqlite.rpc.phase.duration must be recorded over a completed do_get");
@@ -192,21 +193,41 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
         metrics.unit(catalog::RPC_PHASE_DURATION),
         Some(catalog::unit::SECONDS)
     );
-    let merge_setup_samples = phase
-        .points
-        .iter()
-        .filter(|p| {
-            p.attributes
-                .iter()
-                .any(|(k, v)| k == catalog::attr::RPC_PHASE && v == "merge_setup")
-        })
-        .count();
+    let phase_sample_count = |phase_name: &str| {
+        phase
+            .points
+            .iter()
+            .filter(|p| {
+                p.attributes
+                    .iter()
+                    .any(|(k, v)| k == catalog::attr::RPC_PHASE && v == phase_name)
+            })
+            .count()
+    };
     assert!(
-        merge_setup_samples >= 1,
+        phase_sample_count("merge_setup") >= 1,
         "a merge_setup-tagged phase sample must exist (the #2157 stall localizer)"
     );
+    // Issue #2420 roborev-1700: `do_get_inner` now opens `PhaseTimer` in the
+    // `admission` phase BEFORE acquiring a permit, so even an uncontended
+    // (never-queued) `do_get` — this fixture's `Admission::unconstrained()`
+    // default (see `CqliteFlightService::new`) never saturates — still records
+    // one admission-phase sample: `start()` opens it, the first `transition()`
+    // (to `resolve`) closes it. Without this the queue-time phase would be
+    // invisible in `cqlite.rpc.phase.duration` even though
+    // `cqlite.rpc.duration` already counts it in the RPC total — field triage
+    // localizes latency FROM the per-phase breakdown (e.g. #2398).
+    assert!(
+        phase_sample_count("admission") >= 1,
+        "an admission-tagged phase sample must exist even on an uncontended \
+         do_get (issue #2420 roborev-1700) — admission wait must never be \
+         invisible in the phase breakdown"
+    );
 
-    // Every phase value is one of the closed set; no ticket/key/query attribute.
+    // Every phase value is one of the CLOSED 4-value set (issue #2420
+    // roborev-1701: this closed-set list is intentionally exhaustive — a future
+    // 5th phase must update this assertion as a deliberate decision, not drift
+    // silently past it); no ticket/key/query attribute.
     for p in &phase.points {
         let phase_val = p
             .attributes
@@ -214,7 +235,10 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
             .find(|(k, _)| k == catalog::attr::RPC_PHASE)
             .map(|(_, v)| v.as_str());
         assert!(
-            matches!(phase_val, Some("resolve" | "merge_setup" | "stream")),
+            matches!(
+                phase_val,
+                Some("admission" | "resolve" | "merge_setup" | "stream")
+            ),
             "phase value must be in the closed set, got {phase_val:?}"
         );
         assert_bounded_attrs(&p.attributes, catalog::RPC_PHASE_DURATION);
