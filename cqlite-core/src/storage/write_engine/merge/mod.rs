@@ -145,14 +145,14 @@ mod carriers;
 #[cfg(feature = "write-support")]
 mod reconcile;
 
-/// Streaming cluster-group step type (issue #1668, stages 2-3b). See
-/// [`StreamingMerger`]. Wired into [`KWayMerger::merge`] (stage 3b) and
-/// `write_engine::maintenance`'s compaction loop; the Flight producer is
-/// intentionally untouched (Q4/mid-partition-budget territory, later stage).
+/// Streaming cluster-group step type (issue #1668; read-path wiring #2230). Wired
+/// into compaction AND (via the public re-export below) `cqlite-flight`'s read path.
 #[cfg(feature = "write-support")]
 mod streaming;
 #[cfg(feature = "write-support")]
-pub(crate) use streaming::{PartitionReconcileCheckpoint, StreamingMerger, StreamingStep};
+pub(crate) use streaming::PartitionReconcileCheckpoint;
+#[cfg(feature = "write-support")]
+pub use streaming::{StreamingMerger, StreamingStep};
 
 /// Schema-aware heap-direct ordering proof (issue #1668, stage 5b) — proves
 /// cross-group emission order can be correct straight off a heap, with NO

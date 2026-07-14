@@ -206,7 +206,7 @@ mod streaming_dhat_test;
 /// call site anywhere in the codebase is affected by this addition.
 #[cfg(feature = "write-support")]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StreamingStep {
+pub enum StreamingStep {
     /// One already-reconciled row belonging to `key`'s partition, in the SAME
     /// relative order `MergeStep::Partition { rows, .. }` would have held it
     /// (range/partition-tombstone carriers first, then clustering rows in
@@ -323,7 +323,7 @@ impl PartitionReconcileCheckpoint {
 /// `KWayMerger` itself, so the existing `KWayMerger { .. }` struct-literal
 /// unit tests in `mod.rs` are unaffected by this module's changes.
 #[cfg(feature = "write-support")]
-pub(crate) struct StreamingMerger<'a> {
+pub struct StreamingMerger<'a> {
     merger: &'a mut KWayMerger,
     partition_key: Option<DecoratedKey>,
     state: PartitionReconcileCheckpoint,
@@ -332,7 +332,7 @@ pub(crate) struct StreamingMerger<'a> {
 #[cfg(feature = "write-support")]
 impl<'a> StreamingMerger<'a> {
     /// Wrap a [`KWayMerger`] for streaming cluster-group increments.
-    pub(crate) fn new(merger: &'a mut KWayMerger) -> Self {
+    pub fn new(merger: &'a mut KWayMerger) -> Self {
         Self {
             merger,
             partition_key: None,
@@ -598,7 +598,7 @@ impl<'a> StreamingMerger<'a> {
     /// until either a reconciled row becomes available, the partition ends
     /// (`PartitionEnd`), or the whole merge ends (`Complete`). See the
     /// module doc for the full design and its correctness proof.
-    pub(crate) fn step_streaming(&mut self) -> Result<StreamingStep> {
+    pub fn step_streaming(&mut self) -> Result<StreamingStep> {
         loop {
             if let Some(row) = self.state.pending_rows.pop_front() {
                 let Some(key) = self.partition_key.clone() else {
