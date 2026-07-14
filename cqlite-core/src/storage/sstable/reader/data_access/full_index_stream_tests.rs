@@ -20,6 +20,7 @@ use crate::storage::sstable::reader::SSTableReader;
 use crate::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
 use crate::types::Value;
 use crate::{Config, Platform};
+use serial_test::serial;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -104,7 +105,14 @@ async fn open_reader(data_path: &std::path::Path) -> SSTableReader {
 
 /// Non-vacuity + full enumeration (issue #2361): `stream_all_partitions_cancellable`
 /// (no `limit` parameter) emits every one of the fixture's `N` partitions.
+///
+/// `#[serial(work_counters)]` (issue #2398, roborev 1693): this walk increments
+/// the process-global `stream_walk_partitions_parsed` counter as a side effect;
+/// every test in this file that does so shares the `work_counters` key so none
+/// contaminates `sequential_scan_fallback_counts_each_partition_exactly_once`'s
+/// delta assertion (the established convention, issue #1071).
 #[tokio::test]
+#[serial(work_counters)]
 async fn stream_all_partitions_cancellable_emits_every_partition() {
     const N: i32 = 24;
     let (_temp, data_path) = write_fixture(N).await;
@@ -130,7 +138,11 @@ async fn stream_all_partitions_cancellable_emits_every_partition() {
 /// resolvable `Index.db` streams EVERY partition via the index walk (outcome
 /// `Streamed`), in index (token) order, emitting each as it is resolved rather
 /// than after a whole-file materialisation. Non-vacuity: all N rows arrive.
+///
+/// `#[serial(work_counters)]`: see the doc on
+/// `stream_all_partitions_cancellable_emits_every_partition` above.
 #[tokio::test]
+#[serial(work_counters)]
 async fn stream_via_full_index_streams_every_partition_in_order() {
     const N: i32 = 16;
     let (_temp, data_path) = write_fixture(N).await;
@@ -179,7 +191,11 @@ async fn stream_via_full_index_streams_every_partition_in_order() {
 /// FIRST emit stops the walk immediately — the anti-materialisation property. On
 /// the pre-#2361 code the whole SSTable was materialised into a `Vec` BEFORE the
 /// first emit, so a break could never save that work; here it does.
+///
+/// `#[serial(work_counters)]`: see the doc on
+/// `stream_all_partitions_cancellable_emits_every_partition` above.
 #[tokio::test]
+#[serial(work_counters)]
 async fn stream_all_partitions_cancellable_stops_on_break() {
     const N: i32 = 20;
     let (_temp, data_path) = write_fixture(N).await;
@@ -203,7 +219,11 @@ async fn stream_all_partitions_cancellable_stops_on_break() {
 /// Cancellation (issue #2361): a scan whose token is already tripped abandons the
 /// walk promptly, emitting nothing and returning `Error::Cancelled` — the
 /// cooperative poll at the top of the streaming walk.
+///
+/// `#[serial(work_counters)]`: see the doc on
+/// `stream_all_partitions_cancellable_emits_every_partition` above.
 #[tokio::test]
+#[serial(work_counters)]
 async fn stream_all_partitions_cancellable_pre_cancel_emits_nothing() {
     const N: i32 = 12;
     let (_temp, data_path) = write_fixture(N).await;
@@ -225,4 +245,60 @@ async fn stream_all_partitions_cancellable_pre_cancel_emits_nothing() {
         "a pre-cancelled streaming scan must return Error::Cancelled, got {result:?}"
     );
     assert_eq!(emitted, 0, "a pre-cancelled scan must emit no rows");
+}
+
+/// Roborev 1693 (issue #2398): a reader with NO `Index.db` (the sibling deleted
+/// before open, so `index_reader` is `None`) routes `stream_all_partitions_cancellable`
+/// straight into the SAME materialising `sequential_scan` fallback code path a
+/// `FellBack` streaming-walk outcome would use. `stream_walk_partitions_parsed`
+/// must land at EXACTLY `N` — one increment per partition, owned solely by
+/// `sequential_scan`'s internal accounting — never `2 * N` (the double-count a
+/// redundant increment in the fallback's re-emit loop would produce).
+///
+/// `#[serial(work_counters)]`: `stream_walk_partitions_parsed` is a process-global
+/// counter (issue #1071's established convention) — every OTHER test in this file
+/// that touches it shares this key so this delta assertion cannot be contaminated
+/// by a concurrently-running sibling.
+#[tokio::test]
+#[serial(work_counters)]
+async fn sequential_scan_fallback_counts_each_partition_exactly_once() {
+    const N: i32 = 10;
+    let (_temp, data_path) = write_fixture(N).await;
+    // Force the fallback: delete the sibling Index.db so `index_reader` is `None`
+    // and `stream_all_partitions_cancellable` falls straight through to the
+    // materialising `sequential_scan` — the same code the streaming walk's
+    // `FellBack` outcome reaches.
+    let index_path =
+        std::path::PathBuf::from(data_path.to_str().unwrap().replace("-Data.db", "-Index.db"));
+    assert!(index_path.exists(), "fixture must have written an Index.db");
+    std::fs::remove_file(&index_path).unwrap();
+
+    let reader = open_reader(&data_path).await;
+    assert!(
+        reader.index_reader.is_none(),
+        "the reader must open with no usable Index.db (sibling deleted)"
+    );
+    let cancel = ScanCancel::default();
+
+    crate::storage::sstable::work_counters::reset();
+    let mut emitted = 0usize;
+    reader
+        .stream_all_partitions_cancellable(&cancel, |_row| {
+            emitted += 1;
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        emitted, N as usize,
+        "the fallback must emit every partition"
+    );
+    assert_eq!(
+        crate::storage::sstable::work_counters::stream_walk_partitions_parsed(),
+        N as u64,
+        "the fallback must count each partition body EXACTLY ONCE (not 2x — \
+         roborev 1693): sequential_scan owns the increment, the re-emit loop \
+         in stream_all_partitions_cancellable must not increment again"
+    );
 }

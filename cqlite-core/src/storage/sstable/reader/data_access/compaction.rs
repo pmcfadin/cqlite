@@ -744,6 +744,12 @@ impl SSTableReader {
             )?;
             match step {
                 ParseStep::Emitted(consumed) => {
+                    // Work-probe (issue #2398): one partition body decoded on the
+                    // chunk-stitching ('nb') scan path — the counterpart to the
+                    // streaming full-index walk's increment. A token-range split
+                    // must keep this bounded to its in-range slice, not the
+                    // SSTable's whole partition count.
+                    crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                     let take = if consumed == 0 { 1 } else { consumed };
                     // Advance the cursor over the confirmed partition (issue #1589):
                     // NO memmove here — the reclaimed prefix is compacted once at the

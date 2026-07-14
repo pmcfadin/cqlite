@@ -234,6 +234,10 @@ impl SSTableReader {
                 )));
             }
 
+            // Work-probe (issue #2398): one partition body read + parsed. A
+            // token-range split must keep this bounded to its in-range slice, not
+            // the SSTable's whole partition count.
+            crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
             let parsed = parser.parse_block(&raw, schema, self)?;
             for (_table_id, row_key, value) in parsed {
                 if self.filter_tombstone(&value) {
@@ -305,6 +309,13 @@ impl SSTableReader {
         // Fallback: materialising sequential scan (rare degenerate path). No
         // producer-side limit (see this method's doc) — the consumer's
         // post-reconciliation LIMIT break bounds it downstream instead.
+        //
+        // Work-probe (issue #2398, roborev 1693): `sequential_scan` itself owns
+        // the `stream_walk_partitions_parsed` accounting for this path (added at
+        // its per-partition decode boundary, roborev 1692) — do NOT increment
+        // again here. This loop only re-emits `sequential_scan`'s already-decoded
+        // results, one call per RETURNED ROW; a second increment here would
+        // double-count every partition body relative to what was actually decoded.
         let table_id = self.scan_table_id();
         let schema = self.schema.as_deref();
         let entries = self
