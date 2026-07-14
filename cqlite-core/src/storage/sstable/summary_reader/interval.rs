@@ -26,7 +26,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::SummaryEntry;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::storage::sstable::index_reader::{parse_big_index_entry, PartitionIndexEntry};
 
 /// A `Summary.db`-derived half-open byte range `[start_position, end_position)` into
@@ -196,6 +196,25 @@ pub(crate) fn scan_interval_bytes(bytes: &[u8], key: &[u8], entry_cap: usize) ->
 /// from the SAME downsampling-adjusted formula — because `covering_interval_is_end_bounded`
 /// is `false` for it, so a capped miss there is never promoted to an authoritative
 /// absence (the caller falls back to `scan_for_key` instead, preserving #1572).
+///
+/// Corrupt-input hardening (roborev job 1709 follow-up, fuzz doctrine #1614: a
+/// parser must never panic/abort/OOM on arbitrary bytes — and through the
+/// bindings, an allocation-failure abort kills the WHOLE host process, not just
+/// this request):
+/// - `end_position` is validated against the `Index.db` file's ACTUAL length
+///   BEFORE it ever sizes an allocation. An unvalidated, corrupt `Summary.db`
+///   sample claiming an `end` far beyond EOF would otherwise drive
+///   `Vec::resize` to attempt a huge (attacker/corruption-controlled)
+///   allocation — which aborts the process on failure — before `read_exact`
+///   ever gets a chance to fail cleanly. A too-large `end` now returns a clean
+///   `Err` (fail-closed), never a huge alloc.
+/// - Non-monotone samples (`end <= start`) are ALSO fail-closed `Err`, not
+///   silently routed into the read-to-EOF branch: `end_position` staying
+///   `Some(_)` there would leave `covering_interval_is_end_bounded` reporting
+///   `true`, so a corrupt/degenerate interval's capped miss could otherwise be
+///   wrongly promoted to an AUTHORITATIVE absence (no `scan_for_key`
+///   fallback) — the exact false-negative class this job's primary fix closes,
+///   re-opened through a different corrupt-input door.
 pub async fn lookup_key_in_interval(
     index_path: &Path,
     interval: SummaryInterval,
@@ -204,24 +223,45 @@ pub async fn lookup_key_in_interval(
     sampling_level: u32,
 ) -> Result<IntervalLookup> {
     let mut file = File::open(index_path).await?;
+
+    // Validate BEFORE seeking/reading/allocating (no-heuristics #28: derived from
+    // the file's authoritative metadata, never a guess).
+    let file_len = file.metadata().await?.len();
+    match interval.end_position {
+        Some(end) if end <= interval.start_position => {
+            return Err(Error::corruption(format!(
+                "lookup_key_in_interval: interval end_position {end} does not exceed \
+                 start_position {} — non-monotone Summary.db sample ordering (corrupt input)",
+                interval.start_position
+            )));
+        }
+        Some(end) if end > file_len => {
+            return Err(Error::corruption(format!(
+                "lookup_key_in_interval: interval end_position {end} exceeds Index.db file \
+                 length {file_len} (corrupt Summary.db sample position)"
+            )));
+        }
+        _ => {}
+    }
+
     file.seek(std::io::SeekFrom::Start(interval.start_position))
         .await?;
 
     let mut buffer = Vec::new();
     let entry_cap = match interval.end_position {
-        Some(end) if end > interval.start_position => {
-            // Bounded read of exactly the interval's whole entries. The byte
-            // range itself is the bound — no entry-count cap needed or applied.
+        Some(end) => {
+            // Bounded read of exactly the interval's whole entries (validated
+            // above: `end > start` and `end <= file_len`). The byte range itself
+            // is the bound — no entry-count cap needed or applied.
             let len = (end - interval.start_position) as usize;
             buffer.resize(len, 0);
             file.read_exact(&mut buffer).await?;
             usize::MAX
         }
-        // Last interval (or a degenerate empty/zero-width range): read to EOF.
-        // The scan is bounded by the downsampling-adjusted
-        // `last_interval_entry_cap`, so this can never become a whole-file walk
-        // for a many-partition SSTable.
-        _ => {
+        // Last interval: read to EOF. The scan is bounded by the
+        // downsampling-adjusted `last_interval_entry_cap`, so this can never
+        // become a whole-file walk for a many-partition SSTable.
+        None => {
             file.read_to_end(&mut buffer).await?;
             last_interval_entry_cap(min_index_interval, sampling_level)
         }
@@ -635,6 +675,88 @@ mod tests {
             res.entry.is_some(),
             "a present key past the pre-fix cap in a downsampled LAST interval must \
              resolve too (the generous, downsampling-adjusted cap applies here)"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // ---- Corrupt-input hardening (roborev job 1709 follow-up, fuzz doctrine #1614) ----
+
+    /// An `end_position` far beyond the `Index.db` file's actual length (a corrupt
+    /// `Summary.db` sample) must return a clean `Err`, NEVER attempt a huge
+    /// allocation. The synthetic file here is tiny (a handful of bytes); a
+    /// too-large `HOSTILE_END` would otherwise drive `buffer.resize` to zero-fill
+    /// a huge buffer from a few real bytes on disk before `read_exact` ever gets a
+    /// chance to fail.
+    ///
+    /// Asserts on the SPECIFIC validation error message (`"exceeds Index.db file
+    /// length"`), not merely `is_err()`: a generic `Err` is also reachable via
+    /// `read_exact`'s own `UnexpectedEof` AFTER a (successful, just slow) huge
+    /// allocation — that path is NOT what this test is pinning, and asserting only
+    /// `is_err()` would pass on EITHER path, silently accepting the huge-alloc
+    /// route. Matching the specific message proves the FAIL-FAST metadata-length
+    /// check fired BEFORE any allocation was attempted (never depends on actually
+    /// forcing a multi-GiB allocation inside a unit test, which would itself be
+    /// slow/host-memory-dependent and defeat the point of a fast, safe pin).
+    #[tokio::test]
+    async fn end_position_beyond_file_length_is_a_clean_error_not_a_huge_alloc() {
+        let bytes = build_interval(&[(b"alpha", 0), (b"bravo", 100)]);
+        let path = write_temp_index("beyond-eof", &bytes).await;
+
+        // A corrupt sample claiming an `end` ~1 GiB past this tiny file's real length.
+        const HOSTILE_END: u64 = 1 << 30;
+        let iv = SummaryInterval {
+            start_position: 0,
+            end_position: Some(HOSTILE_END),
+            sample_index: 0,
+        };
+        let res = lookup_key_in_interval(&path, iv, b"alpha", 128, 128).await;
+        let err = res.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds Index.db file length"),
+            "an end_position ({HOSTILE_END}) far beyond the file's real length ({}) must \
+             fail via the metadata-length pre-check (fast, no huge alloc attempted), got: {msg}",
+            bytes.len()
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Non-monotone samples (`end_position <= start_position`) are corrupt Summary.db
+    /// input — Cassandra's on-disk samples are always strictly increasing. This must
+    /// fail closed with `Err`, NEVER silently fall into the read-to-EOF branch (which
+    /// would leave `end_position` as `Some(_)`, so `covering_interval_is_end_bounded`
+    /// would keep reporting `true` and a caller could wrongly promote a capped miss
+    /// to an AUTHORITATIVE absence for corrupt input).
+    #[tokio::test]
+    async fn non_monotone_interval_is_a_clean_error_never_authoritative() {
+        let bytes = build_interval(&[(b"alpha", 0), (b"bravo", 100), (b"charlie", 250)]);
+        let path = write_temp_index("non-monotone", &bytes).await;
+
+        // end == start: a degenerate zero-width interval (corrupt).
+        let iv_equal = SummaryInterval {
+            start_position: 50,
+            end_position: Some(50),
+            sample_index: 0,
+        };
+        let res_equal = lookup_key_in_interval(&path, iv_equal, b"anything", 128, 128).await;
+        assert!(
+            res_equal.is_err(),
+            "end_position == start_position must fail closed, not silently read to EOF"
+        );
+
+        // end < start: a genuinely backwards (corrupt) sample pair.
+        let iv_backwards = SummaryInterval {
+            start_position: 100,
+            end_position: Some(10),
+            sample_index: 0,
+        };
+        let res_backwards =
+            lookup_key_in_interval(&path, iv_backwards, b"anything", 128, 128).await;
+        assert!(
+            res_backwards.is_err(),
+            "end_position < start_position must fail closed, not silently read to EOF"
         );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
