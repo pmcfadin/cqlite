@@ -158,7 +158,24 @@ impl SSTableReader {
 
         // Summary-guided start offset: the covering sample for a token range's
         // exclusive lower bound, else the index start for a full scan.
+        //
+        // WRAPAROUND (roborev endgame finding, High — silent data loss): a
+        // wraparound range (`start_excl > end_incl`, the ring segment crossing the
+        // min-token boundary) is `(start_excl, MAX] ∪ [MIN, end_incl]` — its
+        // in-range partitions live in TWO disjoint physical regions of the
+        // token-ordered `Index.db`: a HIGH-token tail (`token > start_excl`) and a
+        // LOW-token head (`token <= end_incl`). This walk is a single FORWARD pass
+        // to EOF (`Index.db` is not circular), so starting at
+        // `scan_start_position_for_token(start_excl)` (the HIGH segment's start)
+        // can NEVER reach the LOW segment's entries — they physically precede that
+        // offset and are silently skipped entirely. For a wraparound range the walk
+        // MUST start at the index's true beginning (offset 0) so BOTH segments are
+        // reachable; `ScanTokenBound::contains` (the per-entry filter below) already
+        // selects exactly the two segments, and `can_stop_past` is unconditionally
+        // `false` for `wraparound` (verified: the walk never early-stops before
+        // EOF), so the pair is coherent — a full walk, filtered.
         let start_position = match token_bound {
+            Some(bound) if bound.wraparound => 0,
             Some(bound) => summary.scan_start_position_for_token(bound.start_excl),
             None => 0,
         };

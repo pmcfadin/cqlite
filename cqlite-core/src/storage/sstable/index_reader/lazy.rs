@@ -7,7 +7,7 @@
 //! type, used only by `SSTableReader`'s BIG-open composition
 //! (`reader::component_loading::load_index_reader`).
 
-use super::parse::parse_index_data_cancellable;
+use super::parse::{parse_big_index_entry, parse_index_data_cancellable};
 use super::{IndexData, IndexReader};
 use crate::error::{Error, Result};
 use crate::platform::Platform;
@@ -15,6 +15,14 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+
+/// Cap on the bounded validity-probe prefix [`IndexReader::open_lazy`] reads
+/// (issue #2302 open-time-detection preservation through the lazy-open change).
+/// Large enough to cover the WORST-CASE single `Index.db` entry — a `u16`
+/// key-length prefix (max 65535 bytes) + the raw key + two small vints — so a
+/// legitimately huge partition key can never false-trigger the probe; bounded so
+/// the probe's cost stays O(1) at open time, never O(partition count).
+const VALIDITY_PROBE_PREFIX_CAP: usize = 70_000;
 
 /// The full parse result, materialized either eagerly (at construction, the
 /// unchanged legacy behavior every direct [`IndexReader::open`] caller relies on)
@@ -51,14 +59,48 @@ impl IndexReader {
         self.materialized.get().is_some()
     }
 
-    /// Lazy Summary-guided open (issue #2412, design §A): checks only that the file
-    /// EXISTS and performs ZERO `Index.db` parse work. Used by `SSTableReader`'s BIG
-    /// open composition when a usable `Summary.db` is present, so open cost is
-    /// bounded by `Summary.db` size, not by `Index.db` partition count. The full
+    /// Lazy Summary-guided open (issue #2412, design §A): checks the file EXISTS
+    /// and is STRUCTURALLY VALID via a bounded O(1) prefix probe, but performs NO
+    /// full `Index.db` parse. Used by `SSTableReader`'s BIG open composition when a
+    /// usable `Summary.db` is present, so open cost is bounded by `Summary.db`
+    /// size + the probe's fixed cap, not by `Index.db` partition count. The full
     /// parse is deferred to the first [`Self::ensure_materialized`] call from an
     /// internal consumer that genuinely needs the resident map (a full-enumeration
     /// scan, or the point-lookup fallback before Stage 3's interval-bounded lookup
     /// lands); a point-lookup-dominated workload may never pay it at all.
+    ///
+    /// ## Open-time present-but-unloadable detection (issue #2302 contract preserved)
+    ///
+    /// A present-but-EMPTY or present-but-structurally-broken `Index.db` (open/parse
+    /// fails at the very first entry) MUST be distinguishable from a genuinely
+    /// valid file AT OPEN TIME, not only when a later consumer happens to call
+    /// [`Self::ensure_materialized`] — issue #2302 killed exactly this class of
+    /// silent degradation (the pre-#2412 eager `open` always full-parsed at open,
+    /// so a corrupt file was detected immediately; a lazy open that ONLY checked
+    /// file existence would silently regress that guarantee, reporting a broken
+    /// file as a usable lazy reader until something eventually materialized it —
+    /// possibly never, for a point-lookup-only workload). This is NOT negotiable:
+    /// open-time detection is the safer contract (`component_loading::load_index_reader`
+    /// maps any non-`NotFound` `Err` here to the loud-WARN `PresentButUnloadable`
+    /// path, exactly as the eager path always has).
+    ///
+    /// The probe: read a BOUNDED prefix (≤ [`VALIDITY_PROBE_PREFIX_CAP`] bytes, or
+    /// the whole file when smaller) and confirm the file is non-empty AND its FIRST
+    /// entry parses ([`parse_big_index_entry`]) — the SAME authoritative on-disk
+    /// entry framing `ensure_materialized`'s full parse and the eager `open` both
+    /// use (no heuristics, issue #28). This is intentionally NOT a full structural
+    /// guarantee (a corruption deep inside the file, past the first entry, is still
+    /// caught later by `is_fully_parsed()`/Signal A at first materializing use,
+    /// exactly as before this change) — it is the SAME bounded confidence the
+    /// original eager `open` effectively offered before its first byte was even
+    /// consumed, at O(1) cost instead of O(partitions).
+    ///
+    /// Not counted on EITHER `index_parses_total` or `index_interval_parses_total`:
+    /// this probe is neither a full parse nor a Summary-guided per-lookup interval
+    /// read (design §F) — conflating it with either would muddy the field-round
+    /// parse-count dashboards those counters exist for. It is deliberately silent
+    /// on success (the common case) and loud only via the `PresentButUnloadable`
+    /// WARN path on failure, matching #2302's existing observability contract.
     pub(crate) async fn open_lazy(path: &Path, platform: Arc<Platform>) -> Result<Self> {
         if !platform.fs().exists(path).await? {
             return Err(Error::not_found(format!(
@@ -66,6 +108,26 @@ impl IndexReader {
                 path.display()
             )));
         }
+
+        let mut file = File::open(path).await?;
+        let file_len = file.metadata().await?.len();
+        if file_len == 0 {
+            return Err(Error::corruption(format!(
+                "Index.db file is empty: {}",
+                path.display()
+            )));
+        }
+        let probe_len = file_len.min(VALIDITY_PROBE_PREFIX_CAP as u64) as usize;
+        let mut probe_buf = vec![0u8; probe_len];
+        file.read_exact(&mut probe_buf).await?;
+        if let Err(e) = parse_big_index_entry(&probe_buf) {
+            return Err(Error::corruption(format!(
+                "Index.db first entry failed to parse (present-but-unloadable) at {}: {:?}",
+                path.display(),
+                e
+            )));
+        }
+
         // `file_path`/`materialized` are private fields of `IndexReader`, defined in
         // the parent `index_reader` module — visible here because `lazy` is a
         // DESCENDANT module of it (Rust privacy: private items are visible to the
@@ -182,6 +244,61 @@ mod tests {
         assert_eq!(reader.get_partition_entries().len(), 1);
         assert!(reader.is_fully_parsed());
         assert!(reader.lookup_partition(&[0xAA, 0xBB, 0xCC, 0xDD]).is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #2302 open-time contract, preserved through lazy open (roborev
+    /// endgame finding): a present-but-EMPTY `Index.db` must be REJECTED by
+    /// `open_lazy` itself — `Err`, never a silently "valid" lazy reader.
+    /// `component_loading::load_index_reader` maps this `Err` to the loud-WARN
+    /// `PresentButUnloadable` path (the field-level pin is
+    /// `issue_2302_written_index_resolve::present_but_unloadable_index_warns_with_summary`).
+    #[tokio::test]
+    async fn open_lazy_rejects_an_empty_file() {
+        let (dir, path) = temp_index_file("empty", &[]);
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("platform must initialize"),
+        );
+        let result = IndexReader::open_lazy(&path, platform).await;
+        let is_corruption = matches!(result, Err(Error::Corruption(_)));
+        let err_display = result.as_ref().err().map(|e| e.to_string());
+        assert!(
+            is_corruption,
+            "open_lazy must reject an empty Index.db as Corruption, got {err_display:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Companion to the empty-file case: a present, NON-EMPTY file whose FIRST
+    /// entry is structurally unparseable (a dangling key-length header with no
+    /// body — the SAME truncation shape `full_index_stream`'s
+    /// `scan_stops_on_truncated_tail`-style tests use elsewhere) must ALSO be
+    /// rejected by the bounded validity probe, not just the zero-byte case.
+    #[tokio::test]
+    async fn open_lazy_rejects_a_truncated_first_entry() {
+        // Dangling key-length header (claims a 0x40-byte key) with zero body bytes.
+        let entry: Vec<u8> = vec![0x00, 0x40];
+        let (dir, path) = temp_index_file("truncated-first-entry", &entry);
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("platform must initialize"),
+        );
+        let result = IndexReader::open_lazy(&path, platform).await;
+        let is_corruption = matches!(result, Err(Error::Corruption(_)));
+        let err_display = result.as_ref().err().map(|e| e.to_string());
+        assert!(
+            is_corruption,
+            "open_lazy must reject a truncated first entry as Corruption, got {err_display:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
