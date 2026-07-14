@@ -138,6 +138,11 @@ pub struct IndexData {
 mod lazy;
 use lazy::MaterializedIndex;
 
+// Forward-streaming Index.db entry iterator for the Summary-guided BIG scan
+// (#2412 §C, Stage 4): see `stream.rs`.
+mod stream;
+pub(crate) use stream::IndexEntryStream;
+
 /// High-level Index.db file reader. See `lazy.rs` for the #2412 lazy-open contract.
 #[allow(dead_code)]
 pub struct IndexReader {

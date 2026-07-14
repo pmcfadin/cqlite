@@ -216,6 +216,26 @@ impl SummaryReader {
         interval::find_interval_for_key(&self.summary_data.entries, key)
     }
 
+    /// The authoritative `Index.db` byte offset from which a token-range scan whose
+    /// exclusive lower bound is `start_excl` should begin its forward walk (issue
+    /// #2412 §C / #2413 Option A). Returns the position of the greatest sample whose
+    /// murmur3 token is `<= start_excl` — the floor sample — so the forward walk
+    /// covers every in-range partition (`token > start_excl`) while skipping the
+    /// wholly-below-range prefix. Clamps to sample 0's position (the index start)
+    /// when every sample sorts above `start_excl`, and returns `0` for an empty
+    /// summary (scan from the beginning). The samples are token-ordered on disk, so
+    /// a token binary search is exact — no key is needed and nothing is guessed
+    /// (no-heuristics, issue #28).
+    pub fn scan_start_position_for_token(&self, start_excl: i64) -> u64 {
+        use crate::util::cassandra_murmur3::cassandra_murmur3_token;
+        let entries = &self.summary_data.entries;
+        // Monotone prefix of samples whose token is <= start_excl (token order).
+        let le =
+            entries.partition_point(|e| cassandra_murmur3_token(&e.partition_key) <= start_excl);
+        let floor = le.saturating_sub(1);
+        entries.get(floor).map(|e| e.position).unwrap_or(0)
+    }
+
     /// Get summary statistics
     pub fn get_statistics(&self) -> SummaryStatistics {
         let header = &self.summary_data.header;

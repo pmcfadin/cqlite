@@ -98,8 +98,14 @@ impl MergeProducer {
             };
         }
 
-        let mut merger = KWayMerger::new_from_readers(readers, &self.schema, cancel.scan_cancel())
-            .map_err(ProducerError::Merge)?;
+        // Issue #2412 §C / #2413 Option A: push the split's token range INTO the
+        // per-SSTable Summary-guided walk so out-of-range partition bodies are
+        // never read (the token filter still runs downstream at `drive_merge` as a
+        // backstop). A full scan (no token filter) passes `None` → full-ring walk.
+        let token_bound = self.spec.token.as_ref().map(|t| t.to_scan_bound());
+        let mut merger =
+            KWayMerger::new_from_readers(readers, &self.schema, cancel.scan_cancel(), token_bound)
+                .map_err(ProducerError::Merge)?;
         on_merger_built();
         // Issue #2423: the warm full-scan branch streams row-granularly too, matching
         // the cold full-scan path (#2230) — bounded memory + mid-partition cancel.

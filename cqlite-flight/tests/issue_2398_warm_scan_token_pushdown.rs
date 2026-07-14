@@ -1,6 +1,10 @@
-//! Issue #2398 — reproduction: a warm token-range `do_get` scan reads + parses
-//! EVERY partition body in the SSTable, a fixed O(all partitions) per-query cost
-//! independent of the split range width and of `LIMIT`.
+//! Issue #2398/#2412/#2413 — pin (FIX LANDED): a warm token-range `do_get` scan
+//! decodes ONLY the in-range partition bodies, NOT every partition in the SSTable.
+//! Before #2412/#2413 this walk read + parsed EVERY partition body, a fixed
+//! O(all partitions) per-query cost independent of the split range width and of
+//! `LIMIT` (the field's fixed multi-second warm-scan setup). The token range is
+//! now pushed INTO the per-SSTable Summary-guided walk (Option A), so a
+//! single-partition range decodes ~1 body.
 //!
 //! ## What the field saw
 //!
@@ -26,14 +30,14 @@
 //! partition and shows the server decoded ALL `N` bodies to answer it — the
 //! scale-free mechanism the field 7s reflects at ~1.9M partitions.
 //!
-//! ## Flip when the fix lands (issue #2398 acceptance criterion 2)
+//! ## The fix (issue #2413 Option A, landed in #2412)
 //!
-//! The fix is to push the token range INTO the walk (binary-search the
-//! token-ordered index entries and walk only the in-range slice). When it lands,
-//! the single-partition-range assertion below MUST become `walked <= small bound`
-//! (a few, for binary-search boundary slack) instead of `== N`, and the
-//! `>` comparison flips. See the issue for the fix plan; this test is its pinned
-//! reproduction.
+//! The token range is pushed INTO the per-SSTable walk: the Summary-guided
+//! streaming walk (`stream_partitions_summary_guided`) begins at the `Summary.db`
+//! sample covering the range start (`scan_start_position_for_token`) and stops
+//! once the walk passes the range end, so out-of-range partition bodies are never
+//! decoded. The single-partition-range assertion below is therefore `walked <= 4`
+//! (a few, for binary-search boundary slack), NOT `== N`.
 //!
 //! ## Warm small-LIMIT latency target (issue #2398 acceptance criterion 3)
 //!
@@ -151,7 +155,7 @@ async fn do_get_rows(svc: &CqliteFlightService, ticket: Vec<u8>) -> usize {
 }
 
 #[test]
-fn warm_token_range_scan_reads_the_whole_sstable_for_one_partition() {
+fn warm_token_range_scan_reads_only_the_in_range_partition() {
     let (_temp, data_dir) = build_single_sstable();
     let svc = CqliteFlightService::new(data_dir, 1024);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -206,23 +210,25 @@ fn warm_token_range_scan_reads_the_whole_sstable_for_one_partition() {
             "a full (no token range) scan walks every partition body"
         );
 
-        // THE evidence (issue #2398): answering a ONE-partition token range cost
-        // the SAME whole-SSTable body-parse work as the full scan — the token
-        // filter runs only at the consumer, so the walk reads every partition
-        // regardless of the split range. This is the fixed per-query setup the
-        // field saw as a multi-second cost independent of the result size.
-        //
-        // FLIP WHEN THE FIX LANDS: once the token range is pushed into the walk
-        // (binary-search the token-ordered index, walk only the in-range slice),
-        // change this to `assert!(walked <= 4, ...)` — the walk will touch only the
-        // in-range partition (+ small boundary slack), NOT all {N}.
+        // THE evidence (issue #2398/#2412/#2413, FIX LANDED): the token range is
+        // now pushed INTO the per-SSTable Summary-guided walk — it begins at the
+        // `Summary.db` sample covering the range start and stops once the walk
+        // passes the range end, so a ONE-partition token range decodes only that
+        // partition's body (plus at most small binary-search boundary slack), NOT
+        // the whole SSTable. This is what collapses the field's fixed multi-second
+        // warm-scan setup cost to O(in-range partitions + LIMIT).
+        assert!(
+            walked <= 4,
+            "issue #2413: a single-partition token range must decode only the \
+             in-range partition body (+ small boundary slack), got walked={walked} \
+             (full-scan baseline {full_walked} = {N}). Token pushdown into the \
+             Summary-guided walk failed — the split still reads out-of-range bodies."
+        );
+        // Non-vacuity: the full-scan control must still walk the whole SSTable, so
+        // the bound above is a genuine reduction, not both sides collapsing.
         assert_eq!(
-            walked, full_walked,
-            "issue #2398: a single-partition token range parsed {walked} partition \
-             bodies — the SAME as the whole-SSTable full scan ({full_walked}) — \
-             because the token filter is applied only downstream at the consumer, \
-             not pushed into the per-SSTable walk. This is the fixed warm-scan \
-             setup cost independent of the split range and of LIMIT."
+            full_walked, N,
+            "the full (no token range) scan still walks every partition body"
         );
     });
 }

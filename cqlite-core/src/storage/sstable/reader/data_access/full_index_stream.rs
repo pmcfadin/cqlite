@@ -67,7 +67,7 @@ use std::ops::ControlFlow;
 /// decrease of the `(token, key)` pair is. Factored out as a pure function
 /// (`prev`/`token`/`key`/`index` in, `Result<()>` out) so it is unit-testable
 /// without a full `SSTableReader` fixture.
-fn check_token_order(
+pub(in crate::storage::sstable::reader) fn check_token_order(
     prev: Option<(i64, &[u8])>,
     token: i64,
     key: &[u8],
