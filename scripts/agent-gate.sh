@@ -1926,20 +1926,35 @@ run_operator_metrics_doc() {
 # real metric's namespace prefix — FAILing (naming the phantom name) on a
 # renamed/removed/typo'd metric. Mirrors the #2426 operator-metrics-doc anti-drift
 # component (a committed artifact cross-checked against catalog::ALL_METRICS).
-# SKIP-aware (loud, never silent PASS): SKIPs when cqlite-core or the dashboard is
-# absent (a minimal checkout). No Docker, no datasets — reads the catalog + JSON.
+# SKIP-aware (loud, never silent PASS): SKIPs ONLY when cqlite-core or the whole
+# kit subtree (easy-db-lab-kits/cqlite-flight/) is absent (a genuine sparse/minimal
+# checkout). If the kit subtree IS present but the expected dashboard JSON is
+# missing/renamed, that is real drift/breakage in a complete checkout → the test
+# FAILs (roborev #2427 r2). No Docker, no datasets — reads the catalog + JSON.
 run_kit_dashboard_drift() {
   local name=kit-dashboard-drift
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
   fi
-  local dashboard="easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json"
+  local kit_root="easy-db-lab-kits/cqlite-flight"
+  local dashboard="$kit_root/dashboards/cqlite-flight.json"
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
-  if [ ! -d "$REPO_ROOT/cqlite-core" ] || [ ! -f "$REPO_ROOT/$dashboard" ]; then
+  # Skip ONLY on a genuine sparse checkout: cqlite-core or the whole kit subtree
+  # absent. A present kit subtree with a missing dashboard is NOT a skip — it falls
+  # through to the test, which FAILs loudly (present-kit + missing-dashboard drift).
+  if [ ! -d "$REPO_ROOT/cqlite-core" ] || [ ! -d "$REPO_ROOT/$kit_root" ]; then
     status=SKIP
-    echo ">>> [$name] SKIP (cqlite-core or kit dashboard unavailable)"
+    echo ">>> [$name] SKIP (cqlite-core or the kit subtree $kit_root is absent — sparse checkout)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  if [ ! -f "$REPO_ROOT/$dashboard" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: kit subtree $kit_root IS present but the expected dashboard"
+    echo "    $dashboard is MISSING (deleted/renamed) — drift/breakage in a complete checkout,"
+    echo "    not a sparse checkout. Restore the dashboard or update the drift test's path."
     record_result "$name" "$status" 0
     return 0
   fi
