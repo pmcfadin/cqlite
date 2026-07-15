@@ -55,6 +55,11 @@ pub(super) enum CellKind {
     Inet,
     /// The literal CQL `blob` type (decodes to `Blob`, empty-value → `Blob([])`).
     Blob,
+    /// CQL `varint` (arbitrary-precision integer). Decodes the VInt-length-prefixed
+    /// raw two's-complement big-endian bytes to `Value::Varint` (empty-value →
+    /// `Varint([])`), mirroring the block / `ComparatorType::Varint` path exactly
+    /// (issue #1885).
+    Varint,
     /// Frozen / tuple / non-frozen-collection / marshal-UDT / unknown-scalar types:
     /// the already-lowercased declared type string, decoded by the retained string
     /// ladder. Empty-value → `Null` (matching the pre-J1 `_ => Null` empty arm).
@@ -88,7 +93,8 @@ impl CellKind {
             "time" => CellKind::Time,
             "inet" => CellKind::Inet,
             "blob" => CellKind::Blob,
-            // frozen<…>, tuple<…>, list/set/map<…>, marshal forms, varint, and any
+            "varint" => CellKind::Varint,
+            // frozen<…>, tuple<…>, list/set/map<…>, marshal forms, and any
             // unrecognized type: decoded by the retained string ladder. Store the
             // lowercased string so the ladder needs no per-cell `to_lowercase`.
             _ => CellKind::Complex(Arc::from(lowered.as_str())),
@@ -115,6 +121,7 @@ mod tests {
         assert_eq!(CellKind::from_type("duration"), CellKind::Duration);
         assert_eq!(CellKind::from_type("inet"), CellKind::Inet);
         assert_eq!(CellKind::from_type("blob"), CellKind::Blob);
+        assert_eq!(CellKind::from_type("varint"), CellKind::Varint);
     }
 
     #[test]
@@ -154,12 +161,6 @@ mod tests {
         assert_eq!(
             CellKind::from_type("list<int>"),
             CellKind::Complex(Arc::from("list<int>"))
-        );
-        // `varint` has no dedicated scalar arm — pre-J1 it fell to the default blob
-        // decode (live) / Null (empty); it must land in `Complex`, not `Blob`.
-        assert_eq!(
-            CellKind::from_type("varint"),
-            CellKind::Complex(Arc::from("varint"))
         );
     }
 }
