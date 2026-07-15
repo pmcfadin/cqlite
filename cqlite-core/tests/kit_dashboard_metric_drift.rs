@@ -6,17 +6,24 @@
 //! dashboard against catalog drift on TWO fronts:
 //!
 //! 1. **Dotted references** in panel titles/descriptions embed the canonical
-//!    metric name (e.g. `cqlite.rpc.phase.duration`); each must be a real name in
-//!    [`catalog::ALL_METRICS`] (or a bounded attribute key / namespace prefix).
+//!    metric name (e.g. `cqlite.rpc.phase.duration`); each must be an EXACT name
+//!    in [`catalog::ALL_METRICS`], an EXACT bounded attribute key, or an explicit
+//!    `.*` wildcard group ref (`cqlite.flight.admission.*`) — a bare namespace
+//!    prefix that is none of those FAILS (roborev #2427 r3, F2).
 //! 2. **PromQL `expr` metric names** — the tokens that ACTUALLY render each panel
-//!    — use the Prometheus/OTel-sanitized form (dots→underscores plus type/unit
-//!    suffixes: counters `_total`, histograms `_bucket`/`_count`/`_sum`, unit
-//!    `_seconds`/`_bytes`). A typo in an `expr` (`…phase_duraton_seconds_bucket`)
-//!    leaves the panel silently EMPTY even when the correct dotted name appears in
-//!    the title, so we FORWARD-derive the valid sanitized name set from
+//!    — use the Prometheus/OTel-sanitized form (dots→underscores plus the EXACT
+//!    unit+type suffixes the collector emits: a counter is `<stem>_total`, a
+//!    seconds histogram is `<stem>_seconds_{bucket,count,sum}`, a gauge is the
+//!    bare unit-suffixed stem). A typo (`…phase_duraton_seconds_bucket`) OR a
+//!    bare/mis-suffixed form (`cqlite_rpc_requests` missing `_total`,
+//!    `cqlite_rpc_phase_duration_bucket` missing `_seconds`) leaves the panel
+//!    silently EMPTY even when the correct dotted name appears in the title, so we
+//!    FORWARD-derive the EXACT emitted-name set (NOT a permissive superset) from
 //!    `operator_metric_docs()` (name + kind + unit — all authoritative, no
 //!    hardcoded parallel list) and assert every `cqlite_*` token referenced in
-//!    every `expr` is in that set.
+//!    every `expr` is in that set (roborev #2427 r3, F1). Attribute-label tokens
+//!    are tracked in a SEPARATE set so referencing only an attribute never counts
+//!    as referencing a metric (roborev #2427 r3, F3).
 //!
 //! A renamed/removed/typo'd metric therefore fails CLOSED on either front — the
 //! dashboard can never silently reference (or render from) a phantom instrument.
@@ -58,16 +65,22 @@ const ATTRIBUTE_KEYS: &[&str] = &[
     attr::WARM_REFRESH_OUTCOME,
 ];
 
-/// True when `token` is a namespace-group prefix of a real catalog metric — i.e.
-/// some metric name equals `token` or starts with `token + "."`. This admits a
-/// row-title group label such as `cqlite.flight.admission` (prefix of
-/// `cqlite.flight.admission.in_use`) while still rejecting a typo like
-/// `cqlite.flight.admissionx` (no metric starts with `…admissionx.`).
-fn is_metric_namespace_prefix(token: &str) -> bool {
-    let dotted = format!("{token}.");
+/// True when `token` is an EXPLICIT `.*` wildcard group reference whose namespace
+/// covers at least one real catalog metric — e.g. `cqlite.flight.admission.*`
+/// (covers `cqlite.flight.admission.in_use`, …). ONLY the explicit-wildcard form
+/// is admitted as a group ref (roborev #2427 r3, F2): a BARE dotted prefix such as
+/// `cqlite.flight.admission` (no trailing `.*`) is NOT a valid reference, so a
+/// phantom that merely happens to be a prefix of a real namespace can no longer
+/// pass. The stem must still cover a real metric, so `cqlite.does.not.exist.*` is
+/// rejected.
+fn is_wildcard_group_ref(token: &str) -> bool {
+    let Some(stem) = token.strip_suffix(".*") else {
+        return false;
+    };
+    let dotted = format!("{stem}.");
     ALL_METRICS
         .iter()
-        .any(|m| *m == token || m.starts_with(&dotted))
+        .any(|m| *m == stem || m.starts_with(&dotted))
 }
 
 /// Resolve the dashboard path against the repo root (cqlite-core's parent).
@@ -78,24 +91,33 @@ fn dashboard_path() -> std::path::PathBuf {
         .join(DASHBOARD_REL)
 }
 
-/// Extract every DOTTED `cqlite.<segment>(.<segment>)+` token from `text`.
+/// Extract every DOTTED `cqlite.<segment>(.<segment>)+` token from `text`,
+/// preserving an explicit trailing `.*` wildcard group marker.
 ///
 /// A catalog metric name is `cqlite.` followed by dot-separated lower-snake
 /// segments (e.g. `cqlite.flight.admission.wait_seconds`). We greedily consume
-/// `[a-z0-9_.]` after the `cqlite.` root and then trim any trailing `.` left by a
-/// prose sentence boundary. The collector-sanitized PromQL form uses `_` instead
-/// of the leading `cqlite_` dot and so never matches `cqlite.` — those are
-/// excluded by construction, exactly as intended (we anchor on the dotted name).
+/// `[a-z0-9_.*]` after the `cqlite.` root, then trim a trailing prose dot while
+/// keeping a genuine `.*` wildcard group ref (`cqlite.flight.admission.*`). The
+/// collector-sanitized PromQL form uses `_` instead of the leading `cqlite_` dot
+/// and so never matches `cqlite.` — those are excluded by construction, exactly
+/// as intended (we anchor on the dotted name).
 fn dotted_cqlite_names(text: &str) -> HashSet<String> {
     let mut names = HashSet::new();
     for (i, _) in text.match_indices("cqlite.") {
         let tail = &text[i..];
         let token: String = tail
             .chars()
-            .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '.')
+            .take_while(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '.' || *c == '*'
+            })
             .collect();
-        // Trim trailing dots (sentence boundary) but keep interior dots.
-        let token = token.trim_end_matches('.').to_string();
+        // Preserve an explicit `.*` wildcard group ref; otherwise trim any
+        // trailing `.`/`*` left by a prose sentence boundary (keep interior dots).
+        let token = if token.ends_with(".*") {
+            token
+        } else {
+            token.trim_end_matches(['.', '*']).to_string()
+        };
         // A bare `cqlite.` with no segment is not a metric reference.
         if token.len() > "cqlite.".len() {
             names.insert(token);
@@ -104,26 +126,34 @@ fn dotted_cqlite_names(text: &str) -> HashSet<String> {
     names
 }
 
-/// The set of Prometheus/OTel-sanitized metric names a catalogued instrument can
-/// legitimately expose, forward-derived from its catalog `(name, kind, unit)` —
-/// NO hardcoded parallel list, so it stays anti-drift.
+/// The EXACT Prometheus/OTel-sanitized metric names a catalogued instrument
+/// exposes, forward-derived from its catalog `(name, kind, unit)` — NO hardcoded
+/// parallel list (anti-drift) and NO permissive superset (roborev #2427 r3, F1):
+/// the set holds ONLY the names the collector actually emits, so a dashboard that
+/// uses a bare/mis-suffixed form (which would render an EMPTY panel) is rejected.
 ///
-/// The OTel Prometheus exporter sanitizes a dotted name (dots→underscores) and
+/// The OTel Prometheus exporter sanitizes a dotted name (dots→underscores), then
 /// appends, in order, a UNIT suffix (`s`→`_seconds`, `By`→`_bytes`; other UCUM
-/// annotation units like `{row}`/`1` add none) and a TYPE suffix (counters
-/// `_total`; histograms expose `_bucket`/`_count`/`_sum`; gauges none). The
-/// exporter also de-duplicates — it does NOT re-append a unit/`_total` suffix a
-/// name already ends with (e.g. `cqlite.errors.total` stays `…_total`,
-/// `…wait_seconds` stays `…_seconds`). We therefore emit a GENEROUS set (the bare
-/// stem plus every plausible unit/type variant): permissive on the suffix (so a
-/// legit exporter-config difference never false-fails) but STRICT on the stem, so
-/// a mistyped metric name (`…phase_duraton_…`) is never in the set.
+/// annotation units like `{row}`/`1` add none) and a TYPE suffix. It also
+/// de-duplicates — it does NOT re-append a unit/type suffix a name already ends
+/// with. The exact emitted name(s) per kind:
+/// - **Counter** → the single `<stem>_total` (bare name is NEVER scraped; e.g.
+///   `cqlite.rpc.requests` → `cqlite_rpc_requests_total`,
+///   `cqlite.rpc.bytes` [`By`] → `cqlite_rpc_bytes_total` — the `By`→`_bytes` is
+///   de-duped against the name's existing `bytes` stem, matching the
+///   field-verified base-RPC exprs). A name already ending `_total` stays as-is.
+/// - **Histogram** → three series `<stem>_bucket`, `<stem>_count`, `<stem>_sum`,
+///   with the unit stem folded in first (`s` → `<stem>_seconds_{bucket,count,sum}`,
+///   seconds BEFORE the `_bucket`/`_count`/`_sum`).
+/// - **Gauge** → the bare unit-suffixed `<stem>` (no type suffix).
+///
+/// The STEM is dedup-guarded so a name already carrying its unit/type suffix is
+/// never double-suffixed (`cqlite.errors.total` stays `…_total`;
+/// `cqlite.flight.admission.wait_seconds` stays `…_seconds_bucket`).
 fn sanitized_variants(name: &str, kind: MetricKind, metric_unit: &str) -> HashSet<String> {
     let base = name.replace('.', "_");
-    // Stems: the bare sanitized name, plus a unit-suffixed stem when the unit maps
-    // to a Prometheus suffix and the name does not already carry it.
-    let mut stems: HashSet<String> = HashSet::new();
-    stems.insert(base.clone());
+    // Fold the UNIT suffix into the stem first (de-duped: never re-append a suffix
+    // the name already ends with).
     let unit_suffix = if metric_unit == unit::SECONDS {
         Some("seconds")
     } else if metric_unit == unit::BYTES {
@@ -131,52 +161,72 @@ fn sanitized_variants(name: &str, kind: MetricKind, metric_unit: &str) -> HashSe
     } else {
         None
     };
-    if let Some(u) = unit_suffix {
-        if !base.ends_with(u) {
-            stems.insert(format!("{base}_{u}"));
-        }
-    }
-    // Type suffixes applied to each stem. Always keep the bare stem too (some
-    // exporter configs omit `_total`); the stem is what actually guards typos.
+    let stem = match unit_suffix {
+        Some(u) if !base.ends_with(u) => format!("{base}_{u}"),
+        _ => base,
+    };
+    // Then the TYPE suffix — the EXACT emitted series, no bare-stem fallback.
     let mut out: HashSet<String> = HashSet::new();
-    for stem in &stems {
-        out.insert(stem.clone());
-        match kind {
-            MetricKind::Gauge => {}
-            MetricKind::Counter => {
-                if !stem.ends_with("_total") {
-                    out.insert(format!("{stem}_total"));
-                }
+    match kind {
+        MetricKind::Gauge => {
+            out.insert(stem);
+        }
+        MetricKind::Counter => {
+            if stem.ends_with("_total") {
+                out.insert(stem);
+            } else {
+                out.insert(format!("{stem}_total"));
             }
-            MetricKind::Histogram => {
-                out.insert(format!("{stem}_bucket"));
-                out.insert(format!("{stem}_count"));
-                out.insert(format!("{stem}_sum"));
-            }
+        }
+        MetricKind::Histogram => {
+            out.insert(format!("{stem}_bucket"));
+            out.insert(format!("{stem}_count"));
+            out.insert(format!("{stem}_sum"));
         }
     }
     out
 }
 
-/// Build the complete set of valid `cqlite_*` Prometheus identifiers a dashboard
-/// `expr` may reference: every metric's sanitized variants (from
-/// `operator_metric_docs()` — authoritative name+kind+unit) UNION the sanitized
-/// bounded attribute keys (used as label selectors / `by(...)` grouping, e.g.
-/// `cqlite_rpc_method`). Anti-drift: derived entirely from the catalog.
-fn valid_sanitized_names() -> HashSet<String> {
-    let mut set = HashSet::new();
+/// The two DISTINCT sets of valid `cqlite_*` Prometheus identifiers a dashboard
+/// `expr` may reference (roborev #2427 r3, F3 — kept separate so an attribute
+/// label never counts as a metric reference).
+struct ValidNames {
+    /// Exact sanitized METRIC-name series (from `operator_metric_docs()` —
+    /// authoritative name+kind+unit). Membership here (and ONLY here) satisfies
+    /// "the dashboard references a real metric".
+    metrics: HashSet<String>,
+    /// Sanitized bounded ATTRIBUTE keys used as PromQL label names / `by(...)`
+    /// grouping (e.g. `cqlite_rpc_method`). Valid tokens, but referencing one
+    /// does NOT count as referencing a metric.
+    attributes: HashSet<String>,
+}
+
+impl ValidNames {
+    /// A token is a valid `cqlite_*` identifier if it is either an exact metric
+    /// series name or a sanitized attribute label.
+    fn is_valid(&self, tok: &str) -> bool {
+        self.metrics.contains(tok) || self.attributes.contains(tok)
+    }
+}
+
+/// Build the metric and attribute identifier sets, both derived entirely from the
+/// catalog (anti-drift). Metric names are the EXACT emitted series per
+/// `sanitized_variants`; attributes are the sanitized bounded `catalog::attr::*`
+/// keys.
+fn valid_sanitized_names() -> ValidNames {
+    let mut metrics = HashSet::new();
     let docs = operator_metric_docs()
         .expect("operator_metric_docs must succeed (every ALL_METRICS entry is annotated)");
     for d in &docs {
         for v in sanitized_variants(d.name, d.kind, d.unit) {
-            set.insert(v);
+            metrics.insert(v);
         }
     }
-    // Sanitized bounded attribute keys appear as PromQL label names.
-    for a in ATTRIBUTE_KEYS {
-        set.insert(a.replace('.', "_"));
+    let attributes = ATTRIBUTE_KEYS.iter().map(|a| a.replace('.', "_")).collect();
+    ValidNames {
+        metrics,
+        attributes,
     }
-    set
 }
 
 /// Extract every `cqlite_*` Prometheus identifier token referenced in a PromQL
@@ -317,15 +367,17 @@ fn every_dashboard_metric_name_exists_in_catalog() {
 
     let attrs: HashSet<&str> = ATTRIBUTE_KEYS.iter().copied().collect();
 
-    // A dotted `cqlite.*` token is accepted iff it is an exact metric name, a
-    // bounded attribute key, or a namespace-group prefix of a real metric (a row
-    // title). Anything else is a renamed/removed/phantom reference — fail CLOSED.
+    // A dotted `cqlite.*` token is accepted iff it is an EXACT metric name, an
+    // EXACT bounded attribute key, or an explicit `.*` wildcard group ref (a row
+    // title such as `cqlite.flight.admission.*`). A bare namespace prefix is NOT
+    // accepted (roborev #2427 r3, F2). Anything else is a renamed/removed/phantom
+    // reference — fail CLOSED.
     let mut phantom: Vec<String> = referenced
         .iter()
         .filter(|name| {
             !catalog.contains(name.as_str())
                 && !attrs.contains(name.as_str())
-                && !is_metric_namespace_prefix(name)
+                && !is_wildcard_group_ref(name)
         })
         .cloned()
         .collect();
@@ -371,13 +423,16 @@ fn every_expr_metric_name_is_a_valid_sanitized_catalog_name() {
     // Every `cqlite_*` token referenced in any expr must be a valid sanitized
     // metric name (or attribute label) — anything else is a mistyped/renamed
     // reference that renders an EMPTY panel. Fail CLOSED, naming the offenders.
+    // `referenced_any_metric` is set ONLY by membership in the METRIC set — an
+    // attribute label alone does not count as referencing a metric (roborev #2427
+    // r3, F3).
     let mut invalid: Vec<String> = Vec::new();
     let mut referenced_any_metric = false;
     for expr in &exprs {
         for tok in cqlite_expr_tokens(expr) {
-            if valid.contains(&tok) {
+            if valid.metrics.contains(&tok) {
                 referenced_any_metric = true;
-            } else {
+            } else if !valid.attributes.contains(&tok) {
                 invalid.push(tok);
             }
         }
@@ -405,9 +460,11 @@ fn expr_validator_rejects_a_typo_in_an_expr_metric_name_negative_test() {
     // expr. Uses a synthetic expr so the test never depends on the live dashboard.
     let valid = valid_sanitized_names();
 
-    // The correct sanitized name IS in the valid set…
+    // The correct sanitized name IS in the metric set…
     assert!(
-        valid.contains("cqlite_rpc_phase_duration_seconds_bucket"),
+        valid
+            .metrics
+            .contains("cqlite_rpc_phase_duration_seconds_bucket"),
         "the correct histogram bucket name must be a valid sanitized variant"
     );
     // …but a one-character typo ("duraton") is NOT — so the panel would be empty.
@@ -415,7 +472,7 @@ fn expr_validator_rejects_a_typo_in_an_expr_metric_name_negative_test() {
                      {cluster=~\"$cluster\"}[5m])) by (le, cqlite_rpc_phase))";
     let mut invalid: Vec<String> = cqlite_expr_tokens(typo_expr)
         .into_iter()
-        .filter(|t| !valid.contains(t))
+        .filter(|t| !valid.is_valid(t))
         .collect();
     invalid.sort();
     assert_eq!(
@@ -426,36 +483,93 @@ fn expr_validator_rejects_a_typo_in_an_expr_metric_name_negative_test() {
 
     // Sanity: a counter's `_total` and a histogram's `_bucket`/`_count`/`_sum` are
     // all accepted (forward-derived from kind), a bare gauge name is accepted, and
-    // a sanitized attribute label is accepted.
+    // a sanitized attribute label is accepted (in the ATTRIBUTE set, not metrics).
     assert!(
-        valid.contains("cqlite_rpc_requests_total"),
+        valid.metrics.contains("cqlite_rpc_requests_total"),
         "counter _total"
     );
     assert!(
-        valid.contains("cqlite_rpc_duration_seconds_count"),
+        valid.metrics.contains("cqlite_rpc_duration_seconds_count"),
         "histogram _count"
     );
     assert!(
-        valid.contains("cqlite_rpc_duration_seconds_sum"),
+        valid.metrics.contains("cqlite_rpc_duration_seconds_sum"),
         "histogram _sum"
     );
-    assert!(valid.contains("cqlite_rpc_in_flight"), "bare gauge name");
     assert!(
-        valid.contains("cqlite_rpc_bytes_total"),
+        valid.metrics.contains("cqlite_rpc_in_flight"),
+        "bare gauge name"
+    );
+    assert!(
+        valid.metrics.contains("cqlite_rpc_bytes_total"),
         "counter with By unit + _total"
     );
     assert!(
-        valid.contains("cqlite_rpc_method"),
-        "sanitized attribute label"
+        valid.attributes.contains("cqlite_rpc_method"),
+        "sanitized attribute label lives in the attribute set"
+    );
+    assert!(
+        !valid.metrics.contains("cqlite_rpc_method"),
+        "an attribute label is NOT a metric name (roborev #2427 r3, F3)"
     );
     // A name that already ends in `_total` is not double-suffixed.
     assert!(
-        valid.contains("cqlite_errors_total"),
+        valid.metrics.contains("cqlite_errors_total"),
         "errors.total counter"
     );
     assert!(
-        !valid.contains("cqlite_errors_total_total"),
+        !valid.metrics.contains("cqlite_errors_total_total"),
         "must not double-append _total to a name already ending in _total"
+    );
+
+    // F1 (roborev #2427 r3) — the EXACT-name tightening: bare and mis-suffixed
+    // forms that would render an EMPTY panel are REJECTED, not accepted.
+    assert!(
+        !valid.metrics.contains("cqlite_rpc_requests"),
+        "bare counter name (missing _total) must be REJECTED — the collector emits \
+         only cqlite_rpc_requests_total"
+    );
+    assert!(
+        !valid.metrics.contains("cqlite_rpc_phase_duration_bucket"),
+        "histogram bucket missing the _seconds unit stem must be REJECTED — the \
+         collector emits cqlite_rpc_phase_duration_seconds_bucket"
+    );
+    assert!(
+        !valid.metrics.contains("cqlite_rpc_duration"),
+        "bare seconds-histogram name (no _seconds_{{bucket,count,sum}}) must be REJECTED"
+    );
+    // And they are flagged as invalid by the expr validator.
+    let bare_counter_expr = "sum(rate(cqlite_rpc_requests{cluster=~\"$cluster\"}[5m]))";
+    let mis_suffixed_hist_expr =
+        "histogram_quantile(0.95, sum(rate(cqlite_rpc_phase_duration_bucket[5m])) by (le))";
+    for (expr, want) in [
+        (bare_counter_expr, "cqlite_rpc_requests"),
+        (mis_suffixed_hist_expr, "cqlite_rpc_phase_duration_bucket"),
+    ] {
+        let flagged: Vec<String> = cqlite_expr_tokens(expr)
+            .into_iter()
+            .filter(|t| !valid.is_valid(t))
+            .collect();
+        assert!(
+            flagged.contains(&want.to_string()),
+            "expr validator must flag the bare/mis-suffixed form `{want}` (would render empty), \
+             flagged: {flagged:?}"
+        );
+    }
+
+    // F2 (roborev #2427 r3) — an explicit `.*` wildcard group ref is recognized,
+    // but a bare namespace prefix is NOT.
+    assert!(
+        is_wildcard_group_ref("cqlite.flight.admission.*"),
+        "explicit .* group ref covering real metrics must be accepted"
+    );
+    assert!(
+        !is_wildcard_group_ref("cqlite.flight.admission"),
+        "a bare namespace prefix (no trailing .*) must be REJECTED (roborev #2427 r3, F2)"
+    );
+    assert!(
+        !is_wildcard_group_ref("cqlite.does.not.exist.*"),
+        "a .* group ref covering NO real metric must be REJECTED"
     );
 }
 
