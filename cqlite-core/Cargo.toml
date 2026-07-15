@@ -198,6 +198,16 @@ required-features = ["arrow"]
 name = "issue_2302_written_index_resolve"
 required-features = ["work-counters", "write-support"]
 
+# Statistics.db single-TOC-walk oracle (issue #2148). `#![cfg(feature =
+# "cli-helpers")]` — the `toc_walk_metrics` counter getters/`reset` +
+# `record_toc_walk` live behind `cli-helpers` — so it only compiles+runs with that
+# feature. The lite gate's blast-radius scoping runs cqlite-core `--lib` +
+# `--features cli-helpers`, which compiles and runs this changed `--test` target;
+# the full gate's core-tests (`--features cli-helpers`) also picks it up.
+[[test]]
+name = "issue_2148_statistics_toc_single_walk"
+required-features = ["cli-helpers"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false

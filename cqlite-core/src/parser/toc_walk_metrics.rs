@@ -1,15 +1,20 @@
 //! Minimal process-wide counter for Statistics.db Table-of-Contents (TOC) walks
 //! (issue #1658, epic #1606).
 //!
-//! The metadata stack re-walks the Statistics.db TOC several times during a
-//! single SSTable open — once to locate the `HEADER` (SerializationHeader)
-//! offset (`enhanced_statistics_parser::header::parse_statistics_toc_for_header_offset`)
-//! and again inside `repair_metadata::stats_component_bounds`, which
-//! `read_table_counts` and `parse_stats_extras` each invoke while building
-//! `SSTableStatistics`. This counter lets the A5 cold-open bench
-//! (`benches/open.rs`) MEASURE that redundancy so a fix can be scoped against a
-//! real number rather than a guess. It is NOT a decoding heuristic: nothing in
-//! the parse path reads the count, so it has no effect on correctness (#28).
+//! Historically the metadata stack re-walked the Statistics.db TOC three times
+//! during a single SSTable open — once to locate the `HEADER`
+//! (SerializationHeader) offset and again inside
+//! `repair_metadata::stats_component_bounds`, which `read_table_counts` and
+//! `parse_stats_extras` each invoked while building `SSTableStatistics`. This
+//! counter let the A5 cold-open bench (`benches/open.rs`) MEASURE that redundancy
+//! so the fix could be scoped against a real number rather than a guess.
+//!
+//! As of issue #2148 the TOC is parsed ONCE
+//! (`repair_metadata::parse_statistics_toc`, which resolves the HEADER offset and
+//! the STATS bounds together) and threaded to the two downstream consumers via
+//! their `*_with_toc` variants, so `toc_walk_count()` reads `1` per metadata
+//! parse. It is NOT a decoding heuristic: nothing in the parse path reads the
+//! count, so it has no effect on correctness (#28).
 //!
 //! The instrumentation is gated behind `cli-helpers` (roborev #1658): the
 //! counter is only read by the cli-helpers-gated bench, so production builds
