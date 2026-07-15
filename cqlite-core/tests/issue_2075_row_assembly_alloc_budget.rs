@@ -25,6 +25,14 @@
 //! *slope* vs schema width, #2075 watches the *absolute level* per row and per
 //! cell.
 //!
+//! **Sensitivity note.** The measured path is the full `execute()`, whose per-row
+//! `QueryRow.values` HashMap construction is a large share of the total — likely
+//! larger than the intermediate `RowCells` `Vec` allocation #1645 item 2 targets.
+//! So the smallvec win will register here as a *fraction* of the budget (a real,
+//! deterministic drop), not a 1:1 collapse. This is a genuine regression net for
+//! the whole decode->assembly path; calibrate expectations for the size of the
+//! #1645-item-2 delta accordingly.
+//!
 //! **Two shapes.**
 //!   - WIDE-ROW: `test_wide_rows.many_columns_table` (100 regular cols, UUID PK) —
 //!     stresses schema width / number of materialized cells per row.
@@ -179,8 +187,11 @@ fn assert_shape(
 // A single `#[test]` covers BOTH shapes: dhat installs a process-wide global
 // allocator and permits only ONE live `Profiler` at a time, so two separate tests
 // in this binary would conflict (the second `Profiler::build` panics). One
-// profiler, two measured scans. `#[serial]` keeps the process-global dhat profiler
-// exclusive against any sibling dhat test. A plain `#[test]` (NOT `#[tokio::test]`)
+// profiler, two measured scans. `#[serial]` is belt-and-suspenders only — it
+// serializes WITHIN this process, so it guards against a future second dhat test
+// being added to THIS binary; the gate additionally runs the lane with
+// `--test-threads=1`, and sibling dhat lanes are separate `cargo test` processes.
+// A plain `#[test]` (NOT `#[tokio::test]`)
 // — `open_read_db` builds its own tokio runtime for ingest, and nesting a
 // `block_on` inside `#[tokio::test]`'s runtime panics.
 #[test]

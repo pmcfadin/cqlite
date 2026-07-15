@@ -200,14 +200,16 @@ impl ReadFixture {
     };
 
     /// `test_wide_rows.document_versions` — the TEXT-HEAVY read shape for the
-    /// issue #2075 row-assembly allocations-per-row / per-cell harness. Partition
-    /// key `document_id UUID` + clustering `version_number INT`, carrying three
-    /// `TEXT` columns (`title`/`content`/`change_summary`) plus a `SET<TEXT>`
-    /// (`tags`) and a `MAP<TEXT,TEXT>` (`metadata`). Where `MANY_COLUMNS` stresses
-    /// schema WIDTH, this fixture stresses per-cell String/collection
-    /// materialization — the RowCells assembly path #1645 item 2 (smallvec
-    /// RowCells) targets. **Optional** — not present in every checkout, so callers
-    /// must guard on [`fixture_present`] and skip-register when absent.
+    /// issue #2075 row-assembly allocations-per-row / per-cell harness. 11 columns:
+    /// partition key `document_id UUID` + clustering `version_number INT`, three
+    /// `TEXT` columns (`title`/`content`/`change_summary`), `created_at TIMESTAMP`,
+    /// `author_id UUID`, `word_count`/`character_count INT`, a `SET<TEXT>` (`tags`)
+    /// and a `MAP<TEXT,TEXT>` (`metadata`) — ~11 materialized cells/row is what
+    /// yields the harness's 550-cell (50-row) text-heavy baseline. Where
+    /// `MANY_COLUMNS` stresses schema WIDTH, this fixture stresses per-cell
+    /// String/collection materialization — the RowCells assembly path #1645 item 2
+    /// (smallvec RowCells) targets. **Optional** — not present in every checkout,
+    /// so callers must guard on [`fixture_present`] and skip-register when absent.
     pub const DOCUMENT_VERSIONS: ReadFixture = ReadFixture {
         keyspace: "test_wide_rows",
         table: "document_versions",
