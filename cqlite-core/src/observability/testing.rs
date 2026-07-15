@@ -331,6 +331,17 @@ impl MetricsCapture {
         self.exporter.reset();
     }
 
+    /// Re-emit the always-on baseline instruments (e.g. `cqlite.errors.total` at
+    /// 0), exactly as production [`crate::observability::init`] does on startup
+    /// (issue #2288). Production uses cumulative temporality so a single seed at
+    /// init is visible in every scrape; this harness uses DELTA temporality, so a
+    /// test that wants to observe the seeded `0` series in its own collect window
+    /// calls this after [`reset`](Self::reset) and before
+    /// [`flush_and_collect`](Self::flush_and_collect).
+    pub fn seed_baseline(&self) {
+        super::otel::register_baseline_instruments();
+    }
+
     /// Force the meter provider to collect + export, then return a snapshot.
     pub fn flush_and_collect(&self) -> CapturedMetrics {
         let _ = self.provider.force_flush();
@@ -372,6 +383,10 @@ pub fn metrics_capture() -> MetricsCapture {
             let provider = SdkMeterProvider::builder().with_reader(reader).build();
             opentelemetry::global::set_meter_provider(provider.clone());
             super::otel::set_metrics_active_for_testing();
+            // Mirror production `otel::init` (issue #2288): seed the always-on
+            // baseline instruments (e.g. `cqlite.errors.total` at 0) so a scrape
+            // of a freshly-started server sees them present, not absent.
+            super::otel::register_baseline_instruments();
             MetricsCapture { exporter, provider }
         })
         .clone()

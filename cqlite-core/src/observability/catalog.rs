@@ -496,6 +496,21 @@ pub const MERGE_PRODUCER_THREADS: &str = "cqlite.merge.producer_threads";
 /// Total errors observed, the canonical error-rate signal (issue #1038).
 /// Bounded attributes: [`attr::ERROR_CATEGORY`] and [`attr::SUBSYSTEM`] ONLY.
 /// The raw error message is never attached.
+///
+/// **Eagerly registered at 0 on startup (issue #2288).** When the
+/// `observability` feature is active, [`crate::observability::init`] emits a
+/// single `add(0)` with an empty attribute set so this counter is present at `0`
+/// in a scrape of a freshly-started server, before any error. This makes "metric
+/// name absent from the backend" unambiguously mean *error counting isn't wired*
+/// (never *no errors occurred yet*), which cost real diagnostic time during the
+/// #2193 round-4 field investigation. Real errors add their own labeled series
+/// alongside the unlabeled baseline.
+///
+/// Limitation (per the #2193 code audit): a peer connection RESET that arrives
+/// *after* the gRPC `END_STREAM` frame is handled entirely inside the h2/tonic
+/// transport and is invisible at this application layer, so it is not counted
+/// here. Such post-END_STREAM resets are an expected, benign transport event, not
+/// an application error.
 pub const ERRORS_TOTAL: &str = "cqlite.errors.total";
 
 // ---------------------------------------------------------------------------
