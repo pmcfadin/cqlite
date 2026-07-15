@@ -962,7 +962,15 @@ async fn v5_varint_arm_decodes_edge_cases() {
 }
 
 /// An empty `varint` cell decodes to `Value::Varint([])` on the v5 path, matching
-/// the block path's empty-slice handling (issue #1885).
+/// the block path's empty-slice handling (issue #1885). This covers BOTH v5 wire
+/// framings that can carry a zero-length varint:
+///  1. A live cell with a VInt length prefix of `0` (`[0x08][0x00]`) — the
+///     `CellKind::Varint => Value::Varint(read_vint_prefixed_bytes(..))` arm reading
+///     an empty payload.
+///  2. A flags-only cell with the `CELL_HAS_EMPTY_VALUE` bit set and NO value bytes
+///     (`[0x0C]` = `CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE`) — the dedicated
+///     `CellKind::Varint => Value::Varint(Vec::new())` empty arm (roborev coverage
+///     gap: this arm was previously never exercised).
 #[tokio::test]
 async fn v5_varint_empty_matches_block() {
     let Some(reader) = open_reader().await else {
@@ -972,15 +980,38 @@ async fn v5_varint_empty_matches_block() {
 
     let block = decode_block(&reader, "varint", &[])
         .unwrap_or_else(|e| panic!("block empty varint failed: {e:?}"));
-    let cell = frame_v5_cell(V5Framing::VintLen, &[]);
-    let v5 = decode_v5(&parser, &reader, "varint", &cell)
-        .unwrap_or_else(|e| panic!("v5 empty varint failed: {e:?}"));
+
+    // Framing 1: live cell, VInt length prefix = 0.
+    let cell_len0 = frame_v5_cell(V5Framing::VintLen, &[]);
+    let v5_len0 = decode_v5(&parser, &reader, "varint", &cell_len0)
+        .unwrap_or_else(|e| panic!("v5 zero-length varint failed: {e:?}"));
     assert_eq!(
-        v5,
+        v5_len0,
         Value::Varint(Vec::new()),
-        "empty v5 varint → Varint([])"
+        "zero-length-prefix v5 varint → Varint([])"
     );
-    assert_eq!(block, v5, "empty varint block vs v5 must agree");
+    assert_eq!(
+        block, v5_len0,
+        "zero-length-prefix varint block vs v5 must agree"
+    );
+
+    // Framing 2: flags-only cell with CELL_HAS_EMPTY_VALUE set — no value bytes at
+    // all. 0x0C = CELL_USE_ROW_TIMESTAMP (0x08) | CELL_HAS_EMPTY_VALUE (0x04); the
+    // row-timestamp bit means no timestamp delta is read, so the whole cell is the
+    // single flags byte. This is the branch that hits the empty `Value::Varint(vec)`
+    // arm rather than reading a length-prefixed payload.
+    let cell_empty_flag = vec![0x0Cu8];
+    let v5_empty_flag = decode_v5(&parser, &reader, "varint", &cell_empty_flag)
+        .unwrap_or_else(|e| panic!("v5 empty-value-flag varint failed: {e:?}"));
+    assert_eq!(
+        v5_empty_flag,
+        Value::Varint(Vec::new()),
+        "empty-value-flag (0x0C) v5 varint → Varint([]) via the empty arm"
+    );
+    assert_eq!(
+        block, v5_empty_flag,
+        "empty-value-flag varint block vs v5 must agree"
+    );
 }
 
 // ===========================================================================

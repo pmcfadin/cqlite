@@ -268,91 +268,61 @@ impl V5CompressedLegacyParser {
             return Ok((empty_value, cell_timestamp, cell_expiration, offset));
         }
 
-        // VInt-length-prefixed blob decode. Shared by the literal `blob` type
-        // (`CellKind::Blob`) and the `CellKind::Complex` default fall-through
-        // (unknown types), which decoded identically pre-J1 (both hit the single
-        // `_ =>` blob arm). Extracted to one closure so the two dispatch sites do not
-        // duplicate the decode. Advances the shared `offset` cursor.
-        let decode_vint_blob = |offset: &mut usize| -> Result<Value> {
+        // VInt-length-prefixed raw-bytes decode. Reads a single unsigned-VInt length
+        // prefix, bounds-checks it, and returns the exact payload bytes, advancing the
+        // shared `offset` cursor. The on-disk framing is identical for `blob` and
+        // `varint`; the caller wraps the bytes in the target `Value` variant. Extracted
+        // to one closure so the dispatch sites do not duplicate the length parse,
+        // bounds check, cursor advance, and allocation (issue #1885, roborev DRY).
+        let read_vint_prefixed_bytes = |offset: &mut usize| -> Result<Vec<u8>> {
             if *offset >= data.len() {
                 return Err(Error::corruption(format!(
                     "Cell '{}': unexpected end at blob length (type: {})",
                     column.name, column.data_type
                 )));
             }
-            // Parse blob length as unsigned VInt (can be > 255 bytes).
-            let (remaining, blob_len) = parse_vuint(&data[*offset..]).map_err(|e| {
-                Error::corruption(format!(
-                    "Cell '{}': failed to parse blob length as VInt: {:?}",
-                    column.name, e
-                ))
-            })?;
-            let blob_len = blob_len as usize;
-            let bytes_consumed = data[*offset..].len() - remaining.len();
-            *offset += bytes_consumed;
-
-            if *offset + blob_len > data.len() {
-                return Err(Error::corruption(format!(
-                    "Cell '{}': need {} bytes for blob, only {} available (type: {})",
-                    column.name,
-                    blob_len,
-                    data.len() - *offset,
-                    column.data_type
-                )));
-            }
-
-            let blob_bytes = data[*offset..*offset + blob_len].to_vec();
-            *offset += blob_len;
-            Ok(Value::Blob(blob_bytes))
-        };
-
-        // At this point, we have a live cell with value data.
-        // Dispatch the decode on the precomputed `CellKind` (jump table). The scalar
-        // arms map 1:1 onto the pre-J1 string-match arms; the frozen/tuple/collection/
-        // marshal-UDT/default ladder is retained verbatim inside `CellKind::Complex`
-        // (the thin adapter Epic J2 collapses), using the tag's already-lowercased
-        // declared type as `type_str` — exactly the pre-J1 `normalized_type`.
-        // Issue #1885: read VInt-length-prefixed raw bytes (shared framing with the
-        // `blob` decode). Returns the exact payload bytes; the caller wraps them in
-        // the target `Value`. Mirrors `decode_vint_blob` but hands back the raw bytes
-        // so `varint` can wrap in `Value::Varint` with byte-identical framing.
-        let read_vint_prefixed_bytes = |offset: &mut usize| -> Result<Vec<u8>> {
-            if *offset >= data.len() {
-                return Err(Error::corruption(format!(
-                    "Cell '{}': unexpected end at length prefix (type: {})",
-                    column.name, column.data_type
-                )));
-            }
+            // Parse the length prefix as an unsigned VInt (can be > 255 bytes).
             let (remaining, len) = parse_vuint(&data[*offset..]).map_err(|e| {
                 Error::corruption(format!(
-                    "Cell '{}': failed to parse length prefix as VInt: {:?}",
+                    "Cell '{}': failed to parse blob length as VInt: {:?}",
                     column.name, e
                 ))
             })?;
             let len = len as usize;
             let bytes_consumed = data[*offset..].len() - remaining.len();
             *offset += bytes_consumed;
+
             if *offset + len > data.len() {
                 return Err(Error::corruption(format!(
-                    "Cell '{}': need {} bytes, only {} available (type: {})",
+                    "Cell '{}': need {} bytes for blob, only {} available (type: {})",
                     column.name,
                     len,
                     data.len() - *offset,
                     column.data_type
                 )));
             }
+
             let bytes = data[*offset..*offset + len].to_vec();
             *offset += len;
             Ok(bytes)
+        };
+
+        // Thin wrapper: the literal `blob` type (`CellKind::Blob`) and the
+        // `CellKind::Complex` default fall-through (unknown types) both wrap the shared
+        // VInt-prefixed bytes in `Value::Blob` — identical pre-J1 decode (the single
+        // `_ =>` blob arm). Advances the shared `offset` cursor.
+        let decode_vint_blob = |offset: &mut usize| -> Result<Value> {
+            Ok(Value::Blob(read_vint_prefixed_bytes(offset)?))
         };
 
         let value = match kind {
             CellKind::Blob => decode_vint_blob(&mut offset)?,
             // CQL `varint`: VInt-length-prefixed raw two's-complement big-endian
             // bytes → `Value::Varint`. Byte-for-byte the same on-disk framing as the
-            // `blob` arm, but preserves the declared `varint` type instead of blobbing
-            // it. Mirrors the block / `ComparatorType::Varint` path
-            // (`Value::Varint(value_data.to_vec())`) — issue #1885.
+            // `blob` arm (shares `read_vint_prefixed_bytes`), but preserves the declared
+            // `varint` type instead of blobbing it. Mirrors the block /
+            // `ComparatorType::Varint` path (`Value::Varint(value_data.to_vec())`) —
+            // issue #1885.
             CellKind::Varint => Value::Varint(read_vint_prefixed_bytes(&mut offset)?),
             CellKind::Boolean => {
                 // Boolean: [0x08][u8 value]
