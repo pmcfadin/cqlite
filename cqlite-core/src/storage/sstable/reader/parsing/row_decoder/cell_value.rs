@@ -253,6 +253,9 @@ impl V5CompressedLegacyParser {
             let empty_value = match kind {
                 CellKind::Text => Value::Text(String::new()),
                 CellKind::Blob => Value::Blob(Vec::new()),
+                // Issue #1885: an empty `varint` cell is `Varint([])`, matching the
+                // block / `ComparatorType::Varint` path (empty slice → `Varint([])`).
+                CellKind::Varint => Value::Varint(Vec::new()),
                 _ => {
                     tracing::warn!(
                         "V5CompressedLegacy: EMPTY value for cell '{}' (type {}), treating as NULL",
@@ -267,7 +270,7 @@ impl V5CompressedLegacyParser {
 
         // VInt-length-prefixed blob decode. Shared by the literal `blob` type
         // (`CellKind::Blob`) and the `CellKind::Complex` default fall-through
-        // (unknown/`varint`), which decoded identically pre-J1 (both hit the single
+        // (unknown types), which decoded identically pre-J1 (both hit the single
         // `_ =>` blob arm). Extracted to one closure so the two dispatch sites do not
         // duplicate the decode. Advances the shared `offset` cursor.
         let decode_vint_blob = |offset: &mut usize| -> Result<Value> {
@@ -309,8 +312,48 @@ impl V5CompressedLegacyParser {
         // marshal-UDT/default ladder is retained verbatim inside `CellKind::Complex`
         // (the thin adapter Epic J2 collapses), using the tag's already-lowercased
         // declared type as `type_str` — exactly the pre-J1 `normalized_type`.
+        // Issue #1885: read VInt-length-prefixed raw bytes (shared framing with the
+        // `blob` decode). Returns the exact payload bytes; the caller wraps them in
+        // the target `Value`. Mirrors `decode_vint_blob` but hands back the raw bytes
+        // so `varint` can wrap in `Value::Varint` with byte-identical framing.
+        let read_vint_prefixed_bytes = |offset: &mut usize| -> Result<Vec<u8>> {
+            if *offset >= data.len() {
+                return Err(Error::corruption(format!(
+                    "Cell '{}': unexpected end at length prefix (type: {})",
+                    column.name, column.data_type
+                )));
+            }
+            let (remaining, len) = parse_vuint(&data[*offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Cell '{}': failed to parse length prefix as VInt: {:?}",
+                    column.name, e
+                ))
+            })?;
+            let len = len as usize;
+            let bytes_consumed = data[*offset..].len() - remaining.len();
+            *offset += bytes_consumed;
+            if *offset + len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Cell '{}': need {} bytes, only {} available (type: {})",
+                    column.name,
+                    len,
+                    data.len() - *offset,
+                    column.data_type
+                )));
+            }
+            let bytes = data[*offset..*offset + len].to_vec();
+            *offset += len;
+            Ok(bytes)
+        };
+
         let value = match kind {
             CellKind::Blob => decode_vint_blob(&mut offset)?,
+            // CQL `varint`: VInt-length-prefixed raw two's-complement big-endian
+            // bytes → `Value::Varint`. Byte-for-byte the same on-disk framing as the
+            // `blob` arm, but preserves the declared `varint` type instead of blobbing
+            // it. Mirrors the block / `ComparatorType::Varint` path
+            // (`Value::Varint(value_data.to_vec())`) — issue #1885.
+            CellKind::Varint => Value::Varint(read_vint_prefixed_bytes(&mut offset)?),
             CellKind::Boolean => {
                 // Boolean: [0x08][u8 value]
                 if offset >= data.len() {
@@ -926,7 +969,7 @@ impl V5CompressedLegacyParser {
             }
 
             // Complex types: frozen, tuple, non-frozen collection, marshal-UDT, and
-            // any unnamed/default type (e.g. `varint`). J1 (issue #1635): the DISPATCH
+            // any unnamed/default type. J1 (issue #1635): the DISPATCH
             // is per-column via this single `CellKind::Complex` arm; the retained
             // prefix ladder (Epic J2 collapses it) uses the tag's already-lowercased
             // declared type as `type_str` — exactly the pre-J1 `normalized_type`, so
@@ -1237,7 +1280,7 @@ impl V5CompressedLegacyParser {
                 // - Parse fields according to UDT schema
                 // - Return Value::Udt(UdtValue)
 
-                // Default: treat as VInt-length-prefixed blob (unknown/`varint`).
+                // Default: treat as VInt-length-prefixed blob (unknown type).
                 // Shares the `decode_vint_blob` closure with the literal-`blob`
                 // `CellKind::Blob` arm — identical decode pre-J1 (both hit `_ =>`).
                 else {

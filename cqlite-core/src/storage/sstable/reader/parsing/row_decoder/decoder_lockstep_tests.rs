@@ -44,10 +44,6 @@
 //!   representation); v5 ladder → [`Value::Float`] (widened `f32 as f64`). Owning
 //!   issue: **J2** (collapse the `ComparatorType` decoders — must unify the
 //!   representation). Recorded as an explicit divergence assertion below.
-//! * **`varint`**: block path → [`Value::Varint`]; v5 ladder has no `varint` arm
-//!   and falls through to its VInt-length-prefixed **blob** default →
-//!   [`Value::Blob`]. Mirror image of I4 (which fixed the block side); the v5
-//!   side gap is owned by **J2**.
 //! * **non-frozen `list`/`set`/`map`**: the v5 *single-cell* ladder STUBS these
 //!   to an empty collection — production routes non-frozen collections through
 //!   the multi-cell complex-column path instead. Owning issue: **#162 / J1**.
@@ -298,21 +294,15 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
             arbitrary_len: false,
             divergence: None,
         },
-        // KNOWN DIVERGENCE (J2): block -> Varint, v5 ladder blobs it (no arm).
+        // CONVERGED (issue #1885): the v5 ladder now has a `varint` arm decoding to
+        // Value::Varint with byte-identical framing to the block path.
         ScalarCase {
             cql_type: "varint",
             value: Value::Varint(vec![0x01, 0x00]),
             value_bytes: vec![0x01, 0x00],
             framing: V5Framing::VintLen,
             arbitrary_len: true,
-            divergence: Some(Divergence {
-                owner: "J2 (#1603) — collapse the ComparatorType decoders",
-                note: "CQL varint: block path decodes Value::Varint; v5 ladder has no \
-                       varint arm and falls through to its blob default (Value::Blob). \
-                       Mirror of I4 (block side fixed by #1627); v5 gap owned by J2.",
-                block: Value::Varint(vec![0x01, 0x00]),
-                v5: Value::Blob(vec![0x01, 0x00]),
-            }),
+            divergence: None,
         },
         ScalarCase {
             cql_type: "decimal",
@@ -896,6 +886,101 @@ mod write_read {
             }
         }
     }
+}
+
+// ===========================================================================
+// Issue #1885 — v5 ladder `varint` arm (mirror of the block path)
+// ===========================================================================
+
+/// The v5 ladder now decodes `varint` to `Value::Varint` (not `Value::Blob`),
+/// byte-for-byte with the block / `ComparatorType::Varint` path, across the edge
+/// cases the block path handles: negative, zero, and a value larger than i64
+/// (varint is arbitrary-precision). The stored bytes are raw two's-complement
+/// big-endian — `num_bigint::BigInt::from_signed_bytes_be` recovers the integer.
+#[tokio::test]
+async fn v5_varint_arm_decodes_edge_cases() {
+    use num_bigint::BigInt;
+
+    let Some(reader) = open_reader().await else {
+        return;
+    };
+    let parser = v5_parser();
+
+    // (label, canonical BigInt) — encoded to signed BE bytes, framed for both paths.
+    let cases: Vec<(&str, BigInt)> = vec![
+        ("zero", BigInt::from(0)),
+        ("small_positive", BigInt::from(42)),
+        ("negative", BigInt::from(-12_345_678_i64)),
+        ("minus_one", BigInt::from(-1)),
+        // Larger than i64::MAX — arbitrary-precision.
+        (
+            "greater_than_i64",
+            BigInt::from(i64::MAX) * BigInt::from(1_000_000) + BigInt::from(7),
+        ),
+        // More negative than i64::MIN.
+        (
+            "less_than_i64_min",
+            BigInt::from(i64::MIN) * BigInt::from(1_000_000) - BigInt::from(7),
+        ),
+    ];
+
+    for (label, n) in cases {
+        // Cassandra `varint` on-disk bytes = Java BigInteger.toByteArray() = signed
+        // two's-complement big-endian (never empty for a real value; zero → [0x00]).
+        let value_bytes = n.to_signed_bytes_be();
+
+        // Block path: exact-slice raw bytes.
+        let block = decode_block(&reader, "varint", &value_bytes)
+            .unwrap_or_else(|e| panic!("block varint {label} failed: {e:?}"));
+        // v5 path: VInt-length-prefixed framing.
+        let cell = frame_v5_cell(V5Framing::VintLen, &value_bytes);
+        let v5 = decode_v5(&parser, &reader, "varint", &cell)
+            .unwrap_or_else(|e| panic!("v5 varint {label} failed: {e:?}"));
+
+        // Both paths must produce Value::Varint with the SAME raw bytes.
+        assert_eq!(
+            v5,
+            Value::Varint(value_bytes.clone()),
+            "v5 varint {label} must decode to Value::Varint (not Blob)"
+        );
+        assert_eq!(
+            block, v5,
+            "LOCKSTEP: block vs v5 disagree on varint {label}"
+        );
+
+        // And the bytes must round-trip back to the canonical integer.
+        if let Value::Varint(bytes) = &v5 {
+            assert_eq!(
+                BigInt::from_signed_bytes_be(bytes),
+                n,
+                "varint {label} bytes must round-trip to the canonical BigInt"
+            );
+        } else {
+            panic!("varint {label}: expected Value::Varint, got {v5:?}");
+        }
+    }
+}
+
+/// An empty `varint` cell decodes to `Value::Varint([])` on the v5 path, matching
+/// the block path's empty-slice handling (issue #1885).
+#[tokio::test]
+async fn v5_varint_empty_matches_block() {
+    let Some(reader) = open_reader().await else {
+        return;
+    };
+    let parser = v5_parser();
+
+    let block = decode_block(&reader, "varint", &[])
+        .unwrap_or_else(|e| panic!("block empty varint failed: {e:?}"));
+    let cell = frame_v5_cell(V5Framing::VintLen, &[]);
+    let v5 = decode_v5(&parser, &reader, "varint", &cell)
+        .unwrap_or_else(|e| panic!("v5 empty varint failed: {e:?}"));
+    assert_eq!(
+        v5,
+        Value::Varint(Vec::new()),
+        "empty v5 varint → Varint([])"
+    );
+    assert_eq!(block, v5, "empty varint block vs v5 must agree");
 }
 
 // ===========================================================================
