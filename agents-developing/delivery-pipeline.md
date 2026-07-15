@@ -81,6 +81,25 @@ rejected with `mergeStateStatus: BLOCKED`), so **there is no bypass**. A red tha
 `gh run rerun --failed` — never an admin override. This is load-bearing: if branch-protection settings
 ever regress (contexts emptied, `enforce_admins` disabled), this doctrine governs catching it.
 
+### Closer merge protocol (#2456)
+
+The `flow-closer` certifies a **specific SHA** — the tree the full gate of record and the final
+roborev pass actually ran on. Three mechanical rules keep the merge honest:
+
+- **Pre-merge SHA assertion (#2456, hard precondition).** Immediately before `gh pr merge`, the closer
+  does `git push`, then asserts `gh pr view <N> --json headRefOid` **equals the locally-certified
+  tip** — and **refuses to merge on mismatch**. Motivated by the 2026-07-14 stale-merge escape on
+  #2299/PR #2421: the closer certified a rebased-and-fixed tip locally but never pushed it, so
+  `gh pr merge` squashed the PR's *stale* pre-fix head and transiently landed a known data-loss
+  blocker on `main` (remediated by PR #2455). The GitHub required check re-runs on push but cannot
+  catch a "merge of an old green head" — the SHA assertion is the real guard.
+- **Unique gate-summary paths.** Each gate writes its `AGENT_GATE_SUMMARY_FILE` to a `mktemp`-unique
+  path (e.g. `$(mktemp /tmp/gate-<issue>-XXXXXX.txt)`) — shared `/tmp` names get contended under
+  multi-lane load, so one lane's summary can clobber or be misread as another's.
+- **Single full gate per machine.** The lead enforces one full gate at a time on a box; the closer
+  `pgrep`-checks for a running gate before launching its own so concurrent gates never corrupt a
+  shared `target/`.
+
 ## The specialist roster
 
 | Role | Agent / tool |

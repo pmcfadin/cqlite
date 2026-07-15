@@ -292,6 +292,14 @@ query finishes; a TTL backstop (`cqlite.snapshot-ttl`, default `6h`) ensures a
 coordinator crash can't leak it. Snapshot creation is **fail-closed** — if it
 fails, the query fails rather than silently falling back to a live read.
 
+To cut snapshot-create (and therefore memtable-flush) churn, the connector
+**reuses one snapshot per `(keyspace, table)`** across queries within a bounded
+staleness window (`cqlite.snapshot-reuse-window-ms`, default `3000`), retiring
+superseded windows after `cqlite.snapshot-retire-grace-ms` (default `10m`, must
+exceed your longest query). See
+[Snapshot reuse and the staleness bound](https://github.com/pmcfadin/cqlite/blob/main/trino-connector/README.md#snapshot-reuse-and-the-staleness-bound)
+in the connector README for the sizing rules (issue #2356/#2306).
+
 **Memtable visibility differs by mode (issue #2305).** `snapshot` mode is a per-query,
 point-in-time read that **includes durable memtable state**: Cassandra's snapshot creation
 flushes the memtable as a side effect by design, and the Sidecar's create-snapshot HTTP API has
