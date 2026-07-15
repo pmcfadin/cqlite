@@ -147,6 +147,13 @@ pub(super) fn read_compressed_offset_window_impl(
             super::model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
             out
         } else {
+            // No compression reader (should not happen: this path is only reached
+            // for a compressed Data.db, which always carries one). Mirror
+            // `stitch_all_chunks`' warn! (issue #2167) so an unexpected reach —
+            // returning still-compressed bytes as if plaintext — is visible in logs.
+            tracing::warn!(
+                "read_compressed_offset_window: No compression reader, using raw chunk data"
+            );
             compressed
         };
         assembled.extend_from_slice(&decompressed);
