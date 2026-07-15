@@ -8,12 +8,16 @@ it holds the **rules and pointers**; recipes and examples live in `docs/developm
 CQLite is a Rust library for local Apache Cassandra SSTable access — it reads (and writes)
 Cassandra 5.0 data files without cluster dependencies.
 
-**Status**: v0.13.0 (Jul 2026) — the performance release. M1–M5 complete (core reading, CLI,
-output writers, Python + Node.js bindings, write support + STCS compaction). v0.12 delivered
-byte-for-byte compaction parity vs Apache Cassandra, Arrow Flight + Trino connector, canonical BTI
-(`da`) write/read, CDC-style delta-export. v0.13 adds read-path speedups, byte-bounded result
-budgets, `Database::refresh()`, and no-heuristics correctness fixes. Next: M6 (WASM bindings),
-M7 (perf validation + v1.0).
+**Status**: v0.14.x (Jul 2026). M1–M5 complete (core reading, CLI, output writers, Python +
+Node.js bindings, write support + STCS compaction); v0.12 delivered byte-for-byte compaction parity
+vs Apache Cassandra, Arrow Flight + Trino connector, canonical BTI (`da`) write/read, CDC-style
+delta-export; v0.13 added read-path speedups, byte-bounded result budgets, and no-heuristics fixes.
+**0.15 is in progress** — the cqlite-trino latency/throughput/operations theme (epic #2403). Headline
+shipped since 0.14: lazy Summary-guided BIG index (O(summary) open, bounded point intervals,
+summary-guided scans — #2412), Flight admission control (`--max-concurrent-scans`, #2420),
+connector snapshot reuse per (keyspace,table) (#2356, connector 0.14.3), row-granular streaming for
+point-read/warm/full-scan merges (#2423/#2230), and a GitHub-enforced merge gate (#2433). Next: M6
+(WASM bindings), M7 (perf validation + v1.0).
 
 ## Documentation
 
