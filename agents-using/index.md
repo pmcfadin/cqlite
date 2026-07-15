@@ -27,6 +27,7 @@ Terse, copy-pasteable, machine-verifiable recipes for agents that integrate with
 | [Handle missing-schema errors](/cqlite/agents-using/missing-schema/) | Diagnose and fix schema-not-found failures | CLI |
 | [Write a mutation and flush](/cqlite/agents-using/write-mutation/) | Insert a row and flush the memtable to SSTable | CLI |
 | [Export SSTable for Cassandra import](/cqlite/agents-using/export-sstable/) | Re-export SSTables in Cassandra-compatible format | CLI |
+| [Flight metrics reference](/cqlite/agents-using/flight-metrics-reference/) | Look up any `cqlite.*` metric's type, unit, attributes, and healthy-vs-alarming reading | Flight/Trino |
 
 ## Setup
 
