@@ -264,6 +264,8 @@ mod tests {
         assert_eq!(stats.key_cache_hits, 0);
         assert_eq!(stats.key_cache_misses, 0);
         assert_eq!(stats.key_cache_evictions, 0);
+        // Issue #2059: the invalidations counter is distinct from evictions.
+        assert_eq!(stats.key_cache_invalidations, 0);
         assert_eq!(stats.key_cache_resident_bytes, 0);
         assert_eq!(stats.key_cache_capacity_bytes, 0);
         assert_eq!(stats.key_cache_hit_rate(), 0.0);
