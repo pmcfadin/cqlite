@@ -203,6 +203,15 @@ required-features = ["arrow"]
 name = "issue_2302_written_index_resolve"
 required-features = ["work-counters", "write-support"]
 
+# BIG clustering-slice seek positional-read migration (issue #1869). It is
+# `#![cfg(all(feature = "work-counters", feature = "write-support", ...))]` — the
+# `read_work_counters::file_opens` probe AND the write engine that builds the wide
+# fixture — so it only compiles+runs when both features are on. Its automated
+# executor is the `work-counters-guard` gate component (scripts/agent-gate.sh).
+[[test]]
+name = "issue_1869_big_clustering_slice_readat"
+required-features = ["work-counters", "write-support"]
+
 # Statistics.db single-TOC-walk oracle (issue #2148). `#![cfg(feature =
 # "cli-helpers")]` — the `toc_walk_metrics` counter getters/`reset` +
 # `record_toc_walk` live behind `cli-helpers` — so it only compiles+runs with that

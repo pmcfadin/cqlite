@@ -27,7 +27,6 @@
 
 #![cfg(not(feature = "tombstones"))]
 
-use super::super::source::ScanCursor;
 use super::super::SSTableReader;
 use super::model::{ClusteringRowWindow, ClusteringSlice};
 use crate::parser::types::{parse_cql_value, CqlTypeId};
@@ -36,8 +35,6 @@ use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
 use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
-use std::io::SeekFrom;
-use tokio::io::AsyncSeekExt;
 use tracing::debug;
 
 /// `ClusteringPrefix.Kind.CLUSTERING` ordinal (a full row clustering name). Block
@@ -484,44 +481,98 @@ impl SSTableReader {
     ///
     /// This mirrors the window-building half of the BTI seek but is kept local so
     /// the over-threshold `bti.rs` is not grown.
+    ///
+    /// I/O path (issue #1573 C2, #1869): chunks are fetched with positioned
+    /// (`read_at`) reads on the shared `point_source` — no per-query `new_scan_cursor`
+    /// / `open(2)`, no cursor, and no cross-I/O mutex — exactly like the BTI seek
+    /// (`bti_decompress_and_parse_target_all`) and the compressed offset-read window
+    /// (`read_compressed_offset_window`). CRC-before-decompress (guardrail #1411) is
+    /// preserved: `read_compressed_chunk_at` verifies each compressed chunk's inline
+    /// CRC32 before it is decompressed, and the uncompressed arm verifies the covering
+    /// `CRC.db` chunk(s) before returning bytes.
     async fn decompress_partition_window(
         &self,
         offset: usize,
         end_bound: Option<usize>,
     ) -> Result<Option<(Vec<u8>, usize)>> {
-        let cursor = self.new_scan_cursor().await?;
+        use super::super::block_io;
+        use crate::storage::sstable::compression::Compression;
+
         let chunk_length = self
             .compression_info
             .as_ref()
             .map(|ci| ci.chunk_length as usize)
             .filter(|&len| len > 0);
 
-        let (window_base, mut window) = match chunk_length {
+        match chunk_length {
             Some(len) => {
                 let target_chunk = offset / len;
                 let window_base = target_chunk * len;
-                let chunk_start = self
-                    .compression_info
-                    .as_ref()
-                    .and_then(|ci| ci.compressed_chunk_offset(target_chunk))
-                    .ok_or_else(|| {
-                        Error::corruption(format!(
-                            "BIG reverse seek: no compressed offset for target chunk {target_chunk} \
-                             (offset {offset}, chunk_length {len})"
-                        ))
-                    })?;
-                {
-                    let mut file_guard = cursor.file.lock().await;
-                    // A5 read-work counter (SEEK_CALLS; consumer E4): the BIG
-                    // promoted-index reverse-block target-chunk seek on the point-read
-                    // path. No-op in release (design.md Decision 1/2).
-                    crate::storage::sstable::read_work_counters::record_seek();
-                    file_guard.seek(SeekFrom::Start(chunk_start)).await?;
+                if offset < window_base {
+                    return Err(Error::corruption(format!(
+                        "BIG clustering/reverse seek: resolved offset {offset} precedes window \
+                         base {window_base}"
+                    )));
                 }
-                cursor
-                    .chunk_index
-                    .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
-                (window_base, Vec::<u8>::new())
+                let within = offset - window_base;
+
+                // Authoritative exclusive end (successor offset / data length).
+                let end_offset = match end_bound {
+                    Some(end) => end,
+                    None => match self
+                        .compression_info
+                        .as_ref()
+                        .map(|ci| ci.data_length as usize)
+                        .filter(|&l| l > offset)
+                    {
+                        Some(l) => l,
+                        None => return Ok(None),
+                    },
+                };
+
+                let comp_info = self.compression_info.as_deref().ok_or_else(|| {
+                    Error::corruption(
+                        "BIG clustering/reverse seek: chunk-targeted path requires CompressionInfo \
+                         but it is absent",
+                    )
+                })?;
+                let compression = self
+                    .compression_reader
+                    .as_ref()
+                    .map(|cr| Compression::new(*cr.algorithm()))
+                    .transpose()?;
+
+                // Buffer EXACTLY the chunks covering `[offset, end_offset)` — never
+                // stitch to EOF (the #953/#1184 bound: a head-of-file seek must not
+                // decompress the whole file). Positioned reads resolve their own
+                // offset from the chunk index, so no pre-seek is needed.
+                let needed = end_offset.saturating_sub(window_base);
+                let mut window = Vec::<u8>::new();
+                let mut chunk_index = target_chunk;
+                while window.len() < needed {
+                    match block_io::read_compressed_chunk_at(
+                        self.point_source.as_ref(),
+                        comp_info,
+                        chunk_index,
+                        self.stats.file_size,
+                        0, // NB: chunk offsets are absolute from Data.db byte 0
+                    )? {
+                        Some(compressed) => {
+                            chunk_index += 1;
+                            // Decompress-only (uncached), preserving this path's
+                            // historical behavior + the separate work_counters counter.
+                            let decompressed =
+                                super::super::chunk_source::ChunkSource::decompress_only(
+                                    compression.as_ref(),
+                                    compressed,
+                                )?;
+                            crate::storage::sstable::work_counters::add_chunk_decompressed();
+                            window.extend_from_slice(&decompressed);
+                        }
+                        None => break, // EOF
+                    }
+                }
+                Ok(Some((window, within)))
             }
             None => {
                 // Uncompressed Data.db: the data section is RAW bytes after the
@@ -531,21 +582,16 @@ impl SSTableReader {
                 // O(partition) — exactly the bound the compressed arm already holds —
                 // so the per-iteration "O(block), not O(partition)" claim is honest
                 // for uncompressed SSTables too. `offset`/`end_bound` are relative to
-                // the data section (after the header), matching the prior within=offset
-                // contract; we keep window_base = offset so within = 0.
+                // the data section (after the header); we keep window_base = offset so
+                // within = 0.
                 let header_size = self.calculate_header_size() as u64;
                 let phys_start = header_size.saturating_add(offset as u64);
                 let phys_end = match end_bound {
                     Some(end) => header_size.saturating_add(end as u64),
                     // Last partition: extends to the end of the Data.db data section.
-                    None => {
-                        let mut file_guard = cursor.file.lock().await;
-                        // A5 read-work counter (SEEK_CALLS; consumer E4): last-partition
-                        // seek-to-end bounding the uncompressed reverse-block window.
-                        // No-op in release (design.md Decision 1/2).
-                        crate::storage::sstable::read_work_counters::record_seek();
-                        file_guard.seek(SeekFrom::End(0)).await?
-                    }
+                    // The authoritative file length comes from the positional source
+                    // (== the reader's `file_size`), so no seek-to-end is needed.
+                    None => self.point_source.len(),
                 };
                 if phys_end <= phys_start {
                     return Ok(None);
@@ -553,73 +599,11 @@ impl SSTableReader {
                 let span = (phys_end - phys_start) as usize;
                 // Issue #1396: the promoted-index / reverse-lookup path reads
                 // uncompressed Data.db bytes directly; route it through the single
-                // CRC-checked accessor so a corrupt chunk yields a typed
+                // CRC-checked positional accessor so a corrupt chunk yields a typed
                 // Error::Corruption instead of parsed corrupt bytes / Ok(None).
-                let buf = self
-                    .read_uncompressed_verified(&cursor.file, phys_start, span)
-                    .await?;
-                (offset, buf)
+                let buf = self.read_uncompressed_verified_at(phys_start, span).await?;
+                Ok(Some((buf, 0)))
             }
-        };
-
-        if offset < window_base {
-            return Err(Error::corruption(format!(
-                "BIG reverse seek: resolved offset {offset} precedes window base {window_base}"
-            )));
-        }
-        let within = offset - window_base;
-
-        if chunk_length.is_some() {
-            // Authoritative exclusive end (successor offset / data length).
-            let end_offset = match end_bound {
-                Some(end) => end,
-                None => match self
-                    .compression_info
-                    .as_ref()
-                    .map(|ci| ci.data_length as usize)
-                    .filter(|&len| len > offset)
-                {
-                    Some(len) => len,
-                    None => return Ok(None),
-                },
-            };
-            let needed = end_offset.saturating_sub(window_base);
-            while window.len() < needed {
-                if !self.pull_reverse_chunk(&cursor, &mut window).await? {
-                    break; // EOF
-                }
-            }
-        }
-        Ok(Some((window, within)))
-    }
-
-    /// Read+decompress the next chunk into `window`, returning `false` at EOF.
-    /// Bumps `chunks_decompressed` so the reverse path's decompression stays
-    /// observably bounded to the target partition's chunk span.
-    ///
-    /// Single decode plane (issue #1598, G2): routes through ChunkSource::decompress_only
-    /// to consolidate the decompress call site, but preserves the current UNCACHED behavior
-    /// (no B1 cache insertion, separate work_counters counter).
-    async fn pull_reverse_chunk(&self, cursor: &ScanCursor, window: &mut Vec<u8>) -> Result<bool> {
-        use crate::storage::sstable::compression::Compression;
-        match self.read_next_block(cursor).await? {
-            Some(compressed_chunk) => {
-                // Build Compression once per call (same as before)
-                let compression_opt = self
-                    .compression_reader
-                    .as_ref()
-                    .map(|cr| Compression::new(*cr.algorithm()))
-                    .transpose()?;
-                // Decompress-only: no cache, keeps work_counters separate
-                let decompressed = super::super::chunk_source::ChunkSource::decompress_only(
-                    compression_opt.as_ref(),
-                    compressed_chunk,
-                )?;
-                crate::storage::sstable::work_counters::add_chunk_decompressed();
-                window.extend_from_slice(&decompressed);
-                Ok(true)
-            }
-            None => Ok(false),
         }
     }
 }
