@@ -320,9 +320,16 @@ impl SSTableReader {
                     let e = (hi - pos) as usize;
                     Ok(crc32fast::hash(&piece[s..e]))
                 } else {
+                    // A chunk straddling the piece boundary must be read off disk.
+                    // Route it through `read_exact_at_reusing` with the SAME per-scan
+                    // `direct_scratch` the main piece read uses (issue #2319), so the
+                    // Direct-I/O backend reuses the one aligned bounce buffer instead
+                    // of allocating a fresh one per straddling chunk. For mmap/plain
+                    // backends this defers to `read_exact_at` (scratch stays empty),
+                    // so those paths are unchanged.
                     let mut cbuf = vec![0u8; (hi - lo) as usize];
                     self.point_source
-                        .read_exact_at(lo, &mut cbuf)
+                        .read_exact_at_reusing(lo, &mut cbuf, direct_scratch)
                         .map_err(|e| {
                             Error::corruption(format!(
                                 "failed to read uncompressed chunk {chunk} at Data.db offset \

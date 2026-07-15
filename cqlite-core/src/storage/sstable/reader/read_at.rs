@@ -433,15 +433,27 @@ impl DirectReadAt {
             .checked_next_multiple_of(DIRECT_IO_ALIGN)
             .unwrap_or(usize::MAX & !(DIRECT_IO_ALIGN - 1));
         // Reuse the slot's buffer when it is already large enough; otherwise
-        // (re)allocate to `aligned_len` and keep it for subsequent reads. `pread`
-        // fills only the aligned span we ask for, so a larger reused buffer is
-        // fine — we read into its leading `aligned_len` bytes.
+        // (re)allocate and keep it for subsequent reads. `pread` fills only the
+        // aligned span we ask for, so a larger reused buffer is fine — we read into
+        // its leading `aligned_len` bytes.
+        //
+        // Grow GEOMETRICALLY (issue #2319 MEDIUM): a grow-to-exact `aligned_len`
+        // reallocated on EVERY chunk whose aligned span exceeded the previous one —
+        // for a windowed scan over progressively larger records that meant a realloc
+        // per chunk, defeating the reuse this issue restores. Doubling the previous
+        // capacity (bounded below by the required `aligned_len`) stabilizes the
+        // buffer after a few growths. Both operands are multiples of
+        // `DIRECT_IO_ALIGN` (`aligned_len` via `next_multiple_of`; a prior capacity
+        // was itself allocated as such a multiple), so `new_cap` stays a 4096
+        // multiple and the `O_DIRECT` alignment rule holds.
         let need_alloc = bounce
             .as_ref()
             .map(|b| b.capacity() < aligned_len)
             .unwrap_or(true);
         if need_alloc {
-            *bounce = Some(AlignedBuf::new(aligned_len, DIRECT_IO_ALIGN)?);
+            let old_cap = bounce.as_ref().map(AlignedBuf::capacity).unwrap_or(0);
+            let new_cap = aligned_len.max(old_cap.saturating_mul(2));
+            *bounce = Some(AlignedBuf::new(new_cap, DIRECT_IO_ALIGN)?);
         }
         // SAFETY of unwrap avoidance: `bounce` is `Some` here (just set, or already
         // large enough). Match to keep the no-`unwrap` rule in library code.
@@ -769,20 +781,41 @@ mod tests {
     /// buffer across chunk reads instead of allocating a fresh ~chunk-sized aligned
     /// buffer per read (the per-chunk-alloc regression #1940 introduced).
     ///
-    /// This asserts the ALLOCATION BEHAVIOUR of the code path — the pure user-space
-    /// alignment + bounce-buffer logic — so it needs NO working `O_DIRECT` syscall
+    /// This asserts the ALLOCATION BEHAVIOUR of the code path -- the pure user-space
+    /// alignment + bounce-buffer logic -- so it needs NO working `O_DIRECT` syscall
     /// (frequently unavailable on macOS/tmpfs/CI; probing it live is what stalled a
     /// prior implementer). `DirectReadAt::from_plain_fd_for_test` runs that exact
     /// path over a regular fd; the bounce buffer, alignment math, and reuse decision
     /// are identical whether or not the fd was opened with direct I/O.
     ///
-    /// Contrast proves the fix AND the pre-fix regression in one test:
+    /// The three scenarios live in ONE `#[test]` function on purpose: they share the
+    /// process-global [`ALIGNED_BUF_ALLOCS`] counter (serialized on `aligned_buf_allocs`)
+    /// and folding them here keeps the crate's test-function COUNT identical to before
+    /// #2319, so the in-process test parallelism -- and thus the timing of unrelated
+    /// process-global work-counter tests -- is unperturbed.
+    ///
+    /// Scenario 1 (equal-sized chunks -- reuse vs per-call contrast):
     /// - The OLD per-chunk path (`read_at`, still the point-read behaviour) allocates
-    ///   ONE aligned buffer PER read → `N` allocs for `N` reads (> 1). This is the
+    ///   ONE aligned buffer PER read -> `N` allocs for `N` reads (> 1). This is the
     ///   regression state the reuse path fixes; the assertion below fails on it.
     /// - The FIXED windowed path (`read_exact_at_reusing` with a shared
-    ///   [`DirectScratch`]) allocates the buffer ONCE and reuses it → exactly 1 alloc
+    ///   [`DirectScratch`]) allocates the buffer ONCE and reuses it -> exactly 1 alloc
     ///   across all `N` reads, in steady state.
+    ///
+    /// Scenario 2 (increasing sizes -- geometric growth, issue #2319 MEDIUM): with the
+    /// reused scratch fed reads of STRICTLY INCREASING aligned span, the buffer grows
+    /// GEOMETRICALLY -- a small constant number of reallocations, NOT one per read. The
+    /// pre-fix grow-to-exact code reallocated on every size increase, preserving the
+    /// very per-chunk-alloc regression #2319 removes; scenario 1 cannot catch it
+    /// because its span never grows.
+    ///
+    /// Scenario 3 (Arc-dyn forward -- wiring evidence): production reaches the reuse
+    /// path through an `Arc<dyn ReadAt>` (`point_source`), whose blanket-impl forward
+    /// ([`ReadAt for Arc<T>`]) must delegate `read_exact_at_reusing` to the concrete
+    /// `DirectReadAt` override. If that forward hop were dropped the `Arc` would fall
+    /// back to the per-chunk-alloc default and production would regress while a
+    /// concrete-typed assertion stayed green -- so this exercises reuse THROUGH the dyn
+    /// `Arc` and asserts a single allocation.
     ///
     /// Serialized on the process-global [`ALIGNED_BUF_ALLOCS`] counter.
     #[cfg(unix)]
@@ -791,18 +824,23 @@ mod tests {
     fn direct_windowed_read_reuses_one_bounce_buffer_across_chunks() {
         use std::sync::atomic::Ordering;
 
+        // Deterministic pseudo-random content (LCG) so mismatches are meaningful.
+        fn fill(data: &mut [u8], mut x: u32) {
+            for b in data.iter_mut() {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *b = (x >> 24) as u8;
+            }
+        }
+
+        // ---- Scenario 1: equal-sized chunks, reuse vs per-call contrast ----
         // 8 aligned, equal-sized "chunks" so every read's aligned span is identical
-        // (`head == 0`, span == chunk) → the reused buffer never needs to grow, so a
+        // (`head == 0`, span == chunk) -> the reused buffer never needs to grow, so a
         // reused buffer means EXACTLY one allocation across all reads.
         let chunk = DIRECT_IO_ALIGN; // 4096
         let n_chunks = 8usize;
         let len = chunk * n_chunks;
         let mut data = vec![0u8; len];
-        let mut x = 0x9e37_79b9u32;
-        for b in data.iter_mut() {
-            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            *b = (x >> 24) as u8;
-        }
+        fill(&mut data, 0x9e37_79b9);
         let path = temp_file(&data, "reuse");
         let file = std::fs::File::open(&path).unwrap();
         let direct = DirectReadAt::from_plain_fd_for_test(file, len as u64);
@@ -831,18 +869,18 @@ mod tests {
 
         // OLD per-chunk path: `read_at` allocates a fresh bounce buffer per call.
         // This is the regression the reuse path removes; it allocates once per read,
-        // so `> 1` for `N > 1` — the exact behaviour the assertion above rejects.
+        // so `> 1` for `N > 1` -- the exact behaviour the assertion above rejects.
         ALIGNED_BUF_ALLOCS.store(0, Ordering::Relaxed);
         for i in 0..n_chunks {
             let off = (i * chunk) as u64;
             let mut got = vec![0u8; chunk];
-            direct.read_exact_at(off, &mut got).unwrap();
+            direct.read_at(off, &mut got).unwrap();
         }
         let percall_allocs = ALIGNED_BUF_ALLOCS.load(Ordering::Relaxed);
         assert_eq!(
             percall_allocs, n_chunks,
             "#2319 (regression witness): the per-call point-read path allocates one aligned \
-             buffer PER read ({n_chunks} reads → {n_chunks} allocs); the windowed scan must \
+             buffer PER read ({n_chunks} reads -> {n_chunks} allocs); the windowed scan must \
              NOT use it (got {percall_allocs})"
         );
         assert!(
@@ -850,7 +888,85 @@ mod tests {
             "#2319: reuse ({reuse_allocs}) must allocate strictly fewer buffers than the \
              per-chunk path ({percall_allocs})"
         );
-
         std::fs::remove_file(&path).ok();
+
+        // ---- Scenario 2: increasing sizes must grow GEOMETRICALLY (#2319 MEDIUM) ----
+        // `M` reads at offset 0 of length `(i+1)*4096` need caps 4096, 8192, ... 32768.
+        // - grow-to-exact: every cap strictly exceeds the last -> `M` allocs (== reads).
+        // - geometric (max(need, old*2)): 4096->8192->16384->32768 -> ~log2(M) allocs,
+        //   well under `M`. The bound below fails on the old code and passes on the fix.
+        let n_reads = 8usize;
+        let grow_len = chunk * n_reads; // largest read spans the whole file
+        let mut grow_data = vec![0u8; grow_len];
+        fill(&mut grow_data, 0x1357_9bdf);
+        let grow_path = temp_file(&grow_data, "reuse_grow");
+        let grow_file = std::fs::File::open(&grow_path).unwrap();
+        let grow_direct = DirectReadAt::from_plain_fd_for_test(grow_file, grow_len as u64);
+
+        ALIGNED_BUF_ALLOCS.store(0, Ordering::Relaxed);
+        let mut grow_scratch = DirectScratch::new();
+        for i in 0..n_reads {
+            let want_len = (i + 1) * chunk; // strictly increasing aligned span
+            let mut got = vec![0u8; want_len];
+            grow_direct
+                .read_exact_at_reusing(0, &mut got, &mut grow_scratch)
+                .unwrap();
+            assert_eq!(
+                got,
+                &grow_data[..want_len],
+                "increasing-size reused-buffer read returned wrong bytes at read {i}"
+            );
+        }
+        let grow_allocs = ALIGNED_BUF_ALLOCS.load(Ordering::Relaxed);
+        // A few geometric growths, NOT one per read. Bound comfortably above the
+        // ~log2(M)=4 growths yet strictly below `n_reads` so grow-to-exact (which
+        // reallocates every read -> n_reads allocs) fails here.
+        assert!(
+            grow_allocs <= 5,
+            "#2319: geometric growth must bound reallocations to a small constant across \
+             {n_reads} increasing-size reads (got {grow_allocs} allocs)"
+        );
+        assert!(
+            grow_allocs < n_reads,
+            "#2319: growth must allocate strictly fewer times than {n_reads} reads -- \
+             grow-to-exact reallocated on every size increase (got {grow_allocs})"
+        );
+        std::fs::remove_file(&grow_path).ok();
+
+        // ---- Scenario 3: reuse must survive the Arc<dyn ReadAt> forward hop ----
+        let arc_chunks = 6usize;
+        let arc_len = chunk * arc_chunks;
+        let mut arc_data = vec![0u8; arc_len];
+        fill(&mut arc_data, 0x2468_ace0);
+        let arc_path = temp_file(&arc_data, "reuse_arc");
+        let arc_file = std::fs::File::open(&arc_path).unwrap();
+        // Erase to the exact production type: an `Arc<dyn ReadAt>` (point_source).
+        let src: Arc<dyn ReadAt> = Arc::new(DirectReadAt::from_plain_fd_for_test(
+            arc_file,
+            arc_len as u64,
+        ));
+
+        ALIGNED_BUF_ALLOCS.store(0, Ordering::Relaxed);
+        let mut arc_scratch = DirectScratch::new();
+        for i in 0..arc_chunks {
+            let off = (i * chunk) as u64;
+            let mut got = vec![0u8; chunk];
+            // Goes Arc<dyn ReadAt> -> forward -> DirectReadAt::read_exact_at_reusing.
+            src.read_exact_at_reusing(off, &mut got, &mut arc_scratch)
+                .unwrap();
+            assert_eq!(
+                got,
+                &arc_data[i * chunk..(i + 1) * chunk],
+                "Arc-dyn reused-buffer read returned wrong bytes for chunk {i}"
+            );
+        }
+        let arc_allocs = ALIGNED_BUF_ALLOCS.load(Ordering::Relaxed);
+        assert_eq!(
+            arc_allocs, 1,
+            "#2319: the Arc<dyn ReadAt> forward must reach DirectReadAt's reuse override -- \
+             exactly ONE aligned buffer across {arc_chunks} equal-sized chunk reads (got \
+             {arc_allocs}); a dropped forward would fall back to the per-chunk-alloc default"
+        );
+        std::fs::remove_file(&arc_path).ok();
     }
 }
