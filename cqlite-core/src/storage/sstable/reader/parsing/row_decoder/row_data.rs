@@ -186,9 +186,9 @@ impl V5CompressedLegacyParser {
         // DROP every legit >1 MB single-cell `text`/`blob` row → `Ok(0 rows)` for a
         // genuinely-written partition (#2436); a row body has no 1 MB limit. `data`
         // is the fully-materialised parse unit, so a row body cannot claim more bytes
-        // than remain after its `row_size` VInt. The remaining-COUNT compare (not
-        // `offset + row_size`, which can wrap `usize` on a corrupt VInt) is
-        // overflow-safe; a chunk-straddling row Errs exactly as before (→ `NeedMore`).
+        // than remain after its `row_size` VInt (overflow-safe vs `offset + row_size`).
+        // RETURNS `Err` on genuine truncation at the parser's OWN return value; the
+        // driver may still swallow that `Err` into a `None` on the final chunk (#2481).
         let row_body_start = row_metadata_offset + row_header.row_size_vint_len;
         let available = data.len().saturating_sub(row_body_start) as u64;
         if row_size > available {
