@@ -149,6 +149,17 @@
 #                      (issue #2426). SKIP-aware (loud, never silent PASS): SKIPs
 #                      when cqlite-core is absent (a minimal checkout). No
 #                      Docker/datasets — reads the catalog + committed doc only.
+#   kit-dashboard-drift
+#                      cqlite-core kit_dashboard_metric_drift test: FAILs (naming
+#                      the phantom name) when the kit Grafana dashboard
+#                      (easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json)
+#                      references a cqlite.* metric name absent from
+#                      catalog::ALL_METRICS, or when the dashboard JSON is
+#                      malformed. Catches the "renamed/removed a cqlite.* instrument,
+#                      the kit dashboard now points at a phantom metric" case at the
+#                      local gate (issue #2427). SKIP-aware (loud, never silent
+#                      PASS): SKIPs when cqlite-core or the dashboard is absent. No
+#                      Docker/datasets — reads the catalog + dashboard JSON only.
 #   binding-unwind-profile
 #                      fail-closed guard (#1440): the shipped Python wheel and
 #                      Node prebuild build definitions must select
@@ -1055,7 +1066,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report operator-metrics-doc binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -1897,6 +1908,49 @@ run_operator_metrics_doc() {
       echo "--- [$name] FAILED: could not render $doc — a catalogued metric is missing its operator annotation."
       echo "    Add the annotation in cqlite-core/src/observability/operator_docs_annotations.rs, then regenerate."
     fi
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# kit-dashboard-drift: verify the kit Grafana dashboard
+# (easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json) references only
+# `cqlite.*` metric names that exist in the observability catalog (issue #2427).
+# Runs the cqlite-core `kit_dashboard_metric_drift` test: it parses the dashboard
+# JSON, extracts every dotted `cqlite.*` token from panel targets/exprs/titles,
+# and asserts each is an exact catalog metric name, a bounded attribute key, or a
+# real metric's namespace prefix — FAILing (naming the phantom name) on a
+# renamed/removed/typo'd metric. Mirrors the #2426 operator-metrics-doc anti-drift
+# component (a committed artifact cross-checked against catalog::ALL_METRICS).
+# SKIP-aware (loud, never silent PASS): SKIPs when cqlite-core or the dashboard is
+# absent (a minimal checkout). No Docker, no datasets — reads the catalog + JSON.
+run_kit_dashboard_drift() {
+  local name=kit-dashboard-drift
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local dashboard="easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -d "$REPO_ROOT/cqlite-core" ] || [ ! -f "$REPO_ROOT/$dashboard" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cqlite-core or kit dashboard unavailable)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] cargo test -p cqlite-core --test kit_dashboard_metric_drift ($dashboard)"
+  if cargo test -q -p cqlite-core --test kit_dashboard_metric_drift >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    echo "--- [$name] FAILED: the kit dashboard references a cqlite.* metric name ABSENT from"
+    echo "    catalog::ALL_METRICS (renamed/removed/typo'd), or the dashboard JSON is malformed."
+    echo "    Fix the dashboard $dashboard or reconcile the name with the catalog."
     echo "--- last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
@@ -3477,6 +3531,7 @@ dispatch_component() {
     delivery-telemetry) run_delivery_telemetry ;;
     parity-report) run_parity_report ;;
     operator-metrics-doc) run_operator_metrics_doc ;;
+    kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build) run_component minimal-build bash -c '
