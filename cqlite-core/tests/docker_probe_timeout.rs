@@ -69,6 +69,49 @@ fn bounded_probe_reports_failure_exit() {
     );
 }
 
+/// Regression guard for the concurrent-drain fix: a command that writes far
+/// more than one OS pipe buffer (~64 KB) to stdout AND stderr but exits
+/// promptly must be reported as `Completed` with its output fully captured —
+/// NOT `TimedOut`. Under the old drain-after-wait approach the child would
+/// block on its own `write()` once the pipe buffer filled, never exit, and get
+/// killed at the deadline (a false `TimedOut` against a healthy command).
+#[cfg(unix)]
+#[test]
+fn bounded_probe_captures_output_larger_than_pipe_buffer() {
+    // ~200 KB per stream — comfortably past the ~64 KB Linux pipe buffer, so a
+    // non-concurrent drain would deadlock. `yes X | head -c N` is portable
+    // across POSIX shells and needs no external data files.
+    const N: usize = 200_000;
+    let script = format!("yes X | head -c {N} ; yes E | head -c {N} 1>&2");
+
+    let budget = Duration::from_secs(10);
+    let start = Instant::now();
+    let outcome = bounded_probe("sh", &["-c", &script], budget);
+    let elapsed = start.elapsed();
+
+    match outcome {
+        ProbeOutcome::Completed { success, stdout } => {
+            assert!(success, "the command should exit 0");
+            assert_eq!(
+                stdout.len(),
+                N,
+                "all {N} stdout bytes must be captured, got {}",
+                stdout.len()
+            );
+        }
+        other => panic!(
+            "large-output command must be Completed (not TimedOut) — got {other:?} \
+             after {elapsed:?}"
+        ),
+    }
+    // The command exits as fast as it can write; it must finish well within the
+    // generous budget rather than being killed at the deadline.
+    assert!(
+        elapsed < Duration::from_secs(9),
+        "large-output command should complete promptly, took {elapsed:?}"
+    );
+}
+
 /// A missing binary yields `SpawnFailed`, never a hang or panic.
 #[test]
 fn bounded_probe_reports_spawn_failure() {

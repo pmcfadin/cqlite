@@ -30,6 +30,8 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use wait_timeout::ChildExt;
@@ -55,17 +57,75 @@ pub enum ProbeOutcome {
     SpawnFailed,
 }
 
+/// A concurrently-draining reader for one of the child's pipes.
+///
+/// The reader thread drains its pipe to end-of-file into a buffer and delivers
+/// it over a channel. Draining happens *concurrently* with the main thread's
+/// `wait_timeout` poll loop, mirroring what `Command::output()` does internally:
+/// a child that emits more than one OS pipe buffer (~64 KB) of output would
+/// otherwise block on its own `write()` — never exiting — and be misreported as
+/// `TimedOut`. `read_to_end` errors are treated as "no more output" (the partial
+/// buffer is kept), so the thread never panics.
+struct PipeReader {
+    handle: JoinHandle<()>,
+    rx: Receiver<Vec<u8>>,
+}
+
+impl PipeReader {
+    /// Spawn a reader draining `pipe` to EOF; `None` yields an already-satisfied
+    /// reader that produces empty output.
+    fn spawn<R: Read + Send + 'static>(pipe: Option<R>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            // The receiver may already be gone (abandoned reader); ignore.
+            let _ = tx.send(buf);
+        });
+        PipeReader { handle, rx }
+    }
+
+    /// Collect the drained output, waiting at most `grace` for the reader.
+    ///
+    /// When the child has exited normally its pipes close, so the reader
+    /// delivers immediately and we join the (finished) thread for cleanliness.
+    /// If `grace` elapses first — which happens when an orphaned *grandchild*
+    /// (e.g. a `sleep` the killed shell forked) still holds the pipe's write end
+    /// open — the reader is abandoned rather than joined, so the probe stays
+    /// bounded and never re-introduces the #1819 hang. A never-joined thread is
+    /// reclaimed when the test process exits. Output is returned lossily; a
+    /// panicked reader degrades to empty output rather than propagating.
+    fn collect(self, grace: Duration) -> Vec<u8> {
+        match self.rx.recv_timeout(grace) {
+            Ok(buf) => {
+                let _ = self.handle.join();
+                buf
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
 /// Run `bin args...` with a hard wall-clock `timeout`.
 ///
-/// Never blocks longer than `timeout` even if the child never exits: on timeout
-/// the child is killed and reaped and [`ProbeOutcome::TimedOut`] is returned.
+/// Never blocks longer than `timeout` (plus a small drain grace) even if the
+/// child never exits: on timeout the child is killed and reaped and
+/// [`ProbeOutcome::TimedOut`] is returned.
 ///
-/// `stdout` is drained only after the child has exited. The Docker probes this
-/// serves emit at most a few KB (well under the OS pipe buffer), so a
-/// write-side deadlock is not a concern here; callers with large output should
-/// stream instead.
+/// Both `stdout` and `stderr` are drained *concurrently* with the wait loop by
+/// dedicated reader threads, so a child that writes more than one OS pipe
+/// buffer (~64 KB) cannot deadlock on its own `write()` and be misreported as
+/// `TimedOut` (mirrors `Command::output()`'s internal concurrent draining).
 #[allow(dead_code)]
 pub fn bounded_probe(bin: &str, args: &[&str], timeout: Duration) -> ProbeOutcome {
+    // On timeout the killed child's pipes normally close and the readers finish
+    // at once; this bounded grace only bites when an orphaned grandchild keeps a
+    // write end open, in which case the reader is abandoned to keep the probe
+    // prompt.
+    const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
     let mut child = match Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -77,12 +137,17 @@ pub fn bounded_probe(bin: &str, args: &[&str], timeout: Duration) -> ProbeOutcom
         Err(_) => return ProbeOutcome::SpawnFailed,
     };
 
+    // Start draining both pipes immediately, before the wait loop, so the child
+    // never blocks on a full pipe buffer.
+    let stdout_reader = PipeReader::spawn(child.stdout.take());
+    let stderr_reader = PipeReader::spawn(child.stderr.take());
+
     match child.wait_timeout(timeout) {
         Ok(Some(status)) => {
-            let mut stdout = Vec::new();
-            if let Some(mut handle) = child.stdout.take() {
-                let _ = handle.read_to_end(&mut stdout);
-            }
+            // Child exited: pipes are (or will be) closed, so the readers
+            // deliver promptly. Collect the fully captured output.
+            let stdout = stdout_reader.collect(DRAIN_GRACE);
+            let _stderr = stderr_reader.collect(DRAIN_GRACE);
             ProbeOutcome::Completed {
                 success: status.success(),
                 stdout: String::from_utf8_lossy(&stdout).to_string(),
@@ -93,6 +158,8 @@ pub fn bounded_probe(bin: &str, args: &[&str], timeout: Duration) -> ProbeOutcom
         Ok(None) | Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
+            let _stdout = stdout_reader.collect(DRAIN_GRACE);
+            let _stderr = stderr_reader.collect(DRAIN_GRACE);
             ProbeOutcome::TimedOut
         }
     }
