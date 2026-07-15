@@ -5,6 +5,8 @@
 //! `finalize_group`) that the executor's `execute_aggregation` drives row by
 //! row.
 
+mod group_key_cmp;
+
 use super::super::select_ast::AggregateType;
 use super::super::select_optimizer::{AggregateComputation, AggregationPlan};
 use super::numeric_acc::NumericAcc;
@@ -14,9 +16,9 @@ use crate::{
     query::result::QueryRow,
     types::{RowKey, Value},
 };
+use group_key_cmp::{group_key_eq, hash_group_key};
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 // Test-only counter for GROUP-key exact (`==`) comparisons performed while
 // locating a row's group (issue #1587, E5). The hash index makes this
@@ -37,12 +39,13 @@ pub(super) struct AggregationState {
     pub(super) groups: Vec<(Vec<Value>, Vec<AggregateValue>)>,
     /// Issue #1587 (E5): hash index over the group key → candidate `groups`
     /// indices sharing that hash. `Value` does not implement `Hash`/`Eq`
-    /// (floats), so we hash a normalization that is *consistent* with `Vec<Value>`
-    /// equality (equal keys hash equal; `-0.0`/`+0.0` normalized) and confirm the
-    /// match with an exact `==` against each candidate. Distinct-but-colliding
-    /// keys (and every NaN key, which is never `==` itself) simply fall through
-    /// the exact check, so grouping semantics are byte-identical to the prior
-    /// linear scan.
+    /// (floats), so we hash a normalization *consistent* with the group-key
+    /// equality used to confirm a match ([`group_key_eq`]), and confirm the match
+    /// with that predicate against each candidate. Issue #2074: `float`/`double`
+    /// group-key equality follows Cassandra's total-order comparator (`float_cmp`),
+    /// so the hash canonicalizes NaN to one bit pattern (all NaN keys hash-collide
+    /// into ONE group) and keeps signed-zero bits DISTINCT (`-0.0`/`+0.0` hash into
+    /// two groups) — exactly consistent with [`group_key_eq`].
     ///
     /// Issue #1590 (E8): `FxHashMap` rather than the default `HashMap`. The key
     /// is already a well-mixed `u64` group-key hash, so SipHashing it again is
@@ -53,70 +56,6 @@ pub(super) struct AggregationState {
     pub(super) memory_usage_bytes: usize,
     /// Maximum memory limit
     pub(super) memory_limit_bytes: usize,
-}
-
-/// Hash a group key consistently with `Vec<Value>` equality: if two keys are
-/// `==`, they hash identically. Only floats need care (`-0.0 == +0.0`), which
-/// are normalized; NaN keys are never `==` themselves, so their hash is
-/// irrelevant to correctness (the exact `==` check separates them). Exotic /
-/// nested variants that are not cheap to hash structurally fall back to a
-/// discriminant-only contribution — still consistent (equal values agree on
-/// discriminant), merely less selective, and only for key types that never
-/// appear in practice.
-fn hash_group_key(key: &[Value]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.len().hash(&mut hasher);
-    for v in key {
-        hash_one_value(v, &mut hasher);
-    }
-    hasher.finish()
-}
-
-fn hash_one_value<H: Hasher>(v: &Value, h: &mut H) {
-    // Tag by discriminant so different variants never alias.
-    std::mem::discriminant(v).hash(h);
-    match v {
-        Value::Null => {}
-        Value::Boolean(b) => b.hash(h),
-        Value::Integer(x) => x.hash(h),
-        Value::BigInt(x) | Value::Counter(x) | Value::Timestamp(x) | Value::Time(x) => x.hash(h),
-        Value::Date(x) => x.hash(h),
-        Value::TinyInt(x) => x.hash(h),
-        Value::SmallInt(x) => x.hash(h),
-        // `-0.0 == +0.0` must hash equal; NaN's hash is irrelevant (never `==`).
-        Value::Float(f) => (if *f == 0.0 { 0.0f64 } else { *f }).to_bits().hash(h),
-        Value::Float32(f) => (if *f == 0.0 { 0.0f32 } else { *f }).to_bits().hash(h),
-        Value::Text(s) => s.hash(h),
-        Value::Blob(b) | Value::Varint(b) | Value::Inet(b) => b.hash(h),
-        Value::Uuid(u) => u.hash(h),
-        Value::Decimal { scale, unscaled } => {
-            scale.hash(h);
-            unscaled.hash(h);
-        }
-        Value::Duration {
-            months,
-            days,
-            nanos,
-        } => {
-            months.hash(h);
-            days.hash(h);
-            nanos.hash(h);
-        }
-        Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
-            for item in items {
-                hash_one_value(item, h);
-            }
-        }
-        Value::Map(pairs) => {
-            for (k, val) in pairs {
-                hash_one_value(k, h);
-                hash_one_value(val, h);
-            }
-        }
-        Value::Frozen(inner) => hash_one_value(inner, h),
-        // Exotic / rarely-grouped variants: discriminant-only (still consistent).
-        Value::Json(_) | Value::Udt(_) | Value::Tombstone(_) => {}
-    }
 }
 
 /// Aggregate value accumulator
@@ -181,9 +120,11 @@ pub(super) fn build_group_key(row: &QueryRow, group_by_columns: &[String]) -> Ve
 /// amortized instead of the old `O(groups)` linear scan (which made a full
 /// aggregation `O(rows × groups)`). Result-row ordering is still defined solely
 /// by insertion order into `state.groups`; the index only accelerates lookup,
-/// and the exact `==` confirmation preserves grouping semantics byte-for-byte
-/// (colliding-but-unequal keys, and NaN keys, create distinct groups exactly as
-/// the linear scan did).
+/// and the [`group_key_eq`] confirmation defines the grouping semantics
+/// (colliding-but-unequal keys create distinct groups). Issue #2074: that
+/// confirmation is [`group_key_eq`], NOT derived `Vec<Value>` `==`, so
+/// `float`/`double` grouping follows Cassandra's comparator (all NaN → ONE group;
+/// `-0.0`/`+0.0` → DISTINCT groups).
 pub(super) fn find_or_init_group(
     state: &mut AggregationState,
     key: Vec<Value>,
@@ -195,7 +136,7 @@ pub(super) fn find_or_init_group(
         for &idx in candidates {
             #[cfg(test)]
             GROUP_KEY_COMPARISONS.with(|c| c.set(c.get() + 1));
-            if state.groups[idx].0 == key {
+            if group_key_eq(&state.groups[idx].0, &key) {
                 return idx;
             }
         }
@@ -462,38 +403,84 @@ mod tests {
         }
     }
 
-    /// The hash index must never merge distinct keys: `-0.0`/`+0.0` group
-    /// together (they are `==`), NaN never groups with itself, and different
-    /// scalars stay separate — byte-identical to the linear-scan semantics.
+    /// Issue #2074: GROUP BY on a float/double key follows Cassandra's total-order
+    /// comparator (`float_cmp`), NOT IEEE `==`. `-0.0` and `+0.0` are DISTINCT
+    /// groups (Cassandra orders them apart); ALL NaN bit-patterns form ONE group
+    /// (Java `doubleToLongBits` canonical); while cross-variant keys (`Integer(1)`
+    /// vs `BigInt(1)`) stay distinct. Both the hash and the `group_key_eq`
+    /// confirmation must agree, so the assertions below simultaneously prove
+    /// hash/eq consistency.
     #[test]
-    fn find_or_init_group_preserves_equality_semantics() {
+    fn find_or_init_group_uses_cassandra_float_comparator() {
         let plan = count_star_plan();
         let mut state = new_state();
+        let mut group =
+            |f: f64| find_or_init_group(&mut state, vec![Value::Float(f)], &plan.aggregates, &[]);
 
-        // -0.0 and +0.0 are `==` → same group.
-        let i0 = find_or_init_group(&mut state, vec![Value::Float(0.0)], &plan.aggregates, &[]);
-        let i1 = find_or_init_group(&mut state, vec![Value::Float(-0.0)], &plan.aggregates, &[]);
-        assert_eq!(i0, i1, "-0.0 and +0.0 must land in the same group");
+        // -0.0 and +0.0 are ordered apart → DISTINCT groups.
+        let i0 = group(0.0);
+        let i1 = group(-0.0);
+        assert_ne!(i0, i1, "-0.0 and +0.0 must land in DISTINCT groups (#2074)");
 
-        // Two NaN keys are never `==` → two distinct groups.
-        let n0 = find_or_init_group(
-            &mut state,
-            vec![Value::Float(f64::NAN)],
-            &plan.aggregates,
-            &[],
+        // Multiple NaN keys — including DIFFERENT NaN bit patterns — all collapse
+        // into ONE group (canonicalized, matching Cassandra).
+        let other_nan = f64::from_bits(0xFFF8_0000_0000_0001);
+        assert!(other_nan.is_nan());
+        let n0 = group(f64::NAN);
+        let n1 = group(f64::NAN);
+        let n2 = group(other_nan);
+        assert_eq!(n0, n1, "all NaN keys share ONE group (#2074)");
+        assert_eq!(
+            n0, n2,
+            "a DIFFERENT NaN bit pattern also joins the single NaN group (#2074)"
         );
-        let n1 = find_or_init_group(
-            &mut state,
-            vec![Value::Float(f64::NAN)],
-            &plan.aggregates,
-            &[],
-        );
-        assert_ne!(n0, n1, "each NaN key forms its own group (NaN != NaN)");
 
-        // Same-value different-variant keys stay separate.
+        // The same holds for f32 (`float`): -0.0/+0.0 distinct, NaN patterns merged.
+        let f32key = |f: f32| vec![Value::Float32(f)];
+        let f0 = find_or_init_group(&mut state, f32key(0.0), &plan.aggregates, &[]);
+        let f1 = find_or_init_group(&mut state, f32key(-0.0), &plan.aggregates, &[]);
+        assert_ne!(f0, f1, "f32 -0.0 and +0.0 must be DISTINCT groups (#2074)");
+        let other_nan32 = f32::from_bits(0xFFC0_0001);
+        assert!(other_nan32.is_nan());
+        let g0 = find_or_init_group(&mut state, f32key(f32::NAN), &plan.aggregates, &[]);
+        let g1 = find_or_init_group(&mut state, f32key(other_nan32), &plan.aggregates, &[]);
+        assert_eq!(g0, g1, "f32 NaN bit patterns share ONE group (#2074)");
+
+        // Same-value different-variant keys stay separate (no numeric coercion).
         let a = find_or_init_group(&mut state, vec![Value::Integer(1)], &plan.aggregates, &[]);
         let b = find_or_init_group(&mut state, vec![Value::BigInt(1)], &plan.aggregates, &[]);
         assert_ne!(a, b, "Integer(1) and BigInt(1) are distinct groups");
+    }
+
+    /// Issue #2074 (nested scope): the Cassandra float comparator applies at
+    /// EVERY nesting depth, not just top-level scalar group columns — a float
+    /// buried inside a `Tuple`/`List` group key must hash AND compare consistent
+    /// with the same total order, or hash/eq would disagree (a correctness bug).
+    #[test]
+    fn find_or_init_group_nested_float_uses_cassandra_comparator() {
+        let plan = count_star_plan();
+        let mut state = new_state();
+        let other_nan = f64::from_bits(0xFFF8_0000_0000_0001);
+        assert!(other_nan.is_nan());
+        let mut group = |k: Vec<Value>| find_or_init_group(&mut state, k, &plan.aggregates, &[]);
+
+        // Nested -0.0 vs +0.0 inside a Tuple → DISTINCT groups (not merged by IEEE).
+        let t0 = group(vec![Value::Tuple(vec![Value::Float(0.0)])]);
+        let t1 = group(vec![Value::Tuple(vec![Value::Float(-0.0)])]);
+        assert_ne!(t0, t1, "nested Tuple -0.0/+0.0 must be DISTINCT (#2074)");
+
+        // Two DIFFERENT NaN bit patterns nested inside a Tuple → SAME group.
+        let n0 = group(vec![Value::Tuple(vec![Value::Float(f64::NAN)])]);
+        let n1 = group(vec![Value::Tuple(vec![Value::Float(other_nan)])]);
+        assert_eq!(
+            n0, n1,
+            "nested Tuple differing-NaN must be ONE group (#2074)"
+        );
+
+        // Same nested behavior inside a List.
+        let l0 = group(vec![Value::List(vec![Value::Float(0.0)])]);
+        let l1 = group(vec![Value::List(vec![Value::Float(-0.0)])]);
+        assert_ne!(l0, l1, "nested List -0.0/+0.0 must be DISTINCT (#2074)");
     }
 
     // ---- Issue #2202: SUM/AVG integral result-type preservation ----
