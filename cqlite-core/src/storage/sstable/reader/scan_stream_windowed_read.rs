@@ -51,6 +51,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use super::super::read_at::DirectScratch;
 use super::SSTableReader;
 use crate::storage::sstable::read_work_counters as rwc;
 use crate::{Error, Result};
@@ -102,12 +103,24 @@ impl SSTableReader {
     /// so the #1940 no-nesting guard records the thread that performs the real read
     /// — making its `io_read_thread == decode_thread` equality a true detector of a
     /// read dispatched off the feed thread. Compiled only under `scan-offload-probe`.
-    fn positional_read_exact_retry_once(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+    fn positional_read_exact_retry_once(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+        scratch: &mut DirectScratch,
+    ) -> Result<()> {
         #[cfg(feature = "scan-offload-probe")]
         super::probe::record_io_read_thread();
         let mut attempt = 0u8;
         loop {
-            match self.point_source.read_exact_at(offset, buf) {
+            // `read_exact_at_reusing` reuses `scratch`'s aligned bounce buffer on
+            // the Direct-I/O backend (issue #2319 — no per-chunk aligned alloc); for
+            // mmap/plain-file backends it defers to `read_exact_at` and `scratch`
+            // stays empty, so those paths are byte-for-byte unchanged (#1940).
+            match self
+                .point_source
+                .read_exact_at_reusing(offset, buf, scratch)
+            {
                 Ok(()) => return Ok(()),
                 Err(e)
                     if attempt == 0
@@ -134,6 +147,7 @@ impl SSTableReader {
         &self,
         chunk_index: usize,
         scratch: &mut Vec<u8>,
+        direct_scratch: &mut DirectScratch,
     ) -> Result<Option<Vec<u8>>> {
         let comp_info = match self.compression_info.as_ref() {
             Some(ci) => ci,
@@ -225,7 +239,9 @@ impl SSTableReader {
         if buf.capacity() > cap_before {
             rwc::record_chunk_path_alloc();
         }
-        if let Err(e) = self.positional_read_exact_retry_once(chunk_offset, &mut buf) {
+        if let Err(e) =
+            self.positional_read_exact_retry_once(chunk_offset, &mut buf, direct_scratch)
+        {
             // Return the scratch's capacity to the caller so the next read reuses it.
             buf.clear();
             *scratch = buf;
@@ -268,7 +284,11 @@ impl SSTableReader {
     /// lifetime) BEFORE the piece is returned — from the resident bytes when a
     /// chunk is fully contained, else by reading the straddling remainder
     /// positionally (issue #1396; mirrors `verify_uncompressed_section_in_buffer`).
-    pub(super) fn read_uncompressed_piece_sync(&self, pos: u64) -> Result<Option<(Vec<u8>, u64)>> {
+    pub(super) fn read_uncompressed_piece_sync(
+        &self,
+        pos: u64,
+        direct_scratch: &mut DirectScratch,
+    ) -> Result<Option<(Vec<u8>, u64)>> {
         let file_size = self.point_source.len();
         let remaining = file_size.saturating_sub(pos);
         if remaining == 0 {
@@ -279,7 +299,7 @@ impl SSTableReader {
         // Same one-shot transient-retry + kind-preserving wrap as the compressed
         // path (issue #1940 BLOCKER-2): a transient fault is re-read once, and the
         // source io kind is preserved (never collapsed to `Error::other`).
-        self.positional_read_exact_retry_once(pos, &mut buf)
+        self.positional_read_exact_retry_once(pos, &mut buf, direct_scratch)
             .map_err(|e| {
                 io_error_with_context(
                     format!("Failed to read uncompressed piece ({to_read} bytes at 0x{pos:x})"),
@@ -365,12 +385,21 @@ impl SSTableReader {
                 })?;
             }
         }
+        // ONE reusable aligned bounce buffer for the WHOLE scan (issue #2319): the
+        // Direct-I/O backend reuses it across every chunk read instead of allocating
+        // a fresh ~chunk-sized aligned buffer per chunk (the #1940 regression). No-op
+        // (stays empty) for the mmap/plain-file backends.
+        let mut direct_scratch = DirectScratch::new();
         let mut chunk_index = 0usize;
         loop {
             // SYNCHRONOUS positional read + CRC (issue #1940): CRC is verified inside
             // the read, BEFORE the payload is trusted (guardrail #1411), exactly as
             // the former cursor path did.
-            match reader.read_compressed_chunk_sync(chunk_index, &mut scratch)? {
+            match reader.read_compressed_chunk_sync(
+                chunk_index,
+                &mut scratch,
+                &mut direct_scratch,
+            )? {
                 Some(compressed) => {
                     // Decompression stays HERE, on this blocking thread (D2), off the
                     // async reactor for every backend.
@@ -395,10 +424,13 @@ impl SSTableReader {
         reader: &Arc<Self>,
         raw_tx: &mpsc::Sender<bytes::Bytes>,
     ) -> Result<()> {
+        // ONE reusable aligned bounce buffer for the whole scan (issue #2319), same
+        // as the compressed feed; no-op for non-Direct backends.
+        let mut direct_scratch = DirectScratch::new();
         let mut pos = reader.calculate_header_size() as u64;
         let mut chunk_index = 0usize;
         loop {
-            match reader.read_uncompressed_piece_sync(pos)? {
+            match reader.read_uncompressed_piece_sync(pos, &mut direct_scratch)? {
                 Some((piece, next_pos)) => {
                     // No compressor: `decode_scan_chunk` moves the piece into the B1
                     // cache zero-copy (`Bytes::from(Vec)`) — no per-piece copy — and
