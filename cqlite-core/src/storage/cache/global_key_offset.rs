@@ -432,6 +432,27 @@ impl GlobalKeyOffsetCache {
         dropped
     }
 
+    /// Drop EVERY entry (a full flush), returning the number dropped and recording
+    /// them on the `invalidations` counter. Used by a whole-dataset drop and by
+    /// tests needing a cold-cache starting point in the shared process-global cache.
+    /// A no-op on a disabled cache.
+    pub fn invalidate_all(&self) -> u64 {
+        if self.disabled {
+            return 0;
+        }
+        let mut dropped: u64 = 0;
+        for shard in self.shards.iter() {
+            let mut guard = Self::lock(shard);
+            dropped = dropped.saturating_add(guard.lru.len() as u64);
+            guard.lru.clear();
+            guard.current_bytes = 0;
+        }
+        if dropped > 0 {
+            self.invalidations.fetch_add(dropped, Ordering::Relaxed);
+        }
+        dropped
+    }
+
     /// Total resident entry count across all shards.
     pub fn len(&self) -> usize {
         self.shards.iter().map(|m| Self::lock(m).lru.len()).sum()
