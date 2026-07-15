@@ -1643,7 +1643,7 @@ impl SSTableManager {
         // The seeking merge reconciles through the SAME `KWayMerger`
         // (`from_row_iterators`), so its output is byte-identical to the former
         // full-merge-then-`retain(matches_key)`, only over O(target) work.
-        #[cfg(feature = "write-support")]
+        #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
         if candidates.len() > 1 {
             if let Some(schema) = schema {
                 let target = RowKey::new(partition_key.to_vec());

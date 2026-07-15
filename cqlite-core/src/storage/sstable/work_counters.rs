@@ -128,21 +128,29 @@ struct Counters {
     /// partition count regardless of how narrow the split range (or `LIMIT`) is —
     /// the fixed multi-second warm-scan setup this counter exists to make visible.
     stream_walk_partitions_parsed: AtomicU64,
-    /// Merge ENTRIES decoded from `Data.db` by a MULTI-candidate point-read merge
-    /// run (Issue #2096). Bumped once per merge entry the reconciliation actually
-    /// materialises out of `Data.db`: on the full-scan run inside
-    /// [`SSTableRowIteratorAdapter`](crate::storage::write_engine::KWayMerger)
-    /// (once per `Ok(entry)` streamed) AND on the seek run's `PathProbe::Seeked`
-    /// arm (once per entry built from a seeked partition).
+    /// Merge ENTRIES decoded from `Data.db` by ANY [`KWayMerger`]-adapter-driven
+    /// run (Issue #2096) — full scans, compaction, AND multi-candidate point
+    /// reads all share the same [`SSTableRowIteratorAdapter`]/`PathProbe::Seeked`
+    /// increment sites, so this counts entries for all of them, not point reads
+    /// alone. Bumped once per merge entry a run actually materialises out of
+    /// `Data.db`: once per `Ok(entry)` streamed on the full-scan adapter run, and
+    /// once per entry built from a seeked partition on the seek run's
+    /// `PathProbe::Seeked` arm. A single partition with N clustering rows bumps
+    /// this N times (an ENTRY-granularity counter, not partition-granularity).
     ///
-    /// This makes the merge run's per-partition decode observable, which the
-    /// existing `partitions_decoded` (#953, single-candidate seek only) does not
-    /// cover. A multi-candidate `WHERE pk = ?` that reconciles through the OLD
+    /// This makes a merge run's decode volume observable, which the existing
+    /// `partitions_decoded` (#953, single-candidate seek only) does not cover.
+    /// For a multi-candidate `WHERE pk = ?` point read specifically: the OLD
     /// full-scan `KWayMerger::new` decodes every partition with token <= the
-    /// target in every generation, so this balloons far past the number of
-    /// candidates holding the key; the partition-SEEKING merger (#2096) decodes
-    /// only the target partition per candidate, so it stays O(target rows).
-    merge_run_partitions_decoded: AtomicU64,
+    /// target in every generation, so the DELTA around that call balloons far
+    /// past the number of candidates holding the key; the partition-SEEKING
+    /// merger (#2096) decodes only the target partition's entries per candidate,
+    /// so its delta stays O(target rows). It is process-global, so a bound
+    /// test's delta assertion around one call is polluted by ANY concurrent
+    /// scan/compaction in the same test binary — callers must `reset()` first
+    /// and serialize (`#[serial_test::serial]`) against other counter-reading
+    /// tests, exactly like the other counters in this file.
+    merge_run_entries_decoded: AtomicU64,
 }
 
 impl Counters {
@@ -157,7 +165,7 @@ impl Counters {
             reverse_peak_block_rows: AtomicU64::new(0),
             data_db_checksum_full_reads: AtomicU64::new(0),
             stream_walk_partitions_parsed: AtomicU64::new(0),
-            merge_run_partitions_decoded: AtomicU64::new(0),
+            merge_run_entries_decoded: AtomicU64::new(0),
         }
     }
 
@@ -217,13 +225,13 @@ impl Counters {
     }
 
     #[cfg(feature = "write-support")]
-    fn add_merge_run_partition_decoded(&self) {
-        self.merge_run_partitions_decoded
+    fn add_merge_run_entry_decoded(&self) {
+        self.merge_run_entries_decoded
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn merge_run_partitions_decoded(&self) -> u64 {
-        self.merge_run_partitions_decoded.load(Ordering::Relaxed)
+    fn merge_run_entries_decoded(&self) -> u64 {
+        self.merge_run_entries_decoded.load(Ordering::Relaxed)
     }
 
     fn reverse_blocks_decoded(&self) -> u64 {
@@ -265,8 +273,7 @@ impl Counters {
         self.data_db_checksum_full_reads.store(0, Ordering::Relaxed);
         self.stream_walk_partitions_parsed
             .store(0, Ordering::Relaxed);
-        self.merge_run_partitions_decoded
-            .store(0, Ordering::Relaxed);
+        self.merge_run_entries_decoded.store(0, Ordering::Relaxed);
     }
 }
 
@@ -513,30 +520,40 @@ pub(crate) mod stream_walk_scope {
     }
 }
 
-/// Record that one merge ENTRY was decoded from `Data.db` by a multi-candidate
-/// point-read merge run (Issue #2096). Called once per entry the reconciliation
-/// materialises out of `Data.db`: the full-scan run's per-`Ok(entry)` yield and
-/// the seek run's per-built-entry `PathProbe::Seeked` arm.
+/// Record that one merge ENTRY was decoded from `Data.db` by ANY
+/// [`KWayMerger`](crate::storage::write_engine::KWayMerger)-adapter-driven run
+/// (Issue #2096) — a full scan, a compaction, OR a multi-candidate point read,
+/// whichever run this increment site's caller is executing. Called once per
+/// entry a run materialises out of `Data.db`: the full-scan adapter's
+/// per-`Ok(entry)` yield and the seek run's per-built-entry `PathProbe::Seeked`
+/// arm. This is an ENTRY-granularity count — a partition with N clustering rows
+/// bumps it N times, not once.
 ///
 /// Gated on `write-support` because both increment sites live in the k-way
 /// merge machinery, which is only compiled with that feature; the getter and
 /// [`reset`] are available in every build for the test API.
 #[cfg(feature = "write-support")]
-pub(crate) fn add_merge_run_partition_decoded() {
-    COUNTERS.add_merge_run_partition_decoded();
+pub(crate) fn add_merge_run_entry_decoded() {
+    COUNTERS.add_merge_run_entry_decoded();
 }
 
-/// Number of merge entries decoded from `Data.db` by multi-candidate point-read
-/// merge runs since the last [`reset`] (Issue #2096).
+/// Number of merge entries decoded from `Data.db` by ANY `KWayMerger`-adapter-
+/// driven run since the last [`reset`] (Issue #2096) — full scans, compaction,
+/// and multi-candidate point reads all share this counter, so it is NOT
+/// point-read-specific. It is process-global: a delta assertion around one call
+/// (e.g. "did this point read stay O(target rows)?") must `reset()` first and
+/// run with no concurrent scan/compaction in the same test binary — serialize
+/// with `#[serial_test::serial]` against other counter-reading tests, exactly
+/// like the other counters in this module.
 ///
-/// For a multi-candidate `WHERE pk = ?` this stays O(target rows) once the
-/// partition-SEEKING merger is wired in: only the target partition per candidate
-/// is decoded. A regression that reverts to the full-scan `KWayMerger::new`
-/// merge decodes every partition with token <= the target in every generation,
-/// ballooning this far past the candidate count — which the `issue_2096` bound
-/// test catches.
-pub fn merge_run_partitions_decoded() -> u64 {
-    COUNTERS.merge_run_partitions_decoded()
+/// For a multi-candidate `WHERE pk = ?` point read specifically, the delta
+/// around that call stays O(target rows) once the partition-SEEKING merger is
+/// wired in: only the target partition's entries per candidate are decoded. A
+/// regression that reverts to the full-scan `KWayMerger::new` merge decodes
+/// every partition with token <= the target in every generation, ballooning the
+/// delta far past the candidate count — which the `issue_2096` bound test catches.
+pub fn merge_run_entries_decoded() -> u64 {
+    COUNTERS.merge_run_entries_decoded()
 }
 
 /// Number of full `Data.db` re-reads performed for checksum computation since

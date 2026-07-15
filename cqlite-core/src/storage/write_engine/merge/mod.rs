@@ -1180,11 +1180,14 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
             }
             match receiver.recv_timeout(RECV_CANCEL_POLL) {
                 Ok(Ok(entry)) => {
-                    // Issue #2096: one merge entry decoded from `Data.db` by a
-                    // full-scan run. This is the O(partitions-below-target) signal
-                    // the seeking point-read merger replaces — see
-                    // `work_counters::merge_run_partitions_decoded`.
-                    crate::storage::sstable::work_counters::add_merge_run_partition_decoded();
+                    // Issue #2096: one merge entry decoded from `Data.db` by THIS
+                    // adapter-driven run — a full scan, compaction, or (via the
+                    // fail-safe `SinglePartitionFilterRun`) a point read all share
+                    // this increment site, so `merge_run_entries_decoded` counts
+                    // entries for any of them, not point reads alone. See
+                    // `work_counters::merge_run_entries_decoded`'s doc for the
+                    // process-global caveat when using it as a delta assertion.
+                    crate::storage::sstable::work_counters::add_merge_run_entry_decoded();
                     return Some(Ok(entry));
                 }
                 // Issue #2264: reconstruct `Error::Cancelled` distinctly so a

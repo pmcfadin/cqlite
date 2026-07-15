@@ -13,7 +13,7 @@
 //!    cell/row-tombstone shadowing, AND a partition-tombstone resurrection.
 //!
 //! B. **Work-counter red→green (the headline AC)** — the new
-//!    `work_counters::merge_run_partitions_decoded` counter proves the multi-gen
+//!    `work_counters::merge_run_entries_decoded` counter proves the multi-gen
 //!    point read decodes only the target partition per generation: the OLD
 //!    full-scan merge (exercised here through `scan(..)`, which routes through the
 //!    same `merge_generations_for_read` full-scan `KWayMerger::new`) decodes every
@@ -268,7 +268,7 @@ fn col<'a>(row: &'a ScanRow, name: &str) -> Option<&'a Value> {
 /// full-scan reconciliation oracle for BOTH the overwrite/tombstone target and
 /// the partition-tombstone (resurrection) partition.
 // `#[serial(work_counters)]`: this test drives scans that bump the process-global
-// `merge_run_partitions_decoded`, so it must never run concurrently (in this test
+// `merge_run_entries_decoded`, so it must never run concurrently (in this test
 // binary) with the counter-asserting test below, whose `reset()`→scan→read delta
 // would otherwise be contaminated (issue #2428 contamination shape).
 #[test]
@@ -367,7 +367,7 @@ fn seeking_point_read_is_byte_identical_to_full_scan_oracle() {
 /// B. Work-counter red→green: the multi-candidate point read decodes ONLY the
 /// target partition per generation. The OLD full-scan merge (exercised via the
 /// full `scan(..)`, which routes through the same `KWayMerger::new`) decodes
-/// every partition and reads a LARGE `merge_run_partitions_decoded`; the NEW
+/// every partition and reads a LARGE `merge_run_entries_decoded`; the NEW
 /// seek path reads a SMALL count that does not scale with the filler count.
 ///
 /// Process-global counters: `#[serial]` + a `reset()` before each measured scan
@@ -395,7 +395,7 @@ fn seeking_point_read_decodes_only_the_target_partition() {
     let _ = rt
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("full scan must not error");
-    let counter_full = work_counters::merge_run_partitions_decoded();
+    let counter_full = work_counters::merge_run_entries_decoded();
     assert!(
         counter_full >= n_partitions,
         "full-scan merge must decode at least one entry per partition (got {counter_full}, \
@@ -407,7 +407,7 @@ fn seeking_point_read_decodes_only_the_target_partition() {
     let (seek_target, _) = rt
         .block_on(manager.scan_partition(&table_id, &pk(TARGET), Some(&schema)))
         .expect("scan_partition must not error");
-    let counter_seek_target = work_counters::merge_run_partitions_decoded();
+    let counter_seek_target = work_counters::merge_run_entries_decoded();
     assert!(
         !seek_target.is_empty(),
         "TARGET seek must return rows (guards against a 0-row false pass)"
@@ -417,7 +417,7 @@ fn seeking_point_read_decodes_only_the_target_partition() {
     let (seek_ptomb, _) = rt
         .block_on(manager.scan_partition(&table_id, &pk(PTOMB), Some(&schema)))
         .expect("scan_partition must not error");
-    let counter_seek_ptomb = work_counters::merge_run_partitions_decoded();
+    let counter_seek_ptomb = work_counters::merge_run_entries_decoded();
     assert!(!seek_ptomb.is_empty(), "PTOMB seek must return rows");
 
     // The seek decodes at least one entry per candidate holding the key ...
