@@ -40,10 +40,12 @@
 //!   (the audit's exemplary VInt/type reference).
 //!
 //! ## Known-divergence set recorded by this net (do NOT "fix" here — #1617)
-//! * **`float`**: block path → [`Value::Float32`] (correct single-precision
-//!   representation); v5 ladder → [`Value::Float`] (widened `f32 as f64`). Owning
-//!   issue: **J2** (collapse the `ComparatorType` decoders — must unify the
-//!   representation). Recorded as an explicit divergence assertion below.
+//! * **`float`**: CONVERGED (issue #1884) — both paths now decode CQL `float` to
+//!   [`Value::Float32`]. The v5 ladder previously widened to `Value::Float`
+//!   (`f32 as f64`); that lossy widening is fixed.
+//! * **`varint`**: CONVERGED (issue #1885) — the v5 ladder gained a `varint` arm,
+//!   so both paths decode CQL `varint` to [`Value::Varint`]. It previously fell
+//!   through to the blob default → `Value::Blob`.
 //! * **non-frozen `list`/`set`/`map`**: the v5 *single-cell* ladder STUBS these
 //!   to an empty collection — production routes non-frozen collections through
 //!   the multi-cell complex-column path instead. Owning issue: **#162 / J1**.
@@ -89,6 +91,13 @@ pub(crate) enum V5Framing {
 }
 
 /// A documented, deliberate divergence between the two read paths (issue #1617).
+///
+/// Retained scaffolding: the float/varint divergences it recorded are now
+/// converged (issues #1884/#1885), so no `ScalarCase` currently sets one. Kept so
+/// the next genuinely-divergent type can be recorded without re-deriving the
+/// machinery; `assert_ne`-based recording in the tests still exercises it once a
+/// case populates `divergence: Some(..)`.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct Divergence {
     /// Owning issue/epic that will unify the paths.
@@ -186,20 +195,14 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
             arbitrary_len: false,
             divergence: None,
         },
-        // KNOWN DIVERGENCE (J2): block -> Float32, v5 -> widened Float(f64).
+        // CONVERGED (issue #1884): both paths now decode CQL float to Value::Float32.
         ScalarCase {
             cql_type: "float",
             value: Value::Float32(3.5),
             value_bytes: 3.5f32.to_be_bytes().to_vec(),
             framing: V5Framing::Fixed,
             arbitrary_len: false,
-            divergence: Some(Divergence {
-                owner: "J2 (#1603) — collapse the ComparatorType decoders",
-                note: "CQL float: block path decodes Value::Float32(f32); v5 ladder \
-                       widens to Value::Float(f32 as f64). J2 must unify the representation.",
-                block: Value::Float32(3.5),
-                v5: Value::Float(3.5f32 as f64),
-            }),
+            divergence: None,
         },
         ScalarCase {
             cql_type: "double",
@@ -294,8 +297,8 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
             arbitrary_len: false,
             divergence: None,
         },
-        // CONVERGED (issue #1885): the v5 ladder now has a `varint` arm decoding to
-        // Value::Varint with byte-identical framing to the block path.
+        // CONVERGED (issue #1885): v5 ladder gained a varint arm; both paths decode
+        // CQL varint to Value::Varint.
         ScalarCase {
             cql_type: "varint",
             value: Value::Varint(vec![0x01, 0x00]),
@@ -965,12 +968,13 @@ async fn v5_varint_arm_decodes_edge_cases() {
 /// the block path's empty-slice handling (issue #1885). This covers BOTH v5 wire
 /// framings that can carry a zero-length varint:
 ///  1. A live cell with a VInt length prefix of `0` (`[0x08][0x00]`) — the
-///     `CellKind::Varint => Value::Varint(read_vint_prefixed_bytes(..))` arm reading
-///     an empty payload.
+///     `CellKind::Complex("varint")` ladder arm (in `cell_value_complex`) reads an
+///     empty payload via `read_vint_length_prefixed_bytes` → `Value::Varint([])`.
 ///  2. A flags-only cell with the `CELL_HAS_EMPTY_VALUE` bit set and NO value bytes
-///     (`[0x0C]` = `CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE`) — the dedicated
-///     `CellKind::Varint => Value::Varint(Vec::new())` empty arm (roborev coverage
-///     gap: this arm was previously never exercised).
+///     (`[0x0C]` = `CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE`) — the empty-value
+///     arm in `parse_cell_value_schema_order` matches `CellKind::Complex("varint")`
+///     → `Value::Varint(Vec::new())` (roborev coverage gap: this arm was previously
+///     never exercised).
 #[tokio::test]
 async fn v5_varint_empty_matches_block() {
     let Some(reader) = open_reader().await else {
