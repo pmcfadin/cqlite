@@ -188,7 +188,11 @@ fn build_fixture(data_dir: &std::path::Path, wal_dir: &std::path::Path, schema: 
         .build()
         .expect("tokio runtime");
 
-    let config = WriteEngineConfig::new(data_dir.to_path_buf(), wal_dir.to_path_buf(), schema.clone());
+    let config = WriteEngineConfig::new(
+        data_dir.to_path_buf(),
+        wal_dir.to_path_buf(),
+        schema.clone(),
+    );
     let mut engine = WriteEngine::new(config).expect("engine creation");
 
     // ── Gen 1 (ts=100): base state ────────────────────────────────────────────
@@ -251,9 +255,11 @@ fn pk(id: i32) -> Vec<u8> {
 
 fn col<'a>(row: &'a ScanRow, name: &str) -> Option<&'a Value> {
     match row {
-        ScanRow::Row(cells) => cells
-            .iter()
-            .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None }),
+        ScanRow::Row(cells) => {
+            cells
+                .iter()
+                .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None })
+        }
         _ => None,
     }
 }
@@ -300,7 +306,10 @@ fn seeking_point_read_is_byte_identical_to_full_scan_oracle() {
         let (seek, engaged) = rt
             .block_on(manager.scan_partition(&table_id, &pk(target), Some(&schema)))
             .expect("scan_partition must not error");
-        assert!(engaged, "scan_partition always reports the partition-targeted path");
+        assert!(
+            engaged,
+            "scan_partition always reports the partition-targeted path"
+        );
 
         assert_eq!(
             seek, oracle,
@@ -316,8 +325,10 @@ fn seeking_point_read_is_byte_identical_to_full_scan_oracle() {
 
     // Spot-check the reconciled semantics themselves so the parity oracle above is
     // not vacuously comparing two identically-wrong results.
-    let target_rows: Vec<&(RowKey, ScanRow)> =
-        full.iter().filter(|(k, _)| k.as_bytes() == pk(TARGET)).collect();
+    let target_rows: Vec<&(RowKey, ScanRow)> = full
+        .iter()
+        .filter(|(k, _)| k.as_bytes() == pk(TARGET))
+        .collect();
     assert_eq!(
         target_rows.len(),
         2,
@@ -333,9 +344,15 @@ fn seeking_point_read_is_byte_identical_to_full_scan_oracle() {
     assert!(col(r3, "score").is_none(), "score cell-deleted in gen3");
 
     // PTOMB: only the resurrecting gen3 row survives the gen2 partition tombstone.
-    let ptomb_rows: Vec<&(RowKey, ScanRow)> =
-        full.iter().filter(|(k, _)| k.as_bytes() == pk(PTOMB)).collect();
-    assert_eq!(ptomb_rows.len(), 1, "PTOMB keeps only the resurrecting gen3 row");
+    let ptomb_rows: Vec<&(RowKey, ScanRow)> = full
+        .iter()
+        .filter(|(k, _)| k.as_bytes() == pk(PTOMB))
+        .collect();
+    assert_eq!(
+        ptomb_rows.len(),
+        1,
+        "PTOMB keeps only the resurrecting gen3 row"
+    );
     let rp = &ptomb_rows[0].1;
     assert_eq!(
         col(rp, "name"),
