@@ -1057,7 +1057,10 @@ mod tests {
                 "{m} must appear exactly once in ALL_METRICS"
             );
         }
-        assert_eq!(MERGE_EGRESS_CHANNEL_DEPTH, "cqlite.merge.egress_channel_depth");
+        assert_eq!(
+            MERGE_EGRESS_CHANNEL_DEPTH,
+            "cqlite.merge.egress_channel_depth"
+        );
         assert_eq!(PROC_THREADS, "cqlite.proc.threads");
         assert_eq!(PROC_FDS, "cqlite.proc.fds");
         assert_eq!(PROC_RSS_BYTES, "cqlite.proc.rss_bytes");

@@ -290,7 +290,7 @@ mod tests {
         let before = sample_ticks();
         sample_once();
         assert!(
-            sample_ticks() >= before + 1,
+            sample_ticks() > before,
             "a collection tick is counted even when every /proc reader is None"
         );
     }
@@ -358,7 +358,7 @@ mod tests {
             joined.expect("the sampler handle must resolve after shutdown (no forever-run)");
         task_result.expect("the sampler task completed without panicking");
         assert!(
-            sample_ticks() >= base + 1,
+            sample_ticks() > base,
             "the sampler performed at least one collection tick before stopping"
         );
     }

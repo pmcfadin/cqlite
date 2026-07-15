@@ -749,8 +749,7 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
     let base = crate::saturation::blocking_tasks_in_use_level();
     let n = 40;
     let (_temp, dir, schema) = many_partition_fixture(n);
-    let producer =
-        MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
+    let producer = MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
     let paths = resolved(&producer, &dir);
     let schema_ref = Arc::new(producer.arrow_schema().unwrap());
 
@@ -773,7 +772,7 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
         let _schema_msg = read_one(&mut stream).await.expect("schema message");
         let _first_batch = read_one(&mut stream).await.expect("first batch");
         assert!(
-            crate::saturation::blocking_tasks_in_use_level() >= base + 1,
+            crate::saturation::blocking_tasks_in_use_level() > base,
             "the real spawn_blocking merge closure must hold a BlockingTaskGuard \
              while producing (proves the gauge is wired into the production path). \
              A robust lower bound: concurrent tests only ADD to the shared count."
