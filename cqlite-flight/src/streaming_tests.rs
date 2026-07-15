@@ -731,6 +731,65 @@ fn metrics_parity_on_full_consumption() {
     );
 }
 
+// ---- Issue #2419 (WS2): blocking-task gauge wiring -------------------------
+
+/// End-to-end wiring evidence (issue #2419): the `cqlite.flight.blocking_tasks_in_use`
+/// [`crate::saturation::BlockingTaskGuard`] is entered by the REAL streaming
+/// `spawn_blocking` merge closure — not merely a standalone unit of the guard.
+///
+/// While the merge is producing into the bounded channel (the closure has
+/// entered its guard and is parked on backpressure / still emitting), the
+/// process-wide in-use level is at least the pre-load baseline + 1. This is a
+/// robust LOWER bound: concurrent tests can only ADD to the shared count, never
+/// pull it below this merge's own +1, so it does not flake under the parallel
+/// runner (the exact balance-to-baseline property is pinned deterministically by
+/// `saturation::tests::blocking_task_guard_rises_and_balances`).
+#[test]
+fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
+    let base = crate::saturation::blocking_tasks_in_use_level();
+    let n = 40;
+    let (_temp, dir, schema) = many_partition_fixture(n);
+    let producer =
+        MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
+    let paths = resolved(&producer, &dir);
+    let schema_ref = Arc::new(producer.arrow_schema().unwrap());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let (mut stream, handle) = spawn_streaming(
+            producer,
+            MergeInput::Paths(paths),
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            probe(),
+            CancelFlag::new(),
+            timer(),
+        );
+        // Pull the schema + first batch: to emit a batch the merge closure must
+        // have entered its `BlockingTaskGuard` and started producing. With
+        // n ≫ channel capacity it is still running / backpressured here, so the
+        // guard is held.
+        let _schema_msg = read_one(&mut stream).await.expect("schema message");
+        let _first_batch = read_one(&mut stream).await.expect("first batch");
+        assert!(
+            crate::saturation::blocking_tasks_in_use_level() >= base + 1,
+            "the real spawn_blocking merge closure must hold a BlockingTaskGuard \
+             while producing (proves the gauge is wired into the production path). \
+             A robust lower bound: concurrent tests only ADD to the shared count."
+        );
+        // Drop the stream to cancel + join the merge; the guard drops on exit.
+        drop(stream);
+        let _ = handle.await;
+    });
+
+    // The gauge never underflows its baseline (the RAII drop balanced the entry).
+    assert!(
+        crate::saturation::blocking_tasks_in_use_level() >= base,
+        "the blocking-task gauge must never underflow its pre-load baseline"
+    );
+}
+
 // ---- Issue #2162 Stage 1: rpc.rows/rpc.bytes move per batch ----------------
 
 /// The rpc-progress seam moves BEFORE the stream is drained: after pulling the

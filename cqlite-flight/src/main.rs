@@ -111,6 +111,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_concurrent_streams,
         "cqlite-flight starting"
     );
+    // Saturation instrumentation (issue #2419, WS2): spawn the background sampler
+    // that drives the `cqlite.proc.*` OS-resource gauges (thread/fd/RSS) on a ~2s
+    // cadence. It takes its OWN `shutdown_signal()` future — the same SIGTERM /
+    // ctrl_c source the tonic server drains on — so it terminates on shutdown
+    // without perturbing the server's shutdown wiring (no leaked task). The
+    // atomic-backed gauges (`egress_channel_depth`, `blocking_tasks_in_use`)
+    // update at their own call sites, independent of this cadence.
+    let _sampler = tokio::spawn(cqlite_flight::saturation::run_sampler(
+        cqlite_flight::saturation::DEFAULT_SAMPLE_INTERVAL,
+        shutdown_signal(),
+    ));
     // Graceful shutdown (issue #1473): on ctrl_c / SIGTERM, tonic stops
     // accepting new connections and drains in-flight RPCs rather than tearing
     // every open stream down abruptly.
