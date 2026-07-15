@@ -260,6 +260,11 @@ impl RunReader {
     /// Peek at the next entry without consuming it
     ///
     /// Returns None if this run is exhausted.
+    ///
+    /// Test-only since issue #1664: `refill_heap` was the sole production
+    /// caller and now moves the owned entry via [`Self::advance`] instead of
+    /// peek+clone. Kept for the `RunReader` API test that exercises lazy refill.
+    #[cfg(test)]
     fn peek(&mut self) -> Result<Option<&MergeEntry>> {
         // Refill buffer if empty and not exhausted
         if self.buffer.is_empty() && !self.exhausted {
@@ -2884,12 +2889,16 @@ impl KWayMerger {
                 .pop()
                 .ok_or_else(|| Error::InvalidInput("Merge heap unexpectedly empty".to_string()))?;
             let entry = wrapped.entry;
+            // Read the Copy `run_index` before moving `entry` (issue #1664: the
+            // entry is already owned, so move it into partition_rows instead of
+            // cloning).
+            let run_index = entry.run_index;
 
             // Add to partition rows
-            partition_rows.push(entry.clone());
+            partition_rows.push(entry);
 
             // Refill heap from the run we just consumed from
-            self.refill_heap(entry.run_index)?;
+            self.refill_heap(run_index)?;
         }
 
         if let Some(key) = partition_key {
@@ -2920,19 +2929,17 @@ impl KWayMerger {
 
         let run = &mut self.runs[run_index];
         if !run.is_exhausted() {
-            if let Some(entry) = run.peek()? {
-                // Clone and push to heap, paired with the schema-aware
-                // comparator's schema (issue #1668, stage 5c-i).
-                let entry = entry.clone();
+            if let Some(entry) = run.advance()? {
+                // Move the owned entry into the heap, paired with the
+                // schema-aware comparator's schema (issue #1668, stage 5c-i).
+                // Issue #1664: `advance()` returns the OWNED front entry, so we
+                // move it in instead of the former peek+clone+discard-advance.
                 self.heap
                     .push(Reverse(schema_order::SchemaOrderedEntry::new(
                         entry,
                         self.schema_arc.clone(),
                     )));
             }
-
-            // Advance the run reader
-            run.advance()?;
         }
 
         Ok(())
@@ -10266,6 +10273,103 @@ mod issue_886_empty_partition_skip {
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
         }
+    }
+
+    /// Build a `KWayMerger` over K in-memory runs (one `RunReader` each) — the
+    /// multi-run analogue of [`merger_over`], for the #1664 double-clone guard.
+    fn merger_over_runs(runs: Vec<Vec<MergeEntry>>, schema: TableSchema) -> KWayMerger {
+        let runs = runs
+            .into_iter()
+            .map(|entries| RunReader::new(Box::new(VecIterator(entries.into_iter())) as _))
+            .collect();
+        KWayMerger {
+            runs,
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
+            purge_safe: false,
+            max_purgeable_timestamp: None,
+            schema_arc: std::sync::Arc::new(schema.clone()),
+            schema,
+        }
+    }
+
+    /// Regression guard for issue #1664 (kill the `MergeEntry` double clone in
+    /// the k-way merge core). Drives a full `KWayMerger` compaction over K=3
+    /// runs of distinct single-row partitions (N total rows) inside a
+    /// `MergeEntryCloneScope` and asserts the `MergeEntry::clone` count stays
+    /// under a threshold that only the post-fix code (owned-move at both the
+    /// `step` push and the `refill_heap` reload) can meet.
+    ///
+    /// Empirically observed on this K/N (N=15, see the constants below):
+    // main today: 30 (== 2N, the two gratuitous clones); post-fix: 0
+    // (reconcile clones nothing for these single-row partitions).
+    #[test]
+    fn kway_merge_does_not_double_clone_entries() {
+        use crate::storage::sstable::work_counters::merge_entry_clone_scope::MergeEntryCloneScope;
+
+        const PER_RUN: usize = 5;
+        const K: usize = 3;
+        const N: u64 = (PER_RUN * K) as u64;
+
+        let schema = schema();
+
+        // K runs, each with PER_RUN distinct single-row partitions. Tokens are
+        // globally distinct and ascending WITHIN each run (RunReaders must yield
+        // ascending `MergeEntry` order), so every partition is exactly one row.
+        let runs: Vec<Vec<MergeEntry>> = (0..K)
+            .map(|r| {
+                (0..PER_RUN)
+                    .map(|i| {
+                        let token = (r * PER_RUN + i) as i64;
+                        MergeEntry::new(
+                            r,
+                            DecoratedKey::new(token, pk_bytes(&schema, token as i32)),
+                            None,
+                            100,
+                            RowData::Live {
+                                cells: vec![CellData::new(
+                                    "name".to_string(),
+                                    Value::Text("v".to_string()),
+                                    100,
+                                )],
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let mut merger = merger_over_runs(runs, schema);
+
+        let scope = MergeEntryCloneScope::new();
+        let mut partitions = 0u64;
+        loop {
+            match merger.step().expect("merge step must not fail") {
+                MergeStep::Complete => break,
+                MergeStep::Partition { .. } => partitions += 1,
+            }
+        }
+        let clones = scope.count();
+        drop(scope);
+
+        assert_eq!(
+            partitions, N,
+            "every distinct key is its own single-row partition"
+        );
+
+        // The two removed gratuitous clones cost exactly 2N combined (the
+        // `step` push + the `refill_heap` reload); reconcile clones nothing for
+        // these single-row partitions. Threshold (N + N/2 = 22 for N=15) sits
+        // strictly between the observed post-fix count (0) and the pre-fix
+        // count (2N = 30): red on main, green post-fix.
+        let threshold = N + N / 2; // 22 for N=15
+        assert!(
+            clones <= threshold,
+            "MergeEntry cloned {clones} times for {N} rows (threshold {threshold}); \
+             the #1664 double clone in step/refill_heap regressed"
+        );
     }
 
     /// END-TO-END writer-path test (#886): a partition whose ONLY merged row is a

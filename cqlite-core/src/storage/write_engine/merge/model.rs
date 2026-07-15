@@ -24,7 +24,7 @@ use std::time::Duration;
 /// Represents a single row from one of the input SSTables. This is the
 /// fundamental unit that flows through the merge heap.
 #[cfg(feature = "write-support")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MergeEntry {
     /// Which SSTable this came from (0 = newest)
     pub run_index: usize,
@@ -84,6 +84,30 @@ pub struct MergeEntry {
     /// live rows in another, resurrecting the deleted partition. `None` for every
     /// non-carrier entry.
     pub partition_deletion: Option<(i64, i32)>,
+}
+
+/// Manual `Clone` (was `#[derive(Clone)]`) so the #1664 double-clone regression
+/// guard can count `MergeEntry` clones via a `#[cfg(test)]`-gated recorder.
+/// The clone is field-wise identical to the former derived clone (all 8 fields);
+/// in a production (non-test) build the `record()` call vanishes entirely, so
+/// this is a plain field-wise clone with ZERO added cost.
+#[cfg(feature = "write-support")]
+impl Clone for MergeEntry {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        crate::storage::sstable::work_counters::merge_entry_clone_scope::record();
+        Self {
+            run_index: self.run_index,
+            key: self.key.clone(),
+            clustering_key: self.clustering_key.clone(),
+            timestamp: self.timestamp,
+            row_data: self.row_data.clone(),
+            complex_deletions: self.complex_deletions.clone(),
+            range_deletion: self.range_deletion.clone(),
+            row_deletion: self.row_deletion,
+            partition_deletion: self.partition_deletion,
+        }
+    }
 }
 
 impl MergeEntry {
