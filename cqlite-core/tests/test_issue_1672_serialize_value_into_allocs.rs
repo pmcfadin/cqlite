@@ -40,7 +40,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::writer::SSTableWriter;
-use cqlite_core::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
+use cqlite_core::storage::write_engine::mutation::{
+    CellOperation, Mutation, PartitionKey, TableId,
+};
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
