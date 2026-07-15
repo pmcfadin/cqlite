@@ -180,22 +180,36 @@ impl V5CompressedLegacyParser {
         let (mut row_header, row_size) =
             self.parse_row_metadata(data, offset, row_flags, extended_flags)?;
 
-        // CRITICAL VALIDATION: row_size must be reasonable
+        // STRUCTURAL BOUND on row_size — the AUTHORITATIVE invariant, not a guess
+        // (no-heuristics mandate, issues #28 / #2436).
         //
-        // In V5CompressedLegacy format, row_size should never exceed the block size (typically 16KB).
-        // If row_size is unreasonably large, it indicates either:
-        // 1. Partition tombstone or deletion marker (no actual row data)
-        // 2. Format parsing error (landed at wrong offset)
-        // 3. Corrupted data
+        // The former `MAX_REASONABLE_ROW_SIZE = 1_000_000` cap was an arbitrary
+        // heuristic ("row_size should never exceed the block size"). Because the
+        // partition driver folds this `Err` into a `None` "row failed to parse"
+        // (its chunk-straddle NeedMore path), a legitimately >1 MB single-cell row
+        // — a plain `text`/`blob` value past ~1 MB — was SILENTLY DROPPED, and the
+        // whole partition read returned `Ok(0 rows)` for a row that was genuinely
+        // written (issue #2436). A Cassandra row body has no 1 MB limit.
         //
-        // In all cases, we should skip this partition rather than panic.
-        const MAX_REASONABLE_ROW_SIZE: u64 = 1_000_000; // 1MB max (very generous)
-        if row_size > MAX_REASONABLE_ROW_SIZE {
+        // The real invariant: `data` is the FULLY-materialised parse unit for this
+        // row — the whole contiguous data section (`V5_0Uncompressed`), the
+        // stitched chunk buffer (`V5CompressedLegacy`), or the exact partition
+        // window (full-index path) — so a row body can never claim more bytes than
+        // remain after its `row_size` VInt. Comparing against the remaining-byte
+        // COUNT (rather than a materialised `offset + row_size`, which can wrap
+        // `usize` for a corrupt VInt) is overflow-safe. On the compressed stitching
+        // path a row straddling the current chunk legitimately exceeds `available`
+        // here; that returns the SAME `Err` the downstream `> data.len()` checks
+        // already return, which the driver folds to `NeedMore` and refills — so
+        // this only moves the bound earlier and overflow-safe, never changing the
+        // straddle semantics. A genuine truncation/corruption still fails LOUD.
+        let row_body_start = row_metadata_offset + row_header.row_size_vint_len;
+        let available = data.len().saturating_sub(row_body_start) as u64;
+        if row_size > available {
             return Err(Error::corruption(format!(
-                "V5CompressedLegacy: Unreasonably large row_size={} at offset {} (max: {}). Likely partition tombstone or format error.",
-                row_size,
-                offset,
-                MAX_REASONABLE_ROW_SIZE
+                "V5CompressedLegacy: row_size={} at offset {} exceeds available data \
+                 ({} bytes remain after the row_size VInt) — truncated or corrupt row",
+                row_size, offset, available
             )));
         }
 
