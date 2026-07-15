@@ -519,6 +519,12 @@ const STREAMING_CHANNEL_CAPACITY: usize = 256;
 #[cfg(feature = "write-support")]
 mod producer_gauge;
 
+// Egress-channel-depth gauge (issue #2419, WS2): process-global live occupancy
+// of the bounded producer→consumer `sync_channel` backing
+// `cqlite.merge.egress_channel_depth`. Sibling module to bound this file.
+#[cfg(feature = "write-support")]
+mod channel_depth;
+
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
 #[cfg(all(test, feature = "write-support"))]
@@ -1180,6 +1186,11 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
             }
             match receiver.recv_timeout(RECV_CANCEL_POLL) {
                 Ok(Ok(entry)) => {
+                    // Issue #2419 (WS2): this DATA entry just left the bounded
+                    // egress channel — decrement the live occupancy gauge,
+                    // balancing the `channel_depth::sent()` at its send site
+                    // (`from_readers::forward_row`).
+                    channel_depth::received();
                     // Issue #2096: one merge entry decoded from `Data.db` by THIS
                     // adapter-driven run — a full scan, compaction, or (via the
                     // fail-safe `SinglePartitionFilterRun`) a point read all share
@@ -1226,7 +1237,25 @@ impl Drop for SSTableRowIteratorAdapter {
         //    block until the channel drained. Dropping it here (before the join)
         //    rather than relying on field-drop order (which runs AFTER this `Drop`)
         //    is what makes the join bounded.
-        drop(self.receiver.take());
+        //
+        //    Issue #2419 (WS2): before discarding it, drain any DATA entries the
+        //    consumer never pulled (a cancelled/disconnected merge) and decrement
+        //    the egress-depth gauge for each, so `cqlite.merge.egress_channel_depth`
+        //    RETURNS to baseline instead of leaking upward per abandoned scan.
+        //    Terminal `Err` messages are untracked on send, so they are not
+        //    decremented here. A producer racing a send between this drain and the
+        //    drop can buffer at most a bounded handful more (floored at 0 by the
+        //    gauge), never the whole channel's worth.
+        if let Some(receiver) = self.receiver.take() {
+            loop {
+                match receiver.try_recv() {
+                    Ok(Ok(_)) => channel_depth::received(),
+                    Ok(Err(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            drop(receiver);
+        }
         // 3. Join the producer — bounded, because after (1)+(2) the producer
         //    cannot block indefinitely: it either observes the cancel in its scan
         //    loop or its next send fails. A failed join (producer panicked) is

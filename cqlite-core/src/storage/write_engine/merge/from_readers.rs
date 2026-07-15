@@ -134,8 +134,20 @@ fn forward_row(
 ) -> Result<std::ops::ControlFlow<()>> {
     let msg = SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)
         .map_err(MergeProducerError::from);
+    // Issue #2419 (WS2): only DATA entries are tracked on the egress-depth gauge
+    // (a terminal `Err` message is untracked on both send and receive, so it
+    // never unbalances the level). Captured BEFORE `send` moves `msg`.
+    let is_data = msg.is_ok();
     match sender.send(msg) {
-        Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
+        Ok(()) => {
+            if is_data {
+                // A DATA entry now occupies a channel slot; balanced by exactly
+                // one `channel_depth::received()` at the consumer's recv site (or
+                // the teardown drain) — see `channel_depth`.
+                super::channel_depth::sent();
+            }
+            Ok(std::ops::ControlFlow::Continue(()))
+        }
         Err(_) => Ok(std::ops::ControlFlow::Break(())),
     }
 }

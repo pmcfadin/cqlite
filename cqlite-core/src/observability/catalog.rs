@@ -46,6 +46,10 @@ pub mod unit {
     pub const SECONDS: &str = "s";
     /// A count of OS threads (UCUM annotation).
     pub const THREADS: &str = "{thread}";
+    /// A count of open file descriptors (UCUM annotation, issue #2419).
+    pub const FDS: &str = "{fd}";
+    /// A count of channel entries / queued items (UCUM annotation, issue #2419).
+    pub const ENTRIES: &str = "{entry}";
 }
 
 /// Bounded attribute keys for catalog metrics.
@@ -491,6 +495,98 @@ pub const COMPACTION_BUDGET_CONSUMED: &str = "cqlite.compaction.budget.consumed"
 /// naming collision. No high-cardinality attributes.
 pub const MERGE_PRODUCER_THREADS: &str = "cqlite.merge.producer_threads";
 
+/// `cqlite.merge.egress_channel_depth` — gauge `{entry}` (issue #2419, WS2).
+///
+/// Live occupancy of the bounded producer→consumer `sync_channel` (capacity
+/// `STREAMING_CHANNEL_CAPACITY` = 256, `merge/mod.rs`) that carries merged
+/// entries from each per-input producer thread toward the consumer (the k-way
+/// merge that feeds the Flight `do_get` egress or the write-engine compaction
+/// output). `std::sync::mpsc::sync_channel` exposes no `len()`, so occupancy is
+/// tracked by a process-wide atomic incremented on a successful data-entry send
+/// and decremented on the matching receive (mirroring the #2316
+/// `producer_threads` gauge pattern), floored at 0.
+///
+/// **Healthy vs alarming**: a depth near zero means the consumer is keeping up
+/// (or a producer is stalled, e.g. disk-bound — cross-check `cqlite.rpc.rows`);
+/// a depth riding near the channel capacity means the producer is outrunning a
+/// slower consumer (the egress is back-pressured, distinguishing a "stuck in
+/// `do_get`" stall from a disk-bound one). OS-independent (always emits, on
+/// every platform), unlike the `cqlite.proc.*` gauges. No high-cardinality
+/// attributes. Lives in `cqlite.merge.*` alongside [`MERGE_PRODUCER_THREADS`]
+/// (both merge-scoped, shared by compaction + Flight).
+pub const MERGE_EGRESS_CHANNEL_DEPTH: &str = "cqlite.merge.egress_channel_depth";
+
+// ---------------------------------------------------------------------------
+// Saturation instrumentation (issue #2419, WS2 of epic #2313) — process-wide
+// OS-resource gauges + a flight blocking-task proxy, so the read-throughput
+// saturation ramp can attribute a plateau to the resource that binds first
+// (thread/scheduler collapse → queueing → fd exhaustion → memory). The
+// `cqlite.proc.*` gauges are sampled on Linux via `/proc/self/*`; on a
+// non-`/proc` platform the reader returns None and the sampler emits NO sample
+// (absence, never a fabricated 0 — the telemetry authoritative-data rule #2314).
+// ---------------------------------------------------------------------------
+
+/// `cqlite.proc.threads` — gauge `{thread}` (issue #2419, WS2).
+///
+/// Process-wide OS thread count, sampled from `/proc/self/task` on Linux by the
+/// background saturation sampler (~2s cadence). Aggregates the thread footprint
+/// across ALL concurrent queries (unlike [`MERGE_PRODUCER_THREADS`], which is
+/// per-merge), so N wide `do_get` merges over-subscribing the box is legible on
+/// the server's own metric surface, not only through out-of-band `kubectl top`.
+///
+/// **Healthy vs alarming**: rises with concurrent scans (each opens producer
+/// threads) and settles back toward baseline as they complete; a level that
+/// keeps climbing toward the container thread ceiling is the thread/scheduler
+/// collapse the ramp watches for. **Absence rule**: on a non-`/proc` platform
+/// the reader returns None and this gauge is ABSENT from the exposition (never
+/// `0`). No high-cardinality attributes.
+pub const PROC_THREADS: &str = "cqlite.proc.threads";
+
+/// `cqlite.proc.fds` — gauge `{fd}` (issue #2419, WS2).
+///
+/// Process-wide open file-descriptor count, sampled from `/proc/self/fd` on
+/// Linux. The read path opens a fresh `File` per SSTable per scan (no reader
+/// pool, by #815 design), so N×M fds accumulate against a container ulimit
+/// (~1024) → `EMFILE`. This gauge makes fd pressure visible before exhaustion.
+///
+/// **Healthy vs alarming**: rises as concurrent scans open SSTables and falls as
+/// they complete; a level approaching the ulimit is the fd-exhaustion binding
+/// point. **Absence rule**: None off-Linux → the gauge is absent (never `0`). No
+/// high-cardinality attributes.
+pub const PROC_FDS: &str = "cqlite.proc.fds";
+
+/// `cqlite.proc.rss_bytes` — gauge `By` (issue #2419, WS2).
+///
+/// Process resident set size in bytes, sampled from the `VmRSS` field of
+/// `/proc/self/status` on Linux (dependency-free plain-text read, no page-size
+/// math). The Flight path bypasses the query engine's result-byte budget, so RSS
+/// ≈ N × per-scan peak; this gauge makes process memory pressure legible.
+///
+/// **Healthy vs alarming**: rises with concurrent in-flight scan payloads and
+/// falls as they drain; a level approaching the container memory limit is the
+/// memory-binding point (and the OOMKill risk). **Absence rule**: None off-Linux
+/// → the gauge is absent (never `0`). No high-cardinality attributes.
+pub const PROC_RSS_BYTES: &str = "cqlite.proc.rss_bytes";
+
+/// `cqlite.flight.blocking_tasks_in_use` — gauge `{thread}` (issue #2419, WS2).
+///
+/// Flight-managed `spawn_blocking` tasks the streaming/merge path currently has
+/// outstanding, tracked by a process-wide atomic incremented on entry to a
+/// flight `spawn_blocking` closure and decremented on exit via an RAII guard (so
+/// a panic / cancel / early-return still decrements). An honest, dependency-free
+/// proxy for blocking-pool pressure.
+///
+/// **Scope caveat**: this is FLIGHT-MANAGED-TASKS-IN-FLIGHT, NOT the global
+/// `tokio` blocking-pool queue depth (which needs a build-wide `tokio_unstable`
+/// cfg — out of scope, design open fork O1). It never records a fabricated
+/// global-pool number. **Healthy vs alarming**: rises with concurrent `do_get`
+/// scans and returns to baseline as they finish; a level pinned near the
+/// blocking-pool size (~512 default) with flat `cqlite.rpc.rows` is the
+/// blocking-pool-saturation smell. OS-independent (always emits). DISTINCT from
+/// [`FLIGHT_ADMISSION_IN_USE`] (held admission permits) — the two measure
+/// different resources. No high-cardinality attributes.
+pub const FLIGHT_BLOCKING_TASKS_IN_USE: &str = "cqlite.flight.blocking_tasks_in_use";
+
 /// `cqlite.errors.total` — counter `{error}`.
 ///
 /// Total errors observed, the canonical error-rate signal (issue #1038).
@@ -737,6 +833,34 @@ pub const ALL_METRICS: &[&str] = &[
     FLIGHT_ADMISSION_WAITING,
     FLIGHT_ADMISSION_REJECTED_TOTAL,
     FLIGHT_ADMISSION_WAIT_SECONDS,
+    // Saturation instrumentation (#2419, WS2 of epic #2313)
+    MERGE_EGRESS_CHANNEL_DEPTH,
+    PROC_THREADS,
+    PROC_FDS,
+    PROC_RSS_BYTES,
+    FLIGHT_BLOCKING_TASKS_IN_USE,
+];
+
+/// The five saturation gauges added by issue #2419 (WS2). Grouped for the
+/// distinctness/registration tests and #2426's operator reference so they can be
+/// presented as one section without re-listing them by hand.
+pub const SATURATION_GAUGES: &[&str] = &[
+    MERGE_EGRESS_CHANNEL_DEPTH,
+    PROC_THREADS,
+    PROC_FDS,
+    PROC_RSS_BYTES,
+    FLIGHT_BLOCKING_TASKS_IN_USE,
+];
+
+/// The five `cqlite.flight.admission.*` gauges/counters from issue #2420 (WS4),
+/// grouped so the saturation-family distinctness test can assert the two
+/// families are pairwise disjoint (spec Requirement: distinct families).
+pub const ADMISSION_METRICS: &[&str] = &[
+    FLIGHT_ADMISSION_LIMIT,
+    FLIGHT_ADMISSION_IN_USE,
+    FLIGHT_ADMISSION_WAITING,
+    FLIGHT_ADMISSION_REJECTED_TOTAL,
+    FLIGHT_ADMISSION_WAIT_SECONDS,
 ];
 
 #[cfg(test)]
@@ -917,6 +1041,74 @@ mod tests {
             "otel.rs registers instruments for metrics ABSENT from ALL_METRICS \
              (add them to catalog::ALL_METRICS): {missing:?}"
         );
+    }
+
+    #[test]
+    fn saturation_gauges_are_registered_namespaced_and_unique() {
+        // Issue #2419 (WS2), spec Requirement: every saturation gauge must be a
+        // `cqlite.*` name in ALL_METRICS, appearing exactly once, with the units
+        // the design's naming table pins. Fails on `main` until the constants land.
+        for m in SATURATION_GAUGES {
+            assert!(ALL_METRICS.contains(m), "{m} must be catalogued");
+            assert!(m.starts_with("cqlite."), "{m} must be rooted under cqlite.");
+            assert_eq!(
+                ALL_METRICS.iter().filter(|n| *n == m).count(),
+                1,
+                "{m} must appear exactly once in ALL_METRICS"
+            );
+        }
+        assert_eq!(MERGE_EGRESS_CHANNEL_DEPTH, "cqlite.merge.egress_channel_depth");
+        assert_eq!(PROC_THREADS, "cqlite.proc.threads");
+        assert_eq!(PROC_FDS, "cqlite.proc.fds");
+        assert_eq!(PROC_RSS_BYTES, "cqlite.proc.rss_bytes");
+        assert_eq!(
+            FLIGHT_BLOCKING_TASKS_IN_USE,
+            "cqlite.flight.blocking_tasks_in_use"
+        );
+        // Units from the design naming table (#2419 design D4).
+        assert_eq!(unit::FDS, "{fd}");
+        assert_eq!(unit::ENTRIES, "{entry}");
+        assert_eq!(unit::THREADS, "{thread}");
+        assert_eq!(unit::BYTES, "By");
+    }
+
+    #[test]
+    fn saturation_gauges_have_dedicated_otel_arms_not_the_adhoc_fallback() {
+        // Issue #2419 (WS2), spec Requirement / #2412 lesson: each saturation
+        // gauge must resolve in `otel::record_gauge` to a pre-built `Instruments`
+        // field, NOT the ad-hoc `_ =>` fallback (which rebuilds the instrument on
+        // every sample). Source-scan otel.rs for a dedicated `catalog::IDENT =>`
+        // match arm per gauge — a fully-automatic check needing no `observability`
+        // feature. Delete an arm → this fails.
+        let otel_src = include_str!("otel.rs");
+        for ident in [
+            "MERGE_EGRESS_CHANNEL_DEPTH",
+            "PROC_THREADS",
+            "PROC_FDS",
+            "PROC_RSS_BYTES",
+            "FLIGHT_BLOCKING_TASKS_IN_USE",
+        ] {
+            let arm = format!("catalog::{ident} =>");
+            assert!(
+                otel_src.contains(&arm),
+                "otel::record_gauge lacks a dedicated arm `{arm}` — the gauge would \
+                 fall through to the ad-hoc per-call-rebuilt fallback (#2412)"
+            );
+        }
+    }
+
+    #[test]
+    fn saturation_family_is_disjoint_from_admission_family() {
+        // Issue #2419 (WS2), spec Requirement: the saturation gauges SHALL NOT
+        // duplicate or overlap the #2420 admission gauges, and
+        // `cqlite.flight.blocking_tasks_in_use` (blocking-pool pressure) must be a
+        // DISTINCT metric from `cqlite.flight.admission.in_use` (held permits).
+        for s in SATURATION_GAUGES {
+            for a in ADMISSION_METRICS {
+                assert_ne!(s, a, "saturation gauge {s} collides with admission {a}");
+            }
+        }
+        assert_ne!(FLIGHT_BLOCKING_TASKS_IN_USE, FLIGHT_ADMISSION_IN_USE);
     }
 
     #[test]

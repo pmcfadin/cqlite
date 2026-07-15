@@ -344,6 +344,12 @@ struct Instruments {
     flight_admission_limit: Gauge<i64>,
     flight_admission_in_use: Gauge<i64>,
     flight_admission_waiting: Gauge<i64>,
+    // Saturation instrumentation (#2419, WS2 of epic #2313).
+    merge_egress_channel_depth: Gauge<i64>,
+    proc_threads: Gauge<i64>,
+    proc_fds: Gauge<i64>,
+    proc_rss_bytes: Gauge<i64>,
+    flight_blocking_tasks_in_use: Gauge<i64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -669,6 +675,31 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::DIMENSIONLESS)
                 .with_description("do_get requests parked waiting for an admission permit (#2420).")
                 .build(),
+            merge_egress_channel_depth: m
+                .i64_gauge(catalog::MERGE_EGRESS_CHANNEL_DEPTH)
+                .with_unit(catalog::unit::ENTRIES)
+                .with_description("Live occupancy of the bounded merge egress sync_channel (#2419).")
+                .build(),
+            proc_threads: m
+                .i64_gauge(catalog::PROC_THREADS)
+                .with_unit(catalog::unit::THREADS)
+                .with_description("Process OS thread count (/proc/self/task, Linux) (#2419).")
+                .build(),
+            proc_fds: m
+                .i64_gauge(catalog::PROC_FDS)
+                .with_unit(catalog::unit::FDS)
+                .with_description("Process open fd count (/proc/self/fd, Linux) (#2419).")
+                .build(),
+            proc_rss_bytes: m
+                .i64_gauge(catalog::PROC_RSS_BYTES)
+                .with_unit(catalog::unit::BYTES)
+                .with_description("Process resident set size (/proc/self/status VmRSS, Linux) (#2419).")
+                .build(),
+            flight_blocking_tasks_in_use: m
+                .i64_gauge(catalog::FLIGHT_BLOCKING_TASKS_IN_USE)
+                .with_unit(catalog::unit::THREADS)
+                .with_description("Flight spawn_blocking tasks currently outstanding (#2419).")
+                .build(),
         }
     })
 }
@@ -770,6 +801,11 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
         catalog::FLIGHT_ADMISSION_LIMIT => &i.flight_admission_limit,
         catalog::FLIGHT_ADMISSION_IN_USE => &i.flight_admission_in_use,
         catalog::FLIGHT_ADMISSION_WAITING => &i.flight_admission_waiting,
+        catalog::MERGE_EGRESS_CHANNEL_DEPTH => &i.merge_egress_channel_depth,
+        catalog::PROC_THREADS => &i.proc_threads,
+        catalog::PROC_FDS => &i.proc_fds,
+        catalog::PROC_RSS_BYTES => &i.proc_rss_bytes,
+        catalog::FLIGHT_BLOCKING_TASKS_IN_USE => &i.flight_blocking_tasks_in_use,
         _ => {
             meter().i64_gauge(name).build().record(value, attributes);
             return;
