@@ -27,7 +27,6 @@
 
 #![cfg(not(feature = "tombstones"))]
 
-use super::super::source::ScanCursor;
 use super::super::SSTableReader;
 use super::model::{ClusteringRowWindow, ClusteringSlice};
 use crate::parser::types::{parse_cql_value, CqlTypeId};
@@ -36,8 +35,6 @@ use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
 use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
-use std::io::SeekFrom;
-use tokio::io::AsyncSeekExt;
 use tracing::debug;
 
 /// `ClusteringPrefix.Kind.CLUSTERING` ordinal (a full row clustering name). Block
@@ -484,44 +481,54 @@ impl SSTableReader {
     ///
     /// This mirrors the window-building half of the BTI seek but is kept local so
     /// the over-threshold `bti.rs` is not grown.
+    ///
+    /// I/O path (issue #1573 C2, #1869): chunks are fetched with positioned
+    /// (`read_at`) reads on the shared `point_source` — no per-query `new_scan_cursor`
+    /// / `open(2)`, no cursor, and no cross-I/O mutex — exactly like the BTI seek
+    /// (`bti_decompress_and_parse_target_all`) and the compressed offset-read window
+    /// (`read_compressed_offset_window`). CRC-before-decompress (guardrail #1411) is
+    /// preserved: `read_compressed_chunk_at` verifies each compressed chunk's inline
+    /// CRC32 before it is decompressed, and the uncompressed arm verifies the covering
+    /// `CRC.db` chunk(s) before returning bytes.
     async fn decompress_partition_window(
         &self,
         offset: usize,
         end_bound: Option<usize>,
     ) -> Result<Option<(Vec<u8>, usize)>> {
-        let cursor = self.new_scan_cursor().await?;
+        use crate::storage::sstable::compression::Compression;
+
         let chunk_length = self
             .compression_info
             .as_ref()
             .map(|ci| ci.chunk_length as usize)
             .filter(|&len| len > 0);
 
-        let (window_base, mut window) = match chunk_length {
-            Some(len) => {
-                let target_chunk = offset / len;
-                let window_base = target_chunk * len;
-                let chunk_start = self
-                    .compression_info
+        match chunk_length {
+            Some(_len) => {
+                // Compressed Data.db: the window-building is a pure function of
+                // `CompressionInfo` + the positional source, so it lives in
+                // `compressed_partition_window` where it is unit-tested directly against
+                // hand-built fixtures (`big_promoted_seek_tests::window_builder`), without a full
+                // write-engine + compressing-writer roundtrip (issue #1869).
+                let comp_info = self.compression_info.as_deref().ok_or_else(|| {
+                    Error::corruption(
+                        "BIG clustering/reverse seek: chunk-targeted path requires CompressionInfo \
+                         but it is absent",
+                    )
+                })?;
+                let compression = self
+                    .compression_reader
                     .as_ref()
-                    .and_then(|ci| ci.compressed_chunk_offset(target_chunk))
-                    .ok_or_else(|| {
-                        Error::corruption(format!(
-                            "BIG reverse seek: no compressed offset for target chunk {target_chunk} \
-                             (offset {offset}, chunk_length {len})"
-                        ))
-                    })?;
-                {
-                    let mut file_guard = cursor.file.lock().await;
-                    // A5 read-work counter (SEEK_CALLS; consumer E4): the BIG
-                    // promoted-index reverse-block target-chunk seek on the point-read
-                    // path. No-op in release (design.md Decision 1/2).
-                    crate::storage::sstable::read_work_counters::record_seek();
-                    file_guard.seek(SeekFrom::Start(chunk_start)).await?;
-                }
-                cursor
-                    .chunk_index
-                    .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
-                (window_base, Vec::<u8>::new())
+                    .map(|cr| Compression::new(*cr.algorithm()))
+                    .transpose()?;
+                compressed_partition_window(
+                    self.point_source.as_ref(),
+                    comp_info,
+                    compression.as_ref(),
+                    self.stats.file_size,
+                    offset,
+                    end_bound,
+                )
             }
             None => {
                 // Uncompressed Data.db: the data section is RAW bytes after the
@@ -531,21 +538,16 @@ impl SSTableReader {
                 // O(partition) — exactly the bound the compressed arm already holds —
                 // so the per-iteration "O(block), not O(partition)" claim is honest
                 // for uncompressed SSTables too. `offset`/`end_bound` are relative to
-                // the data section (after the header), matching the prior within=offset
-                // contract; we keep window_base = offset so within = 0.
+                // the data section (after the header); we keep window_base = offset so
+                // within = 0.
                 let header_size = self.calculate_header_size() as u64;
                 let phys_start = header_size.saturating_add(offset as u64);
                 let phys_end = match end_bound {
                     Some(end) => header_size.saturating_add(end as u64),
                     // Last partition: extends to the end of the Data.db data section.
-                    None => {
-                        let mut file_guard = cursor.file.lock().await;
-                        // A5 read-work counter (SEEK_CALLS; consumer E4): last-partition
-                        // seek-to-end bounding the uncompressed reverse-block window.
-                        // No-op in release (design.md Decision 1/2).
-                        crate::storage::sstable::read_work_counters::record_seek();
-                        file_guard.seek(SeekFrom::End(0)).await?
-                    }
+                    // The authoritative file length comes from the positional source
+                    // (== the reader's `file_size`), so no seek-to-end is needed.
+                    None => self.point_source.len(),
                 };
                 if phys_end <= phys_start {
                     return Ok(None);
@@ -553,75 +555,195 @@ impl SSTableReader {
                 let span = (phys_end - phys_start) as usize;
                 // Issue #1396: the promoted-index / reverse-lookup path reads
                 // uncompressed Data.db bytes directly; route it through the single
-                // CRC-checked accessor so a corrupt chunk yields a typed
+                // CRC-checked positional accessor so a corrupt chunk yields a typed
                 // Error::Corruption instead of parsed corrupt bytes / Ok(None).
-                let buf = self
-                    .read_uncompressed_verified(&cursor.file, phys_start, span)
-                    .await?;
-                (offset, buf)
+                let buf = self.read_uncompressed_verified_at(phys_start, span).await?;
+                Ok(Some((buf, 0)))
             }
-        };
-
-        if offset < window_base {
-            return Err(Error::corruption(format!(
-                "BIG reverse seek: resolved offset {offset} precedes window base {window_base}"
-            )));
         }
-        let within = offset - window_base;
+    }
 
-        if chunk_length.is_some() {
-            // Authoritative exclusive end (successor offset / data length).
-            let end_offset = match end_bound {
-                Some(end) => end,
-                None => match self
-                    .compression_info
-                    .as_ref()
-                    .map(|ci| ci.data_length as usize)
-                    .filter(|&len| len > offset)
-                {
-                    Some(len) => len,
-                    None => return Ok(None),
-                },
-            };
-            let needed = end_offset.saturating_sub(window_base);
-            while window.len() < needed {
-                if !self.pull_reverse_chunk(&cursor, &mut window).await? {
-                    break; // EOF
+    /// Positional (`pread`) sibling of `read_uncompressed_verified` for this BIG
+    /// clustering/reverse seek path (issue #1573 C2, #1869): read `len` raw bytes at
+    /// an ABSOLUTE Data.db `offset` on the shared `point_source`, verifying the
+    /// covering `CRC.db` chunk(s) BEFORE returning any bytes.
+    ///
+    /// Unlike the cursor-based `read_uncompressed_verified` this takes no
+    /// `BlockSource` cursor and no mutex — the offset is a parameter, so concurrent
+    /// seek reads never serialize on a shared file position and never `open(2)` per
+    /// query. The CRC check (guardrail #1411) and its typed `Error::Corruption` on
+    /// mismatch are identical to the cursor path; the verifier is a no-op when this
+    /// reader has no `CRC.db`. Lives here (next to its sole caller) rather than in
+    /// the over-threshold `data_access/mod.rs` (campsite rule, epic #1116).
+    async fn read_uncompressed_verified_at(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let size = u32::try_from(len).map_err(|_| {
+            Error::corruption(format!(
+                "uncompressed read length {len} exceeds u32 range for CRC verification \
+                 at Data.db offset 0x{offset:x}"
+            ))
+        })?;
+        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
+        self.verify_uncompressed_range(offset, size).await?;
+
+        let mut buf = vec![0u8; len];
+        self.point_source.read_exact_at(offset, &mut buf)?;
+        Ok(buf)
+    }
+}
+
+/// Build the compressed-arm partition window covering `[offset, end_bound)` in the
+/// UNCOMPRESSED domain and return `(window, within)` where `within = offset -
+/// window_base` is the partition start inside `window` (issue #1184). `Ok(None)` when
+/// the last partition cannot be bounded authoritatively (no successor offset and no
+/// usable `data_length`).
+///
+/// Extracted from [`SSTableReader::decompress_partition_window`] (issue #1869) so the
+/// window arithmetic is a pure function of `CompressionInfo` + the positional
+/// [`ReadAt`](super::super::read_at::ReadAt) source and can be unit-tested directly
+/// against hand-built fixtures (`big_promoted_seek_tests::window_builder`) — no full write-engine +
+/// compressing-writer roundtrip. I/O-path parity with `read_compressed_offset_window`
+/// (`compressed_offset.rs`) is preserved: CRC-before-decompress via
+/// [`read_compressed_chunk_at`](super::super::block_io::read_compressed_chunk_at), and
+/// the incompressible / raw-chunk fallback (Bug #639) for chunks Cassandra stored
+/// uncompressed.
+pub(super) fn compressed_partition_window(
+    point_source: &dyn super::super::read_at::ReadAt,
+    comp_info: &crate::storage::sstable::compression_info::CompressionInfo,
+    compression: Option<&crate::storage::sstable::compression::Compression>,
+    file_size: u64,
+    offset: usize,
+    end_bound: Option<usize>,
+) -> Result<Option<(Vec<u8>, usize)>> {
+    use super::super::block_io;
+    use super::super::chunk_source::ChunkSource;
+
+    let len = comp_info.chunk_length as usize;
+    if len == 0 {
+        return Err(Error::corruption(
+            "BIG clustering/reverse seek: CompressionInfo chunk_length is zero; cannot map a \
+             Data.db offset to a compressed chunk",
+        ));
+    }
+
+    let target_chunk = offset / len;
+    let window_base = target_chunk * len;
+    if offset < window_base {
+        return Err(Error::corruption(format!(
+            "BIG clustering/reverse seek: resolved offset {offset} precedes window base \
+             {window_base}"
+        )));
+    }
+    let within = offset - window_base;
+
+    // Authoritative exclusive end (successor offset / data length).
+    let end_offset = match end_bound {
+        Some(end) => end,
+        None => {
+            let data_length = comp_info.data_length as usize;
+            if data_length > offset {
+                data_length
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+
+    // Fail closed on an out-of-range starting chunk (malformed/corrupt promoted-index
+    // offset): otherwise the loop below would `break` on the FIRST
+    // `read_compressed_chunk_at` EOF signal, leaving `window` empty while `within > 0`,
+    // and the caller's `&window[within..]` slice would PANIC. Match the typed
+    // corruption error the pre-#1869 code produced via
+    // `compressed_chunk_offset(..).ok_or_else(..)`.
+    if target_chunk >= comp_info.chunk_offsets.len() {
+        return Err(Error::corruption(format!(
+            "BIG clustering/reverse seek: resolved chunk {target_chunk} is out of range (only {} \
+             compressed chunk(s) in CompressionInfo)",
+            comp_info.chunk_offsets.len()
+        )));
+    }
+
+    // Buffer EXACTLY the chunks covering `[offset, end_offset)` — never stitch to EOF
+    // (the #953/#1184 bound: a head-of-file seek must not decompress the whole file).
+    // Positioned reads resolve their own offset from the chunk index, so no pre-seek is
+    // needed.
+    let needed = end_offset.saturating_sub(window_base);
+    let max_compressed_length = comp_info.max_compressed_length as usize;
+    // Fail closed on a corrupt `CompressionInfo` whose `max_compressed_length == 0`:
+    // otherwise the raw-chunk fallback below (`compressed.len() >= max_compressed_length`)
+    // is ALWAYS true, so EVERY still-compressed chunk would be returned verbatim as
+    // "raw/incompressible" plaintext — never decompressed — and the inline CRC32 (computed
+    // over the genuine on-disk bytes) would still pass, silently handing back garbage rows.
+    // A valid Cassandra `CompressionInfo` never records a zero `max_compressed_length`.
+    if max_compressed_length == 0 {
+        return Err(Error::corruption(
+            "BIG clustering/reverse seek: CompressionInfo max_compressed_length is zero; \
+             cannot distinguish compressed chunks from raw/incompressible ones",
+        ));
+    }
+    let mut window = Vec::<u8>::new();
+    let mut chunk_index = target_chunk;
+    while window.len() < needed {
+        match block_io::read_compressed_chunk_at(
+            point_source,
+            comp_info,
+            chunk_index,
+            file_size,
+            0, // NB: chunk offsets are absolute from Data.db byte 0
+        )? {
+            Some(compressed) => {
+                chunk_index += 1;
+                // Incompressible / raw-chunk fallback (Bug #639, epic #970): Cassandra
+                // stores a chunk RAW (uncompressed) when its would-be compressed length
+                // meets or exceeds `max_compressed_length`; those bytes are already
+                // plaintext, so routing them through the decompressor would fail with a
+                // spurious LZ4-decode corruption error on real Cassandra data. Mirror
+                // `read_compressed_offset_window` (compressed_offset.rs) exactly. The
+                // CRC32 is already validated by `read_compressed_chunk_at` above.
+                if compressed.len() >= max_compressed_length {
+                    window.extend_from_slice(&compressed);
+                } else {
+                    // Decompress-only (uncached), preserving this path's historical
+                    // behavior + the separate work_counters counter.
+                    let decompressed = ChunkSource::decompress_only(compression, compressed)?;
+                    crate::storage::sstable::work_counters::add_chunk_decompressed();
+                    window.extend_from_slice(&decompressed);
                 }
             }
+            // EOF. Reaching `None` after ≥1 successful chunk read is the intended "read
+            // to end of window" stop. But if we haven't even collected enough bytes to
+            // satisfy the caller's `within` offset, the length metadata is
+            // inconsistent/corrupt — fail closed rather than hand back a short `window`
+            // the caller would slice past.
+            None => {
+                if window.len() < within {
+                    return Err(Error::corruption(format!(
+                        "BIG clustering/reverse seek: hit EOF at chunk {chunk_index} after {} \
+                         byte(s), before reaching the resolved intra-window offset {within}",
+                        window.len()
+                    )));
+                }
+                break;
+            }
         }
-        Ok(Some((window, within)))
     }
 
-    /// Read+decompress the next chunk into `window`, returning `false` at EOF.
-    /// Bumps `chunks_decompressed` so the reverse path's decompression stays
-    /// observably bounded to the target partition's chunk span.
-    ///
-    /// Single decode plane (issue #1598, G2): routes through ChunkSource::decompress_only
-    /// to consolidate the decompress call site, but preserves the current UNCACHED behavior
-    /// (no B1 cache insertion, separate work_counters counter).
-    async fn pull_reverse_chunk(&self, cursor: &ScanCursor, window: &mut Vec<u8>) -> Result<bool> {
-        use crate::storage::sstable::compression::Compression;
-        match self.read_next_block(cursor).await? {
-            Some(compressed_chunk) => {
-                // Build Compression once per call (same as before)
-                let compression_opt = self
-                    .compression_reader
-                    .as_ref()
-                    .map(|cr| Compression::new(*cr.algorithm()))
-                    .transpose()?;
-                // Decompress-only: no cache, keeps work_counters separate
-                let decompressed = super::super::chunk_source::ChunkSource::decompress_only(
-                    compression_opt.as_ref(),
-                    compressed_chunk,
-                )?;
-                crate::storage::sstable::work_counters::add_chunk_decompressed();
-                window.extend_from_slice(&decompressed);
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+    // Single choke-point guard (issue #1869): EVERY way the loop can exit with an
+    // insufficient window converges here. In particular a non-monotonic/corrupt
+    // successor or end bound with `end_offset <= window_base` yields `needed == 0`, so
+    // the loop body never runs and `window` stays EMPTY while `within > 0`; the up-front
+    // out-of-range guard does NOT fire (target_chunk can be perfectly in range).
+    // Returning `Ok(Some((<empty window>, within)))` would make both callers'
+    // `&window[within..]` slice PANIC. For a VALID read the covering chunk is read in
+    // full, so `within < len <= window.len()` and this never rejects a legitimate case.
+    if window.len() < within {
+        return Err(Error::corruption(format!(
+            "BIG clustering/reverse seek: resolved window is {} byte(s) — shorter than the \
+             required intra-window offset {within} (corrupt successor/end bound)",
+            window.len()
+        )));
     }
+
+    Ok(Some((window, within)))
 }
 
 /// Select the minimal contiguous block index range `[lo, hi]` whose clustering
