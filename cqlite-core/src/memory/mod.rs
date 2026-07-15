@@ -171,16 +171,22 @@ pub struct MemoryStats {
     /// Key cache misses: aggregate across the per-reader B4 caches (issue #1571).
     pub key_cache_misses: u64,
 
-    /// Key cache evictions: aggregate across the per-reader B4 caches (issue
-    /// #1571) — entries evicted to stay within each reader's byte budget.
+    /// Key cache evictions: entries evicted from the process-global key cache to
+    /// stay within its byte budget (issue #1571/#2059) — DISTINCT from
+    /// [`key_cache_invalidations`](Self::key_cache_invalidations).
     pub key_cache_evictions: u64,
 
-    /// Key cache resident bytes: aggregate approximate resident footprint of the
-    /// per-reader B4 caches (issue #1571).
+    /// Key cache invalidations: entries dropped from the process-global key cache on
+    /// generation removal / compaction / warm-registry evict (issue #2059) — a
+    /// distinct counter from budget-driven [`key_cache_evictions`](Self::key_cache_evictions).
+    pub key_cache_invalidations: u64,
+
+    /// Key cache resident bytes: approximate resident footprint of the process-global
+    /// key cache (issue #1571/#2059).
     pub key_cache_resident_bytes: usize,
 
-    /// Key cache capacity bytes: summed configured byte budget across the
-    /// per-reader B4 caches (issue #1571).
+    /// Key cache capacity bytes: the process-global key cache's fixed configured byte
+    /// budget (issue #1571/#2059), or `0` when block caching is disabled.
     pub key_cache_capacity_bytes: usize,
 
     /// Row cache hits. Retained for shape compatibility; the row cache was

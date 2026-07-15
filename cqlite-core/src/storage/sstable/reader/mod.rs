@@ -873,9 +873,19 @@ impl SSTableReader {
             h.finish()
         };
 
-        // Per-reader key→partition-offset cache (issue #1570, B4), built from the
-        // open-time config BEFORE `open_config` is moved into the struct field.
+        // Global key→partition-offset cache handle (issue #2059): the process-global
+        // shared instance when block caching is enabled, else a per-reader disabled
+        // no-op. Built from the open-time config BEFORE `open_config` is moved.
         let key_offset_cache = super::build_key_offset_cache(&open_config);
+
+        // This reader's authoritative inode-stable generation identity (issue #2059),
+        // the namespacing half of every global key-cache entry. Resolved ONCE here
+        // from the Data.db path + parsed generation, and stored immutably — it stays
+        // stable across a #2383 rebind (a path swap over a byte-identical generation),
+        // so cached locations survive a rebind. `None` on a stat failure → the cache
+        // is bypassed rather than fabricating an identity (no-heuristics #28).
+        let generation_identity =
+            crate::storage::cache::GenerationIdentity::resolve(path, generation);
 
         // Cache the immutable `[first_key, last_key]` endpoint tokens ONCE at open
         // (issue #1576, Epic C/C5 perf finding) so `partition_key_out_of_range`
@@ -934,6 +944,7 @@ impl SSTableReader {
             chunk_cache_id,
             bti_lookup_memo: std::sync::Mutex::new(None),
             key_offset_cache,
+            generation_identity,
         })
     }
 

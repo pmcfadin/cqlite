@@ -4,11 +4,31 @@
 //! Summary.db, and Statistics.db readers.
 
 use super::SSTableReader;
+use crate::storage::cache::PartitionLoc;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use tracing::debug;
 
 impl SSTableReader {
+    /// Consult the process-global key→partition-offset cache (issue #2059) with this
+    /// reader's authoritative generation identity. A `None` identity (a stat failure
+    /// at open) BYPASSES the cache — a structural miss, never a fabricated identity
+    /// (no-heuristics #28). Fail-closed on identity mismatch is enforced inside the
+    /// cache: an entry keyed on a different generation is a miss.
+    pub(crate) fn key_cache_get(&self, partition_key: &[u8]) -> Option<PartitionLoc> {
+        let identity = self.generation_identity?;
+        self.key_offset_cache.get(identity, partition_key)
+    }
+
+    /// Populate the process-global key→partition-offset cache (issue #2059) with this
+    /// reader's generation identity. A `None` identity is a no-op (the cache is
+    /// bypassed for this reader rather than fabricating an identity).
+    pub(crate) fn key_cache_insert(&self, partition_key: &[u8], loc: PartitionLoc) {
+        if let Some(identity) = self.generation_identity {
+            self.key_offset_cache.insert(identity, partition_key, loc);
+        }
+    }
+
     /// Enhanced partition lookup using Index.db reader with promoted index support.
     ///
     /// `partition_key` must be the raw partition-key bytes as produced by
@@ -35,7 +55,7 @@ impl SSTableReader {
         // (`INDEX_PROBES` stays 0 on the hit). Positive-only. Checked FIRST — before
         // any materialize / interval read — so the hit skips ALL probe work on both
         // the Summary-guided and resident-map paths (issue #2412 §B).
-        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+        if let Some(loc) = self.key_cache_get(partition_key) {
             debug!(
                 "B4 key-cache hit for partition (raw key len={}): offset={}, size={}",
                 partition_key.len(),
@@ -95,11 +115,11 @@ impl SSTableReader {
                         (catalog::attr::SSTABLE_FORMAT, format.into()),
                     ],
                 );
-                // B4: cache this present-key resolution so the next point read of
-                // the same key skips the Index.db probe (issue #1570).
-                self.key_offset_cache.insert(
+                // Cache this present-key resolution so the next point read of the
+                // same key skips the Index.db probe (issue #1570/#2059).
+                self.key_cache_insert(
                     partition_key,
-                    crate::storage::cache::PartitionLoc::new(entry.data_offset, entry.data_size),
+                    PartitionLoc::new(entry.data_offset, entry.data_size),
                 );
                 return Ok(Some((entry.data_offset, entry.data_size)));
             } else {
@@ -173,7 +193,7 @@ impl SSTableReader {
         // counters (found = true) so a cache-served lookup records the same presence
         // decision a fresh descent does. A disabled cache (`block_cache.enabled=false`)
         // is a genuine no-op `get`, so this falls through and the read re-walks.
-        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+        if let Some(loc) = self.key_cache_get(partition_key) {
             Self::emit_bti_presence_counters(true);
             return Ok(Some(loc.data_offset));
         }
@@ -222,7 +242,7 @@ impl SSTableReader {
         // trie-hit-only correctness guardrail as the raw-key entry: the cached offset
         // is the exact offset a fresh descent resolves. A disabled cache is a no-op
         // `get`, so this falls through and the candidate re-walks.
-        if let Some(loc) = self.key_offset_cache.get(partition_key) {
+        if let Some(loc) = self.key_cache_get(partition_key) {
             Self::emit_bti_presence_counters(true);
             return Ok(Some(loc.data_offset));
         }
@@ -323,13 +343,10 @@ impl SSTableReader {
                     off
                 );
                 self.bti_lookup_memo_store(partition_key, Some(off));
-                // B4: cache this trie-hit resolution (a prefix-collision candidate,
+                // Cache this trie-hit resolution (a prefix-collision candidate,
                 // re-verified by the caller downstream) so a later interleaved read of
-                // the same key skips the trie descent (issue #1570).
-                self.key_offset_cache.insert(
-                    partition_key,
-                    crate::storage::cache::PartitionLoc::offset_only(off),
-                );
+                // the same key skips the trie descent (issue #1570/#2059).
+                self.key_cache_insert(partition_key, PartitionLoc::offset_only(off));
                 Ok(Some(off))
             }
             Some(BtiPartitionLocation::RowsOffset(rows_offset)) => {
@@ -390,10 +407,10 @@ impl SSTableReader {
                     header.block_count
                 );
                 self.bti_lookup_memo_store(partition_key, Some(header.data_position));
-                // B4: cache this present WIDE-partition resolution (issue #1570).
-                self.key_offset_cache.insert(
+                // Cache this present WIDE-partition resolution (issue #1570/#2059).
+                self.key_cache_insert(
                     partition_key,
-                    crate::storage::cache::PartitionLoc::offset_only(header.data_position),
+                    PartitionLoc::offset_only(header.data_position),
                 );
                 Ok(Some(header.data_position))
             }
