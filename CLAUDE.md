@@ -257,6 +257,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
+- **roborev invocation — pass BOTH agent and model (#2433).** `.roborev.toml` on `main` pins
+  `agent = 'claude-code'` + `review_model = 'opus'`. To run the codex reviewer you must override BOTH:
+  `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`. `--agent codex`
+  alone still inherits `review_model = 'opus'` from config, and codex-on-a-ChatGPT-account rejects
+  `opus` with a hard `400 'opus' model is not supported` — a silent review failure that looks like an
+  outage. Run from a checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config);
+  `--model` is the reliable override. codex's own configured model is `gpt-5.6-sol` (`~/.codex/config.toml`).
 - **flow-closer (#2084)**: the full gate, C, the final roborev pass, and the merge run inside the
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
   summary-file path, ≤10 lines residual), never gate stdout or review churn.
@@ -342,6 +349,17 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   data only (a counter not observed is an error, never a fabricated 0). On a cadence the manager
   runs `retro` and files a deduped `flow-meta` issue. The SKIP-aware `delivery-telemetry` gate
   component covers the tool. Doctrine: `docs/development/pm-operating-loop.md`.
+  - **Stamp via a PR-in-worktree, never a direct push (#2433 branch protection).** `main` blocks
+    direct pushes (PR required for every commit, `enforce_admins=true`), so the ledger line CANNOT be
+    pushed to `main` directly. `flow-finalize`/`flow-closer` stamp by: (1) `git worktree add` a
+    `telemetry-<N>` branch off `origin/main` — **never `git checkout` in the shared root** (a closer
+    that switched root to a `telemetry-*` branch and died stranded root off `main`, breaking every
+    session); (2) `scripts/delivery-telemetry.py record` — note it writes to the SCRIPT's repo ledger
+    (root checkout), NOT `$PWD`, so move/verify the line lands in the telemetry worktree's ledger and
+    leave root clean; (3) commit + push the branch + open a telemetry-only PR that merges once its own
+    `required` check is green. The ledger is a hot append-only file: on a rebase conflict, **keep ALL
+    lines** (main's ledger + your new record), never drop a peer's line. Do NOT block the code merge on
+    the telemetry PR — return its number as residual if its CI is still pending.
 - **Keep doctrine current in the same change** — user-facing or workflow changes update CLAUDE.md
   and the website `agents-developing/` page as part of the change.
 
