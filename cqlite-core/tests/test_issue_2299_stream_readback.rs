@@ -261,10 +261,12 @@ fn direct_stream_wide_partition_reads_back_byte_identical() {
     // Phase 2: run the real N→1 STCS compaction via the direct-stream path.
     let budget = Duration::from_secs(120);
     let mut compaction_completed = false;
+    let mut direct_stream_partitions = 0u64;
     for _ in 0..8 {
         let report = engine
             .maintenance_step(budget)
             .expect("maintenance_step must not error");
+        direct_stream_partitions += report.direct_stream_partitions;
         if !report.completed_merges.is_empty() {
             compaction_completed = true;
             break;
@@ -274,6 +276,19 @@ fn direct_stream_wide_partition_reads_back_byte_identical() {
         }
     }
     assert!(compaction_completed, "compaction must complete");
+    // Positively assert the memory-bounding DIRECT-STREAM path actually ran for
+    // both wide partitions (roborev job 1723): byte-identity + the Data.db-size
+    // block-crossing check below both hold on the buffered path too, so without
+    // this a silent regression to buffering (e.g. a future change that stops
+    // setting `stream_rows_directly`) would leave these tests green while the new
+    // behavior stopped executing. Only the dhat-gated memory test — NOT in the
+    // default gate — would otherwise catch it.
+    assert_eq!(
+        direct_stream_partitions,
+        PARTITIONS.len() as u64,
+        "both wide tombstone-free partitions must compact via the issue #2299 \
+         direct-stream path, not the buffered fall-through"
+    );
     assert_eq!(
         count_data_files(&sstable_dir),
         1,

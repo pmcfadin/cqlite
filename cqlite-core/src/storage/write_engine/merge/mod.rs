@@ -1478,6 +1478,52 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
     (baseline_min_ts, baseline_min_ldt, baseline_min_ttl)
 }
 
+/// Issue #2299 fail-CLOSED guard for the direct-stream compaction gate.
+///
+/// The direct-stream write path (`ActiveMerge::stream_rows_directly`) is selected
+/// from `compute_baseline_min`'s LDT baseline surviving at the `i32::MAX`
+/// (`NO_DELETION_TIME`) sentinel — read as "no input carries ANY deletion, so
+/// there are no range/row/partition tombstones to interleave." But
+/// `compute_baseline_min` fails OPEN: an input whose `Statistics.db` is MISSING or
+/// fails the top-level parse is silently skipped and never contributes to the
+/// baseline. If such a skipped input actually carries a tombstone, the baseline
+/// stays at the live sentinel, the direct path is wrongly selected, and that
+/// input's tombstones are dropped from the compacted output — previously-deleted
+/// data resurrects (a silent data-loss failure mode).
+///
+/// This returns `false` when ANY input's `Statistics.db` is missing or
+/// unparseable at the top level, so the caller can force the always-correct
+/// buffered path independently of the (fail-open) baseline seeder. The deletion
+/// signal is authoritative metadata only (`Statistics.db`), never a byte heuristic
+/// (#28); when it cannot be read we refuse to prove "no deletions" and fall back.
+///
+/// (An input that PARSES but whose best-effort STATS-extras histogram is
+/// unparseable is already handled conservatively inside `compute_baseline_min`:
+/// `has_tombstone = true` forces its LDT into the baseline, lowering it below the
+/// sentinel — so that case does not reach this guard.)
+#[cfg(feature = "write-support")]
+pub fn all_input_stats_readable(input_paths: &[PathBuf]) -> bool {
+    for data_path in input_paths {
+        let stats_path = stats_path_for(data_path);
+        if !stats_path.exists() {
+            return false;
+        }
+        let stats_bytes = match std::fs::read(&stats_path) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        if crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+            &stats_bytes,
+            None,
+        )
+        .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Expiry-aware LOWER bound for the compaction output's `min_local_deletion_time`
 /// delta baseline (issue #1537).
 ///
@@ -6015,6 +6061,67 @@ mod tests {
             baseline_ldt, tomb_ldt,
             "an unparseable STATS-extras section must be treated conservatively \
              (INCLUDE the LDT baseline), not as an empty no-tombstone histogram (#1410)"
+        );
+    }
+
+    /// #2299 / roborev job 1723 — fail-CLOSED guard for the direct-stream gate.
+    ///
+    /// `compute_baseline_min` fails OPEN: an input with a MISSING or top-level
+    /// UNPARSEABLE `Statistics.db` never lowers `baseline_min_ldt`, so a skipped
+    /// tombstone-bearing input would leave the live sentinel intact and the
+    /// `#2299` gate (`baseline_min_ldt == i32::MAX`) would wrongly select the
+    /// direct-stream path, dropping that input's tombstones (data resurrection).
+    /// `all_input_stats_readable` closes that hole: it returns `false` unless EVERY
+    /// input's deletion metadata was actually observed, letting the caller force
+    /// the always-correct buffered path. Removing the AND in `compaction.rs`
+    /// re-opens the data-loss hole and re-greens this test's negative cases.
+    #[test]
+    fn all_input_stats_readable_fails_closed_on_missing_or_unparseable_stats() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+
+        // A well-formed input: Data.db + a valid Statistics.db written through the
+        // real writer. Readable → the guard permits proving "no deletions".
+        let good_data = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&good_data, b"").expect("touch good Data.db");
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&StatisticsMetadata::new(), None)
+            .expect("write valid Statistics.db");
+        assert!(
+            all_input_stats_readable(&[good_data.clone()]),
+            "a well-formed input with a valid Statistics.db must be readable"
+        );
+
+        // Missing Statistics.db (roborev's primary scenario): the paired
+        // Statistics.db is simply absent. Must fail closed.
+        let missing_data = tmp.path().join("nb-2-big-Data.db");
+        std::fs::write(&missing_data, b"").expect("touch missing-stats Data.db");
+        // (deliberately write NO nb-2-big-Statistics.db)
+        assert!(
+            !all_input_stats_readable(&[missing_data.clone()]),
+            "an input whose Statistics.db is missing must NOT be provably deletion-free"
+        );
+
+        // Top-level-unparseable Statistics.db: too short to even carry the TOC
+        // count/CRC header, so `parse_statistics_with_fallback` errors. Must fail
+        // closed (do not infer "no deletions" from an undecodable component).
+        let corrupt_data = tmp.path().join("nb-3-big-Data.db");
+        std::fs::write(&corrupt_data, b"").expect("touch corrupt-stats Data.db");
+        std::fs::write(tmp.path().join("nb-3-big-Statistics.db"), b"\x00\x00")
+            .expect("write truncated Statistics.db");
+        assert!(
+            !all_input_stats_readable(&[corrupt_data.clone()]),
+            "an input whose Statistics.db is unparseable at the top level must fail closed"
+        );
+
+        // MIXED: one readable input + one missing-stats input. A single unreadable
+        // input taints the whole merge — the guard must fail closed so the direct
+        // path is never taken when any input's deletion metadata is unknown.
+        assert!(
+            !all_input_stats_readable(&[good_data, missing_data, corrupt_data]),
+            "any single unreadable input must force the whole merge to fail closed"
         );
     }
 

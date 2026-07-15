@@ -162,6 +162,14 @@ pub struct MaintenanceReport {
     /// and its components were reclaimed after the merged output published. Empty
     /// when nothing was dropped. Paths are input Data.db paths.
     pub dropped_whole: Vec<PathBuf>,
+    /// Number of partitions written via the issue #2299 direct-stream path (rows
+    /// fed straight into the writer session with no whole-partition buffer). Taken
+    /// only when authoritative `Statistics.db` proves no input carries a deletion.
+    /// Exposed so tests can positively assert the memory-bounding path actually
+    /// executed (byte-identity alone holds on both the direct and buffered paths,
+    /// so it cannot distinguish them) — roborev job 1723. `0` when every partition
+    /// used the buffered path.
+    pub direct_stream_partitions: u64,
 }
 
 /// Active merge state for incremental compaction (M5.2, Issue #384)
@@ -420,6 +428,7 @@ impl WriteEngine {
             bytes_written: 0,
             pending_compaction: false,
             dropped_whole: Vec::new(),
+            direct_stream_partitions: 0,
         };
 
         // If no merge policy is set, no maintenance work to do
@@ -781,6 +790,10 @@ impl WriteEngine {
                             merge.rows_merged += state.row_count;
                         }
                         report.rows_merged += state.row_count;
+                        // Issue #2299 (roborev job 1723): record that this
+                        // partition used the memory-bounded direct-stream path, so
+                        // the default gate can assert it actually ran.
+                        report.direct_stream_partitions += 1;
                         continue;
                     }
 
@@ -1286,6 +1299,7 @@ mod tests {
             bytes_written: 1024 * 1024,
             pending_compaction: true,
             dropped_whole: Vec::new(),
+            direct_stream_partitions: 0,
         };
 
         assert_eq!(report.time_spent.as_millis(), 250);
