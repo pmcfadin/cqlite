@@ -511,6 +511,13 @@ impl WarmTableRegistry {
                         freed = freed.saturating_add(r.footprint);
                         if !current_set.contains(&r.id) {
                             removed_count += 1;
+                            // Issue #2059 §C: a generation truly gone from disk —
+                            // drop its process-global key-cache entries. A
+                            // present-but-dead-path generation (#2352, re-opened
+                            // from the live dir with the SAME inode identity) is a
+                            // refresh, NOT a removal, so it is deliberately NOT
+                            // invalidated — its entries stay valid across the rebind.
+                            r.reader.invalidate_key_cache_entries();
                         }
                     }
                 }
@@ -519,6 +526,9 @@ impl WarmTableRegistry {
                 for r in prev.readers {
                     freed = freed.saturating_add(r.footprint);
                     removed_count += 1;
+                    // Issue #2059 §C: drop each dropped generation's global
+                    // key-cache entries.
+                    r.reader.invalidate_key_cache_entries();
                 }
             }
         }
@@ -608,6 +618,11 @@ impl WarmTableRegistry {
                 break;
             };
             if let Some(t) = inner.tables.get_mut(&vkey) {
+                // Issue #2059 §C: drop the evicted generation's process-global
+                // key-cache entries before releasing the reader.
+                if let Some(vr) = t.readers.iter().find(|r| r.id == vid) {
+                    vr.reader.invalidate_key_cache_entries();
+                }
                 t.readers.retain(|r| r.id != vid);
                 if t.readers.is_empty() {
                     inner.tables.remove(&vkey);

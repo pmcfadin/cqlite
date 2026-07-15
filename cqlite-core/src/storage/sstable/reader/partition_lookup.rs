@@ -29,6 +29,24 @@ impl SSTableReader {
         }
     }
 
+    /// Drop ALL of this reader's generation's entries from the process-global key
+    /// cache (issue #2059 §C). Called when the generation is removed / compacted
+    /// away / evicted from the warm registry, so its locations are reclaimed
+    /// promptly and recorded on the distinct `invalidations` counter (never the
+    /// budget-driven `evictions`). Returns the number of entries dropped. A
+    /// #2383 rebind does NOT call this — the identity is unchanged across a rebind,
+    /// so entries survive. No-op when the identity is `None`.
+    ///
+    /// `pub` so the flight `WarmTableRegistry` can invalidate on warm eviction
+    /// (issue #2059 §C) — the warm registry is the process's largest reader pin, so
+    /// its evictions are the primary reclamation trigger for the global cache.
+    pub fn invalidate_key_cache_entries(&self) -> u64 {
+        match self.generation_identity {
+            Some(identity) => self.key_offset_cache.invalidate(identity),
+            None => 0,
+        }
+    }
+
     /// Enhanced partition lookup using Index.db reader with promoted index support.
     ///
     /// `partition_key` must be the raw partition-key bytes as produced by

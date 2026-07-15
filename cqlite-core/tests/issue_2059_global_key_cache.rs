@@ -131,6 +131,12 @@ fn cold_miss_populates_warm_hit_skips_interval_parse() {
         .expect("lazy BIG open");
     let table_id = TableId::from("test_basic.simple_table");
 
+    // The key cache is PROCESS-GLOBAL, so a sibling serial test in this binary may
+    // have populated this generation's entry already. Clear this generation's
+    // entries so the "cold" read below is a genuine miss (fresh-slate for THIS
+    // generation only — the identity is the same file across tests).
+    reader.invalidate_key_cache_entries();
+
     // COLD read: miss → exactly one bounded interval parse → populate the cache.
     mc.reset();
     let cold = rt
@@ -166,5 +172,73 @@ fn cold_miss_populates_warm_hit_skips_interval_parse() {
     assert_eq!(
         cold, warm,
         "the warm cache-served read must return the byte-identical partition the cold read did"
+    );
+}
+
+/// Issue #2059 §C — invalidating a generation drops its cached locations, so a
+/// subsequent read of the SAME key must re-read the bounded `Index.db` interval
+/// (proving the invalidation hook actually reclaims the entry end-to-end, not just
+/// the counter). Spec Requirement "Entries are invalidated on generation removal".
+#[test]
+#[serial]
+fn invalidation_forces_a_fresh_interval_parse() {
+    let mc = testing::metrics_capture();
+
+    let Some(data_file) = find_big_data_file_with_summary("test_basic", "simple_table") else {
+        eprintln!("Skipping (#2059 invalidation): BIG test_basic/simple_table absent");
+        return;
+    };
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let config = Config::default();
+    let platform = Arc::new(
+        rt.block_on(Platform::new(&config))
+            .expect("platform must initialize"),
+    );
+
+    let keys = present_raw_keys(&data_file, platform.clone(), &rt);
+    assert!(!keys.is_empty(), "fixture must expose present Index.db entries");
+    let present = keys[0].clone();
+
+    let reader = rt
+        .block_on(SSTableReader::open(&data_file, &config, platform))
+        .expect("lazy BIG open");
+    let table_id = TableId::from("test_basic.simple_table");
+
+    // Fresh-slate this generation (process-global cache; see the sibling test).
+    reader.invalidate_key_cache_entries();
+
+    // Populate the cache (cold read).
+    let _ = rt
+        .block_on(reader.get(&table_id, &RowKey::new(present.clone())))
+        .expect("cold read");
+
+    // Warm read confirms the entry is resident (0 interval parses).
+    mc.reset();
+    let _ = rt
+        .block_on(reader.get(&table_id, &RowKey::new(present.clone())))
+        .expect("warm read");
+    assert_eq!(
+        mc.flush_and_collect()
+            .counter_sum(catalog::INDEX_INTERVAL_PARSES_TOTAL),
+        0.0,
+        "before invalidation the warm read is a cache hit (0 interval parses)"
+    );
+
+    // Invalidate this generation's entries (the removal/compaction/warm-evict hook).
+    let dropped = reader.invalidate_key_cache_entries();
+    assert!(dropped >= 1, "invalidation must drop the cached location");
+
+    // The next read of the same key MISSES → must re-read exactly one interval.
+    mc.reset();
+    let after = rt
+        .block_on(reader.get(&table_id, &RowKey::new(present.clone())))
+        .expect("post-invalidation read");
+    assert!(after.is_some(), "the key is still present on disk — it must still resolve");
+    assert_eq!(
+        mc.flush_and_collect()
+            .counter_sum(catalog::INDEX_INTERVAL_PARSES_TOTAL),
+        1.0,
+        "after invalidation the entry is gone, so the read re-parses one interval"
     );
 }

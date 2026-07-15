@@ -2454,7 +2454,11 @@ impl SSTableManager {
         // Remove from memory
         {
             let mut readers = self.readers.write().await;
-            readers.remove(sstable_id);
+            if let Some(removed) = readers.remove(sstable_id) {
+                // Issue #2059 §C: drop the removed generation's process-global
+                // key-cache entries (distinct `invalidations` counter).
+                removed.invalidate_key_cache_entries();
+            }
         }
 
         // Delete file
