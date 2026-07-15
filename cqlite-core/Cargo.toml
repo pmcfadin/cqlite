@@ -94,7 +94,6 @@ uuid = { version = "1.10", features = ["v4"] }
 regex = "1.10"
 futures = "0.3"
 clap = { version = "4.4", features = ["derive"] }
-env_logger = { workspace = true }
 async-trait = "0.1.88"
 
 # Terminal output and logging
@@ -125,6 +124,10 @@ libc = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Dev/test-only logging init (integration tests under tests/). Post the #1706
+# log->tracing migration the library ships no env_logger usage, so it is a
+# dev-dependency only (issue #2519, item b from #2151).
+env_logger = { workspace = true }
 # Heap profiling harness (examples/heap_profile.rs). The dhat allocator is only
 # installed when the `dhat-heap` feature is enabled; the dependency itself is
 # dev-only and never ships in the library.
