@@ -66,7 +66,11 @@ jobs:
           RAW_ITERS: ${{ github.event.inputs.iterations }}
         run: |
           n="${RAW_ITERS:-500}"
-          if ! printf '%s' "$n" | grep -Eq '^[0-9]+$'; then
+          # Use bash `=~` (whole-string anchor), not `grep`, which is line-oriented
+          # and would accept a multi-line value whose first line is all digits —
+          # that value would then survive to the `echo >> "$GITHUB_OUTPUT"` below
+          # as a GITHUB_OUTPUT-injection vector (roborev-review-branch finding).
+          if [[ ! "$n" =~ ^[0-9]+$ ]]; then
             echo "::error::iterations input must be a non-negative integer; got '$n'"
             exit 1
           fi
