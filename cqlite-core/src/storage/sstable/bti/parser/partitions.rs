@@ -544,13 +544,21 @@ pub fn lookup_partition_in_bti_file<R: Read + Seek>(
 /// # Verified against
 /// Real `da-2-bti-Partitions.db` fixture — see issue #755 for derivation.
 pub fn encode_partition_key_for_bti_trie(raw_key_bytes: &[u8]) -> [u8; 9] {
-    use crate::util::cassandra_murmur3::cassandra_murmur3_token;
-
     // C4 work-counter (KEY_HASH_CALLS, issue #1575): one per Murmur3 hash + encoding
     // of a query key. C4 hoists this call out of the candidate-prune loop so a
     // multi-generation point read records exactly 1 (not one per candidate). No-op in
     // release builds (read_work_counters design.md Decision 1).
     crate::storage::sstable::read_work_counters::record_key_hash();
+    encode_partition_key_for_bti_trie_uncounted(raw_key_bytes)
+}
+
+/// Byte-comparable BTI trie key encoding WITHOUT the C4 `KEY_HASH_CALLS` counter
+/// (issue #2058). Identical output to [`encode_partition_key_for_bti_trie`]; used by
+/// the next-partition successor walk, which encodes the SAME key a point read already
+/// hashed once (via the candidate prune) so it must not inflate `KEY_HASH_CALLS`
+/// beyond the one-hash-per-read C4 invariant.
+pub(crate) fn encode_partition_key_for_bti_trie_uncounted(raw_key_bytes: &[u8]) -> [u8; 9] {
+    use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 
     let token: i64 = cassandra_murmur3_token(raw_key_bytes);
     let bc: u64 = (token as u64) ^ 0x8000_0000_0000_0000u64;

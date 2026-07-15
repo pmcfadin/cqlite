@@ -932,7 +932,6 @@ impl SSTableReader {
             bti_rows_db,
             chunk_cache,
             chunk_cache_id,
-            bti_partition_offsets: std::sync::OnceLock::new(),
             bti_lookup_memo: std::sync::Mutex::new(None),
             key_offset_cache,
         })

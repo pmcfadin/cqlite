@@ -16,12 +16,13 @@
 //!      resolves the per-partition entry ONCE (pre-L1: 2 — once directly, once
 //!      inside `iterate_rows_for_partition`).
 //!
-//! Both counters are measured AFTER a warm-up read so the reader's per-reader
-//! next-partition successor cache (`bti_partition_offsets`, which itself enumerates
-//! the Partitions.db trie and resolves each wide partition's entry) is already
-//! populated — otherwise the FIRST clustering read would carry that one-time
-//! enumeration's nodes/resolves. The measured read therefore reflects only the
-//! clustering-window work, which is exactly what L1 optimizes.
+//! Both counters are measured AFTER a warm-up read. The next-partition seek END
+//! bound is now resolved by an O(depth) local strict-ceiling trie walk (issue #2058,
+//! replacing the pre-#2058 whole-trie DFS + `OnceLock` offset cache): it visits only
+//! O(depth) Partitions.db nodes per read and resolves a wide successor's `Rows.db`
+//! entry UNCOUNTED (it is seek-bound work, not the clustering-window per-partition
+//! resolve this test accounts for). So the measured read reflects the clustering
+//! window work plus that short successor descent — still well under the bounds below.
 //!
 //! Compiled only with `--features work-counters` (the counter getters/`reset` live
 //! behind it). Requires `CQLITE_DATASETS_ROOT` + the optional `test_da` corpus;

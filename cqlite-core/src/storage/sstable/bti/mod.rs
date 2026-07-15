@@ -27,6 +27,14 @@ pub use parser::{
 // PRE-ENCODED byte-comparable key so callers hoist the key hash+encoding out of the
 // candidate-prune loop (issue #1575 / C4).
 pub(crate) use parser::lookup_partition_in_bti_slice;
+// Crate-internal next-partition successor walk + uncounted encoder/entry-resolve
+// (issue #2058): the reader's O(depth) seek-bound resolver replacing the whole-trie
+// DFS enumeration. Consumed only by the seek path, compiled out under `tombstones`.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) use parser::{
+    encode_partition_key_for_bti_trie_uncounted, partition_successor_in_bti_slice,
+    resolve_rows_db_entry_uncounted,
+};
 // Test-only hooks for the issue #1650 (L3) targeted-descent counter invariants.
 #[doc(hidden)]
 pub use parser::{find_child_offset_for_test, parse_bti_node_for_test};
