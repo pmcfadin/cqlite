@@ -1,14 +1,15 @@
 //! Cfg-gated read-work counters for the read-path optimization program
 //! (Issue #1566, Epic A / A5).
 //!
-//! File-size note (issue #2430, campsite rule): this file was already over the
-//! ~800-line source target on `main` (890 lines) before #2430 added
-//! `index_backed_partitions_resolved` (+55 lines) — a single new counter in an
-//! already cohesive, single-responsibility registry (one `Counters` struct +
-//! `record_*`/getter free-function pairs). Splitting this file by counter group
-//! is a larger, out-of-scope refactor tracked under epic #1116 (source-file
-//! campsite backlog); not undertaken here. `CQLITE_ALLOW_FILE_GROWTH=1`
-//! acknowledged for this change.
+//! File-size note (issues #2430/#2470, campsite rule): this file was already over
+//! the ~800-line source target on `main` before #2430 (`index_backed_partitions_
+//! resolved`) and #2470 (the `record_seek`/`record_index_probe` scope wiring) — a
+//! cohesive, single-responsibility registry (one `Counters` struct + `record_*`/
+//! getter pairs). #2470's ~210-line thread-local scope + its regression test live in
+//! the sibling `read_work_counters/read_work_scope.rs` (extracted, not grown here);
+//! the residual few lines are the essential recorder wiring. Fully splitting this
+//! file by counter group is out-of-scope, tracked under epic #1116;
+//! `CQLITE_ALLOW_FILE_GROWTH=1` acknowledged for this change.
 //!
 //! # Why this exists
 //!
@@ -458,6 +459,8 @@ pub fn record_decompress() {
 pub fn record_seek() {
     #[cfg(any(test, feature = "work-counters"))]
     COUNTERS.record_seek();
+    #[cfg(test)]
+    read_work_scope::record_seek();
 }
 
 /// Record one `open(2)` that mints a reader `BlockSource` fd (`FILE_OPENS`;
@@ -590,6 +593,8 @@ pub fn record_compression_info_parse() {
 pub fn record_index_probe() {
     #[cfg(any(test, feature = "work-counters"))]
     COUNTERS.record_index_probe();
+    #[cfg(test)]
+    read_work_scope::record_index_probe();
 }
 
 /// Record one query-key Murmur3 hash + BTI byte-comparable encoding
@@ -813,6 +818,11 @@ fn count_fd_dir(path: &str) -> Option<u64> {
         .ok()
         .map(|rd| rd.filter_map(|e| e.ok()).count() as u64)
 }
+
+/// Thread-local `seek_calls`/`index_probes` scoping for contamination-proof delta
+/// assertions (issue #2470); test-only sibling file (campsite rule). See its docs.
+#[cfg(test)]
+pub(crate) mod read_work_scope;
 
 #[cfg(test)]
 mod tests {
