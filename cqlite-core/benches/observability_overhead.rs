@@ -34,19 +34,31 @@
 //! `#[inline]` and branch on a `const` feature predicate) to keep the CI signal
 //! non-flaky on shared runners.
 //!
-//! # Subscriber-on variant (issue #1703, epic #1686 AI3)
+//! # Subscriber-on variant (issue #1703, epic #1686 AI3; faithful install #2172a)
 //!
-//! The arms above run **subscriber-less** — Criterion installs no `tracing`
-//! subscriber, so the `#[tracing::instrument]` spans on the workload are inert.
-//! That is NOT the posture a real CLI user runs in: the CLI installs a fmt
-//! subscriber at INFO. To measure that previously-unmeasured default posture,
-//! each workload also gets a `*_subscriber_on` variant that wraps the SAME work
-//! in `tracing::subscriber::with_default(<fmt subscriber at INFO>)` (writing to a
-//! sink so span/event formatting cost is counted without polluting output).
-//! After the #1703 uniform DEBUG demotion the write/compaction spans are DEBUG,
-//! so an INFO subscriber filters them out and this number should be close to the
-//! subscriber-less one. The comparison script records it **advisory-first**
-//! (prints + warns, never fails) so the default posture is visible.
+//! A real CLI user runs with a fmt subscriber installed at INFO — the previously
+//! unmeasured default posture. To measure it faithfully this bench installs a
+//! **process-global** fmt subscriber (INFO, writing to `io::sink`) EXACTLY ONCE
+//! (see [`ensure_global_subscriber`]) with a per-call [`ToggleFilter`] gated by an
+//! atomic [`SUBSCRIBER_ON`] toggle. The `*_subscriber_on` variants flip the toggle
+//! ON for their measurement; the baseline arms (`read_scan`, `write_merge`) leave
+//! it OFF.
+//!
+//! Why global, not thread-local: the earlier `*_subscriber_on` arms installed the
+//! subscriber via `tracing::subscriber::with_default`, which is THREAD-LOCAL — it
+//! observed only spans emitted on the bench's own thread. The read scan crosses
+//! `spawn_blocking` / blocking-pool threads, whose spans were therefore NOT
+//! counted, so the recorded subscriber-on number under-counted the true default
+//! posture. A single process-global default reaches every thread, so spans on
+//! `spawn_blocking` threads are now counted too.
+//!
+//! The baseline arms therefore run with the global subscriber INSTALLED but the
+//! toggle OFF (not truly subscriber-less). This does NOT affect the cross-build
+//! feature-overhead comparison: the toggled-off global has the identical structure
+//! in both the default and `observability` builds, so it cancels out. After the
+//! #1703 uniform DEBUG demotion the write/compaction spans are DEBUG, so the INFO
+//! filter drops them and the subscriber-on number stays close to baseline. The
+//! comparison script records it **advisory-first** (prints + warns, never fails).
 //!
 //! Bench group/IDs (consumed by the comparison script):
 //! - `observability_overhead/read_scan`
@@ -55,17 +67,90 @@
 //! - `observability_overhead/write_merge_subscriber_on`  (write-support only)
 
 use criterion::{criterion_group, criterion_main, Criterion};
-
-/// A real `tracing` fmt subscriber capped at INFO — the CLI's default posture —
-/// writing to `io::sink` so span/event formatting cost is measured without
-/// polluting bench output. Installed thread-locally via `with_default` for the
-/// `*_subscriber_on` bench variants (issue #1703).
 #[cfg(any(feature = "cli-helpers", feature = "write-support"))]
-fn info_sink_subscriber() -> impl tracing::Subscriber + Send + Sync {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(std::io::sink)
-        .finish()
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+use std::sync::Once;
+
+/// Process-global on/off toggle for the INFO subscriber installed by
+/// [`ensure_global_subscriber`]. The `*_subscriber_on` bench variants flip this
+/// ON for the duration of their measurement (via [`SubscriberOnGuard`]); every
+/// baseline arm leaves it OFF. Because the subscriber is a single PROCESS-GLOBAL
+/// default it reaches spans emitted on `spawn_blocking` / blocking-pool threads
+/// too — which the old thread-local `with_default` install silently missed,
+/// under-counting the true default posture (issue #2172a).
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+static SUBSCRIBER_ON: AtomicBool = AtomicBool::new(false);
+
+/// Guards the one-time install of the process-global subscriber.
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+static INSTALL_SUBSCRIBER: Once = Once::new();
+
+/// A per-callsite `tracing` filter whose verdict is re-evaluated on EVERY call so
+/// the runtime [`SUBSCRIBER_ON`] toggle is honored. Returning
+/// `Interest::sometimes()` from `callsite_enabled` is load-bearing: `always()` /
+/// `never()` would let `tracing` cache the first verdict per callsite and freeze
+/// the toggle.
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+struct ToggleFilter;
+
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+impl<S> tracing_subscriber::layer::Filter<S> for ToggleFilter {
+    fn enabled(
+        &self,
+        meta: &tracing::Metadata<'_>,
+        _cx: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        SUBSCRIBER_ON.load(Ordering::Relaxed) && *meta.level() <= tracing::Level::INFO
+    }
+
+    fn callsite_enabled(
+        &self,
+        _meta: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        // NEVER always()/never(): those cache the first verdict per callsite and
+        // would defeat the runtime toggle. `sometimes()` forces per-call
+        // `enabled()` re-evaluation.
+        tracing::subscriber::Interest::sometimes()
+    }
+}
+
+/// Install the process-global fmt subscriber (INFO, writing to `io::sink`) EXACTLY
+/// once, gated by [`ToggleFilter`]. Called at the top of each bench fn so the
+/// global is in place before any measurement regardless of which bench runs
+/// first. The baseline arms run with [`SUBSCRIBER_ON`] == false, so this global is
+/// a structurally-identical no-op in both the default and `observability` builds —
+/// the cross-build feature-overhead comparison is unaffected.
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+fn ensure_global_subscriber() {
+    use tracing_subscriber::prelude::*;
+    INSTALL_SUBSCRIBER.call_once(|| {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(ToggleFilter);
+        tracing_subscriber::registry().with(fmt_layer).init();
+    });
+}
+
+/// RAII guard that flips [`SUBSCRIBER_ON`] on for its lifetime and resets it on
+/// drop — so a panic inside the measured closure still clears the toggle and
+/// cannot leak the subscriber-on posture into a later baseline arm.
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+struct SubscriberOnGuard;
+
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+impl SubscriberOnGuard {
+    fn activate() -> Self {
+        SUBSCRIBER_ON.store(true, Ordering::Relaxed);
+        SubscriberOnGuard
+    }
+}
+
+#[cfg(any(feature = "cli-helpers", feature = "write-support"))]
+impl Drop for SubscriberOnGuard {
+    fn drop(&mut self) {
+        SUBSCRIBER_ON.store(false, Ordering::Relaxed);
+    }
 }
 
 #[path = "fixtures/mod.rs"]
@@ -94,6 +179,9 @@ pub const OVERHEAD_THRESHOLD_PCT: f64 = 2.0;
 #[cfg(feature = "cli-helpers")]
 fn bench_read_scan(c: &mut Criterion) {
     use criterion::{black_box, Throughput};
+
+    // Install the process-global subscriber before any measurement (idempotent).
+    ensure_global_subscriber();
 
     const REPEATS: usize = 8;
 
@@ -127,22 +215,21 @@ fn bench_read_scan(c: &mut Criterion) {
         });
     });
 
-    // Subscriber-on variant (issue #1703): identical work, but with a real fmt
-    // subscriber at INFO installed for the whole measurement — the CLI's default
-    // posture. Advisory number recorded by the comparison script.
+    // Subscriber-on variant (issue #1703 / #2172a): identical work, but with the
+    // process-global INFO subscriber toggled ON for the whole measurement — the
+    // CLI's default posture, now faithfully counting spans on `spawn_blocking`
+    // threads too. Advisory number recorded by the comparison script.
     group.bench_function("read_scan_subscriber_on", |b| {
-        let subscriber = info_sink_subscriber();
-        tracing::subscriber::with_default(subscriber, || {
-            b.iter(|| {
-                let mut rows = 0usize;
-                for _ in 0..REPEATS {
-                    let res = rt
-                        .block_on(loaded.db.execute(black_box(&sql)))
-                        .expect("overhead read scan (subscriber on)");
-                    rows += res.rows.len();
-                }
-                black_box(rows)
-            });
+        let _on = SubscriberOnGuard::activate();
+        b.iter(|| {
+            let mut rows = 0usize;
+            for _ in 0..REPEATS {
+                let res = rt
+                    .block_on(loaded.db.execute(black_box(&sql)))
+                    .expect("overhead read scan (subscriber on)");
+                rows += res.rows.len();
+            }
+            black_box(rows)
         });
     });
     group.finish();
@@ -161,6 +248,9 @@ fn bench_read_scan(c: &mut Criterion) {
 fn bench_write_merge(c: &mut Criterion) {
     use criterion::{black_box, BatchSize, Throughput};
     use rand::Rng;
+
+    // Install the process-global subscriber before any measurement (idempotent).
+    ensure_global_subscriber();
 
     /// Fixed number of rows ingested + flushed per iteration. Deterministic via
     /// the shared seeded RNG.
@@ -207,32 +297,30 @@ fn bench_write_merge(c: &mut Criterion) {
         );
     });
 
-    // Subscriber-on variant (issue #1703): identical ingest, but with a real fmt
-    // subscriber at INFO installed for the whole measurement — the CLI's default
-    // posture (per-mutation write.mutation / wal.* / memtable.insert spans are
-    // DEBUG post-#1703, so an INFO subscriber filters them out). Advisory number.
+    // Subscriber-on variant (issue #1703 / #2172a): identical ingest, but with the
+    // process-global INFO subscriber toggled ON for the whole measurement — the
+    // CLI's default posture (per-mutation write.mutation / wal.* / memtable.insert
+    // spans are DEBUG post-#1703, so the INFO filter drops them). Advisory number.
     group.bench_function("write_merge_subscriber_on", |b| {
-        let subscriber = info_sink_subscriber();
-        tracing::subscriber::with_default(subscriber, || {
-            b.iter_batched(
-                || {
-                    let tmp = tempfile::TempDir::new()
-                        .expect("temp dir for write overhead bench (subscriber on)");
-                    let engine = fixtures::open_write_engine_wal_off(tmp.path(), usize::MAX);
-                    (tmp, engine)
-                },
-                |(_tmp, mut engine)| {
-                    fill_engine(&mut engine);
-                    assert_eq!(
-                        engine.memtable_row_count(),
-                        ROWS as usize,
-                        "write_merge overhead (subscriber on): every row must reach the memtable"
-                    );
-                    black_box(engine.memtable_row_count())
-                },
-                BatchSize::SmallInput,
-            );
-        });
+        let _on = SubscriberOnGuard::activate();
+        b.iter_batched(
+            || {
+                let tmp = tempfile::TempDir::new()
+                    .expect("temp dir for write overhead bench (subscriber on)");
+                let engine = fixtures::open_write_engine_wal_off(tmp.path(), usize::MAX);
+                (tmp, engine)
+            },
+            |(_tmp, mut engine)| {
+                fill_engine(&mut engine);
+                assert_eq!(
+                    engine.memtable_row_count(),
+                    ROWS as usize,
+                    "write_merge overhead (subscriber on): every row must reach the memtable"
+                );
+                black_box(engine.memtable_row_count())
+            },
+            BatchSize::SmallInput,
+        );
     });
     group.finish();
 }
