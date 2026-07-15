@@ -181,28 +181,14 @@ impl V5CompressedLegacyParser {
             self.parse_row_metadata(data, offset, row_flags, extended_flags)?;
 
         // STRUCTURAL BOUND on row_size — the AUTHORITATIVE invariant, not a guess
-        // (no-heuristics mandate, issues #28 / #2436).
-        //
-        // The former `MAX_REASONABLE_ROW_SIZE = 1_000_000` cap was an arbitrary
-        // heuristic ("row_size should never exceed the block size"). Because the
-        // partition driver folds this `Err` into a `None` "row failed to parse"
-        // (its chunk-straddle NeedMore path), a legitimately >1 MB single-cell row
-        // — a plain `text`/`blob` value past ~1 MB — was SILENTLY DROPPED, and the
-        // whole partition read returned `Ok(0 rows)` for a row that was genuinely
-        // written (issue #2436). A Cassandra row body has no 1 MB limit.
-        //
-        // The real invariant: `data` is the FULLY-materialised parse unit for this
-        // row — the whole contiguous data section (`V5_0Uncompressed`), the
-        // stitched chunk buffer (`V5CompressedLegacy`), or the exact partition
-        // window (full-index path) — so a row body can never claim more bytes than
-        // remain after its `row_size` VInt. Comparing against the remaining-byte
-        // COUNT (rather than a materialised `offset + row_size`, which can wrap
-        // `usize` for a corrupt VInt) is overflow-safe. On the compressed stitching
-        // path a row straddling the current chunk legitimately exceeds `available`
-        // here; that returns the SAME `Err` the downstream `> data.len()` checks
-        // already return, which the driver folds to `NeedMore` and refills — so
-        // this only moves the bound earlier and overflow-safe, never changing the
-        // straddle semantics. A genuine truncation/corruption still fails LOUD.
+        // (no-heuristics, #28 / #2436). The former arbitrary `MAX_REASONABLE_ROW_SIZE
+        // = 1_000_000` cap made the driver fold its `Err` into a `None` and SILENTLY
+        // DROP every legit >1 MB single-cell `text`/`blob` row → `Ok(0 rows)` for a
+        // genuinely-written partition (#2436); a row body has no 1 MB limit. `data`
+        // is the fully-materialised parse unit, so a row body cannot claim more bytes
+        // than remain after its `row_size` VInt. The remaining-COUNT compare (not
+        // `offset + row_size`, which can wrap `usize` on a corrupt VInt) is
+        // overflow-safe; a chunk-straddling row Errs exactly as before (→ `NeedMore`).
         let row_body_start = row_metadata_offset + row_header.row_size_vint_len;
         let available = data.len().saturating_sub(row_body_start) as u64;
         if row_size > available {

@@ -17,12 +17,13 @@
 //! not merely that a row count is 1 (rejecting count-only illusions per the
 //! regression-test-verification doctrine).
 //!
-//! It exercises THREE read paths that share the partition-body parser:
-//!   * `iterate_all_partitions` (the full `Index.db` random-read path, the exact
-//!     path the issue bisected),
-//!   * `get_all_entries` (the sequential-scan path), and
-//!   * `get` (the point-read `lookup_partition_with_index` path),
-//! proving the fix lands in the shared parser, not one call site.
+//! It exercises THREE read paths that share the partition-body parser, proving
+//! the fix lands in the shared parser and not one call site:
+//!
+//! * `iterate_all_partitions` — the full `Index.db` random-read path (the exact
+//!   path the issue bisected).
+//! * `get_all_entries` — the sequential-scan path.
+//! * `get` — the point-read `lookup_partition_with_index` path.
 
 #![cfg(feature = "write-support")]
 
@@ -163,8 +164,15 @@ async fn assert_roundtrips_scan_and_point(size: usize) {
     let (table_id, key, scan_row) = &entries[0];
     let got = name_text(scan_row)
         .unwrap_or_else(|| panic!("sequential-scan row size={size} missing `name` cell"));
-    assert_eq!(got.len(), size, "sequential-scan `name` length mismatch size={size}");
-    assert_eq!(got, expected, "sequential-scan `name` content mismatch size={size}");
+    assert_eq!(
+        got.len(),
+        size,
+        "sequential-scan `name` length mismatch size={size}"
+    );
+    assert_eq!(
+        got, expected,
+        "sequential-scan `name` content mismatch size={size}"
+    );
 
     // --- point read (lookup_partition_with_index -> parse) ---
     let point = reader
@@ -174,8 +182,15 @@ async fn assert_roundtrips_scan_and_point(size: usize) {
         .unwrap_or_else(|| panic!("point read returned no row for size={size}"));
     let got = name_text(&point)
         .unwrap_or_else(|| panic!("point-read row size={size} missing `name` cell"));
-    assert_eq!(got.len(), size, "point-read `name` length mismatch size={size}");
-    assert_eq!(got, expected, "point-read `name` content mismatch size={size}");
+    assert_eq!(
+        got.len(),
+        size,
+        "point-read `name` length mismatch size={size}"
+    );
+    assert_eq!(
+        got, expected,
+        "point-read `name` content mismatch size={size}"
+    );
 }
 
 #[tokio::test]
