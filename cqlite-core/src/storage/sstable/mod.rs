@@ -1635,21 +1635,22 @@ impl SSTableManager {
 
         // Multiple candidate generations may hold the same partition; reconcile
         // with the same authoritative k-way merge the full scan uses (write-support
-        // only), TARGETED to just this partition (issue #1579): the merge keeps only
-        // `partition_key`'s rows and stops as soon as it finds them, byte-identical
-        // to the former full-merge-then-`retain(matches_key)` but without
-        // materializing every other partition.
+        // only), TARGETED to just this partition. Issue #2096: SEEK each candidate
+        // directly to the target partition's `Data.db` offset (BTI trie / Index.db)
+        // and reconcile through the partition-seeking merger (issues #2207/#2346)
+        // instead of the full-scan `KWayMerger::new`, which decoded every partition
+        // with token <= the target before reaching it (O(partitions-below-target)).
+        // The seeking merge reconciles through the SAME `KWayMerger`
+        // (`from_row_iterators`), so its output is byte-identical to the former
+        // full-merge-then-`retain(matches_key)`, only over O(target) work.
         #[cfg(feature = "write-support")]
         if candidates.len() > 1 {
             if let Some(schema) = schema {
                 let target = RowKey::new(partition_key.to_vec());
-                match generation_merge::merge_generations_for_read(
+                match generation_merge::seek_merge_generations_for_read(
                     &candidates,
                     schema,
-                    None,
-                    None,
-                    None,
-                    Some(&target),
+                    &target,
                 )
                 .await
                 {

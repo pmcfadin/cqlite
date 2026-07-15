@@ -1179,7 +1179,14 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
                 return Some(Err(Error::Cancelled));
             }
             match receiver.recv_timeout(RECV_CANCEL_POLL) {
-                Ok(Ok(entry)) => return Some(Ok(entry)),
+                Ok(Ok(entry)) => {
+                    // Issue #2096: one merge entry decoded from `Data.db` by a
+                    // full-scan run. This is the O(partitions-below-target) signal
+                    // the seeking point-read merger replaces — see
+                    // `work_counters::merge_run_partitions_decoded`.
+                    crate::storage::sstable::work_counters::add_merge_run_partition_decoded();
+                    return Some(Ok(entry));
+                }
                 // Issue #2264: reconstruct `Error::Cancelled` distinctly so a
                 // cancelled scan is never confused with a genuine I/O/corruption
                 // error at the merge/producer boundary — `drive_merge` matches on

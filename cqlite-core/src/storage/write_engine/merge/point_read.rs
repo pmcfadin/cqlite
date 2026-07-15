@@ -201,6 +201,12 @@ pub fn build_single_partition_merger(
                 }
                 let mut entries: Vec<MergeEntry> = Vec::with_capacity(rows.len());
                 for row in rows {
+                    // Issue #2096: one merge entry decoded from `Data.db` by the
+                    // SEEK path (this candidate held the target partition). Counting
+                    // per built entry — the same unit the full-scan run counts per
+                    // `Ok(entry)` — keeps the merge-run decode counter apples-to-
+                    // apples between the two paths.
+                    crate::storage::sstable::work_counters::add_merge_run_partition_decoded();
                     entries.push(SSTableRowIteratorAdapter::build_merge_entry(
                         run_index, row, schema,
                     )?);
@@ -290,6 +296,10 @@ pub fn build_single_partition_merger_from_readers(
                 }
                 let mut entries: Vec<MergeEntry> = Vec::with_capacity(rows.len());
                 for row in rows {
+                    // Issue #2096: one merge entry decoded from `Data.db` by the
+                    // SEEK path (this candidate held the target partition), same
+                    // accounting as the path-based builder above.
+                    crate::storage::sstable::work_counters::add_merge_run_partition_decoded();
                     entries.push(SSTableRowIteratorAdapter::build_merge_entry(
                         run_index, row, schema,
                     )?);
