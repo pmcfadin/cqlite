@@ -532,3 +532,75 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       component-level error text at face value — grep for `No space left on
       device` / linker failures before accepting a FAIL as a real code defect
       and sending an agent off to debug non-existent bugs.
+  16. **2026-07-15 — Lesson 15 recurred WORSE with THREE concurrent lanes: 95G
+      free → 900M free in under 10 minutes, twice in one hour.** Despite
+      actively watching `df -h` between checks, disk went from a comfortable
+      95G to a near-zero 900M-750M free window fast enough that a lane's full
+      gate could plausibly hit ENOSPC between two `df` checks spaced only a
+      few minutes apart. Mitigated live both times by killing the
+      least-progressed lane's gate process tree AND deleting its `target/`
+      (killing the process alone does NOT reclaim already-written disk — the
+      `rm -rf target/` is the actual fix). **Standing lesson, tightened from
+      #15's "serialize full gates" to a harder rule: cap full-gate
+      concurrency at ONE on this box, not two.** Two full gates "worked" most
+      of the time this session but the margin was razor-thin and got worse
+      as more worktrees' target/ dirs accumulated in parallel (each
+      successive lane compounds the peak). If a THIRD lane's full gate wants
+      to start while another is running, hold it — check `df -h /`
+      immediately before green-lighting and again a few minutes in, and
+      prefer killing the newest/least-progressed lane over letting two race
+      to the wire. A lane's build cache (`target/`) is always safely
+      regenerable — killing a gate mid-run costs only wall-clock time, never
+      correctness, so bias toward killing early rather than hoping a
+      tight-margin situation resolves itself.
+  17. **2026-07-15 — A full gate's own orchestrator process can be killed by
+      harness-level eviction mid-run, leaving orphaned SIDE-lane children
+      (python/node bindings builds) running with no parent to collect their
+      exit codes.** Distinct from lesson 16 (disk exhaustion) — this happened
+      with 134G free. The top-level `bash scripts/agent-gate.sh` process (and
+      its immediate MAIN-lane children) simply vanished; `ps` showed the
+      SIDE-lane build processes (npm/cargo for node/python bindings) still
+      running, reparented to PID 1 (init) — genuine orphans. Because the
+      orchestrating script is gone, this run can NEVER produce a real
+      `AGENT-GATE SUMMARY` — the pre-run `INCOMPLETE` placeholder is all that
+      will ever exist for it, indistinguishable at a glance from the
+      disk-kill case in lesson 16. **Standing lesson:** when a full gate's
+      top-level process disappears without a SUMMARY, don't assume the run
+      will eventually resolve — check for orphaned children (`ps -o
+      pid,ppid,cmd` inside the worktree; `ppid=1` is the tell), kill them
+      explicitly, and restart the gate cleanly — or better, launch the gate
+      via `setsid nohup ... & disown` so the whole process tree survives
+      harness eviction outright (confirmed working: multiple lanes adopted
+      this after hitting the bug and their subsequent gate runs survived
+      eviction that would previously have killed them). This is the same
+      background-task eviction phenomenon that repeatedly killed the lead's
+      own `Bash run_in_background` watchers this session (a harness-level
+      resource cap, not a bug in the gate script or the agent's code) — the
+      lead's own watchers should be `setsid`-detached too, not just
+      subagents' gates, since plain `run_in_background` loops kept getting
+      evicted even when a `setsid`-launched process they were watching
+      survived fine.
+  18. **2026-07-15 — Filed a duplicate issue (#2504) for a bug already fixed
+      (#2470/PR #2501) because I didn't search existing issues before
+      filing.** Diagnosed a recurring test flake from a gate FAIL, correctly
+      traced its root cause and fix shape from first principles — but never
+      ran `gh issue list --search "<key symptom>"` to check whether someone
+      else had already hit and fixed the exact same thing. Another lane had
+      (independently, hours earlier, during unrelated #1819 work), and its
+      fix (`ReadWorkScope`) was already merged into `main`. Caught it only
+      because the SAME symptom recurred on a THIRD unrelated PR and a habit
+      of checking `gh pr list --state merged` for situational awareness
+      turned up the giveaway PR title. Wasted: one claimed worktree/branch,
+      one dispatched subagent's setup time (caught before real implementation
+      started — cheap this time, could have been expensive). **Standing
+      lesson:** before filing ANY new issue for a discovered bug — especially
+      a flaky-test/infra-class bug likely to recur across lanes — search
+      first (`gh issue list --search "<key error text or symptom>"`,
+      `gh issue list --state all` for closed-as-fixed matches too, since a
+      fix can land and close the issue before you'd think to check). This is
+      cheap (one API call) against the cost of a full duplicate
+      implementation cycle. Also: when a stale worktree hits an
+      already-fixed-on-main bug, the fix is a `git rebase origin/main`, not a
+      new implementation — check the base commit's age against recent merges
+      before assuming a recurring symptom needs a new fix.
+
