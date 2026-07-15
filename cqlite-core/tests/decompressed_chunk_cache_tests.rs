@@ -278,7 +278,10 @@ async fn big_point_read_repeat_is_cached() {
          got {cold_decompress}; if 0, the public get() path did NOT reach the \
          cached bti_decompress_and_parse_target (issue #1818 mechanism regressed)"
     );
-    assert!(m1 - m0 > 0, "cold BIG read must populate the cache (misses)");
+    assert!(
+        m1 - m0 > 0,
+        "cold BIG read must populate the cache (misses)"
+    );
     assert_eq!(h1 - h0, 0, "cold BIG read must not hit the cache");
 
     // Warm point read: covering chunk resident → zero decompress, cache hit.
