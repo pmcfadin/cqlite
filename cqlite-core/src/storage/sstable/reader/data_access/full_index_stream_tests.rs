@@ -412,9 +412,21 @@ async fn stream_for_compaction_emits_every_partition_windowed() {
 /// live testbed) is NOT reproducible locally; this probe/seek count reduction is
 /// the acceptable substitute the issue permits.
 ///
-/// `#[serial(work_counters)]`: `INDEX_PROBES`/`SEEK_CALLS` are process-global.
+/// Contamination-proof by construction (issue #2470): `INDEX_PROBES`/`SEEK_CALLS`
+/// are process-global atomics bumped by every read-path probe/seek across the whole
+/// `--lib` binary, so a `reset()`→scan→global-getter delta races any concurrent
+/// read-driving test on another thread (the tag `#[serial(work_counters)]` — which
+/// this test carried on `main` — does NOT help: it only serialises OTHER tagged
+/// tests, and the observed contamination came from untagged crate-wide readers,
+/// inflating `seek_calls()` to 144 against the `< 125` bound). The assertion now
+/// measures the deltas through a thread-local
+/// [`ReadWorkScope`](crate::storage::sstable::read_work_counters::read_work_scope::ReadWorkScope):
+/// the uncompressed non-stitching walk records its window-refill seek INLINE on this
+/// `#[tokio::test]`'s current-thread runtime, so the scope captures exactly this
+/// scan's increments and no concurrent test on another thread can inflate them. No
+/// global `reset()` and no `#[serial(work_counters)]` tag needed — see the
+/// `read_work_counters::read_work_scope` module doc for the full rationale.
 #[tokio::test]
-#[serial(work_counters)]
 async fn windowed_stream_read_pattern_is_sequential() {
     use crate::storage::sstable::read_work_counters as rwc;
     const N: i32 = 500;
@@ -422,7 +434,10 @@ async fn windowed_stream_read_pattern_is_sequential() {
     let reader = open_reader(&data_path).await;
     let cancel = ScanCancel::default();
 
-    rwc::reset();
+    // Open the recording scope BEFORE the inline scan; it counts only this thread's
+    // increments, so a concurrent read-driving test on another thread cannot
+    // contaminate the deltas (issue #2470). No global `reset()` needed.
+    let work = rwc::read_work_scope::ReadWorkScope::new();
     let mut emitted = 0usize;
     let outcome = reader
         .stream_all_partitions_via_full_index(&cancel, &mut |_row| {
@@ -443,7 +458,7 @@ async fn windowed_stream_read_pattern_is_sequential() {
 
     // AC #3: zero per-partition index probes (was N before #2366).
     assert_eq!(
-        rwc::index_probes(),
+        work.index_probes(),
         0,
         "the windowed walk must perform ZERO Index.db probes (offset read \
          directly from the in-memory offset table) — was {N} before #2366"
@@ -452,7 +467,7 @@ async fn windowed_stream_read_pattern_is_sequential() {
     // below the partition count (the O(N)→O(N/window) reduction). It is exactly 1
     // for this tiny-partition fixture, but pin the invariant loosely so the
     // benchmark stays robust to fixture-size / window-target tweaks.
-    let seeks = rwc::seek_calls();
+    let seeks = work.seeks();
     assert!(
         seeks < N as u64 / 4,
         "window refills ({seeks}) must be dramatically fewer than the {N} \
