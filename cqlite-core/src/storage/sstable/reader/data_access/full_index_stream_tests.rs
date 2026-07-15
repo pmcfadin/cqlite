@@ -13,11 +13,13 @@
 //! not exist on pre-#2361 `main`, so the module is COMPILE-RED there (the
 //! accepted red-then-green convention for a new streaming seam).
 
-use crate::schema::{Column, KeyColumn, TableSchema};
+use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::data_access::full_index_stream::FullIndexStreamOutcome;
 use crate::storage::sstable::reader::SSTableReader;
-use crate::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
+use crate::storage::write_engine::mutation::{
+    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId,
+};
 use crate::types::Value;
 use crate::{Config, Platform};
 use std::collections::HashMap;
@@ -308,5 +310,370 @@ async fn sequential_scan_fallback_counts_each_partition_exactly_once() {
         "the fallback must count each partition body EXACTLY ONCE (not 2x — \
          roborev 1693): sequential_scan owns the increment, the re-emit loop \
          in stream_all_partitions_cancellable must not increment again"
+    );
+}
+
+/// Issue #2366 (AC #1 parity, larger fixture): over an N ≥ 50 uncompressed
+/// fixture the sequential-window streaming walk emits EVERY partition, in the
+/// SAME token order, with IDENTICAL keys to the materialising sibling
+/// `iterate_all_partitions` — the parity pin proving the window-served slices
+/// decode to exactly the same partitions as the old per-partition positioned
+/// reads. Larger than the smoke fixtures so several partitions share one window.
+///
+/// `#[serial(work_counters)]`: see
+/// `stream_all_partitions_cancellable_emits_every_partition`.
+#[tokio::test]
+#[serial(work_counters)]
+async fn windowed_stream_matches_materialising_over_larger_fixture() {
+    const N: i32 = 60;
+    let (_temp, data_path) = write_fixture(N).await;
+    let reader = open_reader(&data_path).await;
+    let cancel = ScanCancel::default();
+
+    let mut streamed_keys: Vec<crate::RowKey> = Vec::new();
+    let outcome = reader
+        .stream_all_partitions_via_full_index(&cancel, &mut |(key, _value)| {
+            streamed_keys.push(key);
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, FullIndexStreamOutcome::Streamed),
+        "a full-Index.db fixture must stream via the index walk, not fall back"
+    );
+
+    let materialised: Vec<crate::RowKey> = reader
+        .iterate_all_partitions()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(
+        streamed_keys.len(),
+        N as usize,
+        "the windowed streaming walk must emit every one of the {N} partitions"
+    );
+    assert_eq!(
+        streamed_keys, materialised,
+        "windowed streaming emission must be key-for-key IDENTICAL (order + \
+         content) to the materialising sibling — the merge-input parity pin (#2366)"
+    );
+}
+
+/// Issue #2366 (AC #1 wiring): the SAME parity holds end-to-end through the real
+/// flight full-scan producer surface `stream_all_partitions_for_compaction` (the
+/// non-stitching branch routes to the windowed streaming walk). Proves the fix
+/// is exercised by the public producer seam, not just the private helper.
+///
+/// `#[serial(work_counters)]`: see
+/// `stream_all_partitions_cancellable_emits_every_partition`.
+#[tokio::test]
+#[serial(work_counters)]
+async fn stream_for_compaction_emits_every_partition_windowed() {
+    const N: i32 = 50;
+    let (_temp, data_path) = write_fixture(N).await;
+    let reader = open_reader(&data_path).await;
+    let cancel = ScanCancel::default();
+
+    let mut emitted = 0usize;
+    reader
+        .stream_all_partitions_for_compaction(None, &cancel, |_row| {
+            emitted += 1;
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        emitted, N as usize,
+        "the flight full-scan producer surface must emit every one of the {N} \
+         partitions through the windowed non-stitching branch"
+    );
+}
+
+/// Issue #2366 (AC #3 read-pattern benchmark, work-counters): after the windowed
+/// streaming walk over a LARGE uncompressed fixture (N = 500) the read pattern is
+/// O(N/window), not O(N):
+///
+/// - `INDEX_PROBES == 0` (was `== N` before this change — one HashMap probe per
+///   partition via the dropped `lookup_partition_with_index`); the offset now
+///   comes straight from the in-memory offset table.
+/// - `seek_calls()` (one per sequential window refill) is DRAMATICALLY fewer than
+///   the partition count — the O(N)→O(N/window) reduction. The tiny single-row
+///   partitions here pack many per 4 MiB window, so in practice this is a handful
+///   of refills for 500 partitions.
+///
+/// MEASURED (this fixture, 500 single-row int/text partitions):
+///   before: INDEX_PROBES == 500, positioned reads == 500 (one per partition)
+///   after:  INDEX_PROBES == 0,   seek_calls (window refills) == 1
+/// The field ideal (a 1.13M-partition table's wall-time on the #2362/#2157/#2264
+/// live testbed) is NOT reproducible locally; this probe/seek count reduction is
+/// the acceptable substitute the issue permits.
+///
+/// `#[serial(work_counters)]`: `INDEX_PROBES`/`SEEK_CALLS` are process-global.
+#[tokio::test]
+#[serial(work_counters)]
+async fn windowed_stream_read_pattern_is_sequential() {
+    use crate::storage::sstable::read_work_counters as rwc;
+    const N: i32 = 500;
+    let (_temp, data_path) = write_fixture(N).await;
+    let reader = open_reader(&data_path).await;
+    let cancel = ScanCancel::default();
+
+    rwc::reset();
+    let mut emitted = 0usize;
+    let outcome = reader
+        .stream_all_partitions_via_full_index(&cancel, &mut |_row| {
+            emitted += 1;
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, FullIndexStreamOutcome::Streamed),
+        "the large fixture must stream via the index walk"
+    );
+    assert_eq!(
+        emitted, N as usize,
+        "must emit every one of the {N} partitions"
+    );
+
+    // AC #3: zero per-partition index probes (was N before #2366).
+    assert_eq!(
+        rwc::index_probes(),
+        0,
+        "the windowed walk must perform ZERO Index.db probes (offset read \
+         directly from the in-memory offset table) — was {N} before #2366"
+    );
+    // AC #3: sequential window refills, not one read per partition. Assert well
+    // below the partition count (the O(N)→O(N/window) reduction). It is exactly 1
+    // for this tiny-partition fixture, but pin the invariant loosely so the
+    // benchmark stays robust to fixture-size / window-target tweaks.
+    let seeks = rwc::seek_calls();
+    assert!(
+        seeks < N as u64 / 4,
+        "window refills ({seeks}) must be dramatically fewer than the {N} \
+         partitions (O(N/window) sequential reads, not O(N) random reads — #2366)"
+    );
+    assert!(
+        seeks >= 1,
+        "a non-empty scan must perform at least one window read ({seeks})"
+    );
+}
+
+/// Roborev follow-up (issue #2366, review-first): every fixture above is tiny
+/// (<4 MiB total Data.db), so `seek_calls == 1` in every one of them and the
+/// multi-window-refill path (a partition's slice NOT starting at
+/// `window_start == 0`, i.e. `lo != 0`) never actually runs — the defining new
+/// behavior of this change was unexercised. Note: an EARLIER version of this
+/// fixture tried to force the "large single partition" case with one ≈4.6 MiB
+/// SINGLE-CELL value; that hit an UNRELATED pre-existing correctness bug (a
+/// single-cell `Value::Text`/`Value::Blob` write/read round-trip silently drops
+/// the whole row somewhere between ~950 KB and 1 MB — confirmed present on the
+/// UNMODIFIED materialising sibling too, so it predates and is independent of
+/// this change). Flagged separately; NOT fixed here (out of scope for #2366).
+/// This fixture avoids that zone entirely: every per-cell value stays well
+/// under 1 MB.
+fn wide_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_wide_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "seq".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "seq".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+fn wide_row_mutation(id: i32, seq: i32, text_len: usize) -> Mutation {
+    Mutation::new(
+        TableId::new("test_ks", "test_wide_table"),
+        PartitionKey::single("id", Value::Integer(id)),
+        Some(ClusteringKey::single("seq", Value::Integer(seq))),
+        vec![CellOperation::Write {
+            column: "name".to_string(),
+            value: Value::Text("x".repeat(text_len)),
+        }],
+        1_000_000 + (id as i64) * 1_000_000 + seq as i64,
+        None,
+    )
+}
+
+/// Fixture for the multi-window-refill + large-single-partition-clamp test
+/// (issue #2366 roborev follow-up): builds `small_count` ordinary single-row
+/// partitions (`id = 2..=1+small_count`, each `small_text_len` bytes) PLUS ONE
+/// "wide" multi-row partition (`id = 1`, `wide_row_count` clustered rows, each
+/// `wide_row_text_len` bytes) — all under [`wide_schema`] so they share one
+/// Data.db. The wide partition's TOTAL span (not any single cell) is what
+/// exceeds `SEQUENTIAL_WINDOW_TARGET_BYTES`, avoiding the unrelated single-cell
+/// defect noted on [`wide_schema`]. Every per-cell value here stays under 1 MB.
+async fn write_multi_window_fixture(
+    small_count: usize,
+    small_text_len: usize,
+    wide_row_count: usize,
+    wide_row_text_len: usize,
+) -> (TempDir, std::path::PathBuf) {
+    let schema = wide_schema();
+    let temp = TempDir::new().unwrap();
+    let mut writer =
+        crate::storage::sstable::writer::SSTableWriter::new(temp.path().to_path_buf(), 1, &schema)
+            .unwrap();
+
+    let mut partitions: Vec<(_, Vec<Mutation>)> = (0..small_count)
+        .map(|idx| {
+            let id = 2 + idx as i32;
+            let m = wide_row_mutation(id, 0, small_text_len);
+            let key = m.decorated_key(&schema).unwrap();
+            (key, vec![m])
+        })
+        .collect();
+
+    let wide_mutations: Vec<Mutation> = (0..wide_row_count)
+        .map(|seq| wide_row_mutation(1, seq as i32, wide_row_text_len))
+        .collect();
+    let wide_key = wide_mutations[0].decorated_key(&schema).unwrap();
+    partitions.push((wide_key, wide_mutations));
+
+    partitions.sort_by_key(|(k, _)| k.token);
+    for (key, muts) in partitions {
+        writer.write_partition(key, muts).unwrap();
+    }
+    let info = writer.finish().await.unwrap();
+    let data_path = info.data_path.clone();
+    (temp, data_path)
+}
+
+/// Issue #2366 (roborev follow-up): every fixture above tops out well under
+/// `SEQUENTIAL_WINDOW_TARGET_BYTES` (4 MiB), so `seek_calls == 1` in each of
+/// them and the multi-window-refill path — a partition's slice NOT starting at
+/// `window_start == 0` (`lo != 0`) — never actually ran. This fixture forces it:
+///
+/// - 50 ordinary single-row partitions × 100 KB ≈ 4.9 MiB total, so the walk
+///   must refill AT LEAST once among just these (they alone exceed the 4 MiB
+///   target).
+/// - ONE wide (10-row, clustered) partition whose combined span ≈ 5 MB ALONE
+///   exceeds the 4 MiB window target, forcing `want == span` — i.e. the window
+///   is sized to exactly that partition (`lo == 0`, `hi == span == window.len()`,
+///   the single-large-partition clamp roborev asked to pin). Built from
+///   MULTIPLE rows rather than one giant cell specifically to avoid the
+///   unrelated single-cell defect documented on [`wide_schema`].
+///
+/// Partitions are token-sorted before writing (this file's convention), so the
+/// wide partition's position relative to the small ones — and hence the exact
+/// refill count — is NOT controlled; the assertions are robust to that:
+/// `seek_calls() >= 2` proves multiple windows fired regardless of order.
+/// MEASURED (this fixture, 51 partitions / 60 rows, ≈9.9 MiB Data.db):
+/// `INDEX_PROBES == 0`, `seek_calls() == 3` (3 sequential window reads,
+/// not one per partition).
+///
+/// Asserts ROW-FOR-ROW parity (not just key order) against the materialising
+/// sibling `iterate_all_partitions` — `(RowKey, ScanRow)` both derive
+/// `PartialEq`, so this also proves the wide partition's rows round-tripped
+/// intact through the windowed read, not just that some row with that key
+/// arrived.
+///
+/// `#[serial(work_counters)]`: `INDEX_PROBES`/`SEEK_CALLS` are process-global.
+#[tokio::test]
+#[serial(work_counters)]
+async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
+    use crate::storage::sstable::read_work_counters as rwc;
+
+    const SMALL_COUNT: usize = 50;
+    const SMALL_TEXT_LEN: usize = 100_000; // 50 × 100 KB ≈ 4.9 MiB > 4 MiB target.
+    const WIDE_ROW_COUNT: usize = 10;
+    const WIDE_ROW_TEXT_LEN: usize = 500_000; // 10 × 500 KB ≈ 5 MB > 4 MiB target.
+    let expected_rows = SMALL_COUNT + WIDE_ROW_COUNT;
+
+    let (_temp, data_path) = write_multi_window_fixture(
+        SMALL_COUNT,
+        SMALL_TEXT_LEN,
+        WIDE_ROW_COUNT,
+        WIDE_ROW_TEXT_LEN,
+    )
+    .await;
+    let reader = open_reader(&data_path).await;
+    let cancel = ScanCancel::default();
+
+    rwc::reset();
+    let mut streamed: Vec<(crate::RowKey, crate::types::ScanRow)> = Vec::new();
+    let outcome = reader
+        .stream_all_partitions_via_full_index(&cancel, &mut |row| {
+            streamed.push(row);
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, FullIndexStreamOutcome::Streamed),
+        "a full-Index.db fixture must stream via the index walk, not fall back"
+    );
+    assert_eq!(
+        streamed.len(),
+        expected_rows,
+        "the windowed walk must emit every one of the {expected_rows} rows \
+         ({SMALL_COUNT} single-row partitions + {WIDE_ROW_COUNT} rows in the wide partition)"
+    );
+
+    // The defining new-behavior evidence (this roborev round): the read pattern
+    // actually crosses a window boundary — unreachable by any prior (tiny)
+    // fixture. Zero index probes still holds regardless of fixture size.
+    assert_eq!(
+        rwc::index_probes(),
+        0,
+        "the windowed walk must perform ZERO Index.db probes regardless of fixture size"
+    );
+    let seeks = rwc::seek_calls();
+    assert!(
+        seeks >= 2,
+        "a >4 MiB Data.db (small partitions ≈4.9 MiB + a wide partition ≈5 MB) \
+         must force at least 2 window refills (got {seeks}) — proves the \
+         multi-window-refill path actually ran, not just the single-window case \
+         every prior (tiny) fixture exercised"
+    );
+
+    // Row-for-row parity across the refill boundary/boundaries: identical to
+    // the materialising sibling, including the wide partition's rows read via
+    // the `want == span` window-sizing clamp.
+    let materialised = reader.iterate_all_partitions().await.unwrap();
+    assert_eq!(
+        streamed, materialised,
+        "windowed streaming rows (key AND decoded value) must be IDENTICAL to \
+         the materialising sibling across the window-refill boundary — proves \
+         `window_start` advances correctly and every partition's slice \
+         (including the large single-partition clamp) is read intact"
     );
 }
