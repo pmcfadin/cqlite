@@ -43,7 +43,15 @@ impl ElementExpiryShape {
             return Self::LiveForever;
         }
         match (cell.element_ttl, cell.element_local_deletion_time) {
-            (Some(ttl), Some(ldt)) => Self::Explicit(ttl as i32, ldt as u32 as i64),
+            // Clamp `ttl` (a `u32`) to `i32::MAX` to mirror the scalar cell
+            // reader's `abs_ttl.min(i32::MAX as i64) as i32` (see
+            // `cell_value.rs`): a bare `as i32` cast would expose a NEGATIVE
+            // `ttl_seconds` for a `u32` TTL > `i32::MAX`, violating the
+            // `CellExpiration.ttl_seconds` contract. No real Cassandra data
+            // triggers this (max TTL ~20y ≪ `i32::MAX`); defensive parity.
+            (Some(ttl), Some(ldt)) => {
+                Self::Explicit(ttl.min(i32::MAX as u32) as i32, ldt as u32 as i64)
+            }
             // USE_ROW_TTL shape (issue #2038 round 3): no explicit per-element
             // TTL/LDT — both are decoded ONLY when NOT USE_ROW_TTL, so this
             // combination unambiguously means the element inherits the row's
@@ -2205,6 +2213,50 @@ mod tests {
             "Issue #2038: a statement-level USING TTL n collection element \
              (USE_ROW_TTL encoding) must surface its inherited expiry, not None"
         );
+    }
+
+    /// Issue #2173 (a) (roborev Low): the scalar cell reader clamps an absolute
+    /// TTL to `i32::MAX` (`cell_value.rs`: `abs_ttl.min(i32::MAX as i64) as
+    /// i32`). `ElementExpiryShape::from_cell` must MIRROR that clamp — a bare
+    /// `ttl as i32` cast on the `u32` `element_ttl` would expose a NEGATIVE
+    /// `ttl_seconds` for a TTL > `i32::MAX`, violating the `CellExpiration`
+    /// contract. No real Cassandra data reaches this (max TTL ~20y ≪
+    /// `i32::MAX`); this pins the defensive parity.
+    ///
+    /// Revert-verify: reverting the fix to `Self::Explicit(ttl as i32, ...)`
+    /// makes this test FAIL — the resolved `ttl_seconds` becomes negative.
+    #[test]
+    fn test_2173_explicit_element_ttl_clamps_to_i32_max_not_negative() {
+        // A u32 element TTL strictly greater than i32::MAX (defensive only).
+        let over_max: u32 = (i32::MAX as u32) + 1;
+        assert!(
+            (over_max as i32) < 0,
+            "sanity: a bare `as i32` cast of this TTL would be negative"
+        );
+        let cell = ComplexCellParse {
+            value: Some(Value::Blob(vec![0xAA])),
+            path_bytes: Vec::new(),
+            is_deleted: false,
+            has_empty_value: false,
+            next_offset: 0,
+            element_writetime: Some(1),
+            element_ttl: Some(over_max),
+            element_local_deletion_time: Some(1000),
+            is_expiring: true,
+        };
+        // No USE_ROW_TTL inheritance (explicit per-element TTL present).
+        match ElementExpiryShape::from_cell(&cell, None, None) {
+            ElementExpiryShape::Explicit(ttl_seconds, _expires_at) => {
+                assert_eq!(
+                    ttl_seconds,
+                    i32::MAX,
+                    "a u32 TTL > i32::MAX must clamp to i32::MAX (matching the \
+                     scalar reader), never wrap to a negative value"
+                );
+                assert!(ttl_seconds >= 0, "clamped ttl_seconds must be non-negative");
+            }
+            other => panic!("expected Explicit shape, got {other:?}"),
+        }
     }
 
     /// Issue #2038 (roborev 1503, round 3): PRESERVE the round-2 no-over-
