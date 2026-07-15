@@ -25,18 +25,11 @@ mod bti_point;
 // `not(tombstones)` gated.
 #[cfg(not(feature = "tombstones"))]
 mod big_promoted;
-// In-crate proof that the promoted-index / reverse-lookup uncompressed read path
-// verifies CRC.db before parsing (issue #1396, roborev Fix 1). It calls the
-// pub(crate) `big_reverse_partition_rows`, so it cannot live in `tests/`.
+// In-crate regression proofs for the BIG promoted seek read path (issues #1396, #1869):
+// the uncompressed arm verifies CRC.db before parsing; the compressed window builder
+// fails closed / round-trips. Uses crate-visible internals, so not in `tests/`.
 #[cfg(all(test, not(feature = "tombstones")))]
-mod big_promoted_crc_tests;
-// Unit-level regression proofs for the COMPRESSED arm of the BIG clustering/reverse
-// seek window builder (`compressed_partition_window`), issue #1869. Drives the builder
-// directly against hand-built CompressionInfo + in-memory ReadAt fixtures to reproduce
-// the `within > 0` panic classes the SQL-roundtrip test could not, so it cannot live
-// in `tests/`.
-#[cfg(all(test, not(feature = "tombstones")))]
-mod big_promoted_window_tests;
+mod big_promoted_seek_tests;
 // In-crate proof that the BIG point-read chunk fetch (`get_cached_data`) consults
 // the shared decompressed-chunk cache (issue #1567). Needs `pub(crate)` reader
 // state (`actual_header_size`) to build a valid offset, so it cannot live in

@@ -508,7 +508,7 @@ impl SSTableReader {
                 // Compressed Data.db: the window-building is a pure function of
                 // `CompressionInfo` + the positional source, so it lives in
                 // `compressed_partition_window` where it is unit-tested directly against
-                // hand-built fixtures (`big_promoted_window_tests`), without a full
+                // hand-built fixtures (`big_promoted_seek_tests::window_builder`), without a full
                 // write-engine + compressing-writer roundtrip (issue #1869).
                 let comp_info = self.compression_info.as_deref().ok_or_else(|| {
                     Error::corruption(
@@ -600,7 +600,7 @@ impl SSTableReader {
 /// Extracted from [`SSTableReader::decompress_partition_window`] (issue #1869) so the
 /// window arithmetic is a pure function of `CompressionInfo` + the positional
 /// [`ReadAt`](super::super::read_at::ReadAt) source and can be unit-tested directly
-/// against hand-built fixtures (`big_promoted_window_tests`) — no full write-engine +
+/// against hand-built fixtures (`big_promoted_seek_tests::window_builder`) — no full write-engine +
 /// compressing-writer roundtrip. I/O-path parity with `read_compressed_offset_window`
 /// (`compressed_offset.rs`) is preserved: CRC-before-decompress via
 /// [`read_compressed_chunk_at`](super::super::block_io::read_compressed_chunk_at), and

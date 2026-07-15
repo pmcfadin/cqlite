@@ -577,7 +577,8 @@ async fn compressed_ranged_read_across_gap_keeps_adjacent_rows() {
 // out-of-range guard, the `needed == 0` / `end_bound <= window_base` choke-point
 // guard, and the incompressible raw-chunk fallback) live directly against
 // `compressed_partition_window` in
-// `cqlite-core/src/storage/sstable/reader/data_access/big_promoted_window_tests.rs`.
+// `cqlite-core/src/storage/sstable/reader/data_access/big_promoted_seek_tests.rs`
+// (module `window_builder`).
 
 /// Rewrite `CompressionInfo.db` so it records ONE FEWER chunk than its own
 /// `data_length` implies: parse the sidecar, drop the last chunk offset, and write
