@@ -1880,11 +1880,17 @@ run_operator_metrics_doc() {
     # fail-closed generation error (a catalogued metric lacking an operator
     # annotation). grep on the captured $log is injection/quoting-safe.
     if grep -q 'STALE' "$log"; then
-      echo "--- [$name] FAILED: $doc is STALE vs the observability catalog."
+      # Name the artifact(s) that ACTUALLY drifted — either the committed report,
+      # the published website page, or both — rather than always blaming the
+      # report. The example prints `STALE — <path> …` per drifted artifact.
+      local drifted
+      drifted=$(grep 'STALE' "$log" | grep -oE '[[:graph:]]+\.md' | sort -u | tr '\n' ' ')
+      [ -n "$drifted" ] || drifted="$doc"
+      echo "--- [$name] FAILED: the following artifact(s) are STALE vs the observability catalog: $drifted"
       echo "    Regenerate: cargo run -p cqlite-core --example gen_operator_metrics_doc"
     else
       echo "--- [$name] FAILED: could not render $doc — a catalogued metric is missing its operator annotation."
-      echo "    Add the annotation in cqlite-core/src/observability/operator_docs.rs, then regenerate."
+      echo "    Add the annotation in cqlite-core/src/observability/operator_docs_annotations.rs, then regenerate."
     fi
     echo "--- last 40 lines of $log ---"
     tail -40 "$log"

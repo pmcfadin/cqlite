@@ -14,7 +14,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **61**.
+Total instruments: **62**.
 
 ## All instruments
 
@@ -56,9 +56,10 @@ Total instruments: **61**.
 | `cqlite.read.bloom.false_negatives` | counter | `1` | `cqlite.sstable.format` | Opt-in soundness alarm: keys found on an authoritative scan that the presence oracle said were absent. | MUST stay 0. Any non-zero value is a corruption/soundness alarm (only emitted when verification is enabled). |
 | `cqlite.read.bytes` | counter | `By` | `cqlite.sstable.format`<br>`cqlite.compression` | Total Data.db bytes read (post-decompression). | Track against read.rows to spot read amplification; a spike with flat rows means wide scans. |
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` | Distribution of single read/scan operation durations. | Watch p99; a growing tail is the read-latency alarm. |
-| `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`<br>`cqlite.query.access_path`<br>`cqlite.sstable.format` | Partition point lookups attempted, tagged hit/miss so a dashboard computes the hit ratio from one series. | A healthy point-read workload is dominated by hits; a miss-heavy ratio means keys are absent or mis-routed. |
+| `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`<br>`cqlite.read.lookup_route`<br>`cqlite.sstable.format` | Partition point lookups attempted, tagged hit/miss so a dashboard computes the hit ratio from one series. | A healthy point-read workload is dominated by hits; a miss-heavy ratio means keys are absent or mis-routed. |
 | `cqlite.read.partitions` | counter | `{partition}` | `cqlite.sstable.format` | Total partitions scanned by the read path. | Rising in step with read.rows is healthy; many partitions for few rows indicates a full scan. |
 | `cqlite.read.rows` | counter | `{row}` | `cqlite.sstable.format` | Total rows materialised by the read path (climbs incrementally during a long Flight merge scan). | Steadily rising under load is healthy; flat while a scan is in flight suggests a stall. |
+| `cqlite.read.scan.window_refill` | counter | `1` | _(none)_ | Windowed streaming-scan refills at a compression-chunk boundary (a partition straddles the chunk edge and the driver awaits the next decompressed chunk). | Non-zero proves the multi-chunk stitch path was exercised; it stays 0 for single-chunk SSTables. A runaway value means excessive chunk-boundary straddling. |
 | `cqlite.read.sstables_pruned` | counter | `{sstable}` | `cqlite.sstable.format` | SSTables skipped by a definitive presence-oracle negative (bloom/BTI-trie miss). | Higher is better — it is the dashboard-honest prune signal; zero on a point read means no pruning happened. |
 | `cqlite.rpc.bytes` | counter | `By` | `cqlite.rpc.method` | Record-batch payload bytes streamed to clients by do_get (pre-IPC-framing). | Tracks egress volume; pair with rpc.rows to see batch sizing. |
 | `cqlite.rpc.duration` | histogram | `s` | `cqlite.rpc.method`<br>`cqlite.rpc.status` | Arrow Flight RPC handler durations (includes admission wait time). | Watch do_get p99; localize a rising tail with rpc.phase.duration. |
