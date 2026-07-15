@@ -36,6 +36,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "common/docker_probe.rs"]
+mod docker_probe;
+
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::writer::{SSTableFormat, SSTableInfo, SSTableWriter};
 use cqlite_core::storage::write_engine::mutation::{
@@ -96,23 +99,44 @@ fn image_present_locally(listing: &str, image: &str) -> bool {
 /// local-tag discovery (exact pin, then `cassandra:5.0`, then any `cassandra:5.0.*`)
 /// for dev convenience.
 fn try_cassandra_5_image() -> Result<String, String> {
+    use docker_probe::{bounded_probe, ProbeOutcome, DOCKER_PROBE_TIMEOUT};
+
     let pinned = pinned_cassandra_image();
-    // 1. Docker daemon reachable?
-    let info = Command::new("docker").arg("info").output();
-    match info {
-        Ok(out) if out.status.success() => {}
-        Ok(_) => return Err("docker daemon not reachable (`docker info` failed)".to_string()),
-        Err(_) => return Err("docker binary not available".to_string()),
+    // 1. Docker daemon reachable? Bounded probe (issue #1819): an unresponsive
+    //    daemon (`docker info` blocks forever) must surface as an `Err` reason
+    //    within a few seconds, never wedge the gate. In strict mode the caller
+    //    turns that `Err` into a loud FAIL; outside strict mode, a clean SKIP.
+    match bounded_probe("docker", &["info"], DOCKER_PROBE_TIMEOUT) {
+        ProbeOutcome::Completed { success: true, .. } => {}
+        ProbeOutcome::Completed { success: false, .. } => {
+            return Err("docker daemon not reachable (`docker info` failed)".to_string())
+        }
+        ProbeOutcome::TimedOut => {
+            return Err(format!(
+                "`docker info` did not respond within {DOCKER_PROBE_TIMEOUT:?} \
+                 (daemon present but unresponsive); treating Docker as unavailable (issue #1819)"
+            ))
+        }
+        ProbeOutcome::SpawnFailed => return Err("docker binary not available".to_string()),
     }
     // 2. List images present locally. (We do not pull — CI provisions the pin.)
-    let images = Command::new("docker")
-        .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
-        .output();
-    let images = match images {
-        Ok(out) if out.status.success() => out,
+    let listing = match bounded_probe(
+        "docker",
+        &["images", "--format", "{{.Repository}}:{{.Tag}}"],
+        DOCKER_PROBE_TIMEOUT,
+    ) {
+        ProbeOutcome::Completed {
+            success: true,
+            stdout,
+        } => stdout,
+        ProbeOutcome::TimedOut => {
+            return Err(format!(
+                "`docker images` did not respond within {DOCKER_PROBE_TIMEOUT:?} \
+                 (daemon present but unresponsive); treating Docker as unavailable (issue #1819)"
+            ))
+        }
         _ => return Err("`docker images` failed".to_string()),
     };
-    let listing = String::from_utf8_lossy(&images.stdout);
 
     // STRICT: the exact pinned image MUST be present. No looser fallback — the
     // hard leg must validate against the stated pin, not a different local tag.
