@@ -87,8 +87,14 @@ jobs:
           CQLITE_SOAK_ITERATIONS: ${{ steps.iters.outputs.count }}
         run: |
           echo "Running soak with $CQLITE_SOAK_ITERATIONS iterations"
+          # --test-threads=1: both `#[ignore]` soak variants sample PROCESS-GLOBAL
+          # counters (/proc/self/fd, /proc/self/statm). Running them concurrently
+          # (the default) would let each variant's opens/cache pollute the other's
+          # samples, defeating the whole point of splitting them (no-cache isolates
+          # FD/mmap leaks; with-cache isolates cache-entry leaks) — roborev finding,
+          # issue #2013.
           cargo test -p cqlite-core --test soak_resource_leak --features write-support \
-            -- --ignored --nocapture
+            -- --ignored --nocapture --test-threads=1
 
       # Auto-file a tracking issue ONLY on a scheduled failure (AC #4). Skipped for
       # workflow_dispatch so manual reruns don't spam the tracker. The run URL is the
