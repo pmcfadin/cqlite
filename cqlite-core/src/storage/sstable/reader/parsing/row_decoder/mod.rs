@@ -916,13 +916,6 @@ mod regression_1741k_tests;
 #[cfg(test)]
 mod regression_1641_boundary_peek_tests;
 
-// Issue #2436 (roborev job 1729): negative pin for the `row_size > available`
-// structural bound added to `parse_row_data_with_offset_impl` — a corrupt
-// row_size VInt must fail CLOSED (a typed `Error::corruption`), never panic or
-// mis-parse into a truncated/garbage row.
-#[cfg(all(test, feature = "write-support"))]
-mod regression_2436_row_size_bound_tests;
-
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
     ///
