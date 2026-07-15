@@ -312,7 +312,14 @@ The pipeline measures itself so improvement is data-driven, not anecdotal — **
   timestamps (issue/PR open + merge + close → cycle time and coarse phase durations) plus run-observed
   counters — claim collisions, rebase/conflict events, agent-gate pass/fail + run count, roborev findings,
   and rework. A counter that was not observed is an **error**, never a fabricated `0` (no-heuristics
-  mandate). `delivery-telemetry.py lint` schema-validates every line.
+  mandate). `delivery-telemetry.py lint` schema-validates every line. **The stamp lands via a
+  `telemetry-<N>` PR-in-worktree, not a direct push** — `main` blocks direct pushes (PR required for every
+  commit, `enforce_admins=true`). `flow-finalize` branches a throwaway worktree off `origin/main`, appends
+  the record (note `record` writes to the script's repo ledger, not `$PWD` — verify it lands in the
+  worktree and leave root clean), and opens a telemetry-only PR that merges on its own green `required`
+  check. The ledger is a hot append-only file: resolve any rebase conflict by **keeping all lines**, never
+  dropping a peer's record. Never `git checkout` in the shared root to do this — a closer that switched
+  root onto a telemetry branch and died stranded it off `main` and broke every concurrent session.
 - **Diagnose.** On a cadence (per-epic or weekly) the manager runs `delivery-telemetry.py retro`, which
   ranks the recorded failure categories by a **documented weighted tally** (`Σ count × weight` — a
   deterministic policy table, not an inferred or learned model) and reports the single highest-cost

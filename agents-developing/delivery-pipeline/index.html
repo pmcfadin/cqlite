@@ -408,7 +408,14 @@ Records carry <strong>authoritative data only</strong>: GitHub-derived
 timestamps (issue/PR open + merge + close → cycle time and coarse phase durations) plus run-observed
 counters — claim collisions, rebase/conflict events, agent-gate pass/fail + run count, roborev findings,
 and rework. A counter that was not observed is an <strong>error</strong>, never a fabricated <code dir="auto">0</code> (no-heuristics
-mandate). <code dir="auto">delivery-telemetry.py lint</code> schema-validates every line.</li>
+mandate). <code dir="auto">delivery-telemetry.py lint</code> schema-validates every line. <strong>The stamp lands via a
+<code dir="auto">telemetry-&#x3C;N></code> PR-in-worktree, not a direct push</strong> — <code dir="auto">main</code> blocks direct pushes (PR required for every
+commit, <code dir="auto">enforce_admins=true</code>). <code dir="auto">flow-finalize</code> branches a throwaway worktree off <code dir="auto">origin/main</code>, appends
+the record (note <code dir="auto">record</code> writes to the script’s repo ledger, not <code dir="auto">$PWD</code> — verify it lands in the
+worktree and leave root clean), and opens a telemetry-only PR that merges on its own green <code dir="auto">required</code>
+check. The ledger is a hot append-only file: resolve any rebase conflict by <strong>keeping all lines</strong>, never
+dropping a peer’s record. Never <code dir="auto">git checkout</code> in the shared root to do this — a closer that switched
+root onto a telemetry branch and died stranded it off <code dir="auto">main</code> and broke every concurrent session.</li>
 <li><strong>Diagnose.</strong> On a cadence (per-epic or weekly) the manager runs <code dir="auto">delivery-telemetry.py retro</code>, which
 ranks the recorded failure categories by a <strong>documented weighted tally</strong> (<code dir="auto">Σ count × weight</code> — a
 deterministic policy table, not an inferred or learned model) and reports the single highest-cost
