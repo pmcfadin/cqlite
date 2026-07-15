@@ -295,6 +295,20 @@ impl CapturedMetrics {
             .unwrap_or(0.0)
     }
 
+    /// Whether the named metric has a data point with a completely EMPTY
+    /// attribute set (i.e. the unlabeled baseline series) whose value equals
+    /// `value` (within `f64::EPSILON`). Distinct from `sum_where(name, &[])`,
+    /// which matches EVERY point vacuously: this requires that an actual
+    /// unlabeled point *exists* and carries the expected value — the pin that a
+    /// zero-valued labeled point (or an absent baseline) must NOT satisfy.
+    pub fn has_point_with_empty_attrs_at(&self, name: &str, value: f64) -> bool {
+        self.find(name).is_some_and(|m| {
+            m.points
+                .iter()
+                .any(|p| p.attributes.is_empty() && (p.value - value).abs() < f64::EPSILON)
+        })
+    }
+
     /// Sum of values for the data points whose attribute set contains ALL of the
     /// given `(key, value)` pairs. Lets a test assert, e.g., that
     /// `cqlite.errors.total{category=…,subsystem=…}` incremented.

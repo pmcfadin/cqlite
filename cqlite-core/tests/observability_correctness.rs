@@ -454,10 +454,15 @@ fn metric_names(m: &testing::CapturedMetrics) -> Vec<String> {
 }
 
 /// The eagerly-seeded `cqlite.errors.total` baseline (issue #2288) is present and
-/// totals exactly 0: the unlabeled baseline series is 0 AND no series contributes
-/// a nonzero increment in the collect window.
+/// totals exactly 0: an actual UNLABELED (empty-attribute) baseline point exists
+/// at value 0 AND no series contributes a nonzero increment in the collect window.
+///
+/// The unlabeled-point check is deliberately NOT `sum_where(.., &[])`, whose empty
+/// predicate matches every point vacuously (a zero-valued *labeled* point would
+/// pass): `has_point_with_empty_attrs_at` requires a genuinely attribute-free
+/// baseline point, so this fails if the seeded point were labeled or absent.
 fn mc_baseline_is_zero(m: &testing::CapturedMetrics) -> bool {
-    m.sum_where(catalog::ERRORS_TOTAL, &[]).abs() < f64::EPSILON
+    m.has_point_with_empty_attrs_at(catalog::ERRORS_TOTAL, 0.0)
         && m.counter_sum(catalog::ERRORS_TOTAL).abs() < f64::EPSILON
 }
 
