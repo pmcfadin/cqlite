@@ -603,4 +603,13 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       already-fixed-on-main bug, the fix is a `git rebase origin/main`, not a
       new implementation — check the base commit's age against recent merges
       before assuming a recurring symptom needs a new fix.
+  19. **2026-07-15 — Owner standing decision: default SELECT log posture stays
+      fully quiet at INFO level.** Raised as a NEEDS-YOU on #2172 item (c) —
+      whether to add back a minimal "SELECT executed, N rows" INFO marker at
+      `db.execute()` after #1703's demotion work silenced the read path.
+      Owner chose to leave it quiet (operators wanting per-query visibility
+      already have DEBUG/tracing spans). Applies as precedent for any future
+      "should the read path emit a default-posture INFO signal" question —
+      the answer is no, unless the owner revisits this explicitly.
+
 
