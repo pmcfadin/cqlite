@@ -434,20 +434,11 @@ async fn test_type_smallint_max() {
     assert_eq!(read_back, original, "SmallInt(MAX) roundtrip failed");
 }
 
-/// The reader widens Float32 → Float(f64) during read-back.
-/// IEEE 754 bits are preserved through the widening.
-fn widen_float32(v: Value) -> Value {
-    if let Value::Float32(f) = v {
-        Value::Float(f as f64)
-    } else {
-        v
-    }
-}
-
 /// Test Float32 type roundtrip
 ///
-/// The reader widens f32 to f64 (Value::Float) during read-back.
-/// IEEE 754 bits are preserved; we compare against the widened value.
+/// Issue #1884: `CellKind::Float` now decodes to `Value::Float32(f32)` (not a
+/// lossy `f32 as f64` widening to `Value::Float`), so the write→read roundtrip
+/// is lossless and the read-back must equal the original `Value::Float32`.
 #[tokio::test]
 async fn test_type_float32_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
@@ -456,16 +447,12 @@ async fn test_type_float32_roundtrip() {
     let info = write_single_value(&temp_dir, &schema, "float_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "float_col").await;
-    assert_eq!(
-        read_back,
-        widen_float32(original),
-        "Float32 roundtrip failed"
-    );
+    assert_eq!(read_back, original, "Float32 roundtrip failed");
 }
 
 /// Test Float32 type with special value
 ///
-/// The reader widens f32 to f64 (Value::Float) during read-back.
+/// Issue #1884: read-back preserves the `Value::Float32` variant losslessly.
 #[tokio::test]
 async fn test_type_float32_special() {
     let temp_dir = TempDir::new().unwrap();
@@ -474,16 +461,14 @@ async fn test_type_float32_special() {
     let info = write_single_value(&temp_dir, &schema, "float_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "float_col").await;
-    assert_eq!(
-        read_back,
-        widen_float32(original),
-        "Float32 roundtrip failed"
-    );
+    assert_eq!(read_back, original, "Float32 roundtrip failed");
 }
 
 /// Test Float32 type with min value
 ///
-/// The reader widens f32 to f64 (Value::Float) during read-back.
+/// Issue #1884: `f32::MIN` roundtrips losslessly as `Value::Float32`; the old
+/// `f32 as f64` widening changed the printed value (e.g. -3.4028235e38 →
+/// -3.4028234663852886e38), which this test now pins against regressing.
 #[tokio::test]
 async fn test_type_float32_min() {
     let temp_dir = TempDir::new().unwrap();
@@ -492,10 +477,11 @@ async fn test_type_float32_min() {
     let info = write_single_value(&temp_dir, &schema, "float_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "float_col").await;
-    assert_eq!(
-        read_back,
-        widen_float32(original),
-        "Float32 roundtrip failed"
+    assert_eq!(read_back, original, "Float32 roundtrip failed");
+    // Pin the exact variant: read-back must be Float32, never a widened Float.
+    assert!(
+        matches!(read_back, Value::Float32(f) if f == f32::MIN),
+        "expected lossless Value::Float32(f32::MIN), got {read_back:?}"
     );
 }
 
