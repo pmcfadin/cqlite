@@ -197,7 +197,7 @@
 <p><strong>Magic Number</strong>: The constant <code dir="auto">0x26291b05</code> appears at bytes 4-7 and serves dual purposes:</p>
 <ul>
 <li><code dir="auto">statistics_kind</code> when read by <code dir="auto">parse_nb_format_header()</code></li>
-<li><code dir="auto">checksum</code> when read by <code dir="auto">parse_statistics_toc_for_header_offset()</code></li>
+<li><code dir="auto">checksum</code> when read by the single-pass <code dir="auto">parse_statistics_toc()</code> TOC walk (issue #2148)</li>
 </ul>
 <p><strong>Version/Components</strong>: The value <code dir="auto">4</code> at bytes 0-3 indicates:</p>
 <ul>
