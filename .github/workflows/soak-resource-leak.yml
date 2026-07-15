@@ -1,0 +1,126 @@
+name: "Nightly: Resource-Leak Soak (issue #2013)"
+
+# Runs the FD/RSS resource-leak soak test (cqlite-core/tests/soak_resource_leak.rs)
+# with a high iteration count. On a scheduled failure it auto-files a tracking issue.
+
+on:
+  schedule:
+    # 06:20 UTC — offset from coverage.yml's 07:35 slot so the two nightly deep
+    # lanes don't contend for the same runner window.
+    - cron: '20 6 * * *'
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Soak iterations'
+        required: false
+        default: '500'
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: soak-resource-leak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: Resource-Leak Soak (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Pin to the repo toolchain (rust-toolchain.toml = 1.88.0), issue #1990.
+      # dtolnay/rust-toolchain cannot read the pin file, so pin the version ref
+      # explicitly (bump alongside rust-toolchain.toml).
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: soak-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Fetch real Cassandra 5 datasets
+        run: bash test-data/scripts/fetch-datasets.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Normalize the dispatch iteration input to a bounded integer BEFORE it
+      # reaches any `run:` (injection-safe: never interpolate raw input into a
+      # shell body). Scheduled runs use the 500 default.
+      - name: Resolve iteration count
+        id: iters
+        env:
+          RAW_ITERS: ${{ github.event.inputs.iterations }}
+        run: |
+          n="${RAW_ITERS:-500}"
+          # Use bash `=~` (whole-string anchor), not `grep`, which is line-oriented
+          # and would accept a multi-line value whose first line is all digits —
+          # that value would then survive to the `echo >> "$GITHUB_OUTPUT"` below
+          # as a GITHUB_OUTPUT-injection vector (roborev-review-branch finding).
+          if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+            echo "::error::iterations input must be a non-negative integer; got '$n'"
+            exit 1
+          fi
+          # Clamp to a sane ceiling so a dispatch typo can't run for hours.
+          if [ "$n" -gt 5000 ]; then n=5000; fi
+          if [ "$n" -lt 1 ]; then n=500; fi
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Run resource-leak soak
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Fixtures MUST be present in CI — never let the soak pass vacuously.
+          CQLITE_REQUIRE_FIXTURES: '1'
+          CQLITE_SOAK_ITERATIONS: ${{ steps.iters.outputs.count }}
+        run: |
+          echo "Running soak with $CQLITE_SOAK_ITERATIONS iterations"
+          # --test-threads=1: both `#[ignore]` soak variants sample PROCESS-GLOBAL
+          # counters (/proc/self/fd, /proc/self/statm). Running them concurrently
+          # (the default) would let each variant's opens/cache pollute the other's
+          # samples, defeating the whole point of splitting them (no-cache isolates
+          # FD/mmap leaks; with-cache isolates cache-entry leaks) — roborev finding,
+          # issue #2013.
+          cargo test -p cqlite-core --test soak_resource_leak --features write-support \
+            -- --ignored --nocapture --test-threads=1
+
+      # Auto-file a tracking issue ONLY on a scheduled failure (AC #4). Skipped for
+      # workflow_dispatch so manual reruns don't spam the tracker. The run URL is the
+      # only interpolation and it is a trusted GitHub-generated value.
+      - name: File resource-leak issue on scheduled failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v8
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const runUrl = process.env.RUN_URL;
+            const today = new Date().toISOString().slice(0, 10);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly resource-leak soak failed (${today})`,
+              body: [
+                'The nightly resource-leak soak (`soak-resource-leak.yml`, issue #2013) failed.',
+                '',
+                `- Run: ${runUrl}`,
+                '',
+                'A failure means the FD or RSS series crossed the leak threshold. Read the',
+                'printed `fd_samples`/`rss_samples` series in the run log to find the leak-onset',
+                'iteration, then follow `docs/development/soak-resource-leak.md` ("What to do when',
+                'it trips") to triage.',
+              ].join('\n'),
+              labels: ['testing', 'type:test'],
+            });

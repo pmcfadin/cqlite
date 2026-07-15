@@ -19,6 +19,9 @@ See `docs/profiling.md`.
 ./scripts/profile.sh report          # ranked bottleneck report + history.jsonl ledger
 ```
 
+FD/RSS resource-leak soak (long-running open/scan/drop loop): see
+`docs/development/soak-resource-leak.md`.
+
 ## CLI
 
 ```bash
