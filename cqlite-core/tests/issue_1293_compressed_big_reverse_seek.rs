@@ -561,20 +561,23 @@ async fn compressed_ranged_read_across_gap_keeps_adjacent_rows() {
     drop(temp);
 }
 
-// ─────────── 5. Fail-closed on a truncated CompressionInfo (issue #1869) ───────────
+// ─────────── 5. End-to-end fail-closed on a truncated CompressionInfo ───────────
 //
-// Regression guard for the #1869 review blocker: `decompress_partition_window`'s
-// compressed arm must FAIL CLOSED (typed error) — never PANIC — when a
-// promoted-index offset resolves to a chunk index past the last chunk recorded in
-// `CompressionInfo.db` (a malformed/corrupt sidecar).
+// End-to-end guard: a reverse (`ORDER BY ck DESC`) query over an SSTable whose
+// `CompressionInfo.db` records one fewer chunk than its `data_length` implies must
+// FAIL CLOSED (typed error) that propagates to `execute`, never a panic or a
+// silently-short result set.
 //
-// Before the fix, the chunk-stitch loop `break`-ed on the FIRST
-// `read_compressed_chunk_at` EOF signal (which fires for any out-of-range chunk),
-// leaving `window` EMPTY while the resolved intra-window offset `within > 0`. The
-// caller then sliced `&window[within..]` on the empty vec → slice-index-out-of-range
-// PANIC, violating the "parser never panics on adversarial bytes" stance. The fix
-// restores the up-front out-of-range guard (and hardens the loop's EOF branch), so
-// the read now returns a typed `Error::corruption` that propagates to the query.
+// NOTE (issue #1869 review): this SQL-roundtrip drives
+// `decompress_partition_window` with the PARTITION-START offset, so `within == 0` for
+// this fixture — it therefore cannot reproduce the `within > 0` slice-panic classes
+// the #1869 fix targets, and it fails closed here via the reader's oversized
+// last-chunk CRC path (which pre-dates the fix). It is retained as a broad end-to-end
+// fail-closed check. The GENUINE unit-level regression proofs for the fix (up-front
+// out-of-range guard, the `needed == 0` / `end_bound <= window_base` choke-point
+// guard, and the incompressible raw-chunk fallback) live directly against
+// `compressed_partition_window` in
+// `cqlite-core/src/storage/sstable/reader/data_access/big_promoted_window_tests.rs`.
 
 /// Rewrite `CompressionInfo.db` so it records ONE FEWER chunk than its own
 /// `data_length` implies: parse the sidecar, drop the last chunk offset, and write

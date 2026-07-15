@@ -30,6 +30,13 @@ mod big_promoted;
 // pub(crate) `big_reverse_partition_rows`, so it cannot live in `tests/`.
 #[cfg(all(test, not(feature = "tombstones")))]
 mod big_promoted_crc_tests;
+// Unit-level regression proofs for the COMPRESSED arm of the BIG clustering/reverse
+// seek window builder (`compressed_partition_window`), issue #1869. Drives the builder
+// directly against hand-built CompressionInfo + in-memory ReadAt fixtures to reproduce
+// the `within > 0` panic classes the SQL-roundtrip test could not, so it cannot live
+// in `tests/`.
+#[cfg(all(test, not(feature = "tombstones")))]
+mod big_promoted_window_tests;
 // In-crate proof that the BIG point-read chunk fetch (`get_cached_data`) consults
 // the shared decompressed-chunk cache (issue #1567). Needs `pub(crate)` reader
 // state (`actual_header_size`) to build a valid offset, so it cannot live in
