@@ -84,7 +84,9 @@ fn schema_cql() -> String {
 }
 
 fn live_cks() -> Vec<i32> {
-    (0..N_CK).filter(|c| !(GAP_LO..GAP_HI).contains(c)).collect()
+    (0..N_CK)
+        .filter(|c| !(GAP_LO..GAP_HI).contains(c))
+        .collect()
 }
 
 /// Live `ck` strictly below `SLICE_HI` — the expected result of `ck < SLICE_HI`.
@@ -192,7 +194,9 @@ async fn big_clustering_slice_engages_and_matches() {
 
     // Sanity: the wide partition reads back in full.
     let full = db
-        .execute(&format!("SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1"))
+        .execute(&format!(
+            "SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1"
+        ))
         .await
         .expect("full partition read");
     assert_eq!(
@@ -230,7 +234,8 @@ async fn concurrent_big_clustering_slice_queries_open_no_fd() {
     let _g = PROBE_LOCK.lock().await;
     let (_temp, db) = open_db().await;
 
-    let slice_sql = format!("SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1 AND ck < {SLICE_HI}");
+    let slice_sql =
+        format!("SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1 AND ck < {SLICE_HI}");
 
     // Warm the reader (cold-open fd + lazy index materialization happen here, BEFORE
     // the measured window) so the measured section observes only per-query I/O.

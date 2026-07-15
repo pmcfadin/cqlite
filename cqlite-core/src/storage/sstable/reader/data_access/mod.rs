@@ -872,38 +872,6 @@ impl SSTableReader {
         Ok(buf)
     }
 
-    /// Positional (`pread`) sibling of [`read_uncompressed_verified`] for the
-    /// POINT/SEEK read path (issue #1573 C2, #1869): read `len` raw bytes at an
-    /// ABSOLUTE Data.db `offset` on the shared `point_source`, verifying the
-    /// covering `CRC.db` chunk(s) BEFORE returning any bytes.
-    ///
-    /// Unlike [`read_uncompressed_verified`] this takes no `BlockSource` cursor and
-    /// no mutex — the offset is a parameter, so concurrent point/seek reads never
-    /// serialize on a shared file position and never `open(2)` per query. The CRC
-    /// check (guardrail #1411) and its typed [`Error::Corruption`] on mismatch are
-    /// identical to the cursor path; the verifier is a no-op when this reader has
-    /// no `CRC.db`.
-    ///
-    /// [`read_uncompressed_verified`]: Self::read_uncompressed_verified
-    pub(in crate::storage::sstable::reader) async fn read_uncompressed_verified_at(
-        &self,
-        offset: u64,
-        len: usize,
-    ) -> Result<Vec<u8>> {
-        let size = u32::try_from(len).map_err(|_| {
-            Error::corruption(format!(
-                "uncompressed read length {len} exceeds u32 range for CRC verification \
-                 at Data.db offset 0x{offset:x}"
-            ))
-        })?;
-        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
-        self.verify_uncompressed_range(offset, size).await?;
-
-        let mut buf = vec![0u8; len];
-        self.point_source.read_exact_at(offset, &mut buf)?;
-        Ok(buf)
-    }
-
     /// Mint a fresh, independent cursor for one scan (issue #815).
     ///
     /// Each cursor owns a private file handle (or mmap cursor) and chunk index,
