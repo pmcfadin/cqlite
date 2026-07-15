@@ -261,7 +261,12 @@ fn col<'a>(row: &'a ScanRow, name: &str) -> Option<&'a Value> {
 /// A. Parity + C. Wiring: the public seeking point read is byte-identical to the
 /// full-scan reconciliation oracle for BOTH the overwrite/tombstone target and
 /// the partition-tombstone (resurrection) partition.
+// `#[serial(work_counters)]`: this test drives scans that bump the process-global
+// `merge_run_partitions_decoded`, so it must never run concurrently (in this test
+// binary) with the counter-asserting test below, whose `reset()`→scan→read delta
+// would otherwise be contaminated (issue #2428 contamination shape).
 #[test]
+#[serial_test::serial(work_counters)]
 fn seeking_point_read_is_byte_identical_to_full_scan_oracle() {
     let temp_dir = TempDir::new().unwrap();
     let data_dir = temp_dir.path().join("data");

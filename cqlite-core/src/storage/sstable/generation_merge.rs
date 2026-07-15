@@ -309,9 +309,9 @@ pub(super) async fn merge_generations_for_read(
 /// seeks each candidate directly to the target partition's `Data.db` offset
 /// (BTI trie / `Index.db`), or fail-safe filter-scans a single SSTable when its
 /// index is unavailable, then reconciles through the SAME `KWayMerger`
-/// (`from_row_iterators`, run_index = position). Cross-generation last-write-wins
-/// + cell/row tombstone + partition-tombstone reconciliation is therefore
-/// byte-identical to the full-scan merge, only over O(target) work.
+/// (`from_row_iterators`, run_index = position). Cross-generation reconciliation
+/// (last-write-wins, cell/row tombstone, and partition-tombstone shadowing) is
+/// therefore byte-identical to the full-scan merge, only over O(target) work.
 ///
 /// The read-visibility kernel is IDENTICAL to the materializing helper: the same
 /// [`ReadShadow`] (read-time TTL expiry + partition shadow, issue #1849) captured
