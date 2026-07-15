@@ -11,6 +11,15 @@ use super::arrow_convert::{
     bigint_to_i128, ArrowConvertError, DECIMAL_FIXED_SCALE, DECIMAL_MAX_PRECISION,
 };
 use num_bigint::BigInt;
+use std::sync::LazyLock;
+
+/// Maximum absolute value representable by `Decimal128(38, …)`: `10^38 − 1`.
+///
+/// Hoisted to a `LazyLock` so the ~38-digit `BigInt` is allocated ONCE for the
+/// process rather than recomputed on every [`rescale_decimal`] call (which runs
+/// per decimal cell during Parquet export).
+static DECIMAL128_MAX_ABS: LazyLock<BigInt> =
+    LazyLock::new(|| BigInt::from(10i64).pow(38u32) - BigInt::from(1i64));
 
 /// Rescale a CQL decimal value to the fixed column scale (`DECIMAL_FIXED_SCALE`).
 ///
@@ -76,15 +85,14 @@ pub(crate) fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, Arrow
         bigint * factor
     };
 
-    // Verify the result fits in Decimal128(38, …).
-    // 10^38 − 1 is the maximum absolute value representable.
-    let max_abs = BigInt::from(10i64).pow(38u32) - BigInt::from(1i64);
+    // Verify the result fits in Decimal128(38, …). `DECIMAL128_MAX_ABS`
+    // (`10^38 − 1`) is computed once via LazyLock rather than per call.
     let abs_rescaled = if rescaled.sign() == num_bigint::Sign::Minus {
         -rescaled.clone()
     } else {
         rescaled.clone()
     };
-    if abs_rescaled > max_abs {
+    if abs_rescaled > *DECIMAL128_MAX_ABS {
         return Err(ArrowConvertError::InvalidValue(format!(
             "Decimal value exceeds Decimal128(38, {DECIMAL_FIXED_SCALE}) range after rescaling"
         )));
@@ -144,6 +152,14 @@ mod tests {
 
     /// Run `f` on a worker thread and fail the test (rather than hang the suite)
     /// if it does not finish within [`WATCHDOG`].
+    ///
+    /// On a `Timeout` the worker thread is intentionally NOT joined: a
+    /// genuinely-hung worker (the regression this watchdog guards) would block
+    /// the join forever, defeating the whole point. Leaking the thread is the
+    /// acceptable trade-off for a regression watchdog — the test process exits
+    /// on panic and reaps it (issue #2145, nit 3). Distinguishing `Disconnected`
+    /// (worker panicked, channel dropped) from `Timeout` (true hang) gives a
+    /// clearer failure diagnostic (issue #2145, nit 2).
     fn run_bounded<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -151,7 +167,14 @@ mod tests {
         });
         match rx.recv_timeout(WATCHDOG) {
             Ok(v) => v,
-            Err(_) => panic!("issue #1755: {what} did not terminate within {WATCHDOG:?} (hang)"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+                "issue #1755: {what} worker thread panicked without producing a result \
+                 (channel disconnected)"
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "issue #1755: {what} did not terminate within {WATCHDOG:?} (hang) — \
+                 worker thread intentionally leaked (see run_bounded doc comment)"
+            ),
         }
     }
 
