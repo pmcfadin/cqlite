@@ -280,6 +280,69 @@ mod tests {
         }
     }
 
+    /// Spec Requirement 1 scenario ("Thread and fd gauges rise with concurrent
+    /// scans and settle after"): the process thread count read WHILE extra
+    /// threads are parked is strictly greater than the pre-load baseline, and
+    /// after they all exit it drops back below the loaded peak — asserted by
+    /// comparing captured LEVEL snapshots, never by asserting elapsed time. Not
+    /// `#[cfg]`-gated (so it compiles + clippy-checks on every platform); it
+    /// runs the real assertions only where `/proc` is present and early-returns
+    /// on an off-`/proc` platform, whose absence semantics `proc_readers_match_platform`
+    /// already covers.
+    #[test]
+    fn proc_thread_gauge_rises_with_load_and_settles() {
+        let Some(base) = read_proc_threads() else {
+            // Off-/proc platform: readers report absence (covered elsewhere).
+            return;
+        };
+        let n = 8usize;
+        // A barrier so every spawned thread is simultaneously alive when we read
+        // the loaded snapshot, and a second so they exit only after we have.
+        let started = std::sync::Arc::new(std::sync::Barrier::new(n + 1));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(n + 1));
+        let handles: Vec<_> = (0..n)
+            .map(|_| {
+                let s = started.clone();
+                let r = release.clone();
+                std::thread::spawn(move || {
+                    s.wait();
+                    r.wait();
+                })
+            })
+            .collect();
+
+        started.wait(); // all n threads are now alive and parked
+        let loaded = read_proc_threads().expect("linux self-read while loaded");
+        assert!(
+            loaded > base,
+            "the thread count must rise while {n} extra threads are parked \
+             (base={base}, loaded={loaded})"
+        );
+
+        release.wait(); // let the parked threads finish
+        for h in handles {
+            let _ = h.join();
+        }
+
+        // Settle: after every spawned thread has exited, the count returns below
+        // the loaded peak. Thread-table teardown in /proc can lag the join, so
+        // read the LEVEL over a bounded number of probes (a bounded work-probe,
+        // not a fixed wall-clock sleep).
+        let mut settled = read_proc_threads().expect("linux self-read after join");
+        for _ in 0..1000 {
+            if settled < loaded {
+                break;
+            }
+            std::thread::yield_now();
+            settled = read_proc_threads().expect("linux self-read after join");
+        }
+        assert!(
+            settled < loaded,
+            "the released threads must drop the count back below the loaded peak \
+             (loaded={loaded}, settled={settled})"
+        );
+    }
+
     /// Stage 1.2 corollary: a `None` reader contributes NO sample to a tick, so
     /// the gauge is absent rather than `0`. Exercised by driving `sample_once`
     /// and confirming it never panics and always advances the tick probe,
