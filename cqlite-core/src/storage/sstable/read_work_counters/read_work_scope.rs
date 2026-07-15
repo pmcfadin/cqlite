@@ -99,14 +99,21 @@ impl ReadWorkScope {
     /// Begin recording on the current thread. Panics if a scope is already active on
     /// this thread (one scope per assertion; nesting unsupported).
     pub(crate) fn new() -> Self {
-        SEEKS.with(|c| {
-            assert!(
-                c.get().is_none(),
-                "a ReadWorkScope is already active on this thread (nesting unsupported)"
-            );
-            c.set(Some(0));
+        // Guard both cells symmetrically: an active scope always sets BOTH to `Some`
+        // and its `Drop` clears BOTH to `None`, so seeing either already `Some` means a
+        // scope is live on this thread. Asserting both (rather than only `SEEKS`) means
+        // an inconsistent `SEEKS=None, INDEX_PROBES=Some` state panics instead of
+        // silently resetting the probe count.
+        SEEKS.with(|s| {
+            INDEX_PROBES.with(|p| {
+                assert!(
+                    s.get().is_none() && p.get().is_none(),
+                    "a ReadWorkScope is already active on this thread (nesting unsupported)"
+                );
+                s.set(Some(0));
+                p.set(Some(0));
+            });
         });
-        INDEX_PROBES.with(|c| c.set(Some(0)));
         Self {
             _not_send: std::marker::PhantomData,
         }
@@ -133,13 +140,12 @@ impl Drop for ReadWorkScope {
 
 #[cfg(test)]
 mod tests {
-    use super::ReadWorkScope;
-    use crate::storage::sstable::read_work_counters::{record_index_probe, record_seek};
+    use super::{record_index_probe, record_seek, ReadWorkScope};
     use std::sync::mpsc;
 
     /// Structural regression for issue #2470: a [`ReadWorkScope`] records ONLY the
-    /// `record_seek`/`record_index_probe` increments that execute on its own thread,
-    /// so a *concurrent* thread bumping the same process-global counters cannot
+    /// [`record_seek`]/[`record_index_probe`] increments that execute on its own
+    /// thread, so a *concurrent* thread calling the same scope recorders cannot
     /// contaminate a same-thread delta assertion.
     ///
     /// This is the mechanism that made `windowed_stream_read_pattern_is_sequential`
@@ -147,9 +153,11 @@ mod tests {
     /// invocation, which does NOT isolate tests per-process like nextest): another
     /// read-driving test running between that test's `reset()` and its read inflated
     /// the observed global delta to `seek_calls() == 144` against a `< 125` bound.
-    /// Here we reproduce that exact shape — a foreign thread hammering the globals
-    /// while a scope is open — and prove the scoped counts stay exactly the number of
-    /// increments made on THIS thread.
+    /// Here we use the scope-only recorders ([`super::record_seek`] /
+    /// [`super::record_index_probe`], which touch only the thread-local `Cell`s and
+    /// never the process-global `COUNTERS`) so the test itself contaminates nothing:
+    /// a foreign thread hammers the recorders while a scope is open, and we prove the
+    /// scoped counts stay exactly the number of increments made on THIS thread.
     #[test]
     fn read_work_scope_is_immune_to_a_concurrent_thread() {
         const LOCAL_SEEKS: u64 = 3;
@@ -158,10 +166,11 @@ mod tests {
 
         let work = ReadWorkScope::new();
 
-        // A foreign thread bumps the SAME process-global counters (its own thread has
-        // no active scope, so the scope-record is a no-op there). Handshakes force its
-        // increments to interleave DURING this thread's scope, exactly like a
-        // concurrent read-driving test.
+        // A foreign thread calls the SAME scope recorders (its own thread has no active
+        // scope, so the record is a no-op there — and, crucially, these recorders never
+        // touch the process-global counters, so this test cannot itself contaminate a
+        // concurrent global-reading test). Handshakes force its calls to interleave
+        // DURING this thread's scope, exactly like a concurrent read-driving test.
         let (started_tx, started_rx) = mpsc::channel::<()>();
         let (proceed_tx, proceed_rx) = mpsc::channel::<()>();
         let foreign = std::thread::spawn(move || {
