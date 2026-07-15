@@ -212,7 +212,7 @@ pub const STORAGE_OPEN_TABLES: &str = "cqlite.storage.open.tables";
 ///
 /// Total partition point lookups attempted on the read path, one increment per
 /// lookup. Bounded attributes: [`attr::RESULT`] (`hit`/`miss`),
-/// [`attr::ACCESS_PATH`] (`index`/`bti_trie`), and [`attr::SSTABLE_FORMAT`].
+/// [`attr::LOOKUP_ROUTE`] (`index`/`bti_trie`), and [`attr::SSTABLE_FORMAT`].
 /// Carrying `result` as an attribute (instead of separate metric names) lets a
 /// dashboard compute hit ratio from one series.
 pub const READ_PARTITION_LOOKUP: &str = "cqlite.read.partition_lookup.total";
@@ -674,6 +674,7 @@ pub const ALL_METRICS: &[&str] = &[
     READ_DURATION,
     READ_PARTITION_LOOKUP,
     READ_BLOOM_CHECKS,
+    READ_SCAN_WINDOW_REFILL,
     READ_SSTABLES_PRUNED,
     READ_BLOOM_FALSE_NEGATIVES,
     MERGE_ROWS_IN,
@@ -835,6 +836,87 @@ mod tests {
         // Distinct from the full-parse counter — the two must never collapse to one
         // name (a lazy-open regression must stay visible on INDEX_PARSES_TOTAL).
         assert_ne!(INDEX_INTERVAL_PARSES_TOTAL, INDEX_PARSES_TOTAL);
+    }
+
+    #[test]
+    fn read_scan_window_refill_counter_is_registered_and_namespaced() {
+        // Issue #2426 (roborev MEDIUM): the windowed-scan refill counter is an
+        // EMITTED instrument (a dedicated `Instruments` field + emission site in
+        // `scan_stream_windowed.rs`), so it MUST be in the canonical catalog or the
+        // operator "every instrument" reference silently omits it and the freshness
+        // gate cannot see it.
+        assert!(ALL_METRICS.contains(&READ_SCAN_WINDOW_REFILL));
+        assert_eq!(READ_SCAN_WINDOW_REFILL, "cqlite.read.scan.window_refill");
+        assert!(READ_SCAN_WINDOW_REFILL.starts_with("cqlite."));
+    }
+
+    #[test]
+    fn every_instrument_registered_in_otel_is_catalogued() {
+        // Issue #2426 (roborev MEDIUM, F1): guard the "emitted instrument absent
+        // from ALL_METRICS" bug class. `otel.rs` is the canonical instrument
+        // construction + record-routing site (every cross-crate emission — incl.
+        // cqlite-flight's warm-cache/admission metrics — routes through its
+        // `add_counter`/`record_histogram`/`record_gauge` dedicated arms). Any
+        // `catalog::SCREAMING_CONST` referenced there is a metric name bound to a
+        // real instrument, so it MUST appear in `ALL_METRICS`. This is a
+        // fully-automatic source-level check (no `observability` feature needed):
+        // add an instrument in `otel.rs` and forget to catalogue it → this fails.
+        //
+        // Automation note (#2426): this scans the core `otel.rs` registration site.
+        // Because every catalogued instrument that cqlite-flight emits now has a
+        // dedicated arm here (never the ad-hoc `_ =>` fallback), the check
+        // transitively covers the flight emission sites too. A future metric emitted
+        // ONLY via the ad-hoc fallback (no dedicated arm, no catalog entry) would not
+        // be caught here — that path is reserved for genuinely non-catalog names.
+        let otel_src = include_str!("otel.rs");
+        let catalogued: std::collections::HashSet<&str> = ALL_METRICS.iter().copied().collect();
+
+        // Collect the const IDENTIFIERS present in the ALL_METRICS array so we can
+        // map an `otel.rs` `catalog::IDENT` reference to a catalogued name. The
+        // constants are `pub const IDENT: &str = "cqlite. …";`, so build the map
+        // from this source file.
+        let this_src = include_str!("catalog.rs");
+        let mut ident_to_value = std::collections::HashMap::new();
+        for line in this_src.lines() {
+            let line = line.trim_start();
+            if let Some(rest) = line.strip_prefix("pub const ") {
+                if let Some((ident, tail)) = rest.split_once(':') {
+                    if let Some(start) = tail.find('"') {
+                        let after = &tail[start + 1..];
+                        if let Some(end) = after.find('"') {
+                            ident_to_value.insert(ident.trim(), &after[..end]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract every `catalog::SCREAMING_CONST` reference in otel.rs. `unit`/
+        // `attr` submodule refs (`catalog::unit::…`, `catalog::attr::…`) start with
+        // a lowercase char after `catalog::`, so they are excluded by construction.
+        let mut missing = Vec::new();
+        for (i, _) in otel_src.match_indices("catalog::") {
+            let rest = &otel_src[i + "catalog::".len()..];
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            // Skip lowercase submodule paths (unit/attr) — `ident` is empty then.
+            if ident.is_empty() {
+                continue;
+            }
+            let value = ident_to_value.get(ident.as_str()).copied().unwrap_or_else(|| {
+                panic!("otel.rs references catalog::{ident}, which is not a metric-name constant in catalog.rs")
+            });
+            if !catalogued.contains(value) {
+                missing.push(format!("catalog::{ident} (\"{value}\")"));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "otel.rs registers instruments for metrics ABSENT from ALL_METRICS \
+             (add them to catalog::ALL_METRICS): {missing:?}"
+        );
     }
 
     #[test]

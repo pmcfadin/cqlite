@@ -138,6 +138,17 @@
 #                      (two manifest-changing PRs), which no per-PR/local check can
 #                      see; that path self-heals via the push-to-main job in
 #                      .github/workflows/cassandra-parity.yml (issue #1338).
+#   operator-metrics-doc
+#                      gen_operator_metrics_doc --check: FAILs (naming
+#                      docs/reports/flight-metrics-reference.md) when the committed
+#                      operator-facing Flight metrics reference drifts from a fresh
+#                      render of the observability catalog, or when a catalogued
+#                      metric lacks its operator annotation (fail-closed). Catches
+#                      the "added/renamed a cqlite.* instrument, forgot to
+#                      regenerate the field-team doc" case at the local gate
+#                      (issue #2426). SKIP-aware (loud, never silent PASS): SKIPs
+#                      when cqlite-core is absent (a minimal checkout). No
+#                      Docker/datasets — reads the catalog + committed doc only.
 #   binding-unwind-profile
 #                      fail-closed guard (#1440): the shipped Python wheel and
 #                      Node prebuild build definitions must select
@@ -1044,7 +1055,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report operator-metrics-doc binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -1828,6 +1839,63 @@ run_parity_report() {
     else
       echo "--- [$name] FAILED: cannot render $report — the manifest is invalid."
       echo "    Fix the manifest lint/validity error before regenerating: $manifest"
+    fi
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# operator-metrics-doc: verify the committed operator-facing Flight metrics
+# reference (docs/reports/flight-metrics-reference.md) is not stale vs the
+# observability catalog (issue #2426). Renders it via the always-compiled catalog
+# with the cqlite-core `gen_operator_metrics_doc` example in --check mode; PASS
+# when the committed doc matches a fresh render, FAIL (naming the doc) when it
+# drifts. Mirrors the #1338 parity-report pattern: catches the "added/renamed a
+# metric or annotation, forgot to regenerate the field-team doc" case at the
+# local gate. SKIP-aware: when cqlite-core (the example's crate) is absent (a
+# minimal checkout), it records SKIP (loud, never a silent PASS). No Docker, no
+# datasets — reads the catalog + committed doc only. The example resolves the doc
+# at its canonical committed path (repo-root-relative), read-only under --check,
+# so a failure always names that file.
+run_operator_metrics_doc() {
+  local name=operator-metrics-doc
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local doc="docs/reports/flight-metrics-reference.md"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -d "$REPO_ROOT/cqlite-core" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cqlite-core unavailable)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] cargo run -q -p cqlite-core --example gen_operator_metrics_doc -- --check ($doc)"
+  if cargo run -q -p cqlite-core --example gen_operator_metrics_doc -- --check >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    # A nonzero --check exit is either a STALE committed doc (regenerate) or a
+    # fail-closed generation error (a catalogued metric lacking an operator
+    # annotation). grep on the captured $log is injection/quoting-safe.
+    if grep -q 'STALE' "$log"; then
+      # Name the artifact(s) that ACTUALLY drifted — either the committed report,
+      # the published website page, or both — rather than always blaming the
+      # report. The example prints `STALE — <path> …` per drifted artifact.
+      local drifted
+      drifted=$(grep 'STALE' "$log" | grep -oE '[[:graph:]]+\.md' | sort -u | tr '\n' ' ')
+      [ -n "$drifted" ] || drifted="$doc"
+      echo "--- [$name] FAILED: the following artifact(s) are STALE vs the observability catalog: $drifted"
+      echo "    Regenerate: cargo run -p cqlite-core --example gen_operator_metrics_doc"
+    else
+      echo "--- [$name] FAILED: could not render $doc — a catalogued metric is missing its operator annotation."
+      echo "    Add the annotation in cqlite-core/src/observability/operator_docs_annotations.rs, then regenerate."
     fi
     echo "--- last 40 lines of $log ---"
     tail -40 "$log"
@@ -3407,6 +3475,7 @@ dispatch_component() {
     node-bindings) run_node_bindings ;;
     delivery-telemetry) run_delivery_telemetry ;;
     parity-report) run_parity_report ;;
+    operator-metrics-doc) run_operator_metrics_doc ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build) run_component minimal-build bash -c '

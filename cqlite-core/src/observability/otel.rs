@@ -317,6 +317,11 @@ struct Instruments {
     rpc_requests: Counter<u64>,
     rpc_rows: Counter<u64>,
     rpc_bytes: Counter<u64>,
+    warm_cache_hits: Counter<u64>,
+    warm_cache_misses: Counter<u64>,
+    warm_cache_evicts: Counter<u64>,
+    warm_cache_refresh: Counter<u64>,
+    flight_admission_rejected_total: Counter<u64>,
     read_duration: Histogram<f64>,
     query_duration: Histogram<f64>,
     compaction_duration: Histogram<f64>,
@@ -328,6 +333,7 @@ struct Instruments {
     compaction_budget_consumed: Histogram<f64>,
     rpc_duration: Histogram<f64>,
     rpc_phase_duration: Histogram<f64>,
+    flight_admission_wait_seconds: Histogram<f64>,
     sstables_open: Gauge<i64>,
     memtable_size_bytes: Gauge<i64>,
     memtable_rows: Gauge<i64>,
@@ -335,6 +341,9 @@ struct Instruments {
     rpc_in_flight: Gauge<i64>,
     rpc_phase_active: Gauge<i64>,
     merge_producer_threads: Gauge<i64>,
+    flight_admission_limit: Gauge<i64>,
+    flight_admission_in_use: Gauge<i64>,
+    flight_admission_waiting: Gauge<i64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -525,6 +534,31 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::BYTES)
                 .with_description("Record-batch payload bytes streamed to Flight clients.")
                 .build(),
+            warm_cache_hits: m
+                .u64_counter(catalog::WARM_CACHE_HITS)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Flight warm-handle cache hits (#2310).")
+                .build(),
+            warm_cache_misses: m
+                .u64_counter(catalog::WARM_CACHE_MISSES)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Flight warm-handle cache misses (#2310).")
+                .build(),
+            warm_cache_evicts: m
+                .u64_counter(catalog::WARM_CACHE_EVICTS)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Warm generations evicted (LRU / removed on disk) (#2310).")
+                .build(),
+            warm_cache_refresh: m
+                .u64_counter(catalog::WARM_CACHE_REFRESH)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Warm-handle refresh outcomes, keyed by {refresh_outcome} (#2310).")
+                .build(),
+            flight_admission_rejected_total: m
+                .u64_counter(catalog::FLIGHT_ADMISSION_REJECTED_TOTAL)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("do_get requests rejected on admission timeout (#2420).")
+                .build(),
             read_duration: m
                 .f64_histogram(catalog::READ_DURATION)
                 .with_unit(catalog::unit::SECONDS)
@@ -580,6 +614,11 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::SECONDS)
                 .with_description("do_get per-phase duration in seconds (#2162).")
                 .build(),
+            flight_admission_wait_seconds: m
+                .f64_histogram(catalog::FLIGHT_ADMISSION_WAIT_SECONDS)
+                .with_unit(catalog::unit::SECONDS)
+                .with_description("do_get admission acquire wait time in seconds (#2420).")
+                .build(),
             sstables_open: m
                 .i64_gauge(catalog::SSTABLES_OPEN)
                 .with_unit(catalog::unit::SSTABLES)
@@ -614,6 +653,21 @@ fn instruments() -> &'static Instruments {
                 .i64_gauge(catalog::MERGE_PRODUCER_THREADS)
                 .with_unit(catalog::unit::THREADS)
                 .with_description("Live k-way merge producer threads (#2316).")
+                .build(),
+            flight_admission_limit: m
+                .i64_gauge(catalog::FLIGHT_ADMISSION_LIMIT)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Configured do_get admission ceiling K (#2420).")
+                .build(),
+            flight_admission_in_use: m
+                .i64_gauge(catalog::FLIGHT_ADMISSION_IN_USE)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("do_get admission permits currently held (#2420).")
+                .build(),
+            flight_admission_waiting: m
+                .i64_gauge(catalog::FLIGHT_ADMISSION_WAITING)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("do_get requests parked waiting for an admission permit (#2420).")
                 .build(),
         }
     })
@@ -662,6 +716,11 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::RPC_REQUESTS => &i.rpc_requests,
         catalog::RPC_ROWS => &i.rpc_rows,
         catalog::RPC_BYTES => &i.rpc_bytes,
+        catalog::WARM_CACHE_HITS => &i.warm_cache_hits,
+        catalog::WARM_CACHE_MISSES => &i.warm_cache_misses,
+        catalog::WARM_CACHE_EVICTS => &i.warm_cache_evicts,
+        catalog::WARM_CACHE_REFRESH => &i.warm_cache_refresh,
+        catalog::FLIGHT_ADMISSION_REJECTED_TOTAL => &i.flight_admission_rejected_total,
         _ => {
             meter().u64_counter(name).build().add(value, attributes);
             return;
@@ -685,6 +744,7 @@ pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[Key
         catalog::COMPACTION_BUDGET_CONSUMED => &i.compaction_budget_consumed,
         catalog::RPC_DURATION => &i.rpc_duration,
         catalog::RPC_PHASE_DURATION => &i.rpc_phase_duration,
+        catalog::FLIGHT_ADMISSION_WAIT_SECONDS => &i.flight_admission_wait_seconds,
         _ => {
             meter()
                 .f64_histogram(name)
@@ -707,6 +767,9 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
         catalog::RPC_IN_FLIGHT => &i.rpc_in_flight,
         catalog::RPC_PHASE_ACTIVE => &i.rpc_phase_active,
         catalog::MERGE_PRODUCER_THREADS => &i.merge_producer_threads,
+        catalog::FLIGHT_ADMISSION_LIMIT => &i.flight_admission_limit,
+        catalog::FLIGHT_ADMISSION_IN_USE => &i.flight_admission_in_use,
+        catalog::FLIGHT_ADMISSION_WAITING => &i.flight_admission_waiting,
         _ => {
             meter().i64_gauge(name).build().record(value, attributes);
             return;
