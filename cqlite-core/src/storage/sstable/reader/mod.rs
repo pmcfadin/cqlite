@@ -323,6 +323,21 @@ fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
     }
 }
 
+/// Minimum SSTable size for the point-read path to get its OWN mmap advised
+/// `MADV_RANDOM` (issue #2210). Below this the point source shares the scan's
+/// `Arc<Mmap>` unchanged (no 2nd mapping, no advice): the whole file is small
+/// enough that the kernel's default read-ahead cheaply makes it resident, and
+/// `MADV_RANDOM` would only add per-page synchronous faults. Above it, scattered
+/// point-lookup faults otherwise waste the ~128 KiB read-ahead window per read,
+/// so a dedicated `MADV_RANDOM` mapping collapses both the block-I/O
+/// amplification (~30x) and the cold-cache per-read latency (~35-43%). Threshold
+/// is measurement-derived on Linux/EBS: the win is unambiguous by 4 MiB; 8 MiB
+/// leaves 2x margin above the sub-MB "wash" zone. See
+/// docs/reports/issue-2210-madv-random-point-mmap-ab.md. The SCAN mapping is
+/// NEVER advised (measured #1143 behaviour preserved).
+#[cfg(unix)]
+const POINT_MMAP_MADV_RANDOM_MIN_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Process-wide count of currently-open [`SSTableReader`]s, the source value
 /// for the [`SSTABLES_OPEN`](crate::observability::catalog::SSTABLES_OPEN)
 /// gauge. Tracked PER FORMAT so the gauge — which carries the
@@ -550,7 +565,14 @@ impl SSTableReader {
         // backend degrades gracefully to a plain positioned fd if the faster
         // backend is refused, mirroring `build_block_sources`.
         let point_source: Arc<dyn read_at::ReadAt> = match &scan_source {
-            ScanSource::Mapped(mmap) => Arc::new(read_at::MmapReadAt::new(mmap.clone())),
+            ScanSource::Mapped(mmap) => {
+                #[cfg(unix)]
+                let point_mmap =
+                    Self::point_read_mmap(path, file_size, mmap, POINT_MMAP_MADV_RANDOM_MIN_BYTES);
+                #[cfg(not(unix))]
+                let point_mmap = mmap.clone();
+                Arc::new(read_at::MmapReadAt::new(point_mmap))
+            }
             #[cfg(unix)]
             ScanSource::Direct { .. } => match read_at::DirectReadAt::open(path, file_size) {
                 Ok(d) => Arc::new(d) as Arc<dyn read_at::ReadAt>,
@@ -1104,6 +1126,55 @@ impl SSTableReader {
         // reader's lifetime; see the function-level note above.
         let mmap = unsafe { memmap2::MmapOptions::new().map(&std_file)? };
         Ok(mmap)
+    }
+
+    /// Choose the mmap the point-read source will use. For a large file
+    /// (`file_size >= min_random_bytes`) map a SECOND, dedicated read-only mapping
+    /// of the same file and advise it `MADV_RANDOM`, returning that distinct
+    /// mapping so scattered point faults read one page instead of the ~128 KiB
+    /// read-ahead window (issue #2210). The returned mapping is a SEPARATE
+    /// allocation from `scan_mmap`, which is left unadvised — advising the point map
+    /// therefore cannot affect the scan map (#1143 preserved). Below the threshold,
+    /// or if the dedicated map / its advice fails, share `scan_mmap` unchanged
+    /// (never keep a redundant unadvised 2nd map). Mapped directly (not via
+    /// `map_file`) so the read-work FILE_OPENS counter is untouched.
+    #[cfg(unix)]
+    fn point_read_mmap(
+        path: &Path,
+        file_size: u64,
+        scan_mmap: &Arc<memmap2::Mmap>,
+        min_random_bytes: u64,
+    ) -> Arc<memmap2::Mmap> {
+        if file_size >= min_random_bytes {
+            if let Ok(std_file) = std::fs::File::open(path) {
+                // SAFETY: read-only mapping of a file assumed immutable for the
+                // reader's lifetime (same contract as `map_file`).
+                match unsafe { memmap2::MmapOptions::new().map(&std_file) } {
+                    Ok(point_mmap) => match point_mmap.advise(memmap2::Advice::Random) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                "Dedicated MADV_RANDOM point-read mapping for {} ({} bytes, #2210)",
+                                path.display(),
+                                file_size
+                            );
+                            return Arc::new(point_mmap);
+                        }
+                        Err(e) => tracing::debug!(
+                            "madvise(RANDOM) on dedicated point map for {} failed ({}); \
+                             sharing scan mapping",
+                            path.display(),
+                            e
+                        ),
+                    },
+                    Err(e) => tracing::debug!(
+                        "Dedicated point map for {} failed ({}); sharing scan mapping",
+                        path.display(),
+                        e
+                    ),
+                }
+            }
+        }
+        scan_mmap.clone()
     }
 
     /// Load CompressionInfo.db metadata for chunked reading
