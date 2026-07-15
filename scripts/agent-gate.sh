@@ -91,10 +91,15 @@
 #                      issue_1494_converter_alloc_budget.rs (issue #1494, AD5;
 #                      needs `arrow`), per-row CQL→Arrow alloc count; (c) Flight
 #                      producer — cqlite-flight issue_1494_producer_mem_budget.rs
-#                      (#1494), producer total/peak bytes. dhat counts are
-#                      machine-independent, so this is the hard, load-deterministic
-#                      export/Flight signal. Dataset-dependent lanes fail closed on
-#                      empty (assert >=1 row before reading dhat stats).
+#                      (#1494), producer total/peak bytes; (d) row-assembly path —
+#                      issue_2075_row_assembly_alloc_budget.rs (issue #2075),
+#                      absolute allocs/row + allocs/cell for the decode->RowCells->
+#                      QueryRow scan path across a wide-row + text-heavy shape
+#                      (measures/gates the #1645 item 2 smallvec-RowCells win).
+#                      dhat counts are machine-independent, so this is the hard,
+#                      load-deterministic export/Flight/read signal. Dataset-
+#                      dependent lanes fail closed on empty (assert >=1 row/cell/
+#                      alloc before reading dhat stats).
 #   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
 #                      (--no-run, whole package) then run the seven CI-enforced ones
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
@@ -3188,11 +3193,12 @@ dispatch_component() {
     memory-budget) run_component memory-budget bash -c '
   # Read-path dhat budgets (issue #1565) + the export/Flight dhat budgets
   # (issue #1494, AD5): the converter per-row allocation guard (needs `arrow`)
-  # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap).
+  # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap) +
+  # the row-assembly (RowCells) allocs/row AND allocs/cell budgets (issue #2075).
   # dhat allocation counts are machine-independent, so these are the hard,
-  # load-deterministic per-gate signal for the export/Flight path.
+  # load-deterministic per-gate signal for the export/Flight/read paths.
   #
-  # Run all three dhat lanes UNCONDITIONALLY and aggregate (issue #1494 roborev):
+  # Run all FOUR dhat lanes UNCONDITIONALLY and aggregate (issue #1494 roborev):
   # `&&`-chaining short-circuits on the first failure and HIDES the others, costing
   # an extra triage round. Each lane reports its own result to the log; the
   # component FAILs if ANY lane failed (rc sticks at 1). --test-threads=1 is
@@ -3204,6 +3210,14 @@ dispatch_component() {
     --test issue_1494_converter_alloc_budget -- --test-threads=1 || rc=1
   cargo test --package cqlite-flight --features dhat-heap \
     --test issue_1494_producer_mem_budget -- --test-threads=1 || rc=1
+  # (d) row-assembly (RowCells) path — issue #2075: absolute allocs/row AND
+  # allocs/cell budgets for the decode -> RowCells (Vec<(Arc<str>,Value)>) ->
+  # QueryRow scan path, across a wide-row + a text-heavy shape. Complements the
+  # #1046 width-SCALING guard (which lacks a per-cell metric); measures/gates the
+  # #1645 item 2 (smallvec RowCells) win. Same feature set as the sibling lanes to
+  # reuse build artifacts.
+  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+    --test issue_2075_row_assembly_alloc_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
     integration-tests) run_component integration-tests bash -c '
   cargo test --package cqlite-integration-tests --no-run &&

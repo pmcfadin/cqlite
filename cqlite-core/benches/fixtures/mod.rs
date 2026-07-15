@@ -199,6 +199,21 @@ impl ReadFixture {
         schema_file: "wide-rows.cql",
     };
 
+    /// `test_wide_rows.document_versions` — the TEXT-HEAVY read shape for the
+    /// issue #2075 row-assembly allocations-per-row / per-cell harness. Partition
+    /// key `document_id UUID` + clustering `version_number INT`, carrying three
+    /// `TEXT` columns (`title`/`content`/`change_summary`) plus a `SET<TEXT>`
+    /// (`tags`) and a `MAP<TEXT,TEXT>` (`metadata`). Where `MANY_COLUMNS` stresses
+    /// schema WIDTH, this fixture stresses per-cell String/collection
+    /// materialization — the RowCells assembly path #1645 item 2 (smallvec
+    /// RowCells) targets. **Optional** — not present in every checkout, so callers
+    /// must guard on [`fixture_present`] and skip-register when absent.
+    pub const DOCUMENT_VERSIONS: ReadFixture = ReadFixture {
+        keyspace: "test_wide_rows",
+        table: "document_versions",
+        schema_file: "wide-rows.cql",
+    };
+
     /// Fully-qualified `keyspace.table` for use in CQL queries.
     pub fn qualified(&self) -> String {
         format!("{}.{}", self.keyspace, self.table)

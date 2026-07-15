@@ -263,6 +263,31 @@ cargo test -p cqlite-flight --features dhat-heap \
   --test issue_1494_producer_mem_budget -- --test-threads=1 --nocapture
 ```
 
+#### Row-assembly (RowCells) allocs/row + allocs/cell (Issue #2075)
+
+`cqlite-core/tests/issue_2075_row_assembly_alloc_budget.rs` pins ABSOLUTE
+allocations-per-row AND allocations-per-cell for the decode → `RowCells`
+(`Vec<(Arc<str>, Value)>`) → `QueryRow` full-scan path (`Database::execute`),
+across a wide-row and a text-heavy shape. It is complementary to
+`test_issue_1046_scan_alloc_scaling.rs` (a schema-WIDTH-SCALING guard with no
+per-cell metric): #2075 watches the *absolute level* per row and per cell so the
+#1645 item 2 (smallvec `RowCells`) win is measurable and gateable. Runs in the
+`memory-budget` gate component (lane d).
+
+Baselines measured 2026-07-15 on this branch's `main` base (warmed second scan,
+`--features cli-helpers,dhat-heap,arrow`):
+
+| shape | fixture | rows | cells | allocs/row (ceiling) | allocs/cell (ceiling) |
+|-------|---------|-----:|------:|----------------------|-----------------------|
+| WIDE-ROW | `test_wide_rows.many_columns_table` | 50 | 400 | 22.06 (32.0, ~1.45x) | 2.76 (4.0, ~1.45x) |
+| TEXT-HEAVY | `test_wide_rows.document_versions` | 50 | 550 | 49.08 (68.0, ~1.39x) | 4.46 (6.5, ~1.46x) |
+
+```bash
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test -p cqlite-core --features cli-helpers,dhat-heap,arrow \
+  --test issue_2075_row_assembly_alloc_budget -- --test-threads=1 --nocapture
+```
+
 **Refresh procedure (drift-free):** the wall-clock `base` is re-measured on
 `main` every CI run — there is no committed absolute-time number to drift. To
 retune, edit `perf-gate.json` (thresholds / advisory list) **and** update the
