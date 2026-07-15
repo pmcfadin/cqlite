@@ -6,7 +6,7 @@
 //! only exercises the *uncompressed* arm of
 //! `BigPromotedSelector::decompress_partition_window` (the `stitch_all_chunks` /
 //! `compression_reader == None` branch). The **compressed** arm — chunk-stitching
-//! over `CompressionInfo.db` offsets + LZ4 `pull_reverse_chunk` decompress — is the
+//! over `CompressionInfo.db` offsets + positional `read_compressed_chunk_at` decompress — is the
 //! production-dominant path (real Cassandra SSTables are LZ4-compressed by default)
 //! yet was only covered by the skip-on-absence real-fixture test, so a regression in
 //! the compressed window arithmetic could pass CI green.
@@ -17,7 +17,7 @@
 //! 16 KiB chunks → many promoted-index blocks per partition), producing a genuine
 //! LZ4-compressed BIG SSTable with a `CompressionInfo.db` sidecar. The reader then
 //! auto-detects compression and drives the COMPRESSED arm of
-//! `decompress_partition_window` + `pull_reverse_chunk`.
+//! `decompress_partition_window` + `read_compressed_chunk_at`.
 //!
 //! Fail-closed: the fixture is generated in-test (no fetched binaries, no
 //! skip-on-absence). If compression is not actually engaged, or the window
@@ -54,7 +54,7 @@ use cqlite_core::storage::sstable::directory::types::SSTableComponent;
 use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::storage::sstable::writer::{
     create_compressor, ComponentEntry, CompressedDataWriter, CompressionAlgorithm,
-    CompressionInfoWriter, DigestWriter, TocWriter,
+    CompressionInfoWriter, CompressionMetadata, DigestWriter, TocWriter,
 };
 use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
@@ -497,7 +497,7 @@ async fn compressed_reverse_matches_forward_via_chunk_walk() {
         desc_order,
         asc_order.iter().rev().copied().collect::<Vec<_>>(),
         "Issue #1293: compressed DESC must be the exact reverse of the ASC ordering — \
-         a regression in `pull_reverse_chunk` / the compressed `decompress_partition_window` \
+         a regression in `read_compressed_chunk_at` / the compressed `decompress_partition_window` \
          arm drops or reorders rows"
     );
 
@@ -527,7 +527,7 @@ async fn compressed_reverse_matches_forward_via_chunk_walk() {
     assert!(
         chunks >= reverse_floor && chunks <= reverse_ceil,
         "Issue #1293: the compressed reverse walk must decompress most of the partition's \
-         {total_chunks} chunks via `pull_reverse_chunk` (>= {reverse_floor}, <= {reverse_ceil}), \
+         {total_chunks} chunks via `read_compressed_chunk_at` (>= {reverse_floor}, <= {reverse_ceil}), \
          got chunks_decompressed={chunks}"
     );
     drop(temp);
@@ -558,5 +558,112 @@ async fn compressed_ranged_read_across_gap_keeps_adjacent_rows() {
     );
     assert!(returned.contains(&29) && returned.contains(&40));
     assert!(!returned.iter().any(|c| (GAP_LO..GAP_HI).contains(c)));
+    drop(temp);
+}
+
+// ─────────── 5. Fail-closed on a truncated CompressionInfo (issue #1869) ───────────
+//
+// Regression guard for the #1869 review blocker: `decompress_partition_window`'s
+// compressed arm must FAIL CLOSED (typed error) — never PANIC — when a
+// promoted-index offset resolves to a chunk index past the last chunk recorded in
+// `CompressionInfo.db` (a malformed/corrupt sidecar).
+//
+// Before the fix, the chunk-stitch loop `break`-ed on the FIRST
+// `read_compressed_chunk_at` EOF signal (which fires for any out-of-range chunk),
+// leaving `window` EMPTY while the resolved intra-window offset `within > 0`. The
+// caller then sliced `&window[within..]` on the empty vec → slice-index-out-of-range
+// PANIC, violating the "parser never panics on adversarial bytes" stance. The fix
+// restores the up-front out-of-range guard (and hardens the loop's EOF branch), so
+// the read now returns a typed `Error::corruption` that propagates to the query.
+
+/// Rewrite `CompressionInfo.db` so it records ONE FEWER chunk than its own
+/// `data_length` implies: parse the sidecar, drop the last chunk offset, and write
+/// it back with the FULL (unchanged) `data_length`. The Data.db still physically
+/// contains that trailing chunk, so any read into the last chunk's byte range
+/// resolves to `target_chunk == chunk_offsets.len()` — exactly the out-of-range
+/// condition the guard must reject. The sidecar itself stays internally consistent
+/// (its header `chunk_count` matches the shortened offset list), so the reader opens
+/// cleanly and the fault only surfaces when the tail is read.
+fn truncate_last_chunk_offset(info_path: &std::path::Path) {
+    let bytes = std::fs::read(info_path).expect("read CompressionInfo.db");
+    let info = CompressionInfo::parse(&bytes).expect("parse CompressionInfo.db");
+    assert!(
+        info.chunk_offsets.len() > 8,
+        "fixture invariant: need many chunks so dropping the last one still leaves a \
+         genuinely multi-chunk partition (got {})",
+        info.chunk_offsets.len()
+    );
+    let mut chunk_offsets = info.chunk_offsets.clone();
+    chunk_offsets.pop(); // drop the LAST chunk — data_length still implies it exists
+
+    let corrupt = CompressionMetadata {
+        algorithm: CompressionAlgorithm::Lz4,
+        chunk_length: info.chunk_length,
+        max_compressed_length: i32::MAX as u32,
+        data_length: info.data_length, // UNCHANGED — now inconsistent with the shorter offset list
+        chunk_offsets,
+        option_pairs: Vec::new(),
+    };
+    CompressionInfoWriter::new(info_path.to_path_buf())
+        .write(&corrupt)
+        .expect("rewrite truncated CompressionInfo.db");
+}
+
+async fn open_truncated_compression_info_db() -> (TempDir, Arc<Database>) {
+    let temp = TempDir::new().unwrap();
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let schema_path = temp.path().join("schema.cql");
+    std::fs::write(&schema_path, schema_cql()).expect("write schema file");
+
+    {
+        let data_dir = data_dir.clone();
+        let wal_dir = wal_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            build_uncompressed_fixture(&data_dir, &wal_dir);
+            let (data_path, base) = find_data_db(&data_dir);
+            compress_data_db_in_place(&data_path, &base);
+            let info_path = data_path
+                .parent()
+                .unwrap()
+                .join(format!("{base}-CompressionInfo.db"));
+            truncate_last_chunk_offset(&info_path);
+        })
+        .await
+        .expect("fixture build task");
+    }
+
+    let result = ingest(IngestionConfig {
+        schema_paths: vec![schema_path],
+        data_dir,
+        version_hint: None,
+        core_config: Config::default(),
+        table_directory_filter: None,
+    })
+    .await
+    .expect("ingest truncated-CompressionInfo fixture (open must still succeed)");
+    (temp, Arc::new(result.database))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compressed_reverse_out_of_range_chunk_errs_not_panics() {
+    let _g = PROBE_LOCK.lock().await;
+    let (temp, db) = open_truncated_compression_info_db().await;
+
+    // The reverse (DESC) walk visits blocks back-to-front, so it reaches the tail
+    // block — whose bytes live in the dropped last chunk — and resolves an
+    // out-of-range `target_chunk`. Pre-fix this panicked on `&window[within..]`;
+    // post-fix it returns a typed corruption error that propagates here.
+    let result = db
+        .execute(&format!(
+            "SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1 ORDER BY ck DESC"
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "Issue #1869: a reverse read into a chunk past the truncated CompressionInfo must \
+         return a typed error (fail closed), not a panic or a silently-short result — got Ok"
+    );
+
     drop(temp);
 }

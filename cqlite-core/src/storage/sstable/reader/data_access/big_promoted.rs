@@ -536,6 +536,19 @@ impl SSTableReader {
                          but it is absent",
                     )
                 })?;
+                // Fail closed on an out-of-range starting chunk (malformed/corrupt
+                // promoted-index offset): otherwise the loop below would `break` on
+                // the FIRST `read_compressed_chunk_at` EOF signal, leaving `window`
+                // empty while `within > 0`, and the caller's `&window[within..]`
+                // slice would PANIC. Match the typed corruption error the pre-#1869
+                // code produced via `compressed_chunk_offset(..).ok_or_else(..)`.
+                if target_chunk >= comp_info.chunk_offsets.len() {
+                    return Err(Error::corruption(format!(
+                        "BIG clustering/reverse seek: resolved chunk {target_chunk} is out of \
+                         range (only {} compressed chunk(s) in CompressionInfo)",
+                        comp_info.chunk_offsets.len()
+                    )));
+                }
                 let compression = self
                     .compression_reader
                     .as_ref()
@@ -569,7 +582,22 @@ impl SSTableReader {
                             crate::storage::sstable::work_counters::add_chunk_decompressed();
                             window.extend_from_slice(&decompressed);
                         }
-                        None => break, // EOF
+                        // EOF. Reaching `None` after ≥1 successful chunk read is the
+                        // intended "read to end of window" stop. But if we haven't even
+                        // collected enough bytes to satisfy the caller's `within` offset,
+                        // the length metadata is inconsistent/corrupt — fail closed rather
+                        // than hand back a short `window` the caller would slice past.
+                        None => {
+                            if window.len() < within {
+                                return Err(Error::corruption(format!(
+                                    "BIG clustering/reverse seek: hit EOF at chunk \
+                                     {chunk_index} after {} byte(s), before reaching the \
+                                     resolved intra-window offset {within}",
+                                    window.len()
+                                )));
+                            }
+                            break;
+                        }
                     }
                 }
                 Ok(Some((window, within)))
