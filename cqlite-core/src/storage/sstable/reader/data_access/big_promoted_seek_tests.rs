@@ -424,4 +424,40 @@ mod window_builder {
             "raw middle chunk must be taken verbatim; compressed chunks decompressed"
         );
     }
+
+    /// Corrupt/malformed `CompressionInfo` whose `max_compressed_length == 0` must FAIL
+    /// CLOSED with a typed corruption error. Pre-fix, the raw-chunk fallback test
+    /// `compressed.len() >= max_compressed_length` was `>= 0` — ALWAYS true — so EVERY
+    /// still-LZ4-compressed chunk was returned verbatim as "raw" plaintext, never
+    /// decompressed. The inline CRC32 (over the genuine on-disk bytes) still matched, so
+    /// this failed OPEN: garbage rows handed to the caller with no error. Layout: one
+    /// LZ4-compressed chunk, `max_compressed_length = 0`; the up-front guard must fire
+    /// before the fallback comparison is ever reached, so the exact stored-vs-plaintext
+    /// relationship is irrelevant.
+    #[cfg(feature = "lz4")]
+    #[test]
+    #[serial_test::serial]
+    fn zero_max_compressed_length_fails_closed() {
+        use crate::storage::sstable::compression::{Compression, CompressionAlgorithm};
+
+        let c = Compression::new(CompressionAlgorithm::Lz4).expect("lz4");
+        let plain0 = vec![0u8; 64];
+        let (file, offsets) = build_chunked_file(&[c.compress(&plain0).unwrap()]);
+        // Corrupt: max_compressed_length recorded as 0 — a valid CompressionInfo never does.
+        let ci = comp_info(64, 0, 64, offsets);
+        let src = MemReadAt(file.clone());
+
+        let err = compressed_partition_window(&src, &ci, Some(&c), file.len() as u64, 0, Some(64))
+            .expect_err(
+                "CompressionInfo.max_compressed_length == 0 must fail closed with a typed \
+                 corruption error, not silently return still-compressed bytes as plaintext",
+            );
+        match err {
+            Error::Corruption(m) => assert!(
+                m.contains("max_compressed_length is zero"),
+                "unexpected corruption text: {m}"
+            ),
+            other => panic!("expected Corruption(max_compressed_length zero), got {other:?}"),
+        }
+    }
 }

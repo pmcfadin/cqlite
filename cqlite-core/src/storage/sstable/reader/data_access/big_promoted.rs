@@ -668,6 +668,18 @@ pub(super) fn compressed_partition_window(
     // needed.
     let needed = end_offset.saturating_sub(window_base);
     let max_compressed_length = comp_info.max_compressed_length as usize;
+    // Fail closed on a corrupt `CompressionInfo` whose `max_compressed_length == 0`:
+    // otherwise the raw-chunk fallback below (`compressed.len() >= max_compressed_length`)
+    // is ALWAYS true, so EVERY still-compressed chunk would be returned verbatim as
+    // "raw/incompressible" plaintext — never decompressed — and the inline CRC32 (computed
+    // over the genuine on-disk bytes) would still pass, silently handing back garbage rows.
+    // A valid Cassandra `CompressionInfo` never records a zero `max_compressed_length`.
+    if max_compressed_length == 0 {
+        return Err(Error::corruption(
+            "BIG clustering/reverse seek: CompressionInfo max_compressed_length is zero; \
+             cannot distinguish compressed chunks from raw/incompressible ones",
+        ));
+    }
     let mut window = Vec::<u8>::new();
     let mut chunk_index = target_chunk;
     while window.len() < needed {
