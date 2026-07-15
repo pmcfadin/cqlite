@@ -385,6 +385,15 @@ impl<'a> StreamingMerger<'a> {
         self.partition_key.map(|key| (key, self.state))
     }
 
+    /// The partition key currently being reconciled, if any (issue #2299).
+    ///
+    /// The direct-stream compaction path opens its writer session lazily on the
+    /// first `Some(ck)` row and needs the partition key to do so; once
+    /// `step_streaming` has yielded a `ClusterGroup`, `partition_key` is `Some`.
+    pub(crate) fn current_partition_key(&self) -> Option<DecoratedKey> {
+        self.partition_key.clone()
+    }
+
     /// Pop one raw entry belonging to the CURRENT partition
     /// (`self.partition_key`, which must already be `Some`) off the heap,
     /// refilling from its run — the SAME peek/pop/refill mechanism

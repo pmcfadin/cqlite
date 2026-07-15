@@ -394,6 +394,24 @@ impl DataWriter {
         Ok(())
     }
 
+    /// Flush the current scratch `buffer` to the streaming sink MID-PARTITION
+    /// (issue #2299), advancing `position` and clearing the scratch.
+    ///
+    /// Mechanically identical to [`Self::flush_partition`] (feed the CRC/`CRC.db`
+    /// accumulator in write order, advance `position`, clear `buffer`), but named
+    /// distinctly to document the caller's contract: it is safe to call between
+    /// two whole promoted-index blocks of an IN-PROGRESS partition ONLY because the
+    /// streaming session tracks every partition offset as flush-invariant absolute
+    /// math (`writer.position() - partition_offset`), not as a `buffer`-relative
+    /// index. Calling it mid-BLOCK would be equally correct for the on-disk bytes
+    /// (they are append-only), but the session only calls it at block boundaries so
+    /// its bounded-scratch guarantee is exactly one promoted-index block. No-op in
+    /// in-memory mode (the scratch keeps accumulating, matching `flush_partition`).
+    pub(super) fn flush_buffered_partition_scratch(&mut self) -> Result<()> {
+        // Same body as `flush_partition`: the two differ only in intent/documentation.
+        self.flush_partition()
+    }
+
     /// Update the statistics metadata
     ///
     /// This should be called after computing stats from all mutations

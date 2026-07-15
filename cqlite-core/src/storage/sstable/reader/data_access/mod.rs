@@ -43,6 +43,15 @@ mod chunk_cache_wiring_tests;
 // cannot live in `tests/`.
 #[cfg(all(test, feature = "write-support"))]
 mod compaction_cancel_tests;
+// Issue #2299 (roborev should-fix): range-marker resume parity. Drives the
+// row-granular `stream_partition_body_incremental` over a partition whose range
+// tombstone START/END bounds land in SEPARATE window refill chunks, and asserts
+// the emitted `CompactionRow`s are byte-identical to the buffered
+// `parse_block_for_compaction` output on the SAME bytes — proving the
+// cross-chunk `CompactionPartitionState::pending_range_start` carry. Needs
+// `write-support` to synthesize the range-tombstone SSTable bytes.
+#[cfg(all(test, feature = "write-support"))]
+mod compaction_range_marker_resume_tests;
 // BIG ("nb"/uncompressed) point lookup: raw-key Index.db resolve + covering-chunk
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
