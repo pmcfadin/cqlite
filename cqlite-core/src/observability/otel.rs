@@ -202,6 +202,10 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     global::set_meter_provider(meter_provider.clone());
     METRICS_ACTIVE.store(true, Ordering::Relaxed);
 
+    // Eagerly seed the always-on baseline instruments so a fresh scrape of a
+    // just-started server shows them at 0 rather than absent (issue #2288).
+    register_baseline_instruments();
+
     Ok(ObservabilityGuard {
         tracer_provider: Some(tracer_provider),
         meter_provider: Some(meter_provider),
@@ -211,6 +215,21 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
 #[inline]
 pub(crate) fn metrics_active() -> bool {
     METRICS_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Eagerly emit a zero data point for the always-on baseline instruments so they
+/// are visible in a scrape of a freshly-started server, before any real activity
+/// (issue #2288).
+///
+/// `cqlite.errors.total` otherwise registers *lazily* — it appears in a metrics
+/// backend only on its first increment — so "metric name absent from the
+/// backend" was ambiguous between *no errors occurred* and *error counting isn't
+/// wired*. A single `add(0)` builds the instrument and publishes a `0` series so
+/// absence unambiguously means "not wired". The baseline uses an empty attribute
+/// set (no invented `{category, subsystem}` values that would pollute the bounded
+/// taxonomy); real errors add their own labeled series alongside it.
+pub(crate) fn register_baseline_instruments() {
+    instruments().errors_total.add(0, &[]);
 }
 
 #[cfg(feature = "observability-testing")]
