@@ -285,7 +285,17 @@ impl WriteEngine {
         // markers to interleave — the write side can stream rows directly instead
         // of buffering the whole partition (see `ActiveMerge::stream_rows_directly`).
         // Read BEFORE the expiry floor below lowers `baseline_min_ldt`.
-        let no_deletions_in_any_input = baseline_min_ldt == i32::MAX;
+        //
+        // FAIL CLOSED (roborev job 1723, #2299): `compute_baseline_min` fails OPEN
+        // — an input whose `Statistics.db` is missing or top-level-unparseable is
+        // silently skipped and never lowers `baseline_min_ldt`, so a skipped
+        // tombstone-bearing input would leave the sentinel intact and wrongly
+        // select direct-streaming (dropping its tombstones → data resurrection).
+        // `all_input_stats_readable` refuses to prove "no deletions" unless EVERY
+        // input's authoritative deletion metadata was actually observed; otherwise
+        // we take the always-correct buffered path.
+        let no_deletions_in_any_input =
+            baseline_min_ldt == i32::MAX && merge::all_input_stats_readable(&input_paths);
         // Issue #1537: unlike `compact_sstables_with_registry` — whose
         // `now_secs: Option<i64>` parameter can be `None` (expiry disabled), so it
         // gates the floor application on `now_secs.is_some()` — this WriteEngine
