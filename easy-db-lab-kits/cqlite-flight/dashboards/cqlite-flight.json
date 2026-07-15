@@ -1067,14 +1067,14 @@
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "max(cqlite_flight_admission_limit{cluster=~\"$cluster\"})",
+          "expr": "sum(cqlite_flight_admission_limit{cluster=~\"$cluster\"})",
           "legendFormat": "limit K (cqlite.flight.admission.limit)",
           "refId": "B"
         }
       ],
       "title": "Admission Permits: In Use vs Limit",
       "type": "timeseries",
-      "description": "Admitted in-flight scans (cqlite.flight.admission.in_use) against the configured ceiling K (cqlite.flight.admission.limit, #2420). in_use riding the limit = saturation; new do_get requests queue on the permit-wait."
+      "description": "Fleet-total admitted in-flight scans (sum of cqlite.flight.admission.in_use across pods) against the fleet-total ceiling (sum of cqlite.flight.admission.limit, #2420) — both series share the same sum() scope so the saturation threshold is apples-to-apples. Total in_use riding the total limit = saturation; new do_get requests queue on the permit-wait."
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },

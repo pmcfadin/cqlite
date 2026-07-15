@@ -90,9 +90,33 @@ fn dotted_cqlite_names(text: &str) -> HashSet<String> {
     names
 }
 
+/// Loud skip-on-absence: the kit dashboard lives under `easy-db-lab-kits/` which
+/// is NOT present in a sparse/minimal checkout that has cqlite-core alone. This
+/// test runs under the `core-tests` gate component (all integration tests), so it
+/// must SKIP — not FAIL — when the artifact is absent; the dedicated SKIP-aware
+/// `kit-dashboard-drift` gate component ENFORCES presence (and drift) in full
+/// checkouts where the kit exists. Mirrors the repo's local-only-fixture
+/// skip-on-presence convention (dataset tests skip when Data.db is absent).
+/// Returns `None` (caller returns early, prints why) when absent; `Some(raw)`
+/// with the file contents otherwise.
+fn read_dashboard_or_skip() -> Option<String> {
+    let path = dashboard_path();
+    if !path.exists() {
+        eprintln!(
+            "SKIP: kit dashboard absent ({}) — sparse checkout without easy-db-lab-kits/; \
+             the kit-dashboard-drift gate component enforces presence in full checkouts",
+            path.display()
+        );
+        return None;
+    }
+    Some(std::fs::read_to_string(&path).expect("kit dashboard JSON must be readable when present"))
+}
+
 #[test]
 fn dashboard_is_valid_json_with_panels() {
-    let raw = std::fs::read_to_string(dashboard_path()).expect("kit dashboard JSON must exist");
+    let Some(raw) = read_dashboard_or_skip() else {
+        return;
+    };
     let v: serde_json::Value =
         serde_json::from_str(&raw).expect("kit dashboard must be well-formed JSON");
     let panels = v
@@ -110,7 +134,9 @@ fn dashboard_is_valid_json_with_panels() {
 
 #[test]
 fn every_dashboard_metric_name_exists_in_catalog() {
-    let raw = std::fs::read_to_string(dashboard_path()).expect("kit dashboard JSON must exist");
+    let Some(raw) = read_dashboard_or_skip() else {
+        return;
+    };
     let catalog: HashSet<&str> = ALL_METRICS.iter().copied().collect();
 
     let referenced = dotted_cqlite_names(&raw);
