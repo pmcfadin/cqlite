@@ -100,6 +100,15 @@ pub struct GenerationIdentity {
     /// Generation number parsed from the SSTable file name (best-effort; `0`
     /// when unparseable). A cross-check on top of the authoritative inode.
     pub generation: u64,
+    /// `Data.db` modification time in nanoseconds since the epoch (a cross-check
+    /// that hardens the "same on-disk bytes" identity against inode RECYCLING: a
+    /// deleted generation's inode reused by a NEW file of the same size + parsed
+    /// generation number would otherwise alias. mtime is per-INODE, so a snapshot
+    /// hardlink / #2383 rebind (same inode) shares it — rebind-stability is
+    /// preserved — while a distinct file (rewritten or freshly created) differs.
+    /// `0` when the mtime cannot be read. Authoritative fs metadata, never inferred
+    /// from content (no-heuristics #28).
+    pub mtime_ns: i128,
 }
 
 impl GenerationIdentity {
@@ -112,32 +121,40 @@ impl GenerationIdentity {
     /// (missing/racing removal) so the caller treats it as no-identity rather
     /// than fabricating one (no-heuristics #28).
     pub fn resolve(path: &std::path::Path, generation: u64) -> Option<Self> {
-        let (device, inode, size) = stat_identity(path)?;
+        let (device, inode, size, mtime_ns) = stat_identity(path)?;
         Some(Self {
             device,
             inode,
             size,
             generation,
+            mtime_ns,
         })
     }
 }
 
 #[cfg(unix)]
-fn stat_identity(path: &std::path::Path) -> Option<(u64, u64, u64)> {
+fn stat_identity(path: &std::path::Path) -> Option<(u64, u64, u64, i128)> {
     use std::os::unix::fs::MetadataExt;
     // `metadata` (not `symlink_metadata`) so a snapshot hardlink resolves to the
     // SAME (device, inode) as the live file — the point of the inode-stable key.
     let md = std::fs::metadata(path).ok()?;
-    Some((md.dev(), md.ino(), md.len()))
+    let mtime_ns = md.mtime() as i128 * 1_000_000_000 + md.mtime_nsec() as i128;
+    Some((md.dev(), md.ino(), md.len(), mtime_ns))
 }
 
 #[cfg(not(unix))]
-fn stat_identity(path: &std::path::Path) -> Option<(u64, u64, u64)> {
-    // Non-unix has no stable inode identity; carry size + generation only (matches
-    // the flight `warm::identity` degradation on unsupported targets). CQLite's
-    // supported deployment targets are unix (macOS/Linux).
+fn stat_identity(path: &std::path::Path) -> Option<(u64, u64, u64, i128)> {
+    // Non-unix has no stable inode identity; carry size + generation + mtime only
+    // (matches the flight `warm::identity` degradation on unsupported targets).
+    // CQLite's supported deployment targets are unix (macOS/Linux).
     let md = std::fs::metadata(path).ok()?;
-    Some((0, 0, md.len()))
+    let mtime_ns = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0);
+    Some((0, 0, md.len(), mtime_ns))
 }
 
 /// Approximate per-entry byte overhead ON TOP OF the key's own `len()` bytes.
@@ -145,7 +162,8 @@ fn stat_identity(path: &std::path::Path) -> Option<(u64, u64, u64)> {
 /// An entry is a `(GenerationIdentity, Box<[u8]>)` key plus a [`PartitionLoc`]
 /// value, held in an `LruCache` intrusive-list node. This const covers everything
 /// except the key's payload bytes (charged separately via `key.len()`):
-/// - the 32-byte [`GenerationIdentity`] stored inline in the node key tuple,
+/// - the ~48-byte [`GenerationIdentity`] (4×`u64` + `i128`) stored inline in the
+///   node key tuple,
 /// - the `Box<[u8]>` fat pointer + the key allocation's header/rounding,
 /// - the [`PartitionLoc`] value (12 B) stored inline,
 /// - the `LruCache` node (a `HashMap` bucket slot + two `NonNull` links) + slack.
@@ -334,10 +352,7 @@ impl GlobalKeyOffsetCache {
         // The tuple key carries the identity, so a lookup under a different identity
         // for the same raw key structurally misses — no explicit mismatch branch is
         // needed, the map compares the whole `(identity, key)` tuple.
-        let found = guard
-            .lru
-            .get(&(identity, key.into()))
-            .copied();
+        let found = guard.lru.get(&(identity, key.into())).copied();
         drop(guard);
         match found {
             Some(loc) => {
@@ -406,8 +421,7 @@ impl GlobalKeyOffsetCache {
                 .collect();
             for k in victims {
                 if guard.lru.pop(&(identity, k.clone())).is_some() {
-                    guard.current_bytes =
-                        guard.current_bytes.saturating_sub(entry_cost(k.len()));
+                    guard.current_bytes = guard.current_bytes.saturating_sub(entry_cost(k.len()));
                     dropped += 1;
                 }
             }
@@ -494,6 +508,7 @@ mod tests {
             inode: ino,
             size,
             generation: gen,
+            mtime_ns: 0,
         }
     }
 
@@ -742,7 +757,8 @@ mod tests {
 
     #[test]
     fn shard_count_rounds_to_power_of_two() {
-        let cache = GlobalKeyOffsetCache::with_budget_and_shards(DEFAULT_GLOBAL_KEY_CACHE_BYTES, 100);
+        let cache =
+            GlobalKeyOffsetCache::with_budget_and_shards(DEFAULT_GLOBAL_KEY_CACHE_BYTES, 100);
         assert_eq!(cache.shards.len(), 128);
         assert_eq!(cache.mask, 127);
     }
@@ -751,7 +767,10 @@ mod tests {
     fn global_singleton_is_shared() {
         let a = GlobalKeyOffsetCache::global();
         let b = GlobalKeyOffsetCache::global();
-        assert!(Arc::ptr_eq(&a, &b), "global() returns the one shared instance");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "global() returns the one shared instance"
+        );
         assert!(a.budget_bytes() > 0);
     }
 }

@@ -143,7 +143,10 @@ fn cold_miss_populates_warm_hit_skips_interval_parse() {
         .block_on(reader.get(&table_id, &RowKey::new(present.clone())))
         .expect("cold point read must not error");
     let m_cold = mc.flush_and_collect();
-    assert!(cold.is_some(), "a known-present key must resolve on the cold read");
+    assert!(
+        cold.is_some(),
+        "a known-present key must resolve on the cold read"
+    );
     assert_eq!(
         m_cold.counter_sum(catalog::INDEX_INTERVAL_PARSES_TOTAL),
         1.0,
@@ -197,7 +200,10 @@ fn invalidation_forces_a_fresh_interval_parse() {
     );
 
     let keys = present_raw_keys(&data_file, platform.clone(), &rt);
-    assert!(!keys.is_empty(), "fixture must expose present Index.db entries");
+    assert!(
+        !keys.is_empty(),
+        "fixture must expose present Index.db entries"
+    );
     let present = keys[0].clone();
 
     let reader = rt
@@ -234,7 +240,10 @@ fn invalidation_forces_a_fresh_interval_parse() {
     let after = rt
         .block_on(reader.get(&table_id, &RowKey::new(present.clone())))
         .expect("post-invalidation read");
-    assert!(after.is_some(), "the key is still present on disk — it must still resolve");
+    assert!(
+        after.is_some(),
+        "the key is still present on disk — it must still resolve"
+    );
     assert_eq!(
         mc.flush_and_collect()
             .counter_sum(catalog::INDEX_INTERVAL_PARSES_TOTAL),

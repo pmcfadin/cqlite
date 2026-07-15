@@ -3028,7 +3028,10 @@ mod tests {
         .await
         .unwrap();
         let dagg = dmanager.aggregate_key_cache_stats().await;
-        assert_eq!(dagg.capacity_bytes, 0, "disabled manager reports zero capacity");
+        assert_eq!(
+            dagg.capacity_bytes, 0,
+            "disabled manager reports zero capacity"
+        );
         assert_eq!(dagg.hits, 0);
         assert_eq!(dagg.misses, 0);
     }

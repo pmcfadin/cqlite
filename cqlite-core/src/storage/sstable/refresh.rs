@@ -335,10 +335,7 @@ impl SSTableManager {
         // identity), but this reclaims the memory and records the removal.
         {
             let mut seen: HashSet<*const reader::SSTableReader> = HashSet::new();
-            for r in readers
-                .values()
-                .chain(table_readers.values().flatten())
-            {
+            for r in readers.values().chain(table_readers.values().flatten()) {
                 if discovered_canon.contains(&canon_of(&r.file_path())) {
                     continue; // still present on disk — not removed
                 }
