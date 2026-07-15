@@ -158,6 +158,11 @@ zstd = { version = "0.13", features = ["zdict_builder"] }
 # Inline-CRC32 framing for the hand-built Cassandra chunk image in that same
 # test (integration tests don't inherit the library's normal dependencies).
 crc32fast = { workspace = true }
+# Wall-clock-bounded subprocess wait for the Docker-availability probe used by
+# the write-support Cassandra e2e tests: an unresponsive `docker` daemon must
+# degrade to a clean SKIP instead of wedging the test binary (issue #1819,
+# same hazard family as #1691/#1692). Mirrors cqlite-cli's dev-dep.
+wait-timeout = "0.2"
 
 # In-process sampling CPU profiler for the criterion benches (signal-based, so
 # it works in containers and on CI runners where `perf` is unavailable).

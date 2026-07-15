@@ -40,6 +40,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "common/docker_probe.rs"]
+mod docker_probe;
+
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::writer::{SSTableFormat, SSTableInfo, SSTableWriter};
 use cqlite_core::storage::write_engine::mutation::{
@@ -56,18 +59,11 @@ use tempfile::TempDir;
 const SSTABLEDUMP: &str = "/opt/cassandra/tools/bin/sstabledump";
 
 fn cassandra_5_image() -> Option<String> {
-    let info = Command::new("docker").arg("info").output().ok()?;
-    if !info.status.success() {
-        return None;
-    }
-    let images = Command::new("docker")
-        .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
-        .output()
-        .ok()?;
-    if !images.status.success() {
-        return None;
-    }
-    let listing = String::from_utf8_lossy(&images.stdout);
+    // Bounded probes (issue #1819): an unresponsive Docker daemon must degrade
+    // to a clean SKIP (`None`) here, never wedge the test binary — and thus the
+    // gate — the way the old unbounded `docker info` / `docker images` did.
+    docker_probe::docker_probe(&["info"])?;
+    let listing = docker_probe::docker_probe(&["images", "--format", "{{.Repository}}:{{.Tag}}"])?;
     let mut candidate: Option<String> = None;
     for line in listing.lines() {
         let line = line.trim();
