@@ -94,7 +94,6 @@ uuid = { version = "1.10", features = ["v4"] }
 regex = "1.10"
 futures = "0.3"
 clap = { version = "4.4", features = ["derive"] }
-env_logger = { workspace = true }
 async-trait = "0.1.88"
 
 # Terminal output and logging
@@ -125,6 +124,10 @@ libc = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Dev/test-only logging init (integration tests under tests/). Post the #1706
+# log->tracing migration the library ships no env_logger usage, so it is a
+# dev-dependency only (issue #2519, item b from #2151).
+env_logger = { workspace = true }
 # Heap profiling harness (examples/heap_profile.rs). The dhat allocator is only
 # installed when the `dhat-heap` feature is enabled; the dependency itself is
 # dev-only and never ships in the library.
@@ -133,6 +136,13 @@ proptest = { workspace = true }
 tempfile = "3.8"
 rand = "0.8"
 tokio-test = "0.4"
+# Direct handle to the production SAFE lz4 decoder (lz4_flex with `safe-decode`
+# on, the library default) so the Stage-0 DecodePolicy bench (issue #2211,
+# benches/decode_policy_bench.rs) can time the checked decode in isolation from
+# the surrounding chunk-record machinery. Dev-only: the library itself reaches
+# lz4_flex through the optional `lz4` feature; this makes the same crate nameable
+# from the bench target regardless of feature selection.
+lz4_flex = { workspace = true }
 # Serialize tests that read/mutate the process-global work_counters within one
 # test binary so cargo's parallel intra-binary threads cannot race the shared
 # atomics between a counter test's reset() and its read (issue #1071).
@@ -158,6 +168,11 @@ zstd = { version = "0.13", features = ["zdict_builder"] }
 # Inline-CRC32 framing for the hand-built Cassandra chunk image in that same
 # test (integration tests don't inherit the library's normal dependencies).
 crc32fast = { workspace = true }
+# Wall-clock-bounded subprocess wait for the Docker-availability probe used by
+# the write-support Cassandra e2e tests: an unresponsive `docker` daemon must
+# degrade to a clean SKIP instead of wedging the test binary (issue #1819,
+# same hazard family as #1691/#1692). Mirrors cqlite-cli's dev-dep.
+wait-timeout = "0.2"
 
 # In-process sampling CPU profiler for the criterion benches (signal-based, so
 # it works in containers and on CI runners where `perf` is unavailable).
@@ -198,6 +213,25 @@ required-features = ["arrow"]
 name = "issue_2302_written_index_resolve"
 required-features = ["work-counters", "write-support"]
 
+# BIG clustering-slice seek positional-read migration (issue #1869). It is
+# `#![cfg(all(feature = "work-counters", feature = "write-support", ...))]` — the
+# `read_work_counters::file_opens` probe AND the write engine that builds the wide
+# fixture — so it only compiles+runs when both features are on. Its automated
+# executor is the `work-counters-guard` gate component (scripts/agent-gate.sh).
+[[test]]
+name = "issue_1869_big_clustering_slice_readat"
+required-features = ["work-counters", "write-support"]
+
+# Statistics.db single-TOC-walk oracle (issue #2148). `#![cfg(feature =
+# "cli-helpers")]` — the `toc_walk_metrics` counter getters/`reset` +
+# `record_toc_walk` live behind `cli-helpers` — so it only compiles+runs with that
+# feature. The lite gate's blast-radius scoping runs cqlite-core `--lib` +
+# `--features cli-helpers`, which compiles and runs this changed `--test` target;
+# the full gate's core-tests (`--features cli-helpers`) also picks it up.
+[[test]]
+name = "issue_2148_statistics_toc_single_walk"
+required-features = ["cli-helpers"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false
@@ -226,6 +260,19 @@ harness = false
 [[bench]]
 name = "predicate_sort"
 path = "benches/predicate_sort_bench.rs"
+harness = false
+
+# Stage-0 measure-first bench for the runtime DecodePolicy work (issue #2211,
+# F6.4). Quantifies (a) SAFE lz4 decompress-only throughput via `lz4_flex`, (b)
+# the full chunk-decompress path (seek+read+CRC32+decode+validate), and (c)
+# end-to-end scan throughput over the SAME compressed fixture, so the
+# decompress-only cost can be read as a fraction of a real scan. The `full_scan`
+# arm needs `cli-helpers` (for `open_read_db`); without it that arm compiles out
+# and the binary still runs a valid criterion main. NOT a perf-gate entry — a
+# one-time decision artifact feeding the Stage-0 go/no-go (docs/reports/).
+[[bench]]
+name = "decode_policy"
+path = "benches/decode_policy_bench.rs"
 harness = false
 
 # Export / conversion throughput micro-benches (issue #1494, AD5). STRICT

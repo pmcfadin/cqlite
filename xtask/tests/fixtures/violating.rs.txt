@@ -1,0 +1,22 @@
+// Self-test fixture (#2012): a scan-shaped function that materializes the WHOLE
+// row iterator into an owned Vec before returning, with NO ResultBudget, bound
+// parameter, or `.take(n)` in scope. This is exactly the #2361 shape (LIMIT was
+// consumer-only, so intra-scan memory was unbounded). `oom-audit --enforce` MUST
+// flag it.
+//
+// Stored as .rs.txt (not .rs) so it is never compiled into the crate; it is read
+// as text by the fixture-driven tests.
+
+fn scan_all_partitions(reader: &Reader) -> Vec<DataRow> {
+    // Whole-SSTable materialization: unbounded collect over a row iterator.
+    let rows = reader.rows().collect::<Vec<DataRow>>();
+    rows
+}
+
+fn scan_via_push_loop(reader: &Reader) -> Vec<DataRow> {
+    let mut out = Vec::new();
+    for row in reader.rows() {
+        out.push(row);
+    }
+    out
+}

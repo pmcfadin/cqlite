@@ -229,6 +229,83 @@ async fn bti_point_read_repeat_is_cached() {
     assert!(h2 - h1 > 0, "warm BTI read must hit the cache");
 }
 
+/// Issue #1818 (BIG point-read wiring, public-API regression pin): the same BIG
+/// (`nb`) partition point-read twice serves the target chunk from the shared
+/// cache the second time (zero decompress), identical result.
+///
+/// Mechanism (already landed, #1572 `ff36a6e2` + #2412 §B): the public
+/// `get()` on a BIG reader routes `big_get_with_resolution` → `locate`
+/// (raw-key `Index.db` resolve) → `bti_decompress_and_parse_target`, which
+/// consults `chunk_cache`. This test is the missing public-surface pin that the
+/// #1567 C audit flagged (only the BTI side had one). It mirrors
+/// `bti_point_read_repeat_is_cached` above, for the BIG format instead of BTI.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn big_point_read_repeat_is_cached() {
+    let Some(data_db) = resolve_or_skip("test_big", "wide_partition") else {
+        return;
+    };
+    let reader = open(&data_db).await;
+    let tid = TableId::new("test_big.wide_partition");
+
+    // Learn a present key from a small scan (public read surface).
+    let rows = reader
+        .scan(&tid, None, None, Some(1), None)
+        .await
+        .expect("scan for a key");
+    let Some((k, _)) = rows.first() else {
+        panic!("test_big.wide_partition present but scan returned 0 rows");
+    };
+    let key = k.clone();
+
+    // Cold point read: BIG covering chunk decompressed + cached.
+    let (h0, m0) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
+    SSTableReader::reset_decompress_calls();
+    let cold = reader.get(&tid, &key).await.expect("cold BIG point read");
+    let cold_decompress = SSTableReader::decompress_call_count();
+    let (h1, m1) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
+
+    assert!(cold.is_some(), "cold BIG point read must find the key");
+    assert!(
+        cold_decompress > 0,
+        "cold BIG read must decompress the covering chunk (cache site wired?) — \
+         got {cold_decompress}; if 0, the public get() path did NOT reach the \
+         cached bti_decompress_and_parse_target (issue #1818 mechanism regressed)"
+    );
+    assert!(
+        m1 - m0 > 0,
+        "cold BIG read must populate the cache (misses)"
+    );
+    assert_eq!(h1 - h0, 0, "cold BIG read must not hit the cache");
+
+    // Warm point read: covering chunk resident → zero decompress, cache hit.
+    SSTableReader::reset_decompress_calls();
+    let warm = reader.get(&tid, &key).await.expect("warm BIG point read");
+    let warm_decompress = SSTableReader::decompress_call_count();
+    let (h2, m2) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
+
+    assert_eq!(
+        format!("{cold:?}"),
+        format!("{warm:?}"),
+        "cache MUST NOT change the point-read result"
+    );
+    assert_eq!(
+        warm_decompress, 0,
+        "warm BIG read must perform ZERO decompressions (DECOMPRESS_CALLS delta == 0)"
+    );
+    assert_eq!(m2 - m1, 0, "warm BIG read must not miss the cache");
+    assert!(h2 - h1 > 0, "warm BIG read must hit the cache");
+}
+
 /// Task 1.7 (scan larger than cache): a table whose decompressed size exceeds a
 /// small configured budget scans fully and correctly, with the cache's resident
 /// bytes held within the budget throughout (eviction under scan pressure).

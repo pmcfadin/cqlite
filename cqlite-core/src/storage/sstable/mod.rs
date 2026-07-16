@@ -497,41 +497,31 @@ fn build_chunk_cache(config: &Config) -> Arc<crate::storage::cache::Decompressed
     }
 }
 
-/// Build a reader's per-reader key→partition-offset cache (issue #1570, B4),
-/// honoring the same `config.memory.block_cache.enabled` read-cache toggle B2
-/// established (issue #1568). When enabled (the default) the cache is bounded by an
-/// approximate BYTE budget of
-/// [`DEFAULT_KEY_CACHE_BYTES`](crate::storage::cache::DEFAULT_KEY_CACHE_BYTES);
-/// when disabled it is a genuine no-op cache so the point-read path bypasses key
-/// caching entirely rather than the toggle being decorative. The budget is a small
-/// constant, not a new config knob (the audit forbids a decorative one).
+/// Resolve a reader's key→partition-offset cache handle (issue #2059), honoring the
+/// same `config.memory.block_cache.enabled` read-cache toggle B2 established
+/// (issue #1568).
 ///
-/// **Aggregate memory** (`<128MB` budget): this cache is per-reader (design D2), so
-/// with no global ceiling the resident footprint is `≈ N_open_readers ×
-/// DEFAULT_KEY_CACHE_BYTES` for typical (small) keys. Bounding each reader by BYTES
-/// (not an entry count) makes this **independent of key size** for the typical case
-/// — the #1570 roborev fix: partition keys are variable-length (composite/text up to
-/// ~64 KB), so a count cap of 4096 entries did NOT bound resident bytes (worst case
-/// ~40 readers × 4096 × ~1 KB ≈ 160 MB, over budget). The `≈` is deliberate: the
-/// eviction guard never evicts the just-resolved entry, so each of the 16 shards can
-/// retain one oversized (~64 KB) entry beyond its 32 KiB per-shard budget, making a
-/// single reader's true worst case ~1 MB (~2× the nominal 512 KiB) and the exact
-/// upper bound `N × (B + shard_count × max_key_bytes)`. With a 512 KiB per-reader
-/// budget, ~40 open generations is `≈ 40 × 512 KiB ≈ 20 MB` and even ~128 readers is
-/// `≈ 128 × 512 KiB = 64 MB`, both comfortably within `<128MB` for typical keys.
-/// Allocation stays occupancy-proportional, so idle readers cost ~nothing. See
-/// [`DEFAULT_KEY_CACHE_BYTES`](crate::storage::cache::DEFAULT_KEY_CACHE_BYTES) for
-/// the full derivation. A single global bounded cache keyed on `(sstable_id, key)`
-/// would bound the aggregate regardless of reader count and is a deferred future
-/// optimization (see `design.md` "Deferred").
+/// When enabled (the default) this returns a shared `Arc` clone of the PROCESS-GLOBAL
+/// [`GlobalKeyOffsetCache`](crate::storage::cache::GlobalKeyOffsetCache) — ONE
+/// byte-bounded instance shared by every open reader, so the aggregate resident
+/// footprint is bounded by a single fixed global cap
+/// ([`DEFAULT_GLOBAL_KEY_CACHE_BYTES`](crate::storage::cache::DEFAULT_GLOBAL_KEY_CACHE_BYTES))
+/// REGARDLESS of open-reader count — never the retired per-reader form's
+/// `N_readers × per_reader_cap` (the unbounded-aggregate hazard the flight
+/// `WarmTableRegistry` reintroduced by pinning one reader per warm generation).
+/// Entries are namespaced by the reader's authoritative generation identity, so one
+/// global cache safely serves every generation. When disabled it returns a per-reader
+/// [`disabled`](crate::storage::cache::GlobalKeyOffsetCache::disabled) no-op so the
+/// point-read path bypasses key caching entirely rather than the toggle being
+/// decorative. The budget is a fixed named constant, not a new config knob.
 pub(crate) fn build_key_offset_cache(
     config: &Config,
-) -> Arc<crate::storage::cache::KeyOffsetCache> {
-    use crate::storage::cache::{KeyOffsetCache, DEFAULT_KEY_CACHE_BYTES};
+) -> Arc<crate::storage::cache::GlobalKeyOffsetCache> {
+    use crate::storage::cache::GlobalKeyOffsetCache;
     if config.memory.block_cache.enabled {
-        Arc::new(KeyOffsetCache::with_budget_bytes(DEFAULT_KEY_CACHE_BYTES))
+        GlobalKeyOffsetCache::global()
     } else {
-        Arc::new(KeyOffsetCache::disabled())
+        Arc::new(GlobalKeyOffsetCache::disabled())
     }
 }
 
@@ -562,36 +552,25 @@ impl SSTableManager {
     /// **both** directions: (a) the two maps re-reference the same reader `Arc`s,
     /// so a naive sum of both would double-count; (b) crucially, `self.readers` is
     /// **not** a strict superset of `table_readers` — `SSTableId::from_filename`
-    /// keys the by-id map on the bare generation filename (e.g. `nb-1-big-Data.db`),
-    /// so two tables sharing that filename collide and the by-id map keeps only the
-    /// last-inserted reader while `table_readers` retains both under distinct keys.
-    /// Iterating `self.readers` alone would therefore **silently omit** the
-    /// overwritten reader's cache and under-count the aggregate. The pointer-dedup
-    /// union counts every physically-open reader once regardless of collisions.
-    /// Every field is read from a live counter/aggregate — no fabricated values.
+    /// Snapshot of the PROCESS-GLOBAL key→partition-offset cache (issue #2059),
+    /// reported as the single consolidated envelope through
+    /// `Database::stats().memory_stats`.
     ///
-    /// Lock ordering matches every writer (`readers` before `table_readers`), so
-    /// acquiring both read guards here cannot deadlock.
+    /// Since #2059 there is ONE global cache shared by every reader (not a per-reader
+    /// cache summed over the open set), so this reads that single instance's live
+    /// counters directly. When this manager's `block_cache.enabled == false` the read
+    /// caches are disabled, so this reports honest zeros (mirroring
+    /// [`stats_chunk_cache`](Self::stats_chunk_cache) returning `None`) rather than
+    /// surfacing another database's global activity. Every field is a real observed
+    /// value — no fabricated placeholders.
     pub(crate) async fn aggregate_key_cache_stats(
         &self,
-    ) -> crate::storage::cache::KeyCacheSnapshot {
-        let readers = self.readers.read().await;
-        let table_readers = self.table_readers.read().await;
-        let mut seen: std::collections::HashSet<*const reader::SSTableReader> =
-            std::collections::HashSet::new();
-        let mut agg = crate::storage::cache::KeyCacheSnapshot::default();
-        for reader in readers.values().chain(table_readers.values().flatten()) {
-            if !seen.insert(Arc::as_ptr(reader)) {
-                continue; // already counted this physical reader
-            }
-            let s = reader.key_offset_cache.snapshot();
-            agg.hits = agg.hits.saturating_add(s.hits);
-            agg.misses = agg.misses.saturating_add(s.misses);
-            agg.evictions = agg.evictions.saturating_add(s.evictions);
-            agg.resident_bytes = agg.resident_bytes.saturating_add(s.resident_bytes);
-            agg.capacity_bytes = agg.capacity_bytes.saturating_add(s.capacity_bytes);
+    ) -> crate::storage::cache::GlobalKeyCacheSnapshot {
+        if self.config.memory.block_cache.enabled {
+            crate::storage::cache::GlobalKeyOffsetCache::global().snapshot()
+        } else {
+            crate::storage::cache::GlobalKeyCacheSnapshot::default()
         }
-        agg
     }
 
     /// Create a new SSTable manager
@@ -1635,21 +1614,22 @@ impl SSTableManager {
 
         // Multiple candidate generations may hold the same partition; reconcile
         // with the same authoritative k-way merge the full scan uses (write-support
-        // only), TARGETED to just this partition (issue #1579): the merge keeps only
-        // `partition_key`'s rows and stops as soon as it finds them, byte-identical
-        // to the former full-merge-then-`retain(matches_key)` but without
-        // materializing every other partition.
-        #[cfg(feature = "write-support")]
+        // only), TARGETED to just this partition. Issue #2096: SEEK each candidate
+        // directly to the target partition's `Data.db` offset (BTI trie / Index.db)
+        // and reconcile through the partition-seeking merger (issues #2207/#2346)
+        // instead of the full-scan `KWayMerger::new`, which decoded every partition
+        // with token <= the target before reaching it (O(partitions-below-target)).
+        // The seeking merge reconciles through the SAME `KWayMerger`
+        // (`from_row_iterators`), so its output is byte-identical to the former
+        // full-merge-then-`retain(matches_key)`, only over O(target) work.
+        #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
         if candidates.len() > 1 {
             if let Some(schema) = schema {
                 let target = RowKey::new(partition_key.to_vec());
-                match generation_merge::merge_generations_for_read(
+                match generation_merge::seek_merge_generations_for_read(
                     &candidates,
                     schema,
-                    None,
-                    None,
-                    None,
-                    Some(&target),
+                    &target,
                 )
                 .await
                 {
@@ -2474,7 +2454,11 @@ impl SSTableManager {
         // Remove from memory
         {
             let mut readers = self.readers.write().await;
-            readers.remove(sstable_id);
+            if let Some(removed) = readers.remove(sstable_id) {
+                // Issue #2059 §C: drop the removed generation's process-global
+                // key-cache entries (distinct `invalidations` counter).
+                removed.invalidate_key_cache_entries();
+            }
         }
 
         // Delete file
@@ -2973,22 +2957,17 @@ mod tests {
             .any(|f| f.file_name().to_string_lossy().ends_with("-Data.db"))
     }
 
-    /// Issue #1571 (roborev Low, aggregate omission guard): `aggregate_key_cache_stats`
-    /// must count every physically-open reader's key cache **exactly once**, even
-    /// though `self.readers` (by-id) is NOT a strict superset of `table_readers`
-    /// (by-name). `SSTableId::from_filename` keys the by-id map on the bare
-    /// generation filename (`nb-1-big-Data.db`), so two tables sharing that
-    /// filename collide: the by-id map keeps only the last-inserted reader while
-    /// `table_readers` retains both. This test reproduces that collision with two
-    /// real tables (both ship `nb-1-big-Data.db`) and proves the dedup-union
-    /// aggregate (a) is not fooled into omitting the reader reachable only by name
-    /// and (b) does not double-count the readers present in both maps. A pre-fix
-    /// `self.readers`-only aggregate would FAIL this (under-counting the omitted
-    /// reader's capacity).
+    /// Issue #2059: since the key cache is now a SINGLE process-global instance
+    /// shared by every reader (not a per-reader cache summed over the open set),
+    /// `aggregate_key_cache_stats` reports that one global cache's live snapshot —
+    /// its capacity is the fixed GLOBAL budget reported ONCE, INDEPENDENT of how many
+    /// readers a manager has open (the whole point of the global bound: no
+    /// `N_readers × per_reader_cap` growth). A manager with block caching disabled
+    /// reports honest zeros instead of another database's global activity.
     #[tokio::test]
-    async fn test_aggregate_key_cache_counts_every_reader_exactly_once() {
-        // Two distinct real table directories whose Data.db share a generation
-        // filename → colliding SSTableId; skip when datasets are absent.
+    async fn test_global_key_cache_capacity_is_reader_count_independent() {
+        // Two distinct real table directories → several readers open at once; skip
+        // when datasets are absent.
         let Some(dir_a) = dataset_table_dir("test_basic", "simple_table") else {
             eprintln!("skipping: CQLITE_DATASETS_ROOT / test_basic.simple_table absent");
             return;
@@ -3012,44 +2991,49 @@ mod tests {
         .await
         .unwrap();
 
-        // Deduped set of physically-open readers across BOTH maps (by pointer),
-        // and the expected capacity sum computed independently of the aggregate.
-        let (by_id_len, distinct, expected_capacity) = {
+        let distinct = {
             let readers = manager.readers.read().await;
             let table_readers = manager.table_readers.read().await;
             assert!(!readers.is_empty(), "fixture present but no readers by-id");
-            assert!(
-                !table_readers.is_empty(),
-                "fixture present but no readers by-name"
-            );
             let mut seen: std::collections::HashSet<*const reader::SSTableReader> =
                 std::collections::HashSet::new();
-            let mut expected_capacity = 0usize;
             for r in readers.values().chain(table_readers.values().flatten()) {
-                if seen.insert(Arc::as_ptr(r)) {
-                    expected_capacity = expected_capacity
-                        .saturating_add(r.key_offset_cache.snapshot().capacity_bytes);
-                }
+                seen.insert(Arc::as_ptr(r));
             }
-            (readers.len(), seen.len(), expected_capacity)
+            seen.len()
         };
 
-        // The collision reality this guards against: the by-id map holds strictly
-        // fewer readers than physically exist, so a `self.readers`-only aggregate
-        // would silently omit at least one reader's cache.
-        assert!(
-            by_id_len < distinct,
-            "expected an SSTableId collision (by-id map {by_id_len} < {distinct} distinct readers)"
-        );
-
-        // The dedup-union aggregate counts every distinct reader exactly once:
-        // capacity equals the independently-summed deduped capacity — neither
-        // under-counted (omission) nor over-counted (double-count).
+        // The reported capacity is the fixed GLOBAL budget, reported once — NOT
+        // multiplied by the (multiple) open readers.
         let agg = manager.aggregate_key_cache_stats().await;
         assert_eq!(
-            agg.capacity_bytes, expected_capacity,
-            "aggregate must sum each distinct reader's key-cache capacity exactly once"
+            agg.capacity_bytes,
+            crate::storage::cache::DEFAULT_GLOBAL_KEY_CACHE_BYTES,
+            "global cache reports its single fixed budget regardless of reader count \
+             ({distinct} readers open)"
         );
+
+        // A block-cache-disabled manager reports honest zeros (not the global cache's
+        // live numbers) — the disabled toggle genuinely suppresses the surface.
+        let mut disabled_config = Config::default();
+        disabled_config.memory.block_cache.enabled = false;
+        let dplatform = Arc::new(Platform::new(&disabled_config).await.unwrap());
+        let dmanager = SSTableManager::new(
+            &storage_path,
+            &disabled_config,
+            dplatform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .unwrap();
+        let dagg = dmanager.aggregate_key_cache_stats().await;
+        assert_eq!(
+            dagg.capacity_bytes, 0,
+            "disabled manager reports zero capacity"
+        );
+        assert_eq!(dagg.hits, 0);
+        assert_eq!(dagg.misses, 0);
     }
 
     /// Issue #1592 (roborev Finding 1): a MID-STREAM error must NOT drop the

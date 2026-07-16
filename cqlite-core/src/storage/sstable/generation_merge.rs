@@ -296,6 +296,74 @@ pub(super) async fn merge_generations_for_read(
     Ok(merged)
 }
 
+/// Partition-SEEKING sibling of [`merge_generations_for_read`] for the
+/// multi-candidate `WHERE pk = ?` point read (issue #2096).
+///
+/// Where [`merge_generations_for_read`] with a `target_key` still builds the
+/// FULL-SCAN `KWayMerger::new` and sequentially DECODES every partition with token
+/// <= the target before breaking (O(partitions-below-target)), this reuses the
+/// Flight point path's partition-SEEKING merger
+/// ([`build_single_partition_merger_from_readers`](crate::storage::write_engine::build_single_partition_merger_from_readers),
+/// #2207/#2346): each candidate seeks straight to the target partition's `Data.db`
+/// offset (BTI trie / `Index.db`), or fail-safe filter-scans one SSTable when its
+/// index is unavailable, then reconciles through the SAME `KWayMerger`
+/// (`from_row_iterators`, run_index = position). The read-visibility kernel is
+/// IDENTICAL to the materializing helper — the same [`ReadShadow`] (#1849) captured
+/// ONCE, the same [`partition_live_rows`] emission + token-order guard, and
+/// candidates ordered NEWEST→OLDEST like [`ordered_generation_paths`] — so the
+/// output is byte-for-byte `merge_generations_for_read(.., Some(target))`, only
+/// over O(target) work. Blocking builder + `step()` run on `spawn_blocking`.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub(super) async fn seek_merge_generations_for_read(
+    candidates: &[Arc<reader::SSTableReader>],
+    schema: &crate::schema::TableSchema,
+    target_key: &RowKey,
+) -> Result<Vec<(RowKey, ScanRow)>> {
+    use crate::storage::scan_cancel::ScanCancel;
+    use crate::storage::write_engine::merge::build_single_partition_merger_from_readers;
+
+    // NEWEST→OLDEST like `ordered_generation_paths`, so the seeking merger's
+    // run_index (= position) equals the full-scan merger's LWW tie-break rank.
+    let mut ordered: Vec<Arc<reader::SSTableReader>> = candidates.to_vec();
+    ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
+
+    let schema = schema.clone();
+    let target_bytes = target_key.as_bytes().to_vec();
+
+    let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
+        // Issue #1849: same read-visibility kernel `merge_generations_for_read`
+        // applies (read-time TTL clock captured ONCE), REQUIRED for byte-identity.
+        let shadow = ReadShadow::new(&schema, now_epoch_secs());
+        let keys = [target_bytes.clone()];
+        let Some(mut merger) =
+            build_single_partition_merger_from_readers(ordered, &keys, &schema, ScanCancel::new())?
+        else {
+            return Ok(Vec::new()); // no candidate holds the target
+        };
+        let mut out = Vec::new();
+        while let MergeStep::Partition { key, rows } = merger.step()? {
+            let row_key = RowKey::new(key.key.clone());
+            // A fail-safe filter-scan run could surface a prefix-collision key; keep
+            // only the exact target and stop once seen (partition keys are unique).
+            if row_key.as_bytes() != target_bytes.as_slice() {
+                continue;
+            }
+            out.extend(partition_live_rows(&row_key, rows, &shadow));
+            break;
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| {
+        crate::Error::Storage(format!("seeking cross-generation read merge task: {e}"))
+    })??;
+
+    // Parity guard with the materializing helper: stable TOKEN-order sort (no-op for
+    // a single partition, kept for byte-parity, issue #1580).
+    scan_merge::sort_by_token_order(&mut merged, None, |(k, _)| k);
+    Ok(merged)
+}
+
 /// Metadata-aware sibling of [`merge_generations_for_read`] for the
 /// `WRITETIME(col)` / `TTL(col)` projection path (Issue #885).
 ///

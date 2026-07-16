@@ -396,6 +396,7 @@ impl WarmTableRegistry {
         // A dead-path generation with NO identity-matching live entry fails CLOSED:
         // it lands in `added` and is fully re-opened from the live dir.
         let mut alive_ids: HashSet<GenerationId> = HashSet::new();
+        let mut rebind_hits: u64 = 0;
         for (id, reader) in &cached {
             let current_path = reader.file_path();
             if std::fs::metadata(&current_path).is_ok() {
@@ -404,9 +405,16 @@ impl WarmTableRegistry {
                 if super::rebuild::rebind_matches(*id, reader.file_size(), &live.path) {
                     reader.rebind_path(&live.path);
                     alive_ids.insert(*id);
+                    rebind_hits += 1;
                 }
             }
         }
+        // Record the rebinds NOW (not gated on the swap outcome): a rebind
+        // mutates the shared `Arc<SSTableReader>` in place (ArcSwap `file_path`),
+        // so the repoint is already observed by the live cache entry — the
+        // snapshot-lifecycle-closure work probe (flight-warm-snapshot-closure §D:
+        // distinguishes a warm-hit-with-rebind from a full rebuild).
+        self.metrics.record_rebind_hits(rebind_hits);
 
         // ADDED = present now, not already warm/rebound on a LIVE path. Open them
         // (fail-closed) — genuinely-new generations and dead-path ones with no
@@ -451,10 +459,12 @@ impl WarmTableRegistry {
         // (adjudicated: "the previously-installed — here, concurrently
         // NEWER — set was retained instead of being overwritten by an older
         // probe result") rather than adding a new bounded label.
-        if let Some(live) = inner.tables.get(key) {
-            if live.ddl_hash == ddl_hash && live.generation_set() != probe_start_set {
-                let tick = inner.next_tick();
-                let entry = inner.tables.get_mut(key).expect("checked Some above");
+        let fresher_installed = inner.tables.get(key).is_some_and(|live| {
+            live.ddl_hash == ddl_hash && live.generation_set() != probe_start_set
+        });
+        if fresher_installed {
+            let tick = inner.next_tick();
+            if let Some(entry) = inner.tables.get_mut(key) {
                 for r in &mut entry.readers {
                     r.last_access = tick;
                 }
@@ -501,6 +511,13 @@ impl WarmTableRegistry {
                         freed = freed.saturating_add(r.footprint);
                         if !current_set.contains(&r.id) {
                             removed_count += 1;
+                            // Issue #2059 §C: a generation truly gone from disk —
+                            // drop its process-global key-cache entries. A
+                            // present-but-dead-path generation (#2352, re-opened
+                            // from the live dir with the SAME inode identity) is a
+                            // refresh, NOT a removal, so it is deliberately NOT
+                            // invalidated — its entries stay valid across the rebind.
+                            r.reader.invalidate_key_cache_entries();
                         }
                     }
                 }
@@ -509,6 +526,9 @@ impl WarmTableRegistry {
                 for r in prev.readers {
                     freed = freed.saturating_add(r.footprint);
                     removed_count += 1;
+                    // Issue #2059 §C: drop each dropped generation's global
+                    // key-cache entries.
+                    r.reader.invalidate_key_cache_entries();
                 }
             }
         }
@@ -598,6 +618,23 @@ impl WarmTableRegistry {
                 break;
             };
             if let Some(t) = inner.tables.get_mut(&vkey) {
+                // Issue #2059 fix round (review Medium): a CAPACITY eviction here is
+                // NOT a generation removal — the victim generation is still fully
+                // present on disk and will likely be re-read soon (memory pressure,
+                // not deletion, is precisely why it was evicted from the warm set).
+                // Deliberately do NOT invalidate the process-global key cache: doing
+                // so would drop shared cache entries exactly under the memory pressure
+                // where the cache is most valuable, and would pull cache state out
+                // from under any OTHER live reader of the same physical file (a
+                // co-resident `SSTableManager`, another warm entry, or this same
+                // generation re-opened on the next `do_get` miss). Correctness is
+                // preserved by the cache's fail-closed identity match + repopulation;
+                // we only release this warm entry's reader pin/retention and let the
+                // key cache's own byte-budget LRU reclaim entries on its own schedule
+                // if/when memory pressure requires it. GENUINE generation removal
+                // (compaction/drop, DDL change) still invalidates — see `refresh.rs`
+                // and the delta-rebuild removal branches above, which invalidate only
+                // disk-absent generations.
                 t.readers.retain(|r| r.id != vid);
                 if t.readers.is_empty() {
                     inner.tables.remove(&vkey);

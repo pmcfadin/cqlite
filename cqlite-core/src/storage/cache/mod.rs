@@ -41,11 +41,12 @@
 //! eviction ordering. Both remain power-of-two hand-sharded `Mutex<LruCache>` —
 //! the design intent is preserved.
 
-pub mod key_offset;
+pub mod global_key_offset;
 
-pub(crate) use key_offset::KeyCacheSnapshot;
-pub use key_offset::{
-    KeyOffsetCache, PartitionLoc, DEFAULT_KEY_CACHE_BYTES, DEFAULT_KEY_CACHE_SHARDS,
+pub(crate) use global_key_offset::GlobalKeyCacheSnapshot;
+pub use global_key_offset::{
+    GenerationIdentity, GlobalKeyOffsetCache, PartitionLoc, DEFAULT_GLOBAL_KEY_CACHE_BYTES,
+    DEFAULT_GLOBAL_KEY_CACHE_SHARDS,
 };
 
 use bytes::Bytes;

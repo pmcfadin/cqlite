@@ -828,35 +828,29 @@ impl DataWriter {
             self.write_clustering_prefix(clustering_key, schema)?;
         }
 
-        // Calculate row body size (everything after row_size VInt)
-        let (row_body, cells_written) = self.build_merged_row_body(row, schema, flags)?;
-
+        // Build the row body into the reusable `row_scratch` (issue #1673, R2).
+        let cells_written = self.build_merged_row_body(row, schema, flags)?;
         let prev_size_vint_len = unsigned_len(prev_size);
 
-        // Write row_size (VInt) — Cassandra's serializedRowBodySize() includes
-        // the prev_unfiltered_size VInt as part of the row body
-        let row_body_size = prev_size_vint_len as u64 + row_body.len() as u64;
-        let mut row_size_buf = Vec::new();
-        encode_unsigned(row_body_size, &mut row_size_buf);
-        self.buffer.extend_from_slice(&row_size_buf);
+        // Write row_size (VInt) — Cassandra's serializedRowBodySize() includes the
+        // prev_unfiltered_size VInt. Encoded straight into `self.buffer` (#1673, R2
+        // — no `row_size_buf`); body length known from `row_scratch`, order intact.
+        let row_body_size = prev_size_vint_len as u64 + self.row_scratch.len() as u64;
+        encode_unsigned(row_body_size, &mut self.buffer);
 
         // Write prev_unfiltered_size (VInt, inside the row body)
         encode_unsigned(prev_size, &mut self.buffer);
-
-        // Write rest of row body
-        self.buffer.extend_from_slice(&row_body);
+        // Append the row body (disjoint field borrow: buffer vs row_scratch).
+        self.buffer.extend_from_slice(&self.row_scratch);
 
         Ok((self.buffer.len() - start_len, cells_written))
     }
 
-    /// Build row body (everything after row_size VInt)
-    ///
-    /// Returns the bytes for: timestamp, TTL, deletion, column bitmap, and cells.
-    /// Build a row body from a single mutation (legacy/test entry point).
-    /// Routes through the merged-row body builder.
+    /// Build a row body from a single mutation (legacy/test entry point); routes
+    /// through the merged-row body builder and returns a copy of the scratch.
     #[cfg(test)]
     pub(super) fn build_row_body(
-        &self,
+        &mut self,
         mutation: &Mutation,
         schema: &TableSchema,
         flags: u8,
@@ -869,8 +863,8 @@ impl DataWriter {
             ops: Vec::new(),
             complex_element_ops: Vec::new(),
         });
-        let (body, _cells) = self.build_merged_row_body(&row, schema, flags)?;
-        Ok(body)
+        let _cells = self.build_merged_row_body(&row, schema, flags)?;
+        Ok(self.row_scratch.clone())
     }
 
     /// Build a merged row body (everything after the row_size VInt, excluding
@@ -879,19 +873,24 @@ impl DataWriter {
     /// Field order per Cassandra's `UnfilteredSerializer.serializeRowBody`:
     /// liveness timestamp, TTL + expiration LDT, row deletion, columns
     /// subset, then cells. Issue #717: the columns subset is written for
-    /// EVERY row lacking HAS_ALL_COLUMNS — including row tombstones.
+    /// EVERY row lacking HAS_ALL_COLUMNS — including row tombstones. Builds into
+    /// the reusable `self.row_scratch` (issue #1673, R2 — no per-row throwaway
+    /// `Vec`; `clear()`ed here, retaining capacity); the caller reads it back.
     ///
-    /// Returns the serialized body bytes and the number of cells (columns)
-    /// physically written (Issue #851, review): the count is sourced from
-    /// `write_merged_cells`, the only place that decides whether a cell is
-    /// emitted, so Statistics' column count cannot drift from Data.db.
+    /// Returns the number of cells (columns) physically written (Issue #851,
+    /// review): the count is sourced from `write_merged_cells`, the only place
+    /// that decides whether a cell is emitted, so Statistics' column count cannot
+    /// drift from Data.db.
     pub(super) fn build_merged_row_body(
-        &self,
+        &mut self,
         row: &RowWrite<'_>,
         schema: &TableSchema,
         flags: u8,
-    ) -> Result<(Vec<u8>, u64)> {
-        let mut body = Vec::new();
+    ) -> Result<u64> {
+        // Take the scratch out of `self` so the `&self` cell/bitmap helpers below
+        // can run while `&mut body` is held; stored back at the end (keeps capacity).
+        let mut body = std::mem::take(&mut self.row_scratch);
+        body.clear();
 
         // Issue #2038 Scope B: capture "now" ONCE for this entire row write and
         // share it with every expiring cell derived below (row liveness AND,
@@ -981,7 +980,8 @@ impl DataWriter {
         // Write cell data (none survive for pure row tombstones)
         let cells_written = self.write_merged_cells(&mut body, row, schema, now_seconds)?;
 
-        Ok((body, cells_written))
+        self.row_scratch = body; // store back, retaining capacity
+        Ok(cells_written)
     }
 
     /// Write clustering prefix

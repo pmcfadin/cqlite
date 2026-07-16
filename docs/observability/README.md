@@ -42,6 +42,30 @@ CQLITE_OTEL_ENABLED=true CQLITE_OTEL_ENDPOINT=http://localhost:4317 \
 
 See the [Quickstart](quickstart.md) for the full walkthrough.
 
+## Recent instrument families
+
+> **Stopgap.** This hand-maintained list is a temporary bridge — issue #2426 will
+> generate the authoritative, operator-facing flight metrics reference directly
+> from `cqlite-core/src/observability/catalog.rs` (anti-drift). Until then, the
+> catalog is the source of truth; the names below are the recently-added families.
+
+- **`cqlite.flight.admission.*`** — 5 instruments for `do_get` admission control
+  (issue #2420): `limit` (gauge, configured `--max-concurrent-scans`), `in_use`
+  (gauge, permits held), `waiting` (gauge, requests queued for a permit),
+  `rejected_total` (counter, timeout sheds — each a gRPC `UNAVAILABLE`), and
+  `wait_seconds` (histogram, time spent queued before admission or rejection).
+- **`cqlite.rpc.phase` 5-phase closed set** — the bounded `do_get` phase dimension
+  on `cqlite.rpc.phase_duration` is now the closed set
+  `validate → admission → resolve → merge_setup → stream` (`admission` and
+  `validate` added by #2420), so a stalled request localizes to a phase (queued in
+  `admission`, building in `merge_setup`, etc.) from metrics alone.
+- **`cqlite.sstable.index_interval_parses_total`** — NEW counter (issue #2412):
+  one increment per summary-guided interval parse on a point lookup.
+  **`cqlite.sstable.index_parses_total` now counts FULL Index.db parses only** —
+  lazy open (#2412) makes a BIG open O(summary), so this counter stays flat on a
+  lazy open and increments only when a full parse is actually forced (e.g. an
+  absent `Summary.db` → one counted `FellBack` full parse).
+
 ## Source of truth
 
 The metric names, units, attribute keys, and env vars documented here are

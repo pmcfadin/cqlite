@@ -163,7 +163,7 @@ Bytes 32+: EncodingStats data
 
 **Magic Number**: The constant `0x26291b05` appears at bytes 4-7 and serves dual purposes:
 - `statistics_kind` when read by `parse_nb_format_header()`
-- `checksum` when read by `parse_statistics_toc_for_header_offset()`
+- `checksum` when read by the single-pass `parse_statistics_toc()` TOC walk (issue #2148)
 
 **Version/Components**: The value `4` at bytes 0-3 indicates:
 - `version_type = 4` (Cassandra 5.0 format) for nb-format parsers

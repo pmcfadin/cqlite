@@ -91,10 +91,15 @@
 #                      issue_1494_converter_alloc_budget.rs (issue #1494, AD5;
 #                      needs `arrow`), per-row CQL→Arrow alloc count; (c) Flight
 #                      producer — cqlite-flight issue_1494_producer_mem_budget.rs
-#                      (#1494), producer total/peak bytes. dhat counts are
-#                      machine-independent, so this is the hard, load-deterministic
-#                      export/Flight signal. Dataset-dependent lanes fail closed on
-#                      empty (assert >=1 row before reading dhat stats).
+#                      (#1494), producer total/peak bytes; (d) row-assembly path —
+#                      issue_2075_row_assembly_alloc_budget.rs (issue #2075),
+#                      absolute allocs/row + allocs/cell for the decode->RowCells->
+#                      QueryRow scan path across a wide-row + text-heavy shape
+#                      (measures/gates the #1645 item 2 smallvec-RowCells win).
+#                      dhat counts are machine-independent, so this is the hard,
+#                      load-deterministic export/Flight/read signal. Dataset-
+#                      dependent lanes fail closed on empty (assert >=1 row/cell/
+#                      alloc before reading dhat stats).
 #   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
 #                      (--no-run, whole package) then run the seven CI-enforced ones
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
@@ -133,6 +138,28 @@
 #                      (two manifest-changing PRs), which no per-PR/local check can
 #                      see; that path self-heals via the push-to-main job in
 #                      .github/workflows/cassandra-parity.yml (issue #1338).
+#   operator-metrics-doc
+#                      gen_operator_metrics_doc --check: FAILs (naming
+#                      docs/reports/flight-metrics-reference.md) when the committed
+#                      operator-facing Flight metrics reference drifts from a fresh
+#                      render of the observability catalog, or when a catalogued
+#                      metric lacks its operator annotation (fail-closed). Catches
+#                      the "added/renamed a cqlite.* instrument, forgot to
+#                      regenerate the field-team doc" case at the local gate
+#                      (issue #2426). SKIP-aware (loud, never silent PASS): SKIPs
+#                      when cqlite-core is absent (a minimal checkout). No
+#                      Docker/datasets — reads the catalog + committed doc only.
+#   kit-dashboard-drift
+#                      cqlite-core kit_dashboard_metric_drift test: FAILs (naming
+#                      the phantom name) when the kit Grafana dashboard
+#                      (easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json)
+#                      references a cqlite.* metric name absent from
+#                      catalog::ALL_METRICS, or when the dashboard JSON is
+#                      malformed. Catches the "renamed/removed a cqlite.* instrument,
+#                      the kit dashboard now points at a phantom metric" case at the
+#                      local gate (issue #2427). SKIP-aware (loud, never silent
+#                      PASS): SKIPs when cqlite-core or the dashboard is absent. No
+#                      Docker/datasets — reads the catalog + dashboard JSON only.
 #   binding-unwind-profile
 #                      fail-closed guard (#1440): the shipped Python wheel and
 #                      Node prebuild build definitions must select
@@ -1039,7 +1066,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -1658,6 +1685,60 @@ run_delivery_telemetry() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# oom-audit: the STREAM_RETURNS_VEC static AST audit (issue #2012) run in
+# --enforce mode over the v1 scope (data_access/**, query/**, flight producers +
+# streaming). SKIP-aware on the delivery-telemetry model: no cargo, an absent
+# xtask crate, or a failed xtask build -> SKIP (loud, never a silent PASS); a
+# successful build whose enforce run exits non-zero (an unallowlisted finding,
+# orphaned/malformed/expired allowlist entry) -> hard FAIL; otherwise PASS. Not
+# in DATASET_COMPONENTS: it needs no SSTable fixtures (it reads source only).
+#
+# Test seams (mirrors parity-report's env overrides, exercised by
+# scripts/tests/test_agent_gate_oom_audit.sh via `--only oom-audit`):
+#   OOM_AUDIT_XTASK_DIR      - point at an absent dir to force the SKIP path
+#   CQLITE_OOM_AUDIT_ROOT    - point the audit at a synthetic tree (a planted
+#                              violation for FAIL, a clean tree for PASS)
+run_oom_audit() {
+  local name=oom-audit
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  local xtask_dir="${OOM_AUDIT_XTASK_DIR:-$REPO_ROOT/xtask}"
+  if ! command -v cargo >/dev/null 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (no cargo on PATH)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  if [ ! -f "$xtask_dir/Cargo.toml" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (xtask crate absent at $xtask_dir)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] cargo run -p xtask -- oom-audit --enforce"
+  if ! cargo build -p xtask >"$log" 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (xtask build failed; see $log)"
+    record_result "$name" "$status" "$(( $(date +%s) - start ))"
+    return 0
+  fi
+  if cargo run -q -p xtask -- oom-audit --enforce >>"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # compaction-byte-parity: the PR-VISIBLE proxy for the nightly-only Java
 # differential byte tier (issue #1405). The two manifest scenarios
 # cass.compaction.SSTableRewriterTest.output_component_integrity and
@@ -1833,6 +1914,121 @@ run_parity_report() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# operator-metrics-doc: verify the committed operator-facing Flight metrics
+# reference (docs/reports/flight-metrics-reference.md) is not stale vs the
+# observability catalog (issue #2426). Renders it via the always-compiled catalog
+# with the cqlite-core `gen_operator_metrics_doc` example in --check mode; PASS
+# when the committed doc matches a fresh render, FAIL (naming the doc) when it
+# drifts. Mirrors the #1338 parity-report pattern: catches the "added/renamed a
+# metric or annotation, forgot to regenerate the field-team doc" case at the
+# local gate. SKIP-aware: when cqlite-core (the example's crate) is absent (a
+# minimal checkout), it records SKIP (loud, never a silent PASS). No Docker, no
+# datasets — reads the catalog + committed doc only. The example resolves the doc
+# at its canonical committed path (repo-root-relative), read-only under --check,
+# so a failure always names that file.
+run_operator_metrics_doc() {
+  local name=operator-metrics-doc
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local doc="docs/reports/flight-metrics-reference.md"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -d "$REPO_ROOT/cqlite-core" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cqlite-core unavailable)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] cargo run -q -p cqlite-core --example gen_operator_metrics_doc -- --check ($doc)"
+  if cargo run -q -p cqlite-core --example gen_operator_metrics_doc -- --check >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    # A nonzero --check exit is either a STALE committed doc (regenerate) or a
+    # fail-closed generation error (a catalogued metric lacking an operator
+    # annotation). grep on the captured $log is injection/quoting-safe.
+    if grep -q 'STALE' "$log"; then
+      # Name the artifact(s) that ACTUALLY drifted — either the committed report,
+      # the published website page, or both — rather than always blaming the
+      # report. The example prints `STALE — <path> …` per drifted artifact.
+      local drifted
+      drifted=$(grep 'STALE' "$log" | grep -oE '[[:graph:]]+\.md' | sort -u | tr '\n' ' ')
+      [ -n "$drifted" ] || drifted="$doc"
+      echo "--- [$name] FAILED: the following artifact(s) are STALE vs the observability catalog: $drifted"
+      echo "    Regenerate: cargo run -p cqlite-core --example gen_operator_metrics_doc"
+    else
+      echo "--- [$name] FAILED: could not render $doc — a catalogued metric is missing its operator annotation."
+      echo "    Add the annotation in cqlite-core/src/observability/operator_docs_annotations.rs, then regenerate."
+    fi
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# kit-dashboard-drift: verify the kit Grafana dashboard
+# (easy-db-lab-kits/cqlite-flight/dashboards/cqlite-flight.json) references only
+# `cqlite.*` metric names that exist in the observability catalog (issue #2427).
+# Runs the cqlite-core `kit_dashboard_metric_drift` test: it parses the dashboard
+# JSON, extracts every dotted `cqlite.*` token from panel targets/exprs/titles,
+# and asserts each is an exact catalog metric name, a bounded attribute key, or a
+# real metric's namespace prefix — FAILing (naming the phantom name) on a
+# renamed/removed/typo'd metric. Mirrors the #2426 operator-metrics-doc anti-drift
+# component (a committed artifact cross-checked against catalog::ALL_METRICS).
+# SKIP-aware (loud, never silent PASS): SKIPs ONLY when cqlite-core or the whole
+# kit subtree (easy-db-lab-kits/cqlite-flight/) is absent (a genuine sparse/minimal
+# checkout). If the kit subtree IS present but the expected dashboard JSON is
+# missing/renamed, that is real drift/breakage in a complete checkout → the test
+# FAILs (roborev #2427 r2). No Docker, no datasets — reads the catalog + JSON.
+run_kit_dashboard_drift() {
+  local name=kit-dashboard-drift
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local kit_root="easy-db-lab-kits/cqlite-flight"
+  local dashboard="$kit_root/dashboards/cqlite-flight.json"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  # Skip ONLY on a genuine sparse checkout: cqlite-core or the whole kit subtree
+  # absent. A present kit subtree with a missing dashboard is NOT a skip — it falls
+  # through to the test, which FAILs loudly (present-kit + missing-dashboard drift).
+  if [ ! -d "$REPO_ROOT/cqlite-core" ] || [ ! -d "$REPO_ROOT/$kit_root" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cqlite-core or the kit subtree $kit_root is absent — sparse checkout)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  if [ ! -f "$REPO_ROOT/$dashboard" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: kit subtree $kit_root IS present but the expected dashboard"
+    echo "    $dashboard is MISSING (deleted/renamed) — drift/breakage in a complete checkout,"
+    echo "    not a sparse checkout. Restore the dashboard or update the drift test's path."
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] cargo test -p cqlite-core --test kit_dashboard_metric_drift ($dashboard)"
+  if cargo test -q -p cqlite-core --test kit_dashboard_metric_drift >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    echo "--- [$name] FAILED: the kit dashboard references a cqlite.* metric name ABSENT from"
+    echo "    catalog::ALL_METRICS (renamed/removed/typo'd), or the dashboard JSON is malformed."
+    echo "    Fix the dashboard $dashboard or reconcile the name with the catalog."
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -1899,6 +2095,23 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (parity-report self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # oom-audit component self-test (#2012): drives nested `agent-gate.sh --only
+  # oom-audit` to assert the SKIP (xtask absent) / FAIL (planted violation) /
+  # PASS (bounded tree) outcomes. The SKIP case needs no cargo; the FAIL/PASS
+  # cases self-report INFO when cargo is unavailable. A failure FAILs the
+  # component, mirroring the parity-report/keyspace-scoping guards.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_oom_audit.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_oom_audit.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (oom-audit self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -3176,7 +3389,8 @@ dispatch_component() {
       --test issue_1647_rows_floor_walk \
       --test issue_1577_limit_decode_stop \
       --test issue_1599_locate_parity \
-      --test issue_2302_written_index_resolve ;;
+      --test issue_2302_written_index_resolve \
+      --test issue_1869_big_clustering_slice_readat ;;
     byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
       --features write-support,cli-helpers,state_machine \
       --test issue_1582_byte_bounded_result_budget \
@@ -3188,11 +3402,12 @@ dispatch_component() {
     memory-budget) run_component memory-budget bash -c '
   # Read-path dhat budgets (issue #1565) + the export/Flight dhat budgets
   # (issue #1494, AD5): the converter per-row allocation guard (needs `arrow`)
-  # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap).
+  # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap) +
+  # the row-assembly (RowCells) allocs/row AND allocs/cell budgets (issue #2075).
   # dhat allocation counts are machine-independent, so these are the hard,
-  # load-deterministic per-gate signal for the export/Flight path.
+  # load-deterministic per-gate signal for the export/Flight/read paths.
   #
-  # Run all three dhat lanes UNCONDITIONALLY and aggregate (issue #1494 roborev):
+  # Run all FOUR dhat lanes UNCONDITIONALLY and aggregate (issue #1494 roborev):
   # `&&`-chaining short-circuits on the first failure and HIDES the others, costing
   # an extra triage round. Each lane reports its own result to the log; the
   # component FAILs if ANY lane failed (rc sticks at 1). --test-threads=1 is
@@ -3204,6 +3419,14 @@ dispatch_component() {
     --test issue_1494_converter_alloc_budget -- --test-threads=1 || rc=1
   cargo test --package cqlite-flight --features dhat-heap \
     --test issue_1494_producer_mem_budget -- --test-threads=1 || rc=1
+  # (d) row-assembly (RowCells) path — issue #2075: absolute allocs/row AND
+  # allocs/cell budgets for the decode -> RowCells (Vec<(Arc<str>,Value)>) ->
+  # QueryRow scan path, across a wide-row + a text-heavy shape. Complements the
+  # #1046 width-SCALING guard (which lacks a per-cell metric); measures/gates the
+  # #1645 item 2 (smallvec RowCells) win. Same feature set as the sibling lanes to
+  # reuse build artifacts.
+  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+    --test issue_2075_row_assembly_alloc_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
     integration-tests) run_component integration-tests bash -c '
   cargo test --package cqlite-integration-tests --no-run &&
@@ -3392,7 +3615,10 @@ dispatch_component() {
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     delivery-telemetry) run_delivery_telemetry ;;
+    oom-audit) run_oom_audit ;;
     parity-report) run_parity_report ;;
+    operator-metrics-doc) run_operator_metrics_doc ;;
+    kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build) run_component minimal-build bash -c '

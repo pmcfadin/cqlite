@@ -18,6 +18,14 @@ Use `.github/ISSUE_TEMPLATE/round-tracker.yml` to open a new round tracker pre-p
 with this checklist. This document remains the source of truth for rationale and the
 baseline; the issue template only references it.
 
+**Metric reference (anti-drift, issue #2426):** every `cqlite.*` instrument named in the
+rows below — its type, unit, bounded attributes, and healthy-vs-alarming interpretation —
+is defined in the operator-facing reference at
+[`docs/reports/flight-metrics-reference.md`](../reports/flight-metrics-reference.md),
+which is **generated from the observability catalog** so it cannot drift from the code.
+Link a scoreboard item to its metric entry there instead of re-explaining the metric in a
+round handoff.
+
 ## How to use this template
 
 1. Open a new round tracker from the `round-tracker.yml` issue template (or copy this

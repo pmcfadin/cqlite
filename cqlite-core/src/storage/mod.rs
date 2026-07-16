@@ -594,11 +594,11 @@ impl StorageEngine {
         self.sstables.stats_chunk_cache()
     }
 
-    /// Process-level aggregate of the per-reader key→partition-offset caches
-    /// (issue #1571, B5), summed over live readers. Merged into
-    /// `Database::stats().memory_stats` so the B4 key cache's real
-    /// hits/misses/evictions/occupancy/capacity are observable.
-    pub(crate) async fn key_cache_stats(&self) -> crate::storage::cache::KeyCacheSnapshot {
+    /// Snapshot of the process-global key→partition-offset cache (issue #2059).
+    /// Merged into `Database::stats().memory_stats` so the key cache's real
+    /// hits/misses/evictions/invalidations/occupancy/capacity are observable as one
+    /// consolidated envelope.
+    pub(crate) async fn key_cache_stats(&self) -> crate::storage::cache::GlobalKeyCacheSnapshot {
         self.sstables.aggregate_key_cache_stats().await
     }
 

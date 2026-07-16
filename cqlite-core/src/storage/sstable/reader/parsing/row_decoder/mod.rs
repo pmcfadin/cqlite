@@ -164,7 +164,7 @@ pub(super) struct ColumnToParse<'a> {
 /// (resolution is built at the top of each `parse_block_emit*` / per-partition
 /// driver, where `reader` and `schema` are in scope). This is a per-BLOCK hoist —
 /// allocations scale with block count, not row count.
-pub(super) struct RowColumnResolution<'a> {
+pub(in crate::storage::sstable::reader) struct RowColumnResolution<'a> {
     /// On-disk regular (non-static) columns in serialization-header order.
     regular: Vec<ColumnToParse<'a>>,
     /// On-disk static columns in serialization-header order.
@@ -186,7 +186,7 @@ impl<'a> RowColumnResolution<'a> {
     /// semantics). On the header-empty fallback path (synthetic SSTables) the
     /// supplied schema order is used directly, every column schema-present by
     /// construction.
-    pub(super) fn build(
+    pub(in crate::storage::sstable::reader) fn build(
         schema: &'a TableSchema,
         reader: &'a crate::storage::sstable::reader::types::SSTableReader,
     ) -> Self {
@@ -854,7 +854,14 @@ mod block_emit;
 mod block_emit_windowed;
 mod cell_kind;
 mod cell_value;
+// campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.
+mod cell_value_complex;
+mod cell_value_scalar;
 mod compaction;
+mod compaction_stream; // issue #2299 (split of `compaction`, campsite #1116)
+pub(in crate::storage::sstable::reader) use compaction_stream::{
+    CompactionPartitionState, PartitionStreamStep,
+};
 mod complex_column;
 mod frozen;
 mod marshal_element;
@@ -911,6 +918,11 @@ mod regression_1741k_tests;
 // allocating semantics (`!marker && parse_partition_header_full.is_ok()`).
 #[cfg(test)]
 mod regression_1641_boundary_peek_tests;
+
+// Issue #1795: per-cell VInt-length bounds guards reject adversarial lengths
+// (return `Err`, never overflow-panic).
+#[cfg(test)]
+mod regression_1795_overflow_tests;
 
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser

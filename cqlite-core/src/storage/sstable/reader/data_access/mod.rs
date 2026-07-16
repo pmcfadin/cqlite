@@ -25,11 +25,11 @@ mod bti_point;
 // `not(tombstones)` gated.
 #[cfg(not(feature = "tombstones"))]
 mod big_promoted;
-// In-crate proof that the promoted-index / reverse-lookup uncompressed read path
-// verifies CRC.db before parsing (issue #1396, roborev Fix 1). It calls the
-// pub(crate) `big_reverse_partition_rows`, so it cannot live in `tests/`.
+// In-crate regression proofs for the BIG promoted seek read path (issues #1396, #1869):
+// the uncompressed arm verifies CRC.db before parsing; the compressed window builder
+// fails closed / round-trips. Uses crate-visible internals, so not in `tests/`.
 #[cfg(all(test, not(feature = "tombstones")))]
-mod big_promoted_crc_tests;
+mod big_promoted_seek_tests;
 // In-crate proof that the BIG point-read chunk fetch (`get_cached_data`) consults
 // the shared decompressed-chunk cache (issue #1567). Needs `pub(crate)` reader
 // state (`actual_header_size`) to build a valid offset, so it cannot live in
@@ -43,6 +43,15 @@ mod chunk_cache_wiring_tests;
 // cannot live in `tests/`.
 #[cfg(all(test, feature = "write-support"))]
 mod compaction_cancel_tests;
+// Issue #2299 (roborev should-fix): range-marker resume parity. Drives the
+// row-granular `stream_partition_body_incremental` over a partition whose range
+// tombstone START/END bounds land in SEPARATE window refill chunks, and asserts
+// the emitted `CompactionRow`s are byte-identical to the buffered
+// `parse_block_for_compaction` output on the SAME bytes — proving the
+// cross-chunk `CompactionPartitionState::pending_range_start` carry. Needs
+// `write-support` to synthesize the range-tombstone SSTable bytes.
+#[cfg(all(test, feature = "write-support"))]
+mod compaction_range_marker_resume_tests;
 // BIG ("nb"/uncompressed) point lookup: raw-key Index.db resolve + covering-chunk
 // seek (issue #1572), replacing the whole-file scan_for_key fallback.
 mod big_point;
@@ -624,13 +633,13 @@ impl SSTableReader {
 
         // Produce the final DECOMPRESSED, integrity-verified window for this offset.
         let data = if let Some(comp_info) = self.compression_info.as_deref() {
-            // COMPRESSED offset read (issue #1773): the authoritative inline per-chunk
-            // CRC32 MUST be validated before decompression. `read_compressed_offset_window`
-            // reuses the shared CRC-enforcing chunk reader (multi-chunk assembly,
-            // fail-closed past-EOF) rather than reading `size` raw bytes and blindly
-            // LZ4-decoding them — the latter re-introduced the exact #1411 CRC bypass.
-            // Its single decompress resolves inside `ChunkSource` (issue #1598, G2), so
-            // this is NOT a second decode plane.
+            // COMPRESSED offset read (issue #1773): validate the inline per-chunk CRC32
+            // before decompression via the shared CRC-enforcing chunk reader (multi-chunk
+            // assembly, fail-closed past-EOF), NOT a raw read + blind LZ4 decode (#1411);
+            // the single decompress resolves inside `ChunkSource` (#1598). Count one
+            // backing read HERE (point-read site only), symmetric with the uncompressed
+            // branch below (#2167) — scan callers of the shared helper must NOT bump it.
+            model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
             self.read_compressed_offset_window(comp_info, block_offset, size)
                 .await?
         } else {

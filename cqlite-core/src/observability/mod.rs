@@ -56,6 +56,8 @@
 pub mod catalog;
 pub mod config;
 mod error_schema;
+pub mod operator_docs;
+mod operator_docs_annotations;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
 pub use error_schema::ErrorCategory;

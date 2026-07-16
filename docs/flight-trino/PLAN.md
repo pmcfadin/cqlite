@@ -4,6 +4,11 @@
 **Owner:** Jon Haddad
 **Journal:** see `JOURNAL.md` in this directory — append an entry for every change so work is resumable.
 
+**Metrics reference:** every `cqlite.*` instrument the Flight server emits (type, unit,
+bounded attributes, healthy-vs-alarming reading) is in the operator-facing
+[`docs/reports/flight-metrics-reference.md`](../reports/flight-metrics-reference.md),
+**generated from the observability catalog** so it cannot drift (issue #2426).
+
 ---
 
 ## 1. Goal

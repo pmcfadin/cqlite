@@ -8,12 +8,16 @@ it holds the **rules and pointers**; recipes and examples live in `docs/developm
 CQLite is a Rust library for local Apache Cassandra SSTable access — it reads (and writes)
 Cassandra 5.0 data files without cluster dependencies.
 
-**Status**: v0.13.0 (Jul 2026) — the performance release. M1–M5 complete (core reading, CLI,
-output writers, Python + Node.js bindings, write support + STCS compaction). v0.12 delivered
-byte-for-byte compaction parity vs Apache Cassandra, Arrow Flight + Trino connector, canonical BTI
-(`da`) write/read, CDC-style delta-export. v0.13 adds read-path speedups, byte-bounded result
-budgets, `Database::refresh()`, and no-heuristics correctness fixes. Next: M6 (WASM bindings),
-M7 (perf validation + v1.0).
+**Status**: v0.14.x (Jul 2026). M1–M5 complete (core reading, CLI, output writers, Python +
+Node.js bindings, write support + STCS compaction); v0.12 delivered byte-for-byte compaction parity
+vs Apache Cassandra, Arrow Flight + Trino connector, canonical BTI (`da`) write/read, CDC-style
+delta-export; v0.13 added read-path speedups, byte-bounded result budgets, and no-heuristics fixes.
+**0.15 is in progress** — the cqlite-trino latency/throughput/operations theme (epic #2403). Headline
+shipped since 0.14: lazy Summary-guided BIG index (O(summary) open, bounded point intervals,
+summary-guided scans — #2412), Flight admission control (`--max-concurrent-scans`, #2420),
+connector snapshot reuse per (keyspace,table) (#2356, connector 0.14.3), row-granular streaming for
+point-read/warm/full-scan merges (#2423/#2230), and a GitHub-enforced merge gate (#2433). Next: M6
+(WASM bindings), M7 (perf validation + v1.0).
 
 ## Documentation
 
@@ -85,7 +89,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -189,6 +193,10 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   component `query-semantics-oracle`, test `query_semantics_oracle_parity.rs`) records the
   post-reconciliation result set of a canonical `SELECT` at a PINNED `now` (never wall-clock). Add
   the correct oracle for the property under test; correctness of `SELECT` output needs the semantic one.
+  The CQLite-vs-CQLite complement is the *point-vs-full differential lane* (issue #1918,
+  `cqlite-core/tests/point_vs_full_differential.rs`): it runs the same point-eligible query under
+  forced `CQLITE_READ_PATH=point` and `=full` and asserts identical rows/values/order at a PINNED
+  `now` — catching a divergence between the two read paths that a physical dump cannot see.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate
@@ -253,6 +261,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
+- **roborev invocation — pass BOTH agent and model (#2433).** `.roborev.toml` on `main` pins
+  `agent = 'claude-code'` + `review_model = 'opus'`. To run the codex reviewer you must override BOTH:
+  `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`. `--agent codex`
+  alone still inherits `review_model = 'opus'` from config, and codex-on-a-ChatGPT-account rejects
+  `opus` with a hard `400 'opus' model is not supported` — a silent review failure that looks like an
+  outage. Run from a checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config);
+  `--model` is the reliable override. codex's own configured model is `gpt-5.6-sol` (`~/.codex/config.toml`).
 - **flow-closer (#2084)**: the full gate, C, the final roborev pass, and the merge run inside the
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
   summary-file path, ≤10 lines residual), never gate stdout or review churn.
@@ -338,6 +353,17 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   data only (a counter not observed is an error, never a fabricated 0). On a cadence the manager
   runs `retro` and files a deduped `flow-meta` issue. The SKIP-aware `delivery-telemetry` gate
   component covers the tool. Doctrine: `docs/development/pm-operating-loop.md`.
+  - **Stamp via a PR-in-worktree, never a direct push (#2433 branch protection).** `main` blocks
+    direct pushes (PR required for every commit, `enforce_admins=true`), so the ledger line CANNOT be
+    pushed to `main` directly. `flow-finalize`/`flow-closer` stamp by: (1) `git worktree add` a
+    `telemetry-<N>` branch off `origin/main` — **never `git checkout` in the shared root** (a closer
+    that switched root to a `telemetry-*` branch and died stranded root off `main`, breaking every
+    session); (2) `scripts/delivery-telemetry.py record` — note it writes to the SCRIPT's repo ledger
+    (root checkout), NOT `$PWD`, so move/verify the line lands in the telemetry worktree's ledger and
+    leave root clean; (3) commit + push the branch + open a telemetry-only PR that merges once its own
+    `required` check is green. The ledger is a hot append-only file: on a rebase conflict, **keep ALL
+    lines** (main's ledger + your new record), never drop a peer's line. Do NOT block the code merge on
+    the telemetry PR — return its number as residual if its CI is still pending.
 - **Keep doctrine current in the same change** — user-facing or workflow changes update CLAUDE.md
   and the website `agents-developing/` page as part of the change.
 

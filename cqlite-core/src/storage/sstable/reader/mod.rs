@@ -131,6 +131,19 @@ use tracing::debug;
 #[cfg(feature = "tombstones")]
 use super::tombstone_merger::TombstoneMerger;
 
+/// The `Index.db` hardlink SIBLING of a `Data.db` path (issue #2356 roborev),
+/// i.e. the `*-Data.db` name-suffix swapped for `*-Index.db` in the same
+/// directory. `None` when the name is not the expected `*-Data.db` shape. Used
+/// by [`SSTableReader::rebind_path`] to follow a #2383 inode-rebind for the lazy
+/// `Index.db` path, and by the streaming-walk `current_index_db_path` derivation
+/// (same rule) so every `Index.db` consumer stays on the rebound generation.
+pub(crate) fn index_db_sibling(data_path: &Path) -> Option<PathBuf> {
+    let parent = data_path.parent()?;
+    let name = data_path.file_name().and_then(|n| n.to_str())?;
+    let base = name.strip_suffix("-Data.db")?;
+    Some(parent.join(format!("{base}-Index.db")))
+}
+
 /// Returns `true` when memory-mapped reads are force-enabled via the
 /// `CQLITE_USE_MMAP` environment variable.
 ///
@@ -313,6 +326,21 @@ fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
         PrefetchMode::WillNeed => Some(memmap2::Advice::WillNeed),
     }
 }
+
+/// Minimum SSTable size for the point-read path to get its OWN mmap advised
+/// `MADV_RANDOM` (issue #2210). Below this the point source shares the scan's
+/// `Arc<Mmap>` unchanged (no 2nd mapping, no advice): the whole file is small
+/// enough that the kernel's default read-ahead cheaply makes it resident, and
+/// `MADV_RANDOM` would only add per-page synchronous faults. Above it, scattered
+/// point-lookup faults otherwise waste the ~128 KiB read-ahead window per read,
+/// so a dedicated `MADV_RANDOM` mapping collapses both the block-I/O
+/// amplification (~30x) and the cold-cache per-read latency (~35-43%). Threshold
+/// is measurement-derived on Linux/EBS: the win is unambiguous by 4 MiB; 8 MiB
+/// leaves 2x margin above the sub-MB "wash" zone. See
+/// docs/reports/issue-2210-madv-random-point-mmap-ab.md. The SCAN mapping is
+/// NEVER advised (measured #1143 behaviour preserved).
+#[cfg(unix)]
+const POINT_MMAP_MADV_RANDOM_MIN_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Process-wide count of currently-open [`SSTableReader`]s, the source value
 /// for the [`SSTABLES_OPEN`](crate::observability::catalog::SSTABLES_OPEN)
@@ -541,7 +569,14 @@ impl SSTableReader {
         // backend degrades gracefully to a plain positioned fd if the faster
         // backend is refused, mirroring `build_block_sources`.
         let point_source: Arc<dyn read_at::ReadAt> = match &scan_source {
-            ScanSource::Mapped(mmap) => Arc::new(read_at::MmapReadAt::new(mmap.clone())),
+            ScanSource::Mapped(mmap) => {
+                #[cfg(unix)]
+                let point_mmap =
+                    Self::point_read_mmap(path, file_size, mmap, POINT_MMAP_MADV_RANDOM_MIN_BYTES);
+                #[cfg(not(unix))]
+                let point_mmap = mmap.clone();
+                Arc::new(read_at::MmapReadAt::new(point_mmap))
+            }
             #[cfg(unix)]
             ScanSource::Direct { .. } => match read_at::DirectReadAt::open(path, file_size) {
                 Ok(d) => Arc::new(d) as Arc<dyn read_at::ReadAt>,
@@ -842,9 +877,19 @@ impl SSTableReader {
             h.finish()
         };
 
-        // Per-reader key→partition-offset cache (issue #1570, B4), built from the
-        // open-time config BEFORE `open_config` is moved into the struct field.
+        // Global key→partition-offset cache handle (issue #2059): the process-global
+        // shared instance when block caching is enabled, else a per-reader disabled
+        // no-op. Built from the open-time config BEFORE `open_config` is moved.
         let key_offset_cache = super::build_key_offset_cache(&open_config);
+
+        // This reader's authoritative inode-stable generation identity (issue #2059),
+        // the namespacing half of every global key-cache entry. Resolved ONCE here
+        // from the Data.db path + parsed generation, and stored immutably — it stays
+        // stable across a #2383 rebind (a path swap over a byte-identical generation),
+        // so cached locations survive a rebind. `None` on a stat failure → the cache
+        // is bypassed rather than fabricating an identity (no-heuristics #28).
+        let generation_identity =
+            crate::storage::cache::GenerationIdentity::resolve(path, generation);
 
         // Cache the immutable `[first_key, last_key]` endpoint tokens ONCE at open
         // (issue #1576, Epic C/C5 perf finding) so `partition_key_out_of_range`
@@ -901,9 +946,9 @@ impl SSTableReader {
             bti_rows_db,
             chunk_cache,
             chunk_cache_id,
-            bti_partition_offsets: std::sync::OnceLock::new(),
             bti_lookup_memo: std::sync::Mutex::new(None),
             key_offset_cache,
+            generation_identity,
         })
     }
 
@@ -1095,6 +1140,55 @@ impl SSTableReader {
         // reader's lifetime; see the function-level note above.
         let mmap = unsafe { memmap2::MmapOptions::new().map(&std_file)? };
         Ok(mmap)
+    }
+
+    /// Choose the mmap the point-read source will use. For a large file
+    /// (`file_size >= min_random_bytes`) map a SECOND, dedicated read-only mapping
+    /// of the same file and advise it `MADV_RANDOM`, returning that distinct
+    /// mapping so scattered point faults read one page instead of the ~128 KiB
+    /// read-ahead window (issue #2210). The returned mapping is a SEPARATE
+    /// allocation from `scan_mmap`, which is left unadvised — advising the point map
+    /// therefore cannot affect the scan map (#1143 preserved). Below the threshold,
+    /// or if the dedicated map / its advice fails, share `scan_mmap` unchanged
+    /// (never keep a redundant unadvised 2nd map). Mapped directly (not via
+    /// `map_file`) so the read-work FILE_OPENS counter is untouched.
+    #[cfg(unix)]
+    fn point_read_mmap(
+        path: &Path,
+        file_size: u64,
+        scan_mmap: &Arc<memmap2::Mmap>,
+        min_random_bytes: u64,
+    ) -> Arc<memmap2::Mmap> {
+        if file_size >= min_random_bytes {
+            if let Ok(std_file) = std::fs::File::open(path) {
+                // SAFETY: read-only mapping of a file assumed immutable for the
+                // reader's lifetime (same contract as `map_file`).
+                match unsafe { memmap2::MmapOptions::new().map(&std_file) } {
+                    Ok(point_mmap) => match point_mmap.advise(memmap2::Advice::Random) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                "Dedicated MADV_RANDOM point-read mapping for {} ({} bytes, #2210)",
+                                path.display(),
+                                file_size
+                            );
+                            return Arc::new(point_mmap);
+                        }
+                        Err(e) => tracing::debug!(
+                            "madvise(RANDOM) on dedicated point map for {} failed ({}); \
+                             sharing scan mapping",
+                            path.display(),
+                            e
+                        ),
+                    },
+                    Err(e) => tracing::debug!(
+                        "Dedicated point map for {} failed ({}); sharing scan mapping",
+                        path.display(),
+                        e
+                    ),
+                }
+            }
+        }
+        scan_mmap.clone()
     }
 
     /// Load CompressionInfo.db metadata for chunked reading
@@ -1354,13 +1448,37 @@ impl SSTableReader {
     ///    request's NEXT `new_scan_cursor` `File::open` is strictly MORE likely to
     ///    succeed after the rebind than before (pre-rebind it would ENOENT).
     /// 4. **No semantics off the path.** No `file_path()` consumer re-derives
-    ///    keyspace/table/schema from the path after `open`; the scan path uses it
-    ///    ONLY for `File::open` (bytes) and all parsed read state (header,
-    ///    compression info, CRC, index, generation) lives on `&self`, fixed at
-    ///    open — the swapped path changes which hardlink is read, never what the
-    ///    bytes mean.
+    ///    keyspace/table/schema from the path after `open`; the path is used ONLY
+    ///    for `File::open` (bytes) and all parsed read state (header, compression
+    ///    info, CRC, index, generation) lives on `&self`, fixed at open — the
+    ///    swapped path changes which hardlink is read, never what the bytes mean.
+    ///    This covers BOTH the `Data.db` path AND the lazy `Index.db` path (below):
+    ///    both are same-inode hardlink siblings in the rebound snapshot dir.
+    ///
+    /// ## Rebinding the lazy `Index.db` path too (issue #2356 roborev)
+    ///
+    /// Repointing ONLY the `Data.db` path reintroduced the #2352 ENOENT class for
+    /// the dominant point-read shape: a BIG reader opened lazily over a usable
+    /// `Summary.db` (#2412 §A) keeps its own `Index.db` path, and every DEFERRED
+    /// `Index.db` open (`ensure_materialized`, the Summary-guided bounded-interval
+    /// point probe) reads THAT path. If the original snapshot dir is torn down
+    /// before the reader ever materialized, a not-yet-materialized reader would
+    /// `File::open` the dead path and ENOENT. So the rebind ALSO repoints the
+    /// `IndexReader`'s path to the `Index.db` hardlink sibling of `new_path`,
+    /// keeping every `Index.db` consumer (deferred-materialize, point-interval, and
+    /// the streaming walk's `current_index_db_path` Data.db-sibling derivation) on
+    /// the live generation.
     pub fn rebind_path(&self, new_path: &Path) {
         self.file_path.store(Arc::new(new_path.to_path_buf()));
+        // Follow the rebind for the lazy Index.db path too: derive the Index.db
+        // hardlink sibling of the new Data.db path and repoint the IndexReader, so a
+        // deferred materialize / point-interval read opens the live file, not the
+        // dead open-time snapshot path (issue #2356 roborev, #2352 class).
+        if let Some(index_reader) = self.index_reader.as_ref() {
+            if let Some(index_sibling) = index_db_sibling(new_path) {
+                index_reader.rebind_path(&index_sibling);
+            }
+        }
     }
 
     /// The immutable `[first_key_token, last_key_token]` endpoints cached at open

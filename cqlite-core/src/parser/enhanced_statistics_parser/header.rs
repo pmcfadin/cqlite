@@ -7,16 +7,6 @@
 use super::super::statistics::StatisticsHeader;
 use nom::{number::complete::be_u32, IResult};
 
-/// Cassandra MetadataType enum ordinals (from MetadataType.java)
-/// Used to identify component types in Statistics.db TOC
-#[allow(dead_code)]
-const METADATA_TYPE_VALIDATION: u32 = 0;
-#[allow(dead_code)]
-const METADATA_TYPE_COMPACTION: u32 = 1;
-#[allow(dead_code)]
-const METADATA_TYPE_STATS: u32 = 2;
-const METADATA_TYPE_HEADER: u32 = 3; // SerializationHeader
-
 /// Enhanced Statistics.db header parser for real 'nb' format
 ///
 /// This function parses the actual 32-byte binary header structure from
@@ -71,104 +61,12 @@ pub fn parse_nb_format_header(input: &[u8]) -> IResult<&[u8], StatisticsHeader> 
     ))
 }
 
-/// Parse Statistics.db Table of Contents to get component offsets (Issue #216)
-///
-/// Statistics.db format (from Cassandra MetadataSerializer.java):
-/// - [4 bytes] number_of_components (u32 BE)
-/// - [4 bytes] checksum (u32 BE)
-/// - [TOC] component_type (u32) | offset (u32) for each component
-/// - [Component data...]
-///
-/// MetadataType enum ordinals:
-/// - 0 = VALIDATION
-/// - 1 = COMPACTION
-/// - 2 = STATS
-/// - 3 = HEADER (SerializationHeader)
-///
-/// Returns the offset to the HEADER component (SerializationHeader), or None if not found.
-pub(super) fn parse_statistics_toc_for_header_offset(input: &[u8]) -> Option<usize> {
-    // Count this TOC walk (issue #1658 A5 bench instrumentation — no decode effect).
-    super::super::toc_walk_metrics::record_toc_walk();
-    if input.len() < 8 {
-        tracing::debug!("Statistics.db too small for TOC: {} bytes", input.len());
-        return None;
-    }
-
-    // Parse number of components
-    let num_components = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
-    tracing::debug!("Statistics.db TOC: {} components", num_components);
-
-    // Sanity check: Cassandra has exactly 4 MetadataType enum values
-    // (VALIDATION=0, COMPACTION=1, STATS=2, HEADER=3)
-    // A value > 100 indicates corrupted or malicious data
-    if num_components > 100 {
-        tracing::warn!(
-            "Suspicious num_components={} in Statistics.db TOC (expected <=4)",
-            num_components
-        );
-        return None;
-    }
-
-    // Skip checksum (bytes 4-7)
-    // TOC starts at byte 8
-
-    let toc_start: usize = 8;
-    let toc_entry_size: usize = 8; // 4 bytes type + 4 bytes offset
-
-    // Use checked_mul to prevent integer overflow on multiplication
-    let toc_size = (num_components as usize)
-        .checked_mul(toc_entry_size)
-        .and_then(|size| size.checked_add(toc_start))?;
-
-    if input.len() < toc_size {
-        tracing::debug!(
-            "Statistics.db too small for {} TOC entries: {} bytes (need {})",
-            num_components,
-            input.len(),
-            toc_size
-        );
-        return None;
-    }
-
-    // Search for HEADER component (type 3)
-    for i in 0..num_components as usize {
-        // Use checked arithmetic to prevent overflow in entry offset calculation
-        let entry_offset = i
-            .checked_mul(toc_entry_size)
-            .and_then(|offset| offset.checked_add(toc_start))?;
-        let component_type = u32::from_be_bytes([
-            input[entry_offset],
-            input[entry_offset + 1],
-            input[entry_offset + 2],
-            input[entry_offset + 3],
-        ]);
-        let component_offset = u32::from_be_bytes([
-            input[entry_offset + 4],
-            input[entry_offset + 5],
-            input[entry_offset + 6],
-            input[entry_offset + 7],
-        ]) as usize;
-
-        tracing::debug!(
-            "TOC entry {}: type={} offset=0x{:x}",
-            i,
-            component_type,
-            component_offset
-        );
-
-        if component_type == METADATA_TYPE_HEADER {
-            tracing::debug!(
-                "Found HEADER component at offset 0x{:x} ({})",
-                component_offset,
-                component_offset
-            );
-            return Some(component_offset);
-        }
-    }
-
-    tracing::debug!("HEADER component not found in Statistics.db TOC");
-    None
-}
+// The Statistics.db Table-of-Contents is parsed ONCE by
+// `repair_metadata::parse_statistics_toc` (issue #2148), which resolves both the
+// HEADER (SerializationHeader) offset and the STATS component bounds in a single
+// walk. The historical per-consumer `parse_statistics_toc_for_header_offset`
+// walker (issue #216) was removed to eliminate the redundant re-walk (the metadata
+// stack previously walked the TOC three times per open).
 
 #[cfg(test)]
 mod tests {

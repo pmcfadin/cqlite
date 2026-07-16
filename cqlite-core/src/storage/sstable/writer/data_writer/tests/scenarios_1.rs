@@ -339,7 +339,7 @@ fn test_delta_encoding_unsigned_vint_fix_644() {
     stats.min_ttl = 3_600;
     stats.min_local_deletion_time = 0;
 
-    let writer = DataWriter::new(stats.clone());
+    let mut writer = DataWriter::new(stats.clone());
     let schema = create_test_schema();
 
     let table_id = TableId::new("test_ks", "test_table");
@@ -393,7 +393,7 @@ fn test_delta_encoding() {
     stats.min_timestamp = 1000000;
     stats.min_ttl = 3600;
 
-    let writer = DataWriter::new(stats.clone());
+    let mut writer = DataWriter::new(stats.clone());
     let schema = create_test_schema();
 
     let table_id = TableId::new("test_ks", "test_table");

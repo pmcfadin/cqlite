@@ -146,8 +146,15 @@ pub(crate) use stream::IndexEntryStream;
 /// High-level Index.db file reader. See `lazy.rs` for the #2412 lazy-open contract.
 #[allow(dead_code)]
 pub struct IndexReader {
-    /// Path to the Index.db file
-    file_path: PathBuf,
+    /// Path to the Index.db file. Interior-mutable (`ArcSwap`) so a #2383 warm
+    /// inode-rebind can repoint a LAZY reader's DEFERRED `Index.db` open at the
+    /// live hardlink after its original snapshot dir is torn down (issue #2356
+    /// roborev): the Data.db path alone was rebound, but every deferred
+    /// `ensure_materialized`/bounded-interval open reads THIS path, so a
+    /// not-yet-materialized reader would otherwise `File::open` the dead
+    /// snapshot path and ENOENT (the #2352 class). Same-inode hardlink target,
+    /// so the bytes are byte-identical (issue #28 no-heuristics).
+    file_path: arc_swap::ArcSwap<PathBuf>,
     /// Lazily (or eagerly) materialized full parse result.
     materialized: tokio::sync::OnceCell<MaterializedIndex>,
     /// Platform abstraction for file operations
@@ -247,7 +254,7 @@ impl IndexReader {
         });
 
         Ok(Self {
-            file_path: path.to_path_buf(),
+            file_path: arc_swap::ArcSwap::from_pointee(path.to_path_buf()),
             materialized,
             platform,
         })
@@ -297,7 +304,12 @@ impl IndexReader {
             total_partitions: self.get_partition_entries().len(),
             partitions_with_promoted_index: promoted_count,
             total_promoted_entries,
-            file_size: self.file_path.metadata().map(|m| m.len()).unwrap_or(0),
+            file_size: self
+                .file_path
+                .load()
+                .metadata()
+                .map(|m| m.len())
+                .unwrap_or(0),
         }
     }
 

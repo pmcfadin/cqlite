@@ -367,7 +367,7 @@ impl V5CompressedLegacyParser {
 /// shadowing (it reconciles tombstones itself across generations), the static
 /// row is emitted as its own `CompactionRow` (issue #1074, not merged), and
 /// range-tombstone markers are paired into `RangeMarker` rows (issue #933).
-struct CompactionPolicy<'a> {
+pub(super) struct CompactionPolicy<'a> {
     parser: &'a V5CompressedLegacyParser,
     partition_key: RowKey,
     /// Issue #933: in-flight range-tombstone start bound
@@ -381,12 +381,49 @@ struct CompactionPolicy<'a> {
 }
 
 impl<'a> CompactionPolicy<'a> {
-    fn new(parser: &'a V5CompressedLegacyParser) -> Self {
+    pub(super) fn new(parser: &'a V5CompressedLegacyParser) -> Self {
         Self {
             parser,
             partition_key: RowKey::new(Vec::new()),
             pending_range_start: None,
         }
+    }
+
+    /// The partition key decoded on `on_partition_open` (issue #2299: the
+    /// resumable streaming driver in `compaction_stream` reads it back to carry
+    /// across a chunk-straddling refill).
+    pub(super) fn partition_key(&self) -> &RowKey {
+        &self.partition_key
+    }
+
+    /// The in-flight range-tombstone start bound (issue #2299: carried across
+    /// resumed streaming calls — see `CompactionPartitionState::pending_range_start`).
+    pub(super) fn pending_range_start(
+        &self,
+    ) -> &Option<(
+        crate::storage::sstable::reader::compaction_row::CompactionBound,
+        i64,
+        i32,
+    )> {
+        &self.pending_range_start
+    }
+
+    /// Restore the partition key on a resumed streaming call (issue #2299).
+    pub(super) fn set_partition_key(&mut self, key: RowKey) {
+        self.partition_key = key;
+    }
+
+    /// Restore the in-flight range-tombstone start bound on a resumed streaming
+    /// call (issue #2299).
+    pub(super) fn set_pending_range_start(
+        &mut self,
+        pending: Option<(
+            crate::storage::sstable::reader::compaction_row::CompactionBound,
+            i64,
+            i32,
+        )>,
+    ) {
+        self.pending_range_start = pending;
     }
 
     /// Build a `CompactionBound` from decoded clustering-prefix values. An empty

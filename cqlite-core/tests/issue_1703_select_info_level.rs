@@ -1,7 +1,8 @@
-//! Issue #1703 (epic #1686, AI3 "observability honesty"): a single SELECT
-//! executed through the public query API MUST emit AT MOST ONE INFO-level line
-//! at the default level — the per-query `tracing::info!` chatter in the SELECT
-//! executor is demoted to DEBUG.
+//! Issue #1703 (epic #1686, AI3 "observability honesty") + #2172(b): a single
+//! SELECT executed through the public query API MUST emit AT MOST ONE INFO-level
+//! line at the default level — the per-query `tracing::info!` chatter in the
+//! SELECT executor is demoted to DEBUG — across the full-scan, targeted
+//! point-lookup, AND materialization branches.
 //!
 //! # What this pins
 //!
@@ -9,6 +10,17 @@
 //! ("Found schema for …", "Scan returned N rows", the point-lookup lines, the
 //! materialization line, …), all at the default INFO level. After the demotion
 //! those become DEBUG, so a subscriber capped at INFO sees ≤1 line per SELECT.
+//!
+//! Three phases run under ONE process-global subscriber, resetting the event
+//! tally to 0 between them:
+//!   - Phase 1 — full-table `SELECT *` (the scan branch);
+//!   - Phase 2 — targeted `WHERE id = <uuid>` point lookup (the partition-key
+//!     point-lookup branch in `execute.rs`), using a REAL partition key read
+//!     from the fixture so the branch actually runs and returns ≥1 row;
+//!   - Phase 3 — materialization via `execute_streaming` with a reshaping
+//!     projection (`SELECT name AS n`), which trips `requires_materialization`
+//!     and drives the materialization debug site in `execute_streaming`
+//!     (`mod.rs`), draining the iterator so the path really executes.
 //!
 //! # Wiring evidence
 //!
@@ -23,9 +35,9 @@
 //! blocking-pool threads. A thread-local default installed on the test's own
 //! task is NOT observed there, so it would under-count (or miss entirely) any
 //! INFO emitted on a blocking-pool thread — a vacuous-pass risk (roborev,
-//! issue #1703 fix-round 2). This file contains exactly one test, so a
-//! process-wide global default is safe (no other test in this binary competes
-//! for it).
+//! issue #1703 fix-round 2). Because `set_global_default` can be called only
+//! ONCE per binary, this file keeps exactly one `#[test]` and reuses the single
+//! global across all three phases (safe: no other test competes for it).
 //!
 //! Requires `CQLITE_DATASETS_ROOT` + fetched binaries; skips (never fails) when
 //! the fixture is absent, and treats a present-but-0-rows scan as a hard failure
@@ -138,17 +150,18 @@ async fn setup(keyspace: &str, schema_file: &str) -> Option<Database> {
     Some(result.database)
 }
 
-/// One full-scan SELECT, observed through a real INFO-capped subscriber, must
-/// emit AT MOST ONE INFO line. RED before the demotion (info sites fire on
-/// whichever thread runs them, including `spawn_blocking` worker threads);
-/// GREEN after (0).
+/// SELECTs across the scan, targeted point-lookup, and materialization branches,
+/// each observed through a real INFO-capped subscriber, must emit AT MOST ONE
+/// INFO line. RED before the demotion (info sites fire on whichever thread runs
+/// them, including `spawn_blocking` worker threads); GREEN after (0).
 ///
 /// Uses a MULTI-thread tokio runtime (not the `#[tokio::test]` default
 /// current-thread flavor) so `spawn_blocking` closures really do run on a
 /// separate OS thread from the test task — the exact cross-thread hazard this
-/// test's global subscriber must be able to observe.
+/// test's global subscriber must be able to observe. One `set_global_default`
+/// for the binary; the event tally is reset to 0 between phases.
 #[test]
-fn select_emits_at_most_one_info_line() {
+fn select_branches_emit_at_most_one_info_line() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -178,15 +191,19 @@ fn select_emits_at_most_one_info_line() {
         // default installed only on this task would miss any INFO emitted
         // there, making the assertion vacuously pass. `set_global_default` is
         // observed by every thread in the process. This file has exactly one
-        // test, so calling it once is safe.
+        // test, so calling it once is safe; the phases below reuse it.
         tracing::subscriber::set_global_default(subscriber)
             .expect("set_global_default must succeed (only test in this binary)");
 
+        let reset = || tally.events.store(0, Ordering::Relaxed);
+        let info_lines = || tally.events.load(Ordering::Relaxed);
+
+        // ---- Phase 1: full-table SELECT * (the scan branch) --------------
+        reset();
         let result = db
             .execute("SELECT * FROM test_basic.simple_table")
             .await
             .expect("scan");
-
         // A present fixture must return rows — otherwise the scan info sites
         // never fired and the assertion below would pass vacuously.
         assert!(
@@ -195,13 +212,68 @@ fn select_emits_at_most_one_info_line() {
              regression, not a skip",
             result.rows.len()
         );
-
-        let info_lines = tally.events.load(Ordering::Relaxed);
         assert!(
-            info_lines <= 1,
-            "a single SELECT emitted {info_lines} INFO lines (observed process-wide, \
-             including spawn_blocking threads), expected ≤1 — the per-query SELECT \
-             `info!` chatter must be demoted to DEBUG (issue #1703)"
+            info_lines() <= 1,
+            "full-scan SELECT emitted {} INFO lines (observed process-wide, including \
+             spawn_blocking threads), expected ≤1 (issue #1703)",
+            info_lines()
+        );
+
+        // ---- Phase 2: targeted WHERE id = <uuid> point lookup ------------
+        // Read a REAL partition key from the fixture so the point-lookup branch
+        // in execute.rs actually runs (not a synthetic key that matches nothing).
+        let id_row = db
+            .execute("SELECT id FROM test_basic.simple_table LIMIT 1")
+            .await
+            .expect("id probe");
+        let id_uuid = match id_row.rows.first().and_then(|r| r.get("id")) {
+            Some(cqlite_core::types::Value::Uuid(bytes)) => uuid::Uuid::from_bytes(*bytes),
+            other => panic!("expected a UUID `id` from the fixture, got {other:?}"),
+        };
+        reset();
+        let point = db
+            .execute(&format!(
+                "SELECT * FROM test_basic.simple_table WHERE id = {id_uuid}"
+            ))
+            .await
+            .expect("point lookup");
+        assert!(
+            !point.rows.is_empty(),
+            "targeted WHERE id = {id_uuid} returned 0 rows — the point-lookup branch did \
+             not run, so its info sites never fired (vacuous)"
+        );
+        assert!(
+            info_lines() <= 1,
+            "targeted point-lookup SELECT emitted {} INFO lines, expected ≤1 (issue #1703)",
+            info_lines()
+        );
+
+        // ---- Phase 3: materialization via execute_streaming --------------
+        // `SELECT name AS n` is a reshaping projection → `requires_materialization`
+        // is true (mod.rs), so this drives the materialization debug site in
+        // `execute_streaming`. Drain the iterator so the path really executes.
+        reset();
+        let mut iter = db
+            .execute_streaming(
+                "SELECT name AS n FROM test_basic.simple_table",
+                cqlite_core::query::result::StreamingConfig::default(),
+            )
+            .await
+            .expect("streaming materialization");
+        let mut drained = 0usize;
+        while let Some(row) = iter.next_async().await {
+            row.expect("streamed row");
+            drained += 1;
+        }
+        assert!(
+            drained > 0,
+            "materialization SELECT drained 0 rows — the materialization path did not run \
+             (vacuous); expected the fixture's full row set"
+        );
+        assert!(
+            info_lines() <= 1,
+            "materialization SELECT emitted {} INFO lines, expected ≤1 (issue #1703)",
+            info_lines()
         );
     });
 }

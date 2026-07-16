@@ -483,8 +483,16 @@ mod bti {
             "B4/BTI absent: interleave key A must be present"
         );
 
-        // Re-read the absent key with counters reset. The C3 memo holds A and the B4
-        // cache never held the (absent) key, so the read MUST descend the trie again.
+        // Re-read the absent key with counters reset. The C3 memo holds A. The B4
+        // cache is now PROCESS-GLOBAL (issue #2059) and — unlike the retired
+        // per-reader cache, which got a fresh empty cache per reader instance — it
+        // persists a BTI prefix-collision CANDIDATE for an absent key across reader
+        // instances (the documented trie-hit-including-candidates behaviour). Flush
+        // the global cache so this re-read starts COLD and genuinely re-descends the
+        // trie, exercising the "an absent key is never served a false-positive hit"
+        // work-probe. Correctness is unchanged either way: the read returns zero rows
+        // (a cached candidate is re-verified to a different key → absence).
+        cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();
         rwc::reset();
         assert_eq!(rwc::trie_walks(), 0, "reset must zero TRIE_WALKS");
         let r_absent2 = db

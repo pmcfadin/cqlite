@@ -35,6 +35,7 @@ daemon required.
 - [Limitations](/cqlite/user-docs/limitations/) — what CQLite can and cannot read (format matrix, known gaps)
 - [Troubleshooting](/cqlite/user-docs/troubleshooting/) — common problems and fixes
 - [Use Cases](/cqlite/user-docs/use-cases/) — Cassandra sidecar, data science, services, operational scenarios
+- [Performance](/cqlite/user-docs/performance/) — measured cqlite-flight field results and the owner-ratified performance goals ladder
 
 ## Quick links
 

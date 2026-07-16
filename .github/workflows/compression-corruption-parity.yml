@@ -192,17 +192,40 @@ jobs:
 
       - name: Run BIG promoted-CRC lib proof over corrupt corpus (strict, issue #1799)
         # The uncompressed read-time CRC proof (issue #1396) lives as an in-crate
-        # `--lib` test (big_promoted_crc_tests), so it does NOT run in the strict
-        # `--test`-only step above. It is the ONLY lane that regenerates the
+        # `--lib` test module (big_promoted_seek_tests), so it does NOT run in the
+        # strict `--test`-only step above. It is the ONLY lane that regenerates the
         # corrupt uncompressed fixture, so enforce the hard requirement HERE with
         # the corpus-specific flag: an absent/rotted corrupt fixture or a
         # corrupt-detection regression FAILS the job (never a silent skip).
         run: |
-          env CQLITE_REQUIRE_CORRUPT_FIXTURES=1 \
+          set -uo pipefail
+          # Hardening (issue #1869): `cargo test <filter>` is a substring match, so a
+          # future module rename would silently select ZERO tests and exit 0 — exactly
+          # the bug this step is recovering from. Capture the run and fail closed unless
+          # (a) the filter selected >0 tests and (b) both strict #1799 corrupt-corpus
+          # proofs actually ran to `ok`.
+          out=$(env CQLITE_REQUIRE_CORRUPT_FIXTURES=1 \
             CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
             cargo test -p cqlite-core --features write-support,cli-helpers \
-              --lib big_promoted_crc_tests \
-              -- --nocapture
+              --lib big_promoted_seek_tests \
+              -- --nocapture 2>&1)
+          rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "FATAL: big_promoted_seek_tests lib proof failed (exit $rc)." >&2
+            exit "$rc"
+          fi
+          passed=$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' | tail -n1)
+          if [ -z "$passed" ] || [ "$passed" -eq 0 ]; then
+            echo "FATAL: the 'big_promoted_seek_tests' filter selected ZERO tests — a module rename likely broke this strict lane (issue #1869)." >&2
+            exit 1
+          fi
+          for t in clean_reverse_partition_path_returns_rows reverse_partition_path_over_corrupt_chunk_fails_fast; do
+            if ! printf '%s\n' "$out" | grep -qE "${t} \.\.\. ok"; then
+              echo "FATAL: strict corrupt-corpus proof '$t' did not run to ok (#1799 enforcement lost)." >&2
+              exit 1
+            fi
+          done
 
       # issue #1028: structured failure summary for the parity-failure-issue automation.
       - name: Emit parity-failures.json (on failure)

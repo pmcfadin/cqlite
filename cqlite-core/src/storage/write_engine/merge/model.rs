@@ -24,7 +24,7 @@ use std::time::Duration;
 /// Represents a single row from one of the input SSTables. This is the
 /// fundamental unit that flows through the merge heap.
 #[cfg(feature = "write-support")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MergeEntry {
     /// Which SSTable this came from (0 = newest)
     pub run_index: usize,
@@ -84,6 +84,30 @@ pub struct MergeEntry {
     /// live rows in another, resurrecting the deleted partition. `None` for every
     /// non-carrier entry.
     pub partition_deletion: Option<(i64, i32)>,
+}
+
+/// Manual `Clone` (was `#[derive(Clone)]`) so the #1664 double-clone regression
+/// guard can count `MergeEntry` clones via a `#[cfg(test)]`-gated recorder.
+/// The clone is field-wise identical to the former derived clone (all 9 fields);
+/// in a production (non-test) build the `record()` call vanishes entirely, so
+/// this is a plain field-wise clone with ZERO added cost.
+#[cfg(feature = "write-support")]
+impl Clone for MergeEntry {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        crate::storage::sstable::work_counters::merge_entry_clone_scope::record();
+        Self {
+            run_index: self.run_index,
+            key: self.key.clone(),
+            clustering_key: self.clustering_key.clone(),
+            timestamp: self.timestamp,
+            row_data: self.row_data.clone(),
+            complex_deletions: self.complex_deletions.clone(),
+            range_deletion: self.range_deletion.clone(),
+            row_deletion: self.row_deletion,
+            partition_deletion: self.partition_deletion,
+        }
+    }
 }
 
 impl MergeEntry {
@@ -282,7 +306,7 @@ pub enum RowData {
 /// Where the reader does not yet surface a value the field is left `None`; the
 /// dependent issues fill it in once the reader is extended.
 #[cfg(feature = "write-support")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CellData {
     /// Column name
     pub column: String,
@@ -342,6 +366,31 @@ pub struct CellData {
     /// on-disk emptiness rather than re-deriving it from the decoded value.
     /// Always `false` for simple cells.
     pub has_empty_value: bool,
+}
+
+/// Manual `Clone` (was `#[derive(Clone)]`) so the #1665 reconcile micro-alloc
+/// guard can count `CellData` clones via a `#[cfg(test)]`-gated recorder. The
+/// clone is field-wise identical to the former derived clone (all 9 fields); in
+/// a production (non-test) build the `record()` call vanishes entirely, so this
+/// is a plain field-wise clone with ZERO added cost (mirrors [`MergeEntry`]'s
+/// #1664 manual clone).
+#[cfg(feature = "write-support")]
+impl Clone for CellData {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        crate::storage::sstable::work_counters::cell_data_clone_scope::record();
+        Self {
+            column: self.column.clone(),
+            value: self.value.clone(),
+            timestamp: self.timestamp,
+            ttl: self.ttl,
+            cell_path: self.cell_path.clone(),
+            local_deletion_time: self.local_deletion_time,
+            is_complex_element: self.is_complex_element,
+            is_deleted: self.is_deleted,
+            has_empty_value: self.has_empty_value,
+        }
+    }
 }
 
 #[cfg(feature = "write-support")]

@@ -211,6 +211,52 @@ fn rebind_across_snapshot_teardown_does_not_reparse() {
         "a snapshot teardown + same-inode restage must REBIND (zero further \
          Index.db parses), not re-open every generation (issue #2383 / #2356)"
     );
+    // The rebind is COUNTED (issue #2356 §D closure probe): both generations
+    // were rebound to the fresh snap2 hardlinks, distinguishing this from a
+    // pure warm hit (which would leave `rebind_hits` at 0).
+    assert!(
+        reg.metrics().snapshot().rebind_hits >= 2,
+        "both generations must be counted as rebinds, got {}",
+        reg.metrics().snapshot().rebind_hits
+    );
+}
+
+/// **Warm-hit work is scale-free (flight-warm-snapshot-closure spec).** A warm hit
+/// over a LARGE-partition-count generation costs ZERO reader opens and ZERO rebinds
+/// — the warm-hit work probe is bounded by the warm-set DIFF (here: nothing
+/// changed), never by partition count. Pairs with the small-generation warm-hit
+/// tests (e.g. `service::do_get_second_request_is_a_warm_hit_with_zero_reader_opens`)
+/// to show independence from partition count: both are 0.
+#[test]
+fn warm_hit_over_large_generation_is_scale_free() {
+    let schema = simple_schema();
+    // Many partitions in ONE generation so a cold parse is genuinely large.
+    let (_temp, table_dir) = build_big_single_gen(&schema, 3_000);
+
+    let reg = WarmTableRegistry::new();
+    let cancel = CancelFlag::new();
+
+    // Cold warm: opens (parses) the one big generation.
+    reg.warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .expect("cold warm of the big generation");
+    let after_cold = reg.metrics().snapshot();
+    assert!(
+        after_cold.reader_opens >= 1,
+        "cold build parsed the generation"
+    );
+
+    // Repeat over the SAME stable path: a pure warm hit — zero further work.
+    reg.warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .expect("warm hit");
+    let after_hit = reg.metrics().snapshot();
+    assert_eq!(
+        after_hit.reader_opens, after_cold.reader_opens,
+        "the warm hit opened ZERO further readers regardless of partition count"
+    );
+    assert_eq!(
+        after_hit.rebind_hits, after_cold.rebind_hits,
+        "a stable-path warm hit performs ZERO rebinds regardless of partition count"
+    );
 }
 
 /// **Fix A — single-flight rebuild.** M concurrent misses for ONE fresh table key

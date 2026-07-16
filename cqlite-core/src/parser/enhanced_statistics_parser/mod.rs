@@ -53,9 +53,9 @@ pub use header::parse_nb_format_header;
 
 use super::statistics::*;
 use crate::error::{Error, Result};
+use crate::parser::repair_metadata::{parse_statistics_toc, StatisticsToc};
 use crate::storage::sstable::version_gate::VersionGates;
 use encoding_stats::parse_minimal_encoding_stats;
-use header::parse_statistics_toc_for_header_offset;
 
 /// Type alias for EncodingStats parse result to reduce complexity
 type EncodingStatsResult = (
@@ -114,8 +114,33 @@ pub fn parse_nb_format_statistics_data(
     Vec<super::header::ColumnInfo>,
     Vec<super::header::ColumnInfo>,
 )> {
-    // Get HEADER offset from TOC (Issue #216)
-    let header_offset = parse_statistics_toc_for_header_offset(full_input);
+    // Standalone/test entry: parse the TOC once here, then delegate. The main
+    // open path (`parse_enhanced_statistics_file`) parses the TOC ONCE and threads
+    // it to both this decode and the STATS post-pass (issue #2148).
+    let toc = parse_statistics_toc(full_input);
+    parse_nb_format_statistics_data_with_toc(input, header, full_input, &toc, gates)
+}
+
+/// [`parse_nb_format_statistics_data`] over a `Statistics.db` TOC that was already
+/// parsed once (issue #2148): reuses the resolved HEADER offset and STATS bounds
+/// from `toc` instead of re-walking the TOC, so a single metadata parse walks the
+/// TOC exactly once.
+#[allow(clippy::type_complexity)]
+pub(crate) fn parse_nb_format_statistics_data_with_toc(
+    input: &[u8],
+    header: &StatisticsHeader,
+    full_input: &[u8],
+    toc: &StatisticsToc,
+    gates: Option<&VersionGates>,
+) -> Result<(
+    RowStatistics,
+    TimestampStatistics,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+)> {
+    // HEADER offset from the shared single TOC parse (Issue #216, #2148).
+    let header_offset = toc.header_offset();
 
     // Parse the EncodingStats section from the data following the header
     let result = parse_minimal_encoding_stats(input, full_input, header_offset, gates);
@@ -181,7 +206,9 @@ pub fn parse_nb_format_statistics_data(
             //     safer than the old `nb` synthesis, which could fabricate a nonzero
             //     count for an oa/da file.
             let (total_rows, partition_count) =
-                match crate::parser::repair_metadata::read_table_counts(full_input, gates) {
+                match crate::parser::repair_metadata::read_table_counts_with_toc(
+                    full_input, toc, gates,
+                ) {
                     // `total_rows.unwrap_or(0)`: a `None` here means STATS does NOT
                     // authoritatively expose `totalRows` (e.g. an unmodeled
                     // improvedMinMax covered-Slice bound blocks the walk). The 0 is
@@ -301,9 +328,15 @@ pub fn parse_enhanced_statistics_file<'a>(
     // Parse the 32-byte header
     let (remaining, header) = parse_nb_format_header(input)?;
 
+    // Parse the Statistics.db TOC ONCE (issue #2148) and thread it to every
+    // downstream consumer — the EncodingStats/row-count decode below and the
+    // STATS-extras post-pass — so the TOC is walked exactly once per open,
+    // never re-walked to relocate an already-resolved component offset.
+    let toc = parse_statistics_toc(input);
+
     // Parse minimal statistics data (EncodingStats + SerializationHeader columns)
     // Pass full input for TOC-based HEADER offset lookup (Issue #216)
-    let result = parse_nb_format_statistics_data(remaining, &header, input, gates);
+    let result = parse_nb_format_statistics_data_with_toc(remaining, &header, input, &toc, gates);
 
     match result {
         Ok((row_stats, mut timestamp_stats, partition_columns, clustering_columns, columns)) => {
@@ -328,7 +361,9 @@ pub fn parse_enhanced_statistics_file<'a>(
             // substituting the min — consumers requiring a real max must not
             // proceed.
             let tombstone_drop_times =
-                match crate::parser::repair_metadata::parse_stats_extras(input, gates) {
+                match crate::parser::repair_metadata::parse_stats_extras_with_toc(
+                    input, &toc, gates,
+                ) {
                     Ok(extras) => {
                         // Only set max_deletion_time. Do NOT touch min_deletion_time
                         // (the EncodingStats min baseline consumed elsewhere).

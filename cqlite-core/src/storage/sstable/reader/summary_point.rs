@@ -124,8 +124,12 @@ impl SSTableReader {
         // `index_interval_parses_total` is emitted inside `lookup_key_in_interval`.
         crate::storage::sstable::read_work_counters::record_index_probe();
 
+        // The reader's CURRENT (possibly #2383-rebound) Index.db path (issue #2356
+        // roborev): a lazy warm reader rebound across a snapshot teardown must open the
+        // live hardlink here, not the dead open-time path (#2352 class).
+        let index_db_path = index_reader.index_path();
         let lookup = lookup_key_in_interval(
-            index_reader.index_path(),
+            &index_db_path,
             interval,
             partition_key,
             min_index_interval,
@@ -144,10 +148,12 @@ impl SSTableReader {
                         (catalog::attr::SSTABLE_FORMAT, format.into()),
                     ],
                 );
-                // B4: cache this present-key resolution so a repeat point read of the
-                // same key skips both the summary search and the interval read
-                // (issue #1570). BIG `Index.db` records no size (`data_size == 0`).
-                self.key_offset_cache.insert(
+                // Issue #2059: cache this present-key resolution (keyed on the
+                // reader's generation identity) so a repeat point read of the same
+                // key skips BOTH the summary search AND the bounded `Index.db`
+                // interval parse (post-#2412 this is the load-bearing latency win —
+                // a hit touches ZERO interval parses). BIG `Index.db` records no size.
+                self.key_cache_insert(
                     partition_key,
                     crate::storage::cache::PartitionLoc::new(entry.data_offset, entry.data_size),
                 );

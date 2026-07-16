@@ -221,6 +221,39 @@ fn compaction_flow_emits_compaction_spans() {
 #[test]
 fn catalog_metrics_have_expected_names_units_and_error_labels() {
     let mc = testing::metrics_capture();
+
+    // --- Phase 0: eager registration at 0 before any error (issue #2288) ---
+    // On a freshly-started server `cqlite.errors.total` must be PRESENT at 0, not
+    // absent, so "metric name absent" unambiguously means *error counting isn't
+    // wired*. Production `otel::init` seeds this baseline once at startup under
+    // cumulative temporality (visible in every scrape); this DELTA-temporality
+    // harness mirrors that seed with `seed_baseline()` in an isolated collect
+    // window with NO error induced, then asserts the series is present at exactly
+    // 0. This runs inside the single serial metric test to avoid racing another
+    // flow's `errors.total` emission on the process-global provider.
+    mc.reset();
+    mc.seed_baseline();
+    let baseline = mc.flush_and_collect();
+    assert!(
+        baseline.contains(catalog::ERRORS_TOTAL),
+        "cqlite.errors.total must be REGISTERED at startup before any error; saw: {:?}",
+        metric_names(&baseline)
+    );
+    assert_eq!(
+        baseline.unit(catalog::ERRORS_TOTAL),
+        Some(catalog::unit::ERRORS),
+        "eagerly-registered cqlite.errors.total must carry the errors unit"
+    );
+    // Unlabeled baseline series (no invented {category, subsystem}) at exactly 0,
+    // and no other series contributes a nonzero increment in this window.
+    assert!(
+        mc_baseline_is_zero(&baseline),
+        "eagerly-registered cqlite.errors.total baseline must be exactly 0 before any error; \
+         saw entries: {:?}",
+        baseline.find(catalog::ERRORS_TOTAL)
+    );
+
+    // --- Phase 1: names, units, and induced-error labels ---
     mc.reset();
 
     // Defense-in-depth against cross-test metric bleed: the in-memory exporter is
@@ -418,6 +451,19 @@ fn span_tree(spans: &testing::CapturedSpans) -> Vec<(String, String)> {
 
 fn metric_names(m: &testing::CapturedMetrics) -> Vec<String> {
     m.entries().iter().map(|e| e.name.clone()).collect()
+}
+
+/// The eagerly-seeded `cqlite.errors.total` baseline (issue #2288) is present and
+/// totals exactly 0: an actual UNLABELED (empty-attribute) baseline point exists
+/// at value 0 AND no series contributes a nonzero increment in the collect window.
+///
+/// The unlabeled-point check is deliberately NOT `sum_where(.., &[])`, whose empty
+/// predicate matches every point vacuously (a zero-valued *labeled* point would
+/// pass): `has_point_with_empty_attrs_at` requires a genuinely attribute-free
+/// baseline point, so this fails if the seeded point were labeled or absent.
+fn mc_baseline_is_zero(m: &testing::CapturedMetrics) -> bool {
+    m.has_point_with_empty_attrs_at(catalog::ERRORS_TOTAL, 0.0)
+        && m.counter_sum(catalog::ERRORS_TOTAL).abs() < f64::EPSILON
 }
 
 // ---------------------------------------------------------------------------

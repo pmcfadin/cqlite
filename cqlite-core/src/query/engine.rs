@@ -144,7 +144,11 @@ impl QueryEngine {
                 )
                 .with_max_result_rows(
                     usize::try_from(config.query.max_result_rows).unwrap_or(usize::MAX),
-                ),
+                )
+                // Issue #1918: wire the read-path forcing knob from config so the
+                // `forced_read_path` field (config over env over auto) is
+                // load-bearing on the read path.
+                .with_forced_read_path(config.query.forced_read_path),
         );
 
         Ok(Self {

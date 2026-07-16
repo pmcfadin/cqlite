@@ -454,8 +454,9 @@ impl DataWriter {
         elements.sort_by(|a, b| compare_cell_paths(&a.cell_path, &b.cell_path, true));
 
         encode_unsigned(elements.len() as u64, buf);
+        let mut value_scratch = Vec::new();
         for elem in &elements {
-            self.write_complex_element_cell(buf, elem, timestamp_micros)?;
+            self.write_complex_element_cell(buf, elem, timestamp_micros, &mut value_scratch)?;
         }
         Ok(())
     }
@@ -665,30 +666,33 @@ impl DataWriter {
         // unsigned-byte otherwise) from the key `Value`s. Null keys rejected inline.
         let mut ordered: Vec<&(Value, Value)> = entries.iter().collect();
         ordered.sort_by(|a, b| compare_collection_elements(&a.0, &b.0));
-        let serialized: Vec<(Vec<u8>, Vec<u8>)> = ordered
-            .iter()
-            .map(|(key, val)| {
-                if matches!(key, Value::Null) {
-                    return Err(Error::InvalidInput(
-                        "MAP keys cannot be null (CQL semantics)".to_string(),
-                    ));
-                }
-                Ok((serialize_value(key)?, serialize_value(val)?))
-            })
-            .collect::<Result<Vec<_>>>()?;
 
-        encode_unsigned(serialized.len() as u64, buf); // cell count
-        for (path_bytes, value_bytes) in &serialized {
+        // Reusable per-entry scratch (issue #1672): one alloc for the whole map,
+        // not a Vec-of-Vecs holding every key/value.
+        encode_unsigned(ordered.len() as u64, buf); // cell count
+        let mut key_scratch = Vec::new();
+        let mut val_scratch = Vec::new();
+        for (key, val) in ordered {
+            if matches!(key, Value::Null) {
+                return Err(Error::InvalidInput(
+                    "MAP keys cannot be null (CQL semantics)".to_string(),
+                ));
+            }
+
             // Cell header: flags + optional TTL fields
             self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds, now_seconds)?;
 
             // Cell path: serialized key
-            encode_unsigned(path_bytes.len() as u64, buf);
-            buf.extend_from_slice(path_bytes);
+            key_scratch.clear();
+            serialize_value_into(key, &mut key_scratch)?;
+            encode_unsigned(key_scratch.len() as u64, buf);
+            buf.extend_from_slice(&key_scratch);
 
             // Cell value: serialized value
-            encode_unsigned(value_bytes.len() as u64, buf);
-            buf.extend_from_slice(value_bytes);
+            val_scratch.clear();
+            serialize_value_into(val, &mut val_scratch)?;
+            encode_unsigned(val_scratch.len() as u64, buf);
+            buf.extend_from_slice(&val_scratch);
         }
 
         Ok(())
@@ -719,6 +723,8 @@ impl DataWriter {
         // Cell count
         encode_unsigned(elements.len() as u64, buf);
 
+        // Reusable per-element scratch buffer (issue #1672).
+        let mut value_scratch = Vec::new();
         for (i, elem) in elements.iter().enumerate() {
             // Reject null elements inline (CQL semantics)
             if matches!(elem, Value::Null) {
@@ -736,9 +742,10 @@ impl DataWriter {
             buf.extend_from_slice(&timeuuid);
 
             // Cell value: serialized element
-            let value_bytes = serialize_value(elem)?;
-            encode_unsigned(value_bytes.len() as u64, buf);
-            buf.extend_from_slice(&value_bytes);
+            value_scratch.clear();
+            serialize_value_into(elem, &mut value_scratch)?;
+            encode_unsigned(value_scratch.len() as u64, buf);
+            buf.extend_from_slice(&value_scratch);
         }
 
         Ok(())
@@ -828,8 +835,9 @@ impl DataWriter {
         encode_unsigned(ordered.len() as u64, buf);
 
         // ---- Per-element cells.
+        let mut value_scratch = Vec::new();
         for elem in ordered {
-            self.write_complex_element_cell(buf, elem, row_ts)?;
+            self.write_complex_element_cell(buf, elem, row_ts, &mut value_scratch)?;
         }
 
         Ok(())
@@ -850,11 +858,14 @@ impl DataWriter {
     /// A tombstone (`is_deleted`) carries no value bytes, so it sets
     /// HAS_EMPTY_VALUE (0x04) alongside IS_DELETED (0x01) — final flags 0x05 —
     /// matching Cassandra's Cell.Serializer (`hasValue = !flag(HAS_EMPTY_VALUE)`).
+    /// `value_scratch` (issue #1672): caller-owned buffer reused across the
+    /// element loop; cleared before serializing each element's value.
     pub(super) fn write_complex_element_cell(
         &self,
         buf: &mut Vec<u8>,
         elem: &ComplexElementWrite,
         row_ts: i64,
+        value_scratch: &mut Vec<u8>,
     ) -> Result<()> {
         // Determine flags.
         //
@@ -950,9 +961,10 @@ impl DataWriter {
         let has_empty_value = (flags & CELL_HAS_EMPTY_VALUE) != 0;
         if !has_empty_value {
             if let Some(value) = &elem.value {
-                let value_bytes = serialize_value(value)?;
-                encode_unsigned(value_bytes.len() as u64, buf);
-                buf.extend_from_slice(&value_bytes);
+                value_scratch.clear();
+                serialize_value_into(value, value_scratch)?;
+                encode_unsigned(value_scratch.len() as u64, buf);
+                buf.extend_from_slice(value_scratch);
             }
         }
 

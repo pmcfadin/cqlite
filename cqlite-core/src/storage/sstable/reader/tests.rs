@@ -1058,4 +1058,78 @@ mod tests {
             ),
         }
     }
+
+    /// Boundary of the point-read `MADV_RANDOM` size gate (issue #2210): a file
+    /// just below the threshold shares the scan mapping (no 2nd map), while a
+    /// file at/above it gets a distinct dedicated mapping.
+    #[cfg(unix)]
+    #[test]
+    fn test_point_read_mmap_size_gate_boundary() {
+        use super::super::SSTableReader;
+        use std::io::Write;
+        use std::sync::Arc;
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("temp file");
+        tmp.write_all(&[0xABu8; 4096]).expect("write");
+        tmp.flush().expect("flush");
+        let path = tmp.path();
+        let file_size = 4096u64;
+
+        let std_file = std::fs::File::open(path).expect("open");
+        let scan_mmap =
+            Arc::new(unsafe { memmap2::MmapOptions::new().map(&std_file).expect("map") });
+
+        // file_size just below the threshold -> share the scan mapping.
+        let below = SSTableReader::point_read_mmap(path, file_size, &scan_mmap, file_size + 1);
+        assert!(
+            Arc::ptr_eq(&below, &scan_mmap),
+            "below-threshold file must share the scan mapping (no dedicated map)"
+        );
+
+        // file_size == threshold -> dedicated, distinct mapping.
+        let at = SSTableReader::point_read_mmap(path, file_size, &scan_mmap, file_size);
+        assert!(
+            !Arc::ptr_eq(&at, &scan_mmap),
+            "at/above-threshold file must get its own dedicated mapping"
+        );
+    }
+
+    /// The dedicated point mapping is a SEPARATE allocation from the scan
+    /// mapping (so advising it cannot touch the scan map, #1143 preserved) yet
+    /// exposes the same bytes; below the gate the exact scan Arc is returned
+    /// unchanged (issue #2210 acceptance: "scan mapping is unaffected").
+    #[cfg(unix)]
+    #[test]
+    fn test_point_read_mmap_distinct_from_scan() {
+        use super::super::SSTableReader;
+        use std::io::Write;
+        use std::sync::Arc;
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let contents: Vec<u8> = (0..2048u32).map(|i| (i % 251) as u8).collect();
+        tmp.write_all(&contents).expect("write");
+        tmp.flush().expect("flush");
+        let path = tmp.path();
+        let file_size = contents.len() as u64;
+
+        let std_file = std::fs::File::open(path).expect("open");
+        let scan_mmap =
+            Arc::new(unsafe { memmap2::MmapOptions::new().map(&std_file).expect("map") });
+
+        // Tiny threshold (1) forces the >= branch on a small file: dedicated map.
+        let dedicated = SSTableReader::point_read_mmap(path, file_size, &scan_mmap, 1);
+        assert!(
+            !Arc::ptr_eq(&dedicated, &scan_mmap),
+            "dedicated point map must be a distinct allocation from the scan map"
+        );
+        assert_eq!(dedicated.len(), scan_mmap.len(), "same length");
+        assert_eq!(&dedicated[..], &contents[..], "same byte contents");
+
+        // Threshold above the file size shares the scan Arc unchanged.
+        let shared = SSTableReader::point_read_mmap(path, file_size, &scan_mmap, file_size + 1);
+        assert!(
+            Arc::ptr_eq(&shared, &scan_mmap),
+            "below-threshold must return the exact scan Arc (scan mapping unaffected)"
+        );
+    }
 }

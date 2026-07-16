@@ -143,62 +143,95 @@ pub(crate) fn len_as_i32(len: usize) -> Result<i32> {
 }
 
 /// Serialize a collection element, rejecting null (CQL semantics: lists/sets cannot contain null).
+///
+/// Thin wrapper over [`serialize_collection_element_into`] preserving the
+/// owned-`Vec` signature that the comparator fallback (`collection_order`) and
+/// tests depend on.
 pub(crate) fn serialize_collection_element(
     value: &Value,
     collection_kind: &str,
 ) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    serialize_collection_element_into(value, collection_kind, &mut out)?;
+    Ok(out)
+}
+
+/// Serialize a collection element directly into `out`, rejecting null (CQL
+/// semantics: lists/sets cannot contain null). Byte-identical to
+/// [`serialize_collection_element`] with zero throwaway allocation (issue #1672).
+pub(crate) fn serialize_collection_element_into(
+    value: &Value,
+    collection_kind: &str,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     if matches!(value, Value::Null) {
         return Err(Error::InvalidInput(format!(
             "{} elements cannot be null (CQL semantics)",
             collection_kind
         )));
     }
-    serialize_value(value)
+    serialize_value_into(value, out)
 }
 
-/// Serialize a Value to bytes for cell storage
+/// Serialize a Value to bytes for cell storage.
 ///
-/// This follows Cassandra's type-specific serialization rules.
+/// Thin wrapper over [`serialize_value_into`], preserving the owned-`Vec`
+/// signature that the comparator, UDT canonicalization, clustering-key
+/// serialization, and tests depend on. Callers on the hot write path should
+/// prefer [`serialize_value_into`] to write straight into their destination
+/// buffer (issue #1672).
 pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    serialize_value_into(value, &mut out)?;
+    Ok(out)
+}
+
+/// Serialize a Value directly into `out`, following Cassandra's type-specific
+/// serialization rules. Byte-identical to [`serialize_value`] but writes into a
+/// caller-supplied buffer with no per-value throwaway `Vec` (issue #1672, R1).
+///
+/// The FIXED-WIDTH i32 length prefixes of List/Set/Map/Tuple are back-patched in
+/// place: reserve 4 bytes, serialize the element into `out`, then overwrite the
+/// reservation with the encoded length — so nested collections never build a
+/// per-element temporary either.
+pub(crate) fn serialize_value_into(value: &Value, out: &mut Vec<u8>) -> Result<()> {
     match value {
-        Value::Null => Ok(Vec::new()),
-        Value::Boolean(b) => Ok(vec![if *b { 1 } else { 0 }]),
-        Value::TinyInt(n) => Ok(vec![*n as u8]),
-        Value::SmallInt(n) => Ok(n.to_be_bytes().to_vec()),
-        Value::Integer(n) => Ok(n.to_be_bytes().to_vec()),
-        Value::BigInt(n) => Ok(n.to_be_bytes().to_vec()),
-        Value::Counter(n) => Ok(n.to_be_bytes().to_vec()),
-        Value::Float32(f) => Ok(f.to_bits().to_be_bytes().to_vec()),
-        Value::Float(f) => Ok(f.to_bits().to_be_bytes().to_vec()),
-        Value::Text(s) => Ok(s.to_vec()),
-        Value::Blob(bytes) => Ok(bytes.to_vec()),
-        Value::Timestamp(millis) => Ok(millis.to_be_bytes().to_vec()),
+        Value::Null => {}
+        Value::Boolean(b) => out.push(if *b { 1 } else { 0 }),
+        Value::TinyInt(n) => out.push(*n as u8),
+        Value::SmallInt(n) => out.extend_from_slice(&n.to_be_bytes()),
+        Value::Integer(n) => out.extend_from_slice(&n.to_be_bytes()),
+        Value::BigInt(n) => out.extend_from_slice(&n.to_be_bytes()),
+        Value::Counter(n) => out.extend_from_slice(&n.to_be_bytes()),
+        Value::Float32(f) => out.extend_from_slice(&f.to_bits().to_be_bytes()),
+        Value::Float(f) => out.extend_from_slice(&f.to_bits().to_be_bytes()),
+        // Issue #1644: Text/Blob hold `bytes::Bytes`; `&Bytes` deref-coerces to
+        // `&[u8]` for `extend_from_slice` (same as the pre-split `&Vec<u8>`).
+        Value::Text(s) => out.extend_from_slice(s),
+        Value::Blob(bytes) => out.extend_from_slice(bytes),
+        Value::Timestamp(millis) => out.extend_from_slice(&millis.to_be_bytes()),
         Value::Date(days) => {
             // Cassandra DATE: stored as unsigned int with Integer.MIN_VALUE offset
             let stored = days.wrapping_sub(i32::MIN) as u32;
-            Ok(stored.to_be_bytes().to_vec())
+            out.extend_from_slice(&stored.to_be_bytes());
         }
-        Value::Time(nanos) => Ok(nanos.to_be_bytes().to_vec()),
-        Value::Uuid(bytes) => Ok(bytes.to_vec()),
-        Value::Inet(bytes) => Ok(bytes.to_vec()),
-        Value::Varint(bytes) => Ok(bytes.to_vec()),
+        Value::Time(nanos) => out.extend_from_slice(&nanos.to_be_bytes()),
+        Value::Uuid(bytes) => out.extend_from_slice(bytes),
+        Value::Inet(bytes) => out.extend_from_slice(bytes),
+        Value::Varint(bytes) => out.extend_from_slice(bytes),
         Value::Decimal { scale, unscaled } => {
-            let mut result = Vec::new();
-            result.extend_from_slice(&scale.to_be_bytes());
-            result.extend_from_slice(unscaled);
-            Ok(result)
+            out.extend_from_slice(&scale.to_be_bytes());
+            out.extend_from_slice(unscaled);
         }
         Value::Duration {
             months,
             days,
             nanos,
         } => {
-            let mut result = Vec::new();
             // Cassandra DurationType stores three signed VInts, not fixed-width ints.
-            encode_signed(*months as i64, &mut result);
-            encode_signed(*days as i64, &mut result);
-            encode_signed(*nanos, &mut result);
-            Ok(result)
+            encode_signed(*months as i64, out);
+            encode_signed(*days as i64, out);
+            encode_signed(*nanos, out);
         }
         Value::Udt(udt_value) => {
             // Construct UdtTypeDef from UdtValue fields by inferring types
@@ -211,19 +244,20 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
                 schema = schema.with_field(field.name.clone(), field_type, true);
             }
 
+            // `serialize_udt` returns an owned Vec (its signature is out of R1
+            // scope); one temp per UDT cell is acceptable (R1 targets per-SCALAR
+            // -cell allocations).
             let serializer = TypeSerializer::new();
-            serializer.serialize_udt(value, &schema)
+            out.extend_from_slice(&serializer.serialize_udt(value, &schema)?);
         }
         Value::List(elements) => {
             // ListType preserves insertion order — do NOT sort.
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&len_as_i32(elements.len())?.to_be_bytes());
+            out.extend_from_slice(&len_as_i32(elements.len())?.to_be_bytes());
             for elem in elements {
-                let elem_bytes = serialize_collection_element(elem, "Collection")?;
-                buf.extend_from_slice(&len_as_i32(elem_bytes.len())?.to_be_bytes());
-                buf.extend_from_slice(&elem_bytes);
+                write_len_prefixed_i32(out, |o| {
+                    serialize_collection_element_into(elem, "Collection", o)
+                })?;
             }
-            Ok(buf)
         }
         Value::Set(elements) => {
             // Cassandra SetType is a sorted collection: a frozen set serializes its
@@ -235,21 +269,17 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             // complex.rs). A raw serialized-byte sort (the pre-#1275 behavior) put
             // negatives last, e.g. `frozen<set<int>>` of {-1,0,1} serialized in the
             // wrong order. Then serialize each element in that order
-            // (`serialize_collection_element` rejects Value::Null).
+            // (`serialize_collection_element_into` rejects Value::Null). Sorting the
+            // `&Value` refs needs no serialization.
             let mut ordered: Vec<&Value> = elements.iter().collect();
             ordered.sort_by(|a, b| compare_collection_elements(a, b));
-            let serialized: Vec<Vec<u8>> = ordered
-                .iter()
-                .map(|e| serialize_collection_element(e, "Collection"))
-                .collect::<Result<Vec<_>>>()?;
 
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&len_as_i32(serialized.len())?.to_be_bytes());
-            for elem_bytes in &serialized {
-                buf.extend_from_slice(&len_as_i32(elem_bytes.len())?.to_be_bytes());
-                buf.extend_from_slice(elem_bytes);
+            out.extend_from_slice(&len_as_i32(ordered.len())?.to_be_bytes());
+            for elem in ordered {
+                write_len_prefixed_i32(out, |o| {
+                    serialize_collection_element_into(elem, "Collection", o)
+                })?;
             }
-            Ok(buf)
         }
         Value::Map(entries) => {
             // Cassandra MapType is a sorted collection: a frozen map serializes its
@@ -262,48 +292,94 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             // key/value in that order.
             let mut ordered: Vec<&(Value, Value)> = entries.iter().collect();
             ordered.sort_by(|a, b| compare_collection_elements(&a.0, &b.0));
-            let serialized: Vec<(Vec<u8>, Vec<u8>)> = ordered
-                .iter()
-                .map(|(key, val)| {
-                    if matches!(key, Value::Null) {
-                        return Err(Error::InvalidInput(
-                            "MAP keys cannot be null (CQL semantics)".to_string(),
-                        ));
-                    }
-                    Ok((serialize_value(key)?, serialize_value(val)?))
-                })
-                .collect::<Result<Vec<_>>>()?;
 
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&len_as_i32(serialized.len())?.to_be_bytes());
-            for (key_bytes, val_bytes) in &serialized {
-                buf.extend_from_slice(&len_as_i32(key_bytes.len())?.to_be_bytes());
-                buf.extend_from_slice(key_bytes);
-                buf.extend_from_slice(&len_as_i32(val_bytes.len())?.to_be_bytes());
-                buf.extend_from_slice(val_bytes);
+            out.extend_from_slice(&len_as_i32(ordered.len())?.to_be_bytes());
+            for (key, val) in ordered {
+                if matches!(key, Value::Null) {
+                    return Err(Error::InvalidInput(
+                        "MAP keys cannot be null (CQL semantics)".to_string(),
+                    ));
+                }
+                write_len_prefixed_i32(out, |o| serialize_value_into(key, o))?;
+                write_len_prefixed_i32(out, |o| serialize_value_into(val, o))?;
             }
-            Ok(buf)
         }
         Value::Tuple(fields) => {
-            let mut buf = Vec::new();
             for field in fields {
                 match field {
-                    Value::Null => buf.extend_from_slice(&(-1i32).to_be_bytes()),
-                    other => {
-                        let field_bytes = serialize_value(other)?;
-                        buf.extend_from_slice(&len_as_i32(field_bytes.len())?.to_be_bytes());
-                        buf.extend_from_slice(&field_bytes);
-                    }
+                    Value::Null => out.extend_from_slice(&(-1i32).to_be_bytes()),
+                    other => write_len_prefixed_i32(out, |o| serialize_value_into(other, o))?,
                 }
             }
-            Ok(buf)
         }
-        Value::Frozen(inner) => serialize_value(inner),
-        _ => Err(Error::InvalidInput(format!(
-            "Unsupported value type for serialization: {:?}",
-            value
-        ))),
+        Value::Frozen(inner) => serialize_value_into(inner, out)?,
+        _ => {
+            return Err(Error::InvalidInput(format!(
+                "Unsupported value type for serialization: {:?}",
+                value
+            )))
+        }
     }
+    Ok(())
+}
+
+/// Run `write_body`, framing the bytes it appends to `out` with a FIXED 4-byte
+/// big-endian i32 length prefix — reserved before the body and back-patched
+/// after — so a collection element/field never needs a per-element temporary
+/// (issue #1672). Byte-identical to `extend(len_as_i32(bytes.len())); extend(bytes)`.
+fn write_len_prefixed_i32(
+    out: &mut Vec<u8>,
+    write_body: impl FnOnce(&mut Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    let len_pos = out.len();
+    out.extend_from_slice(&[0u8; 4]);
+    write_body(out)?;
+    let body_len = out.len() - len_pos - 4;
+    out[len_pos..len_pos + 4].copy_from_slice(&len_as_i32(body_len)?.to_be_bytes());
+    Ok(())
+}
+
+/// Append a regular cell's value to `buf` with Cassandra's cell framing — a
+/// VInt length prefix for variable-width types, raw bytes for fixed-width — and
+/// the `i64::MAX` length bound check.
+///
+/// Fixed-width scalars (bool/int/bigint/float/timestamp/uuid — the types WITHOUT
+/// a length prefix, per [`cell_value_uses_length_prefix`]) are written STRAIGHT
+/// into `buf` via [`serialize_value_into`], eliminating the throwaway per-cell
+/// `Vec` + second copy that dominated the int write hot path (issue #1672, R1).
+/// Variable-width types still serialize once into an owned buffer because the
+/// VInt length must precede the bytes. Byte-identical to the prior
+/// `serialize_value` → optional length prefix → `extend_from_slice` sequence.
+pub(crate) fn write_cell_value_into(buf: &mut Vec<u8>, column: &str, value: &Value) -> Result<()> {
+    if cell_value_uses_length_prefix(value) {
+        // Variable-width: the VInt length must precede the bytes, so serialize
+        // once into an owned buffer, then length-prefix + copy.
+        let value_bytes = serialize_value(value)?;
+        if value_bytes.len() > i64::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Value too large for column '{}': {} bytes (max {})",
+                column,
+                value_bytes.len(),
+                i64::MAX
+            )));
+        }
+        encode_unsigned(value_bytes.len() as u64, buf);
+        buf.extend_from_slice(&value_bytes);
+    } else {
+        // Fixed-width: no length prefix — write straight into `buf` (zero alloc).
+        let start = buf.len();
+        serialize_value_into(value, buf)?;
+        let written = buf.len() - start;
+        if written > i64::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Value too large for column '{}': {} bytes (max {})",
+                column,
+                written,
+                i64::MAX
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Infer CQL type from a Value instance

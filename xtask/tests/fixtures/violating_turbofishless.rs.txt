@@ -1,0 +1,22 @@
+// Self-test fixture (#2012): the CANONICAL turbofish-less shapes of the
+// unbounded-materialization anti-pattern. Neither `.collect()` carries a
+// `Vec<..>` turbofish — the target element type is learned from the enclosing
+// function's return type (a) or the `let` binding's type annotation (b). Both
+// MUST be flagged. The collecting fn in (a) is deliberately NOT `scan*`-named,
+// so admission comes solely from its `-> Vec<DataRow>` return type.
+//
+// Stored as .rs.txt (not .rs) so it is never compiled into the crate; it is read
+// as text by the fixture-driven tests.
+
+// (a) turbofish-less collect in tail/return position; plain-named fn admitted by
+//     its `-> Vec<DataRow>` return type.
+fn read_all_rows(reader: &Reader) -> Vec<DataRow> {
+    reader.rows().collect()
+}
+
+// (b) turbofish-less collect typed by a `let x: Vec<DataRow>` annotation; the fn
+//     is admitted by its `scan` name and returns something else.
+fn scan_and_count(reader: &Reader) -> usize {
+    let rows: Vec<DataRow> = reader.rows().collect();
+    rows.len()
+}

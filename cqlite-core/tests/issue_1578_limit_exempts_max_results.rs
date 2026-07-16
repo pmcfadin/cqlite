@@ -160,8 +160,7 @@ async fn no_limit_still_trips_row_count_valve() {
     let err = db
         .execute(&format!("SELECT * FROM {KS}.{TBL}"))
         .await
-        .err()
-        .expect(
+        .expect_err(
             "Issue #1578: an UNBOUNDED SELECT over 4 rows with max_result_rows=2 \
              must still trip the safety valve",
         );
@@ -186,8 +185,7 @@ async fn explicit_limit_does_not_exempt_byte_budget() {
     let err = db
         .execute(&format!("SELECT * FROM {KS}.{TBL} LIMIT 4"))
         .await
-        .err()
-        .expect(
+        .expect_err(
             "Issue #1578: an explicit LIMIT exempts the ROW-COUNT valve only — \
              the byte budget must still trip ResultTooLarge",
         );
@@ -249,8 +247,7 @@ async fn tight_byte_budget_still_trips_at_scale() {
     let err = db
         .execute(&format!("SELECT * FROM {KS}.{TBL} LIMIT 1500000"))
         .await
-        .err()
-        .expect(
+        .expect_err(
             "Issue #1578: a huge LIMIT over a few-thousand-row table with a \
              tiny max_result_bytes must still trip the byte guard — LIMIT \
              exempts only the row-count valve, never the byte ceiling, at any \

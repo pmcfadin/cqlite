@@ -260,6 +260,11 @@ impl RunReader {
     /// Peek at the next entry without consuming it
     ///
     /// Returns None if this run is exhausted.
+    ///
+    /// Test-only since issue #1664: `refill_heap` was the sole production
+    /// caller and now moves the owned entry via [`Self::advance`] instead of
+    /// peek+clone. Kept for the `RunReader` API test that exercises lazy refill.
+    #[cfg(test)]
     fn peek(&mut self) -> Result<Option<&MergeEntry>> {
         // Refill buffer if empty and not exhausted
         if self.buffer.is_empty() && !self.exhausted {
@@ -465,6 +470,23 @@ struct SSTableRowIteratorAdapter {
     /// `recv` cancel-aware and (b) [`Drop`] can trip it, waking a producer that is
     /// mid-scan (not blocked on send) so it exits promptly before the join.
     scan_cancel: crate::storage::scan_cancel::ScanCancel,
+    /// This adapter's OWN count of DATA entries its producer thread has
+    /// successfully sent into the bounded channel (issue #2419 roborev job
+    /// 1733), shared with the producer thread via `Arc` so `Drop` can read it.
+    /// It only becomes STABLE — no further increments possible — once the
+    /// producer thread has been joined (see `Drop`). Paired with
+    /// [`Self::received_count`] to compute the exact post-join egress-depth
+    /// reconcile residual: reading it BEFORE the join (as the pre-fix drain loop
+    /// did) races a producer send that can slip in after the drain's last
+    /// `Empty` and before the receiver is actually dropped, permanently leaking
+    /// the shared `cqlite.merge.egress_channel_depth` gauge upward across
+    /// repeated cancellations on a long-running server.
+    sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// This adapter's own count of DATA entries actually received/consumed,
+    /// incremented alongside every [`channel_depth::received`] call this adapter
+    /// makes ([`Self::next`]'s normal consumption). Only ever touched by the
+    /// thread holding `&mut self` (never shared), so a plain `i64`.
+    received_count: i64,
 }
 
 /// Poll interval for the cancel-aware blocking `recv` in
@@ -519,10 +541,26 @@ const STREAMING_CHANNEL_CAPACITY: usize = 256;
 #[cfg(feature = "write-support")]
 mod producer_gauge;
 
+// Egress-channel-depth gauge (issue #2419, WS2): process-global live occupancy
+// of the bounded producer→consumer `sync_channel` backing
+// `cqlite.merge.egress_channel_depth`. Sibling module to bound this file.
+#[cfg(feature = "write-support")]
+mod channel_depth;
+
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
 #[cfg(all(test, feature = "write-support"))]
 mod teardown_tests;
+
+// Issue #1664: `MergeEntry` double-clone regression guard (kept in a sibling
+// file, not inline here, per the #1116 campsite file-size rule).
+#[cfg(all(test, feature = "write-support"))]
+mod clone_regression_tests;
+
+// Issue #1665: reconcile micro-alloc guard — proves `filter_dropped_columns` no
+// longer deep-clones the survivor set (sibling file, #1116 campsite rule).
+#[cfg(all(test, feature = "write-support"))]
+mod reconcile_microalloc_tests;
 
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
@@ -555,6 +593,11 @@ impl SSTableRowIteratorAdapter {
         let adapter_cancel = scan_cancel.clone();
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
+        // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
+        // with the producer thread so `Drop` can read its post-join-stable value
+        // for the egress-depth reconcile (see the field doc).
+        let sent_count = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let producer_sent_count = sent_count.clone();
 
         // Issue #2316: account this producer on the `cqlite.merge.producer_threads`
         // gauge BEFORE spawning, so the increment happens-before any possible
@@ -582,6 +625,7 @@ impl SSTableRowIteratorAdapter {
                 udt_registry,
                 scan_cancel,
                 sender,
+                producer_sent_count,
             );
         }) {
             Ok(handle) => handle,
@@ -598,6 +642,8 @@ impl SSTableRowIteratorAdapter {
             receiver: Some(receiver),
             producer: Some(producer),
             scan_cancel: adapter_cancel,
+            sent_count,
+            received_count: 0,
         })
     }
 
@@ -620,6 +666,7 @@ impl SSTableRowIteratorAdapter {
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+        sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
     ) {
         // Issue #2316: decrement the live producer-thread gauge when this thread
         // exits (even on panic). Created FIRST so the spawn-time increment in
@@ -707,6 +754,7 @@ impl SSTableRowIteratorAdapter {
                     &schema,
                     &scan_cancel,
                     &sender,
+                    sent_count.as_ref(),
                 )
                 .await
             })
@@ -1179,7 +1227,26 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
                 return Some(Err(Error::Cancelled));
             }
             match receiver.recv_timeout(RECV_CANCEL_POLL) {
-                Ok(Ok(entry)) => return Some(Ok(entry)),
+                Ok(Ok(entry)) => {
+                    // Issue #2419 (WS2): this DATA entry just left the bounded
+                    // egress channel — decrement the live occupancy gauge,
+                    // balancing the `channel_depth::sent()` at its send site
+                    // (`from_readers::forward_row`). `received_count` is this
+                    // adapter's OWN mirror of that decrement (roborev job 1733),
+                    // read by `Drop` post-join to compute the exact reconcile
+                    // residual — see the field doc.
+                    channel_depth::received();
+                    self.received_count += 1;
+                    // Issue #2096: one merge entry decoded from `Data.db` by THIS
+                    // adapter-driven run — a full scan, compaction, or (via the
+                    // fail-safe `SinglePartitionFilterRun`) a point read all share
+                    // this increment site, so `merge_run_entries_decoded` counts
+                    // entries for any of them, not point reads alone. See
+                    // `work_counters::merge_run_entries_decoded`'s doc for the
+                    // process-global caveat when using it as a delta assertion.
+                    crate::storage::sstable::work_counters::add_merge_run_entry_decoded();
+                    return Some(Ok(entry));
+                }
                 // Issue #2264: reconstruct `Error::Cancelled` distinctly so a
                 // cancelled scan is never confused with a genuine I/O/corruption
                 // error at the merge/producer boundary — `drive_merge` matches on
@@ -1216,6 +1283,19 @@ impl Drop for SSTableRowIteratorAdapter {
         //    block until the channel drained. Dropping it here (before the join)
         //    rather than relying on field-drop order (which runs AFTER this `Drop`)
         //    is what makes the join bounded.
+        //
+        //    Issue #2419 roborev job 1733: do NOT try to drain-and-decrement the
+        //    egress-depth gauge HERE. A prior version looped `try_recv` until
+        //    `Empty` and decremented per drained entry before dropping the
+        //    receiver — but the producer runs on another OS thread, so a send can
+        //    slip in and succeed (incrementing the shared gauge) in the window
+        //    between that loop's last `Empty` and this `drop`, with no entry ever
+        //    physically drained to balance it: a PERMANENT, monotonic upward leak
+        //    of `cqlite.merge.egress_channel_depth` across every
+        //    cancelled/disconnected scan on a long-running server. The gauge is
+        //    reconciled instead in step 4, AFTER the join, using this adapter's
+        //    own sent/received delta — which only becomes authoritative once the
+        //    producer thread has provably stopped sending.
         drop(self.receiver.take());
         // 3. Join the producer — bounded, because after (1)+(2) the producer
         //    cannot block indefinitely: it either observes the cancel in its scan
@@ -1224,6 +1304,20 @@ impl Drop for SSTableRowIteratorAdapter {
         if let Some(handle) = self.producer.take() {
             let _ = handle.join();
         }
+        // 4. Issue #2419 roborev job 1733: reconcile the shared egress-depth
+        //    gauge AFTER the producer thread has definitively exited — `join`
+        //    returning guarantees `self.sent_count` can never increase again, so
+        //    this read is race-free (unlike reading it, or draining the channel,
+        //    before the join). Any DATA entries this adapter's producer
+        //    successfully sent but this consumer never received — abandoned when
+        //    the channel was torn down while entries were still buffered —
+        //    are exactly `sent_count - received_count`; reconcile the shared
+        //    gauge by that residual in ONE atomic op so a cancelled/disconnected
+        //    scan returns `cqlite.merge.egress_channel_depth` to baseline instead
+        //    of drifting upward.
+        let residual =
+            self.sent_count.load(std::sync::atomic::Ordering::SeqCst) - self.received_count;
+        channel_depth::reconcile_residual(residual);
     }
 }
 
@@ -1476,6 +1570,52 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
         }
     }
     (baseline_min_ts, baseline_min_ldt, baseline_min_ttl)
+}
+
+/// Issue #2299 fail-CLOSED guard for the direct-stream compaction gate.
+///
+/// The direct-stream write path (`ActiveMerge::stream_rows_directly`) is selected
+/// from `compute_baseline_min`'s LDT baseline surviving at the `i32::MAX`
+/// (`NO_DELETION_TIME`) sentinel — read as "no input carries ANY deletion, so
+/// there are no range/row/partition tombstones to interleave." But
+/// `compute_baseline_min` fails OPEN: an input whose `Statistics.db` is MISSING or
+/// fails the top-level parse is silently skipped and never contributes to the
+/// baseline. If such a skipped input actually carries a tombstone, the baseline
+/// stays at the live sentinel, the direct path is wrongly selected, and that
+/// input's tombstones are dropped from the compacted output — previously-deleted
+/// data resurrects (a silent data-loss failure mode).
+///
+/// This returns `false` when ANY input's `Statistics.db` is missing or
+/// unparseable at the top level, so the caller can force the always-correct
+/// buffered path independently of the (fail-open) baseline seeder. The deletion
+/// signal is authoritative metadata only (`Statistics.db`), never a byte heuristic
+/// (#28); when it cannot be read we refuse to prove "no deletions" and fall back.
+///
+/// (An input that PARSES but whose best-effort STATS-extras histogram is
+/// unparseable is already handled conservatively inside `compute_baseline_min`:
+/// `has_tombstone = true` forces its LDT into the baseline, lowering it below the
+/// sentinel — so that case does not reach this guard.)
+#[cfg(feature = "write-support")]
+pub fn all_input_stats_readable(input_paths: &[PathBuf]) -> bool {
+    for data_path in input_paths {
+        let stats_path = stats_path_for(data_path);
+        if !stats_path.exists() {
+            return false;
+        }
+        let stats_bytes = match std::fs::read(&stats_path) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        if crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+            &stats_bytes,
+            None,
+        )
+        .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Expiry-aware LOWER bound for the compaction output's `min_local_deletion_time`
@@ -2759,12 +2899,16 @@ impl KWayMerger {
                 .pop()
                 .ok_or_else(|| Error::InvalidInput("Merge heap unexpectedly empty".to_string()))?;
             let entry = wrapped.entry;
+            // Read the Copy `run_index` before moving `entry` (issue #1664: the
+            // entry is already owned, so move it into partition_rows instead of
+            // cloning).
+            let run_index = entry.run_index;
 
             // Add to partition rows
-            partition_rows.push(entry.clone());
+            partition_rows.push(entry);
 
             // Refill heap from the run we just consumed from
-            self.refill_heap(entry.run_index)?;
+            self.refill_heap(run_index)?;
         }
 
         if let Some(key) = partition_key {
@@ -2795,19 +2939,17 @@ impl KWayMerger {
 
         let run = &mut self.runs[run_index];
         if !run.is_exhausted() {
-            if let Some(entry) = run.peek()? {
-                // Clone and push to heap, paired with the schema-aware
-                // comparator's schema (issue #1668, stage 5c-i).
-                let entry = entry.clone();
+            if let Some(entry) = run.advance()? {
+                // Move the owned entry into the heap, paired with the
+                // schema-aware comparator's schema (issue #1668, stage 5c-i).
+                // Issue #1664: `advance()` returns the OWNED front entry, so we
+                // move it in instead of the former peek+clone+discard-advance.
                 self.heap
                     .push(Reverse(schema_order::SchemaOrderedEntry::new(
                         entry,
                         self.schema_arc.clone(),
                     )));
             }
-
-            // Advance the run reader
-            run.advance()?;
         }
 
         Ok(())
@@ -6015,6 +6157,67 @@ mod tests {
             baseline_ldt, tomb_ldt,
             "an unparseable STATS-extras section must be treated conservatively \
              (INCLUDE the LDT baseline), not as an empty no-tombstone histogram (#1410)"
+        );
+    }
+
+    /// #2299 / roborev job 1723 — fail-CLOSED guard for the direct-stream gate.
+    ///
+    /// `compute_baseline_min` fails OPEN: an input with a MISSING or top-level
+    /// UNPARSEABLE `Statistics.db` never lowers `baseline_min_ldt`, so a skipped
+    /// tombstone-bearing input would leave the live sentinel intact and the
+    /// `#2299` gate (`baseline_min_ldt == i32::MAX`) would wrongly select the
+    /// direct-stream path, dropping that input's tombstones (data resurrection).
+    /// `all_input_stats_readable` closes that hole: it returns `false` unless EVERY
+    /// input's deletion metadata was actually observed, letting the caller force
+    /// the always-correct buffered path. Removing the AND in `compaction.rs`
+    /// re-opens the data-loss hole and re-greens this test's negative cases.
+    #[test]
+    fn all_input_stats_readable_fails_closed_on_missing_or_unparseable_stats() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+
+        // A well-formed input: Data.db + a valid Statistics.db written through the
+        // real writer. Readable → the guard permits proving "no deletions".
+        let good_data = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&good_data, b"").expect("touch good Data.db");
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&StatisticsMetadata::new(), None)
+            .expect("write valid Statistics.db");
+        assert!(
+            all_input_stats_readable(&[good_data.clone()]),
+            "a well-formed input with a valid Statistics.db must be readable"
+        );
+
+        // Missing Statistics.db (roborev's primary scenario): the paired
+        // Statistics.db is simply absent. Must fail closed.
+        let missing_data = tmp.path().join("nb-2-big-Data.db");
+        std::fs::write(&missing_data, b"").expect("touch missing-stats Data.db");
+        // (deliberately write NO nb-2-big-Statistics.db)
+        assert!(
+            !all_input_stats_readable(&[missing_data.clone()]),
+            "an input whose Statistics.db is missing must NOT be provably deletion-free"
+        );
+
+        // Top-level-unparseable Statistics.db: too short to even carry the TOC
+        // count/CRC header, so `parse_statistics_with_fallback` errors. Must fail
+        // closed (do not infer "no deletions" from an undecodable component).
+        let corrupt_data = tmp.path().join("nb-3-big-Data.db");
+        std::fs::write(&corrupt_data, b"").expect("touch corrupt-stats Data.db");
+        std::fs::write(tmp.path().join("nb-3-big-Statistics.db"), b"\x00\x00")
+            .expect("write truncated Statistics.db");
+        assert!(
+            !all_input_stats_readable(&[corrupt_data.clone()]),
+            "an input whose Statistics.db is unparseable at the top level must fail closed"
+        );
+
+        // MIXED: one readable input + one missing-stats input. A single unreadable
+        // input taints the whole merge — the guard must fail closed so the direct
+        // path is never taken when any input's deletion metadata is unknown.
+        assert!(
+            !all_input_stats_readable(&[good_data, missing_data, corrupt_data]),
+            "any single unreadable input must force the whole merge to fail closed"
         );
     }
 

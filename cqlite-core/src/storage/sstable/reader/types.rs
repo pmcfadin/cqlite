@@ -409,17 +409,6 @@ pub struct SSTableReader {
     ///
     /// [`ChunkKey::sstable`]: crate::storage::cache::ChunkKey::sstable
     pub(crate) chunk_cache_id: u64,
-    /// Lazily-computed, ascending-sorted list of every partition's UNCOMPRESSED
-    /// `Data.db` start offset, enumerated authoritatively from the BTI
-    /// `Partitions.db` trie (issue #953 / #951).
-    ///
-    /// `None` until the first within-SSTable seek requests a successor offset;
-    /// computed once via [`SSTableReader::bti_partition_offsets`] (a full trie DFS
-    /// resolving WIDE-partition `RowsOffset`s through `Rows.db`) and cached so the
-    /// successor lookup is an O(log n) binary search per seek, not an O(n) DFS.
-    /// Only ever populated for BTI readers; BIG readers use the sorted `Index.db`
-    /// entries directly.
-    pub(crate) bti_partition_offsets: std::sync::OnceLock<Vec<u64>>,
     /// Single-slot same-key memo of the most recent BTI partition resolution
     /// (issue #1574, audit C3). A single-candidate `WHERE pk = ?` point read
     /// descends the `Partitions.db` trie twice — once for the candidate prune
@@ -437,12 +426,20 @@ pub struct SSTableReader {
     /// location the index/trie descent produces, so a repeated hot point read can
     /// return the location without re-probing `Index.db` (BIG,
     /// `lookup_partition_with_index`) or re-descending the `Partitions.db` trie
-    /// (BTI, `lookup_partition_via_bti_trie`, `TRIE_WALKS`). Per-reader (not shared):
-    /// a location is meaningful only within this SSTable's offset domain, so the
-    /// cache dies with the reader on remove/reload — the audit's immutable-SSTable
-    /// invalidation rule, trivially satisfied. Positive-only (absent keys are never
-    /// stored, so a hit can never be fabricated). Built honoring
-    /// `config.memory.block_cache.enabled` (the B2 read-cache toggle): a disabled
-    /// cache is a genuine no-op so the point-read path bypasses it.
-    pub(crate) key_offset_cache: Arc<crate::storage::cache::KeyOffsetCache>,
+    /// (BTI, `lookup_partition_via_bti_trie`, `TRIE_WALKS`). Issue #2059: a shared
+    /// handle to the PROCESS-GLOBAL byte-bounded cache (or a per-reader
+    /// [`disabled`](crate::storage::cache::GlobalKeyOffsetCache::disabled) no-op
+    /// when `block_cache.enabled == false`), keyed on
+    /// `(generation_identity, raw key)` so aggregate resident memory is bounded by
+    /// ONE global cap regardless of open-reader count. Positive-only (absent keys
+    /// are never stored, so a hit can never be fabricated).
+    pub(crate) key_offset_cache: Arc<crate::storage::cache::GlobalKeyOffsetCache>,
+    /// This reader's authoritative inode-stable generation identity
+    /// (device+inode+size+generation, #2345/#2059) — the namespacing half of every
+    /// global key-cache entry. Computed ONCE at open and IMMUTABLE thereafter, so it
+    /// stays stable across a #2383 rebind-by-inode (a path swap over a byte-identical
+    /// generation), which is exactly why cached entries survive a rebind. `None` when
+    /// the `Data.db` could not be `stat`ed at open (the cache is then bypassed rather
+    /// than fabricating an identity — no-heuristics #28).
+    pub(crate) generation_identity: Option<crate::storage::cache::GenerationIdentity>,
 }

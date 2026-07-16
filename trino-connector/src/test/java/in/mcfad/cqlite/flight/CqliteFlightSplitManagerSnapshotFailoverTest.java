@@ -76,9 +76,14 @@ class CqliteFlightSplitManagerSnapshotFailoverTest {
     private static List<CqliteFlightSplit> planSnapshotModeSplits(
             TokenRangeReplicasResponse resp, SnapshotManager snapshots) {
         Set<String> primaryHosts = CqliteFlightSplitManager.distinctReplicaHosts(resp, "dc1");
-        Optional<String> snapshot = snapshots.snapshotFor("q1", "ks", "t", primaryHosts);
-        Set<String> availableHosts = snapshots.availableHosts(
-                "q1", "ks", "t", CqliteFlightSplitManager.allReplicaHosts(resp, "dc1"));
+        // Resolve the window ONCE and thread it into availableHosts, mirroring the double-resolve
+        // race fix in getSplits (issue #2356 roborev).
+        Optional<SnapshotManager.Window> window = snapshots.resolveSnapshot("ks", "t", primaryHosts);
+        Optional<String> snapshot = window.map(SnapshotManager.Window::name);
+        Set<String> availableHosts = window.isPresent()
+                ? snapshots.availableHosts(
+                        window.get(), "ks", "t", CqliteFlightSplitManager.allReplicaHosts(resp, "dc1"))
+                : Set.of();
         return CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815, snapshot, availableHosts);
     }
 

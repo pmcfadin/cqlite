@@ -504,6 +504,15 @@ mod tests {
                 Error::UnsupportedQuery(_) => {
                     assert_eq!(err.category(), ErrorCategory::Query);
                 }
+                // Issue #1918: read-path forcing knob errors. `InvalidReadPath`
+                // is Configuration-category; the fail-closed `point` error is
+                // Query-category. Both flow through `category()` like the rest.
+                Error::InvalidReadPath { .. } => {
+                    assert_eq!(err.category(), ErrorCategory::Configuration);
+                }
+                Error::ForcedReadPathUnavailable { .. } => {
+                    assert_eq!(err.category(), ErrorCategory::Query);
+                }
                 Error::CqlParse(_) => {
                     // CqlParse is Query category in cqlite-core
                     assert_eq!(err.category(), ErrorCategory::Query);

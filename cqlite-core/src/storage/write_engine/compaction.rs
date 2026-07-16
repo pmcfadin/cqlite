@@ -278,6 +278,24 @@ impl WriteEngine {
         // The output baseline must be ≤ all per-partition values from all inputs.
         let (baseline_min_ts, mut baseline_min_ldt, baseline_min_ttl) =
             merge::compute_baseline_min(&input_paths);
+        // Issue #2299: capture the raw pre-floor LDT baseline. `i32::MAX` is
+        // Cassandra's `NO_DELETION_TIME` sentinel; when it survives the min over
+        // EVERY input's Statistics.db, no input carries ANY deletion (partition/
+        // row/cell/range tombstone), so the merged output has no range-tombstone
+        // markers to interleave — the write side can stream rows directly instead
+        // of buffering the whole partition (see `ActiveMerge::stream_rows_directly`).
+        // Read BEFORE the expiry floor below lowers `baseline_min_ldt`.
+        //
+        // FAIL CLOSED (roborev job 1723, #2299): `compute_baseline_min` fails OPEN
+        // — an input whose `Statistics.db` is missing or top-level-unparseable is
+        // silently skipped and never lowers `baseline_min_ldt`, so a skipped
+        // tombstone-bearing input would leave the sentinel intact and wrongly
+        // select direct-streaming (dropping its tombstones → data resurrection).
+        // `all_input_stats_readable` refuses to prove "no deletions" unless EVERY
+        // input's authoritative deletion metadata was actually observed; otherwise
+        // we take the always-correct buffered path.
+        let no_deletions_in_any_input =
+            baseline_min_ldt == i32::MAX && merge::all_input_stats_readable(&input_paths);
         // Issue #1537: unlike `compact_sstables_with_registry` — whose
         // `now_secs: Option<i64>` parameter can be `None` (expiry disabled), so it
         // gates the floor application on `now_secs.is_some()` — this WriteEngine
@@ -312,6 +330,9 @@ impl WriteEngine {
             dropped_whole,
             // Stage 4 (#1668): no partition is mid-drain when a merge starts.
             pending_partition: None,
+            // Issue #2299: stream rows straight to the writer session (no
+            // whole-partition buffer) when no input carries any deletion.
+            stream_rows_directly: no_deletions_in_any_input,
         });
 
         Ok(())

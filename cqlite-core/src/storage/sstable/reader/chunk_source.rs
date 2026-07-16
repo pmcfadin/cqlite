@@ -185,8 +185,9 @@ impl<'a> ChunkSource<'a> {
 
     /// Decompress-only helper for the BIG reverse path: decompress without caching.
     ///
-    /// Preserves the current uncached behavior of `pull_reverse_chunk` — no B1 cache
-    /// insertion, no DECOMPRESS_CALLS counter (separate work_counters::add_chunk_decompressed).
+    /// Preserves the uncached behavior of the BIG reverse/seek window path
+    /// (`decompress_partition_window` via `block_io::read_compressed_chunk_at`) — no B1
+    /// cache insertion, no DECOMPRESS_CALLS counter (separate work_counters::add_chunk_decompressed).
     /// This exists ONLY to consolidate the `Compression::decompress` call site into this
     /// module while changing zero runtime behavior on the reverse path.
     pub(crate) fn decompress_only(

@@ -81,6 +81,25 @@ rejected with `mergeStateStatus: BLOCKED`), so **there is no bypass**. A red tha
 `gh run rerun --failed` — never an admin override. This is load-bearing: if branch-protection settings
 ever regress (contexts emptied, `enforce_admins` disabled), this doctrine governs catching it.
 
+### Closer merge protocol (#2456)
+
+The `flow-closer` certifies a **specific SHA** — the tree the full gate of record and the final
+roborev pass actually ran on. Three mechanical rules keep the merge honest:
+
+- **Pre-merge SHA assertion (#2456, hard precondition).** Immediately before `gh pr merge`, the closer
+  does `git push`, then asserts `gh pr view <N> --json headRefOid` **equals the locally-certified
+  tip** — and **refuses to merge on mismatch**. Motivated by the 2026-07-14 stale-merge escape on
+  #2299/PR #2421: the closer certified a rebased-and-fixed tip locally but never pushed it, so
+  `gh pr merge` squashed the PR's *stale* pre-fix head and transiently landed a known data-loss
+  blocker on `main` (remediated by PR #2455). The GitHub required check re-runs on push but cannot
+  catch a "merge of an old green head" — the SHA assertion is the real guard.
+- **Unique gate-summary paths.** Each gate writes its `AGENT_GATE_SUMMARY_FILE` to a `mktemp`-unique
+  path (e.g. `$(mktemp /tmp/gate-<issue>-XXXXXX.txt)`) — shared `/tmp` names get contended under
+  multi-lane load, so one lane's summary can clobber or be misread as another's.
+- **Single full gate per machine.** The lead enforces one full gate at a time on a box; the closer
+  `pgrep`-checks for a running gate before launching its own so concurrent gates never corrupt a
+  shared `target/`.
+
 ## The specialist roster
 
 | Role | Agent / tool |
@@ -293,7 +312,14 @@ The pipeline measures itself so improvement is data-driven, not anecdotal — **
   timestamps (issue/PR open + merge + close → cycle time and coarse phase durations) plus run-observed
   counters — claim collisions, rebase/conflict events, agent-gate pass/fail + run count, roborev findings,
   and rework. A counter that was not observed is an **error**, never a fabricated `0` (no-heuristics
-  mandate). `delivery-telemetry.py lint` schema-validates every line.
+  mandate). `delivery-telemetry.py lint` schema-validates every line. **The stamp lands via a
+  `telemetry-<N>` PR-in-worktree, not a direct push** — `main` blocks direct pushes (PR required for every
+  commit, `enforce_admins=true`). `flow-finalize` branches a throwaway worktree off `origin/main`, appends
+  the record (note `record` writes to the script's repo ledger, not `$PWD` — verify it lands in the
+  worktree and leave root clean), and opens a telemetry-only PR that merges on its own green `required`
+  check. The ledger is a hot append-only file: resolve any rebase conflict by **keeping all lines**, never
+  dropping a peer's record. Never `git checkout` in the shared root to do this — a closer that switched
+  root onto a telemetry branch and died stranded it off `main` and broke every concurrent session.
 - **Diagnose.** On a cadence (per-epic or weekly) the manager runs `delivery-telemetry.py retro`, which
   ranks the recorded failure categories by a **documented weighted tally** (`Σ count × weight` — a
   deterministic policy table, not an inferred or learned model) and reports the single highest-cost

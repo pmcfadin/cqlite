@@ -634,6 +634,7 @@ impl Database {
         memory_stats.key_cache_hits = key_cache.hits;
         memory_stats.key_cache_misses = key_cache.misses;
         memory_stats.key_cache_evictions = key_cache.evictions;
+        memory_stats.key_cache_invalidations = key_cache.invalidations;
         memory_stats.key_cache_resident_bytes = key_cache.resident_bytes;
         memory_stats.key_cache_capacity_bytes = key_cache.capacity_bytes;
 

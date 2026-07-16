@@ -180,22 +180,22 @@ impl V5CompressedLegacyParser {
         let (mut row_header, row_size) =
             self.parse_row_metadata(data, offset, row_flags, extended_flags)?;
 
-        // CRITICAL VALIDATION: row_size must be reasonable
-        //
-        // In V5CompressedLegacy format, row_size should never exceed the block size (typically 16KB).
-        // If row_size is unreasonably large, it indicates either:
-        // 1. Partition tombstone or deletion marker (no actual row data)
-        // 2. Format parsing error (landed at wrong offset)
-        // 3. Corrupted data
-        //
-        // In all cases, we should skip this partition rather than panic.
-        const MAX_REASONABLE_ROW_SIZE: u64 = 1_000_000; // 1MB max (very generous)
-        if row_size > MAX_REASONABLE_ROW_SIZE {
+        // STRUCTURAL BOUND on row_size — the AUTHORITATIVE invariant, not a guess
+        // (no-heuristics, #28 / #2436). The former arbitrary `MAX_REASONABLE_ROW_SIZE
+        // = 1_000_000` cap made the driver fold its `Err` into a `None` and SILENTLY
+        // DROP every legit >1 MB single-cell `text`/`blob` row → `Ok(0 rows)` for a
+        // genuinely-written partition (#2436); a row body has no 1 MB limit. `data`
+        // is the fully-materialised parse unit, so a row body cannot claim more bytes
+        // than remain after its `row_size` VInt (overflow-safe vs `offset + row_size`).
+        // RETURNS `Err` on genuine truncation at the parser's OWN return value; the
+        // driver may still swallow that `Err` into a `None` on the final chunk (#2481).
+        let row_body_start = row_metadata_offset + row_header.row_size_vint_len;
+        let available = data.len().saturating_sub(row_body_start) as u64;
+        if row_size > available {
             return Err(Error::corruption(format!(
-                "V5CompressedLegacy: Unreasonably large row_size={} at offset {} (max: {}). Likely partition tombstone or format error.",
-                row_size,
-                offset,
-                MAX_REASONABLE_ROW_SIZE
+                "V5CompressedLegacy: row_size={} at offset {} exceeds available data \
+                 ({} bytes remain after the row_size VInt) — truncated or corrupt row",
+                row_size, offset, available
             )));
         }
 

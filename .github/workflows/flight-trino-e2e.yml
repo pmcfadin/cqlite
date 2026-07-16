@@ -20,11 +20,16 @@ on:
       - '.github/workflows/flight-trino-e2e.yml'
   pull_request:
     branches: [ main ]
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Targeted path filter (#2358): the docker-compose E2E runs automatically on
+    # PRs touching the Flight/Trino integration surface or the core storage
+    # read path that feeds it — the exact surface whose regression (#2352,
+    # warm handles #2310) was structurally uncatchable pre-merge. Kept narrow so
+    # unrelated PRs (docs, other core modules) never spin up the Docker stack.
     paths:
       - 'cqlite-flight/**'
-      - 'cqlite-core/**'
       - 'trino-connector/**'
+      - 'cqlite-core/src/storage/**'
       - '.github/workflows/flight-trino-e2e.yml'
   workflow_dispatch:
 
@@ -39,13 +44,6 @@ jobs:
   tier-summary:
     name: E2E tier summary
     runs-on: ubuntu-latest
-    env:
-      RUN_FULL: >-
-        ${{
-          github.event_name != 'pull_request' ||
-          contains(github.event.pull_request.labels.*.name, 'ci:flight-full') ||
-          contains(github.event.pull_request.labels.*.name, 'ci:trino-full')
-        }}
     steps:
       - name: Write CI tier summary
         run: |
@@ -53,21 +51,20 @@ jobs:
             echo "## Flight ↔ Trino E2E tier"
             echo ""
             echo "- Docker compose E2E is a full-tier workflow."
-            echo "- Ordinary PRs skip the Docker stack by default."
-            echo "- PRs can opt in with \`ci:flight-full\` or \`ci:trino-full\`."
+            echo "- On PRs it runs automatically when the diff touches the integration surface:"
+            echo "  \`cqlite-flight/**\`, \`trino-connector/**\`, or \`cqlite-core/src/storage/**\` (#2358)."
+            echo "- Unrelated PRs (docs, other core modules) do not trigger the Docker stack."
             echo "- Full E2E also runs on push to main, nightly schedule, workflow_dispatch, and release publication."
-            echo "- Current full-tier decision: ${RUN_FULL}."
+            echo "- Need it on a PR outside the path filter? Trigger it manually via workflow_dispatch."
           } >> "$GITHUB_STEP_SUMMARY"
 
   e2e:
     name: docker-compose integration
     needs: tier-summary
-    if: >-
-      ${{
-        github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'ci:flight-full') ||
-        contains(github.event.pull_request.labels.*.name, 'ci:trino-full')
-      }}
+    # No opt-in gate: any event that reaches this workflow warrants the E2E.
+    # On pull_request the on.paths filter above already restricts triggering to
+    # the integration surface, so the job runs as a required-visible check for
+    # exactly those PRs (#2358).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

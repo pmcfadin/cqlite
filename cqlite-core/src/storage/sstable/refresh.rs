@@ -326,6 +326,25 @@ impl SSTableManager {
             )
             .collect();
 
+        // Invalidate the process-global key cache (issue #2059 §C) for every
+        // generation being removed from disk (compaction / drop), so its cached
+        // partition locations are reclaimed promptly on the distinct `invalidations`
+        // counter. Deduped by `Arc` pointer so a reader reachable via both maps is
+        // invalidated once. Correctness against a stale hit is ALSO guaranteed by the
+        // cache's fail-closed identity match (no surviving reader holds the removed
+        // identity), but this reclaims the memory and records the removal.
+        {
+            let mut seen: HashSet<*const reader::SSTableReader> = HashSet::new();
+            for r in readers.values().chain(table_readers.values().flatten()) {
+                if discovered_canon.contains(&canon_of(&r.file_path())) {
+                    continue; // still present on disk — not removed
+                }
+                if seen.insert(Arc::as_ptr(r)) {
+                    r.invalidate_key_cache_entries();
+                }
+            }
+        }
+
         readers.retain(|_id, r| discovered_canon.contains(&canon_of(&r.file_path())));
         for list in table_readers.values_mut() {
             list.retain(|r| discovered_canon.contains(&canon_of(&r.file_path())));

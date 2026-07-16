@@ -60,6 +60,8 @@ use crate::storage::sstable::version_gate::VersionGates;
 
 /// Cassandra `MetadataType.STATS` ordinal (MetadataType.java).
 const METADATA_TYPE_STATS: u32 = 2;
+/// Cassandra `MetadataType.HEADER` ordinal (SerializationHeader; MetadataType.java).
+const METADATA_TYPE_HEADER: u32 = 3;
 
 /// A STATS repair field that may either have been decoded from real bytes
 /// (`Decoded`) or is honestly reported as not-yet-decoded (`Unparsed`).
@@ -199,23 +201,118 @@ struct StatsComponentBounds {
 ///     invalid (offset past EOF, inverted, or zero-length) — fail closed so a
 ///     corrupt `Statistics.db` is never silently reported as unrepaired.
 fn stats_component_bounds(input: &[u8]) -> Result<Option<StatsComponentBounds>> {
+    parse_statistics_toc(input).stats_bounds()
+}
+
+/// The `Statistics.db` Table-of-Contents parsed ONCE (issue #2148): the resolved
+/// HEADER (SerializationHeader) offset and the STATS component `[start, end)`
+/// bounds, both extracted in a single forward walk.
+///
+/// Before #2148 the metadata stack re-walked the same on-disk TOC **three times**
+/// per open — once for the HEADER offset in
+/// [`crate::parser::enhanced_statistics_parser`], then once each inside
+/// [`read_table_counts`] and [`parse_stats_extras`]. Parsing the TOC once and
+/// threading this struct to those consumers (`*_with_toc`) eliminates the two
+/// redundant walks (`parser::toc_walk_metrics` drops from 3 → 1 per parse).
+/// Crate-private (issue #2148 blocker): this reuse type has no external consumers
+/// (only the in-crate `enhanced_statistics_parser`), and its `*_with_toc` consumers
+/// slice `input` by bounds carried in the TOC. Keeping it `pub(crate)` guarantees a
+/// `StatisticsToc` parsed from one buffer can never be paired with a different
+/// (smaller) buffer at a public boundary, which would index out of range.
+#[derive(Debug, Clone)]
+pub(crate) struct StatisticsToc {
+    /// Offset of the HEADER (SerializationHeader) component, or `None` when the
+    /// TOC has no HEADER entry OR is too malformed to locate one. Resolved
+    /// INDEPENDENTLY of the STATS bounds (issue #2148): a HEADER entry found before
+    /// an invalid STATS byte-range is still returned here, so EncodingStats decodes
+    /// authoritatively from it even while [`Self::stats_bounds`] fails closed. This
+    /// preserves the pre-#2148 `parse_statistics_toc_for_header_offset` semantics,
+    /// whose header walk never depended on any STATS-range check.
+    header_offset: Option<usize>,
+    /// STATS component `[start, end)` bounds. `Ok(None)` = a well-formed TOC that
+    /// carries no STATS component; `Err(msg)` = a malformed/truncated TOC or an
+    /// invalid STATS range (fail-closed). The corruption *message* is stored (not
+    /// `Error`, which is not `Clone`) so BOTH the row-count and stats-extras
+    /// consumers can each rebuild the same `Error::Corruption` from one shared
+    /// parse.
+    stats_bounds: std::result::Result<Option<StatsComponentBounds>, String>,
+}
+
+impl StatisticsToc {
+    /// The resolved HEADER (SerializationHeader) component offset (lenient `None`).
+    pub(crate) fn header_offset(&self) -> Option<usize> {
+        self.header_offset
+    }
+
+    /// The STATS component bounds as a strict [`Result`], reconstructing the
+    /// fail-closed `Error::Corruption` for a malformed TOC / invalid range so
+    /// consumers see identical error semantics to the pre-#2148 per-consumer walk.
+    fn stats_bounds(&self) -> Result<Option<StatsComponentBounds>> {
+        match &self.stats_bounds {
+            Ok(v) => Ok(*v),
+            Err(msg) => Err(Error::Corruption(msg.clone())),
+        }
+    }
+}
+
+/// Parse the `Statistics.db` TOC ONCE (issue #2148), resolving both the HEADER
+/// offset and the STATS component bounds in a single pass.
+///
+/// This is the single TOC-walk site the `parser::toc_walk_metrics` counter
+/// records — consumers that accept a [`StatisticsToc`] (`*_with_toc`) add no
+/// further walk. A malformed/truncated TOC yields `header_offset = None` (lenient)
+/// and a fail-closed STATS-bounds error (surfaced when a consumer reads it).
+pub(crate) fn parse_statistics_toc(input: &[u8]) -> StatisticsToc {
     // Count this TOC walk (issue #1658 A5 bench instrumentation — no decode effect).
     crate::parser::toc_walk_metrics::record_toc_walk();
-    // A malformed or truncated TOC must FAIL CLOSED rather than be silently
-    // reported as "no STATS component" (which would misreport corrupt repair
-    // metadata as the unrepaired default). `Ok(None)` is reserved exclusively
-    // for a well-formed TOC that genuinely carries no STATS entry (below).
+    // The walk resolves the HEADER offset and the STATS bounds INDEPENDENTLY: a
+    // corrupt STATS byte-range must never nuke a HEADER that was already located
+    // (issue #2148 roborev/reviewer blocker) — a valid HEADER still decodes
+    // EncodingStats authoritatively even when the STATS range fails closed.
+    let (header_offset, stats_bounds) = walk_statistics_toc(input);
+    StatisticsToc {
+        header_offset,
+        stats_bounds,
+    }
+}
+
+/// Single forward walk over the `Statistics.db` TOC resolving the HEADER offset
+/// and the STATS `[start, end)` bounds together. Pure (no counter side effect);
+/// the public [`parse_statistics_toc`] records the walk and wraps the outcome.
+///
+/// The two outputs are resolved INDEPENDENTLY, exactly as the pre-#2148 separate
+/// walks (`parse_statistics_toc_for_header_offset` for the header, and
+/// `stats_component_bounds` for STATS) were: the returned `header_offset` is the
+/// first present HEADER entry (lenient — `None` when the TOC is malformed/truncated
+/// or carries no HEADER). The STATS-bounds `Result` FAILS CLOSED (`Err(msg)`) on a
+/// malformed/truncated TOC or an invalid STATS range rather than being silently
+/// reported as "no STATS component"; `Ok(None)` is reserved exclusively for a
+/// well-formed TOC that genuinely carries no STATS entry. Crucially, a corrupt
+/// STATS byte-range does NOT discard an already-resolved HEADER offset — a valid
+/// HEADER still decodes EncodingStats authoritatively (issue #2148 blocker).
+fn walk_statistics_toc(
+    input: &[u8],
+) -> (
+    Option<usize>,
+    std::result::Result<Option<StatsComponentBounds>, String>,
+) {
     if input.len() < 8 {
-        return Err(Error::Corruption(format!(
-            "Statistics.db too short for a metadata TOC header: {} bytes",
-            input.len()
-        )));
+        return (
+            None,
+            Err(format!(
+                "Statistics.db too short for a metadata TOC header: {} bytes",
+                input.len()
+            )),
+        );
     }
     let num_components = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
     if num_components == 0 || num_components > 100 {
-        return Err(Error::Corruption(format!(
-            "Statistics.db TOC component count out of range: {num_components}"
-        )));
+        return (
+            None,
+            Err(format!(
+                "Statistics.db TOC component count out of range: {num_components}"
+            )),
+        );
     }
     let toc_start = 8usize;
     let entry_size = 8usize;
@@ -225,19 +322,26 @@ fn stats_component_bounds(input: &[u8]) -> Result<Option<StatsComponentBounds>> 
     {
         Some(n) => n,
         None => {
-            return Err(Error::Corruption(format!(
-                "Statistics.db TOC size overflow for {num_components} components"
-            )))
+            return (
+                None,
+                Err(format!(
+                    "Statistics.db TOC size overflow for {num_components} components"
+                )),
+            )
         }
     };
     if input.len() < toc_size {
-        return Err(Error::Corruption(format!(
-            "Statistics.db TOC truncated: need {toc_size} bytes, have {}",
-            input.len()
-        )));
+        return (
+            None,
+            Err(format!(
+                "Statistics.db TOC truncated: need {toc_size} bytes, have {}",
+                input.len()
+            )),
+        );
     }
 
     let mut stats_off: Option<usize> = None;
+    let mut header_off: Option<usize> = None;
     let mut offsets: Vec<usize> = Vec::with_capacity(num_components as usize);
     for i in 0..num_components as usize {
         let entry = match i
@@ -246,9 +350,14 @@ fn stats_component_bounds(input: &[u8]) -> Result<Option<StatsComponentBounds>> 
         {
             Some(e) => e,
             None => {
-                return Err(Error::Corruption(format!(
-                    "Statistics.db TOC entry offset overflow at index {i}"
-                )))
+                // TOC index arithmetic overflow: the header is not reliably
+                // resolvable, so surface the corruption on BOTH channels.
+                return (
+                    header_off,
+                    Err(format!(
+                        "Statistics.db TOC entry offset overflow at index {i}"
+                    )),
+                );
             }
         };
         let ty = u32::from_be_bytes([
@@ -265,16 +374,20 @@ fn stats_component_bounds(input: &[u8]) -> Result<Option<StatsComponentBounds>> 
         ]) as usize;
         offsets.push(off);
         if ty == METADATA_TYPE_STATS {
+            // Last-wins, matching the historical `stats_component_bounds` walk.
             stats_off = Some(off);
+        } else if ty == METADATA_TYPE_HEADER && header_off.is_none() {
+            // First-wins, matching the historical
+            // `parse_statistics_toc_for_header_offset` early-return.
+            header_off = Some(off);
         }
     }
 
     // No STATS component in the TOC → nothing to decode (not an error).
     let Some(start) = stats_off else {
-        return Ok(None);
+        return (header_off, Ok(None));
     };
 
-    // The STATS body ends where the *next* component (or the file) begins. For
     // The STATS body ends 4 bytes before the *next* component begins: every
     // supported Cassandra 5.0 format (`nb`/`oa`/`da`, all `>= na`) writes a
     // per-component CRC32 between each component body and the next component's
@@ -291,18 +404,22 @@ fn stats_component_bounds(input: &[u8]) -> Result<Option<StatsComponentBounds>> 
     let end = next_boundary.saturating_sub(METADATA_COMPONENT_CRC_LEN);
 
     // A STATS entry exists but its derived range is invalid (offset past EOF,
-    // inverted, or empty): this is genuine corruption — fail closed rather than
-    // silently reporting the unrepaired default or building a cursor over
-    // garbage.
+    // inverted, or empty): genuine corruption — fail closed on the STATS channel
+    // rather than silently reporting the unrepaired default or building a cursor
+    // over garbage. The HEADER offset stays resolved and is returned regardless
+    // (issue #2148 blocker: a corrupt STATS range must not nuke a valid HEADER).
     if start >= end || end > input.len() {
-        return Err(Error::Corruption(format!(
-            "STATS component range invalid: start {start}, derived end {end}, \
-             Statistics.db {} bytes",
-            input.len()
-        )));
+        return (
+            header_off,
+            Err(format!(
+                "STATS component range invalid: start {start}, derived end {end}, \
+                 Statistics.db {} bytes",
+                input.len()
+            )),
+        );
     }
 
-    Ok(Some(StatsComponentBounds { start, end }))
+    (header_off, Ok(Some(StatsComponentBounds { start, end })))
 }
 
 /// A bounded cursor over the STATS component bytes that fails closed (explicit
@@ -824,9 +941,28 @@ pub struct TableCounts {
 /// `Statistics.db` with NO STATS component yields all-zero counts
 /// (`partition_count == 0`, `total_rows == None`).
 pub fn read_table_counts(input: &[u8], gates: Option<&VersionGates>) -> Result<TableCounts> {
+    read_table_counts_from_bounds(input, stats_component_bounds(input)?, gates)
+}
+
+/// [`read_table_counts`] over a `Statistics.db` TOC that was already parsed once
+/// (issue #2148): reuses the STATS bounds from `toc` instead of re-walking the
+/// TOC, so a single metadata parse walks the TOC exactly once.
+pub(crate) fn read_table_counts_with_toc(
+    input: &[u8],
+    toc: &StatisticsToc,
+    gates: Option<&VersionGates>,
+) -> Result<TableCounts> {
+    read_table_counts_from_bounds(input, toc.stats_bounds()?, gates)
+}
+
+fn read_table_counts_from_bounds(
+    input: &[u8],
+    bounds: Option<StatsComponentBounds>,
+    gates: Option<&VersionGates>,
+) -> Result<TableCounts> {
     let walk = gates.map(RepairWalkGates::from);
 
-    let Some(bounds) = stats_component_bounds(input)? else {
+    let Some(bounds) = bounds else {
         return Ok(TableCounts {
             partition_count: 0,
             total_rows: None,
@@ -1013,7 +1149,26 @@ impl Default for StatsExtras {
 /// existing placeholders" and MUST NOT propagate it (a `Statistics.db` that
 /// parses today must keep parsing).
 pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<StatsExtras> {
-    let Some(bounds) = stats_component_bounds(input)? else {
+    parse_stats_extras_from_bounds(input, stats_component_bounds(input)?, gates)
+}
+
+/// [`parse_stats_extras`] over a `Statistics.db` TOC that was already parsed once
+/// (issue #2148): reuses the STATS bounds from `toc` instead of re-walking the
+/// TOC, so a single metadata parse walks the TOC exactly once.
+pub(crate) fn parse_stats_extras_with_toc(
+    input: &[u8],
+    toc: &StatisticsToc,
+    gates: Option<&VersionGates>,
+) -> Result<StatsExtras> {
+    parse_stats_extras_from_bounds(input, toc.stats_bounds()?, gates)
+}
+
+fn parse_stats_extras_from_bounds(
+    input: &[u8],
+    bounds: Option<StatsComponentBounds>,
+    gates: Option<&VersionGates>,
+) -> Result<StatsExtras> {
+    let Some(bounds) = bounds else {
         // No STATS component → nothing to decode. Report the canonical
         // "no tombstones" default rather than failing.
         return Ok(StatsExtras::default());
@@ -1962,6 +2117,51 @@ mod tests {
         assert_eq!(
             counts.total_rows, None,
             "no gates → totalRows honestly absent, never guessed"
+        );
+    }
+
+    /// Issue #2148 blocker (roborev + rust-reviewer): a corrupt STATS byte-range
+    /// must NOT discard an already-resolved HEADER offset. The pre-#2148 header
+    /// walk (`parse_statistics_toc_for_header_offset`) was independent of any
+    /// STATS-range check, so a Statistics.db with a VALID HEADER entry but an
+    /// INVALID STATS range still decoded EncodingStats authoritatively from the
+    /// HEADER. The single-pass walk must preserve that: the STATS channel fails
+    /// closed while `header_offset()` still returns the resolved HEADER — otherwise
+    /// EncodingStats silently falls back to the marker search (a different result).
+    #[test]
+    fn invalid_stats_range_preserves_resolved_header_offset() {
+        // 2-component TOC: HEADER (type 3) at a VALID body offset, STATS (type 2)
+        // at an offset PAST EOF (an invalid derived range → fail-closed STATS).
+        let toc_len = 4 + 4 + 2 * 8; // count + marker + 2 entries = 24
+        let header_off = toc_len; // HEADER body starts right after the TOC
+        let stats_off_bad = 10_000usize; // far past the buffer end → invalid range
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&2u32.to_be_bytes()); // 2 components
+        out.extend_from_slice(&0u32.to_be_bytes()); // marker
+                                                    // HEADER first (first-wins) with a valid offset, then the bad STATS entry.
+        for (ty, off) in [
+            (METADATA_TYPE_HEADER, header_off as u32),
+            (METADATA_TYPE_STATS, stats_off_bad as u32),
+        ] {
+            out.extend_from_slice(&ty.to_be_bytes());
+            out.extend_from_slice(&off.to_be_bytes());
+        }
+        debug_assert_eq!(out.len(), header_off);
+        out.extend_from_slice(&[0xABu8; 8]); // HEADER body
+        out.extend_from_slice(&0u32.to_be_bytes()); // trailing CRC
+
+        let toc = parse_statistics_toc(&out);
+        assert_eq!(
+            toc.header_offset(),
+            Some(header_off),
+            "a corrupt STATS range must NOT nuke the already-resolved HEADER offset \
+             (issue #2148): EncodingStats must still decode from the HEADER, not the \
+             marker fallback"
+        );
+        assert!(
+            toc.stats_bounds().is_err(),
+            "the invalid STATS range must STILL fail closed on its own channel"
         );
     }
 

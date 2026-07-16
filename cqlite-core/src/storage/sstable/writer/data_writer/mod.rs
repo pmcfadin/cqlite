@@ -173,6 +173,16 @@ pub struct DataWriter {
     /// and flushed to `sink` at the end, so only one partition is resident.
     /// In memory mode it accumulates the entire Data.db output.
     buffer: Vec<u8>,
+    /// Reusable scratch buffer for one row's serialized body (issue #1673, R2).
+    ///
+    /// Each row's body (timestamp/TTL/deletion/column-bitmap/cells, everything
+    /// after the row_size VInt) is built into this buffer, then appended to
+    /// `buffer`. `build_merged_row_body` / `build_static_row_body` `clear()` it
+    /// at the start of every row — `clear()` retains capacity, so after warmup no
+    /// per-row body allocation occurs (it previously allocated a fresh throwaway
+    /// `Vec` per row). Distinct field from `buffer` so the two can be borrowed
+    /// disjointly (`buffer.extend_from_slice(&row_scratch)`).
+    row_scratch: Vec<u8>,
     /// Streaming sink over the Data.db path (streaming mode only).
     ///
     /// Lazily opened on the first `write_partition` so that the keyspace/table
@@ -305,6 +315,7 @@ impl DataWriter {
     pub fn new(stats: StatisticsMetadata) -> Self {
         Self {
             buffer: Vec::new(),
+            row_scratch: Vec::new(),
             sink: None,
             data_path: None,
             position: 0,
@@ -335,6 +346,7 @@ impl DataWriter {
     pub fn with_sink(stats: StatisticsMetadata, data_path: PathBuf) -> Self {
         Self {
             buffer: Vec::new(),
+            row_scratch: Vec::new(),
             sink: None,
             data_path: Some(data_path),
             position: 0,
@@ -392,6 +404,24 @@ impl DataWriter {
         self.position += self.buffer.len() as u64;
         self.buffer.clear();
         Ok(())
+    }
+
+    /// Flush the current scratch `buffer` to the streaming sink MID-PARTITION
+    /// (issue #2299), advancing `position` and clearing the scratch.
+    ///
+    /// Mechanically identical to [`Self::flush_partition`] (feed the CRC/`CRC.db`
+    /// accumulator in write order, advance `position`, clear `buffer`), but named
+    /// distinctly to document the caller's contract: it is safe to call between
+    /// two whole promoted-index blocks of an IN-PROGRESS partition ONLY because the
+    /// streaming session tracks every partition offset as flush-invariant absolute
+    /// math (`writer.position() - partition_offset`), not as a `buffer`-relative
+    /// index. Calling it mid-BLOCK would be equally correct for the on-disk bytes
+    /// (they are append-only), but the session only calls it at block boundaries so
+    /// its bounded-scratch guarantee is exactly one promoted-index block. No-op in
+    /// in-memory mode (the scratch keeps accumulating, matching `flush_partition`).
+    pub(super) fn flush_buffered_partition_scratch(&mut self) -> Result<()> {
+        // Same body as `flush_partition`: the two differ only in intent/documentation.
+        self.flush_partition()
     }
 
     /// Update the statistics metadata

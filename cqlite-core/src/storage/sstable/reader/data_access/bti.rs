@@ -147,7 +147,7 @@ impl SSTableReader {
         // bounds the end with the authoritative data-section length, or falls back
         // to the safe full-scan path when that length is unknown.
         let end_bound = self
-            .successor_partition_offset(offset)
+            .successor_partition_offset(offset, partition_key)
             .await?
             .map(|e| e as usize);
 

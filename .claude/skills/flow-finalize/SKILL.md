@@ -45,22 +45,31 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
      --gate pass --gate-runs <runs through the first PASS; don't re-run after a pass> \
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
-   # Stamp on MAIN — never on a commandeered root branch. If the root is on main, commit there;
-   # otherwise land the ledger via a throwaway origin/main worktree so it can't go to the wrong branch:
-   if [ "$(git -C ~/projects/cqlite rev-parse --abbrev-ref HEAD)" = "main" ]; then
-     git -C ~/projects/cqlite add docs/reports/delivery-telemetry.jsonl
-     git -C ~/projects/cqlite commit -m "telemetry(#<N>): stamp delivery ledger" && git -C ~/projects/cqlite push
-   else
-     git -C ~/projects/cqlite worktree add /tmp/cqlite-ledger origin/main -q
-     # re-run the `record` command above with its output going to /tmp/cqlite-ledger (cd there first), then:
-     git -C /tmp/cqlite-ledger add docs/reports/delivery-telemetry.jsonl
-     git -C /tmp/cqlite-ledger commit -m "telemetry(#<N>): stamp delivery ledger" && git -C /tmp/cqlite-ledger push origin HEAD:main
-     git -C ~/projects/cqlite worktree remove /tmp/cqlite-ledger
-   fi
+   # Land the ledger via a PR — `main` blocks direct pushes (#2433 branch protection: PR required,
+   # enforce_admins=true). NEVER `git push`/`push origin HEAD:main` (rejected), and NEVER `git checkout`
+   # in the shared root (a closer that switched root to a telemetry branch stranded it off main).
+   # ALWAYS a dedicated telemetry-<N> worktree branched off origin/main:
+   git -C ~/projects/cqlite fetch origin main -q
+   git -C ~/projects/cqlite worktree add /tmp/cqlite-ledger-<N> -b telemetry-<N> origin/main -q
+   cd /tmp/cqlite-ledger-<N>
+   # IMPORTANT: `record` writes to the SCRIPT's repo ledger (the root checkout), NOT $PWD. After running
+   # it, verify the new line landed in THIS worktree's docs/reports/delivery-telemetry.jsonl (move it here
+   # if the tool wrote it to root) and leave the root checkout CLEAN.
+   git add docs/reports/delivery-telemetry.jsonl
+   git commit -m "chore(telemetry): record #<N> delivery (PR #<pr>)"
+   git push -u origin telemetry-<N>
+   gh api repos/pmcfadin/cqlite/pulls -f title="chore(telemetry): record #<N> delivery" \
+     -f head="telemetry-<N>" -f base="main" \
+     -f body="Telemetry-only ledger stamp for #<N> (PR #<pr>). Routed via PR — main blocks direct pushes." --jq '.html_url'
+   cd ~/projects/cqlite && git worktree remove /tmp/cqlite-ledger-<N> --force
+   # The telemetry PR merges once its own `required` check goes green. The ledger is a HOT append-only
+   # file: on a rebase conflict, KEEP ALL lines (main's ledger + your new record) — never drop a peer's.
+   # Do NOT block the code merge on the telemetry PR; if its CI is pending, hand its number back and
+   # merge it centrally when green.
    ```
    `--routing` is required (it is never inferred); `--priority` defaults from the issue's `P?` label
    (pass it to override). `record` refuses a second stamp for the same issue (pass `--allow-duplicate` to
-   override). The live ledger lives on `main` — stamp it on main only (never a commandeered root branch).
+   override). The live ledger lives on `main`, reachable only via a PR (never a direct push).
    Confirm with `python3 scripts/delivery-telemetry.py lint`.
 5. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
    should already have moved the Project item to `Status=Done` (it fires even when you merge from the

@@ -58,7 +58,20 @@ Asserting a value sampled at one instant against a window captured at a differen
 flakes on one-second boundaries.
 
 **Fix:** capture the time window so it covers *all* sampled operations (sample the bounds
-around the whole block, not per-call).
+around the whole block, not per-call). If the assertion is really a *perf* signal, convert it to a
+recorded metric (`eprintln!`) that belongs to the benchmark lane rather than the correctness gate —
+that is how #2369's `collection_benchmarks` wall-clock bounds were retired.
+
+### Process-global work counters under thread-parallel tests
+A test that asserts a **delta** on a process-global counter (an `AtomicU64` incremented deep in the
+read/scan path) flakes under CI's thread-parallel `cargo test` — unrelated concurrent tests bump the
+same counter between the before/after reads. `#[serial(tag)]` only serializes same-tag tests, so an
+untagged sibling still contaminates the delta. Local per-process runners (nextest) never reproduce it.
+
+**Fix (structural):** scope the measurement to the current thread — a `#[cfg(test)]` thread-local
+scope guard (the `StreamWalkScope` pattern, #2428; `index_probes` follow-up #2451) that reads only
+its own thread's increments, contamination-proof by construction. Production builds keep the plain
+atomic. Serial tags on the counter then become redundant.
 
 ### No-heuristics violations
 Inferring a type or behaviour from byte patterns instead of authoritative metadata.
@@ -79,3 +92,18 @@ fresh `git worktree add --detach HEAD`, never the dirty tree.
 2. Fix matches up front rather than waiting for roborev to flag them.
 3. Then run `scripts/agent-gate.sh` and request review as usual — see the
    [gate contract](/cqlite/agents-developing/gate-contract/).
+
+## Running the codex reviewer — override BOTH agent and model
+
+`.roborev.toml` on `main` pins `agent = 'claude-code'` and `review_model = 'opus'`. To run the codex
+backend you must override **both** on the command line:
+
+```bash
+roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait
+```
+
+`--agent codex` **alone** still inherits `review_model = 'opus'` from config, and codex on a ChatGPT
+account rejects `opus` with a hard `400 'opus' model is not supported` — a silent review failure that
+looks like a backend outage rather than a config mismatch. Worktrees inherit `main`'s pinned config, so
+`--model gpt-5.6-sol` (codex's own configured model, from `~/.codex/config.toml`) is the reliable
+override on every checkout.

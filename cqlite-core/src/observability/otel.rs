@@ -202,6 +202,10 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     global::set_meter_provider(meter_provider.clone());
     METRICS_ACTIVE.store(true, Ordering::Relaxed);
 
+    // Eagerly seed the always-on baseline instruments so a fresh scrape of a
+    // just-started server shows them at 0 rather than absent (issue #2288).
+    register_baseline_instruments();
+
     Ok(ObservabilityGuard {
         tracer_provider: Some(tracer_provider),
         meter_provider: Some(meter_provider),
@@ -211,6 +215,21 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
 #[inline]
 pub(crate) fn metrics_active() -> bool {
     METRICS_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Eagerly emit a zero data point for the always-on baseline instruments so they
+/// are visible in a scrape of a freshly-started server, before any real activity
+/// (issue #2288).
+///
+/// `cqlite.errors.total` otherwise registers *lazily* — it appears in a metrics
+/// backend only on its first increment — so "metric name absent from the
+/// backend" was ambiguous between *no errors occurred* and *error counting isn't
+/// wired*. A single `add(0)` builds the instrument and publishes a `0` series so
+/// absence unambiguously means "not wired". The baseline uses an empty attribute
+/// set (no invented `{category, subsystem}` values that would pollute the bounded
+/// taxonomy); real errors add their own labeled series alongside it.
+pub(crate) fn register_baseline_instruments() {
+    instruments().errors_total.add(0, &[]);
 }
 
 #[cfg(feature = "observability-testing")]
@@ -298,6 +317,11 @@ struct Instruments {
     rpc_requests: Counter<u64>,
     rpc_rows: Counter<u64>,
     rpc_bytes: Counter<u64>,
+    warm_cache_hits: Counter<u64>,
+    warm_cache_misses: Counter<u64>,
+    warm_cache_evicts: Counter<u64>,
+    warm_cache_refresh: Counter<u64>,
+    flight_admission_rejected_total: Counter<u64>,
     read_duration: Histogram<f64>,
     query_duration: Histogram<f64>,
     compaction_duration: Histogram<f64>,
@@ -309,6 +333,7 @@ struct Instruments {
     compaction_budget_consumed: Histogram<f64>,
     rpc_duration: Histogram<f64>,
     rpc_phase_duration: Histogram<f64>,
+    flight_admission_wait_seconds: Histogram<f64>,
     sstables_open: Gauge<i64>,
     memtable_size_bytes: Gauge<i64>,
     memtable_rows: Gauge<i64>,
@@ -316,6 +341,15 @@ struct Instruments {
     rpc_in_flight: Gauge<i64>,
     rpc_phase_active: Gauge<i64>,
     merge_producer_threads: Gauge<i64>,
+    flight_admission_limit: Gauge<i64>,
+    flight_admission_in_use: Gauge<i64>,
+    flight_admission_waiting: Gauge<i64>,
+    // Saturation instrumentation (#2419, WS2 of epic #2313).
+    merge_egress_channel_depth: Gauge<i64>,
+    proc_threads: Gauge<i64>,
+    proc_fds: Gauge<i64>,
+    proc_rss_bytes: Gauge<i64>,
+    flight_blocking_tasks_in_use: Gauge<i64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -506,6 +540,31 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::BYTES)
                 .with_description("Record-batch payload bytes streamed to Flight clients.")
                 .build(),
+            warm_cache_hits: m
+                .u64_counter(catalog::WARM_CACHE_HITS)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Flight warm-handle cache hits (#2310).")
+                .build(),
+            warm_cache_misses: m
+                .u64_counter(catalog::WARM_CACHE_MISSES)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Flight warm-handle cache misses (#2310).")
+                .build(),
+            warm_cache_evicts: m
+                .u64_counter(catalog::WARM_CACHE_EVICTS)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Warm generations evicted (LRU / removed on disk) (#2310).")
+                .build(),
+            warm_cache_refresh: m
+                .u64_counter(catalog::WARM_CACHE_REFRESH)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Warm-handle refresh outcomes, keyed by {refresh_outcome} (#2310).")
+                .build(),
+            flight_admission_rejected_total: m
+                .u64_counter(catalog::FLIGHT_ADMISSION_REJECTED_TOTAL)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("do_get requests rejected on admission timeout (#2420).")
+                .build(),
             read_duration: m
                 .f64_histogram(catalog::READ_DURATION)
                 .with_unit(catalog::unit::SECONDS)
@@ -561,6 +620,11 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::SECONDS)
                 .with_description("do_get per-phase duration in seconds (#2162).")
                 .build(),
+            flight_admission_wait_seconds: m
+                .f64_histogram(catalog::FLIGHT_ADMISSION_WAIT_SECONDS)
+                .with_unit(catalog::unit::SECONDS)
+                .with_description("do_get admission acquire wait time in seconds (#2420).")
+                .build(),
             sstables_open: m
                 .i64_gauge(catalog::SSTABLES_OPEN)
                 .with_unit(catalog::unit::SSTABLES)
@@ -595,6 +659,46 @@ fn instruments() -> &'static Instruments {
                 .i64_gauge(catalog::MERGE_PRODUCER_THREADS)
                 .with_unit(catalog::unit::THREADS)
                 .with_description("Live k-way merge producer threads (#2316).")
+                .build(),
+            flight_admission_limit: m
+                .i64_gauge(catalog::FLIGHT_ADMISSION_LIMIT)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Configured do_get admission ceiling K (#2420).")
+                .build(),
+            flight_admission_in_use: m
+                .i64_gauge(catalog::FLIGHT_ADMISSION_IN_USE)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("do_get admission permits currently held (#2420).")
+                .build(),
+            flight_admission_waiting: m
+                .i64_gauge(catalog::FLIGHT_ADMISSION_WAITING)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("do_get requests parked waiting for an admission permit (#2420).")
+                .build(),
+            merge_egress_channel_depth: m
+                .i64_gauge(catalog::MERGE_EGRESS_CHANNEL_DEPTH)
+                .with_unit(catalog::unit::ENTRIES)
+                .with_description("Live occupancy of the bounded merge egress sync_channel (#2419).")
+                .build(),
+            proc_threads: m
+                .i64_gauge(catalog::PROC_THREADS)
+                .with_unit(catalog::unit::THREADS)
+                .with_description("Process OS thread count (/proc/self/task, Linux) (#2419).")
+                .build(),
+            proc_fds: m
+                .i64_gauge(catalog::PROC_FDS)
+                .with_unit(catalog::unit::FDS)
+                .with_description("Process open fd count (/proc/self/fd, Linux) (#2419).")
+                .build(),
+            proc_rss_bytes: m
+                .i64_gauge(catalog::PROC_RSS_BYTES)
+                .with_unit(catalog::unit::BYTES)
+                .with_description("Process resident set size (/proc/self/status VmRSS, Linux) (#2419).")
+                .build(),
+            flight_blocking_tasks_in_use: m
+                .i64_gauge(catalog::FLIGHT_BLOCKING_TASKS_IN_USE)
+                .with_unit(catalog::unit::THREADS)
+                .with_description("Flight spawn_blocking tasks currently outstanding (#2419).")
                 .build(),
         }
     })
@@ -643,6 +747,11 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::RPC_REQUESTS => &i.rpc_requests,
         catalog::RPC_ROWS => &i.rpc_rows,
         catalog::RPC_BYTES => &i.rpc_bytes,
+        catalog::WARM_CACHE_HITS => &i.warm_cache_hits,
+        catalog::WARM_CACHE_MISSES => &i.warm_cache_misses,
+        catalog::WARM_CACHE_EVICTS => &i.warm_cache_evicts,
+        catalog::WARM_CACHE_REFRESH => &i.warm_cache_refresh,
+        catalog::FLIGHT_ADMISSION_REJECTED_TOTAL => &i.flight_admission_rejected_total,
         _ => {
             meter().u64_counter(name).build().add(value, attributes);
             return;
@@ -666,6 +775,7 @@ pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[Key
         catalog::COMPACTION_BUDGET_CONSUMED => &i.compaction_budget_consumed,
         catalog::RPC_DURATION => &i.rpc_duration,
         catalog::RPC_PHASE_DURATION => &i.rpc_phase_duration,
+        catalog::FLIGHT_ADMISSION_WAIT_SECONDS => &i.flight_admission_wait_seconds,
         _ => {
             meter()
                 .f64_histogram(name)
@@ -688,6 +798,14 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
         catalog::RPC_IN_FLIGHT => &i.rpc_in_flight,
         catalog::RPC_PHASE_ACTIVE => &i.rpc_phase_active,
         catalog::MERGE_PRODUCER_THREADS => &i.merge_producer_threads,
+        catalog::FLIGHT_ADMISSION_LIMIT => &i.flight_admission_limit,
+        catalog::FLIGHT_ADMISSION_IN_USE => &i.flight_admission_in_use,
+        catalog::FLIGHT_ADMISSION_WAITING => &i.flight_admission_waiting,
+        catalog::MERGE_EGRESS_CHANNEL_DEPTH => &i.merge_egress_channel_depth,
+        catalog::PROC_THREADS => &i.proc_threads,
+        catalog::PROC_FDS => &i.proc_fds,
+        catalog::PROC_RSS_BYTES => &i.proc_rss_bytes,
+        catalog::FLIGHT_BLOCKING_TASKS_IN_USE => &i.flight_blocking_tasks_in_use,
         _ => {
             meter().i64_gauge(name).build().record(value, attributes);
             return;

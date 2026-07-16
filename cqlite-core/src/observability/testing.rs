@@ -295,6 +295,20 @@ impl CapturedMetrics {
             .unwrap_or(0.0)
     }
 
+    /// Whether the named metric has a data point with a completely EMPTY
+    /// attribute set (i.e. the unlabeled baseline series) whose value equals
+    /// `value` (within `f64::EPSILON`). Distinct from `sum_where(name, &[])`,
+    /// which matches EVERY point vacuously: this requires that an actual
+    /// unlabeled point *exists* and carries the expected value — the pin that a
+    /// zero-valued labeled point (or an absent baseline) must NOT satisfy.
+    pub fn has_point_with_empty_attrs_at(&self, name: &str, value: f64) -> bool {
+        self.find(name).is_some_and(|m| {
+            m.points
+                .iter()
+                .any(|p| p.attributes.is_empty() && (p.value - value).abs() < f64::EPSILON)
+        })
+    }
+
     /// Sum of values for the data points whose attribute set contains ALL of the
     /// given `(key, value)` pairs. Lets a test assert, e.g., that
     /// `cqlite.errors.total{category=…,subsystem=…}` incremented.
@@ -329,6 +343,17 @@ impl MetricsCapture {
         // DELTA temporality this also resets the aggregation window.
         let _ = self.provider.force_flush();
         self.exporter.reset();
+    }
+
+    /// Re-emit the always-on baseline instruments (e.g. `cqlite.errors.total` at
+    /// 0), exactly as production [`crate::observability::init`] does on startup
+    /// (issue #2288). Production uses cumulative temporality so a single seed at
+    /// init is visible in every scrape; this harness uses DELTA temporality, so a
+    /// test that wants to observe the seeded `0` series in its own collect window
+    /// calls this after [`reset`](Self::reset) and before
+    /// [`flush_and_collect`](Self::flush_and_collect).
+    pub fn seed_baseline(&self) {
+        super::otel::register_baseline_instruments();
     }
 
     /// Force the meter provider to collect + export, then return a snapshot.
@@ -372,6 +397,10 @@ pub fn metrics_capture() -> MetricsCapture {
             let provider = SdkMeterProvider::builder().with_reader(reader).build();
             opentelemetry::global::set_meter_provider(provider.clone());
             super::otel::set_metrics_active_for_testing();
+            // Mirror production `otel::init` (issue #2288): seed the always-on
+            // baseline instruments (e.g. `cqlite.errors.total` at 0) so a scrape
+            // of a freshly-started server sees them present, not absent.
+            super::otel::register_baseline_instruments();
             MetricsCapture { exporter, provider }
         })
         .clone()

@@ -17,7 +17,7 @@
 //!   3. `where_clause_literal_is_never_logged` — run a `WHERE name = <sentinel>`
 //!      scan with a capturing `tracing` subscriber at the CLI-default (and stricter)
 //!      level; the captured records must not contain the sentinel. Pre-fix, the
-//!      `Executing SSTableScan … predicates={:?}` INFO log AND the
+//!      `Executing SSTableScan … predicates={:?}` DEBUG log AND the
 //!      `Database::execute('{sql}')` DEBUG log both leaked it.
 
 /// A recognizable, otherwise-nonexistent value we plant in the WHERE clause. If
@@ -221,22 +221,38 @@ fn lib_execute_does_not_log_raw_sql() {
 }
 
 /// True if `arg` (a diagnostic macro's full argument text) formats a predicate
-/// VALUE rather than its SHAPE. Two value-bearing patterns are rejected. First, a
-/// debug format spec (`{:?}`, `{:#?}`, `{predicates:?}`) whose text also names the
-/// `predicate`/`filter` — i.e. `Debug`-dumping the predicate list, which prints
-/// the underlying `Value` literals (the exact #1694 leak `predicates={:?}`).
-/// Second, a field access of `SSTablePredicate.values` (`p.values`, `.values,`) —
-/// the `Vec<Value>` literal store — as opposed to a `.values()` iterator method
-/// (allowed: shapes can be iterated). Shape-only references (`predicates.len()`,
-/// `p.column`, column names, counts) are NOT flagged.
+/// VALUE rather than its SHAPE. Value-bearing patterns rejected:
+///
+/// 1. A debug format spec (`{:?}`, `{:#?}`, `{predicates:?}`) whose text also
+///    names the `predicate`/`filter` — i.e. `Debug`-dumping the predicate list,
+///    which prints the underlying `Value` literals (the #1694 leak
+///    `predicates={:?}`).
+/// 2. A `tracing` structured-field dump sigil — `?value` (Debug) or `%value`
+///    (Display) — on a predicate/filter/`.values` token, e.g.
+///    `tracing::info!(filter = ?predicate, …)` or `val = %p.values`. The #1706
+///    facade migration opened this channel: such a value lands in a structured
+///    field (not the message), so it must be flagged as a value-bearing site
+///    (issue #2151(a)).
+/// 3. A field access of `SSTablePredicate.values` (`p.values`, `.values,`) — the
+///    `Vec<Value>` literal store — as opposed to a `.values()` iterator method
+///    (allowed: shapes can be iterated).
+///
+/// Shape-only references (`predicates.len()`, `p.column`, column names, counts)
+/// are NOT flagged.
 fn references_predicate_value(arg: &str) -> bool {
-    // Debug-format of the predicate/filter (`?}` closes {:?} / {:#?} / {x:?}).
-    let has_debug_fmt = arg.contains("?}");
     let names_predicate = arg.contains("predicate") || arg.contains("filter");
-    if has_debug_fmt && names_predicate {
+
+    // (1) Debug-format of the predicate/filter (`?}` closes {:?} / {:#?} / {x:?}).
+    if arg.contains("?}") && names_predicate {
         return true;
     }
-    // `.values` field access (not the `.values()` iterator method).
+
+    // (2) `tracing` `?`/`%` sigil dumping a predicate/filter/`.values` value.
+    if (names_predicate || arg.contains(".values")) && has_tracing_sigil_dump(arg) {
+        return true;
+    }
+
+    // (3) `.values` field access (not the `.values()` iterator method).
     let bytes = arg.as_bytes();
     let mut i = 0;
     while let Some(rel) = arg[i..].find(".values") {
@@ -250,10 +266,30 @@ fn references_predicate_value(arg: &str) -> bool {
     false
 }
 
+/// True if `arg` contains a `tracing` value-dump sigil: a `?` (Debug) or `%`
+/// (Display) immediately followed by an identifier-start char, as in
+/// `field = ?value` / `field = %value`. The immediately-following identifier char
+/// distinguishes the sigil from the `?` try operator (`foo()?` — sigil FOLLOWS the
+/// expr), the `{:?}` / `?}` format spec (`?` precedes `}`), and the `%` modulo
+/// operator (conventionally space- or digit-separated, e.g. `a % b`).
+fn has_tracing_sigil_dump(arg: &str) -> bool {
+    let bytes = arg.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'?' || b == b'%' {
+            if let Some(&next) = bytes.get(i + 1) {
+                if next.is_ascii_alphabetic() || next == b'_' {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Issue #1694: `execute_sstable_scan` (query/select_executor/execute.rs) must
 /// log the scan SHAPE only (predicate count, constrained column names) and NEVER
 /// predicate VALUES. Pre-fix it logged `Executing SSTableScan … predicates={:?}`
-/// at INFO (CLI default), dumping the WHERE-clause literals. The runtime sentinel
+/// at DEBUG, dumping the WHERE-clause literals. The runtime sentinel
 /// guard (`where_clause_literal_is_never_logged`) exercises this path but is
 /// feature+Data.db-gated and can skip; this ALWAYS-ON source guard rejects a
 /// regression to a value-bearing scan diagnostic unconditionally.
@@ -273,6 +309,41 @@ fn execute_sstable_scan_does_not_log_predicate_values() {
         leaks.is_empty(),
         "execute_sstable_scan must log predicate SHAPE only (counts, column names), never \
          predicate VALUES (data-safety #1694); found value-bearing diagnostic(s): {leaks:#?}"
+    );
+}
+
+/// Issue #2151(a): the source-scan guard `references_predicate_value` must flag a
+/// predicate/filter VALUE dumped through `tracing`'s `field = ?value` /
+/// `field = %value` structured-field sigils — the channel the #1706 facade
+/// migration opened. Pre-fix the scan only matched `{:?}` / `.values`, so a
+/// `tracing::info!(filter = ?predicate, …)` leak site slipped through.
+#[test]
+fn source_scan_flags_tracing_sigil_predicate_dump() {
+    // Debug sigil on the predicate list (the migration's new leak shape).
+    assert!(
+        references_predicate_value("(filter = ?predicate, \"Executing scan\")"),
+        "`?predicate` Debug-sigil dump must be flagged as a predicate-value leak"
+    );
+    // Display sigil on a predicate field named via the value-token.
+    assert!(
+        references_predicate_value("(predicate_value = %val, \"scan\")"),
+        "`%`-sigil dump of a predicate value must be flagged"
+    );
+    // Display sigil on the `.values` literal store.
+    assert!(
+        references_predicate_value("(dumped = %p.values, \"scan\")"),
+        "`%p.values` sigil dump must be flagged"
+    );
+
+    // Shape-only structured fields must NOT be flagged (no false positives).
+    assert!(
+        !references_predicate_value("(predicate_count = predicates.len(), \"scan\")"),
+        "predicate COUNT (shape) must not be flagged"
+    );
+    // The `?` try operator adjacent to a predicate token is not a sigil dump.
+    assert!(
+        !references_predicate_value("(\"n={}\", build_predicates(filter)?.len())"),
+        "the `?` try operator must not be mistaken for a value-dump sigil"
     );
 }
 
@@ -302,16 +373,47 @@ mod integration {
 
     static LOG_BUFFER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
-    /// Extracts the rendered `message` field of an event.
+    /// Extracts the rendered `message` field of an event AND concatenates every
+    /// OTHER structured field's rendered value into `fields` (issue #2151(a)).
+    ///
+    /// `tracing`'s `field = ?value` (Debug sigil) / `field = %value` (Display
+    /// sigil) syntax dumps a value into a *non-`message`* structured field. A
+    /// message-only visitor never sees it, so a predicate/PII value logged via
+    /// that channel would slip past the AG5 "never log values" guard. Recording
+    /// every field — across the Debug/str/numeric/bool `record_*` callbacks that
+    /// `tracing` dispatches to — closes that blind spot.
     #[derive(Default)]
     struct MessageVisitor {
         message: String,
+        fields: String,
+    }
+    impl MessageVisitor {
+        fn record_field(&mut self, field: &Field, rendered: String) {
+            if field.name() == "message" {
+                self.message = rendered;
+            } else {
+                self.fields.push(' ');
+                self.fields.push_str(field.name());
+                self.fields.push('=');
+                self.fields.push_str(&rendered);
+            }
+        }
     }
     impl Visit for MessageVisitor {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.message = format!("{value:?}");
-            }
+            self.record_field(field, format!("{value:?}"));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.record_field(field, value.to_string());
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.record_field(field, value.to_string());
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.record_field(field, value.to_string());
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.record_field(field, value.to_string());
         }
     }
 
@@ -327,10 +429,11 @@ mod integration {
             let meta = event.metadata();
             if let Ok(mut v) = buf.lock() {
                 v.push(format!(
-                    "{} [{}] {}",
+                    "{} [{}] {}{}",
                     meta.level(),
                     meta.target(),
-                    visitor.message
+                    visitor.message,
+                    visitor.fields
                 ));
             }
         }
@@ -445,7 +548,7 @@ mod integration {
     /// reach the diagnostic logs.
     ///
     /// Pre-fix, two sites leaked it at reachable levels:
-    ///   * `execute_sstable_scan` logged `predicates={:?}` at INFO (CLI default);
+    ///   * `execute_sstable_scan` logged `predicates={:?}` at DEBUG;
     ///   * `Database::execute` logged the whole `'{sql}'` at DEBUG.
     /// Both are reshaped to log shapes (counts/column names) only.
     #[tokio::test]
@@ -468,7 +571,7 @@ mod integration {
         clear_logs();
 
         // A `WHERE <non-pk> = <literal>` scan routes through the SelectExecutor
-        // SSTableScan path (a pre-fix INFO leak site). We do not care whether any
+        // SSTableScan path (a pre-fix DEBUG leak site). We do not care whether any
         // row matches — only that the sentinel literal is never logged.
         let query =
             format!("SELECT id, name FROM test_basic.simple_table WHERE name = '{SENTINEL}'");
@@ -493,6 +596,38 @@ mod integration {
             logs.iter().any(|l| l.contains("Executing SSTableScan")),
             "expected an `Executing SSTableScan` diagnostic proving the scan path ran \
              (test would be vacuous otherwise); captured: {logs:#?}"
+        );
+    }
+
+    /// Issue #2151(a): the capturing subscriber's `MessageVisitor` must inspect
+    /// `tracing` STRUCTURED fields, not just `message` — otherwise a value dumped
+    /// via the `field = ?value` / `field = %value` sigil syntax (the channel the
+    /// #1706 facade migration opened) slips past the AG5 no-leak guard silently.
+    ///
+    /// This proves the *capture mechanism* now sees a structured-field value:
+    /// emit an event whose message is shape-only but whose structured field
+    /// carries the sentinel, then assert the sentinel IS present in the captured
+    /// text. Pre-fix (message-only visitor) the sentinel would be invisible here,
+    /// so a real leak on this channel would pass unnoticed.
+    #[test]
+    #[serial]
+    fn structured_field_values_are_inspected_by_the_guard() {
+        install_logger();
+        clear_logs();
+
+        // Shape-only message; the (would-be predicate) VALUE rides a structured
+        // field via the `?`/`%` sigils. Both sigil forms are exercised.
+        let leaked = SENTINEL;
+        tracing::info!(filter_value = ?leaked, "Executing SSTableScan: shape only");
+        tracing::info!(display_value = %leaked, "Executing SSTableScan: shape only");
+
+        let logs = captured_logs();
+        let seen: Vec<&String> = logs.iter().filter(|l| l.contains(SENTINEL)).collect();
+        assert_eq!(
+            seen.len(),
+            2,
+            "the guard must observe values dumped into `tracing` structured fields \
+             (both `?` and `%` sigils); captured: {logs:#?}"
         );
     }
 }

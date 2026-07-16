@@ -96,8 +96,31 @@ cargo run -p cqlite-flight -- \
 | `--data-dir` | (required) | Root holding `<keyspace>/<table>[-<uuid>]/` SSTable dirs. |
 | `--listen` | `0.0.0.0:8815` | Flight gRPC listen address. |
 | `--batch-size` | `8192` | Max rows per Arrow record batch. |
+| `--max-concurrent-scans` (`CQLITE_MAX_CONCURRENT_SCANS`) | `64` | Admission-control cap on concurrent `do_get` scans (issue #2420). Sized from blocking-pool / fd ceilings, not core count. Clamped to `[1, Semaphore::MAX_PERMITS]` (an out-of-range value is clamped with an operator warning rather than failing startup). |
 
 `RUST_LOG=info` enables logging (per-SSTable reads, etc.).
+
+### Admission control (`--max-concurrent-scans`)
+
+Each `do_get` acquires an admission permit **after** minimal ticket-syntax validation
+but **before** any producer/schema construction or filesystem work; the permit rides
+the response stream and releases on completion, client drop, or cancel. When all
+permits are held, a request queues briefly and, if none frees in time, is shed with
+gRPC **`UNAVAILABLE` before the first batch** — a retryable status that rides the
+connector's failover (never `RESOURCE_EXHAUSTED`). Malformed tickets fast-fail
+`INVALID_ARGUMENT` without consuming a permit. Queue time is visible in the
+`cqlite.rpc.phase` `admission` phase and the `cqlite.flight.admission.*` metrics
+(see [observability](../docs/observability/README.md)).
+
+### Lazy Summary-guided index (operational note, #2412)
+
+Opening a BIG-format SSTable is **O(summary)**: when a `Summary.db` component is
+present, `cqlite-flight` reads only the summary at open time and parses index
+intervals on demand, so a cold first query no longer pays a full `Index.db` parse.
+If `Summary.db` is **absent**, the reader fails closed to **one counted full
+Index.db parse** (a `FellBack` full parse). The metrics tell which path ran:
+`cqlite.sstable.index_parses_total` counts only full parses (flat on a lazy open),
+while `cqlite.sstable.index_interval_parses_total` counts per-lookup interval parses.
 
 ## Container image (GHCR)
 

@@ -315,6 +315,11 @@ pub(crate) fn spawn_streaming(
     // a panic can still report through it — `sink` (holding the other clone) lives
     // inside the closure catch_unwind guards, and unwinding drops it.
     let handle = tokio::task::spawn_blocking(move || {
+        // Issue #2419 (WS2): account this flight-managed blocking task on
+        // `cqlite.flight.blocking_tasks_in_use` for the whole closure — the guard
+        // is the FIRST act here and its Drop decrements on every exit path
+        // (normal, error, cancel, panic).
+        let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
         let error_tx = tx.clone();
         let mut sink = ChannelSink {
             tx,
@@ -394,9 +399,14 @@ pub(crate) async fn build_aggregate_response(
     // Cancellation during materialization mirrors the pre-change guard-across-await.
     let mut guard = cancel.drop_guard();
     let merge_cancel = cancel;
-    let result =
-        tokio::task::spawn_blocking(move || producer.produce_from_resolved(paths, &merge_cancel))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        // Issue #2419 (WS2): account this flight-managed blocking task on
+        // `cqlite.flight.blocking_tasks_in_use` for the whole closure (RAII drop
+        // decrements on every exit path).
+        let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
+        producer.produce_from_resolved(paths, &merge_cancel)
+    })
+    .await;
     guard.disarm();
 
     let batches = match result {

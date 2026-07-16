@@ -1,0 +1,26 @@
+// Self-test fixture (#2012): the SAME scan bodies as violating.rs.txt, but each
+// threads a bound that structurally caps the materialization — a `ResultBudget`
+// param, a `.take(limit)` adaptor, or a `batch_size` param. `oom-audit` MUST NOT
+// flag any of these (the bound suppresses the rule with no allowlist entry).
+
+fn scan_all_partitions(reader: &Reader, budget: &ResultBudget) -> Vec<DataRow> {
+    // ResultBudget in scope -> bounded.
+    let rows = reader.rows().collect::<Vec<DataRow>>();
+    let _ = budget;
+    rows
+}
+
+fn scan_with_take(reader: &Reader, limit: usize) -> Vec<DataRow> {
+    // `.take(limit)` bounds the accumulation; `limit` is also a bound param.
+    let rows = reader.rows().take(limit).collect::<Vec<DataRow>>();
+    rows
+}
+
+fn scan_via_push_loop(reader: &Reader, batch_size: usize) -> Vec<DataRow> {
+    // `batch_size` bound param -> bounded.
+    let mut out = Vec::new();
+    for row in reader.rows().take(batch_size) {
+        out.push(row);
+    }
+    out
+}

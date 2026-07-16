@@ -9,6 +9,7 @@ members = [
     "tests/format-compatibility",
     "examples",
     "tools/*",
+    "xtask",
 ]
 # The cargo-fuzz crate (issue #1614) is its own workspace (`fuzz/Cargo.toml` has
 # an empty `[workspace]` table). Exclude it here too so no default `cargo
@@ -34,10 +35,14 @@ cqlite-core = { path = "cqlite-core" }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 log = { workspace = true }
-env_logger = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Dev/test-only logging init. The workspace-root `cqlite` package has no src/
+# (it only hosts the top-level tests/*.rs integration tests), so env_logger can
+# only ever serve dev/test context — a dev-dependency, never a shipped one
+# (issue #2519, item b from #2151).
+env_logger = { workspace = true }
 futures = { workspace = true }
 uuid = { version = "1.6", features = ["v4"] }
 insta = "1.34"
