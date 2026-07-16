@@ -306,6 +306,15 @@ otherwise-separate problems:
   snapshot dir and forced a full re-open + re-parse. The flight server exposes scale-free work
   probes (`reader_opens`, `index_parses_total`, `rebind_hits_total`) so a field round can verify
   the closure: within a window these stay flat.
+
+  > **Metrics exposure (field-probe note, issue #2452 / #2356).** `reader_opens` and
+  > `rebind_hits_total` are exposed **only** through the flight server's programmatic
+  > `WarmMetricsSnapshot` stats surface (the authoritative surface for round-over-round field
+  > verification) — they are **not** mirrored to the OpenTelemetry counter export, unlike the warm
+  > cache `hit`/`miss`/`evict`/`refresh` counters. This is intentional per the
+  > `flight-warm-snapshot-closure` spec (§D): the snapshot-lifecycle work does not expand the OTel
+  > counter set. A field probe or audit that expects these two on the OTel scrape will not find
+  > them — read them from `WarmMetricsSnapshot`.
 - **Fewer memtable flushes (#2306).** Flush-on-snapshot is **by design** (issue #2305; the
   Sidecar HTTP API has no `skipFlush`, and this connector does not relitigate that). The only
   lever on flush volume is **fewer snapshot creations**: because each snapshot create triggers
