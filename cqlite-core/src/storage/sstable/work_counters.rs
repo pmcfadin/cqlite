@@ -527,8 +527,13 @@ pub(crate) mod stream_walk_scope {
 /// compaction captures exactly the `MergeEntry` clones performed during it.
 ///
 /// `#[cfg(test)]`: the `record()` call in `MergeEntry::clone` is likewise
-/// `#[cfg(test)]`-gated, so production clone pays ZERO added cost.
-#[cfg(test)]
+/// `#[cfg(test)]`-gated, so production clone pays ZERO added cost. Gated on
+/// `feature = "write-support"` as well because every consumer (the
+/// `MergeEntry::clone` recorder and the `clone_regression_tests` guard) lives
+/// in the write-support-only merge module — under the minimal feature set those
+/// callers vanish, so an unconditional `#[cfg(test)]` here would be dead code
+/// and trip the `-D warnings` dead-code lint in the all-compression build.
+#[cfg(all(test, feature = "write-support"))]
 pub(crate) mod merge_entry_clone_scope {
     use std::cell::Cell;
 

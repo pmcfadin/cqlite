@@ -88,7 +88,7 @@ pub struct MergeEntry {
 
 /// Manual `Clone` (was `#[derive(Clone)]`) so the #1664 double-clone regression
 /// guard can count `MergeEntry` clones via a `#[cfg(test)]`-gated recorder.
-/// The clone is field-wise identical to the former derived clone (all 8 fields);
+/// The clone is field-wise identical to the former derived clone (all 9 fields);
 /// in a production (non-test) build the `record()` call vanishes entirely, so
 /// this is a plain field-wise clone with ZERO added cost.
 #[cfg(feature = "write-support")]
