@@ -639,5 +639,27 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       well-known path, checked+created atomically) would close this race
       properly; the ad-hoc `ps`-and-hope pattern used all session is a
       mitigation, not a fix, and should be revisited if this recurs.
-
-
+  21. **2026-07-16 — Disk hit 100% full THREE separate times in one session
+      (lessons 15/16 recurring at higher frequency), always the same
+      mechanism: an IDLE worktree's `target/` regrows to 47-79G during a
+      `--lite` re-cert or gate retry round, then a SIBLING lane's full gate
+      (or its own next retry) pushes the machine over capacity.** Each time,
+      the fix was the same: confirm no live process is using the idle
+      worktree (`lsof +D <worktree>` / `ps aux | grep <worktree>` — only an
+      idle `sleep` waiter, no cargo/rustc), then `rm -rf <worktree>/target`
+      to reclaim tens of gigabytes immediately, leaving the ACTIVELY-running
+      gate's own worktree untouched. This is fully safe (target/ is always
+      regenerable; correctness is never affected, only wall-clock from the
+      next cold rebuild) but requires a HUMAN-OR-LEAD judgment call each
+      time — the automated `agent-gate.sh` machinery does not self-clean
+      idle worktrees, and a subagent mid-wait has no reason to notice its
+      own `target/` growing. **Standing lesson:** treat "disk below ~30G
+      free" as a standing trigger to proactively sweep ALL worktrees (not
+      just the one that just failed) for idle `target/` dirs before the
+      NEXT gate launch, not only reactively after a FAIL with a suspicious
+      linker error. A cheap periodic disk-watchdog (even a simple
+      `df`-threshold check baked into the closer's own pre-launch routine,
+      not just the lead's 30-minute self-check) would catch this earlier
+      than relying on the lead noticing during an unrelated status check —
+      worth wiring directly into `agent-gate.sh`'s pre-flight or the
+      `flow-closer` prompt template if this recurs a 4th time.
