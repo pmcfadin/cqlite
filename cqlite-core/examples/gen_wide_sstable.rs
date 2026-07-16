@@ -78,10 +78,10 @@ async fn main() -> cqlite_core::error::Result<()> {
                 table: "wide_check".to_string(),
             },
             partition_key: PartitionKey::single("pk", Value::Integer(42)),
-            clustering_key: Some(ClusteringKey::single("ck", Value::Text(ck))),
+            clustering_key: Some(ClusteringKey::single("ck", Value::Text(ck.into()))),
             operations: vec![CellOperation::Write {
                 column: "data".to_string(),
-                value: Value::Text(data),
+                value: Value::Text(data.into()),
             }],
             timestamp_micros: 1_000_000 + i as i64,
             ttl_seconds: None,

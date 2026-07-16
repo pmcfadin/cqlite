@@ -290,7 +290,7 @@ fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
             },
             UdtField {
                 name: "city".into(),
-                value: city.map(|s| Value::text(s)),
+                value: city.map(Value::from),
             },
             UdtField {
                 name: "zip".into(),

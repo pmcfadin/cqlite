@@ -385,11 +385,11 @@ fn person(first: Option<&str>, last: Option<&str>, age: Option<i32>) -> Value {
         fields: vec![
             UdtField {
                 name: "first_name".into(),
-                value: first.map(|s| Value::text(s)),
+                value: first.map(Value::from),
             },
             UdtField {
                 name: "last_name".into(),
-                value: last.map(|s| Value::text(s)),
+                value: last.map(Value::from),
             },
             UdtField {
                 name: "age".into(),
@@ -432,7 +432,7 @@ fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
             },
             UdtField {
                 name: "city".into(),
-                value: city.map(|s| Value::text(s)),
+                value: city.map(Value::from),
             },
             UdtField {
                 name: "zip".into(),
