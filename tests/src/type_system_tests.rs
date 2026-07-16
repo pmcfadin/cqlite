@@ -147,7 +147,11 @@ impl TypeSystemTests {
 
         // Long strings
         let long_string = "A".repeat(10000);
-        self.test_type_roundtrip("LONG_STRING", CqlTypeId::Varchar, Value::Text(long_string.into()))?;
+        self.test_type_roundtrip(
+            "LONG_STRING",
+            CqlTypeId::Varchar,
+            Value::Text(long_string.into()),
+        )?;
 
         // BLOB tests
         self.test_type_roundtrip(
@@ -288,7 +292,11 @@ impl TypeSystemTests {
 
         // Text with all ASCII characters
         let all_ascii: String = (0..128).map(|i| i as u8 as char).collect();
-        self.test_type_roundtrip("ALL_ASCII", CqlTypeId::Varchar, Value::Text(all_ascii.into()))?;
+        self.test_type_roundtrip(
+            "ALL_ASCII",
+            CqlTypeId::Varchar,
+            Value::Text(all_ascii.into()),
+        )?;
 
         // Binary data with all byte values
         let all_bytes: Vec<u8> = (0..256).map(|i| i as u8).collect();

@@ -877,7 +877,11 @@ impl QueryExecutor {
 /// Build a `Value::Map` from a string-keyed map for storage writes.
 #[cfg(feature = "experimental")]
 fn map_to_value(map: HashMap<String, Value>) -> Value {
-    Value::Map(map.into_iter().map(|(k, v)| (Value::Text(k), v)).collect())
+    Value::Map(
+        map.into_iter()
+            .map(|(k, v)| (Value::Text(k.into()), v))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

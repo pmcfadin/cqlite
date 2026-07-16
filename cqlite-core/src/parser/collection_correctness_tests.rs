@@ -26,7 +26,7 @@ fn arb_simple_value(type_id: CqlTypeId) -> impl Strategy<Value = Value> {
         CqlTypeId::Boolean => any::<bool>().prop_map(Value::Boolean).boxed(),
         CqlTypeId::Varchar => any::<String>()
             .prop_filter("non-empty strings", |s| !s.is_empty())
-            .prop_map(|s| Value::text(s))
+            .prop_map(Value::from)
             .boxed(),
         _ => any::<i32>().prop_map(Value::Integer).boxed(),
     }

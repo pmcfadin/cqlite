@@ -68,7 +68,7 @@ fn render_value(v: &Value) -> String {
         Value::BigInt(i) => i.to_string(),
         Value::SmallInt(i) => i.to_string(),
         Value::TinyInt(i) => i.to_string(),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         Value::Float(f) => render_double(*f),
         Value::Float32(f) => render_double(*f as f64),
         Value::Decimal { scale, unscaled } => render_decimal(*scale, unscaled),

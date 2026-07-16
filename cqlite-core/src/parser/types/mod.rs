@@ -156,13 +156,13 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
                     if input.len() >= 4 + length {
                         let text_bytes = &input[4..4 + length];
                         if let Ok(text) = String::from_utf8(text_bytes.to_vec()) {
-                            return Ok((&input[4 + length..], Value::Text(text)));
+                            return Ok((&input[4 + length..], Value::Text(text.into())));
                         }
                     }
                 }
                 if let Some(null_pos) = input.iter().position(|&b| b == 0) {
                     if let Ok(text) = String::from_utf8(input[..null_pos].to_vec()) {
-                        return Ok((&input[null_pos + 1..], Value::Text(text)));
+                        return Ok((&input[null_pos + 1..], Value::Text(text.into())));
                     }
                 }
                 if let Ok(text) = String::from_utf8(input.to_vec()) {

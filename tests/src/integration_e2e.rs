@@ -437,7 +437,10 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
     map.insert("key1".to_string(), Value::text("value1".to_string()));
     map.insert("unicode_key_键".to_string(), Value::Integer(42));
     // Convert HashMap to Vec<(Value, Value)>
-    let map_vec: Vec<(Value, Value)> = map.into_iter().map(|(k, v)| (Value::Text(k), v)).collect();
+    let map_vec: Vec<(Value, Value)> = map
+        .into_iter()
+        .map(|(k, v)| (Value::Text(k.into()), v))
+        .collect();
     let map_value = Value::Map(map_vec);
 
     let serialized_map = serialize_cql_value(&map_value)?;
@@ -525,7 +528,7 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
                     // Convert HashMap to Vec<(Value, Value)>
                     let metadata_vec: Vec<(Value, Value)> = metadata
                         .into_iter()
-                        .map(|(k, v)| (Value::Text(k), v))
+                        .map(|(k, v)| (Value::Text(k.into()), v))
                         .collect();
                     metadata_vec
                 }),
@@ -886,7 +889,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
                             // Convert deep HashMap to Vec<(Value, Value)>
                             let deep_map_vec: Vec<(Value, Value)> = deep_map
                                 .into_iter()
-                                .map(|(k, v)| (Value::Text(k), v))
+                                .map(|(k, v)| (Value::Text(k.into()), v))
                                 .collect();
                             deep_map_vec
                         }),
@@ -895,7 +898,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
                 // Convert inner HashMap to Vec<(Value, Value)>
                 let inner_map_vec: Vec<(Value, Value)> = inner_map
                     .into_iter()
-                    .map(|(k, v)| (Value::Text(k), v))
+                    .map(|(k, v)| (Value::Text(k.into()), v))
                     .collect();
                 inner_map_vec
             }),
@@ -903,7 +906,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
         // Convert outer HashMap to Vec<(Value, Value)>
         let outer_map_vec: Vec<(Value, Value)> = outer_map
             .into_iter()
-            .map(|(k, v)| (Value::Text(k), v))
+            .map(|(k, v)| (Value::Text(k.into()), v))
             .collect();
         outer_map_vec
     });

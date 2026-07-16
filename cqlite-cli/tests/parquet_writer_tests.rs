@@ -208,8 +208,11 @@ fn test_parquet_varint_values() {
     // Varint is serialized as string via ValueFormatter fallback
     // Representing a large integer: 123456789012345678901234567890
     let varint_bytes = vec![0x00, 0x5E, 0xCE, 0x0E, 0x6A, 0xEB, 0xBC, 0x22, 0xD2, 0xD2];
-    let result =
-        create_single_value_result("varint_col", Value::Varint(varint_bytes.into()), DataType::Text);
+    let result = create_single_value_result(
+        "varint_col",
+        Value::Varint(varint_bytes.into()),
+        DataType::Text,
+    );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     verify_parquet_magic(&bytes);

@@ -291,7 +291,7 @@ impl PerformanceBenchmarks {
         let large_map_value = Value::Map(
             large_map
                 .into_iter()
-                .map(|(k, v)| (Value::Text(k), v))
+                .map(|(k, v)| (Value::Text(k.into()), v))
                 .collect(),
         );
 
@@ -824,7 +824,7 @@ impl PerformanceBenchmarks {
             ),
             Value::text("🚀 Unicode text with émojis and spëcial chars: αβγδε".to_string()),
             Value::blob(vec![0x01, 0x02, 0x03, 0xFF]),
-            Value::blob((0..255).collect()),
+            Value::blob((0..255).collect::<Vec<u8>>()),
             Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             Value::Timestamp(1640995200000000),
             Value::List(vec![
@@ -837,8 +837,10 @@ impl PerformanceBenchmarks {
                 map.insert("key1".to_string(), Value::text("value1".to_string()));
                 map.insert("key2".to_string(), Value::Integer(42));
                 // Convert HashMap to Vec<(Value, Value)>
-                let map_vec: Vec<(Value, Value)> =
-                    map.into_iter().map(|(k, v)| (Value::Text(k), v)).collect();
+                let map_vec: Vec<(Value, Value)> = map
+                    .into_iter()
+                    .map(|(k, v)| (Value::Text(k.into()), v))
+                    .collect();
                 map_vec
             }),
         ]

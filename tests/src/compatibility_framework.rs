@@ -238,7 +238,11 @@ impl CompatibilityTestFramework {
         map.insert("key2".to_string(), Value::Integer(42));
         map.insert("key3".to_string(), Value::Boolean(true));
 
-        let map_value = Value::Map(map.into_iter().map(|(k, v)| (Value::Text(k.into()), v)).collect());
+        let map_value = Value::Map(
+            map.into_iter()
+                .map(|(k, v)| (Value::Text(k.into()), v))
+                .collect(),
+        );
 
         if let Ok(serialized) = serialize_cql_value(&map_value) {
             total_bytes += serialized.len();

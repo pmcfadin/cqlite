@@ -80,7 +80,7 @@ fn lower_value(v: &Value) -> CanonicalValue {
         Value::TinyInt(i) => CanonicalValue::Int(*i as i128),
         Value::Float(f) => CanonicalValue::Float(NormalizedFloat(*f)),
         Value::Float32(f) => CanonicalValue::Float(NormalizedFloat(*f as f64)),
-        Value::Text(s) => CanonicalValue::Text(s.clone()),
+        Value::Text(s) => CanonicalValue::Text(String::from_utf8_lossy(s).into_owned()),
         Value::Timestamp(micros) => CanonicalValue::Timestamp {
             micros: *micros,
             raw: micros.to_string(),
@@ -306,7 +306,7 @@ fn render_canonical_key(ck: &[CanonicalValue]) -> String {
 fn render_canonical(v: &CanonicalValue) -> String {
     match v {
         CanonicalValue::Int(i) => i.to_string(),
-        CanonicalValue::Text(s) => s.clone(),
+        CanonicalValue::Text(s) => String::from_utf8_lossy(s).into_owned(),
         CanonicalValue::Bool(b) => b.to_string(),
         CanonicalValue::Null => "null".to_string(),
         other => format!("{other:?}"),
@@ -346,7 +346,7 @@ fn value_key(v: &Value) -> String {
     match v {
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         Value::Boolean(b) => b.to_string(),
         other => format!("{other:?}"),
     }
