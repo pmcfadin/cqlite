@@ -1,3 +1,16 @@
+> **DISPOSITION — CLOSED as measured-but-not-justified (2026-07-16). NOT IMPLEMENTED.**
+> Stage-0 measure-first (the design's Decision-5 blocking gate) was executed via PR #2563
+> (`cqlite-core/benches/decode_policy_bench.rs` + `docs/reports/issue-2211-decode-policy-stage0-ab.md`).
+> Result: no material end-to-end win. Best-case projected scan improvement is **~0.90%**, ~5x below
+> the scan's own measurement noise (**±4.7%**), even in the most favorable hot-cache CPU-bound regime.
+> The design's recommended backend (A, liblz4 `LZ4_decompress_fast`) measured **3.6x SLOWER** than the
+> checked path (deprecated upstream shim). The only variant that shows a real decode win (`lz4_flex`
+> with `safe-decode` off) violates this design's own Decision-1 safety invariant (no graph-global
+> feature flip that makes the minimal build silently unsafe). The owner chose "Close as not-justified"
+> over "Proceed anyway" given both options with full data. **No `unsafe` code shipped; no DecodePolicy
+> enum or production behavior change was built.** The committed bench remains as the standing
+> decode-vs-scan measurement asset. Stages 1–5 were never started. See PR #2563 and issue #2211.
+
 # Runtime DecodePolicy — Safe default / opt-in FastUnsafe lz4 (F6.4)
 
 ## Milestone
