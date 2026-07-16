@@ -56,6 +56,11 @@
 mod encoding;
 mod node_decode;
 mod partitions;
+// O(depth) next-partition (in-order successor) walk (issue #2058). Consumed only by
+// the reader's within-SSTable seek bound (`partition_successor` / `point_compaction`),
+// compiled out under `tombstones` like the seek path it serves.
+#[cfg(not(feature = "tombstones"))]
+mod partition_successor_walk;
 mod rows;
 mod rows_floor;
 mod slice_walk;
@@ -67,6 +72,11 @@ pub use partitions::{
     decode_bti_partition_payload, encode_partition_key_for_bti_trie, lookup_partition_in_bti_file,
     lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation, FLAG_HAS_HASH_BYTE,
 };
+// Crate-internal uncounted encoder (issue #2058): the successor walk encodes the SAME
+// key a point read already hashed, so it must not inflate C4's `KEY_HASH_CALLS`.
+// Consumed only by the seek-bound path, compiled out under `tombstones`.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) use partitions::encode_partition_key_for_bti_trie_uncounted;
 pub use rows::{
     decode_bti_row_payload, iterate_rows_for_partition, iterate_rows_in_bti_file,
     iterate_rows_in_bti_trie, read_signed_vint_from_slice_for_test,
@@ -74,6 +84,11 @@ pub use rows::{
     select_row_index_blocks_for_range, BtiRowIndexEntry, BtiRowIndexEntryWithKey,
     BtiRowIndexHeader, FLAG_OPEN_MARKER,
 };
+// Crate-internal uncounted `TrieIndexEntry.deserialize` (issue #2058): the successor
+// walk resolves a WIDE successor's `data_position` for the seek END bound, which must
+// not bump the L1 clustering-window `ROWS_DB_ENTRY_RESOLVES` invariant.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) use rows::resolve_rows_db_entry_uncounted;
 // Crate-internal only: the zero-copy slice walker's sole consumers are the
 // SSTable reader (partition_lookup / data_access::bti). Kept off the public
 // semver surface (rust-reviewer #1574). `lookup_partition_in_bti_slice` takes a
@@ -81,6 +96,15 @@ pub use rows::{
 // (issue #1575 / C4): every BTI partition lookup now encodes then walks via this
 // single primitive.
 pub(crate) use slice_walk::lookup_partition_in_bti_slice;
+// Crate-internal next-partition successor walk (issue #2058). Consumed only by the
+// reader's seek-bound path (compiled out under `tombstones`); kept off the public
+// semver surface like the point slice walker.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) use partition_successor_walk::partition_successor_in_bti_slice;
+// Test-only hook for the issue #2058 real-fixture oracle (local walk == old DFS).
+#[cfg(not(feature = "tombstones"))]
+#[doc(hidden)]
+pub use partition_successor_walk::partition_successor_in_bti_slice_for_test;
 // Test-only hooks for the issue #1650 (L3) targeted-descent counter invariants.
 #[doc(hidden)]
 pub use slice_walk::{find_child_offset_for_test, parse_bti_node_for_test};

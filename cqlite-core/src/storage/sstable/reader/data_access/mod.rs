@@ -633,13 +633,13 @@ impl SSTableReader {
 
         // Produce the final DECOMPRESSED, integrity-verified window for this offset.
         let data = if let Some(comp_info) = self.compression_info.as_deref() {
-            // COMPRESSED offset read (issue #1773): the authoritative inline per-chunk
-            // CRC32 MUST be validated before decompression. `read_compressed_offset_window`
-            // reuses the shared CRC-enforcing chunk reader (multi-chunk assembly,
-            // fail-closed past-EOF) rather than reading `size` raw bytes and blindly
-            // LZ4-decoding them — the latter re-introduced the exact #1411 CRC bypass.
-            // Its single decompress resolves inside `ChunkSource` (issue #1598, G2), so
-            // this is NOT a second decode plane.
+            // COMPRESSED offset read (issue #1773): validate the inline per-chunk CRC32
+            // before decompression via the shared CRC-enforcing chunk reader (multi-chunk
+            // assembly, fail-closed past-EOF), NOT a raw read + blind LZ4 decode (#1411);
+            // the single decompress resolves inside `ChunkSource` (#1598). Count one
+            // backing read HERE (point-read site only), symmetric with the uncompressed
+            // branch below (#2167) — scan callers of the shared helper must NOT bump it.
+            model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
             self.read_compressed_offset_window(comp_info, block_offset, size)
                 .await?
         } else {

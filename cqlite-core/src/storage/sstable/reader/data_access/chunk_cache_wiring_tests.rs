@@ -74,6 +74,35 @@ fn uncompressed_data_db() -> Option<PathBuf> {
     None
 }
 
+/// Locate `test_comp.lz4_table`'s Data.db — a COMPRESSED BIG (`nb`) table, so
+/// `get_cached_data` routes through `read_compressed_offset_window` (CRC-validated,
+/// issue #1773). The wiring evidence is the same `CHUNK_READ_CALLS` counter, which
+/// the compressed branch must increment (issue #2167).
+fn compressed_data_db() -> Option<PathBuf> {
+    let base = datasets_root()?.join("sstables/test_comp");
+    let rd = std::fs::read_dir(&base).ok()?;
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        if name.starts_with("lz4_table-") {
+            let dir = entry.path();
+            if let Ok(files) = std::fs::read_dir(&dir) {
+                for f in files.flatten() {
+                    let p = f.path();
+                    if p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                    {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 async fn open(path: &std::path::Path) -> SSTableReader {
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
@@ -165,5 +194,62 @@ async fn big_point_read_get_cached_data_is_wired() {
         format!("{cold:?}"),
         format!("{warm:?}"),
         "cache MUST NOT change the read result"
+    );
+}
+
+/// Issue #2167 (a): the COMPRESSED offset-read branch of `get_cached_data` must
+/// increment `CHUNK_READ_CALLS` too, so compressed-table read observability does not
+/// underreport. The #1773 CRC fix moved the read into `read_compressed_offset_window`
+/// and dropped the increment; this pins it back.
+///
+/// FAILS on pre-fix code: a compressed cold read leaves `CHUNK_READ_CALLS` at 0, so
+/// the `>= 1` assertion below trips. The warm read still leaves it unchanged (the
+/// increment sits after the shared-cache check, so a cached repeat does no backing read).
+#[tokio::test]
+#[serial_test::serial]
+async fn big_point_read_compressed_increments_chunk_read_calls() {
+    let Some(data_db) = compressed_data_db() else {
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but test_comp.lz4_table is absent"
+        );
+        eprintln!("SKIP: test_comp.lz4_table absent — cannot prove compressed CHUNK_READ_CALLS");
+        return;
+    };
+
+    let reader = open(&data_db).await;
+    // Offset 0, 16 bytes lands wholly inside compressed chunk 0 of the single-partition
+    // lz4_table — the same clean window the #1773 offset-read test decodes successfully.
+    let (offset, size) = (0u64, 16u32);
+
+    // Cold read: cache miss → the compressed branch performs a real backing read and
+    // must bump the counter.
+    SSTableReader::reset_chunk_read_calls();
+    let cold = reader
+        .read_value_at_offset(offset, size)
+        .await
+        .expect("cold compressed offset read");
+    let cold_reads = SSTableReader::chunk_read_call_count();
+    assert!(
+        cold_reads >= 1,
+        "compressed cold read must increment CHUNK_READ_CALLS (issue #2167), got {cold_reads}"
+    );
+
+    // Warm read: identical offset → cache hit, ZERO further backing reads (the
+    // increment is gated behind the cache check), identical result.
+    SSTableReader::reset_chunk_read_calls();
+    let warm = reader
+        .read_value_at_offset(offset, size)
+        .await
+        .expect("warm compressed offset read");
+    assert_eq!(
+        SSTableReader::chunk_read_call_count(),
+        0,
+        "warm compressed read must perform ZERO further backing reads (cache hit)"
+    );
+    assert_eq!(
+        format!("{cold:?}"),
+        format!("{warm:?}"),
+        "cache MUST NOT change the compressed read result"
     );
 }

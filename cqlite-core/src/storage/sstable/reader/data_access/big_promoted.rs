@@ -371,7 +371,7 @@ impl SSTableReader {
             return Ok(None);
         };
         let end_bound = self
-            .successor_partition_offset(offset)
+            .successor_partition_offset(offset, partition_key)
             .await?
             .map(|e| e as usize);
 

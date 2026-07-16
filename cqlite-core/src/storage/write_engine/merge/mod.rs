@@ -465,6 +465,23 @@ struct SSTableRowIteratorAdapter {
     /// `recv` cancel-aware and (b) [`Drop`] can trip it, waking a producer that is
     /// mid-scan (not blocked on send) so it exits promptly before the join.
     scan_cancel: crate::storage::scan_cancel::ScanCancel,
+    /// This adapter's OWN count of DATA entries its producer thread has
+    /// successfully sent into the bounded channel (issue #2419 roborev job
+    /// 1733), shared with the producer thread via `Arc` so `Drop` can read it.
+    /// It only becomes STABLE — no further increments possible — once the
+    /// producer thread has been joined (see `Drop`). Paired with
+    /// [`Self::received_count`] to compute the exact post-join egress-depth
+    /// reconcile residual: reading it BEFORE the join (as the pre-fix drain loop
+    /// did) races a producer send that can slip in after the drain's last
+    /// `Empty` and before the receiver is actually dropped, permanently leaking
+    /// the shared `cqlite.merge.egress_channel_depth` gauge upward across
+    /// repeated cancellations on a long-running server.
+    sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// This adapter's own count of DATA entries actually received/consumed,
+    /// incremented alongside every [`channel_depth::received`] call this adapter
+    /// makes ([`Self::next`]'s normal consumption). Only ever touched by the
+    /// thread holding `&mut self` (never shared), so a plain `i64`.
+    received_count: i64,
 }
 
 /// Poll interval for the cancel-aware blocking `recv` in
@@ -519,6 +536,12 @@ const STREAMING_CHANNEL_CAPACITY: usize = 256;
 #[cfg(feature = "write-support")]
 mod producer_gauge;
 
+// Egress-channel-depth gauge (issue #2419, WS2): process-global live occupancy
+// of the bounded producer→consumer `sync_channel` backing
+// `cqlite.merge.egress_channel_depth`. Sibling module to bound this file.
+#[cfg(feature = "write-support")]
+mod channel_depth;
+
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
 #[cfg(all(test, feature = "write-support"))]
@@ -555,6 +578,11 @@ impl SSTableRowIteratorAdapter {
         let adapter_cancel = scan_cancel.clone();
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
+        // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
+        // with the producer thread so `Drop` can read its post-join-stable value
+        // for the egress-depth reconcile (see the field doc).
+        let sent_count = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let producer_sent_count = sent_count.clone();
 
         // Issue #2316: account this producer on the `cqlite.merge.producer_threads`
         // gauge BEFORE spawning, so the increment happens-before any possible
@@ -582,6 +610,7 @@ impl SSTableRowIteratorAdapter {
                 udt_registry,
                 scan_cancel,
                 sender,
+                producer_sent_count,
             );
         }) {
             Ok(handle) => handle,
@@ -598,6 +627,8 @@ impl SSTableRowIteratorAdapter {
             receiver: Some(receiver),
             producer: Some(producer),
             scan_cancel: adapter_cancel,
+            sent_count,
+            received_count: 0,
         })
     }
 
@@ -620,6 +651,7 @@ impl SSTableRowIteratorAdapter {
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+        sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
     ) {
         // Issue #2316: decrement the live producer-thread gauge when this thread
         // exits (even on panic). Created FIRST so the spawn-time increment in
@@ -707,6 +739,7 @@ impl SSTableRowIteratorAdapter {
                     &schema,
                     &scan_cancel,
                     &sender,
+                    sent_count.as_ref(),
                 )
                 .await
             })
@@ -1180,6 +1213,15 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
             }
             match receiver.recv_timeout(RECV_CANCEL_POLL) {
                 Ok(Ok(entry)) => {
+                    // Issue #2419 (WS2): this DATA entry just left the bounded
+                    // egress channel — decrement the live occupancy gauge,
+                    // balancing the `channel_depth::sent()` at its send site
+                    // (`from_readers::forward_row`). `received_count` is this
+                    // adapter's OWN mirror of that decrement (roborev job 1733),
+                    // read by `Drop` post-join to compute the exact reconcile
+                    // residual — see the field doc.
+                    channel_depth::received();
+                    self.received_count += 1;
                     // Issue #2096: one merge entry decoded from `Data.db` by THIS
                     // adapter-driven run — a full scan, compaction, or (via the
                     // fail-safe `SinglePartitionFilterRun`) a point read all share
@@ -1226,6 +1268,19 @@ impl Drop for SSTableRowIteratorAdapter {
         //    block until the channel drained. Dropping it here (before the join)
         //    rather than relying on field-drop order (which runs AFTER this `Drop`)
         //    is what makes the join bounded.
+        //
+        //    Issue #2419 roborev job 1733: do NOT try to drain-and-decrement the
+        //    egress-depth gauge HERE. A prior version looped `try_recv` until
+        //    `Empty` and decremented per drained entry before dropping the
+        //    receiver — but the producer runs on another OS thread, so a send can
+        //    slip in and succeed (incrementing the shared gauge) in the window
+        //    between that loop's last `Empty` and this `drop`, with no entry ever
+        //    physically drained to balance it: a PERMANENT, monotonic upward leak
+        //    of `cqlite.merge.egress_channel_depth` across every
+        //    cancelled/disconnected scan on a long-running server. The gauge is
+        //    reconciled instead in step 4, AFTER the join, using this adapter's
+        //    own sent/received delta — which only becomes authoritative once the
+        //    producer thread has provably stopped sending.
         drop(self.receiver.take());
         // 3. Join the producer — bounded, because after (1)+(2) the producer
         //    cannot block indefinitely: it either observes the cancel in its scan
@@ -1234,6 +1289,20 @@ impl Drop for SSTableRowIteratorAdapter {
         if let Some(handle) = self.producer.take() {
             let _ = handle.join();
         }
+        // 4. Issue #2419 roborev job 1733: reconcile the shared egress-depth
+        //    gauge AFTER the producer thread has definitively exited — `join`
+        //    returning guarantees `self.sent_count` can never increase again, so
+        //    this read is race-free (unlike reading it, or draining the channel,
+        //    before the join). Any DATA entries this adapter's producer
+        //    successfully sent but this consumer never received — abandoned when
+        //    the channel was torn down while entries were still buffered —
+        //    are exactly `sent_count - received_count`; reconcile the shared
+        //    gauge by that residual in ONE atomic op so a cancelled/disconnected
+        //    scan returns `cqlite.merge.egress_channel_depth` to baseline instead
+        //    of drifting upward.
+        let residual =
+            self.sent_count.load(std::sync::atomic::Ordering::SeqCst) - self.received_count;
+        channel_depth::reconcile_residual(residual);
     }
 }
 

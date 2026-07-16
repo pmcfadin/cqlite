@@ -19,6 +19,7 @@ pub mod producer;
 mod producer_point;
 mod producer_stream;
 mod producer_warm;
+pub mod saturation;
 pub mod scan_progress;
 pub mod service;
 pub mod shutdown;
