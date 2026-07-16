@@ -4,6 +4,9 @@
 //! Within a reader/producer *scan* function in scope, and with **no budget or
 //! bound in scope for that function**, the rule flags either shape:
 //!   * `EXPR.collect::<Vec<..>>()` over a row/partition/cell iterator, or
+//!   * a turbofish-less `EXPR.collect()` whose target `Vec<..>` element type is
+//!     learned from the enclosing `let x: Vec<T> = ..` annotation or the
+//!     enclosing function's `-> Vec<T>` return type, or
 //!   * a `for .. in <stream iterator> { .. v.push(..)/v.extend(..) .. }`
 //!     accumulation loop.
 //!
@@ -31,9 +34,9 @@ pub struct Finding {
 }
 
 /// Parse `src` and return every `STREAM_RETURNS_VEC` finding, attributing each
-/// to `file`. A parse error yields no findings (the file is skipped, reported by
-/// the caller) — the audit never fails the build on an unparseable source; that
-/// is a compiler's job, not the lint's.
+/// to `file`. A parse error yields an `Err`, surfaced by the caller — in enforce
+/// mode an unparseable in-scope file is a failure (a standalone `--only
+/// oom-audit` run has no compile step to catch it first).
 pub fn analyze_file(file: &str, src: &str) -> Result<Vec<Finding>, syn::Error> {
     let parsed = syn::parse_file(src)?;
     let mut collector = FnCollector::default();
@@ -41,6 +44,12 @@ pub fn analyze_file(file: &str, src: &str) -> Result<Vec<Finding>, syn::Error> {
 
     let mut findings = Vec::new();
     for unit in &collector.fns {
+        // The Vec element type the function returns, if any — a second way (besides
+        // a `collect::<Vec<..>>()` turbofish) to learn a materialized element type.
+        let return_elem = match &unit.output {
+            syn::ReturnType::Type(_, ty) => vec_type_element(ty),
+            _ => None,
+        };
         if !is_scan_fn(&unit.name, &unit.output) {
             continue;
         }
@@ -52,6 +61,11 @@ pub fn analyze_file(file: &str, src: &str) -> Result<Vec<Finding>, syn::Error> {
             function: &unit.name,
             findings: &mut findings,
         };
+        // Turbofish-less collect in a return position (`-> Vec<T> { .. it.collect() }`
+        // or an explicit `return it.collect();`), typed by the return type.
+        if let Some(elem) = &return_elem {
+            shape.scan_return_positions(&unit.block, elem);
+        }
         shape.visit_block(&unit.block);
     }
     Ok(findings)
@@ -117,6 +131,64 @@ impl<'a> ShapeVisitor<'a> {
             fingerprint: fingerprint_tokens(&tokens),
         });
     }
+
+    /// Flag a turbofish-less `EXPR.collect()` whose target element type `target`
+    /// (learned from a `let` annotation or the fn return type) is a stream
+    /// element, **and** whose receiver is still a recognized stream iterator.
+    /// Turbofish collects are handled by `visit_expr_method_call`, so we skip
+    /// them here to avoid double-counting.
+    fn record_turbofishless(&mut self, target: &VecElement, expr: &syn::Expr) {
+        if matches!(target, VecElement::NonStream) {
+            return;
+        }
+        if let Some(call) = as_bare_collect(expr) {
+            if call.turbofish.is_none() && receiver_is_stream_iter(&call.receiver) {
+                self.record(call);
+            }
+        }
+    }
+
+    /// Scan the function's return positions — the block's implicit tail
+    /// expression and every explicit `return EXPR;` not inside a nested
+    /// closure/item fn — for a turbofish-less collect typed by `target`.
+    fn scan_return_positions(&mut self, block: &syn::Block, target: &VecElement) {
+        if let Some(syn::Stmt::Expr(expr, None)) = block.stmts.last() {
+            self.record_turbofishless(target, expr);
+        }
+        let mut rc = ReturnCollector { exprs: Vec::new() };
+        rc.visit_block(block);
+        for expr in rc.exprs {
+            self.record_turbofishless(target, expr);
+        }
+    }
+}
+
+/// Unwrap parens/groups and return the `.collect()` method call if `expr` is one.
+fn as_bare_collect(expr: &syn::Expr) -> Option<&syn::ExprMethodCall> {
+    match expr {
+        syn::Expr::MethodCall(mc) if mc.method == "collect" => Some(mc),
+        syn::Expr::Paren(p) => as_bare_collect(&p.expr),
+        syn::Expr::Group(g) => as_bare_collect(&g.expr),
+        _ => None,
+    }
+}
+
+/// Collects the operands of `return EXPR;` statements within one function body,
+/// without crossing into nested closures or item fns (whose `return` binds to
+/// them, not the enclosing scan fn).
+struct ReturnCollector<'ast> {
+    exprs: Vec<&'ast syn::Expr>,
+}
+
+impl<'ast> Visit<'ast> for ReturnCollector<'ast> {
+    fn visit_item_fn(&mut self, _f: &'ast syn::ItemFn) {}
+    fn visit_expr_closure(&mut self, _c: &'ast syn::ExprClosure) {}
+    fn visit_expr_return(&mut self, r: &'ast syn::ExprReturn) {
+        if let Some(e) = &r.expr {
+            self.exprs.push(e);
+        }
+        syn::visit::visit_expr_return(self, r);
+    }
 }
 
 impl<'ast, 'a> Visit<'ast> for ShapeVisitor<'a> {
@@ -147,6 +219,17 @@ impl<'ast, 'a> Visit<'ast> for ShapeVisitor<'a> {
         }
         syn::visit::visit_expr_for_loop(self, for_loop);
     }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        // `let x: Vec<T> = <stream iter>.collect();` — turbofish-less; the target
+        // element type comes from the binding's type annotation.
+        if let syn::Pat::Type(pt) = &local.pat {
+            if let (Some(elem), Some(init)) = (vec_type_element(&pt.ty), &local.init) {
+                self.record_turbofishless(&elem, &init.expr);
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
 }
 
 /// What `collect::<Vec<..>>()` collects into, as far as syntactically visible.
@@ -167,6 +250,14 @@ fn collect_vec_element(call: &syn::ExprMethodCall) -> Option<VecElement> {
     let syn::GenericArgument::Type(ty) = first else {
         return None;
     };
+    vec_type_element(ty)
+}
+
+/// Classify a syntactic type as a `Vec<..>` and its element: `Some(Stream)` for
+/// `Vec<row/partition/cell type>`, `Some(Unknown)` for `Vec<_>`/`Vec` without a
+/// resolvable element, `Some(NonStream)` for `Vec<other>`, `None` when not a
+/// `Vec` at all. Shared by the turbofish, `let`-annotation, and return-type paths.
+fn vec_type_element(ty: &syn::Type) -> Option<VecElement> {
     let seg = last_path_segment(ty)?;
     if seg.ident != "Vec" {
         return None;
@@ -228,7 +319,8 @@ fn block_pushes_or_extends(block: &syn::Block) -> bool {
 
 /// A reader/producer scan function: name-shaped (`scan*`, `run_scan*`,
 /// `produce*`, `iterate_*partition*`) or a signature returning/holding a
-/// row/partition/cell iterator or stream.
+/// row/partition/cell iterator or stream, or one that returns `Vec<T>` over a
+/// stream element type (the canonical `-> Vec<DataRow> { it.collect() }` shape).
 fn is_scan_fn(name: &str, output: &syn::ReturnType) -> bool {
     if name.starts_with("scan")
         || name.starts_with("run_scan")
@@ -237,9 +329,13 @@ fn is_scan_fn(name: &str, output: &syn::ReturnType) -> bool {
     {
         return true;
     }
-    // Signature-shaped: returns an iterator/stream over a stream element type.
+    // Signature-shaped: returns an iterator/stream over a stream element type, or
+    // a `Vec<T>` whose element is a recognized stream element type.
     if let syn::ReturnType::Type(_, ty) = output {
         if type_is_stream_iterator(ty) {
+            return true;
+        }
+        if matches!(vec_type_element(ty), Some(VecElement::Stream)) {
             return true;
         }
     }

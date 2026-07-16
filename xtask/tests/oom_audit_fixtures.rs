@@ -38,6 +38,34 @@ fn violating_fixture_produces_findings() {
 }
 
 #[test]
+fn turbofishless_collect_forms_are_flagged() {
+    // Blocker (#2012 review): the CANONICAL no-turbofish shapes must be caught —
+    // the target `Vec<T>` element type comes from the fn return type (a) or a
+    // `let` type annotation (b), not a `collect::<Vec<..>>()` turbofish.
+    let findings = analyze("violating_turbofishless.rs.txt");
+    assert!(
+        findings.iter().all(|f| f.rule == "STREAM_RETURNS_VEC"),
+        "unexpected rule: {findings:?}"
+    );
+    // (a) return-type-typed, plain-named fn admitted only via `-> Vec<DataRow>`.
+    assert!(
+        findings.iter().any(|f| f.function == "read_all_rows"),
+        "turbofish-less return-position collect must be flagged, got {findings:?}"
+    );
+    // (b) let-annotation-typed collect inside a scan fn returning `usize`.
+    assert!(
+        findings.iter().any(|f| f.function == "scan_and_count"),
+        "turbofish-less let-typed collect must be flagged, got {findings:?}"
+    );
+    // Exactly one finding per function — no double-counting across paths.
+    assert_eq!(
+        findings.len(),
+        2,
+        "expected exactly 2 findings (one per fn), got {findings:?}"
+    );
+}
+
+#[test]
 fn bounded_fixture_produces_no_findings() {
     let findings = analyze("bounded.rs.txt");
     assert!(

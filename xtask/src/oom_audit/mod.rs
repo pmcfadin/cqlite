@@ -24,14 +24,18 @@ pub struct Outcome {
     pub findings: Vec<Finding>,
     /// Allowlist entries that fail (orphaned / malformed / expired).
     pub allowlist_problems: Vec<AllowlistProblem>,
-    /// Files that failed to parse (reported, never fatal).
+    /// In-scope files that failed to parse (an enforce-mode failure — a
+    /// standalone `--only oom-audit` run has no compile step to catch them first).
     pub parse_errors: Vec<String>,
 }
 
 impl Outcome {
-    /// True if enforce mode should fail: any live finding or allowlist problem.
+    /// True if enforce mode should fail: any live finding, allowlist problem, or
+    /// unparseable in-scope file.
     pub fn has_failures(&self) -> bool {
-        !self.findings.is_empty() || !self.allowlist_problems.is_empty()
+        !self.findings.is_empty()
+            || !self.allowlist_problems.is_empty()
+            || !self.parse_errors.is_empty()
     }
 
     /// Whether the process should exit non-zero: only in enforce mode, and only
@@ -149,8 +153,13 @@ fn print_report(outcome: &Outcome, enforce: bool) {
 
     if !outcome.parse_errors.is_empty() {
         println!(
-            "  note: {} file(s) skipped (unparseable):",
-            outcome.parse_errors.len()
+            "  parse errors: {} in-scope file(s) unparseable ({}):",
+            outcome.parse_errors.len(),
+            if enforce {
+                "enforce failure"
+            } else {
+                "report-only"
+            }
         );
         for e in &outcome.parse_errors {
             println!("    - {e}");
@@ -252,6 +261,20 @@ mod tests {
         };
         assert!(!clean.has_failures());
         assert!(!clean.should_fail(true));
+    }
+
+    #[test]
+    fn parse_errors_fail_enforce_but_not_report_only() {
+        // Low (#2012 review): an unparseable in-scope file must not be a silent
+        // PASS under a standalone `--only oom-audit` run.
+        let outcome = Outcome {
+            findings: vec![],
+            allowlist_problems: vec![],
+            parse_errors: vec!["cqlite-core/src/query/x.rs: parse error: ...".to_string()],
+        };
+        assert!(outcome.has_failures());
+        assert!(outcome.should_fail(true));
+        assert!(!outcome.should_fail(false));
     }
 
     #[test]

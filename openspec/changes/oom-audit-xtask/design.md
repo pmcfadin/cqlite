@@ -62,8 +62,8 @@ producing spurious "moved" churn. Each entry:
 [[allow]]
 file = "cqlite-core/src/storage/sstable/statistics/reader.rs"
 fn = "parse_statistics"
-# fingerprint = blake3 of the syn-normalized (whitespace/renamed-local-insensitive) offending expr
-fingerprint = "b3:9f2c…"
+# fingerprint = FNV-1a-64 of the syn-normalized token stream of the offending expr (see below)
+fingerprint = "f1:9f2c…"
 issue = "#2012"
 justification = "Statistics.db is bounded-small (< a few KB); whole-file parse is sound."
 # expiry = "2026-12-31"   # optional; when present, a past date fails the audit
@@ -71,9 +71,15 @@ justification = "Statistics.db is bounded-small (< a few KB); whole-file parse i
 - **Orphaned** (fingerprint matches nothing in scope) → FAIL. Keeps the list from rotting.
 - Missing `issue`/`justification` → FAIL. Every suppression is reviewable and attributable.
 - `expiry` optional (see fork F).
-The fingerprint is the `quote`-normalized token stream of the offending expression hashed — stable
-across reformatting and local renames, changes when the code changes (so a real new materialization at
-a previously-allowed site re-fires).
+The fingerprint is the `quote`-normalized token stream of the offending expression hashed with a
+small in-tree **FNV-1a-64** (`f1:` prefix), not blake3 — the crate's dependencies are capped at
+syn/quote/walkdir/toml, and FNV-1a is deterministic and stable across Rust versions/platforms
+(unlike `std`'s SipHash `DefaultHasher`), which a committed fingerprint requires. It is stable across
+reformatting (whitespace is normalized away) but **rename-sensitive**: the token stream includes
+identifiers, so renaming a local changes the fingerprint. This is the safe direction — a rename
+orphans the allowlist entry (→ FAIL, demanding a re-review) rather than silently keeping a stale
+suppression alive. It still changes when the code changes, so a real new materialization at a
+previously-allowed site re-fires. (Impl: `xtask/src/oom_audit/fingerprint.rs`.)
 
 ## D — Modes, exit codes, and gate wiring (chosen: SKIP-aware like delivery-telemetry)
 - `cargo run -p xtask -- oom-audit` → report-only, exit `0` always.
