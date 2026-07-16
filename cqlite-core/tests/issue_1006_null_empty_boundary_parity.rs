@@ -219,7 +219,7 @@ fn value_to_canonical(v: &Value) -> CanonicalValue {
         Value::BigInt(i) | Value::Counter(i) => CanonicalValue::Int(*i as i128),
         Value::TinyInt(i) => CanonicalValue::Int(*i as i128),
         Value::SmallInt(i) => CanonicalValue::Int(*i as i128),
-        Value::Text(s) => CanonicalValue::Text(s.clone()),
+        Value::Text(s) => CanonicalValue::Text(String::from_utf8_lossy(s).into_owned()),
         // sstabledump renders blobs as `0x<lowercase-hex>`; empty blob => "0x".
         Value::Blob(b) => CanonicalValue::Text(format!("0x{}", hex::encode(b))),
         Value::List(xs) | Value::Set(xs) | Value::Tuple(xs) => {
@@ -809,7 +809,7 @@ async fn length_prefix_edges_boundary_and_neighbor() {
             // are short non-empty strings; both must decode as the expected literals.
             match get("after_col") {
                 Some(Some(Value::Text(s))) => assert!(
-                    s.starts_with("after"),
+                    String::from_utf8_lossy(s).starts_with("after"),
                     "ck={ck}: after_col neighbour corrupted (got {s:?}); \
                      boundary edge value mis-consumed bytes"
                 ),
@@ -817,7 +817,7 @@ async fn length_prefix_edges_boundary_and_neighbor() {
             }
             match get("before_col") {
                 Some(Some(Value::Text(s))) => assert!(
-                    s.starts_with("before"),
+                    String::from_utf8_lossy(s).starts_with("before"),
                     "ck={ck}: before_col neighbour corrupted (got {s:?})"
                 ),
                 other => panic!("ck={ck}: before_col neighbour missing/corrupt: {other:?}"),

@@ -472,7 +472,7 @@ fn value_to_string(v: &Value) -> String {
     match v {
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         Value::Boolean(b) => b.to_string(),
         Value::Null => "null".to_string(),
         other => format!("{other:?}"),
@@ -908,12 +908,17 @@ fn dropped_regular_col_per_cell_purge_on_compaction() {
                         for c in cells {
                             if c.column == "drop_col" {
                                 if let Value::Text(t) = &c.value {
-                                    drop_col_survivors.push((ck.clone(), t.clone()));
+                                    drop_col_survivors.push((
+                                        ck.clone(),
+                                        String::from_utf8_lossy(t).into_owned(),
+                                    ));
                                 }
                             } else if c.column == "keep_col" {
                                 if let Value::Text(t) = &c.value {
-                                    keep_col_survivors
-                                        .push((ck.clone().unwrap_or_default(), t.clone()));
+                                    keep_col_survivors.push((
+                                        ck.clone().unwrap_or_default(),
+                                        String::from_utf8_lossy(t).into_owned(),
+                                    ));
                                 }
                             }
                         }

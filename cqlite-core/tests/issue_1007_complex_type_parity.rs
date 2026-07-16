@@ -306,7 +306,7 @@ fn render_canonical_key(ck: &[CanonicalValue]) -> String {
 fn render_canonical(v: &CanonicalValue) -> String {
     match v {
         CanonicalValue::Int(i) => i.to_string(),
-        CanonicalValue::Text(s) => String::from_utf8_lossy(s).into_owned(),
+        CanonicalValue::Text(s) => s.clone(),
         CanonicalValue::Bool(b) => b.to_string(),
         CanonicalValue::Null => "null".to_string(),
         other => format!("{other:?}"),

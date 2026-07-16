@@ -764,7 +764,7 @@ fn value_to_string(v: &Value) -> String {
         Value::BigInt(i) => i.to_string(),
         Value::SmallInt(i) => i.to_string(),
         Value::TinyInt(i) => i.to_string(),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         Value::Boolean(b) => b.to_string(),
         Value::Uuid(u) => format!("{}", uuid::Uuid::from_bytes(*u)),
         Value::Null => "null".to_string(),
