@@ -662,6 +662,41 @@ mod tests {
         assert!(cache.resident_bytes() <= cache.budget_bytes());
     }
 
+    /// Byte-accounting regression (roborev round 3): reinserting the SAME
+    /// `(identity, key)` pair with a DIFFERENT value must NOT grow resident bytes.
+    /// The `insert` `replaced` branch subtracts the old cost before re-adding the
+    /// new (identical) cost; a dropped or mis-signed subtraction would double-count
+    /// bytes on every hot-key reinsert and silently breach the byte budget invariant
+    /// #2059 exists to enforce. Mirrors the retired per-reader cache's
+    /// `reinsert_same_key_does_not_grow_resident_bytes`. Single shard so the pair is
+    /// deterministically co-resident.
+    #[test]
+    fn reinsert_same_key_does_not_grow_resident_bytes() {
+        let cache = GlobalKeyOffsetCache::with_budget_and_shards(DEFAULT_GLOBAL_KEY_CACHE_BYTES, 1);
+        let g = ident(1, 1, 100, 1);
+        let key = b"hot-partition-key";
+
+        cache.insert(g, key, PartitionLoc::new(10, 100));
+        let bytes_after_first = cache.resident_bytes();
+        assert_eq!(cache.len(), 1, "one entry after the first insert");
+
+        // Reinsert the SAME (identity, key) with a DIFFERENT value.
+        cache.insert(g, key, PartitionLoc::new(999, 42));
+
+        assert_eq!(
+            cache.len(),
+            1,
+            "reinsert updates in place — no duplicate entry"
+        );
+        assert_eq!(
+            cache.resident_bytes(),
+            bytes_after_first,
+            "reinserting the same key must not double-count resident bytes"
+        );
+        // Latest write wins.
+        assert_eq!(cache.get(g, key), Some(PartitionLoc::new(999, 42)));
+    }
+
     /// Spec Requirement 1 scenario: aggregate footprint stays bounded as the
     /// number of distinct generations/readers grows far past what the budget holds.
     #[test]
