@@ -473,12 +473,15 @@ fn test_duckdb_schema_inference() {
 /// Regression test for issue #2491: DuckDB must be able to read the UUID and
 /// TimeUUID columns of a CQLite Parquet export.
 ///
-/// `simple_table` has both an `id UUID` primary key and a `session_id TIMEUUID`
-/// column, both exported as `FixedSizeBinary(16)` carrying the canonical
-/// `arrow.uuid` extension. This test materializes the `id` column through
-/// `read_parquet`, exercising DuckDB's Arrow/UUID conversion end-to-end so a
-/// future export change (e.g. altering the UUID logical-type annotation) can't
-/// silently break DuckDB interop.
+/// `simple_table` has both an `id UUID` primary key (exported as an
+/// `arrow.uuid` FixedSizeBinary(16)) and a `session_id TIMEUUID` column. This
+/// test materializes the actual UUID *values* of BOTH columns through
+/// `read_parquet` — via `hex(...)`, which forces DuckDB to read every content
+/// byte of each value (the value-decode path) rather than answering from
+/// Parquet row-group/null-count metadata — and asserts each renders as a
+/// canonical 8-4-4-4-12 UUID. A future export change that corrupts the UUID
+/// values or logical-type annotation therefore fails this test instead of
+/// slipping through a metadata-only `COUNT(*)`.
 #[test]
 fn test_duckdb_reads_uuid_columns_without_panic() {
     let (data_dir, schema_file) = assert_test_data_available();
@@ -498,25 +501,99 @@ fn test_duckdb_reads_uuid_columns_without_panic() {
 
     let conn = Connection::open_in_memory().expect("Failed to open DuckDB connection");
 
-    // Materialize the UUID columns through DuckDB. Prior to the #2491 fix this
-    // panicked inside the duckdb crate rather than returning a row count.
-    let uuid_rows: i64 = conn
+    // Materialize the actual UUID *values* of both the `id` (UUID) primary key
+    // and the `session_id` (TIMEUUID) column. `hex(...)` forces DuckDB to read
+    // every content byte of each value (a metadata-only COUNT(*)/null-count can
+    // never produce the content hex), so this exercises the value-decode path
+    // end-to-end. Note the two columns land in Parquet with different physical
+    // encodings — `id` as a 16-byte arrow.uuid FixedSizeBinary(16) blob,
+    // `session_id` as the 36-char canonical UUID text — and `hex()` reads the
+    // content bytes of both. Prior to the #2491 fix this panicked inside the
+    // duckdb crate rather than returning the values.
+    let (id_hex, session_id_hex): (String, String) = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM read_parquet('{}') WHERE id IS NOT NULL",
+                "SELECT hex(id), hex(session_id) \
+                 FROM read_parquet('{}') \
+                 WHERE id IS NOT NULL AND session_id IS NOT NULL LIMIT 1",
                 parquet_file.display()
             ),
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .expect("DuckDB should read the uuid `id` column without panicking (#2491)");
+        .expect(
+            "DuckDB should decode the uuid `id` and timeuuid `session_id` values without panicking (#2491)",
+        );
+
+    let id_uuid = duckdb_hex_to_uuid(&id_hex).unwrap_or_else(|| {
+        panic!(
+            "#2491: DuckDB-decoded `id` content bytes should render as a UUID, got hex {id_hex:?}"
+        )
+    });
+    let session_id_uuid = duckdb_hex_to_uuid(&session_id_hex).unwrap_or_else(|| {
+        panic!(
+            "#2491: DuckDB-decoded `session_id` content bytes should render as a UUID, got hex {session_id_hex:?}"
+        )
+    });
 
     assert!(
-        uuid_rows > 0,
-        "simple_table should have at least one non-null uuid id"
+        is_canonical_uuid(&id_uuid),
+        "#2491: DuckDB-decoded `id` should render as a canonical UUID, got {id_uuid:?}"
+    );
+    assert!(
+        is_canonical_uuid(&session_id_uuid),
+        "#2491: DuckDB-decoded `session_id` should render as a canonical UUID, got {session_id_uuid:?}"
     );
 
-    eprintln!("SUCCESS: DuckDB read {uuid_rows} uuid rows without panic (#2491)");
+    eprintln!(
+        "SUCCESS: DuckDB decoded uuid id={id_uuid} and timeuuid session_id={session_id_uuid} (#2491)"
+    );
+}
+
+/// Normalizes DuckDB's `hex()` output of a UUID-bearing value into a canonical
+/// 8-4-4-4-12 UUID string, or `None` if the bytes are not a UUID. Handles the
+/// two physical encodings CQLite emits: 16 raw bytes (32 hex chars, an
+/// arrow.uuid FixedSizeBinary(16)) and the 36-char canonical UUID text (72 hex
+/// chars of ASCII). Used by the #2491 regression test to prove DuckDB actually
+/// decoded the value bytes rather than reading Parquet metadata.
+fn duckdb_hex_to_uuid(hex: &str) -> Option<String> {
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        // Raw 16-byte value (arrow.uuid FixedSizeBinary(16)).
+        32 => Some(format!(
+            "{}-{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..32],
+        )),
+        // Hex of the 36-char canonical UUID text (already 8-4-4-4-12).
+        72 => {
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                .collect::<Result<_, _>>()
+                .ok()?;
+            String::from_utf8(bytes).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Returns true iff `s` is a canonical 8-4-4-4-12 lowercase/uppercase-hex UUID
+/// string (36 chars). Used by the #2491 regression test to prove DuckDB
+/// actually decoded the arrow.uuid values rather than reading Parquet metadata.
+fn is_canonical_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    s.char_indices().all(|(i, c)| match i {
+        8 | 13 | 18 | 23 => c == '-',
+        _ => c.is_ascii_hexdigit(),
+    })
 }
 
 #[test]
