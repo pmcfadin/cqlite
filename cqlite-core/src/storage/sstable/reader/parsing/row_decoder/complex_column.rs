@@ -2238,7 +2238,7 @@ mod tests {
             "sanity: a bare `as i32` cast of this TTL would be negative"
         );
         let cell = ComplexCellParse {
-            value: Some(Value::Blob(vec![0xAA])),
+            value: Some(Value::blob(vec![0xAA])),
             path_bytes: Vec::new(),
             is_deleted: false,
             has_empty_value: false,

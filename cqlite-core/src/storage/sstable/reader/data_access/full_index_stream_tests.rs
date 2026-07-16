@@ -542,7 +542,7 @@ fn wide_row_mutation(id: i32, seq: i32, text_len: usize) -> Mutation {
         Some(ClusteringKey::single("seq", Value::Integer(seq))),
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("x".repeat(text_len)),
+            value: Value::text("x".repeat(text_len)),
         }],
         1_000_000 + (id as i64) * 1_000_000 + seq as i64,
         None,

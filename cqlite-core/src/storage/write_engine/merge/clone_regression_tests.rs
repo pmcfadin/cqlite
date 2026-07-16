@@ -112,7 +112,7 @@ fn kway_merge_does_not_double_clone_entries() {
                         RowData::Live {
                             cells: vec![CellData::new(
                                 "name".to_string(),
-                                Value::Text("v".to_string()),
+                                Value::text("v"),
                                 100,
                             )],
                         },

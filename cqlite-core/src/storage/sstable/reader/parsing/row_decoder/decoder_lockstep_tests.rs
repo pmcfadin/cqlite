@@ -943,7 +943,7 @@ async fn v5_varint_arm_decodes_edge_cases() {
         // Both paths must produce Value::Varint with the SAME raw bytes.
         assert_eq!(
             v5,
-            Value::Varint(value_bytes.clone()),
+            Value::varint(value_bytes.clone()),
             "v5 varint {label} must decode to Value::Varint (not Blob)"
         );
         assert_eq!(
@@ -991,7 +991,7 @@ async fn v5_varint_empty_matches_block() {
         .unwrap_or_else(|e| panic!("v5 zero-length varint failed: {e:?}"));
     assert_eq!(
         v5_len0,
-        Value::Varint(Vec::new()),
+        Value::varint(Vec::new()),
         "zero-length-prefix v5 varint → Varint([])"
     );
     assert_eq!(
@@ -1009,7 +1009,7 @@ async fn v5_varint_empty_matches_block() {
         .unwrap_or_else(|e| panic!("v5 empty-value-flag varint failed: {e:?}"));
     assert_eq!(
         v5_empty_flag,
-        Value::Varint(Vec::new()),
+        Value::varint(Vec::new()),
         "empty-value-flag (0x0C) v5 varint → Varint([]) via the empty arm"
     );
     assert_eq!(
