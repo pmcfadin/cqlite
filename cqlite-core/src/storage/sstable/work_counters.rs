@@ -595,6 +595,83 @@ pub(crate) mod merge_entry_clone_scope {
     }
 }
 
+/// A thread-local recording scope for `CellData::clone` calls, mirroring
+/// [`merge_entry_clone_scope`] exactly (issue #2428's parallel-test-pollution-
+/// immune design). Used by the #1665 reconcile micro-alloc guard: reconciliation
+/// runs single-threaded, so a [`CellDataCloneScope`] opened around one
+/// clustering-group reconcile captures exactly the `CellData` clones performed
+/// during it — enough to prove Site 2 (`filter_dropped_columns`) no longer
+/// deep-clones the survivor set.
+///
+/// `#[cfg(test)]`: the `record()` call in `CellData::clone` is likewise
+/// `#[cfg(test)]`-gated, so production clone pays ZERO added cost. Gated on
+/// `feature = "write-support"` as well because `CellData` and its only consumer
+/// (the `filter_dropped_columns` guard) live in the write-support-only merge
+/// module — under the minimal feature set those callers vanish, so an
+/// unconditional `#[cfg(test)]` here would be dead code and trip the
+/// `-D warnings` dead-code lint in the all-compression build.
+#[cfg(all(test, feature = "write-support"))]
+pub(crate) mod cell_data_clone_scope {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `Some(count)` while a [`CellDataCloneScope`] is active on this thread,
+        /// `None` otherwise. Only `CellData::clone` calls executing on this
+        /// thread bump it.
+        static SCOPED: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Bump the active scope on the current thread, if any. A no-op on threads
+    /// (production reconcile, other tests) with no active scope.
+    pub(crate) fn record() {
+        SCOPED.with(|c| {
+            if let Some(v) = c.get() {
+                c.set(Some(v.saturating_add(1)));
+            }
+        });
+    }
+
+    /// A per-thread recording scope for `CellData::clone`. Open one before
+    /// driving a clustering-group reconcile and read
+    /// [`count`](CellDataCloneScope::count) after. Immune to concurrent tests on
+    /// other threads (issue #2428). Dropping it clears the scope.
+    ///
+    /// Deliberately `!Send` (holds a `PhantomData<*const ()>`): the scope is
+    /// meaningful only on the thread that opened it.
+    pub(crate) struct CellDataCloneScope {
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    impl CellDataCloneScope {
+        /// Begin recording on the current thread. Panics if a scope is already
+        /// active on this thread (one scope per assertion; nesting unsupported).
+        pub(crate) fn new() -> Self {
+            SCOPED.with(|c| {
+                assert!(
+                    c.get().is_none(),
+                    "a CellDataCloneScope is already active on this thread (nesting unsupported)"
+                );
+                c.set(Some(0));
+            });
+            Self {
+                _not_send: std::marker::PhantomData,
+            }
+        }
+
+        /// `CellData::clone` increments recorded on this thread since the scope
+        /// opened.
+        pub(crate) fn count(&self) -> u64 {
+            SCOPED.with(|c| c.get().unwrap_or(0))
+        }
+    }
+
+    impl Drop for CellDataCloneScope {
+        fn drop(&mut self) {
+            SCOPED.with(|c| c.set(None));
+        }
+    }
+}
+
 /// Record that one merge ENTRY was decoded from `Data.db` by ANY
 /// [`KWayMerger`](crate::storage::write_engine::KWayMerger)-adapter-driven run
 /// (Issue #2096) — a full scan, a compaction, OR a multi-candidate point read,
