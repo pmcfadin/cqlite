@@ -243,6 +243,15 @@ pub(super) async fn merge_generations_for_read(
     limit: Option<usize>,
     target_key: Option<&RowKey>,
 ) -> Result<Vec<(RowKey, ScanRow)>> {
+    // Issue #2063: admit this eager multi-generation operation through the SAME
+    // operation-level scan-admission semaphore the windowed path uses (#1594).
+    // ONE permit for the whole operation, acquired at the top before the single
+    // `spawn_blocking`, held (RAII) across the join `.await`, and released on
+    // every exit (success/error/cancel) via `Drop`. Once-only, no nested acquire:
+    // the KWayMerger's producer OS threads never call `admit()`, so this cannot
+    // reintroduce the #1594 fan-out hold-and-wait deadlock.
+    let _admission = reader::scan_stream_windowed::scan_admission::admit().await;
+
     // Own the bounds/target so the merge body can use them without borrowing
     // across the await; cheap clone of the key bytes.
     let start_key = start_key.cloned();
@@ -392,6 +401,14 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     limit: Option<usize>,
     target_key: Option<&RowKey>,
 ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
+    // Issue #2063: admit this eager multi-generation metadata operation through the
+    // SAME operation-level scan-admission semaphore the windowed path uses (#1594),
+    // identically to the plain `merge_generations_for_read`. ONE permit for the whole
+    // operation, acquired at the top before the single `KWayMerger` `spawn_blocking`,
+    // held (RAII) across the join `.await`, released on every exit via `Drop`. No
+    // nested acquire, so no #1594 hold-and-wait deadlock.
+    let _admission = reader::scan_stream_windowed::scan_admission::admit().await;
+
     // Own the bounds so the merge body can use them without borrowing across the
     // await; cheap clone of the key bytes. Mirrors the plain helper.
     let owned_start = start_key.cloned();

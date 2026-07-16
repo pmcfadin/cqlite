@@ -50,12 +50,28 @@
 //!
 //! # Scope
 //!
-//! Admission covers the LAZY/WINDOWED scan path only. The write-support
-//! multi-generation EAGER-materialize branch (`merge_generations_for_read` in
-//! `storage/sstable/mod.rs`, which drains a `KWayMerger` inside a single
-//! `spawn_blocking`) does NOT pass through admission — it predates F4 and is not
-//! the `spawn_blocking`-windowed target. Do not assume ALL reads are throttled by
-//! this semaphore; wiring that eager path in would be a separate change.
+//! Admission covers BOTH the LAZY/WINDOWED scan path AND the write-support
+//! multi-generation EAGER-materialize path (issue #2063). The eager path —
+//! `merge_generations_for_read` and its metadata sibling
+//! `merge_generations_for_read_with_metadata` in
+//! `storage/sstable/generation_merge.rs`, each of which drains a `KWayMerger`
+//! inside a single `spawn_blocking` — acquires exactly ONE operation-level permit
+//! at the top of the function (before its `spawn_blocking`, held across the join
+//! via the RAII guard), through this same process-wide semaphore. That is the
+//! precise fit for the eager shape (one `spawn_blocking`, no async fan-out, no
+//! sub-scans) and cannot reintroduce the #1594 hold-and-wait deadlock: it is a
+//! single top-level once-only `admit()` with no nested acquisition (the
+//! KWayMerger's producer OS threads never call [`admit`]).
+//!
+//! KNOWN LIMITATION (documented, not solved here): the shared semaphore bounds
+//! eager *operation* concurrency, NOT the eager path's per-operation resource
+//! footprint. Unlike the windowed path (tokio blocking-pool threads), each eager
+//! operation drives `M` `std::thread` producer threads (M = generation count;
+//! KWayMerger, #2316), so `cap` admitted eager operations can still spawn up to
+//! `cap × M` producer OS threads. The bound limits how many eager operations run
+//! at once, consistent with #1594's "operation concurrency, not total blocking
+//! threads" semantic; sizing the eager path's thread footprint separately is a
+//! future issue (see the change's Non-goals).
 //!
 //! # Deadlock-freedom
 //!
