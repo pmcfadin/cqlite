@@ -52,7 +52,16 @@ impl Outcome {
 
 /// Locate the workspace root. When run via `cargo run -p xtask`, the crate
 /// manifest dir is `<root>/xtask`, so the parent is the workspace root.
+///
+/// `CQLITE_OOM_AUDIT_ROOT` overrides the root (used by the gate self-test to
+/// point the audit at a synthetic tree — a planted violation for the FAIL path,
+/// a clean tree for the PASS path — without touching the real source).
 pub fn repo_root() -> Result<PathBuf, String> {
+    if let Ok(override_root) = std::env::var("CQLITE_OOM_AUDIT_ROOT") {
+        if !override_root.is_empty() {
+            return Ok(PathBuf::from(override_root));
+        }
+    }
     let manifest = env!("CARGO_MANIFEST_DIR");
     let dir = Path::new(manifest);
     dir.parent()
