@@ -51,6 +51,12 @@ const CLEAN_DATA_DB: &str =
 /// partition of `lz4_table`). The exact window is immaterial: chunk 0's inline CRC
 /// covers the whole chunk, so any read touching it must validate that CRC.
 const CHUNK0_OFFSET: u64 = 0;
+// 16 bytes is a "non-tombstone" window for this path: the offset-read path wraps the
+// bytes as `ScanRow::RawRow` (issue #1334), which `filter_tombstone` keeps
+// unconditionally (it suppresses only a `ScanRow::Marker` row-tombstone) — the raw
+// bytes are never parsed into a tombstone marker. So a clean read surfaces as
+// `Ok(Some(_))` regardless of the 16 bytes' content; the size only has to be non-zero
+// and land inside chunk 0.
 const CHUNK0_SIZE: u32 = 16;
 
 /// `true` when the full-dataset/nightly lanes demand the corpus be present.
