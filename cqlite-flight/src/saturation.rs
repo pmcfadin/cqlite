@@ -130,27 +130,68 @@ fn record_blocking(level: i64) {
     obs::record_gauge(catalog::FLIGHT_BLOCKING_TASKS_IN_USE, level.max(0), &[]);
 }
 
+/// Apply `delta` to `atomic` and return the resulting level — the exact
+/// arithmetic [`BlockingTaskGuard`] applies to the shared [`BLOCKING_TASKS`].
+/// Parameterized over the atomic (issue #2419 roborev job 1734, the #2451
+/// flake class — mirrors `channel_depth::adjust`) so a test can pin the guard's
+/// rise/balance/panic-decrements behavior against a private, per-test atomic
+/// instead of racing every other concurrently-running test that also holds a
+/// REAL guard against the shared global (e.g. the streaming e2e wiring test).
+fn adjust(atomic: &AtomicI64, delta: i64) -> i64 {
+    atomic.fetch_add(delta, Ordering::SeqCst) + delta
+}
+
 /// RAII guard that accounts one flight `spawn_blocking` task as in-use for its
 /// lifetime. Constructed as the FIRST act inside a flight `spawn_blocking`
 /// closure ([`crate::streaming`]); its `Drop` decrements on EVERY exit path —
 /// normal return, early `?`, cancel, or panic — so the increment/decrement are
 /// balanced by construction (mirroring the #2316 `ProducerThreadGuard`).
 pub(crate) struct BlockingTaskGuard {
-    _private: (),
+    /// The atomic this guard tracks — always the shared [`BLOCKING_TASKS`] in
+    /// production ([`Self::enter`]); a test-only constructor
+    /// ([`Self::enter_on`]) can point it at a private, per-test atomic.
+    atomic: &'static AtomicI64,
+    /// Whether to emit the real OTel gauge on change. `false` for a
+    /// test-injected atomic, so a unit test pinning the guard's arithmetic
+    /// against a private atomic never publishes a synthetic reading over
+    /// `cqlite.flight.blocking_tasks_in_use`.
+    emit: bool,
 }
 
 impl BlockingTaskGuard {
     /// Enter a flight blocking task: increment the in-use gauge and return the
     /// guard whose drop decrements it.
     pub(crate) fn enter() -> Self {
-        record_blocking(BLOCKING_TASKS.fetch_add(1, Ordering::SeqCst) + 1);
-        Self { _private: () }
+        record_blocking(adjust(&BLOCKING_TASKS, 1));
+        Self {
+            atomic: &BLOCKING_TASKS,
+            emit: true,
+        }
+    }
+
+    /// Test-only: enter a guard tracking `atomic` instead of the shared
+    /// [`BLOCKING_TASKS`] (issue #2419 roborev job 1734). `atomic` must be
+    /// `'static` — a test declares a function-local `static` (no heap leak
+    /// needed) so each test gets its own private counter, immune to
+    /// concurrently-running tests that hold a REAL guard against the shared
+    /// global. Never emits the OTel gauge (the level is synthetic, not a real
+    /// blocking-pool reading).
+    #[cfg(test)]
+    fn enter_on(atomic: &'static AtomicI64) -> Self {
+        adjust(atomic, 1);
+        Self {
+            atomic,
+            emit: false,
+        }
     }
 }
 
 impl Drop for BlockingTaskGuard {
     fn drop(&mut self) {
-        record_blocking(BLOCKING_TASKS.fetch_sub(1, Ordering::SeqCst) - 1);
+        let level = adjust(self.atomic, -1);
+        if self.emit {
+            record_blocking(level);
+        }
     }
 }
 
@@ -360,40 +401,51 @@ mod tests {
 
     /// Stage 2.2: the blocking-task gauge RISES with concurrent guards and
     /// balances back to baseline on every exit path (RAII drop), asserted on the
-    /// LEVEL, not on timing. Uses a captured pre/post baseline so it is robust
-    /// under the parallel test runner.
+    /// LEVEL, not on timing.
+    ///
+    /// Roborev job 1734 (the #2451 flake class): pinned against a PRIVATE,
+    /// per-test `static` atomic via [`BlockingTaskGuard::enter_on`] — never the
+    /// shared [`BLOCKING_TASKS`] global — because
+    /// `blocking_tasks_gauge_tracks_real_streaming_do_get` (the streaming e2e
+    /// wiring test, same binary, parallel runner) holds a REAL guard against
+    /// that shared global concurrently, which would flake this test's
+    /// exact-equality assertions exactly like the #2419 egress-depth fix.
     #[test]
     fn blocking_task_guard_rises_and_balances() {
-        let base = blocking_tasks_in_use_level();
+        static LOCAL: AtomicI64 = AtomicI64::new(0);
+        let base = LOCAL.load(Ordering::SeqCst);
         {
-            let _g1 = BlockingTaskGuard::enter();
-            assert_eq!(blocking_tasks_in_use_level(), base + 1);
-            let _g2 = BlockingTaskGuard::enter();
+            let _g1 = BlockingTaskGuard::enter_on(&LOCAL);
+            assert_eq!(LOCAL.load(Ordering::SeqCst), base + 1);
+            let _g2 = BlockingTaskGuard::enter_on(&LOCAL);
             assert_eq!(
-                blocking_tasks_in_use_level(),
+                LOCAL.load(Ordering::SeqCst),
                 base + 2,
                 "a second concurrent blocking task must ADD to the in-use count"
             );
         }
         assert_eq!(
-            blocking_tasks_in_use_level(),
+            LOCAL.load(Ordering::SeqCst),
             base,
             "every guard's drop decrements — the level returns to its baseline"
         );
     }
 
     /// A guard dropped on the panic-unwind path still decrements (RAII), so a
-    /// panicking blocking closure never leaks in-use count. Asserted on the level.
+    /// panicking blocking closure never leaks in-use count. Asserted on the
+    /// level, pinned against a private per-test atomic for the same
+    /// determinism reason as the test above (roborev job 1734).
     #[test]
     fn blocking_task_guard_decrements_on_panic() {
-        let base = blocking_tasks_in_use_level();
+        static LOCAL: AtomicI64 = AtomicI64::new(0);
+        let base = LOCAL.load(Ordering::SeqCst);
         let result = std::panic::catch_unwind(|| {
-            let _g = BlockingTaskGuard::enter();
+            let _g = BlockingTaskGuard::enter_on(&LOCAL);
             panic!("simulated blocking-closure panic");
         });
         assert!(result.is_err(), "the closure panicked as set up");
         assert_eq!(
-            blocking_tasks_in_use_level(),
+            LOCAL.load(Ordering::SeqCst),
             base,
             "the guard's Drop ran during unwind, restoring the baseline"
         );
