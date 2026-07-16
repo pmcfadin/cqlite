@@ -19,8 +19,9 @@ use super::{
     apply_forcing, build_row_from_scan_cached, classify_partition_lookup,
     collect_capped_materialized, column_info_from_type_str, full_forbids_schemaless_seek,
     honest_targeted_path, parse_table_id, point_forbids_fallback, point_requires_engaged,
-    project_expr_reshapes_row, scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token,
-    validate_token_predicates, ForcedPlan, PartitionLookupOutcome, SSTablePredicate,
+    project_expr_reshapes_row, scan_pushdown_cap, select_has_writetime_ttl,
+    sort_metadata_rows_by_token, sort_rows_by_token, validate_token_predicates, ForcedPlan,
+    PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
@@ -557,17 +558,60 @@ impl SelectExecutor {
                     crate::query::access_path::record(path);
                     rows
                 }
-                // Issue #962: `WHERE pk IN (...)` on the metadata path is NOT yet
-                // fanned out to N targeted metadata lookups; it still full-scans.
-                // Report that honestly (MetadataScanPath) rather than faking a
-                // targeted path — the IN-metadata fan-out is a documented follow-up.
-                // Issue #1918: under `point` this unwired targeted surface is a
-                // non-targeted execution → fail closed (a classification `Fallback`
-                // already errored up front in `apply_forcing`, so only a
-                // `MultiTargeted` reaches here under `point`).
-                ForcedPlan::Proceed(
-                    PartitionLookupOutcome::MultiTargeted(_) | PartitionLookupOutcome::Fallback(_),
-                ) => {
+                // Issue #1916: `WHERE pk IN (...)` on the metadata path is the union
+                // of N independent partition-targeted metadata lookups, each of which
+                // prunes SSTables (bloom/BTI) before decoding — mirroring the plain
+                // `MultiTargeted` fan-out (see the non-metadata arm below). #962
+                // shipped the single-key metadata fast path and left this fan-out as a
+                // documented follow-up; this arm is that follow-up. Each per-key call
+                // goes through the SAME single/multi-generation reconciliation the
+                // single-key `Targeted` arm uses (#1741), so the merged WRITETIME/TTL
+                // values are byte-identical to the old full-scan result.
+                //
+                // Epic #951 (honest paths): on the `tombstones` build each lookup
+                // full-scans + retains with NO prune (`engaged == false`); report
+                // `MultiPartitionLookup` only when the lookups actually pruned, else
+                // the honest `TombstonesBuildNoPrune` fallback. Rows are unchanged.
+                ForcedPlan::Proceed(PartitionLookupOutcome::MultiTargeted(pk_keys)) => {
+                    tracing::debug!(
+                        "SSTableScan(metadata): multi-partition lookup ({} keys) for \"{}\"",
+                        pk_keys.len(),
+                        table
+                    );
+                    let mut combined = Vec::new();
+                    let mut all_engaged = true;
+                    for pk_bytes in &pk_keys {
+                        let (rows, engaged) = self
+                            .storage
+                            .scan_partition_with_cell_metadata(table, pk_bytes, schema_opt)
+                            .await?;
+                        all_engaged &= engaged;
+                        combined.extend(rows);
+                    }
+                    // Issue #1918: `point` fails closed when the fan-out did not prune
+                    // (tombstones build) rather than silently full-scanning.
+                    point_requires_engaged(
+                        mode,
+                        all_engaged,
+                        FallbackReason::TombstonesBuildNoPrune,
+                    )?;
+                    let path = honest_targeted_path(AccessPath::MultiPartitionLookup, all_engaged);
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
+                    // Order the union with the IDENTICAL token-then-raw-bytes rule the
+                    // plain `MultiTargeted` arm uses (`sort_rows_by_token`), so the
+                    // metadata IN result equals a full scan filtered to these keys.
+                    sort_metadata_rows_by_token(&mut combined);
+                    combined
+                }
+                // A genuinely unclassifiable metadata projection (no usable
+                // restriction) still full-scans; report that honestly
+                // (MetadataScanPath) rather than faking a targeted path.
+                // Issue #1918: under `point` a classification `Fallback` already
+                // errored up front in `apply_forcing`, so this arm is reached only
+                // under `auto`/`full`; `point_forbids_fallback` keeps the fail-closed
+                // contract explicit here.
+                ForcedPlan::Proceed(PartitionLookupOutcome::Fallback(_)) => {
                     point_forbids_fallback(mode, FallbackReason::MetadataScanPath)?;
                     let metadata_path = AccessPath::FallbackFullScan {
                         reason: FallbackReason::MetadataScanPath,

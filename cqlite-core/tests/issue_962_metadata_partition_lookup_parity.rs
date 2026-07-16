@@ -43,7 +43,7 @@
 use std::sync::Arc;
 
 use cqlite_core::ingestion::{ingest, IngestionConfig};
-use cqlite_core::query::access_path::{self, AccessPath};
+use cqlite_core::query::access_path::{self, AccessPath, FallbackReason};
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::storage::write_engine::{
@@ -175,6 +175,21 @@ fn writetime_of(row: &QueryRow, alias: &str) -> Option<i64> {
         Some(Value::BigInt(v)) => Some(*v),
         _ => None,
     }
+}
+
+fn id_of(row: &QueryRow) -> Option<i32> {
+    match row.values.get("id") {
+        Some(Value::Integer(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+/// Two ids that each live in exactly one (distinct) generation of the fixture
+/// (`id = g*100 + 1`), for the `WHERE id IN (k1, k2)` fan-out. Generation 1 and
+/// generation `N-2`, so both are single-generation keys with a real holder.
+fn two_target_ids() -> (i32, i32) {
+    let gen_id = |g: i32| g * 100 + 1;
+    (gen_id(1), gen_id(N_GENERATIONS as i32 - 2))
 }
 
 // ---------------------------------------------------------------------------
@@ -313,5 +328,191 @@ async fn metadata_unrestricted_reports_full_scan_fallback() {
     assert!(
         path.is_full_scan(),
         "Issue #962: an unrestricted WRITETIME projection must report a full scan, got {path:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. Issue #1916: a WRITETIME/TTL `WHERE pk IN (k1, k2)` projection fans out to
+//    N partition-targeted metadata lookups (mirroring the plain `MultiTargeted`
+//    fan-out) instead of full-scanning. It must:
+//      (a) report AccessPath::MultiPartitionLookup — NOT FallbackFullScan
+//          { MetadataScanPath } (the pre-#1916 behaviour), and
+//      (b) return rows + WRITETIME values byte-identical, IN THE SAME ORDER, to a
+//          full metadata scan filtered to the same two keys.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_in_fanout_matches_full_scan_filtered() {
+    let _guard = PROBE_LOCK.lock().await;
+    let (db, _target_id, _temp) = open_fixture().await;
+    let (k1, k2) = two_target_ids();
+
+    access_path::reset();
+    let targeted = db
+        .execute(&format!(
+            "SELECT id, WRITETIME(name) AS wt FROM {KS}.{TBL} WHERE id IN ({k1}, {k2})"
+        ))
+        .await
+        .expect("metadata IN fan-out query must succeed");
+
+    // (a) The IN fan-out is the metadata analogue of the plain MultiTargeted
+    // union: the targeted multi-partition lookup, NOT the old MetadataScanPath
+    // full-scan fallback.
+    assert_eq!(
+        targeted.metadata.access_path,
+        Some(AccessPath::MultiPartitionLookup),
+        "Issue #1916: a WHERE id IN (..) WRITETIME query must report \
+         MultiPartitionLookup, got {:?}",
+        targeted.metadata.access_path
+    );
+    assert_eq!(access_path::last(), Some(AccessPath::MultiPartitionLookup));
+    assert_ne!(
+        targeted.metadata.access_path,
+        Some(AccessPath::FallbackFullScan {
+            reason: FallbackReason::MetadataScanPath,
+        }),
+        "Issue #1916: the metadata IN case must NOT record the MetadataScanPath fallback",
+    );
+
+    // (b) Byte-identical rows + WRITETIME values, in identical order, vs a full
+    // metadata scan filtered to the same keys (the correctness oracle).
+    let full = db
+        .execute(&format!("SELECT id, WRITETIME(name) AS wt FROM {KS}.{TBL}"))
+        .await
+        .expect("full metadata scan");
+    assert!(
+        full.metadata
+            .access_path
+            .as_ref()
+            .map(|p| p.is_full_scan())
+            .unwrap_or(false),
+        "the unrestricted WRITETIME scan must report a full scan, got {:?}",
+        full.metadata.access_path
+    );
+
+    let oracle: Vec<(Option<i32>, Option<i64>)> = full
+        .rows
+        .iter()
+        .filter(|r| matches!(id_of(r), Some(v) if v == k1 || v == k2))
+        .map(|r| (id_of(r), writetime_of(r, "wt")))
+        .collect();
+    let got: Vec<(Option<i32>, Option<i64>)> = targeted
+        .rows
+        .iter()
+        .map(|r| (id_of(r), writetime_of(r, "wt")))
+        .collect();
+
+    assert_eq!(got.len(), 2, "expected exactly the two targeted partitions");
+    assert_eq!(
+        got, oracle,
+        "Issue #1916: the metadata IN fan-out result (rows + WRITETIME, in order) \
+         must be byte-identical to the full-scan-filtered result",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_in_fanout_touches_bounded_sstables_not_n() {
+    let _guard = PROBE_LOCK.lock().await;
+    let (db, _target_id, _temp) = open_fixture().await;
+    let (k1, k2) = two_target_ids();
+
+    work_counters::reset();
+    access_path::reset();
+    let targeted = db
+        .execute(&format!(
+            "SELECT id, WRITETIME(name) FROM {KS}.{TBL} WHERE id IN ({k1}, {k2})"
+        ))
+        .await
+        .expect("metadata IN fan-out query must succeed");
+
+    // Signal 1: the executor took the partition-targeted metadata fan-out (#1916),
+    // not the old MetadataScanPath full scan.
+    assert_eq!(
+        targeted.metadata.access_path,
+        Some(AccessPath::MultiPartitionLookup),
+        "Issue #1916: a WHERE id IN (..) WRITETIME query must report MultiPartitionLookup, got {:?}",
+        targeted.metadata.access_path
+    );
+
+    // Signal 2: the work counter proves O(candidates x keys), not O(N). A
+    // regression to the full metadata scan increments the counter 0 (the full
+    // scan path never touches it) OR opens all N — either way the two bounds
+    // below (>= keys AND <= keys*MAX) fail. #958 rationale for the FP allowance.
+    const KEYS: u64 = 2;
+    let scanned = work_counters::sstables_scanned();
+    assert!(
+        scanned >= KEYS,
+        "Issue #1916: the IN fan-out must parse at least one candidate per key ({KEYS}), got \
+         {scanned}. A count of 0 means the metadata IN path did NOT fan out to targeted lookups \
+         (it full-scanned, which never touches the work counter).",
+    );
+    assert!(
+        scanned <= KEYS * MAX_CANDIDATES_SCANNED,
+        "Issue #1916: a {KEYS}-key WRITETIME IN read over {N_GENERATIONS} SSTables must parse at \
+         most {} candidate(s) (bloom false-positive allowance), but parsed {scanned}. A count near \
+         {N_GENERATIONS} means the metadata IN path regressed to a full scan.",
+        KEYS * MAX_CANDIDATES_SCANNED,
+    );
+
+    assert_eq!(
+        targeted.rows.len(),
+        2,
+        "expected exactly the two targeted partitions, got {}",
+        targeted.rows.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Issue #1916: the TTL() projection triggers the SAME metadata IN fan-out as
+//    WRITETIME() (the metadata path is projection-agnostic). Assert the access
+//    path and byte-identity vs the full-scan-filtered TTL result, so the TTL side
+//    of the surface has explicit wiring evidence too.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_in_fanout_ttl_matches_full_scan_filtered() {
+    let _guard = PROBE_LOCK.lock().await;
+    let (db, _target_id, _temp) = open_fixture().await;
+    let (k1, k2) = two_target_ids();
+
+    access_path::reset();
+    let targeted = db
+        .execute(&format!(
+            "SELECT id, TTL(name) AS t FROM {KS}.{TBL} WHERE id IN ({k1}, {k2})"
+        ))
+        .await
+        .expect("metadata TTL IN fan-out query must succeed");
+
+    assert_eq!(
+        targeted.metadata.access_path,
+        Some(AccessPath::MultiPartitionLookup),
+        "Issue #1916: a TTL() WHERE id IN (..) query must also report MultiPartitionLookup, got {:?}",
+        targeted.metadata.access_path
+    );
+
+    let full = db
+        .execute(&format!("SELECT id, TTL(name) AS t FROM {KS}.{TBL}"))
+        .await
+        .expect("full metadata scan");
+
+    // The TTL projected column (Value, incl. null for a cell written with no TTL)
+    // must be byte-identical, in order, to the full-scan-filtered result.
+    let oracle: Vec<(Option<i32>, Option<Value>)> = full
+        .rows
+        .iter()
+        .filter(|r| matches!(id_of(r), Some(v) if v == k1 || v == k2))
+        .map(|r| (id_of(r), r.values.get("t").cloned()))
+        .collect();
+    let got: Vec<(Option<i32>, Option<Value>)> = targeted
+        .rows
+        .iter()
+        .map(|r| (id_of(r), r.values.get("t").cloned()))
+        .collect();
+
+    assert_eq!(got.len(), 2, "expected exactly the two targeted partitions");
+    assert_eq!(
+        got, oracle,
+        "Issue #1916: the metadata TTL IN fan-out result (rows + TTL, in order) must be \
+         byte-identical to the full-scan-filtered result",
     );
 }

@@ -145,8 +145,9 @@ pub(super) fn point_requires_engaged(
 }
 
 /// Under `Point`, fail closed when a call site is about to run a NON-targeted
-/// execution its surface cannot serve as a genuine partition lookup (e.g. the
-/// metadata `IN` fan-out, which still full-scans). A no-op in every other mode.
+/// execution its surface cannot serve as a genuine partition lookup (e.g. a
+/// WRITETIME/TTL metadata projection with no usable partition-key restriction,
+/// which full-scans). A no-op in every other mode.
 pub(super) fn point_forbids_fallback(mode: ReadPathMode, reason: FallbackReason) -> Result<()> {
     if mode == ReadPathMode::Point {
         return Err(Error::forced_read_path_unavailable("point", reason.label()));
