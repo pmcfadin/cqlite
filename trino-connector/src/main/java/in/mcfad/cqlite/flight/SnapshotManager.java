@@ -14,6 +14,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
@@ -108,6 +109,9 @@ public final class SnapshotManager {
      * quiet tables.
      */
     private final SnapshotRetireScheduler retireScheduler;
+    /** Guards {@link #start()} so a second call cannot double-register the periodic cadence
+     * (roborev job 1754 finding 6). */
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
     /** The current reused snapshot window per {@code (keyspace, table)}. */
     private final Map<TableRef, Window> windows = new ConcurrentHashMap<>();
@@ -163,10 +167,23 @@ public final class SnapshotManager {
          * ref-counted rollback retirement). Incremented atomically under the {@code windows.compute}
          * bin lock when a query resolves the window; consulted ONLY on a fresh-window fail-closed
          * rollback so a concurrent reuser that committed this window to its tickets is never
-         * stranded by another query deleting the shared hardlinks. A successful query keeps its hold
-         * for its lifetime (there is no read-completion hook), so the count is conservatively high —
-         * which only ever SUPPRESSES a rollback delete (never strands), the safe direction. Grace /
-         * invalidate / shutdown retirement is unaffected (those paths never consult holders).
+         * stranded by another query deleting the shared hardlinks. Decremented ONLY by a query's OWN
+         * failing rollback (never by a successful query) — a successful resolve keeps its hold for
+         * the window's entire lifetime, since there is no query/read-completion hook to release it
+         * (a genuine such hook is tracked as a separate follow-up, out of scope here).
+         *
+         * <p><b>ACCEPTED design tradeoff (roborev job 1754 finding 2), pinned so it is discoverable
+         * in code+test rather than the field:</b> because a successful hold is never released,
+         * {@code holders} is permanently &ge;1 the moment ANY second query has ever resolved a given
+         * window — meaning on essentially any table with real concurrent traffic (a "hot" table),
+         * the active rollback-retire this field enables degrades to a permanent no-op: the failing
+         * query's own rollback always finds {@code remaining > 0} and leaves its partial per-host
+         * creates to the grace/TTL backstop rather than actively clearing them. This is the
+         * deliberately SAFE direction (a suppressed retire only ever costs a bounded, already-covered
+         * leak; an unconditional retire could strand a live reader) — see
+         * {@code SnapshotManagerRetireHardeningTest
+         * #successfulReuseHoldIsPermanentSoRollbackRetireDegradesToNoOpOnHotTables}, which pins both
+         * the suppression and its permanence.
          */
         final AtomicInteger holders = new AtomicInteger();
 
@@ -229,8 +246,17 @@ public final class SnapshotManager {
      * every field of the owning object) is fully constructed — never from within the constructor
      * itself (this-escape). A no-op for a scheduler whose {@code startPeriodic} does not tick (e.g.
      * {@link SnapshotRetireScheduler.InlineRetireScheduler}).
+     *
+     * <p>Idempotent (roborev job 1754 finding 6): a second call is a silent no-op so double-starting
+     * (e.g. a duplicate wiring mistake) cannot double the periodic sweep cadence.
      */
     public void start() {
+        if (!started.compareAndSet(false, true)) {
+            return;
+        }
+        // Deliberate semantic shift (roborev job 1754 finding 5): the periodic tick evaluates grace
+        // due-ness against `clock.nanoTime()` read AT TICK TIME, not any `now` captured at start()
+        // call time — each tick must see the CURRENT clock, not a stale snapshot from registration.
         retireScheduler.startPeriodic(() -> sweepRetireDue(clock.nanoTime()));
     }
 
@@ -333,6 +359,30 @@ public final class SnapshotManager {
             // to the grace/TTL backstop (the pre-#2452 bounded leak, now only on the contended
             // path). A reused-window rollback (removedFresh false) never retires here: a live shared
             // window must survive a transient added-fallback error.
+            //
+            // HAZARD DOWNGRADE (roborev job 1754 finding 1, HIGH — verified, not guarded): this
+            // direct retire() COULD in principle race a background grace-sweep's retire() of the
+            // SAME window, or land on a window the Sidecar already cleared externally (its own TTL).
+            // Verified safe rather than guarded, for two independent reasons:
+            //   1. `windows.remove(ref, window)` above is an IDENTITY-based conditional removal on
+            //      the SAME ConcurrentHashMap key a supersede's `windows.compute` also locks — the
+            //      two are mutually exclusive per key, so whichever wins determines the ONE path that
+            //      retires this exact Window instance: if a concurrent supersede already replaced the
+            //      map entry, `removedFresh` is false here and this rollback never calls retire() at
+            //      all (the window is instead only ever reachable via the pendingRetire queue, whose
+            //      own `Queue#remove` race guard already dedupes concurrent sweeps — see
+            //      sweepRetireDue). So the SAME Window object can never be handed to retire() by BOTH
+            //      a rollback AND a sweep.
+            //   2. Even so, `retire()` itself is safe against a redundant call: each per-host
+            //      `clearSnapshot` is wrapped in `try/catch(RuntimeException)` that logs and swallows
+            //      (see `retire` below), and `SidecarClient.clearSnapshot`'s non-2xx failure —
+            //      including a 404/NotFound from a repeat DELETE, e.g. the Sidecar's own TTL having
+            //      already reclaimed it — surfaces as exactly that RuntimeException
+            //      (`SidecarClient.SidecarException`). So retire() NEVER throws and always converges
+            //      on the same logical outcome (every host's snapshot ends up cleared, best-effort)
+            //      regardless of how many times — or how redundantly — it is invoked. Pinned by
+            //      {@code SnapshotManagerRetireHardeningTest
+            //      #doubleRetireOfTheSameWindowNeverThrowsAndConvergesToTheSameOutcome}.
             int remaining = window.holders.decrementAndGet();
             if (removedFresh && remaining == 0) {
                 retire(window, ref);
@@ -463,7 +513,11 @@ public final class SnapshotManager {
         // Offload the due-retirement sweep off the split-planning path (issue #2452 item 2, roborev
         // job 1722): a hot table must not pay a synchronous multi-host DELETE fan-out in planning
         // latency. The inline scheduler still runs it now (deterministic tests); the background
-        // scheduler hands it to a bounded best-effort executor.
+        // scheduler hands it to a bounded best-effort executor. Deliberate semantic shift (roborev
+        // job 1754 finding 5): the lambda re-reads `clock.nanoTime()` when the sweep actually EXECUTES
+        // — NOT the `now` captured above for THIS resolve's supersede decision — since a background
+        // sweep can run an arbitrary (possibly long) delay later and must judge grace due-ness
+        // against the CURRENT clock, not a stale reading from enqueue time.
         retireScheduler.submitSweep(() -> sweepRetireDue(clock.nanoTime()));
         return new Resolved(window, reused[0]);
     }
@@ -592,6 +646,20 @@ public final class SnapshotManager {
                                 + " (TTL backstop will reclaim it): " + ex.getMessage());
             }
         }
+    }
+
+    /**
+     * Test-support hook (roborev job 1754 finding 1): directly invoke the best-effort retire logic
+     * for an already-resolved {@link Window}, so a test can pin that retiring the SAME window TWICE
+     * — the rollback-races-a-sweep / hits-an-already-cleared-snapshot hazard roborev raised — never
+     * throws and converges on the same logical outcome. Production code never needs this: {@link
+     * #invalidate}, {@link #retireAll}, and the grace-sweep are the only retire entry points, and
+     * (per the hazard-downgrade note on the rollback catch block above) the {@code windows} map's
+     * identity-based conditional removal already makes a genuine double-retire of the SAME
+     * {@code Window} instance from two DIFFERENT production code paths structurally impossible.
+     */
+    void retireForTest(Window window, String keyspace, String table) {
+        retire(window, new TableRef(keyspace, table));
     }
 
     /** The reused-window snapshot name {@code cqlite-<ks>-<table>-<epoch>}. */

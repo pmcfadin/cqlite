@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -47,27 +48,40 @@ class SnapshotManagerRetireHardeningTest {
     private static final long WINDOW = 1_000L; // logical nanos
     private static final long GRACE = 5_000L;  // logical nanos
 
-    /** A settable logical clock so window/grace timing is pinned deterministically. */
+    /**
+     * A settable logical clock so window/grace timing is pinned deterministically. Backed by an
+     * {@link AtomicLong} (roborev job 1754 finding 7) rather than a bare {@code volatile long}: every
+     * test in this file only ever calls {@link #advance} from the main test thread (worker threads
+     * only ever READ via {@link #nanoTime}), so a plain volatile read is already correct today, but
+     * the atomic read-modify-write removes the "single-threaded only" precondition entirely — a
+     * future test that advances the clock from a worker thread can't silently reintroduce a lost
+     * update.
+     */
     private static final class ManualClock implements SnapshotManager.Clock {
-        volatile long nanos;
+        private final AtomicLong nanos = new AtomicLong();
 
         @Override
         public long nanoTime() {
-            return nanos;
+            return nanos.get();
         }
 
         void advance(long delta) {
-            nanos += delta;
+            nanos.addAndGet(delta);
         }
     }
 
-    /** Records every create/clear (prefixed with host) and can block/throw a chosen host's create. */
+    /**
+     * Records every create/clear (prefixed with host) and can block/throw a chosen host's create, or
+     * throw a repeat-DELETE-shaped {@code SidecarException} (simulating the Sidecar having already
+     * cleared the snapshot, e.g. via its own TTL) on chosen hosts' clear.
+     */
     private static final class FakeSidecars implements HostSnapshotApis {
         final List<String> creates = Collections.synchronizedList(new ArrayList<>());
         final List<String> clears = Collections.synchronizedList(new ArrayList<>());
         volatile String failHost;
         volatile CountDownLatch failHostReached;
         volatile CountDownLatch failHostRelease;
+        volatile Set<String> failClearHosts = Set.of();
 
         @Override
         public SnapshotApi forHost(String host) {
@@ -92,9 +106,23 @@ class SnapshotManagerRetireHardeningTest {
 
                 @Override
                 public void clearSnapshot(String keyspace, String table, String name) {
+                    if (failClearHosts.contains(host)) {
+                        // Simulates a repeat DELETE 404/NotFound (the snapshot is already gone —
+                        // another retire, or the Sidecar's own TTL, already reclaimed it).
+                        throw new SidecarClient.SidecarException("not found: " + host + "/" + name, 404);
+                    }
                     clears.add(host + "/" + name);
                 }
             };
+        }
+    }
+
+    /** Snapshot {@code list} under its own monitor before streaming (roborev job 1754 finding 7):
+     * {@link Collections#synchronizedList} makes individual add/contains calls thread-safe, but
+     * iteration/{@code stream()} still needs external synchronization per its own javadoc. */
+    private static List<String> snapshotOf(List<String> list) {
+        synchronized (list) {
+            return List.copyOf(list);
         }
     }
 
@@ -119,7 +147,7 @@ class SnapshotManagerRetireHardeningTest {
         // h1 and h2 were created then the window rolled back -> both are retired immediately; the
         // failing h3 created nothing (its future was removed on throw), so it is not cleared.
         assertEquals(Set.of("h1/cqlite-ks-t-0", "h2/cqlite-ks-t-0"),
-                Set.copyOf(fake.clears),
+                Set.copyOf(snapshotOf(fake.clears)),
                 "the fresh window's partial creates are actively retired, no TTL leak: " + fake.clears);
     }
 
@@ -162,6 +190,97 @@ class SnapshotManagerRetireHardeningTest {
                     "a concurrent reuser must not be stranded — W's hardlinks stay intact: " + fake.clears);
             // And W is B's live, valid snapshot: B's create on h1 succeeded and was never cleared.
             assertTrue(fake.creates.contains("h1"), "B's snapshot on h1 exists: " + fake.creates);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * roborev job 1754 finding 1 (HIGH) — VERIFIED idempotent, not guarded: a rollback's direct
+     * {@code retire()} racing a background sweep's {@code retire()} of the same window (or landing
+     * on a window the Sidecar already cleared externally, e.g. its own TTL) can never throw and
+     * always converges on the same logical outcome. Verified two ways: (1) structurally, the
+     * {@code windows} map's identity-based conditional removal makes it impossible for the SAME
+     * {@code Window} instance to be handed to {@code retire()} by both a rollback and a supersede
+     * -triggered sweep (see the hazard-downgrade comment on the rollback catch block in
+     * {@code SnapshotManager#resolveSnapshot}); (2) even so, this test pins that a raw double-retire
+     * — including one whose SECOND attempt hits a repeat-DELETE 404/NotFound on every host — never
+     * throws and the outcome (every host's snapshot ends up cleared, best-effort) is unaffected by
+     * how many times retirement is attempted.
+     */
+    @Test
+    void doubleRetireOfTheSameWindowNeverThrowsAndConvergesToTheSameOutcome() {
+        FakeSidecars fake = new FakeSidecars();
+        SnapshotManager mgr = new SnapshotManager(
+                fake, ReadMode.SNAPSHOT, Optional.of("6h"), WINDOW, GRACE, new ManualClock());
+
+        SnapshotManager.Window window =
+                mgr.resolveSnapshot("ks", "t", List.of("h1", "h2")).orElseThrow();
+        String name = window.name();
+
+        // First retire: succeeds normally on both hosts.
+        assertDoesNotThrow(() -> mgr.retireForTest(window, "ks", "t"));
+        assertEquals(Set.of("h1/" + name, "h2/" + name), Set.copyOf(snapshotOf(fake.clears)));
+
+        // Second retire of the IDENTICAL window — simulating either a racing sweep or the Sidecar
+        // having already reclaimed it (TTL): every host's repeat DELETE now 404s.
+        fake.failClearHosts = Set.of("h1", "h2");
+        assertDoesNotThrow(() -> mgr.retireForTest(window, "ks", "t"),
+                "a second retire of the same (already-cleared) window must never throw");
+
+        // Single logical outcome either way: the window's snapshots are gone on both hosts — the
+        // first retire's clears are unaffected by the second attempt's swallowed 404s.
+        assertEquals(Set.of("h1/" + name, "h2/" + name), Set.copyOf(snapshotOf(fake.clears)),
+                "the observable outcome (cleared) is unchanged by a redundant retire attempt");
+    }
+
+    /**
+     * roborev job 1754 finding 2 (MEDIUM) — ACCEPTED design tradeoff, pinned so it is discoverable
+     * in code+test rather than the field (a query/read-completion hook to release a successful
+     * hold is tracked as a separate follow-up, out of scope here): {@code holders} is decremented
+     * ONLY by a query's own failing rollback, never by a successful resolve. So once a SECOND query
+     * has ever successfully resolved (created or reused) a window, {@code holders} is permanently
+     * &ge;1 for that window's remaining lifetime — meaning the active rollback-retire from finding
+     * 1 / item 1 degrades to a permanent no-op on any table with real concurrent traffic: the
+     * failing query's own rollback always finds a remaining holder and leaves its partial per-host
+     * creates to the grace/TTL backstop. This is the deliberately SAFE direction (never strands a
+     * live reader) — just not free lunch on hot tables.
+     */
+    @Test
+    void successfulReuseHoldIsPermanentSoRollbackRetireDegradesToNoOpOnHotTables() throws Exception {
+        FakeSidecars fake = new FakeSidecars();
+        fake.failHost = "h3";
+        fake.failHostReached = new CountDownLatch(1);
+        fake.failHostRelease = new CountDownLatch(1);
+        SnapshotManager mgr = new SnapshotManager(
+                fake, ReadMode.SNAPSHOT, Optional.of("6h"), WINDOW, GRACE, new ManualClock());
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            // Query A: the eventual-failing creator of window W.
+            java.util.concurrent.Future<?> a = pool.submit(() ->
+                    assertThrows(SidecarClient.SidecarException.class,
+                            () -> mgr.snapshotFor("ks", "t", List.of("h1", "h2", "h3"))));
+            assertTrue(fake.failHostReached.await(5, TimeUnit.SECONDS), "A reached the failing host");
+
+            // Query B successfully reuses+commits the SAME fresh window — a permanent hold.
+            SnapshotManager.Window window =
+                    mgr.resolveSnapshot("ks", "t", List.of("h1")).orElseThrow();
+            assertEquals(2, window.holders.get(), "A's creator hold + B's reuser hold");
+
+            fake.failHostRelease.countDown();
+            a.get(5, TimeUnit.SECONDS);
+
+            // A's rollback released ONLY its own hold (2 -> 1); B's successful hold is never
+            // released, so the active retire is suppressed — not merely delayed, but PERMANENTLY:
+            // there is no other trigger that revisits THIS specific window's retirement once its
+            // creator's rollback has already run, so the partial h1/h2 creates now survive until an
+            // explicit invalidate/shutdown or the Sidecar's own TTL backstop reclaims them.
+            assertEquals(1, window.holders.get(),
+                    "A released its own hold; B's successful hold is never released");
+            assertTrue(fake.clears.isEmpty(),
+                    "rollback retire suppressed by B's permanent hold (accepted hot-table "
+                            + "degradation): " + fake.clears);
         } finally {
             pool.shutdownNow();
         }
@@ -221,7 +340,7 @@ class SnapshotManagerRetireHardeningTest {
 
         // Draining the background scheduler runs the offloaded sweep, which retires the due window.
         scheduler.drain();
-        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w0)),
+        assertTrue(snapshotOf(fake.clears).stream().anyMatch(c -> c.contains(w0)),
                 "the offloaded background sweep retires the due window: " + fake.clears);
     }
 
@@ -254,7 +373,7 @@ class SnapshotManagerRetireHardeningTest {
         clock.advance(GRACE);
         scheduler.periodic.run();
 
-        assertTrue(fake.clears.stream().anyMatch(c -> c.contains(w0)),
+        assertTrue(snapshotOf(fake.clears).stream().anyMatch(c -> c.contains(w0)),
                 "the periodic tick prunes the quiet table's superseded backlog: " + fake.clears);
     }
 
