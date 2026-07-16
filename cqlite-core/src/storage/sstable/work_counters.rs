@@ -672,6 +672,88 @@ pub(crate) mod cell_data_clone_scope {
     }
 }
 
+/// A thread-local recording scope for `range_tombstone_covers_ck` calls,
+/// mirroring [`cell_data_clone_scope`] exactly (issue #2428's parallel-test-
+/// pollution-immune design). Used by the #1669 range-shadowing binary-search
+/// guard: range shadowing runs single-threaded, so a [`RangeCoverageScope`]
+/// opened around one partition's `apply_range_shadowing` calls captures exactly
+/// the range-coverage COMPARISONS performed during it.
+///
+/// The former linear scan invoked `range_tombstone_covers_ck` once per
+/// (clustering row × coalesced range) — O(rows × ranges). The binary-search fix
+/// (#1669) invokes it at most once per clustering row (only the single
+/// binary-search candidate, since the coalesced ranges are sorted+disjoint per
+/// partition so at most ONE covers a given `ck`). This scope makes the
+/// comparison count observable so a bound test fails the moment the search
+/// reverts to a full linear scan.
+///
+/// `#[cfg(test)]`: the `record()` call in `range_tombstone_covers_ck` is likewise
+/// `#[cfg(test)]`-gated, so production coverage pays ZERO added cost. Gated on
+/// `feature = "write-support"` as well because every consumer (the
+/// `range_tombstone_covers_ck` recorder and the `range_shadowing_binsearch_tests`
+/// guard) lives in the write-support-only merge module.
+#[cfg(all(test, feature = "write-support"))]
+pub(crate) mod range_coverage_scope {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `Some(count)` while a [`RangeCoverageScope`] is active on this thread,
+        /// `None` otherwise. Only `range_tombstone_covers_ck` calls executing on
+        /// this thread bump it.
+        static SCOPED: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Bump the active scope on the current thread, if any. A no-op on threads
+    /// (production shadowing, other tests) with no active scope.
+    pub(crate) fn record() {
+        SCOPED.with(|c| {
+            if let Some(v) = c.get() {
+                c.set(Some(v.saturating_add(1)));
+            }
+        });
+    }
+
+    /// A per-thread recording scope for `range_tombstone_covers_ck`. Open one
+    /// before driving a partition's range shadowing and read
+    /// [`count`](RangeCoverageScope::count) after. Immune to concurrent tests on
+    /// other threads (issue #2428). Dropping it clears the scope.
+    ///
+    /// Deliberately `!Send` (holds a `PhantomData<*const ()>`): the scope is
+    /// meaningful only on the thread that opened it.
+    pub(crate) struct RangeCoverageScope {
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    impl RangeCoverageScope {
+        /// Begin recording on the current thread. Panics if a scope is already
+        /// active on this thread (one scope per assertion; nesting unsupported).
+        pub(crate) fn new() -> Self {
+            SCOPED.with(|c| {
+                assert!(
+                    c.get().is_none(),
+                    "a RangeCoverageScope is already active on this thread (nesting unsupported)"
+                );
+                c.set(Some(0));
+            });
+            Self {
+                _not_send: std::marker::PhantomData,
+            }
+        }
+
+        /// `range_tombstone_covers_ck` increments recorded on this thread since
+        /// the scope opened.
+        pub(crate) fn count(&self) -> u64 {
+            SCOPED.with(|c| c.get().unwrap_or(0))
+        }
+    }
+
+    impl Drop for RangeCoverageScope {
+        fn drop(&mut self) {
+            SCOPED.with(|c| c.set(None));
+        }
+    }
+}
+
 /// Record that one merge ENTRY was decoded from `Data.db` by ANY
 /// [`KWayMerger`](crate::storage::write_engine::KWayMerger)-adapter-driven run
 /// (Issue #2096) — a full scan, a compaction, OR a multi-candidate point read,

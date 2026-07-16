@@ -562,6 +562,12 @@ mod clone_regression_tests;
 #[cfg(all(test, feature = "write-support"))]
 mod reconcile_microalloc_tests;
 
+// Issue #1669: range-shadowing binary-search guard — proves `apply_range_shadowing`
+// costs O(rows + ranges) coverage comparisons, not the former O(rows × ranges)
+// linear scan (sibling file, #1116 campsite rule).
+#[cfg(all(test, feature = "write-support"))]
+mod range_shadowing_binsearch_tests;
+
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
     /// Open an SSTable and start a streaming producer thread.
@@ -3706,6 +3712,11 @@ impl KWayMerger {
         rt: &RangeTombstone,
         schema: &TableSchema,
     ) -> bool {
+        // Issue #1669: count coverage comparisons so a bound test can prove the
+        // binary search stays O(rows) — one candidate per row — instead of the
+        // former O(rows × ranges) linear scan. Vanishes in production builds.
+        #[cfg(test)]
+        crate::storage::sstable::work_counters::range_coverage_scope::record();
         use crate::storage::write_engine::mutation::ClusteringBound;
 
         // Compare `ck` against a bound key over the bound's component count so a
@@ -3735,6 +3746,46 @@ impl KWayMerger {
         after_start && before_end
     }
 
+    /// Whether a coalesced range tombstone's END bound lies strictly BEFORE `ck`
+    /// on the clustering axis — i.e. `ck` is beyond the range's end, so the range
+    /// cannot cover it. This is exactly the negation of the `before_end` test in
+    /// [`Self::range_tombstone_covers_ck`], kept in lock-step with it.
+    ///
+    /// It is the monotonic predicate the #1669 binary search feeds to
+    /// [`slice::partition_point`]: because `coalesce_range_tombstones` yields a
+    /// per-partition sequence sorted by start bound and DISJOINT, the ranges are
+    /// also sorted by end bound, so `range_end_before_ck` is `true` for every
+    /// range wholly before `ck` and `false` thereafter — a clean partition point.
+    /// The first `false` range is the ONLY candidate that can contain `ck`
+    /// (disjointness ⇒ at most one covers it).
+    ///
+    /// Deliberately does NOT bump the `range_coverage_scope` counter: it is the
+    /// cheap `O(log ranges)` search step, distinct from the single authoritative
+    /// `range_tombstone_covers_ck` containment check the counter measures.
+    fn range_end_before_ck(ck: &ClusteringKey, rt: &RangeTombstone, schema: &TableSchema) -> bool {
+        use crate::storage::write_engine::mutation::ClusteringBound;
+
+        // Same prefix-aware comparison as `range_tombstone_covers_ck` (compare
+        // `ck` against the bound over the bound's component count).
+        let cmp = |bound: &ClusteringKey| -> Ordering {
+            let n = bound.columns.len();
+            let truncated = ClusteringKey {
+                columns: ck.columns.iter().take(n).cloned().collect(),
+            };
+            truncated
+                .compare(bound, schema)
+                .unwrap_or_else(|_| truncated.cmp(bound))
+        };
+
+        match &rt.end {
+            // Negation of the `before_end` arms in `range_tombstone_covers_ck`.
+            ClusteringBound::Inclusive(b) => cmp(b) == Ordering::Greater,
+            ClusteringBound::Exclusive(b) => cmp(b) != Ordering::Less,
+            ClusteringBound::Top => false,
+            ClusteringBound::Bottom => true,
+        }
+    }
+
     /// Shadow the cells of a reconciled cluster entry that are covered by a range
     /// tombstone (issue #933, the re-applied #846 "Step 2c" made schema-aware).
     ///
@@ -3761,13 +3812,51 @@ impl KWayMerger {
             return Some(entry);
         };
 
-        let floor = range_tombstones
-            .iter()
-            .filter(|(key, rt)| {
-                key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema)
+        // Issue #1669: binary search for the covering range instead of a linear
+        // `filter().max()` scan run per clustering key. `coalesce_range_tombstones`
+        // produces, per partition key, a sequence sorted by start bound and
+        // DISJOINT (verified: it partitions the clustering axis into segments
+        // between distinct sorted cut boundaries and only merges adjacent
+        // same-deletion segments — see `coalesce_partition_range_tombstones`). And
+        // `apply_range_shadowing` is called from `merge_partition_rows`, which is
+        // strictly per-partition, so this whole slice is ONE partition's
+        // sorted+disjoint ranges. Disjoint ⇒ at most ONE range covers a given `ck`,
+        // so the former max over the covering set is a max over ≤1 element: a
+        // binary search finds it. O(rows × ranges) → O(rows × log ranges + ranges).
+        //
+        // Defensive guard: only take the binary-search path when the slice is
+        // provably a single partition matching `entry`. `coalesce_range_tombstones`
+        // groups partitions into CONTIGUOUS blocks, so first.key == last.key ⇒ one
+        // group; == `entry.key` ⇒ it is `entry`'s partition. Any other shape (a
+        // future multi-partition caller) falls back to the original exact linear
+        // scan, so correctness never depends on the guarantee holding — only the
+        // speedup does.
+        let single_partition = match (range_tombstones.first(), range_tombstones.last()) {
+            (Some((first, _)), Some((last, _))) => {
+                first.key == entry.key.key && last.key == entry.key.key
+            }
+            _ => false,
+        };
+        let floor = if single_partition {
+            // First range whose end is NOT before `ck` — the unique candidate that
+            // can contain `ck` (disjoint + sorted). Verify full containment (both
+            // bounds) via the authoritative `range_tombstone_covers_ck`.
+            let idx = range_tombstones
+                .partition_point(|(_, rt)| Self::range_end_before_ck(&ck, rt, schema));
+            range_tombstones.get(idx).and_then(|(key, rt)| {
+                (key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema))
+                    .then_some(rt.deletion_time)
             })
-            .map(|(_, rt)| rt.deletion_time)
-            .max();
+        } else {
+            // Exact pre-#1669 behavior for any non-single-partition slice.
+            range_tombstones
+                .iter()
+                .filter(|(key, rt)| {
+                    key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema)
+                })
+                .map(|(_, rt)| rt.deletion_time)
+                .max()
+        };
         let Some(floor) = floor else {
             return Some(entry);
         };
