@@ -83,7 +83,8 @@ use forcing::{
 };
 use limit_pushdown::{collect_capped_materialized, scan_pushdown_cap};
 use lookup::{
-    classify_partition_lookup, honest_targeted_path, sort_rows_by_token, PartitionLookupOutcome,
+    classify_partition_lookup, honest_targeted_path, sort_metadata_rows_by_token,
+    sort_rows_by_token, PartitionLookupOutcome,
 };
 use row_build::{column_info_from_type_str, parse_cql_type_str, parse_table_id};
 use value_ops::{compare_values_ordering, const_arithmetic, eval_arithmetic};
