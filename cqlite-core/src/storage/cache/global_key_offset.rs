@@ -27,19 +27,35 @@
 //!   CURRENT identity; an entry keyed on a different identity is always a MISS, so a stale
 //!   entry from a removed/replaced generation can never serve a location for a generation
 //!   that no longer holds it.
-//! - **Byte-bounded LRU, sharded (§B/§F).** Each shard is an `unbounded` `LruCache` with
-//!   running byte accounting; on insert the owning shard `pop_lru`s until within its
-//!   per-shard byte budget, never evicting the just-inserted MRU entry. A HIGH shard count
-//!   ([`DEFAULT_GLOBAL_KEY_CACHE_SHARDS`]) keeps the single global instance off the
-//!   #2052-class single-`Mutex` hot path — the hit path locks exactly ONE shard.
+//! - **Byte-bounded LRU, sharded, nested-by-identity (§B/§F).** Each shard holds a
+//!   `HashMap<GenerationIdentity, LruCache<Box<[u8]>, _>>` — an inner per-generation LRU —
+//!   plus a running resident-byte counter and a per-shard monotonic recency clock. Shard
+//!   selection still hashes `(identity, key)` so a hot generation's keys spread across ALL
+//!   shards (the #2052-class contention mitigation is NOT collapsed to one shard-per-identity);
+//!   a HIGH shard count ([`DEFAULT_GLOBAL_KEY_CACHE_SHARDS`]) keeps the single global instance
+//!   off the single-`Mutex` hot path — the hit path locks exactly ONE shard. Two structural
+//!   wins over a flat `LruCache<(identity, key), _>`: (1) a `get`/lookup probes the inner LRU
+//!   with a borrowed `&[u8]` (`Box<[u8]>: Borrow<[u8]>`), so the hot hit/miss path allocates
+//!   NO owned key — only `insert` (which must own the key anyway) allocates; (2) invalidation
+//!   is a per-shard O(1) `HashMap` removal, never a full LRU scan.
+//! - **Single global byte budget across nested LRUs (§B).** The budget is still ONE aggregate
+//!   byte cap, NOT a per-identity budget. Because entries live in separate inner LRUs, each
+//!   entry carries a `seq` stamp from the per-shard recency clock (bumped on every get/insert);
+//!   when a shard is over budget, eviction picks the globally-least-recently-used entry across
+//!   ALL identities in that shard by comparing each inner LRU's tail `seq` (`peek_lru`) and
+//!   `pop_lru`-ing the minimum. This is the cross-identity recency signal that stops one hot
+//!   generation from starving another and keeps the byte bound aggregate, not per-identity.
 //! - **Invalidation by identity (§C).** On generation removal / compaction / warm-registry
 //!   evict, [`invalidate`](GlobalKeyOffsetCache::invalidate) drops ALL entries for that
-//!   identity, counted by a DISTINCT `invalidations` counter (separate from budget
-//!   `evictions`). A #2383 rebind-by-inode does NOT invalidate (identity unchanged).
+//!   identity by removing its inner `HashMap` entry from each shard — O(matching-shards) O(1)
+//!   removals that never scan an unrelated identity's entries. Dropped entries are counted by
+//!   a DISTINCT `invalidations` counter (separate from budget `evictions`). A #2383
+//!   rebind-by-inode does NOT invalidate (identity unchanged).
 //! - **Poison-tolerant (§F).** Every lock uses `lock().unwrap_or_else(|e| e.into_inner())`.
 //!   No `unwrap()`/`expect()`.
 
 use lru::LruCache;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -159,17 +175,20 @@ fn stat_identity(path: &std::path::Path) -> Option<(u64, u64, u64, i128)> {
 
 /// Approximate per-entry byte overhead ON TOP OF the key's own `len()` bytes.
 ///
-/// An entry is a `(GenerationIdentity, Box<[u8]>)` key plus a [`PartitionLoc`]
-/// value, held in an `LruCache` intrusive-list node. This const covers everything
-/// except the key's payload bytes (charged separately via `key.len()`):
-/// - the ~48-byte [`GenerationIdentity`] (4×`u64` + `i128`) stored inline in the
-///   node key tuple,
+/// In the nested structure an entry is a `Box<[u8]>` key plus an [`Entry`] value
+/// ([`PartitionLoc`] + a `u64` recency `seq`), held in a per-identity `LruCache`
+/// intrusive-list node. The [`GenerationIdentity`] is NO LONGER stored per entry —
+/// it is the inner-LRU's `HashMap` key, held once per resident identity and
+/// amortized away here. This const covers everything except the key's payload
+/// bytes (charged separately via `key.len()`):
 /// - the `Box<[u8]>` fat pointer + the key allocation's header/rounding,
-/// - the [`PartitionLoc`] value (12 B) stored inline,
-/// - the `LruCache` node (a `HashMap` bucket slot + two `NonNull` links) + slack.
+/// - the [`Entry`] value (12 B [`PartitionLoc`] + 8 B `seq`) stored inline,
+/// - the `LruCache` node (a `HashMap` bucket slot + two `NonNull` links) + slack,
+/// - a generous share of the outer `HashMap<GenerationIdentity, _>` bucket slot.
 ///
-/// Rounded generously to 96 B so byte accounting OVER-estimates true resident
-/// memory (the budget must never be silently exceeded).
+/// Kept at 96 B (unchanged from the flat layout) so byte accounting OVER-estimates
+/// true resident memory (the budget must never be silently exceeded); dropping the
+/// per-entry identity makes 96 B strictly MORE conservative than before.
 const PER_ENTRY_OVERHEAD: usize = 96;
 
 /// Approximate resident cost of caching one entry whose key is `key_len` bytes.
@@ -193,20 +212,96 @@ pub const DEFAULT_GLOBAL_KEY_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// (design §F, the explicit #2052-class mitigation).
 pub const DEFAULT_GLOBAL_KEY_CACHE_SHARDS: usize = 128;
 
-/// One cache shard: an `unbounded`-by-count `LruCache` mapping
-/// `(GenerationIdentity, raw partition-key bytes)` to the resolved
-/// [`PartitionLoc`], plus a running resident-byte counter. The byte budget is
-/// enforced manually on insert (`pop_lru` while over budget).
+/// A resident entry value: the resolved [`PartitionLoc`] plus a recency `seq`
+/// stamp from the owning shard's monotonic clock. The `seq` gives a cross-identity
+/// recency ordering so budget eviction can pick the globally-LRU entry across all
+/// inner LRUs in a shard (the inner `LruCache`'s own order is per-identity only).
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    loc: PartitionLoc,
+    seq: u64,
+}
+
+/// One cache shard: a `HashMap` from [`GenerationIdentity`] to that generation's
+/// `unbounded`-by-count inner `LruCache` (raw partition-key bytes → [`Entry`]),
+/// plus a running resident-byte counter and a monotonic recency clock. The byte
+/// budget (aggregate across ALL inner LRUs in the shard) is enforced manually on
+/// insert (`evict_one` while over budget).
 struct Shard {
-    lru: LruCache<(GenerationIdentity, Box<[u8]>), PartitionLoc>,
+    map: HashMap<GenerationIdentity, LruCache<Box<[u8]>, Entry>>,
     current_bytes: usize,
+    /// Monotonic per-shard recency clock; each get/insert stamps the touched entry
+    /// with the next value so tails can be compared across inner LRUs.
+    seq: u64,
 }
 
 impl Shard {
     fn new() -> Self {
         Self {
-            lru: LruCache::unbounded(),
+            map: HashMap::new(),
             current_bytes: 0,
+            seq: 0,
+        }
+    }
+
+    /// Next recency stamp. `wrapping_add` cannot panic; at one bump/ns a `u64`
+    /// takes ~584 years to wrap, so ordering is effectively total in practice.
+    #[inline]
+    fn next_seq(&mut self) -> u64 {
+        self.seq = self.seq.wrapping_add(1);
+        self.seq
+    }
+
+    /// Total resident entry count across every inner LRU in this shard.
+    fn total_len(&self) -> usize {
+        self.map.values().map(LruCache::len).sum()
+    }
+
+    /// Look up `key` under `identity`, bumping both the inner LRU recency and the
+    /// cross-identity `seq`. Probes the inner LRU with the borrowed `&[u8]`
+    /// (`Box<[u8]>: Borrow<[u8]>`), allocating NO owned key on the hot path.
+    fn get(&mut self, identity: &GenerationIdentity, key: &[u8]) -> Option<PartitionLoc> {
+        let seq = self.next_seq();
+        let inner = self.map.get_mut(identity)?;
+        let entry = inner.get_mut(key)?;
+        entry.seq = seq;
+        Some(entry.loc)
+    }
+
+    /// Evict the globally-least-recently-used entry across all inner LRUs (the
+    /// minimum tail `seq`), returning whether one was removed. Removes an inner LRU
+    /// that becomes empty so the outer `HashMap` never accumulates dead identities.
+    ///
+    /// O(identities-in-shard) to find the min tail — bounded by the number of
+    /// generations whose keys hash into this shard (small; entries spread across
+    /// all shards), and only paid under budget pressure. The just-inserted entry
+    /// carries the max `seq`, so it is never chosen unless it is the sole entry.
+    fn evict_one(&mut self) -> bool {
+        let mut victim: Option<GenerationIdentity> = None;
+        let mut min_seq = u64::MAX;
+        for (id, inner) in self.map.iter() {
+            if let Some((_, entry)) = inner.peek_lru() {
+                if victim.is_none() || entry.seq < min_seq {
+                    min_seq = entry.seq;
+                    victim = Some(*id);
+                }
+            }
+        }
+        let Some(id) = victim else {
+            return false;
+        };
+        let Some(inner) = self.map.get_mut(&id) else {
+            return false;
+        };
+        match inner.pop_lru() {
+            Some((k, _)) => {
+                self.current_bytes = self.current_bytes.saturating_sub(entry_cost(k.len()));
+                if inner.is_empty() {
+                    self.map.remove(&id);
+                }
+                true
+            }
+            None => false,
         }
     }
 }
@@ -349,10 +444,10 @@ impl GlobalKeyOffsetCache {
             return None;
         }
         let mut guard = Self::lock(self.shard_for(&identity, key));
-        // The tuple key carries the identity, so a lookup under a different identity
-        // for the same raw key structurally misses — no explicit mismatch branch is
-        // needed, the map compares the whole `(identity, key)` tuple.
-        let found = guard.lru.get(&(identity, key.into())).copied();
+        // Fail-closed by construction: the inner LRU is selected by `identity`, so a
+        // lookup under a different identity for the same raw key never sees the wrong
+        // generation's entries. Probes with the borrowed `&[u8]` — no owned-key alloc.
+        let found = guard.get(&identity, key);
         drop(guard);
         match found {
             Some(loc) => {
@@ -376,23 +471,29 @@ impl GlobalKeyOffsetCache {
         let cost = entry_cost(key.len());
         let mut guard = Self::lock(self.shard_for(&identity, key));
 
-        if guard.lru.put((identity, key.into()), loc).is_some() {
+        let seq = guard.next_seq();
+        let inner = guard
+            .map
+            .entry(identity)
+            .or_insert_with(LruCache::unbounded);
+        let replaced = inner.put(key.into(), Entry { loc, seq }).is_some();
+        if replaced {
             // In-place replacement: the key bytes are identical, so `cost` matches;
             // subtract-then-add keeps the counter exact (sibling-cache discipline).
             guard.current_bytes = guard.current_bytes.saturating_sub(cost);
         }
         guard.current_bytes = guard.current_bytes.saturating_add(cost);
 
+        // Evict the globally-LRU entry across all identities until within budget,
+        // never evicting the just-inserted MRU (it carries the max `seq`, so it is
+        // only picked when it is the sole resident entry — then `total_len() > 1`
+        // stops us, retaining one oversized entry, matching the flat-layout policy).
         let mut evicted_here: u64 = 0;
-        while guard.current_bytes > self.per_shard_bytes && guard.lru.len() > 1 {
-            match guard.lru.pop_lru() {
-                Some(((_, evicted_key), _)) => {
-                    let reclaimed = entry_cost(evicted_key.len());
-                    guard.current_bytes = guard.current_bytes.saturating_sub(reclaimed);
-                    evicted_here += 1;
-                }
-                None => break,
+        while guard.current_bytes > self.per_shard_bytes && guard.total_len() > 1 {
+            if !guard.evict_one() {
+                break;
             }
+            evicted_here += 1;
         }
         drop(guard);
         if evicted_here > 0 {
@@ -412,18 +513,18 @@ impl GlobalKeyOffsetCache {
         let mut dropped: u64 = 0;
         for shard in self.shards.iter() {
             let mut guard = Self::lock(shard);
-            // Collect the matching keys first (can't mutate the LRU while iterating).
-            let victims: Vec<Box<[u8]>> = guard
-                .lru
-                .iter()
-                .filter(|((id, _), _)| *id == identity)
-                .map(|((_, k), _)| k.clone())
-                .collect();
-            for k in victims {
-                if guard.lru.pop(&(identity, k.clone())).is_some() {
-                    guard.current_bytes = guard.current_bytes.saturating_sub(entry_cost(k.len()));
-                    dropped += 1;
+            // O(1) removal of this identity's whole inner LRU — no scan of unrelated
+            // identities' entries. We iterate ONLY the removed inner LRU to reclaim
+            // its bytes and count its drops; other identities are never touched.
+            if let Some(inner) = guard.map.remove(&identity) {
+                let mut reclaimed = 0usize;
+                let mut n: u64 = 0;
+                for (k, _) in inner.iter() {
+                    reclaimed = reclaimed.saturating_add(entry_cost(k.len()));
+                    n += 1;
                 }
+                guard.current_bytes = guard.current_bytes.saturating_sub(reclaimed);
+                dropped += n;
             }
         }
         if dropped > 0 {
@@ -443,8 +544,8 @@ impl GlobalKeyOffsetCache {
         let mut dropped: u64 = 0;
         for shard in self.shards.iter() {
             let mut guard = Self::lock(shard);
-            dropped = dropped.saturating_add(guard.lru.len() as u64);
-            guard.lru.clear();
+            dropped = dropped.saturating_add(guard.total_len() as u64);
+            guard.map.clear();
             guard.current_bytes = 0;
         }
         if dropped > 0 {
@@ -453,9 +554,9 @@ impl GlobalKeyOffsetCache {
         dropped
     }
 
-    /// Total resident entry count across all shards.
+    /// Total resident entry count across all shards (summed over every inner LRU).
     pub fn len(&self) -> usize {
-        self.shards.iter().map(|m| Self::lock(m).lru.len()).sum()
+        self.shards.iter().map(|m| Self::lock(m).total_len()).sum()
     }
 
     /// Whether the cache currently holds no entries.
@@ -650,6 +751,88 @@ mod tests {
         // A surviving generation's entry is untouched (rebind-stability analogue:
         // g2's identity is unchanged, so its entry still serves a hit).
         assert_eq!(cache.get(g2, b"c"), Some(PartitionLoc::new(3, 3)));
+    }
+
+    /// Nested-restructure regression (Finding A): `invalidate` drops ONLY the target
+    /// identity's inner LRU and never touches an unrelated identity's entries, bytes,
+    /// or recency — the O(1)-per-shard removal, not a full-LRU scan. Single shard so
+    /// both identities are guaranteed co-resident in the same shard's `HashMap`.
+    #[test]
+    fn invalidate_does_not_touch_other_identities() {
+        let cache = GlobalKeyOffsetCache::with_budget_and_shards(DEFAULT_GLOBAL_KEY_CACHE_BYTES, 1);
+        let g1 = ident(1, 10, 100, 1);
+        let g2 = ident(1, 20, 200, 2);
+        cache.insert(g1, b"a1", PartitionLoc::new(1, 1));
+        cache.insert(g1, b"a2", PartitionLoc::new(2, 2));
+        cache.insert(g2, b"b1", PartitionLoc::new(3, 3));
+        cache.insert(g2, b"b2", PartitionLoc::new(4, 4));
+        let bytes_before = cache.resident_bytes();
+        let g2_bytes = entry_cost(2) * 2; // b1 + b2, 2-byte keys
+
+        let dropped = cache.invalidate(g1);
+        assert_eq!(dropped, 2, "only g1's two entries dropped");
+        // g2's entries, count, and bytes are all exactly as before — untouched.
+        assert_eq!(cache.get(g2, b"b1"), Some(PartitionLoc::new(3, 3)));
+        assert_eq!(cache.get(g2, b"b2"), Some(PartitionLoc::new(4, 4)));
+        assert_eq!(cache.len(), 2, "g2's two entries remain");
+        assert_eq!(
+            cache.resident_bytes(),
+            g2_bytes,
+            "only g1's bytes reclaimed"
+        );
+        assert!(bytes_before > g2_bytes);
+        assert_eq!(cache.eviction_count(), 0, "invalidation is not eviction");
+        assert_eq!(cache.get(g1, b"a1"), None);
+        assert_eq!(cache.get(g1, b"a2"), None);
+    }
+
+    /// Nested-restructure regression (Finding B): a `get` probes the inner LRU with a
+    /// borrowed `&[u8]` (via `Box<[u8]>: Borrow<[u8]>`), so the hot hit path needs no
+    /// owned `Box<[u8]>`. Proven behaviorally by matching on a borrowed SUBSLICE of a
+    /// larger buffer — the caller never materializes an owned key. (Rust can't assert
+    /// zero-allocation without a custom allocator harness; the API taking `&[u8]` plus
+    /// the `Shard::get` implementation probing by borrow is the structural guarantee.)
+    #[test]
+    fn get_probes_by_borrowed_slice() {
+        let cache = GlobalKeyOffsetCache::with_budget_and_shards(DEFAULT_GLOBAL_KEY_CACHE_BYTES, 4);
+        let g = ident(1, 1, 100, 1);
+        cache.insert(g, b"KEY", PartitionLoc::new(42, 7));
+        let buf = b"prefixKEYsuffix";
+        assert_eq!(
+            cache.get(g, &buf[6..9]),
+            Some(PartitionLoc::new(42, 7)),
+            "lookup by a borrowed subslice hits — no owned key needed"
+        );
+    }
+
+    /// Single global byte budget across the nested per-identity LRUs: budget eviction
+    /// picks the globally-least-recently-used entry ACROSS identity boundaries (via the
+    /// per-shard recency clock), never merely the LRU within one identity — so a hot
+    /// generation does not starve, and a cold entry in ANY identity goes first.
+    #[test]
+    fn eviction_crosses_identity_by_global_recency() {
+        let cache = GlobalKeyOffsetCache::with_budget_and_shards(budget_for(2, 5), 1);
+        let g1 = ident(1, 10, 100, 1);
+        let g2 = ident(1, 20, 200, 2);
+        cache.insert(g1, b"key-A", PartitionLoc::new(1, 1));
+        cache.insert(g2, b"key-B", PartitionLoc::new(2, 2));
+        // Touch g1/A so g2/B becomes the global LRU across BOTH identities.
+        assert_eq!(cache.get(g1, b"key-A"), Some(PartitionLoc::new(1, 1)));
+        // Over budget → evicts the global LRU, which lives in the OTHER identity.
+        cache.insert(g2, b"key-C", PartitionLoc::new(3, 3));
+
+        assert_eq!(
+            cache.get(g1, b"key-A"),
+            Some(PartitionLoc::new(1, 1)),
+            "recently-used entry survives across the identity boundary"
+        );
+        assert_eq!(
+            cache.get(g2, b"key-B"),
+            None,
+            "global LRU evicted regardless of which identity owns it"
+        );
+        assert_eq!(cache.get(g2, b"key-C"), Some(PartitionLoc::new(3, 3)));
+        assert!(cache.resident_bytes() <= cache.budget_bytes());
     }
 
     /// Rebind-stability: an entry inserted under an identity is served after a
