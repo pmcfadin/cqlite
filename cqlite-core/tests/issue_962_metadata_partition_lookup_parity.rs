@@ -461,3 +461,58 @@ async fn metadata_in_fanout_touches_bounded_sstables_not_n() {
         targeted.rows.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// 5. Issue #1916: the TTL() projection triggers the SAME metadata IN fan-out as
+//    WRITETIME() (the metadata path is projection-agnostic). Assert the access
+//    path and byte-identity vs the full-scan-filtered TTL result, so the TTL side
+//    of the surface has explicit wiring evidence too.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_in_fanout_ttl_matches_full_scan_filtered() {
+    let _guard = PROBE_LOCK.lock().await;
+    let (db, _target_id, _temp) = open_fixture().await;
+    let (k1, k2) = two_target_ids();
+
+    access_path::reset();
+    let targeted = db
+        .execute(&format!(
+            "SELECT id, TTL(name) AS t FROM {KS}.{TBL} WHERE id IN ({k1}, {k2})"
+        ))
+        .await
+        .expect("metadata TTL IN fan-out query must succeed");
+
+    assert_eq!(
+        targeted.metadata.access_path,
+        Some(AccessPath::MultiPartitionLookup),
+        "Issue #1916: a TTL() WHERE id IN (..) query must also report MultiPartitionLookup, got {:?}",
+        targeted.metadata.access_path
+    );
+
+    let full = db
+        .execute(&format!("SELECT id, TTL(name) AS t FROM {KS}.{TBL}"))
+        .await
+        .expect("full metadata scan");
+
+    // The TTL projected column (Value, incl. null for a cell written with no TTL)
+    // must be byte-identical, in order, to the full-scan-filtered result.
+    let oracle: Vec<(Option<i32>, Option<Value>)> = full
+        .rows
+        .iter()
+        .filter(|r| matches!(id_of(r), Some(v) if v == k1 || v == k2))
+        .map(|r| (id_of(r), r.values.get("t").cloned()))
+        .collect();
+    let got: Vec<(Option<i32>, Option<Value>)> = targeted
+        .rows
+        .iter()
+        .map(|r| (id_of(r), r.values.get("t").cloned()))
+        .collect();
+
+    assert_eq!(got.len(), 2, "expected exactly the two targeted partitions");
+    assert_eq!(
+        got, oracle,
+        "Issue #1916: the metadata TTL IN fan-out result (rows + TTL, in order) must be \
+         byte-identical to the full-scan-filtered result",
+    );
+}
