@@ -14,7 +14,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **68**.
+Total instruments: **73**.
 
 ## All instruments
 
