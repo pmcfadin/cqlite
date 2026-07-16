@@ -570,11 +570,16 @@ pub const PROC_RSS_BYTES: &str = "cqlite.proc.rss_bytes";
 
 /// `cqlite.flight.blocking_tasks_in_use` — gauge `{thread}` (issue #2419, WS2).
 ///
-/// Flight-managed `spawn_blocking` tasks the streaming/merge path currently has
-/// outstanding, tracked by a process-wide atomic incremented on entry to a
-/// flight `spawn_blocking` closure and decremented on exit via an RAII guard (so
-/// a panic / cancel / early-return still decrements). An honest, dependency-free
-/// proxy for blocking-pool pressure.
+/// Flight-managed `spawn_blocking` tasks currently outstanding, tracked by a
+/// process-wide atomic incremented on entry to a flight `spawn_blocking`
+/// closure and decremented on exit via an RAII guard (so a panic / cancel /
+/// early-return still decrements). Guards EVERY flight-managed blocking closure
+/// (roborev job 1733 fix 3, so the gauge reflects true pool-saturation
+/// pressure, not merge-only): the streaming merge and aggregate-materialize
+/// closures (`streaming.rs`), `do_get`'s resolve-phase closure (producer/schema
+/// construction + `DirSource::resolve` + token-prune, `service.rs`), and the
+/// `table_stats` `gather_table_stats` closure (`service.rs`). An honest,
+/// dependency-free proxy for blocking-pool pressure.
 ///
 /// **Scope caveat**: this is FLIGHT-MANAGED-TASKS-IN-FLIGHT, NOT the global
 /// `tokio` blocking-pool queue depth (which needs a build-wide `tokio_unstable`

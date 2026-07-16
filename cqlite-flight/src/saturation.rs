@@ -410,8 +410,10 @@ mod tests {
             let _ = rx.await;
         }));
 
-        // Signal shutdown; the immediate first interval tick (polled first via
-        // `biased`) guarantees ≥1 collection before the loop breaks.
+        // Signal shutdown; `run_sampler`'s unconditional pre-loop `sample_once()`
+        // (not an interval-tick race) guarantees ≥1 collection has already
+        // happened before the `shutdown` future is even polled, regardless of
+        // how quickly it resolves.
         let _ = tx.send(());
 
         // Assert on COMPLETION (the handle resolving), with a generous safety

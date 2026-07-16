@@ -59,6 +59,7 @@
 //! reason (an accepted-but-silently-ignored parameter would be a correctness
 //! trap).
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
@@ -88,10 +89,11 @@ pub(super) async fn drive_compaction_stream(
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
     sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+    local_sent: &AtomicI64,
 ) -> Result<()> {
     reader
         .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |compaction_row| {
-            forward_row(run_index, compaction_row, schema, sender)
+            forward_row(run_index, compaction_row, schema, sender, local_sent)
         })
         .await
 }
@@ -114,10 +116,11 @@ pub(super) async fn drive_query_stream(
     scan_cancel: &ScanCancel,
     token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
     sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+    local_sent: &AtomicI64,
 ) -> Result<()> {
     reader
         .stream_all_partitions_for_query(Some(schema), scan_cancel, token_bound, |compaction_row| {
-            forward_row(run_index, compaction_row, schema, sender)
+            forward_row(run_index, compaction_row, schema, sender, local_sent)
         })
         .await
 }
@@ -126,11 +129,17 @@ pub(super) async fn drive_query_stream(
 /// signalling `Break` when the consumer has dropped the channel. Shared by BOTH
 /// [`drive_compaction_stream`] and [`drive_query_stream`] so their emit
 /// contract is defined in exactly one place.
+///
+/// `local_sent` is THIS adapter's own sent-count (issue #2419 roborev job
+/// 1733), incremented alongside the shared `channel_depth::sent()` gauge — it
+/// is what lets `Drop` compute an exact post-join reconcile residual instead of
+/// racing a pre-drop drain against a concurrently-sending producer.
 fn forward_row(
     run_index: usize,
     compaction_row: crate::storage::sstable::reader::CompactionRow,
     schema: &TableSchema,
     sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+    local_sent: &AtomicI64,
 ) -> Result<std::ops::ControlFlow<()>> {
     let msg = SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)
         .map_err(MergeProducerError::from);
@@ -143,8 +152,9 @@ fn forward_row(
             if is_data {
                 // A DATA entry now occupies a channel slot; balanced by exactly
                 // one `channel_depth::received()` at the consumer's recv site (or
-                // the teardown drain) — see `channel_depth`.
+                // by the post-join reconcile in `Drop`) — see `channel_depth`.
                 super::channel_depth::sent();
+                local_sent.fetch_add(1, Ordering::SeqCst);
             }
             Ok(std::ops::ControlFlow::Continue(()))
         }
@@ -174,6 +184,10 @@ impl SSTableRowIteratorAdapter {
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
+        // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
+        // with the producer thread — see `SSTableRowIteratorAdapter`'s field doc.
+        let sent_count = Arc::new(AtomicI64::new(0));
+        let producer_sent_count = sent_count.clone();
 
         // Issue #2316: account this producer on the live-thread gauge BEFORE
         // spawning (see `SSTableRowIteratorAdapter::open`'s identical rationale).
@@ -187,6 +201,7 @@ impl SSTableRowIteratorAdapter {
                 scan_cancel,
                 token_bound,
                 sender,
+                producer_sent_count,
             );
         }) {
             Ok(handle) => handle,
@@ -203,6 +218,8 @@ impl SSTableRowIteratorAdapter {
             receiver: Some(receiver),
             producer: Some(producer),
             scan_cancel: adapter_cancel,
+            sent_count,
+            received_count: 0,
         })
     }
 
@@ -222,6 +239,7 @@ impl SSTableRowIteratorAdapter {
         scan_cancel: ScanCancel,
         token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
         sender: SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+        sent_count: Arc<AtomicI64>,
     ) {
         let _thread_guard = producer_gauge::ProducerThreadGuard;
         let error_sender = sender.clone();
@@ -243,6 +261,7 @@ impl SSTableRowIteratorAdapter {
                 &scan_cancel,
                 token_bound,
                 &sender,
+                sent_count.as_ref(),
             ))
         })();
 
