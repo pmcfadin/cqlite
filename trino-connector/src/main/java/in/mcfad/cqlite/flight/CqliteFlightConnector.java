@@ -82,12 +82,15 @@ public class CqliteFlightConnector implements Connector {
 
     @Override
     public void shutdown() {
+        // Close the scheduler FIRST (roborev job 1755 finding 3): retireAll() below runs its own
+        // retirement synchronously on THIS thread (it never goes through the scheduler), so closing
+        // the scheduler before calling it means no background sweep can still be running concurrently
+        // with — or outlive — retireAll()'s drain or the allocator.close() that follows.
+        snapshots.close();
         // Retire every live reused snapshot (issue #2356): a reused snapshot outlives the query
         // that created it, so retirement is not per-query — the connector releases them at
         // shutdown (the Sidecar TTL backstop covers a crash/miss).
         snapshots.retireAll();
-        // Release the background retire scheduler (issue #2452 item 2) after draining the snapshots.
-        snapshots.close();
         allocator.close();
     }
 }

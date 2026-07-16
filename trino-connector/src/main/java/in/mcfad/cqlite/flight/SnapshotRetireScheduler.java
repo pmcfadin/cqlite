@@ -119,6 +119,8 @@ public interface SnapshotRetireScheduler {
                 // Executor already shut down (connector shutdown raced a late supersede): the sweep
                 // is best-effort and the TTL backstops it, so drop it. Reset the flag for tidiness.
                 sweepQueued.set(false);
+                LOG.log(Level.FINE,
+                        () -> "Snapshot retire sweep dropped: scheduler already closed (TTL backstop covers it)");
             }
         }
 

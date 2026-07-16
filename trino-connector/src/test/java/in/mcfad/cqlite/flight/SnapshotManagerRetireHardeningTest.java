@@ -5,13 +5,13 @@ import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 import in.mcfad.cqlite.flight.sidecar.SnapshotApi;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -152,6 +152,100 @@ class SnapshotManagerRetireHardeningTest {
     }
 
     /**
+     * A host list whose iteration blocks right BEFORE yielding the element at {@code blockBeforeIndex}
+     * — a test can thereby pause a creator's per-host fan-out AT THE BOUNDARY between two hosts
+     * (rather than inside a host's own create call), needed to construct
+     * {@link #invalidateRacingAnInFlightCreatorStillRetiresAllOfItsPartialCreates} deterministically:
+     * blocking inside a host's create leaves an entry already present (if pending) in {@code
+     * hostCreates}, so a concurrent {@code retire()}'s weakly-consistent {@code entrySet()} iteration
+     * could non-deterministically also observe a LATER host inserted mid-iteration — not a solid
+     * regression pin. Blocking BEFORE the boundary host is even looked up guarantees no such entry
+     * can exist yet.
+     */
+    private static List<String> blockingHostList(
+            List<String> hosts, int blockBeforeIndex, CountDownLatch reached, CountDownLatch release) {
+        return new java.util.AbstractList<>() {
+            @Override
+            public String get(int index) {
+                if (index == blockBeforeIndex) {
+                    reached.countDown();
+                    try {
+                        release.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return hosts.get(index);
+            }
+
+            @Override
+            public int size() {
+                return hosts.size();
+            }
+        };
+    }
+
+    /**
+     * roborev job 1755 finding 1 (HIGH, real defect): if {@code invalidate(ks,t)} removes window W
+     * out from under an in-flight creator A BETWEEN two of A's OWN per-host creates, invalidate's
+     * own (single, immediate) {@code retire()} call only sees whatever hosts existed AT THAT MOMENT
+     * — it cannot know about a host A goes on to create AFTERWARD. The prior code gated A's own
+     * rollback retire on {@code removedFresh} ("did *I* win the map removal"), which is false here
+     * (invalidate already removed it) — so A's rollback skipped retire entirely and the LATER host
+     * leaked to the ~6h TTL, in the fully UNCONTENDED case, via an entirely ordinary code path (no
+     * exotic timing beyond an operator calling {@code invalidate} while a query is mid-flight).
+     *
+     * <p>Constructed so the leak is deterministic, not merely likely: A's host list itself blocks
+     * BEFORE yielding h2 (via {@link #blockingHostList}), so at the moment the test calls
+     * {@code invalidate()} h1 has ALREADY fully succeeded and h2 has not even been looked up yet —
+     * {@code hostCreates} contains exactly {@code {h1}}, complete, so invalidate's retire() call is
+     * fully synchronous (no pending future to block on) and is GUARANTEED to return before h2 exists.
+     * A is then released to attempt h2 (succeeds) and h3 (fails, triggering A's rollback). The fix
+     * retires once {@code activeHolds} reaches 0 and the window is no longer the live map entry —
+     * regardless of who removed it — so A's rollback catches h2 too.
+     */
+    @Test
+    void invalidateRacingAnInFlightCreatorStillRetiresAllOfItsPartialCreates() throws Exception {
+        FakeSidecars fake = new FakeSidecars();
+        fake.failHost = "h3"; // fails immediately, no latch needed
+        SnapshotManager mgr = new SnapshotManager(
+                fake, ReadMode.SNAPSHOT, Optional.of("6h"), WINDOW, GRACE, new ManualClock());
+
+        CountDownLatch reachedH2Boundary = new CountDownLatch(1);
+        CountDownLatch releaseH2Boundary = new CountDownLatch(1);
+        List<String> hosts =
+                blockingHostList(List.of("h1", "h2", "h3"), 1, reachedH2Boundary, releaseH2Boundary);
+
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        try {
+            // Query A: h1 succeeds immediately; the host list itself pauses right before yielding h2
+            // (h1 fully complete, h2 not yet attempted); h3 then fails, aborting A's fan-out.
+            java.util.concurrent.Future<?> a = pool.submit(() ->
+                    assertThrows(SidecarClient.SidecarException.class,
+                            () -> mgr.snapshotFor("ks", "t", hosts)));
+            assertTrue(reachedH2Boundary.await(5, TimeUnit.SECONDS),
+                    "A paused between h1 (done) and h2 (not yet attempted)");
+
+            // invalidate() races HERE: hostCreates has ONLY h1 (fully complete, no pending future),
+            // so this call is fully synchronous and deterministic — it clears h1 and returns.
+            mgr.invalidate("ks", "t");
+
+            // Release A to attempt h2 (succeeds, created strictly AFTER invalidate() already
+            // returned) then h3 (fails, aborting the loop -> A's rollback).
+            releaseH2Boundary.countDown();
+            a.get(5, TimeUnit.SECONDS);
+
+            assertTrue(snapshotOf(fake.clears).stream().anyMatch(c -> c.startsWith("h1/")),
+                    "h1 is retired directly by invalidate(): " + fake.clears);
+            assertTrue(snapshotOf(fake.clears).stream().anyMatch(c -> c.startsWith("h2/")),
+                    "h2 — created strictly AFTER invalidate()'s call already returned — is STILL "
+                            + "retired by A's own rollback, not left to leak until the TTL: " + fake.clears);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
      * THE stranding race (issue #2452 item 1, warned about explicitly): query A creates a fresh
      * window W and fans out; concurrently query B REUSES the same fresh W and commits it to its
      * tickets; then A's fan-out fails on a later host. A's rollback must NOT delete W's shared
@@ -237,9 +331,9 @@ class SnapshotManagerRetireHardeningTest {
     /**
      * roborev job 1754 finding 2 (MEDIUM) — ACCEPTED design tradeoff, pinned so it is discoverable
      * in code+test rather than the field (a query/read-completion hook to release a successful
-     * hold is tracked as a separate follow-up, out of scope here): {@code holders} is decremented
+     * hold is tracked as separate follow-up issue #2580): {@code activeHolds} is decremented
      * ONLY by a query's own failing rollback, never by a successful resolve. So once a SECOND query
-     * has ever successfully resolved (created or reused) a window, {@code holders} is permanently
+     * has ever successfully resolved (created or reused) a window, {@code activeHolds} is permanently
      * &ge;1 for that window's remaining lifetime — meaning the active rollback-retire from finding
      * 1 / item 1 degrades to a permanent no-op on any table with real concurrent traffic: the
      * failing query's own rollback always finds a remaining holder and leaves its partial per-host
@@ -266,7 +360,7 @@ class SnapshotManagerRetireHardeningTest {
             // Query B successfully reuses+commits the SAME fresh window — a permanent hold.
             SnapshotManager.Window window =
                     mgr.resolveSnapshot("ks", "t", List.of("h1")).orElseThrow();
-            assertEquals(2, window.holders.get(), "A's creator hold + B's reuser hold");
+            assertEquals(2, window.activeHolds.get(), "A's creator hold + B's reuser hold");
 
             fake.failHostRelease.countDown();
             a.get(5, TimeUnit.SECONDS);
@@ -276,7 +370,7 @@ class SnapshotManagerRetireHardeningTest {
             // there is no other trigger that revisits THIS specific window's retirement once its
             // creator's rollback has already run, so the partial h1/h2 creates now survive until an
             // explicit invalidate/shutdown or the Sidecar's own TTL backstop reclaims them.
-            assertEquals(1, window.holders.get(),
+            assertEquals(1, window.activeHolds.get(),
                     "A released its own hold; B's successful hold is never released");
             assertTrue(fake.clears.isEmpty(),
                     "rollback retire suppressed by B's permanent hold (accepted hot-table "
@@ -288,10 +382,15 @@ class SnapshotManagerRetireHardeningTest {
 
     // ---- Item 2: grace-sweep offload + quiet-table periodic tick -------------------------------
 
-    /** A scheduler that DEFERS submitted sweeps so the test controls exactly when they run. */
+    /**
+     * A scheduler that DEFERS submitted sweeps so the test controls exactly when they run. Backed by
+     * {@link ConcurrentLinkedQueue} (roborev job 1755 finding 6) rather than {@link ArrayDeque}: cheap
+     * and removes the "only ever touched from one thread" precondition an {@code ArrayDeque} would
+     * impose, in case a future test submits sweeps from a background thread.
+     */
     private static final class DeferringScheduler implements SnapshotRetireScheduler {
-        final Queue<Runnable> deferred = new ArrayDeque<>();
-        Runnable periodic;
+        final Queue<Runnable> deferred = new ConcurrentLinkedQueue<>();
+        volatile Runnable periodic;
 
         @Override
         public void submitSweep(Runnable sweep) {

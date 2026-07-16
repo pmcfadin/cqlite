@@ -163,29 +163,38 @@ public final class SnapshotManager {
         final long generationFingerprint;
         final Map<String, CompletableFuture<String>> hostCreates = new ConcurrentHashMap<>();
         /**
-         * In-flight queries that resolved (created or reused) this window (issue #2452 item 1,
-         * ref-counted rollback retirement). Incremented atomically under the {@code windows.compute}
-         * bin lock when a query resolves the window; consulted ONLY on a fresh-window fail-closed
-         * rollback so a concurrent reuser that committed this window to its tickets is never
-         * stranded by another query deleting the shared hardlinks. Decremented ONLY by a query's OWN
-         * failing rollback (never by a successful query) — a successful resolve keeps its hold for
-         * the window's entire lifetime, since there is no query/read-completion hook to release it
-         * (a genuine such hook is tracked as a separate follow-up, out of scope here).
+         * NOT a true refcount (roborev job 1755 finding 2, renamed from {@code holders}) — a
+         * one-shot safety latch: incremented atomically under the {@code windows.compute} bin lock
+         * when a query resolves (creates or reuses) this window, but decremented ONLY by a query's
+         * OWN failing rollback and NEVER by a successful one, since there is no query/read-completion
+         * hook to release a success (tracked as follow-up issue #2580). It guards only the CREATOR's
+         * own rollback against stranding a concurrent reuser that already committed this window to
+         * its tickets — it is not a general liveness/usage count.
          *
-         * <p><b>ACCEPTED design tradeoff (roborev job 1754 finding 2), pinned so it is discoverable
-         * in code+test rather than the field:</b> because a successful hold is never released,
-         * {@code holders} is permanently &ge;1 the moment ANY second query has ever resolved a given
-         * window — meaning on essentially any table with real concurrent traffic (a "hot" table),
-         * the active rollback-retire this field enables degrades to a permanent no-op: the failing
-         * query's own rollback always finds {@code remaining > 0} and leaves its partial per-host
-         * creates to the grace/TTL backstop rather than actively clearing them. This is the
-         * deliberately SAFE direction (a suppressed retire only ever costs a bounded, already-covered
-         * leak; an unconditional retire could strand a live reader) — see
+         * <p><b>ACCEPTED hot-table active-retire degradation, pinned so it is discoverable in
+         * code+test rather than the field:</b> because a successful hold is never released,
+         * {@code activeHolds} is permanently &ge;1 the moment ANY second query has ever resolved a
+         * given window — so on essentially any table with real concurrent traffic, the active
+         * rollback-retire this field enables degrades to a permanent no-op: the failing query's own
+         * rollback always finds {@code remaining > 0} and leaves its partial per-host creates to the
+         * grace/TTL backstop. This is the deliberately SAFE direction (a suppressed retire only ever
+         * costs a bounded, already-covered leak; an unconditional retire could strand a live reader).
+         * See issue #2580 for the read-completion-hook follow-up, and
          * {@code SnapshotManagerRetireHardeningTest
          * #successfulReuseHoldIsPermanentSoRollbackRetireDegradesToNoOpOnHotTables}, which pins both
          * the suppression and its permanence.
          */
-        final AtomicInteger holders = new AtomicInteger();
+        final AtomicInteger activeHolds = new AtomicInteger();
+        /**
+         * Set (not a run-once gate) the first time {@link #retire} is invoked for this window —
+         * tracked for tests/observability, per roborev job 1755 finding 4. {@code retire()} MAY
+         * legitimately run more than once for the same window (see the hazard note on the rollback
+         * catch block in {@code resolveSnapshot}); this flag intentionally does NOT skip a repeat
+         * invocation, since doing so would silently reintroduce the finding-1 leak (a later call can
+         * still need to clear hosts a racing {@link #invalidate}/{@link #retireAll} created before it
+         * ran).
+         */
+        final AtomicBoolean retired = new AtomicBoolean(false);
 
         Window(String name, long epoch, long createdNanos, long generationFingerprint) {
             this.name = name;
@@ -346,45 +355,35 @@ public final class SnapshotManager {
         } catch (RuntimeException e) {
             // Roborev (issue #2356, half-created window): a fail-closed fan-out must not leave a
             // freshly-created window cached as "fresh" (a later query would reuse a snapshot that
-            // never fully materialized) nor count a create/flush that did not complete. Roll back
-            // the fresh window so the next query recomputes; a REUSED window is left intact (a
-            // transient host error on an added fallback host must not nuke a live shared window).
-            boolean removedFresh = !resolved.reused() && windows.remove(ref, window);
-            // Ref-counted retirement (issue #2452 item 1, roborev job 1721): release THIS query's
-            // hold and, when the fresh window was actually removed from the live map AND no
-            // concurrent query still holds it, ACTIVELY retire the partial hardlinks this fan-out
-            // created (else they leak to the ~6h TTL). A concurrent query that REUSED this same
-            // fresh window and committed it to its tickets is a holder — deleting the shared
-            // hardlinks would strand it (NotFound), so a remaining holder leaves the partial creates
-            // to the grace/TTL backstop (the pre-#2452 bounded leak, now only on the contended
-            // path). A reused-window rollback (removedFresh false) never retires here: a live shared
-            // window must survive a transient added-fallback error.
+            // never fully materialized) nor count a create/flush that did not complete. A REUSED
+            // window is left entirely alone here (never removed, never retired): a transient host
+            // error on an added fallback host must not nuke a live shared window.
+            if (!resolved.reused()) {
+                // Best-effort: a no-op if invalidate()/retireAll() already removed this EXACT window
+                // out from under this in-flight resolve — see the liveness check below, which is what
+                // actually decides whether to retire, not whether THIS call's removal won.
+                windows.remove(ref, window);
+            }
+            int remaining = window.activeHolds.decrementAndGet();
+            // Retire once nobody can still JOIN this window as a holder: true whenever `window` is no
+            // longer the live `windows[ref]` entry — whether *I* just removed it above, or
+            // invalidate()/retireAll() removed it earlier while my OWN fan-out was still adding hosts
+            // (issue #2452 roborev job 1755 finding 1: the prior `removedFresh`-only gate — "did MY
+            // OWN remove call win" — missed exactly this: an ordinary invalidate() racing an in-flight
+            // creator retires whatever existed at THAT moment and returns, then the creator goes on to
+            // create MORE hosts that nobody ever cleans up). `remaining == 0` alone already proves no
+            // reader can be stranded (a live successful hold never releases — see `activeHolds`), so
+            // checking liveness too only adds "retire promptly" cases, never an unsafe one. A REUSED
+            // window's rollback never reaches here (guarded above).
             //
-            // HAZARD DOWNGRADE (roborev job 1754 finding 1, HIGH — verified, not guarded): this
-            // direct retire() COULD in principle race a background grace-sweep's retire() of the
-            // SAME window, or land on a window the Sidecar already cleared externally (its own TTL).
-            // Verified safe rather than guarded, for two independent reasons:
-            //   1. `windows.remove(ref, window)` above is an IDENTITY-based conditional removal on
-            //      the SAME ConcurrentHashMap key a supersede's `windows.compute` also locks — the
-            //      two are mutually exclusive per key, so whichever wins determines the ONE path that
-            //      retires this exact Window instance: if a concurrent supersede already replaced the
-            //      map entry, `removedFresh` is false here and this rollback never calls retire() at
-            //      all (the window is instead only ever reachable via the pendingRetire queue, whose
-            //      own `Queue#remove` race guard already dedupes concurrent sweeps — see
-            //      sweepRetireDue). So the SAME Window object can never be handed to retire() by BOTH
-            //      a rollback AND a sweep.
-            //   2. Even so, `retire()` itself is safe against a redundant call: each per-host
-            //      `clearSnapshot` is wrapped in `try/catch(RuntimeException)` that logs and swallows
-            //      (see `retire` below), and `SidecarClient.clearSnapshot`'s non-2xx failure —
-            //      including a 404/NotFound from a repeat DELETE, e.g. the Sidecar's own TTL having
-            //      already reclaimed it — surfaces as exactly that RuntimeException
-            //      (`SidecarClient.SidecarException`). So retire() NEVER throws and always converges
-            //      on the same logical outcome (every host's snapshot ends up cleared, best-effort)
-            //      regardless of how many times — or how redundantly — it is invoked. Pinned by
-            //      {@code SnapshotManagerRetireHardeningTest
-            //      #doubleRetireOfTheSameWindowNeverThrowsAndConvergesToTheSameOutcome}.
-            int remaining = window.holders.decrementAndGet();
-            if (removedFresh && remaining == 0) {
+            // HAZARD (roborev job 1754 f.1 / job 1755 f.4): retire() below CAN run more than once for
+            // the same window — BY DESIGN, to catch hosts created after an earlier call already ran.
+            // `Window#retired` is a tracked fact for tests, not a run-once gate (gating it would
+            // silently reintroduce the leak just described). Re-invocation is safe regardless: a
+            // repeat clearSnapshot swallows its own 404/NotFound, so every call converges on the same
+            // outcome. See {@code SnapshotManagerRetireHardeningTest} (double-retire + invalidate-race
+            // tests).
+            if (!resolved.reused() && remaining == 0 && windows.get(ref) != window) {
                 retire(window, ref);
             }
             throw e;
@@ -466,8 +465,11 @@ public final class SnapshotManager {
 
     /**
      * Release the background retirement scheduler (issue #2452 item 2). Called from the connector's
-     * shutdown after {@link #retireAll} has drained the live + pending snapshots; idempotent and a
-     * no-op for the inline scheduler.
+     * shutdown BEFORE {@link #retireAll} (roborev job 1755 finding 3): {@link #retireAll} runs its
+     * own retirement synchronously on the CALLER's thread (it never goes through the scheduler), so
+     * closing the scheduler first ensures no background sweep can still be running concurrently with
+     * (or after) {@link #retireAll}'s drain — no argued-safe race to reason about, just none possible.
+     * Idempotent and a no-op for the inline scheduler.
      */
     public void close() {
         retireScheduler.close();
@@ -493,9 +495,9 @@ public final class SnapshotManager {
         Window[] superseded = {null};
         Window window = windows.compute(ref, (k, existing) -> {
             if (existing != null && isFresh(existing, generationFingerprint, now)) {
-                // Ref-count this query's hold under the bin lock (issue #2452 item 1), atomic with
+                // Latch this query's hold under the bin lock (issue #2452 item 1), atomic with
                 // the reuse decision so a concurrent creator's rollback sees this reuser as a holder.
-                existing.holders.incrementAndGet();
+                existing.activeHolds.incrementAndGet();
                 reused[0] = true;
                 return existing;
             }
@@ -504,7 +506,7 @@ public final class SnapshotManager {
             }
             long epoch = epochs.computeIfAbsent(k, r -> new AtomicLong()).getAndIncrement();
             Window fresh = new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
-            fresh.holders.incrementAndGet();
+            fresh.activeHolds.incrementAndGet();
             return fresh;
         });
         if (superseded[0] != null) {
@@ -627,6 +629,7 @@ public final class SnapshotManager {
      * swallowed — the Sidecar TTL backstop covers a miss.
      */
     private void retire(Window window, TableRef ref) {
+        window.retired.set(true); // tracked fact, not a gate — see the Window#retired javadoc.
         for (Map.Entry<String, CompletableFuture<String>> e : window.hostCreates.entrySet()) {
             String host = e.getKey();
             String name;
