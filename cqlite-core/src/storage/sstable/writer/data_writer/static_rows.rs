@@ -162,23 +162,25 @@ impl DataWriter {
 
         // NO clustering prefix for static rows (key difference from write_row)
 
-        // Build row body
-        let (row_body, cells_written) =
+        // Build the row body into the reusable `row_scratch` buffer (issue #1673,
+        // R2 — no per-row throwaway Vec).
+        let cells_written =
             self.build_static_row_body(static_ops, liveness_ts, ttl_seconds, schema, flags)?;
 
         let prev_size_vint_len = unsigned_len(prev_size);
 
-        // Write row_size (VInt) — includes prev_unfiltered_size VInt + rest of body
-        let row_body_size = prev_size_vint_len as u64 + row_body.len() as u64;
-        let mut row_size_buf = Vec::new();
-        encode_unsigned(row_body_size, &mut row_size_buf);
-        self.buffer.extend_from_slice(&row_size_buf);
+        // Write row_size (VInt) — includes prev_unfiltered_size VInt + rest of
+        // body. Encoded straight into `self.buffer` (issue #1673, R2 — no
+        // throwaway `row_size_buf`); the body length is already known from
+        // `row_scratch`, so wire order is unchanged.
+        let row_body_size = prev_size_vint_len as u64 + self.row_scratch.len() as u64;
+        encode_unsigned(row_body_size, &mut self.buffer);
 
         // Write prev_unfiltered_size (VInt, inside the row body)
         encode_unsigned(prev_size, &mut self.buffer);
 
-        // Write rest of row body
-        self.buffer.extend_from_slice(&row_body);
+        // Write rest of row body (disjoint field borrow: buffer vs row_scratch)
+        self.buffer.extend_from_slice(&self.row_scratch);
 
         Ok((self.buffer.len() - start_len, cells_written))
     }
@@ -187,18 +189,28 @@ impl DataWriter {
     ///
     /// Similar to build_row_body but only processes static columns.
     ///
-    /// Returns the body bytes and the number of static cells (columns)
-    /// physically written (Issue #851, review). A static row tombstone writes no
-    /// cells (count 0); otherwise the count is sourced from `write_static_cells`.
+    /// Builds into the reusable `self.row_scratch` buffer (issue #1673, R2 — no
+    /// per-row throwaway `Vec`; the scratch is `clear()`ed here, retaining
+    /// capacity across rows, covering BOTH the normal static path AND the
+    /// early-return static-tombstone/empty-static path). The caller reads the body
+    /// from `self.row_scratch`.
+    ///
+    /// Returns the number of static cells (columns) physically written (Issue
+    /// #851, review). A static row tombstone writes no cells (count 0); otherwise
+    /// the count is sourced from `write_static_cells`.
     pub(super) fn build_static_row_body(
-        &self,
+        &mut self,
         static_ops: &[StaticMergedOp],
         liveness_ts: i64,
         ttl_seconds: Option<u32>,
         schema: &TableSchema,
         flags: u8,
-    ) -> Result<(Vec<u8>, u64)> {
-        let mut body = Vec::new();
+    ) -> Result<u64> {
+        // Take the scratch out of `self` so the `&self` cell/bitmap/schema helpers
+        // below can run while `&mut body` is held (see `build_merged_row_body`).
+        // Stored back at every return point, preserving capacity across rows.
+        let mut body = std::mem::take(&mut self.row_scratch);
+        body.clear();
 
         // Issue #2038 Scope B: capture "now" ONCE for this static row write and
         // share it with every expiring cell derived below (mirrors
@@ -295,8 +307,10 @@ impl DataWriter {
                 self.write_column_subset(&mut body, &static_columns, &empty_present)?;
             }
 
-            // No cells written for row tombstones
-            return Ok((body, 0));
+            // No cells written for row tombstones. Store the body back into the
+            // reusable scratch (empty-static/tombstone early-return path).
+            self.row_scratch = body;
+            return Ok(0);
         }
 
         // Write column bitmap (if NOT HAS_ALL_COLUMNS)
@@ -309,7 +323,9 @@ impl DataWriter {
         let cells_written =
             self.write_static_cells(&mut body, static_ops, liveness_ts, schema, now_seconds)?;
 
-        Ok((body, cells_written))
+        // Store the built body back into the reusable scratch (retains capacity).
+        self.row_scratch = body;
+        Ok(cells_written)
     }
 
     /// Write column bitmap for static columns only.
