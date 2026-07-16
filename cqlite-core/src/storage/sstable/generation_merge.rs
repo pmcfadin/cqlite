@@ -36,6 +36,9 @@
 //!
 //! The whole module is gated on `write-support` at its `mod` declaration in the
 //! parent (`sstable/mod.rs`).
+//!
+//! NOTE (#1116 file-size): already over the 800-line target on `origin/main`; the
+//! #2063 admission acquires add a few lines. Splitting is tracked under epic #1116.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -243,14 +246,9 @@ pub(super) async fn merge_generations_for_read(
     limit: Option<usize>,
     target_key: Option<&RowKey>,
 ) -> Result<Vec<(RowKey, ScanRow)>> {
-    // Issue #2063: admit this eager multi-generation operation through the SAME
-    // operation-level scan-admission semaphore the windowed path uses (#1594).
-    // ONE permit for the whole operation, acquired at the top before the single
-    // `spawn_blocking`, held (RAII) across the join `.await`, and released on
-    // every exit (success/error/cancel) via `Drop`. Once-only, no nested acquire:
-    // the KWayMerger's producer OS threads never call `admit()`, so this cannot
-    // reintroduce the #1594 fan-out hold-and-wait deadlock.
-    let _admission = reader::scan_stream_windowed::scan_admission::admit().await;
+    // Issue #2063: one operation-level scan-admission permit; rationale + cancellation
+    // shape in `scan_admission.rs` `# Scope`. Moved into the closure below.
+    let admission = reader::scan_stream_windowed::scan_admission::admit().await;
 
     // Own the bounds/target so the merge body can use them without borrowing
     // across the await; cheap clone of the key bytes.
@@ -262,7 +260,8 @@ pub(super) async fn merge_generations_for_read(
     let schema = schema.clone();
 
     let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
-        // Issue #1849: capture the read-time TTL clock ONCE per scan.
+        let _admission = admission; // #2063: hold across the detached blocking work.
+                                    // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let mut merger = KWayMerger::new(paths, &schema)?;
         let mut out = Vec::new();
@@ -331,6 +330,11 @@ pub(super) async fn seek_merge_generations_for_read(
     use crate::storage::scan_cancel::ScanCancel;
     use crate::storage::write_engine::merge::build_single_partition_merger_from_readers;
 
+    // Issue #2063: one operation-level scan-admission permit; ONLY call site is the
+    // top-level `scan_partition_clustering`, never nested. Rationale + cancellation
+    // shape in `scan_admission.rs` `# Scope`.
+    let admission = reader::scan_stream_windowed::scan_admission::admit().await;
+
     // NEWEST→OLDEST like `ordered_generation_paths`, so the seeking merger's
     // run_index (= position) equals the full-scan merger's LWW tie-break rank.
     let mut ordered: Vec<Arc<reader::SSTableReader>> = candidates.to_vec();
@@ -340,8 +344,9 @@ pub(super) async fn seek_merge_generations_for_read(
     let target_bytes = target_key.as_bytes().to_vec();
 
     let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
-        // Issue #1849: same read-visibility kernel `merge_generations_for_read`
-        // applies (read-time TTL clock captured ONCE), REQUIRED for byte-identity.
+        let _admission = admission; // #2063: hold across the detached blocking work.
+                                    // Issue #1849: same read-visibility kernel `merge_generations_for_read`
+                                    // applies (read-time TTL clock captured ONCE), REQUIRED for byte-identity.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let keys = [target_bytes.clone()];
         let Some(mut merger) =
@@ -401,12 +406,10 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     limit: Option<usize>,
     target_key: Option<&RowKey>,
 ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
-    // Issue #2063: admit this eager multi-generation metadata operation through the
-    // SAME operation-level scan-admission semaphore the windowed path uses (#1594),
-    // identically to the plain `merge_generations_for_read`. ONE permit for the whole
-    // operation, acquired at the top before the single `KWayMerger` `spawn_blocking`,
-    // held (RAII) across the join `.await`, released on every exit via `Drop`. No
-    // nested acquire, so no #1594 hold-and-wait deadlock.
+    // Issue #2063: one operation-level scan-admission permit, held as an OUTER future
+    // guard (NOT in a closure): it must span both the async per-reader
+    // `scan_with_cell_metadata` loop AND the `spawn_blocking` merge. RESIDUAL: weaker
+    // cancellation than the plain/seek helpers (`scan_admission.rs` `# Scope`).
     let _admission = reader::scan_stream_windowed::scan_admission::admit().await;
 
     // Own the bounds so the merge body can use them without borrowing across the

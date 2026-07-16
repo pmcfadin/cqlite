@@ -38,7 +38,12 @@
 #                      scheduling change is data-transparent — issue #1593); and the
 #                      F4 admission guard --test issue_1594_scan_admission_bound
 #                      (concurrent windowed scans admitted to the blocking pool
-#                      never exceed the admission limit — issue #1594). It then
+#                      never exceed the admission limit — issue #1594); and the
+#                      eager-merge admission guard
+#                      --test issue_2063_eager_merge_admission_bound (concurrent
+#                      write-support multi-generation EAGER-materialize scans are
+#                      bounded by the SAME operation-concurrency semaphore — issue
+#                      #2063). It then
 #                      runs a SECOND invocation: cargo test -p cqlite-core --lib
 #                      --features cli-helpers,scan-offload-probe --
 #                      scan_admission issue_1594_fanout_deadlock — the fan-out
@@ -3255,6 +3260,7 @@ run_scan_offload_guard_cmd() {
     --test issue_1593_io_offload_thread \
     --test issue_1593_mmap_scan_parity \
     --test issue_1594_scan_admission_bound \
+    --test issue_2063_eager_merge_admission_bound \
     && cargo test --package cqlite-core --lib \
     --features cli-helpers,scan-offload-probe \
     -- scan_admission issue_1594_fanout_deadlock
