@@ -657,7 +657,7 @@ async fn truncated_chunk_window_degrades_to_scan_fallback_not_partial_rows() {
             .unwrap()
             .expect("pk=1 must resolve via the intact BTI trie");
         let end = reader
-            .successor_partition_offset(target_off)
+            .successor_partition_offset(target_off, &key1)
             .await
             .unwrap()
             .expect("pk=1 is a head partition and must have a successor bound");

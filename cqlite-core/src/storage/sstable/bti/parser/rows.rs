@@ -355,9 +355,22 @@ pub struct BtiRowIndexHeader {
 /// implausible, the vint fields are truncated, or the recovered trie root falls
 /// outside `rows_db`.
 pub fn resolve_rows_db_entry(rows_db: &[u8], rows_offset: usize) -> BtiResult<BtiRowIndexHeader> {
-    // Issue #1647 (L1): count every `TrieIndexEntry.deserialize` so the clustering
-    // read path can prove it resolves the per-partition entry EXACTLY once.
+    // Issue #1647 (L1): count every `TrieIndexEntry.deserialize` on the CLUSTERING
+    // read path so it can prove it resolves the per-partition entry EXACTLY once.
     crate::storage::sstable::read_work_counters::record_rows_db_entry_resolve();
+    resolve_rows_db_entry_uncounted(rows_db, rows_offset)
+}
+
+/// `TrieIndexEntry.deserialize` WITHOUT the L1 `ROWS_DB_ENTRY_RESOLVES` counter
+/// (issue #2058). Identical decode to [`resolve_rows_db_entry`]; used by the
+/// next-partition SUCCESSOR walk, which resolves a WIDE successor partition's
+/// `data_position` only to compute the target partition's exclusive END bound — that
+/// is seek-bound work, NOT the clustering-window per-partition resolve the L1
+/// invariant (`ROWS_DB_ENTRY_RESOLVES == 1`) accounts for, so it must not bump it.
+pub(crate) fn resolve_rows_db_entry_uncounted(
+    rows_db: &[u8],
+    rows_offset: usize,
+) -> BtiResult<BtiRowIndexHeader> {
     if rows_offset + 2 > rows_db.len() {
         return Err(Error::Parse(format!(
             "Rows.db entry: rows_offset {rows_offset} + 2 (key length) exceeds file size {}",
