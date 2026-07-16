@@ -12,7 +12,7 @@
 //! O(rows × log ranges + ranges).
 //!
 //! This sibling file (not inline in `merge/mod.rs`, per the #1116 campsite rule)
-//! houses two guards:
+//! houses these guards:
 //!   1. A WORK-COUNTER regression — drives R rows against T coalesced ranges
 //!      inside a
 //!      [`RangeCoverageScope`](crate::storage::sstable::work_counters::range_coverage_scope::RangeCoverageScope)
@@ -22,12 +22,26 @@
 //!      EXACTLY the rows an independent coverage oracle says are covered, across a
 //!      full clustering sweep including bound edges and inter-range gaps, plus the
 //!      multi-partition FALLBACK path (which keeps the exact linear scan).
+//!   3. INVARIANT sweeps over the HARD cases where the load-bearing monotonicity
+//!      of `range_end_before_ck` is non-trivial — `Exclusive` bounds, multi-column
+//!      PREFIX bounds (the prefix-truncation `cmp` closure), and DESC clustering
+//!      order (the `cut_cmp` axis reversal). Each asserts BOTH oracle-exact
+//!      shadowing AND that `range_end_before_ck` is monotone (all-true then
+//!      all-false) over the coalescer's output — the precise precondition that
+//!      makes the `partition_point` binary search sound. A drift in the coalescer's
+//!      ordering or the `range_end_before_ck`/`range_tombstone_covers_ck` mirror
+//!      (which would silently drop shadowed rows → a byte-parity break) trips these.
+//!   4. A MIRROR guard — `range_end_before_ck(ck, rt)` equals the exact negation of
+//!      the `before_end` test in `range_tombstone_covers_ck`, restated
+//!      independently, across all four end-bound variants and a ck sweep. Pins the
+//!      hand-mirrored negation against future divergence.
 
 use super::*;
-use crate::schema::{Column, KeyColumn};
+use crate::schema::{ClusteringOrder, Column, KeyColumn};
 use crate::storage::sstable::work_counters::range_coverage_scope::RangeCoverageScope;
 use crate::storage::write_engine::mutation::ClusteringBound;
 use crate::types::Value;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 /// Single-column `int` partition + single-column `int` clustering schema.
@@ -275,4 +289,361 @@ fn multi_partition_slice_uses_exact_fallback_scan() {
         p2_miss.is_some(),
         "p2 ck=1 must NOT be shadowed by p1's range (no cross-partition leak)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Invariant sweeps over the HARD cases (roborev #1669 Medium): the monotonicity
+// of `range_end_before_ck` that makes `partition_point` sound is trivial for the
+// single-column int / ASC / Inclusive case above. Below it is exercised where it
+// is NOT trivial — Exclusive bounds, multi-column PREFIX bounds, and DESC order.
+// ---------------------------------------------------------------------------
+
+/// Single `int` PK + single `int` clustering, DESC order. The clustering axis is
+/// reversed, so the coalescer sorts high→low and the binary search must stay
+/// monotone against the reversed `compare`.
+fn schema_desc() -> TableSchema {
+    let mut s = schema();
+    s.clustering_keys[0].order = ClusteringOrder::Desc;
+    s
+}
+
+/// Single `int` PK + two `int` clustering columns (c1, c2), both ASC. Range
+/// bounds are built on a PREFIX (c1 only) to exercise the prefix-truncation `cmp`
+/// closure shared by `range_end_before_ck` and `range_tombstone_covers_ck`.
+fn schema_two_col() -> TableSchema {
+    let mut s = schema();
+    s.clustering_keys = vec![
+        crate::schema::ClusteringColumn {
+            name: "c1".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: Default::default(),
+        },
+        crate::schema::ClusteringColumn {
+            name: "c2".to_string(),
+            data_type: "int".to_string(),
+            position: 1,
+            order: Default::default(),
+        },
+    ];
+    s
+}
+
+/// A full two-column clustering key `(c1, c2)`.
+fn ck2(a: i32, b: i32) -> ClusteringKey {
+    ClusteringKey {
+        columns: vec![
+            ("c1".to_string(), Value::Integer(a)),
+            ("c2".to_string(), Value::Integer(b)),
+        ],
+    }
+}
+
+/// A PREFIX clustering bound holding only the first component `c1`.
+fn ckp(a: i32) -> ClusteringKey {
+    ClusteringKey {
+        columns: vec![("c1".to_string(), Value::Integer(a))],
+    }
+}
+
+/// A whole-row tombstone at an arbitrary clustering key, dropped exactly when a
+/// covering range's floor (100) outranks its `deletion_time` (1).
+fn entry_tomb(key: DecoratedKey, ck: ClusteringKey) -> MergeEntry {
+    MergeEntry::new(
+        0,
+        key,
+        Some(ck),
+        1,
+        RowData::Tombstone {
+            deletion_time: 1,
+            local_deletion_time: 0,
+        },
+    )
+}
+
+/// A live row (one data cell @ ts 1) at an arbitrary clustering key, likewise
+/// shadowed to `None` when a covering range's floor outranks its cell timestamp.
+fn entry_live(key: DecoratedKey, ck: ClusteringKey) -> MergeEntry {
+    MergeEntry::new(
+        0,
+        key,
+        Some(ck),
+        1,
+        RowData::Live {
+            cells: vec![CellData::new("v".to_string(), Value::Integer(0), 1)],
+        },
+    )
+}
+
+/// The reusable HARD-case assertion. Given a single-partition, coalesced+sorted
+/// range set, it checks for every swept `ck`:
+///   1. `range_end_before_ck` is MONOTONE (all-true then all-false) over the
+///      sorted ranges — the exact precondition `partition_point` relies on; a
+///      coalescer ordering drift or a broken end-bound mirror makes it non-monotone
+///      and the binary search would then pick the wrong (or no) candidate; and
+///   2. the binary-search `apply_range_shadowing` shadows the row iff an
+///      INDEPENDENT `oracle` says the key is covered — for both a tombstone row and
+///      a live row.
+fn assert_binsearch_matches_oracle<F>(
+    schema: &TableSchema,
+    range_tombstones: &[(DecoratedKey, RangeTombstone)],
+    keys: &[ClusteringKey],
+    oracle: F,
+) where
+    F: Fn(&ClusteringKey) -> bool,
+{
+    for w in range_tombstones.windows(2) {
+        assert_eq!(
+            w[0].0.key, w[1].0.key,
+            "helper requires a single-partition slice (binary-search path)"
+        );
+    }
+    let key = range_tombstones
+        .first()
+        .expect("range set non-empty")
+        .0
+        .clone();
+
+    for ck in keys {
+        // (1) monotone partition predicate.
+        let flags: Vec<bool> = range_tombstones
+            .iter()
+            .map(|(_, rt)| KWayMerger::range_end_before_ck(ck, rt, schema))
+            .collect();
+        let first_false = flags.iter().position(|&b| !b).unwrap_or(flags.len());
+        assert!(
+            flags[first_false..].iter().all(|&b| !b),
+            "range_end_before_ck not monotone for ck={ck:?}: {flags:?} — \
+             partition_point precondition violated"
+        );
+
+        // (2) oracle-exact shadowing, both row arms.
+        let expected = oracle(ck);
+        for row in [
+            entry_tomb(key.clone(), ck.clone()),
+            entry_live(key.clone(), ck.clone()),
+        ] {
+            let survived =
+                KWayMerger::apply_range_shadowing(row, range_tombstones, schema).is_some();
+            assert_eq!(
+                !survived, expected,
+                "ck={ck:?}: oracle covered={expected} but survived={survived} \
+                 (binary-search coverage diverged from the oracle)"
+            );
+        }
+    }
+}
+
+/// EXCLUSIVE-bound sweep: the previous guards used only `Inclusive` bounds, so the
+/// `Exclusive` arms of `range_end_before_ck` / `range_tombstone_covers_ck` (and
+/// their monotonicity) were untested. Mixes all four start/end inclusivities.
+#[test]
+fn binary_search_exact_over_exclusive_bounds() {
+    let schema = schema();
+
+    // (10,20) excl-excl → 11..=19 ; (30,40] excl-incl → 31..=40 ;
+    // [50,60) incl-excl → 50..=59. Disjoint, non-adjacent.
+    let mut range_tombstones = vec![
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Exclusive(ck(10)),
+                ClusteringBound::Exclusive(ck(20)),
+                100,
+            ),
+        ),
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Exclusive(ck(30)),
+                ClusteringBound::Inclusive(ck(40)),
+                100,
+            ),
+        ),
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Inclusive(ck(50)),
+                ClusteringBound::Exclusive(ck(60)),
+                100,
+            ),
+        ),
+    ];
+    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+
+    let keys: Vec<ClusteringKey> = (5..=65).map(ck).collect();
+    assert_binsearch_matches_oracle(&schema, &range_tombstones, &keys, |k| {
+        let n = col_i32(k, 0);
+        (10 < n && n < 20) || (30 < n && n <= 40) || (50..60).contains(&n)
+    });
+}
+
+/// MULTI-COLUMN PREFIX-bound sweep: ranges bounded on `c1` alone (a prefix of the
+/// two-column key) plus one full `(c1,c2)` range. Exercises the prefix-truncation
+/// `cmp` closure — a covered `(c1,*)` must be recognised regardless of `c2`.
+#[test]
+fn binary_search_exact_over_prefix_bounds() {
+    let schema = schema_two_col();
+
+    // c1==1 : whole prefix covered ; c1==3 : whole prefix covered ;
+    // c1==5 & 10<=c2<=20 : full-key range. Gaps at c1 in {0,2,4,6}.
+    let mut range_tombstones = vec![
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Inclusive(ckp(1)),
+                ClusteringBound::Inclusive(ckp(1)),
+                100,
+            ),
+        ),
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Inclusive(ckp(3)),
+                ClusteringBound::Inclusive(ckp(3)),
+                100,
+            ),
+        ),
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Inclusive(ck2(5, 10)),
+                ClusteringBound::Inclusive(ck2(5, 20)),
+                100,
+            ),
+        ),
+    ];
+    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+
+    let mut keys: Vec<ClusteringKey> = Vec::new();
+    for c1 in 0..=6 {
+        for c2 in [0, 5, 10, 15, 20, 25] {
+            keys.push(ck2(c1, c2));
+        }
+    }
+    assert_binsearch_matches_oracle(&schema, &range_tombstones, &keys, |k| {
+        let c1 = col_i32(k, 0);
+        let c2 = col_i32(k, 1);
+        c1 == 1 || c1 == 3 || (c1 == 5 && (10..=20).contains(&c2))
+    });
+}
+
+/// DESC-order sweep: the clustering axis is reversed, so a range covering VALUES
+/// `[lo,hi]` is stored with its axis-first (higher-value) bound as `start`. The
+/// coalescer sorts high→low; `range_end_before_ck` must stay monotone against the
+/// reversed `compare`. Oracle stays in value space.
+#[test]
+fn binary_search_exact_over_desc_order() {
+    let schema = schema_desc();
+
+    // Values [10,20] incl, [30,40] incl, (50,60) excl — on the DESC axis the
+    // higher value is the START bound.
+    let mut range_tombstones = vec![
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Inclusive(ck(20)),
+                ClusteringBound::Inclusive(ck(10)),
+                100,
+            ),
+        ),
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Inclusive(ck(40)),
+                ClusteringBound::Inclusive(ck(30)),
+                100,
+            ),
+        ),
+        (
+            dk(1),
+            rt(
+                ClusteringBound::Exclusive(ck(60)),
+                ClusteringBound::Exclusive(ck(50)),
+                100,
+            ),
+        ),
+    ];
+    KWayMerger::coalesce_range_tombstones(&mut range_tombstones, &schema);
+
+    let keys: Vec<ClusteringKey> = (5..=65).map(ck).collect();
+    assert_binsearch_matches_oracle(&schema, &range_tombstones, &keys, |k| {
+        let n = col_i32(k, 0);
+        (10..=20).contains(&n) || (30..=40).contains(&n) || (50 < n && n < 60)
+    });
+}
+
+/// MIRROR guard: `range_end_before_ck` MUST equal the exact negation of the
+/// `before_end` test inside `range_tombstone_covers_ck`. `ref_before_end` restates
+/// that test INDEPENDENTLY (not by calling the function under test), so a future
+/// edit that changes one negation arm without the other trips this — the Low nit
+/// roborev flagged, promoted to an enforced invariant across all four end-bound
+/// variants (Inclusive / Exclusive / Top / Bottom) and a full ck sweep, ASC + DESC.
+#[test]
+fn range_end_before_ck_mirrors_before_end() {
+    // Independent restatement of the `before_end` arms of
+    // `range_tombstone_covers_ck` (compare `ck` against the end bound over the
+    // bound's component count). Must be kept semantically identical to that
+    // function — this test exists to catch a drift between the two.
+    fn ref_before_end(ck: &ClusteringKey, rt: &RangeTombstone, schema: &TableSchema) -> bool {
+        let cmp = |bound: &ClusteringKey| -> Ordering {
+            let n = bound.columns.len();
+            let truncated = ClusteringKey {
+                columns: ck.columns.iter().take(n).cloned().collect(),
+            };
+            truncated
+                .compare(bound, schema)
+                .unwrap_or_else(|_| truncated.cmp(bound))
+        };
+        match &rt.end {
+            ClusteringBound::Inclusive(b) => cmp(b) != Ordering::Greater,
+            ClusteringBound::Exclusive(b) => cmp(b) == Ordering::Less,
+            ClusteringBound::Top => true,
+            ClusteringBound::Bottom => false,
+        }
+    }
+
+    for (schema, ends) in [
+        (
+            schema(),
+            vec![
+                ClusteringBound::Inclusive(ck(30)),
+                ClusteringBound::Exclusive(ck(30)),
+                ClusteringBound::Top,
+                ClusteringBound::Bottom,
+            ],
+        ),
+        (
+            schema_desc(),
+            vec![
+                ClusteringBound::Inclusive(ck(30)),
+                ClusteringBound::Exclusive(ck(30)),
+                ClusteringBound::Top,
+                ClusteringBound::Bottom,
+            ],
+        ),
+    ] {
+        for end in &ends {
+            // The start bound is irrelevant to `range_end_before_ck`; use Bottom.
+            let rt = rt(ClusteringBound::Bottom, end.clone(), 100);
+            for n in 25..=35 {
+                let k = ck(n);
+                assert_eq!(
+                    KWayMerger::range_end_before_ck(&k, &rt, &schema),
+                    !ref_before_end(&k, &rt, &schema),
+                    "range_end_before_ck must be the exact negation of before_end \
+                     (ck={n}, end={end:?}, desc={})",
+                    schema.clustering_keys[0].order == ClusteringOrder::Desc
+                );
+            }
+        }
+    }
+}
+
+/// Extract the `i32` at clustering column `i` for the oracles above.
+fn col_i32(ck: &ClusteringKey, i: usize) -> i32 {
+    match ck.columns.get(i).map(|(_, v)| v) {
+        Some(Value::Integer(n)) => *n,
+        other => panic!("expected Integer at clustering col {i}, got {other:?}"),
+    }
 }
