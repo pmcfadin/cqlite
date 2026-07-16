@@ -213,16 +213,35 @@ impl WindowCursor {
     }
 
     /// Reclaim the consumed prefix (single compaction) so a fresh chunk can be
-    /// appended at offset 0. Shared by both refill entry points below.
-    fn compact_residual(&mut self) -> Vec<u8> {
+    /// appended at offset 0, returning an owned buffer holding ONLY the
+    /// unconsumed residual at offset 0. Shared by both refill entry points below.
+    ///
+    /// When the backing is already an owned [`Backing::Stitched`] `Vec`, the
+    /// residual is compacted IN PLACE (`copy_within` + `truncate`), REUSING the
+    /// existing allocation — no fresh `Vec` per refill (the pre-#1644
+    /// allocation pattern). A [`Backing::Borrowed`] chunk has no reusable owned
+    /// `Vec`, so its residual is copied into a fresh one.
+    fn take_residual_buf(&mut self) -> Vec<u8> {
+        let start = self.start;
         let residual_len = self.len();
-        let mut residual = Vec::with_capacity(residual_len);
-        residual.extend_from_slice(self.as_slice());
         #[cfg(feature = "scan-offload-probe")]
-        if self.start > 0 {
+        if start > 0 {
             probe::note_bytes_memmoved(residual_len);
         }
-        residual
+        match std::mem::replace(&mut self.backing, Backing::Stitched(Vec::new())) {
+            Backing::Stitched(mut buf) => {
+                if start > 0 {
+                    buf.copy_within(start.., 0);
+                }
+                buf.truncate(residual_len);
+                buf
+            }
+            Backing::Borrowed(b) => {
+                let mut buf = Vec::with_capacity(residual_len);
+                buf.extend_from_slice(&b[start..]);
+                buf
+            }
+        }
     }
 
     /// Append a freshly decompressed `chunk` sourced as an OWNED, refcounted
@@ -245,7 +264,8 @@ impl WindowCursor {
             self.start = 0;
             return;
         }
-        let mut residual = self.compact_residual();
+        let mut residual = self.take_residual_buf();
+        residual.reserve(chunk.len());
         residual.extend_from_slice(&chunk);
         self.backing = Backing::Stitched(residual);
         self.start = 0;
@@ -254,13 +274,16 @@ impl WindowCursor {
     /// Append a freshly decompressed `chunk` sourced as a borrowed `&[u8]`
     /// (the `Vec<u8>`-based compaction driver, which never adopted the #1940
     /// `Bytes` substrate). ALWAYS copies — there is no `Bytes` to move — so the
-    /// window ends up [`Backing::Stitched`] regardless of prior state; this is
-    /// the pre-#1644 behavior, unchanged. See [`refill_owned`](Self::refill_owned)
-    /// for the Bytes-sourced zero-copy-refill fast path.
+    /// window ends up [`Backing::Stitched`] regardless of prior state. Like the
+    /// pre-#1644 path it compacts the residual IN PLACE and appends into the
+    /// reused buffer (see [`take_residual_buf`](Self::take_residual_buf)) — no
+    /// fresh allocation per refill. See [`refill_owned`](Self::refill_owned) for
+    /// the Bytes-sourced zero-copy-refill fast path.
     pub(crate) fn refill(&mut self, chunk: &[u8]) {
         #[cfg(feature = "scan-offload-probe")]
         probe::note_bytes_appended(chunk.len());
-        let mut residual = self.compact_residual();
+        let mut residual = self.take_residual_buf();
+        residual.reserve(chunk.len());
         residual.extend_from_slice(chunk);
         self.backing = Backing::Stitched(residual);
         self.start = 0;

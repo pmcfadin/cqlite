@@ -1110,22 +1110,28 @@ impl Value {
 ///
 /// A borrowed [`Value`] payload is a refcounted `slice`/`slice_ref` view of a
 /// whole decompression chunk, so a tiny value can pin a large (e.g. 64 KB)
-/// chunk alive. The design's literal rule is "compact any payload whose
-/// backing is materially larger than the payload —
-/// `backing.len() > payload.len() + RETENTION_SLACK`". `bytes::Bytes`,
-/// however, exposes NO public API to inspect a slice view's PARENT
-/// allocation length — only [`bytes::Bytes::is_unique`] /
-/// [`bytes::Bytes::try_into_mut`], which report whether a `Bytes` is
-/// uniquely-owned AND spans its ENTIRE original allocation (owner-approved
-/// resolution, 2026-07-16): that combined signal is a strictly EXACT
-/// (`RETENTION_SLACK` effectively `0`, not merely bounded by it) test for "is
-/// this payload's backing exactly its own size, with nothing else retaining
-/// it" — stricter than, and satisfying, the documented intent via the API
-/// `Bytes` actually provides, rather than a literal length comparison. This
-/// constant is kept as the DESIGN reference point [`Value::into_owned`]'s doc
-/// comment cites; the implementation does not need to construct it (a
-/// fuzzy-slack comparison would require the very parent-length introspection
-/// `Bytes` does not expose).
+/// chunk alive. The rule is "compact any payload whose backing is materially
+/// larger than the payload — `backing_capacity > payload.len() +
+/// RETENTION_SLACK`".
+///
+/// [`bytes::Bytes::try_into_mut`] alone CANNOT detect an oversized backing: it
+/// succeeds whenever the `Bytes` is uniquely REFERENCED (refcount == 1),
+/// regardless of whether the payload is a small sub-slice of a much larger
+/// original allocation. A sole-owner sliver of a big chunk — the
+/// production-common case once the scan window advances past a chunk and drops
+/// its own reference, leaving a retained cell as the last borrower — succeeds
+/// there, and `BytesMut::from(bytes)` would REUSE the original oversized
+/// allocation rather than shrink it, so `Bytes::from(mutable)` would still pin
+/// the whole parent chunk.
+///
+/// The available signal is the recovered [`bytes::BytesMut::capacity`]: it
+/// reflects the remaining capacity of the ORIGINAL backing allocation ahead of
+/// this payload's start (verified against `bytes` 1.12.1 — a 10-byte slice at
+/// offset 100 of a 64 KiB buffer recovers `capacity() == 65436`; a genuinely
+/// tight 10-byte `Bytes` recovers `capacity() == 10`). [`Value::into_owned`]
+/// therefore recovers the `BytesMut` via `try_into_mut` and compacts when
+/// `capacity() > len() + RETENTION_SLACK`, keeping only payloads whose backing
+/// is within `RETENTION_SLACK` of their own size.
 pub const RETENTION_SLACK: usize = 4 * 1024;
 
 impl Value {
@@ -1182,25 +1188,47 @@ impl Value {
     /// releases every chunk its leaves borrowed, not just its own top-level
     /// payload.
     ///
-    /// Per-payload rule (see [`RETENTION_SLACK`] for the design-intent
-    /// rationale and why this uses `Bytes::try_into_mut` rather than a literal
-    /// length comparison): a payload is compacted (copied into a tight
-    /// standalone `Bytes`) unless it is ALREADY uniquely-owned and spans its
-    /// entire backing allocation exactly (`try_into_mut` succeeds) — the only
-    /// case where the payload is not, in fact, wasting any memory. `Decimal`'s
-    /// `unscaled: Vec<u8>` is already owned (D3) and needs no compaction.
+    /// Per-payload rule (see [`RETENTION_SLACK`] for the rationale and the
+    /// verified `bytes` semantics): a payload is compacted (copied into a tight
+    /// standalone `Bytes`) if it is shared (`try_into_mut` fails) OR it is a
+    /// uniquely-referenced sliver whose recovered `BytesMut::capacity()` exceeds
+    /// its length by more than `RETENTION_SLACK` — the case where a tiny payload
+    /// still pins a large parent chunk. Only a payload whose backing is within
+    /// `RETENTION_SLACK` of its own size is kept as-is (no wasteful copy).
+    /// `Decimal`'s `unscaled: Vec<u8>` is already owned (D3) and needs no
+    /// compaction.
     #[must_use]
     pub fn into_owned(self) -> Value {
         fn compact(b: Bytes) -> Bytes {
             match b.try_into_mut() {
-                // Already tight: uniquely owned AND spans the whole original
-                // allocation — no waste, keep it (the round-trip through
-                // BytesMut is a pointer move, not a copy).
-                Ok(mutable) => Bytes::from(mutable),
-                // Shared with another retained value / the live window, OR a
-                // strict subrange of a larger chunk: copy into a tight,
-                // standalone allocation, releasing the (possibly oversized)
-                // parent.
+                // `try_into_mut` succeeds whenever this `Bytes` is uniquely
+                // REFERENCED (refcount == 1) — it says NOTHING about whether the
+                // payload spans its whole backing allocation. A sole-owner sliver
+                // of a large chunk (the production-common case once the scan
+                // window advances past a chunk and drops its own reference)
+                // succeeds here too, and `BytesMut::from(bytes)` would REUSE the
+                // original oversized allocation without shrinking. So inspect the
+                // recovered `BytesMut`'s capacity: it reflects the remaining
+                // capacity of the ORIGINAL backing allocation ahead of this
+                // payload's start (verified against bytes 1.12.1: a 10-byte
+                // slice at offset 100 of a 64 KiB buffer recovers capacity
+                // 65436, a genuinely tight 10-byte `Bytes` recovers capacity 10).
+                Ok(mutable) => {
+                    if mutable.capacity() > mutable.len() + RETENTION_SLACK {
+                        // Sole-owner sliver of an oversized parent chunk: copy
+                        // into a tight, standalone allocation so the parent is
+                        // released.
+                        Bytes::copy_from_slice(&mutable)
+                    } else {
+                        // Genuinely tight (capacity within RETENTION_SLACK of the
+                        // payload): keep it — the round-trip through BytesMut is a
+                        // pointer move, not a copy.
+                        Bytes::from(mutable)
+                    }
+                }
+                // Shared with another retained value / the live window: copy into
+                // a tight, standalone allocation, releasing the (possibly
+                // oversized) parent.
                 Err(shared) => Bytes::copy_from_slice(&shared),
             }
         }
@@ -1987,43 +2015,71 @@ mod tests {
         assert!(Value::text_from_bytes(Bytes::from_static(&[0xff, 0xfe])).is_err());
     }
 
-    /// Issue #1644 (D2, retention boundary): a small value borrowed from a
-    /// much larger chunk, retained past the "window" that produced it (here
-    /// simulated by dropping every other reference to the parent chunk), must
-    /// NOT keep pinning that whole chunk after `into_owned()` — it must end up
-    /// a tight, standalone allocation. `try_into_mut` succeeding is the
-    /// observable proof: it succeeds ONLY for a uniquely-owned `Bytes` that
-    /// spans its ENTIRE backing allocation exactly (see `RETENTION_SLACK`'s
-    /// doc comment for why this is the correct-and-available signal).
+    /// Issue #1644 (D2, retention boundary): a small value that is the GENUINE
+    /// SOLE OWNER of a much larger chunk (the production shape once the scan
+    /// window advances past a chunk and drops its own reference) must NOT keep
+    /// pinning that whole chunk after `into_owned()` — it must end up a tight,
+    /// standalone allocation.
+    ///
+    /// The observable is the recovered `BytesMut::capacity()`, NOT
+    /// `try_into_mut().is_ok()`: a sole-owner sliver of an oversized parent and
+    /// a genuinely tight allocation BOTH return `is_ok()`, so only capacity can
+    /// distinguish them. Before the capacity-based fix this test FAILS — the
+    /// buggy `Ok(mutable) => Bytes::from(mutable)` branch reuses the 64 KiB
+    /// backing, so the recovered capacity stays chunk-sized (~65 KiB). Verified
+    /// by temporarily reverting the fix: the payload's capacity remained 65_492
+    /// (64 KiB − offset) instead of the compacted 4.
     #[test]
     fn into_owned_compacts_a_tiny_value_retained_from_a_large_chunk() {
-        let chunk = Bytes::from(vec![0u8; 64 * 1024]); // a 64 KiB "decoded chunk"
-        let small = chunk.slice(40_000..40_004); // a 4-byte borrowed view
-        drop(chunk); // the window moved on; `small` is now the sole reference
+        const CHUNK: usize = 64 * 1024;
 
-        // Pre-compaction: still a subrange of a (now solely-owned, but NOT
-        // exactly-spanned) larger allocation — try_into_mut must NOT report it
-        // as already tight.
+        // Precondition: a sole-owner sliver of a 64 KiB parent is uniquely
+        // referenced, so try_into_mut SUCCEEDS (refcount == 1) — yet the
+        // recovered capacity is still chunk-sized, proving `try_into_mut`
+        // success alone does NOT mean "already tight". (Consumed here so the
+        // probe holds the sole reference.)
+        let probe_chunk = Bytes::from(vec![0u8; CHUNK]);
+        let probe_sliver = probe_chunk.slice(40_000..40_004);
+        drop(probe_chunk);
+        let probe = probe_sliver
+            .try_into_mut()
+            .expect("a sole-owner sliver is uniquely referenced, so try_into_mut succeeds");
         assert!(
-            small.clone().try_into_mut().is_err(),
-            "precondition: the borrowed view must not already be a tight allocation"
+            probe.capacity() > 4 + RETENTION_SLACK,
+            "precondition: the borrowed sliver must still pin the oversized parent \
+             (capacity {} should be chunk-sized)",
+            probe.capacity()
         );
 
-        let borrowed_value = Value::Blob(small.clone());
-        let compacted = borrowed_value.into_owned();
+        // The actual retention case: build the value by CONSUMING the sole
+        // reference to the parent chunk — no live clone kept.
+        let chunk = Bytes::from(vec![0u8; CHUNK]); // a 64 KiB "decoded chunk"
+        let small = chunk.slice(40_000..40_004); // a 4-byte borrowed view
+        drop(chunk); // the window moved on; `small` is now the SOLE reference
+        let expected = small.to_vec();
+
+        let compacted = Value::Blob(small).into_owned();
 
         let Value::Blob(tight) = compacted else {
             panic!("expected Blob");
         };
         assert_eq!(
             &tight[..],
-            &small[..],
+            &expected[..],
             "compaction must not change the bytes"
         );
+
+        // The compacted payload's backing must now be payload-sized, not
+        // chunk-sized. `tight` is the sole owner, so try_into_mut recovers the
+        // BytesMut whose capacity reveals the real backing size.
+        let recovered = tight
+            .try_into_mut()
+            .expect("compacted payload must be uniquely owned");
         assert!(
-            tight.try_into_mut().is_ok(),
+            recovered.capacity() <= 4 + RETENTION_SLACK,
             "issue #1644 REGRESSION: into_owned() must release the 64 KiB parent chunk — the \
-             compacted payload must be a tight, uniquely-owned allocation exactly its own size"
+             compacted payload's capacity ({}) must be payload-sized, not chunk-sized",
+            recovered.capacity()
         );
     }
 
@@ -2065,7 +2121,14 @@ mod tests {
         let Value::Blob(b) = items.remove(0) else {
             panic!("expected Blob element");
         };
-        assert!(b.try_into_mut().is_ok(), "list element must be compacted");
+        let recovered = b
+            .try_into_mut()
+            .expect("list element must be uniquely owned");
+        assert!(
+            recovered.capacity() <= 4 + RETENTION_SLACK,
+            "list element must be compacted to payload size, not the 8 KiB chunk (capacity {})",
+            recovered.capacity()
+        );
 
         let udt_chunk = Bytes::from(vec![b'y'; 8192]);
         let udt_leaf = udt_chunk.slice(10..14);
@@ -2085,7 +2148,12 @@ mod tests {
         let Some(Value::Blob(b)) = u.fields.remove(0).value else {
             panic!("expected Blob field");
         };
-        assert!(b.try_into_mut().is_ok(), "UDT field must be compacted");
+        let recovered = b.try_into_mut().expect("UDT field must be uniquely owned");
+        assert!(
+            recovered.capacity() <= 4 + RETENTION_SLACK,
+            "UDT field must be compacted to payload size, not the 8 KiB chunk (capacity {})",
+            recovered.capacity()
+        );
     }
 
     #[test]
