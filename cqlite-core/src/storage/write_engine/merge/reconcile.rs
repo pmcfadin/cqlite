@@ -32,6 +32,7 @@
 //! 7. [`build`](ReconcileState::build) — Step 4: phantom-row guard + emit the
 //!    merged `MergeEntry`.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey, RangeTombstone};
@@ -192,12 +193,19 @@ impl ReconcileState {
             if let RowData::Live { cells } = &entry.row_data {
                 for cell in cells {
                     let cell_key: CellKey = (cell.column.clone(), cell.cell_path.clone());
-                    match self.winners.get(&cell_key) {
-                        None => {
-                            self.order.push(cell_key.clone());
-                            self.winners.insert(cell_key, cell.clone());
+                    // Issue #1665: the HashMap `entry()` API hashes ONCE on the
+                    // vacant path (the old `get()`+`insert()` hashed twice) and
+                    // lets `order` reuse the slot's owned key. Output is
+                    // byte-identical: the vacant/occupied arms below are the same
+                    // two branches as the former `None`/`Some` match, and the
+                    // `order.push` still precedes the `insert` so first-seen order
+                    // is preserved for the equal-timestamp tie-break.
+                    match self.winners.entry(cell_key) {
+                        Entry::Vacant(slot) => {
+                            self.order.push(slot.key().clone());
+                            slot.insert(cell.clone());
                         }
-                        Some(existing) => {
+                        Entry::Occupied(mut slot) => {
                             // Higher timestamp wins. At EQUAL timestamp a cell
                             // DELETION (tombstone) beats a LIVE or EXPIRING
                             // (TTL) cell, decided BEFORE any localDeletionTime
@@ -207,8 +215,8 @@ impl ReconcileState {
                             // (newer file) winner. The tie-break is the SHARED
                             // [`reconcile_rules::cell_wins`] rule (issue #947),
                             // also used by the flush/write path.
-                            if reconcile_rules::cell_wins(cell, existing) {
-                                self.winners.insert(cell_key, cell.clone());
+                            if reconcile_rules::cell_wins(cell, slot.get()) {
+                                slot.insert(cell.clone());
                             }
                         }
                     }
@@ -379,16 +387,15 @@ impl ReconcileState {
     /// `has_data_after` / `purged_to_empty` determination is DEFERRED to
     /// [`Self::build`], after Step 3c — #921 finding 3).
     pub(super) fn filter_dropped_columns(&mut self, dropped_columns: &HashMap<String, i64>) {
-        self.surviving = self
-            .after_row_del
-            .iter()
-            .filter(|cell| match dropped_columns.get(&cell.column) {
-                Some(drop_time) => cell.timestamp > *drop_time,
-                None => true,
-            })
-            .cloned()
-            .collect();
-
+        // Issue #1665: capture the pre-purge phantom-row guard state FIRST — while
+        // `after_row_del` is still populated — so we can then MOVE it into the
+        // survivor filter instead of deep-cloning every survivor. `after_row_del`
+        // is DEAD after this method (VERIFIED against the reconcile step sequence
+        // in `merge/mod.rs`: shadow_by_row_deletion → filter_dropped_columns →
+        // expire_ttl_cells → purge_gc_grace → build, none of which read it again,
+        // and `build` destructures `self` with `..`), so `mem::take` is safe and
+        // output is byte-identical (same `had_data_before`, same `surviving`
+        // contents and order — only the survivor clone is eliminated).
         let ck_names: HashSet<&str> = self
             .clustering_key
             .as_ref()
@@ -396,6 +403,15 @@ impl ReconcileState {
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
         self.had_data_before = self.after_row_del.iter().any(is_data_cell);
+        drop(ck_names);
+
+        self.surviving = std::mem::take(&mut self.after_row_del)
+            .into_iter()
+            .filter(|cell| match dropped_columns.get(&cell.column) {
+                Some(drop_time) => cell.timestamp > *drop_time,
+                None => true,
+            })
+            .collect();
     }
 
     /// Step 3b′ — TTL EXPIRY (issue #1382, parity Cassandra `ExpiringCell`
