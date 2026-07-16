@@ -1,0 +1,57 @@
+[package]
+name = "flight-loadgen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Raw FlightServiceClient concurrency-ramp load generator for cqlite-flight (issue #2418, epic #2313 WS1)"
+publish = false
+
+[[bin]]
+name = "flight-loadgen"
+path = "src/main.rs"
+
+[dependencies]
+# Raw Flight client transport — pinned to the same major lines cqlite-flight
+# serves with so the tonic/arrow-flight wire types unify across the loopback
+# self-test (arrow-flight 53 → tonic 0.12).
+arrow-flight = "53"
+tonic = "0.12"
+arrow = { workspace = true, features = ["ipc"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+# Fixed-footprint recording histogram for per-step p50/p95/p99/max under a
+# memory bound (design §(d)); reset per step so memory is O(buckets), never
+# O(requests).
+hdrhistogram = "7"
+# Seeded RNG for deterministic, wall-clock-independent ticket selection (design §(c)).
+rand = { workspace = true }
+
+# The self-test (`--self-test` subcommand + the `#[test]`) serves a real
+# `CqliteFlightService` in-process over an ephemeral loopback port, reusing the
+# shared `keyvalue` byte-pin fixture (`test-util`) and the `write_engine` flush.
+# These are normal (not dev) deps because the binary's `--self-test` subcommand
+# must be able to spin the server up itself; this crate is `publish = false`
+# operator/bench tooling, so pulling the fixture code in is intended.
+cqlite-flight = { path = "../../cqlite-flight", features = ["test-util"] }
+cqlite-core = { path = "../../cqlite-core", features = ["arrow"] }
+tempfile = { workspace = true }
+
+# The `flight_loadgen` library holds the ramp engine, ticket synthesis, outcome
+# classifier, JSONL record schema, and the in-process self-test harness so both
+# the binary and the `#[test]` wiring-evidence test drive the same code.
+[lib]
+name = "flight_loadgen"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+
+[lints]
+workspace = true
