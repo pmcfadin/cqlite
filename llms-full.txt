@@ -1523,6 +1523,20 @@ env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 
 `CQLITE_REQUIRE_FIXTURES=1` (which the gate component sets) makes an absent/empty fixture a **hard failure**; without it, a minimal checkout that lacks the committed `test_compaction_tombstone_ttl` fixtures SKIPs loudly.
 
+### Point-vs-full differential lane (CQLite-vs-CQLite, issue #1918)
+
+[Section titled “Point-vs-full differential lane (CQLite-vs-CQLite, issue #1918)”](#point-vs-full-differential-lane-cqlite-vs-cqlite-issue-1918)
+
+A third lane complements the two oracles above by comparing CQLite to *itself* across its two read access paths. `cqlite-core/tests/point_vs_full_differential.rs` runs each point-read-eligible corpus query under forced `CQLITE_READ_PATH=point` (a partition-targeted lookup) and forced `CQLITE_READ_PATH=full` (a full scan + reconciliation) — via the `QueryConfig::forced_read_path` knob — and asserts the two paths return byte-identical rows/values/**order** at a **pinned `now`** (`CQLITE_TTL_NOW_OVERRIDE_SECS`). The corpus deliberately includes multi-generation, tombstone, and TTL fixtures — the reconciliation classes #1741 hid — so a divergence between the point and full paths (invisible to a physical dump, which retains the shadowed rows on both sides) fails the lane and names the diverging query. Same fail-closed/SKIP contract as the query-semantics oracle:
+
+```bash
+env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test -p cqlite-core --features "state_machine cli-helpers" \
+  --test point_vs_full_differential -- --nocapture
+```
+
+The `CQLITE_READ_PATH` knob is a **test/debug** control (not a perf recommendation); `point` fails closed rather than silently full-scanning. See the CLI reference for the user-facing knob docs.
+
 ## Golden JSONL files
 
 [Section titled “Golden JSONL files”](#golden-jsonl-files)
@@ -13653,6 +13667,39 @@ cqlite \
 For write statistics, compaction, and export see the `write-stats`, `maintenance`, and `export-sstable` subcommands above.
 
 ***
+
+## Debug / test controls
+
+[Section titled “Debug / test controls”](#debug--test-controls)
+
+### `CQLITE_READ_PATH` — force the SELECT access path
+
+[Section titled “CQLITE\_READ\_PATH — force the SELECT access path”](#cqlite_read_path--force-the-select-access-path)
+
+`CQLITE_READ_PATH` forces every `SELECT` down a specific read access path. It is a **test and debugging control** — **not a performance recommendation** — used to remove doubt about which path served a query and to differentially compare the two paths.
+
+| Value                      | Behavior                                                                                                                                                                                                                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto` (default, or unset) | The engine chooses point-vs-full per query, exactly as normal. Byte-for-byte identical to leaving the knob unset.                                                                                                                                                                                        |
+| `point`                    | Force a genuinely partition-targeted lookup. **Fails closed** — the query returns an error whenever it would not run a partition-targeted lookup (a partial/absent partition key, an unwired targeted surface, or a path that does not actually prune). It **never** silently falls back to a full scan. |
+| `full`                     | Force the full-scan + reconciliation path regardless of classification. Returns the same rows/values/order as `auto` for the same query.                                                                                                                                                                 |
+
+The value is case-insensitive (`auto`/`point`/`full`). An **unrecognized** value is a loud error naming the value and the allowed set — never a silent fall-through to `auto`. The programmatic equivalent is the `QueryConfig.forced_read_path` field, which takes precedence over the environment variable. The mode is resolved once per process.
+
+```bash
+# Force a point lookup; errors loudly if the query is not partition-targeted.
+CQLITE_READ_PATH=point cqlite \
+  --schema schema.cql --data-dir ./sstables \
+  -e "SELECT * FROM ks.tbl WHERE pk = 1" --out json
+
+
+# Force a full scan of the same query (rows/values/order match the point path).
+CQLITE_READ_PATH=full cqlite \
+  --schema schema.cql --data-dir ./sstables \
+  -e "SELECT * FROM ks.tbl WHERE pk = 1" --out json
+```
+
+Forcing changes **routing only** — value decoding, tombstone/timestamp reconciliation, and WRITETIME/TTL semantics are identical across all three modes.
 
 ## Logging
 
