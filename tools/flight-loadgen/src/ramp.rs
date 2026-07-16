@@ -191,8 +191,12 @@ pub fn parse_ramp(s: &str) -> Result<Vec<usize>, String> {
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     // Validate the parsed number before constructing a Duration: negative, NaN,
-    // and infinite values all make Duration::from_secs_f64 panic, so reject them
-    // here and return the Err the signature promises instead.
+    // and infinite values all make Duration::from_secs_f64 panic. We keep this
+    // early check for a clearer error, but the authoritative guard is
+    // Duration::try_from_secs_f64 applied to the FINAL, SCALED value in every
+    // branch below: it also rejects post-scale overflow to +inf (e.g. "1e308m")
+    // and finite values that overflow Duration's range (e.g. "1e30"), both of
+    // which would still panic under from_secs_f64.
     let parse_num = |num: &str| -> Result<f64, String> {
         let n = num
             .parse::<f64>()
@@ -204,14 +208,17 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         }
         Ok(n)
     };
+    let to_duration = |secs: f64| -> Result<Duration, String> {
+        Duration::try_from_secs_f64(secs).map_err(|_| format!("bad duration {s:?}: out of range"))
+    };
     if let Some(ms) = s.strip_suffix("ms") {
-        Ok(Duration::from_secs_f64(parse_num(ms)? / 1000.0))
+        to_duration(parse_num(ms)? / 1000.0)
     } else if let Some(m) = s.strip_suffix('m') {
-        Ok(Duration::from_secs_f64(parse_num(m)? * 60.0))
+        to_duration(parse_num(m)? * 60.0)
     } else if let Some(sec) = s.strip_suffix('s') {
-        Ok(Duration::from_secs_f64(parse_num(sec)?))
+        to_duration(parse_num(sec)?)
     } else {
-        Ok(Duration::from_secs_f64(parse_num(s)?))
+        to_duration(parse_num(s)?)
     }
 }
 
@@ -248,7 +255,13 @@ mod tests {
     fn parse_duration_rejects_non_finite_and_negative_without_panicking() {
         // Regression: these previously reached Duration::from_secs_f64, which
         // panics on negative/NaN/infinite input instead of returning Err.
-        for bad in ["-5s", "-1", "nan", "inf", "-inf", "infms", "-2m"] {
+        // "1e30" (bare, finite, non-negative) overflows Duration's range, and
+        // "1e308m" is finite pre-scale but overflows to +inf after *60.0 — both
+        // still panicked under from_secs_f64 despite the pre-scale check, so the
+        // try_from_secs_f64 guard on the final scaled value must catch them.
+        for bad in [
+            "-5s", "-1", "nan", "inf", "-inf", "infms", "-2m", "1e30", "1e308m",
+        ] {
             assert!(
                 parse_duration(bad).is_err(),
                 "expected Err for {bad:?}, got Ok"
