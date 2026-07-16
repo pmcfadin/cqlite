@@ -557,6 +557,11 @@ mod teardown_tests;
 #[cfg(all(test, feature = "write-support"))]
 mod clone_regression_tests;
 
+// Issue #1665: reconcile micro-alloc guard — proves `filter_dropped_columns` no
+// longer deep-clones the survivor set (sibling file, #1116 campsite rule).
+#[cfg(all(test, feature = "write-support"))]
+mod reconcile_microalloc_tests;
+
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
     /// Open an SSTable and start a streaming producer thread.
