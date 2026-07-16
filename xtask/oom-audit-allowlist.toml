@@ -1,0 +1,33 @@
+# oom-audit suppression allowlist (issue #2012).
+#
+# The ONLY way to suppress a STREAM_RETURNS_VEC finding. Every entry MUST carry:
+#   file          — repo-root-relative path of the allowed site
+#   fn            — enclosing function name
+#   fingerprint   — content fingerprint (`f1:<hex>`) printed by
+#                   `cargo run -p xtask -- oom-audit` for the finding; it is
+#                   reformat-stable and changes when the offending code changes,
+#                   so a real new materialization at an allowed site re-fires.
+#   issue         — MANDATORY, non-empty tracking issue reference (e.g. "#2012")
+#   justification — MANDATORY, non-empty reason the whole-buffer read is sound
+#                   (e.g. the source is bounded-small, like Statistics.db)
+#   expiry        — OPTIONAL "YYYY-MM-DD"; when present and past, the entry FAILS
+#                   the audit (per fork F-expiry: optional, not a mandatory
+#                   wall-clock time bomb; review cadence is manual).
+#
+# An entry whose fingerprint matches no current in-scope finding is ORPHANED and
+# FAILS the audit — the list cannot silently rot. Remove such entries.
+#
+# The v1 report over the scoped set (data_access/**, query/**, flight producers +
+# streaming) is CLEAN — zero findings — so this allowlist is intentionally empty.
+# The rule favors false-negatives (fires only when both the collect/push shape
+# AND the iterator element type are syntactically visible), so a seeded entry is
+# expected only for a genuinely-bounded whole-buffer read.
+#
+# Example (do not uncomment unless a real, reviewed, sound site exists):
+# [[allow]]
+# file = "cqlite-core/src/query/example.rs"
+# fn = "parse_small_bounded_thing"
+# fingerprint = "f1:0123456789abcdef"
+# issue = "#2012"
+# justification = "input is bounded-small (< a few KB); whole-buffer read is sound"
+# expiry = "2026-12-31"

@@ -1,0 +1,10 @@
+// Self-test fixture (#2012): the violating shape with the collecting helper and
+// all local variables RENAMED, but the syntactic shape (collect over a row
+// iterator, no bound) unchanged. The AST audit MUST still flag it — it matches
+// on the parsed shape, not identifier text (spec: "A renamed helper with the
+// same shape is still caught").
+
+fn scan_the_whole_thing(src: &Reader) -> Vec<DataRow> {
+    let materialized_everything = src.rows().collect::<Vec<DataRow>>();
+    materialized_everything
+}

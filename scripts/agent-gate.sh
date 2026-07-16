@@ -1066,7 +1066,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -1685,6 +1685,60 @@ run_delivery_telemetry() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# oom-audit: the STREAM_RETURNS_VEC static AST audit (issue #2012) run in
+# --enforce mode over the v1 scope (data_access/**, query/**, flight producers +
+# streaming). SKIP-aware on the delivery-telemetry model: no cargo, an absent
+# xtask crate, or a failed xtask build -> SKIP (loud, never a silent PASS); a
+# successful build whose enforce run exits non-zero (an unallowlisted finding,
+# orphaned/malformed/expired allowlist entry) -> hard FAIL; otherwise PASS. Not
+# in DATASET_COMPONENTS: it needs no SSTable fixtures (it reads source only).
+#
+# Test seams (mirrors parity-report's env overrides, exercised by
+# scripts/tests/test_agent_gate_oom_audit.sh via `--only oom-audit`):
+#   OOM_AUDIT_XTASK_DIR      - point at an absent dir to force the SKIP path
+#   CQLITE_OOM_AUDIT_ROOT    - point the audit at a synthetic tree (a planted
+#                              violation for FAIL, a clean tree for PASS)
+run_oom_audit() {
+  local name=oom-audit
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  local xtask_dir="${OOM_AUDIT_XTASK_DIR:-$REPO_ROOT/xtask}"
+  if ! command -v cargo >/dev/null 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (no cargo on PATH)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  if [ ! -f "$xtask_dir/Cargo.toml" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (xtask crate absent at $xtask_dir)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] cargo run -p xtask -- oom-audit --enforce"
+  if ! cargo build -p xtask >"$log" 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (xtask build failed; see $log)"
+    record_result "$name" "$status" "$(( $(date +%s) - start ))"
+    return 0
+  fi
+  if cargo run -q -p xtask -- oom-audit --enforce >>"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # compaction-byte-parity: the PR-VISIBLE proxy for the nightly-only Java
 # differential byte tier (issue #1405). The two manifest scenarios
 # cass.compaction.SSTableRewriterTest.output_component_integrity and
@@ -2041,6 +2095,23 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (parity-report self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # oom-audit component self-test (#2012): drives nested `agent-gate.sh --only
+  # oom-audit` to assert the SKIP (xtask absent) / FAIL (planted violation) /
+  # PASS (bounded tree) outcomes. The SKIP case needs no cargo; the FAIL/PASS
+  # cases self-report INFO when cargo is unavailable. A failure FAILs the
+  # component, mirroring the parity-report/keyspace-scoping guards.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_oom_audit.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_oom_audit.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (oom-audit self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -3544,6 +3615,7 @@ dispatch_component() {
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     delivery-telemetry) run_delivery_telemetry ;;
+    oom-audit) run_oom_audit ;;
     parity-report) run_parity_report ;;
     operator-metrics-doc) run_operator_metrics_doc ;;
     kit-dashboard-drift) run_kit_dashboard_drift ;;

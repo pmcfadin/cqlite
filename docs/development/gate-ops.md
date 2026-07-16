@@ -198,4 +198,39 @@ Recovery default: `.agent-gate-delta-summary.txt`.
 
 ---
 
+## The `oom-audit` component (issue #2012)
+
+`oom-audit` is a SKIP-aware full-gate component that structurally audits the
+codebase for the "never materialize an unbounded read" memory-safety invariant.
+It runs the `xtask` crate's static AST audit — `cargo run -p xtask -- oom-audit
+--enforce` — over a committed v1 scope (`cqlite-core/.../data_access/**`,
+`cqlite-core/src/query/**`, and the `cqlite-flight` producers + `streaming.rs`).
+
+- **Rule (v1): `STREAM_RETURNS_VEC`.** A `syn`-based (never regex) per-function,
+  path-scoped rule that flags a `.collect::<Vec<..>>()` or a `Vec::push`/`extend`
+  loop over a row/partition/cell iterator in a scan/producer function when no
+  bound (`ResultBudget`, a `buffer_size`/`batch_size`/`limit`/`max_*` param, or a
+  `.take(n)`) is in scope. It fires only when both the shape and the iterator
+  element type are syntactically visible (favor false-negatives), so its residue
+  is small and reviewable. Rules 2 & 3 (`UNBOUNDED_RANGE_READ`,
+  `CLONE_IN_SCAN_CLOSURE`) and the wider surface are deferred follow-ups.
+- **SKIP-aware (delivery-telemetry model):** no `cargo`, an absent `xtask` crate,
+  or a failed `xtask` build → **SKIP** (loud, never a silent PASS); a clean build
+  whose enforce run exits non-zero → **FAIL**; otherwise **PASS**. Not in
+  `DATASET_COMPONENTS` (it reads source, needs no SSTable fixtures).
+- **Suppression — the allowlist** (`xtask/oom-audit-allowlist.toml`): the ONLY
+  way to suppress a finding. Each entry carries a content fingerprint (`f1:<hex>`,
+  reformat-stable, changes when the code changes) plus a **mandatory non-empty
+  `issue`** and **mandatory non-empty `justification`**. An entry whose
+  fingerprint matches no current finding is **orphaned** and FAILs (the list
+  cannot rot); `expiry` is **optional** and FAILs only when present-and-past (per
+  design fork F-expiry — no mandatory wall-clock time bomb; review cadence is
+  manual). The v1 seeded allowlist is empty (the report is clean over scope).
+- **Self-test:** `scripts/tests/test_agent_gate_oom_audit.sh` (run inside the
+  `tooling-tests` component) drives `agent-gate.sh --only oom-audit` to assert the
+  SKIP/FAIL/PASS outcomes via the `OOM_AUDIT_XTASK_DIR` / `CQLITE_OOM_AUDIT_ROOT`
+  test seams.
+
+---
+
 Back to [`CLAUDE.md`](../../CLAUDE.md).

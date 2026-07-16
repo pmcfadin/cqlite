@@ -1,0 +1,29 @@
+# xtask — workspace developer-tooling crate (issue #2012).
+#
+# Hosts `cargo run -p xtask -- oom-audit [--enforce]`, the static AST audit for
+# the "never materialize an unbounded read" invariant. This crate is a normal
+# workspace member so it gets fmt/clippy coverage and the shared lockfile, but it
+# depends on NO cqlite crate — it never enters the cqlite-core/cqlite-flight
+# build graph. A plain `cargo build`/`test` of the core packages does not compile
+# it; the SKIP-aware `oom-audit` gate component builds it in isolation.
+#
+# Dependency floor (spec #2012): syn/quote/walkdir/toml only, plus proc-macro2
+# (a transitive dep of syn/quote used directly for token-stream fingerprinting).
+[package]
+name = "xtask"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+walkdir = "2"
+toml = { workspace = true }
