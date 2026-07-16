@@ -251,7 +251,12 @@ pub fn build_row_from_scan_cached(
     // NO `String` re-allocation of the name).
     for (name, col_value) in cells {
         if project(&name) {
-            row_values.insert(name, col_value);
+            // Issue #1644 (D2): this row is about to be handed to the
+            // streaming-scan caller through a channel — once sent, the
+            // window may refill/move on, so this is a retention boundary.
+            // Compact any borrowed value whose backing is a shared/oversized
+            // decoded chunk (a no-op for an already-tight/owned value).
+            row_values.insert(name, col_value.into_owned());
         }
     }
     // Cassandra never serialises partition-key columns in the cell payload;

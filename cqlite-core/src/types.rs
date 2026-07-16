@@ -1105,17 +1105,27 @@ impl Value {
     }
 }
 
-/// Retention force-copy slack (issue #1644, D2).
+/// Retention force-copy slack (issue #1644, D2) — DOCUMENTED INTENT, see
+/// [`Value::into_owned`] for the actual implementation.
 ///
-/// A borrowed [`Value`] payload is a refcounted `slice_ref` view of a whole
-/// decompression chunk, so a tiny value can pin a large (e.g. 64 KB) chunk alive.
-/// [`Value::into_owned`] compacts (copies to a tight standalone allocation) any
-/// borrowed payload whose backing is *materially* larger than the payload —
-/// `backing.len() > payload.len() + RETENTION_SLACK` — at every retention
-/// boundary, bounding retained RSS to `O(retained value bytes + N * slack)`. A
-/// payload whose backing is already close to its own size stays borrowed (no
-/// wasteful copy). Tunable; measured. 4 KiB is small enough to release big chunks
-/// yet large enough that near-tight payloads never re-allocate.
+/// A borrowed [`Value`] payload is a refcounted `slice`/`slice_ref` view of a
+/// whole decompression chunk, so a tiny value can pin a large (e.g. 64 KB)
+/// chunk alive. The design's literal rule is "compact any payload whose
+/// backing is materially larger than the payload —
+/// `backing.len() > payload.len() + RETENTION_SLACK`". `bytes::Bytes`,
+/// however, exposes NO public API to inspect a slice view's PARENT
+/// allocation length — only [`bytes::Bytes::is_unique`] /
+/// [`bytes::Bytes::try_into_mut`], which report whether a `Bytes` is
+/// uniquely-owned AND spans its ENTIRE original allocation (owner-approved
+/// resolution, 2026-07-16): that combined signal is a strictly EXACT
+/// (`RETENTION_SLACK` effectively `0`, not merely bounded by it) test for "is
+/// this payload's backing exactly its own size, with nothing else retaining
+/// it" — stricter than, and satisfying, the documented intent via the API
+/// `Bytes` actually provides, rather than a literal length comparison. This
+/// constant is kept as the DESIGN reference point [`Value::into_owned`]'s doc
+/// comment cites; the implementation does not need to construct it (a
+/// fuzzy-slack comparison would require the very parent-length introspection
+/// `Bytes` does not expose).
 pub const RETENTION_SLACK: usize = 4 * 1024;
 
 impl Value {
@@ -1157,6 +1167,72 @@ impl Value {
         std::str::from_utf8(&b)
             .map_err(|e| crate::Error::corruption(format!("invalid UTF-8 in text value: {e}")))?;
         Ok(Value::Text(b))
+    }
+
+    /// Compact every `Bytes`-backed payload that is a shared or oversized view
+    /// into a decoded chunk into a tight, standalone allocation, releasing the
+    /// parent (issue #1644, D2 — the retention force-copy boundary).
+    ///
+    /// On the streaming decode path values are left borrowed (zero-copy); this
+    /// is applied ONLY at retention boundaries — any point a `Value` outlives
+    /// the scan window that produced it: materialized/collected result sets,
+    /// LIMIT/sort/dedup buffers, core-internal caches, or any `Value` moved
+    /// into a longer-lived structure. Recurses into
+    /// `List`/`Set`/`Map`/`Tuple`/`Frozen`/`Udt` so a retained CONTAINER
+    /// releases every chunk its leaves borrowed, not just its own top-level
+    /// payload.
+    ///
+    /// Per-payload rule (see [`RETENTION_SLACK`] for the design-intent
+    /// rationale and why this uses `Bytes::try_into_mut` rather than a literal
+    /// length comparison): a payload is compacted (copied into a tight
+    /// standalone `Bytes`) unless it is ALREADY uniquely-owned and spans its
+    /// entire backing allocation exactly (`try_into_mut` succeeds) — the only
+    /// case where the payload is not, in fact, wasting any memory. `Decimal`'s
+    /// `unscaled: Vec<u8>` is already owned (D3) and needs no compaction.
+    #[must_use]
+    pub fn into_owned(self) -> Value {
+        fn compact(b: Bytes) -> Bytes {
+            match b.try_into_mut() {
+                // Already tight: uniquely owned AND spans the whole original
+                // allocation — no waste, keep it (the round-trip through
+                // BytesMut is a pointer move, not a copy).
+                Ok(mutable) => Bytes::from(mutable),
+                // Shared with another retained value / the live window, OR a
+                // strict subrange of a larger chunk: copy into a tight,
+                // standalone allocation, releasing the (possibly oversized)
+                // parent.
+                Err(shared) => Bytes::copy_from_slice(&shared),
+            }
+        }
+        match self {
+            Value::Text(b) => Value::Text(compact(b)),
+            Value::Blob(b) => Value::Blob(compact(b)),
+            Value::Varint(b) => Value::Varint(compact(b)),
+            Value::Inet(b) => Value::Inet(compact(b)),
+            Value::List(items) => Value::List(items.into_iter().map(Value::into_owned).collect()),
+            Value::Set(items) => Value::Set(items.into_iter().map(Value::into_owned).collect()),
+            Value::Map(pairs) => Value::Map(
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect(),
+            ),
+            Value::Tuple(items) => Value::Tuple(items.into_iter().map(Value::into_owned).collect()),
+            Value::Frozen(inner) => Value::Frozen(Box::new(inner.into_owned())),
+            Value::Udt(udt) => Value::Udt(Box::new(UdtValue {
+                type_name: udt.type_name,
+                keyspace: udt.keyspace,
+                fields: udt
+                    .fields
+                    .into_iter()
+                    .map(|f| UdtField {
+                        name: f.name,
+                        value: f.value.map(Value::into_owned),
+                    })
+                    .collect(),
+            })),
+            other => other,
+        }
     }
 }
 
@@ -1909,6 +1985,107 @@ mod tests {
             Value::text("ok")
         );
         assert!(Value::text_from_bytes(Bytes::from_static(&[0xff, 0xfe])).is_err());
+    }
+
+    /// Issue #1644 (D2, retention boundary): a small value borrowed from a
+    /// much larger chunk, retained past the "window" that produced it (here
+    /// simulated by dropping every other reference to the parent chunk), must
+    /// NOT keep pinning that whole chunk after `into_owned()` — it must end up
+    /// a tight, standalone allocation. `try_into_mut` succeeding is the
+    /// observable proof: it succeeds ONLY for a uniquely-owned `Bytes` that
+    /// spans its ENTIRE backing allocation exactly (see `RETENTION_SLACK`'s
+    /// doc comment for why this is the correct-and-available signal).
+    #[test]
+    fn into_owned_compacts_a_tiny_value_retained_from_a_large_chunk() {
+        let chunk = Bytes::from(vec![0u8; 64 * 1024]); // a 64 KiB "decoded chunk"
+        let small = chunk.slice(40_000..40_004); // a 4-byte borrowed view
+        drop(chunk); // the window moved on; `small` is now the sole reference
+
+        // Pre-compaction: still a subrange of a (now solely-owned, but NOT
+        // exactly-spanned) larger allocation — try_into_mut must NOT report it
+        // as already tight.
+        assert!(
+            small.clone().try_into_mut().is_err(),
+            "precondition: the borrowed view must not already be a tight allocation"
+        );
+
+        let borrowed_value = Value::Blob(small.clone());
+        let compacted = borrowed_value.into_owned();
+
+        let Value::Blob(tight) = compacted else {
+            panic!("expected Blob");
+        };
+        assert_eq!(
+            &tight[..],
+            &small[..],
+            "compaction must not change the bytes"
+        );
+        assert!(
+            tight.try_into_mut().is_ok(),
+            "issue #1644 REGRESSION: into_owned() must release the 64 KiB parent chunk — the \
+             compacted payload must be a tight, uniquely-owned allocation exactly its own size"
+        );
+    }
+
+    /// A value whose backing is not materially larger than itself (a
+    /// standalone allocation, no oversized shared parent) is left as-is by
+    /// `into_owned()` — no wasteful copy of an already-tight payload.
+    #[test]
+    fn into_owned_leaves_an_already_tight_value_alone() {
+        let tight = Bytes::copy_from_slice(b"already tight, no shared parent");
+        let ptr_before = tight.as_ptr();
+        let value = Value::Text(tight);
+        let owned = value.into_owned();
+        let Value::Text(after) = owned else {
+            panic!("expected Text");
+        };
+        assert_eq!(
+            after.as_ptr(),
+            ptr_before,
+            "an already-tight payload must not be re-copied"
+        );
+    }
+
+    /// `into_owned()` recurses into containers so a retained collection
+    /// releases every chunk its leaves borrowed, not just its own top-level
+    /// payload.
+    #[test]
+    fn into_owned_recurses_into_collections_and_udts() {
+        let list_chunk = Bytes::from(vec![b'x'; 8192]);
+        let list_leaf = list_chunk.slice(10..14);
+        drop(list_chunk); // `list_leaf` is now the sole reference
+
+        let list = Value::List(vec![Value::Blob(list_leaf), Value::Integer(1)]);
+        let Value::List(mut items) = list.into_owned() else {
+            panic!("expected List");
+        };
+        // Move the Bytes OUT of the container (not `&items[0]`, which would
+        // keep the container's own copy alive as a second reference and make
+        // any `try_into_mut` check on a clone spuriously non-unique).
+        let Value::Blob(b) = items.remove(0) else {
+            panic!("expected Blob element");
+        };
+        assert!(b.try_into_mut().is_ok(), "list element must be compacted");
+
+        let udt_chunk = Bytes::from(vec![b'y'; 8192]);
+        let udt_leaf = udt_chunk.slice(10..14);
+        drop(udt_chunk); // `udt_leaf` is now the sole reference
+
+        let udt = Value::Udt(Box::new(UdtValue {
+            type_name: "t".to_string(),
+            keyspace: "ks".to_string(),
+            fields: vec![UdtField {
+                name: "f".to_string(),
+                value: Some(Value::Blob(udt_leaf)),
+            }],
+        }));
+        let Value::Udt(mut u) = udt.into_owned() else {
+            panic!("expected Udt");
+        };
+        let Some(Value::Blob(b)) = u.fields.remove(0).value else {
+            panic!("expected Blob field");
+        };
+        assert!(b.try_into_mut().is_ok(), "UDT field must be compacted");
     }
 
     #[test]

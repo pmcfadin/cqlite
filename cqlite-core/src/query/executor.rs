@@ -771,8 +771,15 @@ impl QueryExecutor {
         // * `Marker` (row tombstone / null) carries no columns.
         match data {
             ScanRow::Row(cells) => {
+                // Issue #1644 (D2): this row is about to be pushed into the
+                // materialized `Vec<QueryRow>` result the caller retains for
+                // however long it likes — a retention boundary. Compact any
+                // borrowed value whose backing is a shared/oversized decoded
+                // chunk into a tight standalone allocation before it escapes
+                // the scan window's lifetime (`into_owned` is a no-op for an
+                // already-tight/owned value, e.g. every non-Bytes variant).
                 for (name, cell_value) in cells {
-                    values.insert(name, cell_value);
+                    values.insert(name, cell_value.into_owned());
                 }
             }
             ScanRow::RawRow(bytes) => {
