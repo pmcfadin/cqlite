@@ -1124,14 +1124,31 @@ impl Value {
 /// allocation rather than shrink it, so `Bytes::from(mutable)` would still pin
 /// the whole parent chunk.
 ///
-/// The available signal is the recovered [`bytes::BytesMut::capacity`]: it
-/// reflects the remaining capacity of the ORIGINAL backing allocation ahead of
-/// this payload's start (verified against `bytes` 1.12.1 — a 10-byte slice at
-/// offset 100 of a 64 KiB buffer recovers `capacity() == 65436`; a genuinely
-/// tight 10-byte `Bytes` recovers `capacity() == 10`). [`Value::into_owned`]
-/// therefore recovers the `BytesMut` via `try_into_mut` and compacts when
-/// `capacity() > len() + RETENTION_SLACK`, keeping only payloads whose backing
-/// is within `RETENTION_SLACK` of their own size.
+/// The only signals `bytes` exposes are the recovered
+/// [`bytes::BytesMut::capacity`] and the payload [`len`](bytes::Bytes::len);
+/// neither the slice's offset within its parent NOR the parent's total size is
+/// observable. Critically, `capacity()` reflects only the remaining capacity of
+/// the ORIGINAL backing allocation AHEAD of this payload's start (verified
+/// against `bytes` 1.12.1 — a 10-byte slice at offset 100 of a 64 KiB buffer
+/// recovers `capacity() == 65436`; a genuinely tight 10-byte `Bytes` recovers
+/// `capacity() == 10`). Bytes BEFORE the payload's offset are invisible to it,
+/// so an ahead-capacity-only rule misses a small payload sliced near the END of
+/// a big chunk (a 4-byte value at offset 65_000 of a 64 KiB chunk recovers
+/// `capacity() ~= 536`, well under `RETENTION_SLACK`, yet still pins the whole
+/// 64 KiB).
+///
+/// [`Value::into_owned`] therefore keys the decision on absolute payload SIZE,
+/// since the danger is specifically "a SMALL payload pinning a LARGE backing":
+///
+/// - **Small payloads (`len() <= RETENTION_SLACK`) — unconditional, exact**:
+///   always copied into a tight standalone `Bytes`, regardless of `capacity()`.
+///   This guarantees no small value pins a large parent no matter WHERE it sits
+///   in the original chunk (closes both the low-offset and high-offset cases).
+/// - **Large payloads (`len() > RETENTION_SLACK`) — best-effort**: kept unless
+///   the ahead-capacity heuristic `capacity() > len() + RETENTION_SLACK` fires.
+///   A full copy of a large value is expensive, and any leading-offset waste
+///   the heuristic cannot see is proportionally small relative to the payload's
+///   own size, so the imperfect signal is an acceptable tradeoff here.
 pub const RETENTION_SLACK: usize = 4 * 1024;
 
 impl Value {
@@ -1190,11 +1207,19 @@ impl Value {
     ///
     /// Per-payload rule (see [`RETENTION_SLACK`] for the rationale and the
     /// verified `bytes` semantics): a payload is compacted (copied into a tight
-    /// standalone `Bytes`) if it is shared (`try_into_mut` fails) OR it is a
-    /// uniquely-referenced sliver whose recovered `BytesMut::capacity()` exceeds
-    /// its length by more than `RETENTION_SLACK` — the case where a tiny payload
-    /// still pins a large parent chunk. Only a payload whose backing is within
-    /// `RETENTION_SLACK` of its own size is kept as-is (no wasteful copy).
+    /// standalone `Bytes`) if it is shared (`try_into_mut` fails), OR — via a
+    /// two-tier decision keyed on absolute payload SIZE:
+    ///
+    /// - **Small payloads (`len() <= RETENTION_SLACK`)**: ALWAYS copied,
+    ///   unconditionally, regardless of `capacity()`. `capacity()` only reflects
+    ///   backing AHEAD of the payload's offset, so a small value near the END of
+    ///   a big chunk would evade an ahead-space-only check; an unconditional copy
+    ///   guarantees no small value pins a large parent wherever it sits (exact).
+    /// - **Large payloads (`len() > RETENTION_SLACK`)**: kept as-is UNLESS the
+    ///   best-effort ahead-space signal `capacity() > len() + RETENTION_SLACK`
+    ///   fires — a full copy of a large value is expensive and any undetected
+    ///   leading-offset waste is small relative to the payload.
+    ///
     /// `Decimal`'s `unscaled: Vec<u8>` is already owned (D3) and needs no
     /// compaction.
     #[must_use]
@@ -1214,15 +1239,31 @@ impl Value {
                 // slice at offset 100 of a 64 KiB buffer recovers capacity
                 // 65436, a genuinely tight 10-byte `Bytes` recovers capacity 10).
                 Ok(mutable) => {
-                    if mutable.capacity() > mutable.len() + RETENTION_SLACK {
-                        // Sole-owner sliver of an oversized parent chunk: copy
-                        // into a tight, standalone allocation so the parent is
-                        // released.
+                    if mutable.len() <= RETENTION_SLACK {
+                        // TIER 1 (small payload — unconditional, exact): a small
+                        // payload is EXACTLY the "single cell retained from a huge
+                        // chunk" case Stage 5 targets, and `capacity()` only sees
+                        // the backing AHEAD of the payload's start, so a small
+                        // value sliced near the END of a big chunk recovers a tiny
+                        // `capacity()` and would evade the ahead-space heuristic
+                        // below (a 4-byte value at offset 65_000 of a 64 KiB chunk
+                        // recovers capacity ~536 < RETENTION_SLACK). Always copy so
+                        // no small value pins a large parent, regardless of where
+                        // it sits in the original chunk.
+                        Bytes::copy_from_slice(&mutable)
+                    } else if mutable.capacity() > mutable.len() + RETENTION_SLACK {
+                        // TIER 2 (large payload — best-effort via ahead-capacity):
+                        // sole-owner sliver of an oversized parent chunk detected
+                        // via ahead-space. Copy into a tight, standalone allocation
+                        // so the parent is released.
                         Bytes::copy_from_slice(&mutable)
                     } else {
-                        // Genuinely tight (capacity within RETENTION_SLACK of the
-                        // payload): keep it — the round-trip through BytesMut is a
-                        // pointer move, not a copy.
+                        // Large payload whose backing is within RETENTION_SLACK of
+                        // the payload (or whose leading-offset waste is invisible
+                        // to `capacity()`): keep it — a full copy of a large value
+                        // is expensive and any undetected leading waste is small
+                        // relative to the payload. The round-trip through BytesMut
+                        // is a pointer move, not a copy.
                         Bytes::from(mutable)
                     }
                 }
@@ -2027,8 +2068,8 @@ mod tests {
     /// distinguish them. Before the capacity-based fix this test FAILS — the
     /// buggy `Ok(mutable) => Bytes::from(mutable)` branch reuses the 64 KiB
     /// backing, so the recovered capacity stays chunk-sized (~65 KiB). Verified
-    /// by temporarily reverting the fix: the payload's capacity remained 65_492
-    /// (64 KiB − offset) instead of the compacted 4.
+    /// by temporarily reverting the fix: the payload's capacity remained 25_536
+    /// (64 KiB − offset 40_000) instead of the compacted 4.
     #[test]
     fn into_owned_compacts_a_tiny_value_retained_from_a_large_chunk() {
         const CHUNK: usize = 64 * 1024;
@@ -2083,12 +2124,79 @@ mod tests {
         );
     }
 
-    /// A value whose backing is not materially larger than itself (a
-    /// standalone allocation, no oversized shared parent) is left as-is by
-    /// `into_owned()` — no wasteful copy of an already-tight payload.
+    /// Issue #1644 (residual high-offset retention gap found in review of
+    /// d355ab5f8): a SMALL value sliced near the END of a large chunk. Here
+    /// `capacity()` reflects only the backing AHEAD of the payload's offset, so
+    /// a 4-byte value at offset 65_000 of a 65_536-byte chunk recovers
+    /// `capacity() ~= 536` — well UNDER `RETENTION_SLACK` (4096). The previous
+    /// ahead-capacity-only fix's condition `capacity() > len() + RETENTION_SLACK`
+    /// was therefore `536 > 4100` == false → the keep branch fired → the value
+    /// still pinned the whole 65_536-byte chunk (NON-VACUOUS: this test would
+    /// have FAILED under d355ab5f8). The two-tier fix copies unconditionally for
+    /// small payloads (TIER 1), releasing the chunk regardless of offset.
     #[test]
-    fn into_owned_leaves_an_already_tight_value_alone() {
-        let tight = Bytes::copy_from_slice(b"already tight, no shared parent");
+    fn into_owned_compacts_a_small_value_sliced_near_the_end_of_a_large_chunk() {
+        const CHUNK: usize = 65_536;
+        const OFFSET: usize = 65_000; // near the END: ahead-capacity ~= 536
+
+        // Precondition proving the gap: a sole-owner high-offset sliver recovers
+        // a TINY ahead-capacity, so the OLD ahead-space-only heuristic would have
+        // (wrongly) treated it as "already tight" and kept the pinning.
+        let probe_chunk = Bytes::from(vec![0u8; CHUNK]);
+        let probe_sliver = probe_chunk.slice(OFFSET..OFFSET + 4);
+        drop(probe_chunk);
+        let probe = probe_sliver
+            .try_into_mut()
+            .expect("a sole-owner sliver is uniquely referenced");
+        assert!(
+            probe.capacity() <= 4 + RETENTION_SLACK,
+            "precondition: a high-offset sliver's ahead-capacity ({}) is SMALL, so the old \
+             capacity()-only rule would NOT have compacted it",
+            probe.capacity()
+        );
+
+        // The retention case: build the value by CONSUMING the sole reference.
+        let chunk = Bytes::from(vec![0u8; CHUNK]);
+        let small = chunk.slice(OFFSET..OFFSET + 4);
+        drop(chunk); // `small` is now the SOLE reference to the parent chunk
+        let expected = small.to_vec();
+
+        let compacted = Value::Blob(small).into_owned();
+        let Value::Blob(tight) = compacted else {
+            panic!("expected Blob");
+        };
+        assert_eq!(
+            &tight[..],
+            &expected[..],
+            "compaction must not change bytes"
+        );
+
+        let recovered = tight
+            .try_into_mut()
+            .expect("compacted payload must be uniquely owned");
+        assert!(
+            recovered.capacity() <= 4 + RETENTION_SLACK,
+            "issue #1644 high-offset REGRESSION: into_owned() must release the 65_536-byte \
+             parent chunk even for a slice near its end — recovered capacity ({}) must be \
+             payload-sized, not chunk-sized",
+            recovered.capacity()
+        );
+    }
+
+    /// A genuinely LARGE (`len() > RETENTION_SLACK`) value whose backing is not
+    /// materially larger than itself (a standalone allocation, no oversized
+    /// shared parent) is left as-is by `into_owned()` — no wasteful copy of an
+    /// already-tight large payload (the TIER 2 no-copy path).
+    ///
+    /// Under the two-tier logic (issue #1644 high-offset gap) the no-copy path
+    /// is only reachable for LARGE payloads: small payloads
+    /// (`len() <= RETENTION_SLACK`) are now ALWAYS copied defensively, so the
+    /// "skip copy when already tight" guarantee is exercised here with a large
+    /// tight value rather than a small one.
+    #[test]
+    fn into_owned_leaves_an_already_tight_large_value_alone() {
+        // > RETENTION_SLACK so TIER 2 (best-effort keep) applies; tight backing.
+        let tight = Bytes::copy_from_slice(&vec![b'a'; RETENTION_SLACK * 2]);
         let ptr_before = tight.as_ptr();
         let value = Value::Text(tight);
         let owned = value.into_owned();
@@ -2098,7 +2206,36 @@ mod tests {
         assert_eq!(
             after.as_ptr(),
             ptr_before,
-            "an already-tight payload must not be re-copied"
+            "an already-tight large payload must not be re-copied"
+        );
+    }
+
+    /// A SMALL already-tight value is now copied DEFENSIVELY (TIER 1) even
+    /// though it has no oversized parent: `capacity()` cannot prove a small
+    /// payload is free of a large leading-offset parent, so `into_owned()`
+    /// unconditionally copies small payloads. The observable is that the
+    /// result is a valid, uniquely-owned, byte-identical tight payload (a
+    /// pointer-equality assertion would be wrong here — a copy is expected).
+    #[test]
+    fn into_owned_defensively_copies_a_small_value() {
+        let original = b"small, tight, but copied defensively";
+        assert!(
+            original.len() <= RETENTION_SLACK,
+            "must be a TIER 1 payload"
+        );
+        let value = Value::Text(Bytes::copy_from_slice(original));
+        let owned = value.into_owned();
+        let Value::Text(after) = owned else {
+            panic!("expected Text");
+        };
+        assert_eq!(&after[..], &original[..], "bytes must be preserved");
+        let recovered = after
+            .try_into_mut()
+            .expect("copied payload must be uniquely owned");
+        assert!(
+            recovered.capacity() <= original.len() + RETENTION_SLACK,
+            "defensive copy must be tight (capacity {})",
+            recovered.capacity()
         );
     }
 
