@@ -17,10 +17,10 @@
 use super::schemaless_point::classify_schemaless_point_lookup;
 use super::{
     apply_forcing, build_row_from_scan_cached, classify_partition_lookup,
-    collect_capped_materialized, column_info_from_type_str, honest_targeted_path,
-    parse_table_id, point_forbids_fallback, point_requires_engaged, project_expr_reshapes_row,
-    scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
-    ForcedPlan, PartitionLookupOutcome, SSTablePredicate,
+    collect_capped_materialized, column_info_from_type_str, honest_targeted_path, parse_table_id,
+    point_forbids_fallback, point_requires_engaged, project_expr_reshapes_row, scan_pushdown_cap,
+    select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates, ForcedPlan,
+    PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
@@ -485,16 +485,16 @@ impl SelectExecutor {
         // so the query takes the full-scan path (recorded as `ForcedFullScan` by
         // the main branch below). `point`/`auto` keep the seek; `point` adds the
         // post-call engaged check in the seek branch.
-        let schemaless_seek: Option<super::schemaless_point::SchemalessPointSeek> =
-            if schema_opt.is_none()
-                && !context.projection_flags.include_cell_metadata
-                && mode != crate::config::ReadPathMode::Full
-            {
-                let shape = self.storage.partition_key_shape(table).await;
-                classify_schemaless_point_lookup(predicates, shape.as_ref())
-            } else {
-                None
-            };
+        let schemaless_seek: Option<super::schemaless_point::SchemalessPointSeek> = if schema_opt
+            .is_none()
+            && !context.projection_flags.include_cell_metadata
+            && mode != crate::config::ReadPathMode::Full
+        {
+            let shape = self.storage.partition_key_shape(table).await;
+            classify_schemaless_point_lookup(predicates, shape.as_ref())
+        } else {
+            None
+        };
 
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
@@ -762,7 +762,11 @@ impl SelectExecutor {
                     }
                     // Issue #1918: `point` fails closed when the fan-out did not
                     // prune (tombstones build) rather than silently full-scanning.
-                    point_requires_engaged(mode, all_engaged, FallbackReason::TombstonesBuildNoPrune)?;
+                    point_requires_engaged(
+                        mode,
+                        all_engaged,
+                        FallbackReason::TombstonesBuildNoPrune,
+                    )?;
                     let path = honest_targeted_path(AccessPath::MultiPartitionLookup, all_engaged);
                     context.access_path = Some(path.clone());
                     crate::query::access_path::record(path);

@@ -865,7 +865,10 @@ mod tests {
             let mut cfg = QueryConfig::default();
             cfg.forced_read_path = Some(mode);
             let json = serde_json::to_string(&cfg).unwrap();
-            assert!(json.contains(tag), "mode {mode:?} must serialize as {tag:?}: {json}");
+            assert!(
+                json.contains(tag),
+                "mode {mode:?} must serialize as {tag:?}: {json}"
+            );
             let restored: QueryConfig = serde_json::from_str(&json).unwrap();
             assert_eq!(restored.forced_read_path, Some(mode));
         }

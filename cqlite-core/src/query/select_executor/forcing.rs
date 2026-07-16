@@ -85,7 +85,9 @@ fn cached_env() -> Option<&'static str> {
 /// override (if any) wins, else the once-read `CQLITE_READ_PATH` env, else
 /// `Auto`. Returns [`Error::InvalidReadPath`] when the env is the decision source
 /// and holds an unrecognized value.
-pub(super) fn resolve_read_path_mode(config_override: Option<ReadPathMode>) -> Result<ReadPathMode> {
+pub(super) fn resolve_read_path_mode(
+    config_override: Option<ReadPathMode>,
+) -> Result<ReadPathMode> {
     resolve_mode(config_override, cached_env())
 }
 
@@ -167,7 +169,10 @@ mod tests {
     fn parse_rejects_unknown_value_loudly() {
         let err = parse_read_path_mode("compact").expect_err("unknown value must error");
         let msg = err.to_string();
-        assert!(msg.contains("compact"), "error must name the invalid value: {msg}");
+        assert!(
+            msg.contains("compact"),
+            "error must name the invalid value: {msg}"
+        );
         assert!(
             msg.contains("auto") && msg.contains("point") && msg.contains("full"),
             "error must name the allowed set: {msg}"
