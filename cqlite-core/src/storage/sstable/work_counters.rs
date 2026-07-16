@@ -520,6 +520,81 @@ pub(crate) mod stream_walk_scope {
     }
 }
 
+/// A thread-local recording scope for `MergeEntry::clone` calls, mirroring
+/// [`stream_walk_scope`] exactly (issue #2428's parallel-test-pollution-immune
+/// design). Used by the #1664 double-clone regression guard: the k-way merge
+/// runs single-threaded, so a [`MergeEntryCloneScope`] opened around a full
+/// compaction captures exactly the `MergeEntry` clones performed during it.
+///
+/// `#[cfg(test)]`: the `record()` call in `MergeEntry::clone` is likewise
+/// `#[cfg(test)]`-gated, so production clone pays ZERO added cost. Gated on
+/// `feature = "write-support"` as well because every consumer (the
+/// `MergeEntry::clone` recorder and the `clone_regression_tests` guard) lives
+/// in the write-support-only merge module — under the minimal feature set those
+/// callers vanish, so an unconditional `#[cfg(test)]` here would be dead code
+/// and trip the `-D warnings` dead-code lint in the all-compression build.
+#[cfg(all(test, feature = "write-support"))]
+pub(crate) mod merge_entry_clone_scope {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `Some(count)` while a [`MergeEntryCloneScope`] is active on this
+        /// thread, `None` otherwise. Only `MergeEntry::clone` calls executing
+        /// on this thread bump it.
+        static SCOPED: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Bump the active scope on the current thread, if any. A no-op on threads
+    /// (production compaction, other tests) with no active scope.
+    pub(crate) fn record() {
+        SCOPED.with(|c| {
+            if let Some(v) = c.get() {
+                c.set(Some(v.saturating_add(1)));
+            }
+        });
+    }
+
+    /// A per-thread recording scope for `MergeEntry::clone`. Open one before
+    /// driving a `KWayMerger` compaction to completion and read
+    /// [`count`](MergeEntryCloneScope::count) after. Immune to concurrent
+    /// tests on other threads (issue #2428). Dropping it clears the scope.
+    ///
+    /// Deliberately `!Send` (holds a `PhantomData<*const ()>`): the scope is
+    /// meaningful only on the thread that opened it.
+    pub(crate) struct MergeEntryCloneScope {
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    impl MergeEntryCloneScope {
+        /// Begin recording on the current thread. Panics if a scope is already
+        /// active on this thread (one scope per assertion; nesting unsupported).
+        pub(crate) fn new() -> Self {
+            SCOPED.with(|c| {
+                assert!(
+                    c.get().is_none(),
+                    "a MergeEntryCloneScope is already active on this thread (nesting unsupported)"
+                );
+                c.set(Some(0));
+            });
+            Self {
+                _not_send: std::marker::PhantomData,
+            }
+        }
+
+        /// `MergeEntry::clone` increments recorded on this thread since the
+        /// scope opened.
+        pub(crate) fn count(&self) -> u64 {
+            SCOPED.with(|c| c.get().unwrap_or(0))
+        }
+    }
+
+    impl Drop for MergeEntryCloneScope {
+        fn drop(&mut self) {
+            SCOPED.with(|c| c.set(None));
+        }
+    }
+}
+
 /// Record that one merge ENTRY was decoded from `Data.db` by ANY
 /// [`KWayMerger`](crate::storage::write_engine::KWayMerger)-adapter-driven run
 /// (Issue #2096) — a full scan, a compaction, OR a multi-candidate point read,

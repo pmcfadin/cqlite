@@ -260,6 +260,11 @@ impl RunReader {
     /// Peek at the next entry without consuming it
     ///
     /// Returns None if this run is exhausted.
+    ///
+    /// Test-only since issue #1664: `refill_heap` was the sole production
+    /// caller and now moves the owned entry via [`Self::advance`] instead of
+    /// peek+clone. Kept for the `RunReader` API test that exercises lazy refill.
+    #[cfg(test)]
     fn peek(&mut self) -> Result<Option<&MergeEntry>> {
         // Refill buffer if empty and not exhausted
         if self.buffer.is_empty() && !self.exhausted {
@@ -546,6 +551,11 @@ mod channel_depth;
 // merge adapter.
 #[cfg(all(test, feature = "write-support"))]
 mod teardown_tests;
+
+// Issue #1664: `MergeEntry` double-clone regression guard (kept in a sibling
+// file, not inline here, per the #1116 campsite file-size rule).
+#[cfg(all(test, feature = "write-support"))]
+mod clone_regression_tests;
 
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
@@ -2884,12 +2894,16 @@ impl KWayMerger {
                 .pop()
                 .ok_or_else(|| Error::InvalidInput("Merge heap unexpectedly empty".to_string()))?;
             let entry = wrapped.entry;
+            // Read the Copy `run_index` before moving `entry` (issue #1664: the
+            // entry is already owned, so move it into partition_rows instead of
+            // cloning).
+            let run_index = entry.run_index;
 
             // Add to partition rows
-            partition_rows.push(entry.clone());
+            partition_rows.push(entry);
 
             // Refill heap from the run we just consumed from
-            self.refill_heap(entry.run_index)?;
+            self.refill_heap(run_index)?;
         }
 
         if let Some(key) = partition_key {
@@ -2920,19 +2934,17 @@ impl KWayMerger {
 
         let run = &mut self.runs[run_index];
         if !run.is_exhausted() {
-            if let Some(entry) = run.peek()? {
-                // Clone and push to heap, paired with the schema-aware
-                // comparator's schema (issue #1668, stage 5c-i).
-                let entry = entry.clone();
+            if let Some(entry) = run.advance()? {
+                // Move the owned entry into the heap, paired with the
+                // schema-aware comparator's schema (issue #1668, stage 5c-i).
+                // Issue #1664: `advance()` returns the OWNED front entry, so we
+                // move it in instead of the former peek+clone+discard-advance.
                 self.heap
                     .push(Reverse(schema_order::SchemaOrderedEntry::new(
                         entry,
                         self.schema_arc.clone(),
                     )));
             }
-
-            // Advance the run reader
-            run.advance()?;
         }
 
         Ok(())
