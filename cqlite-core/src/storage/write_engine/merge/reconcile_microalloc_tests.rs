@@ -57,7 +57,9 @@ fn live_entry(run_index: usize, cells: Vec<CellData>) -> MergeEntry {
 /// * `dropped_columns = {"d": 100}` → `d@50` is dropped (`50 <= 100`).
 ///
 /// Distinct winners `W = 4` (a, b, c, d); survivors `S = 3` (a, b, c).
-/// `resolve_cell_winners` clones once per winner WRITE = `W + 2` re-inserts = 6.
+/// `resolve_cell_winners` clones once per winner WRITE = `W + 2` re-inserts = 6
+/// (Site 1 is unchanged by the fix; the bound uses the DISTINCT-winner count,
+/// not the write count, so the pre-fix survivor clones show up as the excess).
 ///
 // CLONE ACCOUNTING (recorded for context):
 //   main today (pre-fix): 6 (Site 1 winner writes) + 3 (Site 2 `.cloned()`
@@ -69,8 +71,11 @@ fn live_entry(run_index: usize, cells: Vec<CellData>) -> MergeEntry {
 #[test]
 fn filter_dropped_columns_does_not_clone_survivors() {
     // Distinct winner keys across the group (the map owns one CellData per key;
-    // that clone is unavoidable — the map is by-value). = 4: a, b, c, d.
-    const WINNER_WRITES: u64 = 4;
+    // that clone is unavoidable — the map is by-value). = 4: a, b, c, d. NB: this
+    // is the DISTINCT-winner count, not the winner-map WRITE count (6 = 4 vacant
+    // inserts + 2 winning re-inserts); the extra slack from re-inserts is why the
+    // pre-fix survivor clones (3) push the total past the bound.
+    const DISTINCT_WINNERS: u64 = 4;
     // Cells surviving the dropped-column filter: a, b, c (d@50 is dropped). = 3.
     const S: u64 = 3;
 
@@ -131,11 +136,11 @@ fn filter_dropped_columns_does_not_clone_survivors() {
         other => panic!("expected a live row, got {other:?}"),
     }
 
-    let bound = S + WINNER_WRITES; // 3 + 4 = 7
+    let bound = S + DISTINCT_WINNERS; // 3 + 4 = 7
     assert!(
         clones <= bound,
         "reconcile cloned CellData {clones} times (bound {bound} = S={S} + \
-         winner_writes={WINNER_WRITES}); the #1665 survivor `.cloned()` in \
+         distinct_winners={DISTINCT_WINNERS}); the #1665 survivor `.cloned()` in \
          filter_dropped_columns regressed (main-today was 9)"
     );
 }
