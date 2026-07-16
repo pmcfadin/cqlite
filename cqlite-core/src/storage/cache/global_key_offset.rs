@@ -12,10 +12,16 @@
 //!
 //! # Design (`openspec/changes/bounded-key-cache/design.md`)
 //!
-//! - **Global, not per-table (§A).** One instance shared by every reader (mirroring
-//!   [`DecompressedChunkCache`](super::DecompressedChunkCache)). The generation identity
-//!   in the key namespaces per-generation entries so one global byte budget bounds the
-//!   whole process — Cassandra's single global key cache, not N per-table caches.
+//! - **Global, not per-table (§A).** One instance shared by every reader. The generation
+//!   identity in the key namespaces per-generation entries so one global byte budget bounds
+//!   the whole process — Cassandra's single global key cache, not N per-table caches. Note
+//!   the contrast with [`DecompressedChunkCache`](super::DecompressedChunkCache), which is
+//!   *per-manager* and sized by the configurable `config.memory.block_cache.max_size`: this
+//!   key cache is instead a true process-wide SINGLETON with a FIXED
+//!   [`DEFAULT_GLOBAL_KEY_CACHE_BYTES`] budget that ignores `max_size`. That is a deliberate
+//!   design decision (design §B: "no new user knob", the #2343 WS4 owner call), not an
+//!   oversight — and not a resident-memory regression: occupancy is proportional to live
+//!   entries, and the retired per-reader cache (#1570) already ignored `max_size` too.
 //! - **Key = `(GenerationIdentity, raw partition key)` (§A, no-heuristics #28).** The
 //!   identity is the authoritative inode-stable identity (device+inode+size+generation,
 //!   #2345) — never a path hash (paths rebind under snapshots, #2383, but the offsets are
