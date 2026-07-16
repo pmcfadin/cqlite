@@ -66,21 +66,26 @@ const ATTRIBUTE_KEYS: &[&str] = &[
 ];
 
 /// True when `token` is an EXPLICIT `.*` wildcard group reference whose namespace
-/// covers at least one real catalog metric — e.g. `cqlite.flight.admission.*`
-/// (covers `cqlite.flight.admission.in_use`, …). ONLY the explicit-wildcard form
-/// is admitted as a group ref (roborev #2427 r3, F2): a BARE dotted prefix such as
-/// `cqlite.flight.admission` (no trailing `.*`) is NOT a valid reference, so a
-/// phantom that merely happens to be a prefix of a real namespace can no longer
-/// pass. The stem must still cover a real metric, so `cqlite.does.not.exist.*` is
-/// rejected.
+/// contains at least one real catalog metric BELOW it — e.g.
+/// `cqlite.flight.admission.*` (covers `cqlite.flight.admission.in_use`, …). ONLY
+/// the explicit-wildcard form is admitted as a group ref (roborev #2427 r3, F2): a
+/// BARE dotted prefix such as `cqlite.flight.admission` (no trailing `.*`) is NOT a
+/// valid reference, so a phantom that merely happens to be a prefix of a real
+/// namespace can no longer pass.
+///
+/// A `<stem>.*` is valid ONLY if ≥1 catalog metric name starts with the literal
+/// `"<stem>."` — i.e. a real CHILD lives under the namespace (roborev #2427 r4, F1).
+/// A wildcard on an exact LEAF metric with no children — `cqlite.errors.total.*`
+/// where `cqlite.errors.total` IS a metric but nothing lives below it — covers
+/// nothing and is REJECTED; the earlier `*m == stem` clause fail-open here let such
+/// a leaf-wildcard pass. `cqlite.does.not.exist.*` (no such namespace at all) also
+/// remains rejected.
 fn is_wildcard_group_ref(token: &str) -> bool {
     let Some(stem) = token.strip_suffix(".*") else {
         return false;
     };
     let dotted = format!("{stem}.");
-    ALL_METRICS
-        .iter()
-        .any(|m| *m == stem || m.starts_with(&dotted))
+    ALL_METRICS.iter().any(|m| m.starts_with(&dotted))
 }
 
 /// Resolve the dashboard path against the repo root (cqlite-core's parent).
@@ -264,6 +269,145 @@ fn cqlite_expr_tokens(expr: &str) -> HashSet<String> {
     tokens
 }
 
+/// PromQL grouping / vector-matching keywords whose FOLLOWING `( … )` holds LABEL
+/// keys, not metric selectors (`sum(...) by (le, cqlite_rpc_method)`). Identifiers
+/// inside such a paren group — and these keywords themselves — are never metric
+/// (vector-selector) position tokens.
+const PROMQL_GROUPING_KEYWORDS: &[&str] = &[
+    "by",
+    "without",
+    "on",
+    "ignoring",
+    "group_left",
+    "group_right",
+];
+
+/// Bare PromQL words that can appear at brace-depth 0 in identifier position but
+/// are NOT series selectors — logical/set binary operators and misc keywords that
+/// stand without an immediately-following `(`.
+const PROMQL_RESERVED_WORDS: &[&str] = &[
+    "and", "or", "unless", "bool", "offset", "atan2", "inf", "nan", "start", "end",
+];
+
+/// Extract every identifier in METRIC (instant-vector-selector) POSITION from a
+/// PromQL `expr`, REGARDLESS of prefix (roborev #2427 r4, F2). Unlike
+/// [`cqlite_expr_tokens`] — which only sees `cqlite_`-prefixed tokens and so cannot
+/// catch a *prefix* typo like `cqltie_rpc_requests_total` — this classifies by
+/// syntactic position. The dashboard is cqlite-only, so EVERY metric-position token
+/// must be a recognized catalog series; anything else renders an EMPTY panel and
+/// must FAIL. Excludes, by construction:
+///   - function/aggregation names (identifier immediately followed by `(`),
+///   - label keys inside `{ … }` selectors and quoted strings,
+///   - identifiers inside `[ … ]` range/duration brackets,
+///   - grouping-clause label lists (`by`/`without`/`on`/`ignoring`/`group_*`),
+///   - bare reserved binary keywords.
+fn metric_position_tokens(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    let mut brace_depth = 0usize; // inside `{ … }` label selectors
+    let mut bracket_depth = 0usize; // inside `[ … ]` range / duration
+                                    // Paren stack: true == this `( … )` is a grouping label list.
+    let mut paren_is_label_list: Vec<bool> = Vec::new();
+    let mut next_paren_is_label_list = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'"' | b'\'' => {
+                // Skip a quoted string literal wholesale (handle `\` escapes).
+                let quote = c;
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1; // consume closing quote (or run off end)
+            }
+            b'{' => {
+                brace_depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                i += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                i += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                i += 1;
+            }
+            b'(' => {
+                paren_is_label_list.push(next_paren_is_label_list);
+                next_paren_is_label_list = false;
+                i += 1;
+            }
+            b')' => {
+                paren_is_label_list.pop();
+                i += 1;
+            }
+            _ if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b':')
+                {
+                    i += 1;
+                }
+                let tok = &expr[start..i];
+                // Peek the next non-space char to detect a function/keyword call.
+                let mut j = i;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let followed_by_paren = j < bytes.len() && bytes[j] == b'(';
+                if followed_by_paren {
+                    // Function or grouping keyword — never a metric itself. A
+                    // grouping keyword marks its following paren as a label list.
+                    if PROMQL_GROUPING_KEYWORDS.contains(&tok) {
+                        next_paren_is_label_list = true;
+                    }
+                    continue;
+                }
+                let in_label_context = brace_depth > 0
+                    || bracket_depth > 0
+                    || paren_is_label_list.last().copied().unwrap_or(false);
+                let is_reserved =
+                    PROMQL_GROUPING_KEYWORDS.contains(&tok) || PROMQL_RESERVED_WORDS.contains(&tok);
+                if !in_label_context && !is_reserved {
+                    out.push(tok.to_string());
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Classify one expr's metric-position tokens against the catalog, returning
+/// `(referenced_a_catalog_metric, offending_tokens)` (roborev #2427 r4, F2). A
+/// metric-position identifier that isn't a known catalog series is an offender EVEN
+/// IF it isn't `cqlite_`-prefixed — which is exactly how a *prefix* typo
+/// (`cqltie_rpc_requests_total`) is caught. Sanitized attribute labels are accepted
+/// but do NOT count as referencing a metric (roborev #2427 r3, F3).
+fn classify_expr(expr: &str, valid: &ValidNames) -> (bool, Vec<String>) {
+    let mut referenced = false;
+    let mut offenders = Vec::new();
+    for tok in metric_position_tokens(expr) {
+        if valid.metrics.contains(&tok) {
+            referenced = true;
+        } else if !valid.attributes.contains(&tok) {
+            offenders.push(tok);
+        }
+    }
+    (referenced, offenders)
+}
+
 /// Collect every PromQL `expr` string from a dashboard's panels (recursing into
 /// nested `panels`, e.g. inside a row), reading each panel target's `expr`.
 fn collect_exprs(panels: &serde_json::Value, out: &mut Vec<String>) {
@@ -420,34 +564,35 @@ fn every_expr_metric_name_is_a_valid_sanitized_catalog_name() {
 
     let valid = valid_sanitized_names();
 
-    // Every `cqlite_*` token referenced in any expr must be a valid sanitized
-    // metric name (or attribute label) — anything else is a mistyped/renamed
-    // reference that renders an EMPTY panel. Fail CLOSED, naming the offenders.
-    // `referenced_any_metric` is set ONLY by membership in the METRIC set — an
-    // attribute label alone does not count as referencing a metric (roborev #2427
-    // r3, F3).
+    // Validate PER EXPR (roborev #2427 r4, F2), by metric POSITION rather than by
+    // `cqlite_` prefix, so that (a) a *prefix* typo like `cqltie_rpc_requests_total`
+    // is caught (the old `cqlite_`-only scanner ignored it), and (b) EVERY panel
+    // target must ITSELF reference ≥1 recognized catalog metric — a valid sibling
+    // panel no longer masks a typo'd one that renders EMPTY. Both conditions fail
+    // CLOSED, naming the offending token and its expr.
     let mut invalid: Vec<String> = Vec::new();
-    let mut referenced_any_metric = false;
+    let mut exprs_without_metric: Vec<String> = Vec::new();
     for expr in &exprs {
-        for tok in cqlite_expr_tokens(expr) {
-            if valid.metrics.contains(&tok) {
-                referenced_any_metric = true;
-            } else if !valid.attributes.contains(&tok) {
-                invalid.push(tok);
-            }
+        let (referenced_metric, offenders) = classify_expr(expr, &valid);
+        for tok in offenders {
+            invalid.push(format!("{tok}  (in expr: {expr})"));
+        }
+        if !referenced_metric {
+            exprs_without_metric.push(expr.clone());
         }
     }
     invalid.sort();
     invalid.dedup();
     assert!(
         invalid.is_empty(),
-        "kit dashboard {DASHBOARD_REL} references cqlite_* PromQL metric/label name(s) that are \
-         NOT valid sanitized forms of any catalog metric or bounded attribute (a typo/rename \
-         renders the panel EMPTY — fix the expr or the catalog): {invalid:?}"
+        "kit dashboard {DASHBOARD_REL} has expr metric-position name(s) that are NOT a valid \
+         sanitized catalog metric (a typo/rename — incl. a mistyped PREFIX — renders the panel \
+         EMPTY; fix the expr or the catalog): {invalid:#?}"
     );
     assert!(
-        referenced_any_metric,
-        "expected the dashboard exprs to reference at least one valid cqlite_* sanitized name"
+        exprs_without_metric.is_empty(),
+        "kit dashboard {DASHBOARD_REL} has panel target expr(s) that reference NO recognized \
+         catalog metric (would render EMPTY): {exprs_without_metric:#?}"
     );
 }
 
@@ -570,6 +715,83 @@ fn expr_validator_rejects_a_typo_in_an_expr_metric_name_negative_test() {
     assert!(
         !is_wildcard_group_ref("cqlite.does.not.exist.*"),
         "a .* group ref covering NO real metric must be REJECTED"
+    );
+
+    // F1 (roborev #2427 r4) — a wildcard on an exact LEAF metric with no children
+    // must be REJECTED: `cqlite.errors.total` IS a metric, but no catalog series
+    // starts with `cqlite.errors.total.`, so `cqlite.errors.total.*` covers nothing
+    // and would be a dead group ref. The removed `*m == stem` clause used to let it
+    // pass (fail-open).
+    assert!(
+        ALL_METRICS.contains(&"cqlite.errors.total"),
+        "precondition: cqlite.errors.total is an exact catalog leaf metric"
+    );
+    assert!(
+        !ALL_METRICS
+            .iter()
+            .any(|m| m.starts_with("cqlite.errors.total.")),
+        "precondition: no catalog metric lives BELOW cqlite.errors.total"
+    );
+    assert!(
+        !is_wildcard_group_ref("cqlite.errors.total.*"),
+        "a wildcard on an exact leaf metric with no children must be REJECTED \
+         (roborev #2427 r4, F1) — the removed `*m == stem` clause let it pass"
+    );
+    // The dashboard's real wildcard row titles DO have children, so they still pass.
+    assert!(
+        is_wildcard_group_ref("cqlite.warm.cache.*"),
+        "a real namespace with children must still be accepted"
+    );
+}
+
+#[test]
+fn per_expr_prefix_typo_fails_even_with_a_valid_sibling_panel_negative_test() {
+    // FINDING 2 negative test (roborev #2427 r4): metric coverage is checked PER
+    // EXPR, not globally, and by metric POSITION (not `cqlite_` prefix) — so a panel
+    // whose ONLY selector is a *prefix*-typo'd metric (`cqltie_rpc_requests_total`)
+    // FAILS even when OTHER panels are valid. The old global+prefix-scoped check
+    // passed this: the typo has the wrong prefix (invisible to a `cqlite_`-only
+    // scanner) and a sibling panel satisfied the single global coverage flag.
+    let valid = valid_sanitized_names();
+
+    // A valid panel and a prefix-typo'd panel, exactly as they would coexist.
+    let valid_expr = "sum(rate(cqlite_rpc_requests_total{cluster=~\"$cluster\"}[1m])) \
+                      by (cqlite_rpc_method)";
+    let typo_expr = "sum(rate(cqltie_rpc_requests_total{cluster=~\"$cluster\"}[1m]))";
+
+    // The valid panel references a real metric; the typo panel references NONE.
+    let (valid_ref, valid_off) = classify_expr(valid_expr, &valid);
+    assert!(valid_ref, "the valid sibling expr references a real metric");
+    assert!(
+        valid_off.is_empty(),
+        "the valid sibling expr has no offending tokens, got: {valid_off:?}"
+    );
+
+    let (typo_ref, typo_off) = classify_expr(typo_expr, &valid);
+    assert!(
+        !typo_ref,
+        "the prefix-typo'd expr references NO recognized catalog metric — the \
+         per-expr coverage check must FAIL it even beside a valid sibling"
+    );
+    assert_eq!(
+        typo_off,
+        vec!["cqltie_rpc_requests_total".to_string()],
+        "the prefix typo must be flagged as an offending metric-position token \
+         (a `cqlite_`-only scanner would have missed the mistyped prefix)"
+    );
+
+    // `metric_position_tokens` isolates the SELECTOR position: function names,
+    // grouping-clause label keys, and `{…}` matcher keys are NOT metric-position.
+    let hist_expr = "histogram_quantile(0.95, sum(rate(\
+                     cqlite_rpc_duration_seconds_bucket{cluster=~\"$cluster\"}[5m])) \
+                     by (le, cqlite_rpc_method))";
+    let positions = metric_position_tokens(hist_expr);
+    assert_eq!(
+        positions,
+        vec!["cqlite_rpc_duration_seconds_bucket".to_string()],
+        "only the vector-selector metric is in metric position; \
+         histogram_quantile/sum/rate (functions), le, cqlite_rpc_method (grouping \
+         labels) and cluster ({{}} matcher key) are excluded, got: {positions:?}"
     );
 }
 
