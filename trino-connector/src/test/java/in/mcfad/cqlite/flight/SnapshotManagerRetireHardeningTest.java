@@ -17,6 +17,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -237,6 +238,10 @@ class SnapshotManagerRetireHardeningTest {
         DeferringScheduler scheduler = new DeferringScheduler();
         SnapshotManager mgr = new SnapshotManager(
                 fake, ReadMode.SNAPSHOT, Optional.of("6h"), WINDOW, GRACE, clock, scheduler);
+        // start() registers the periodic hook — called explicitly post-construction (issue #2452
+        // this-escape fix), mirroring how CqliteFlightConnector calls it after the SnapshotManager
+        // instance is fully built.
+        mgr.start();
 
         String w0 = mgr.snapshotFor("ks", "t", List.of("h1")).orElseThrow();
         clock.advance(WINDOW);
@@ -271,5 +276,33 @@ class SnapshotManagerRetireHardeningTest {
             scheduler.close();
             scheduler.close(); // idempotent
         }
+    }
+
+    /**
+     * Regression guard (issue #2452 item 3, roborev job 1753): a {@code submitSweep} call whose
+     * executor has already been closed hits the {@code RejectedExecutionException} branch. That
+     * branch must reset the coalescing {@code sweepQueued} flag exactly like a normal completed
+     * sweep would — otherwise ANY submission racing (or following) a close() would permanently wedge
+     * the flag at {@code true}, silently no-op-ing every future {@code submitSweep} for the rest of
+     * the scheduler's life (indistinguishable in the field from the #2367 quiet-table accumulation
+     * bug this issue fixes: sweeps are silently never queued again).
+     */
+    @Test
+    void submitSweepAfterCloseDoesNotThrowAndDoesNotWedgeTheCoalescingFlag() {
+        SnapshotRetireScheduler.BackgroundRetireScheduler scheduler =
+                new SnapshotRetireScheduler.BackgroundRetireScheduler(1_000L);
+        scheduler.close();
+
+        assertDoesNotThrow(() -> scheduler.submitSweep(() -> { }),
+                "submitSweep after close() must not throw (best-effort, TTL backstops it)");
+        assertFalse(scheduler.sweepQueued.get(),
+                "the RejectedExecutionException path must reset sweepQueued, not leave it wedged");
+
+        // A second call after close must ALSO not throw and must ALSO not find the flag stuck —
+        // proving the reset genuinely un-wedges future calls, not just a one-shot coincidence.
+        assertDoesNotThrow(() -> scheduler.submitSweep(() -> { }),
+                "a second post-close submitSweep must not throw either");
+        assertFalse(scheduler.sweepQueued.get(),
+                "sweepQueued must still not be wedged after a second post-close submission");
     }
 }

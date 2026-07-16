@@ -23,6 +23,21 @@ public class CqliteFlightConnector implements Connector {
     public CqliteFlightConnector(CqliteFlightConfig config, SidecarClient sidecar) {
         this.config = config;
         this.sidecar = sidecar;
+        // Fail fast at catalog load if arrow-java's off-heap memory init is broken by a missing JVM
+        // flag (issues #2193, #2290) — otherwise every do_get dies far downstream with a cryptic
+        // "Failed to read message". Runs before the first RootAllocator (the earliest Arrow touch)
+        // and is a no-op when the flag is present.
+        //
+        // Deliberately BEFORE the SnapshotManager/scheduler construction below (issue #2452 item 1,
+        // roborev job 1753 blocker): the background scheduler starts a live daemon thread, and this
+        // preflight (like RootAllocator below) is designed to throw at catalog load on a broken JVM
+        // flag. Connector construction has no shutdown() hook to unwind on a thrown constructor —
+        // Trino simply discards the half-built object — so constructing the thread-owning
+        // SnapshotManager BEFORE either of these throw-prone steps would leak a scheduler thread (and
+        // its periodic task) for the JVM's lifetime, once per failed catalog-load retry.
+        ArrowMemoryPreflight.verify();
+        this.allocator = new RootAllocator();
+        this.flight = new CqliteFlightClient(allocator);
         // One shared snapshot manager (issues #2105, #2227): the split manager creates the
         // per-query snapshot on each replica host, the metadata cleans it up — both must see
         // the same registry. Each host's Sidecar is derived from the configured URI's scheme
@@ -38,13 +53,10 @@ public class CqliteFlightConnector implements Connector {
                 config.snapshotReuseWindowNanos(), config.snapshotRetireGraceNanos(),
                 new SnapshotManager.SystemClock(),
                 new SnapshotRetireScheduler.BackgroundRetireScheduler(config.snapshotRetireGraceMillis()));
-        // Fail fast at catalog load if arrow-java's off-heap memory init is broken by a missing JVM
-        // flag (issues #2193, #2290) — otherwise every do_get dies far downstream with a cryptic
-        // "Failed to read message". Runs before the first RootAllocator (the earliest Arrow touch)
-        // and is a no-op when the flag is present.
-        ArrowMemoryPreflight.verify();
-        this.allocator = new RootAllocator();
-        this.flight = new CqliteFlightClient(allocator);
+        // Started only after the SnapshotManager instance is fully constructed (this-escape nit,
+        // roborev job 1753): registering the periodic hook from WITHIN the constructor would hand the
+        // background thread a lambda closing over a not-yet-fully-initialized `this`.
+        this.snapshots.start();
     }
 
     @Override

@@ -201,8 +201,13 @@ public final class SnapshotManager {
      * DI constructor (issue #2452 item 2): the caller supplies the {@link SnapshotRetireScheduler}.
      * Production passes {@link SnapshotRetireScheduler.BackgroundRetireScheduler} (offload +
      * periodic quiet-table sweep); tests pass a controllable or inline scheduler for determinism.
-     * Registers the periodic sweep so a quiet table (no further queries) still prunes its superseded
-     * backlog (the #2367 accumulation fix) — a no-op for the inline scheduler.
+     *
+     * <p>Does NOT register the periodic sweep itself — call {@link #start()} once construction
+     * (and, in production, the caller's own field assignment) has fully completed. Registering the
+     * periodic hook here would pass a lambda closing over {@code this} to the scheduler BEFORE the
+     * constructor returns (a partial-construction / this-escape hazard, Java reviewer nit on #2452):
+     * the background thread could invoke {@code sweepRetireDue} on a not-yet-fully-initialized
+     * instance. {@link #start()} is a no-op for the inline scheduler either way.
      */
     public SnapshotManager(
             HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
@@ -215,7 +220,17 @@ public final class SnapshotManager {
         this.retireGraceNanos = Math.max(0L, retireGraceNanos);
         this.clock = clock;
         this.retireScheduler = retireScheduler;
-        // Quiet-table pruning: sweep due retirements on a background cadence even without a query.
+    }
+
+    /**
+     * Start the periodic quiet-table sweep (issue #2452 item 2, #2367 accumulation fix): a table
+     * that receives no further query must still have its superseded-window backlog pruned rather
+     * than accumulating until the multi-hour TTL. Call ONCE, after the instance (and, in production,
+     * every field of the owning object) is fully constructed — never from within the constructor
+     * itself (this-escape). A no-op for a scheduler whose {@code startPeriodic} does not tick (e.g.
+     * {@link SnapshotRetireScheduler.InlineRetireScheduler}).
+     */
+    public void start() {
         retireScheduler.startPeriodic(() -> sweepRetireDue(clock.nanoTime()));
     }
 

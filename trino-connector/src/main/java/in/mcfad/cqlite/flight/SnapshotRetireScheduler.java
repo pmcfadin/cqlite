@@ -63,13 +63,23 @@ public interface SnapshotRetireScheduler {
     final class BackgroundRetireScheduler implements SnapshotRetireScheduler {
         private static final Logger LOG = Logger.getLogger(BackgroundRetireScheduler.class.getName());
 
+        /** Floor for the periodic cadence (issue #2452 roborev nit): guards against a near-zero or
+         * negative caller-supplied period turning the periodic tick into a busy-loop. */
+        private static final long MIN_PERIOD_MILLIS = 1_000L;
+
         private final ScheduledExecutorService exec;
         private final long periodMillis;
-        /** Coalesce submitted sweeps: at most one queued at a time. */
-        private final AtomicBoolean sweepQueued = new AtomicBoolean(false);
+        /**
+         * Coalesce submitted sweeps: at most one queued at a time. Package-private (not private) so
+         * {@code SnapshotManagerRetireHardeningTest} can observe that a rejected-on-close submission
+         * still resets the flag (issue #2452 item 3) rather than permanently wedging all future
+         * coalesced sweeps — a stuck-flag regression would silently disable grace-sweeps exactly like
+         * the #2367 bug this issue fixes.
+         */
+        final AtomicBoolean sweepQueued = new AtomicBoolean(false);
 
         BackgroundRetireScheduler(long periodMillis) {
-            this.periodMillis = Math.max(1L, periodMillis);
+            this.periodMillis = Math.max(MIN_PERIOD_MILLIS, periodMillis);
             ThreadFactory daemon = r -> {
                 Thread t = new Thread(r, "cqlite-snapshot-retire");
                 t.setDaemon(true);
@@ -115,10 +125,15 @@ public interface SnapshotRetireScheduler {
         private static void runSafely(Runnable sweep) {
             try {
                 sweep.run();
-            } catch (RuntimeException e) {
-                // A best-effort background sweep must never kill the executor thread; the TTL
-                // backstop reclaims anything a failed sweep left behind.
-                LOG.log(Level.WARNING, e, () -> "Background snapshot retire sweep failed (TTL backstop reclaims)");
+            } catch (Throwable t) {
+                // A best-effort background sweep must NEVER let an uncaught throwable escape (roborev
+                // job 1753 fix #2): scheduleWithFixedDelay PERMANENTLY cancels all future executions
+                // of a periodic task the moment its Runnable throws ANYTHING uncaught — catching only
+                // RuntimeException left a single Error free to silently kill quiet-table pruning for
+                // the rest of the JVM's life, a silent regression back to the exact #2367
+                // 714-snapshot accumulation bug this issue fixes. The TTL backstop reclaims anything
+                // a failed sweep left behind, so swallowing (after logging) is safe here.
+                LOG.log(Level.WARNING, t, () -> "Background snapshot retire sweep failed (TTL backstop reclaims)");
             }
         }
     }
