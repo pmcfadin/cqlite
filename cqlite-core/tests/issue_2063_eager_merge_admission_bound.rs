@@ -157,7 +157,11 @@ async fn build_multigen_fixture(schema: &TableSchema) -> (TempDir, std::path::Pa
             .expect("write gen2");
     }
     engine
-        .write(write_name(SEEK_TARGET_ID, &format!("g2-{SEEK_TARGET_ID}"), 200))
+        .write(write_name(
+            SEEK_TARGET_ID,
+            &format!("g2-{SEEK_TARGET_ID}"),
+            200,
+        ))
         .expect("write seek target into gen2");
     engine.flush().await.expect("flush 2").expect("gen2");
 
