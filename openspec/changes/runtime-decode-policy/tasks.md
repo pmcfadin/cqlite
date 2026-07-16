@@ -6,15 +6,22 @@ close #2211.** Nothing in stages 2+ is written until the owner accepts the Stage
 backend (Decision 2).
 
 ## Stage 0 — measure-first (blocking; no unsafe code yet)
-- [ ] 0.1 Add a Criterion/bench (or a gated integration bench) that decodes a present real compressed
+- [x] 0.1 Add a Criterion/bench (or a gated integration bench) that decodes a present real compressed
   LZ4 fixture and reports decompress-only throughput for checked `lz4_flex`. (runtime-decode-policy)
-- [ ] 0.2 Add an end-to-end scan bench over the same fixture reporting scan throughput, so the
+  → `cqlite-core/benches/decode_policy_bench.rs` `decode_policy/lz4_flex_decompress`: 2.50 GiB/s.
+- [x] 0.2 Add an end-to-end scan bench over the same fixture reporting scan throughput, so the
   decompress delta can be put in end-to-end context. (runtime-decode-policy)
-- [ ] 0.3 Prototype the chosen fast backend (Decision 2 option A/B/C) *locally only* to obtain a
+  → same bench, `decode_policy/full_scan`: 45.5 MiB/s; SAFE decode is only 1.78% of scan time.
+- [x] 0.3 Prototype the chosen fast backend (Decision 2 option A/B/C) *locally only* to obtain a
   FastUnsafe-vs-Safe number on Linux; commit the benchmark result artifact (both deltas). Do NOT merge
   the prototype. (runtime-decode-policy)
-- [ ] 0.4 **Decision point**: if the end-to-end win does not meet the owner-set threshold, close #2211
-  as not-worth-it and archive this change with a "measured, not justified" note. Otherwise proceed.
+  → throwaway liblz4 (backend A) + `lz4_flex` safe-off proxies (NOT committed); results +
+  methodology in `docs/reports/issue-2211-decode-policy-stage0-ab.md`. Best-case unchecked decode
+  win ~2x, projecting ~0.90% end-to-end (below the scan's ±4.7% noise). Backend A's
+  `LZ4_decompress_fast` is deprecated and measured SLOWER than the checked path.
+- [ ] 0.4 **Decision point (OWNER)**: if the end-to-end win does not meet the owner-set threshold, close
+  #2211 as not-worth-it and archive this change with a "measured, not justified" note. Otherwise
+  proceed. → Evidence recommends CLOSE; awaiting owner call. Nothing in Stages 1–5 is written yet.
 
 ## Stage 1 — the policy type (Safe default, no unsafe yet)
 - [ ] 1.1 Add `enum DecodePolicy { Safe, FastUnsafe }` with `#[derive(Default)]`/`Safe` default in

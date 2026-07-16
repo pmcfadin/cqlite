@@ -133,6 +133,13 @@ proptest = { workspace = true }
 tempfile = "3.8"
 rand = "0.8"
 tokio-test = "0.4"
+# Direct handle to the production SAFE lz4 decoder (lz4_flex with `safe-decode`
+# on, the library default) so the Stage-0 DecodePolicy bench (issue #2211,
+# benches/decode_policy_bench.rs) can time the checked decode in isolation from
+# the surrounding chunk-record machinery. Dev-only: the library itself reaches
+# lz4_flex through the optional `lz4` feature; this makes the same crate nameable
+# from the bench target regardless of feature selection.
+lz4_flex = { workspace = true }
 # Serialize tests that read/mutate the process-global work_counters within one
 # test binary so cargo's parallel intra-binary threads cannot race the shared
 # atomics between a counter test's reset() and its read (issue #1071).
@@ -216,6 +223,19 @@ harness = false
 
 [[bench]]
 name = "read"
+harness = false
+
+# Stage-0 measure-first bench for the runtime DecodePolicy work (issue #2211,
+# F6.4). Quantifies (a) SAFE lz4 decompress-only throughput via `lz4_flex`, (b)
+# the full chunk-decompress path (seek+read+CRC32+decode+validate), and (c)
+# end-to-end scan throughput over the SAME compressed fixture, so the
+# decompress-only cost can be read as a fraction of a real scan. The `full_scan`
+# arm needs `cli-helpers` (for `open_read_db`); without it that arm compiles out
+# and the binary still runs a valid criterion main. NOT a perf-gate entry — a
+# one-time decision artifact feeding the Stage-0 go/no-go (docs/reports/).
+[[bench]]
+name = "decode_policy"
+path = "benches/decode_policy_bench.rs"
 harness = false
 
 # Export / conversion throughput micro-benches (issue #1494, AD5). STRICT
