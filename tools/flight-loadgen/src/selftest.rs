@@ -120,9 +120,12 @@ pub async fn run_self_test(request_count: u64) -> Result<Vec<StepRecord>, String
         connect_timeout: Duration::from_secs(5),
         seed: 42,
     };
-    let result = run_ramp(&config, &gen).await;
+    let (records, err) = run_ramp(&config, &gen).await;
     server.shutdown();
-    result
+    match err {
+        Some(e) => Err(e),
+        None => Ok(records),
+    }
 }
 
 #[cfg(test)]

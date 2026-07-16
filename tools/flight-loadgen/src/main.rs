@@ -9,12 +9,12 @@
 //! Run `flight-loadgen --help` for flags, or `flight-loadgen --self-test` to
 //! exercise the full client→server→JSONL pipeline against an in-process fixture.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 
+use flight_loadgen::output::{finalize, write_records};
 use flight_loadgen::ramp::{parse_duration, parse_ramp, run_ramp, RampConfig, StepBound};
 use flight_loadgen::record::StepRecord;
 use flight_loadgen::selftest::run_self_test;
@@ -110,16 +110,22 @@ fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
-    let records = if cli.self_test {
-        run_self_test(cli.self_test_requests).await?
+    if cli.self_test {
+        let records = run_self_test(cli.self_test_requests).await?;
+        write_records(&records, cli.out.as_deref())
     } else {
-        run_real_ramp(&cli).await?
-    };
-    write_records(&records, cli.out.as_deref())
+        // `run_real_ramp` returns whatever steps completed PLUS any terminal error.
+        // `finalize` writes the completed steps' JSONL BEFORE surfacing that error,
+        // so a late-step connect failure never discards prior steps' data.
+        let (records, ramp_error) = run_real_ramp(&cli).await?;
+        finalize(&records, ramp_error, cli.out.as_deref())
+    }
 }
 
 /// Drive the operator ramp against `--endpoint` using `--ticket-template`.
-async fn run_real_ramp(cli: &Cli) -> Result<Vec<StepRecord>, String> {
+/// Returns the completed-step records and an optional terminal ramp error
+/// (config/setup errors are surfaced as the outer `Err`, before any ramp runs).
+async fn run_real_ramp(cli: &Cli) -> Result<(Vec<StepRecord>, Option<String>), String> {
     let endpoint = cli
         .endpoint
         .clone()
@@ -146,7 +152,7 @@ async fn run_real_ramp(cli: &Cli) -> Result<Vec<StepRecord>, String> {
         connect_timeout,
         seed: cli.seed,
     };
-    run_ramp(&config, &gen).await
+    Ok(run_ramp(&config, &gen).await)
 }
 
 /// Load and validate the base ticket template from disk.
@@ -155,27 +161,4 @@ fn load_template(path: &std::path::Path) -> Result<FlightTicket, String> {
         .map_err(|e| format!("reading --ticket-template {}: {e}", path.display()))?;
     FlightTicket::from_bytes(&bytes)
         .map_err(|e| format!("parsing --ticket-template {}: {e}", path.display()))
-}
-
-/// Write records as JSONL (one object per line) to `out` or stdout.
-fn write_records(records: &[StepRecord], out: Option<&std::path::Path>) -> Result<(), String> {
-    let mut buf = String::new();
-    for rec in records {
-        let line = rec
-            .to_jsonl()
-            .map_err(|e| format!("serializing record: {e}"))?;
-        buf.push_str(&line);
-        buf.push('\n');
-    }
-    match out {
-        Some(path) => std::fs::write(path, buf.as_bytes())
-            .map_err(|e| format!("writing --out {}: {e}", path.display())),
-        None => {
-            let stdout = std::io::stdout();
-            let mut lock = stdout.lock();
-            lock.write_all(buf.as_bytes())
-                .and_then(|()| lock.flush())
-                .map_err(|e| format!("writing stdout: {e}"))
-        }
-    }
 }

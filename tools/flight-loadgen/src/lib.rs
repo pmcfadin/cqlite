@@ -9,6 +9,7 @@
 //! - [`record`] — the `flight-loadgen.step/v1` JSONL step record + accumulator,
 //! - [`client`] — raw `FlightServiceClient` connect + memory-bounded `do_get` drain,
 //! - [`ramp`] — the concurrency-ramp engine (per-step worker pool),
+//! - [`output`] — JSONL emission + write-before-error finalization,
 //! - [`selftest`] — the in-process ephemeral-port self-test harness.
 //!
 //! It measures throughput/latency/shedding of the SERVER directly (no Trino, no
@@ -17,6 +18,7 @@
 
 pub mod classify;
 pub mod client;
+pub mod output;
 pub mod ramp;
 pub mod record;
 pub mod selftest;

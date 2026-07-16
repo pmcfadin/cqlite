@@ -50,16 +50,32 @@ pub struct RampConfig {
     pub seed: u64,
 }
 
-/// Run the full ramp, returning one [`StepRecord`] per configured concurrency,
-/// in order. `gen` supplies deterministic tickets; each worker connects its own
-/// raw client to `config.endpoint`.
-pub async fn run_ramp(config: &RampConfig, gen: &ShapeGen) -> Result<Vec<StepRecord>, String> {
+/// Run the full ramp, returning one [`StepRecord`] per COMPLETED step (in order)
+/// plus an optional terminal error. `gen` supplies deterministic tickets; each
+/// worker connects its own raw client to `config.endpoint`.
+///
+/// A step failing (e.g. a connect failure at a later, higher-concurrency step —
+/// an EXPECTED saturation outcome, design §(c)) STOPS the ramp but is returned
+/// alongside the records already gathered from prior successful steps, never in
+/// place of them: the caller ([`crate::output::finalize`]) writes the completed
+/// steps' JSONL before surfacing the error, so one late-step hiccup can never
+/// discard many steps' worth of data.
+pub async fn run_ramp(config: &RampConfig, gen: &ShapeGen) -> (Vec<StepRecord>, Option<String>) {
     let mut records = Vec::with_capacity(config.concurrencies.len());
     for (step_idx, &concurrency) in config.concurrencies.iter().enumerate() {
-        let record = run_step(config, gen, step_idx, concurrency).await?;
-        records.push(record);
+        match run_step(config, gen, step_idx, concurrency).await {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                return (
+                    records,
+                    Some(format!(
+                        "ramp stopped at step {step_idx} (target concurrency {concurrency}): {e}"
+                    )),
+                );
+            }
+        }
     }
-    Ok(records)
+    (records, None)
 }
 
 /// Run one ramp step at `concurrency`, merging per-worker partials into a record.
@@ -70,6 +86,24 @@ async fn run_step(
     concurrency: usize,
 ) -> Result<StepRecord, String> {
     let concurrency = concurrency.max(1);
+
+    // Connect ALL workers up front, BEFORE spawning any task (design 1a). If any
+    // connect fails we return `Err` here with ZERO worker tasks in flight, so no
+    // already-spawned worker is ever orphaned: dropping a `JoinHandle` DETACHES the
+    // task (it does NOT abort it), which — under the old connect-inside-the-spawn-loop
+    // code — left earlier workers issuing uncounted, unbounded load past the step's
+    // deadline on a mid-loop `?`. Nothing to abort now: on failure `clients` (and its
+    // open channels) simply drop.
+    let mut clients = Vec::with_capacity(concurrency);
+    for worker_idx in 0..concurrency {
+        let client = connect(&config.endpoint, config.connect_timeout)
+            .await
+            .map_err(|e| format!("worker {worker_idx} connect: {e}"))?;
+        clients.push(client);
+    }
+
+    // Capture the step's timing window AFTER every connect has completed, so the
+    // (variable) connect latency never biases the measured `duration_s`/deadline.
     let started = Instant::now();
     let deadline = match config.bound {
         StepBound::Duration(d) => Some(started + d),
@@ -84,13 +118,12 @@ async fn run_step(
     };
 
     let mut handles = Vec::with_capacity(concurrency);
-    for worker_idx in 0..concurrency {
+    for (worker_idx, mut client) in clients.into_iter().enumerate() {
         let gen = gen.clone();
         let shape = config.shape;
         let step_u = step_idx as u64;
         let worker_u = worker_idx as u64;
         let claimed = Arc::clone(&claimed);
-        let mut client = connect(&config.endpoint, config.connect_timeout).await?;
         handles.push(tokio::spawn(async move {
             let mut agg = StepAgg::new();
             let mut iter: u64 = 0;
@@ -240,6 +273,49 @@ mod tests {
         assert!(parse_ramp("").is_err());
         assert!(parse_ramp("0").is_err());
         assert!(parse_ramp("x").is_err());
+    }
+
+    /// Regression (roborev Medium): a connect failure must NOT `?`-propagate out of
+    /// `run_ramp` and nuke everything. It now returns the records gathered so far
+    /// (empty here — the very first step fails) PLUS a terminal error, and returns
+    /// PROMPTLY because the connect is attempted up front, before any worker task is
+    /// spawned (no orphaned/detached workers issuing load past the deadline).
+    #[tokio::test]
+    async fn run_ramp_connect_failure_returns_terminal_error_not_panic() {
+        // A definitely-closed loopback port: bind then immediately drop the listener.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        let gen = ShapeGen::new(
+            crate::selftest::selftest_template(),
+            42,
+            100,
+            1 << 40,
+            crate::shape::MixWeights::default(),
+        );
+        let config = RampConfig {
+            concurrencies: vec![1, 2],
+            bound: StepBound::Requests(3),
+            shape: Shape::Full,
+            round: "connect-fail".into(),
+            endpoint: format!("http://{addr}"),
+            connect_timeout: Duration::from_millis(150),
+            seed: 42,
+        };
+
+        let (records, err) = run_ramp(&config, &gen).await;
+        assert!(
+            records.is_empty(),
+            "no step completed against the closed port"
+        );
+        let err = err.expect("a connect failure must surface a terminal error");
+        assert!(
+            err.contains("step 0") && err.contains("connect"),
+            "error names the failing step + connect cause: {err}"
+        );
     }
 
     #[test]
