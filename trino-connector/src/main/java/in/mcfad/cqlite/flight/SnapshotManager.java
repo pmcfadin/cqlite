@@ -348,6 +348,13 @@ public final class SnapshotManager {
         TableRef ref = new TableRef(keyspace, table);
         Resolved resolved = resolveWindow(ref, generationFingerprint);
         Window window = resolved.window();
+        // resolveWindow ALWAYS increments window.activeHolds exactly once for THIS call before
+        // returning (both the reuse and the fresh-create branch of its compute() do) — captured here,
+        // right where the increment contract is established, rather than left as something the catch
+        // block below must infer from control flow alone (roborev job 1756 finding 1): the pairing is
+        // now structural (gated on this local), and any future code path that returns from
+        // resolveWindow WITHOUT incrementing must flip this to false or the WARNING below will fire.
+        boolean heldByMe = true;
         try {
             for (String host : hosts) {
                 createOnHost(window, host, keyspace, table);
@@ -364,7 +371,18 @@ public final class SnapshotManager {
                 // actually decides whether to retire, not whether THIS call's removal won.
                 windows.remove(ref, window);
             }
-            int remaining = window.activeHolds.decrementAndGet();
+            // Release THIS query's hold ONLY if resolveWindow actually incremented it for us (see
+            // `heldByMe` above) — a structural pairing, not an inferred one (roborev job 1756
+            // finding 1). A negative result means a decrement ran without a matching increment
+            // somewhere: a pairing-invariant break that would otherwise silently corrupt every later
+            // rollback decision on this window, so it is logged loudly rather than swallowed.
+            int remaining = heldByMe ? window.activeHolds.decrementAndGet() : window.activeHolds.get();
+            if (remaining < 0) {
+                LOG.log(Level.WARNING, () -> "activeHolds went negative for " + ref.keyspace() + "."
+                        + ref.table() + " window=" + window.name()
+                        + " — a decrement ran without a matching increment (pairing invariant "
+                        + "broken); this is a bug, please file an issue");
+            }
             // Retire once nobody can still JOIN this window as a holder: true whenever `window` is no
             // longer the live `windows[ref]` entry — whether *I* just removed it above, or
             // invalidate()/retireAll() removed it earlier while my OWN fan-out was still adding hosts
@@ -377,12 +395,8 @@ public final class SnapshotManager {
             // window's rollback never reaches here (guarded above).
             //
             // HAZARD (roborev job 1754 f.1 / job 1755 f.4): retire() below CAN run more than once for
-            // the same window — BY DESIGN, to catch hosts created after an earlier call already ran.
-            // `Window#retired` is a tracked fact for tests, not a run-once gate (gating it would
-            // silently reintroduce the leak just described). Re-invocation is safe regardless: a
-            // repeat clearSnapshot swallows its own 404/NotFound, so every call converges on the same
-            // outcome. See {@code SnapshotManagerRetireHardeningTest} (double-retire + invalidate-race
-            // tests).
+            // the same window, BY DESIGN — see the {@code Window#retired} javadoc for why it is a
+            // tracked fact, not a run-once gate, and why re-invocation is always safe.
             if (!resolved.reused() && remaining == 0 && windows.get(ref) != window) {
                 retire(window, ref);
             }
@@ -469,7 +483,16 @@ public final class SnapshotManager {
      * own retirement synchronously on the CALLER's thread (it never goes through the scheduler), so
      * closing the scheduler first ensures no background sweep can still be running concurrently with
      * (or after) {@link #retireAll}'s drain — no argued-safe race to reason about, just none possible.
-     * Idempotent and a no-op for the inline scheduler.
+     * Idempotent (including under concurrent callers, roborev job 1756 finding 2) and a no-op for the
+     * inline scheduler.
+     *
+     * <p><b>Honest caveat:</b> this is a graceful-then-forceful shutdown of the scheduler's executor,
+     * NOT a hard guarantee. If the calling thread is interrupted while waiting for the executor to
+     * drain, the fallback is an immediate forceful {@code shutdownNow()} with no further wait for
+     * genuine termination — {@code close()} still returns promptly, but does NOT guarantee every
+     * in-flight sweep fully drained first. This is safe (retirement is best-effort and the Sidecar
+     * TTL backstop reclaims anything left mid-flight) but callers must not treat a returned
+     * {@code close()} as proof of a completed drain in that specific (interrupted) path.
      */
     public void close() {
         retireScheduler.close();

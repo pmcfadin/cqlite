@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -315,6 +316,10 @@ class SnapshotManagerRetireHardeningTest {
         // First retire: succeeds normally on both hosts.
         assertDoesNotThrow(() -> mgr.retireForTest(window, "ks", "t"));
         assertEquals(Set.of("h1/" + name, "h2/" + name), Set.copyOf(snapshotOf(fake.clears)));
+        // roborev job 1756 finding 3: Window#retired is set by retire() but was never actually READ
+        // by a test — a live reader, not just the write side, so a future regression that stops
+        // setting it (or sets it wrong) is caught here rather than staying silently unobserved.
+        assertTrue(window.retired.get(), "retire() marks the window retired on its first invocation");
 
         // Second retire of the IDENTICAL window — simulating either a racing sweep or the Sidecar
         // having already reclaimed it (TTL): every host's repeat DELETE now 404s.
@@ -493,6 +498,39 @@ class SnapshotManagerRetireHardeningTest {
         } finally {
             scheduler.close();
             scheduler.close(); // idempotent
+        }
+    }
+
+    /**
+     * Important pin (roborev job 1756 finding 4): {@code scheduleWithFixedDelay} PERMANENTLY cancels
+     * every future execution of a periodic task the moment its {@code Runnable} throws ANYTHING
+     * uncaught — this is exactly the silent-regression class the catch-{@code Throwable} fix in
+     * {@code runSafely} (roborev job 1753 fix #2) exists to prevent (catching only
+     * {@code RuntimeException} would let a single {@code Error} silently reintroduce the #2367
+     * quiet-table accumulation bug). Proven directly: the sweep throws an {@code Error} on its FIRST
+     * invocation and signals a latch on its SECOND — the tick must still be alive to reach it.
+     */
+    @Test
+    void periodicTickSurvivesAnErrorOnItsFirstInvocation() throws Exception {
+        SnapshotRetireScheduler.BackgroundRetireScheduler scheduler =
+                new SnapshotRetireScheduler.BackgroundRetireScheduler(1_000L); // clamped floor
+        try {
+            AtomicInteger invocation = new AtomicInteger();
+            CountDownLatch secondInvocationRan = new CountDownLatch(1);
+            scheduler.startPeriodic(() -> {
+                if (invocation.incrementAndGet() == 1) {
+                    throw new AssertionError("simulated Error on the first periodic tick");
+                }
+                secondInvocationRan.countDown();
+            });
+
+            assertTrue(secondInvocationRan.await(5, TimeUnit.SECONDS),
+                    "the periodic tick must survive an Error on its first invocation and still fire "
+                            + "a second time — catching only RuntimeException would let this Error "
+                            + "permanently cancel the tick, silently reintroducing the #2367 "
+                            + "quiet-table accumulation bug");
+        } finally {
+            scheduler.close();
         }
     }
 

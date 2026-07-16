@@ -1,5 +1,6 @@
 package in.mcfad.cqlite.flight;
 
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -86,6 +87,13 @@ public interface SnapshotRetireScheduler {
          * job 1754 finding 6) — defense-in-depth alongside {@link SnapshotManager#start()}'s own
          * guard, in case some OTHER caller invokes this scheduler directly. */
         private final AtomicBoolean periodicStarted = new AtomicBoolean(false);
+        /** Elects exactly one caller of {@link #close} to actually perform shutdown (roborev job
+         * 1756 finding 2); every other concurrent caller waits on {@link #closed} instead of
+         * independently racing its own {@code awaitTermination} call. */
+        private final AtomicBoolean closing = new AtomicBoolean(false);
+        /** Counts down once the electing {@link #close} caller's shutdown sequence has run to
+         * completion (gracefully or via the interrupted/timeout fallback) — see {@link #close}. */
+        private final CountDownLatch closed = new CountDownLatch(1);
 
         BackgroundRetireScheduler(long periodMillis) {
             this.periodMillis = Math.max(MIN_PERIOD_MILLIS, periodMillis);
@@ -144,17 +152,38 @@ public interface SnapshotRetireScheduler {
             // Graceful-then-forceful shutdown (roborev job 1754 finding 4): let an in-flight sweep
             // finish its host fan-out (no dangling network calls or partial state once close()
             // returns) before falling back to shutdownNow() — the connector calls this right before
-            // allocator.close(), and a forcefully-interrupted sweep must never race that. Idempotent:
-            // shutdown()/awaitTermination()/shutdownNow() are all no-ops on an already-terminated
-            // executor, so a repeat close() call is safe.
-            exec.shutdown();
-            try {
-                if (!exec.awaitTermination(2, TimeUnit.SECONDS)) {
-                    exec.shutdownNow();
+            // allocator.close(), and a forcefully-interrupted sweep must never race that.
+            //
+            // Exactly ONE caller performs the actual shutdown sequence (roborev job 1756 finding 2):
+            // a concurrent second close() call must not return early while the first is still
+            // mid-awaitTermination (that would break the connector shutdown()'s "the scheduler is
+            // fully quiesced once close() returns" assumption) — it BLOCKS on `closed` instead of
+            // independently racing its own fresh awaitTermination budget.
+            if (closing.compareAndSet(false, true)) {
+                try {
+                    exec.shutdown();
+                    try {
+                        if (!exec.awaitTermination(2, TimeUnit.SECONDS)) {
+                            exec.shutdownNow();
+                        }
+                    } catch (InterruptedException e) {
+                        // Honest fallback (roborev job 1756 finding 2): an interrupted close() does
+                        // NOT retry waiting for genuine termination — it forces shutdownNow() and
+                        // returns. A caller relying on this path does NOT get a drain guarantee (see
+                        // SnapshotManager#close's javadoc); this is still safe because retirement is
+                        // best-effort and the Sidecar TTL backstop covers anything left mid-flight.
+                        Thread.currentThread().interrupt();
+                        exec.shutdownNow();
+                    }
+                } finally {
+                    closed.countDown();
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                exec.shutdownNow();
+            } else {
+                try {
+                    closed.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
 

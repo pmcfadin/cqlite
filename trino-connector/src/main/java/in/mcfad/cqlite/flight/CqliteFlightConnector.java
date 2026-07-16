@@ -45,9 +45,14 @@ public class CqliteFlightConnector implements Connector {
         // The superseded-snapshot grace-sweep runs on a background best-effort scheduler (issue
         // #2452 item 2), NOT synchronously on the split-planning path — a hot table would otherwise
         // pay a multi-host DELETE fan-out in planning latency (roborev job 1722). The periodic tick
-        // (cadence = the retire-grace period) also prunes QUIET tables that receive no further query,
-        // so a short reuse window plus a long TTL never accumulates snapshot dirs (the #2367 field
-        // accumulation). Retired at connector shutdown via SnapshotManager.close().
+        // (cadence = the retire-grace period) is the ACTUAL #2367 fix: it prunes QUIET tables that
+        // receive no further query, so a short reuse window plus a long TTL never accumulates
+        // snapshot dirs — this is what closes the 714-snapshot field accumulation, independent of any
+        // query ever running again. The rollback-retire (item 1) is a NARROWER, separate hardening —
+        // it only fires on an UNCONTENDED creator's own fan-out failure (see the accepted hot-table
+        // degradation on {@code Window#activeHolds}); the general (any-window, any-time)
+        // active-retire is tracked as follow-up issue #2580, not this fix. Scheduler retired at
+        // connector shutdown via SnapshotManager.close().
         this.snapshots = new SnapshotManager(
                 HostSnapshotApis.fromBaseUri(config.sidecarUri()), config.readMode(), config.snapshotTtl(),
                 config.snapshotReuseWindowNanos(), config.snapshotRetireGraceNanos(),
