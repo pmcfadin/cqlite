@@ -173,11 +173,23 @@ pub struct WarmMetricsSnapshot {
     /// Refresh outcomes = fail-closed-retained.
     pub refresh_fail_closed_retained: u64,
     /// Total `SSTableReader::open` calls — the work-done probe (0 on a warm hit).
+    ///
+    /// **Programmatic-stats-only, NOT mirrored to OTel by design** (issue #2452
+    /// item 3; spec `flight-warm-snapshot-closure`, §D). Unlike the warm cache
+    /// hit/miss/evict/refresh counters (`WARM_CACHE_*`), `reader_opens` is
+    /// exposed ONLY through this snapshot — the authoritative surface for
+    /// round-over-round field verification. Its absence from the OTel counter
+    /// export is intentional, not a gap, so a field probe / audit does not
+    /// mistake it for a bug.
     pub reader_opens: u64,
     /// Total cached readers rebound to a fresh same-inode snapshot path
     /// (issue #2383/#2356). `0` on a pure warm hit (path unchanged) and on a
     /// full rebuild; `> 0` only when a fresh snapshot dir rolled over and the
     /// cached parsed state was repointed to it without re-parse.
+    ///
+    /// **Programmatic-stats-only, NOT mirrored to OTel by design** (issue #2452
+    /// item 3; spec `flight-warm-snapshot-closure`, §D) — same intentional
+    /// snapshot-only exposure as [`Self::reader_opens`].
     pub rebind_hits: u64,
 }
 
