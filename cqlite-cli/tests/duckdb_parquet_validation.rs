@@ -424,30 +424,40 @@ fn test_duckdb_schema_inference() {
 
     let conn = Connection::open_in_memory().expect("Failed to open DuckDB connection");
 
-    // Query to list all columns in the Parquet file
-    let stmt = conn
+    // Query to list all columns in the Parquet file.
+    //
+    // NOTE: duckdb-rs 1.2.2's `Statement::column_count()`/`column_name()`
+    // unwrap the query result, which is only populated once the statement is
+    // executed. Inspecting columns on a merely-prepared statement panics inside
+    // the duckdb crate (`Option::unwrap()` on `None`). We therefore execute the
+    // query via `query_arrow` and read the Arrow schema it exposes, which also
+    // exercises DuckDB's Arrow schema conversion for every projected column
+    // (including the uuid `id` and timeuuid `session_id`) — the path issue
+    // #2491 must not crash.
+    let mut stmt = conn
         .prepare(&format!(
             "SELECT * FROM read_parquet('{}') LIMIT 0",
             parquet_file.display()
         ))
         .expect("Failed to prepare query");
 
-    let column_count = stmt.column_count();
+    let arrow = stmt
+        .query_arrow([])
+        .expect("DuckDB should execute the schema query without panicking (#2491)");
+    let schema = arrow.get_schema();
+
+    let column_names: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    let column_count = column_names.len();
     eprintln!("DuckDB inferred {column_count} columns from Parquet");
 
     assert!(
         column_count > 0,
         "DuckDB should infer at least one column from Parquet file"
     );
-
-    // Get column names
-    let column_names: Vec<String> = (0..column_count)
-        .map(|i| {
-            stmt.column_name(i)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| "unknown".to_string())
-        })
-        .collect();
 
     eprintln!("DuckDB column names: {column_names:?}");
 
@@ -458,6 +468,55 @@ fn test_duckdb_schema_inference() {
     );
 
     eprintln!("SUCCESS: DuckDB schema inference validated - {column_count} columns");
+}
+
+/// Regression test for issue #2491: DuckDB must be able to read the UUID and
+/// TimeUUID columns of a CQLite Parquet export.
+///
+/// `simple_table` has both an `id UUID` primary key and a `session_id TIMEUUID`
+/// column, both exported as `FixedSizeBinary(16)` carrying the canonical
+/// `arrow.uuid` extension. This test materializes the `id` column through
+/// `read_parquet`, exercising DuckDB's Arrow/UUID conversion end-to-end so a
+/// future export change (e.g. altering the UUID logical-type annotation) can't
+/// silently break DuckDB interop.
+#[test]
+fn test_duckdb_reads_uuid_columns_without_panic() {
+    let (data_dir, schema_file) = assert_test_data_available();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let parquet_file = temp_dir.path().join("uuid_regression.parquet");
+
+    let output = export_to_parquet(
+        &schema_file,
+        &data_dir,
+        "test_basic.simple_table",
+        &parquet_file,
+    );
+    assert!(
+        output.status.success(),
+        "Parquet export should succeed for the UUID regression test"
+    );
+
+    let conn = Connection::open_in_memory().expect("Failed to open DuckDB connection");
+
+    // Materialize the UUID columns through DuckDB. Prior to the #2491 fix this
+    // panicked inside the duckdb crate rather than returning a row count.
+    let uuid_rows: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM read_parquet('{}') WHERE id IS NOT NULL",
+                parquet_file.display()
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .expect("DuckDB should read the uuid `id` column without panicking (#2491)");
+
+    assert!(
+        uuid_rows > 0,
+        "simple_table should have at least one non-null uuid id"
+    );
+
+    eprintln!("SUCCESS: DuckDB read {uuid_rows} uuid rows without panic (#2491)");
 }
 
 #[test]
