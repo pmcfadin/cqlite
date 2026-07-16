@@ -6,14 +6,15 @@
 //! directly; logic, ordering, and error handling are unchanged.
 
 use super::{
-    build_row_from_scan_cached, classify_partition_lookup, evaluate_predicates,
-    honest_targeted_path, partition_key_digest, sort_rows_by_token, validate_token_predicates,
-    PartitionKeyCache, PartitionLookupOutcome,
+    apply_forcing, build_row_from_scan_cached, classify_partition_lookup, evaluate_predicates,
+    honest_targeted_path, partition_key_digest, point_requires_engaged, sort_rows_by_token,
+    validate_token_predicates, ForcedPlan, PartitionKeyCache, PartitionLookupOutcome,
 };
 use super::{
-    AccessPath, ExecutionStep, QueryRow, Result, SelectExecutor, StorageEngine, TableId,
-    TableSchema,
+    AccessPath, ExecutionStep, FallbackReason, QueryRow, Result, SelectExecutor, StorageEngine,
+    TableId, TableSchema,
 };
+use crate::config::ReadPathMode;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -28,6 +29,10 @@ impl SelectExecutor {
         execution_steps: Vec<ExecutionStep>,
         tx: mpsc::Sender<Result<QueryRow>>,
         buffer_size: usize,
+        // Issue #1918: the read-path forcing mode, resolved once by
+        // `execute_streaming` (so an invalid env value fails the query
+        // synchronously before this task is spawned).
+        mode: ReadPathMode,
     ) -> Result<()> {
         // Issue #581: LIMIT/OFFSET must be enforced by the producer in the
         // streaming path. The `ExecutionStep::Limit` arm previously only logged a
@@ -94,8 +99,22 @@ impl SelectExecutor {
                     // materializing `scan()` (last-write-wins + tombstone shadowing),
                     // which is the authoritative read semantics; it does not merely
                     // mirror `scan_stream`'s per-key merge.
-                    let lookup = classify_partition_lookup(predicates, schema_opt);
-                    if let PartitionLookupOutcome::Targeted(ref pk_bytes) = lookup {
+                    // Issue #1918: the single forcing gate wraps the classifier
+                    // outcome. Forced `full` records the distinct `ForcedFullScan`
+                    // reason and skips the targeted branches (`lookup = None`) so
+                    // the shared full-scan streaming code below runs; `point` fails
+                    // closed on a classification `Fallback` inside `apply_forcing`.
+                    let outcome = classify_partition_lookup(predicates, schema_opt);
+                    let lookup = match apply_forcing(outcome, mode)? {
+                        ForcedPlan::ForceFullScan => {
+                            crate::query::access_path::record(AccessPath::FallbackFullScan {
+                                reason: FallbackReason::ForcedFullScan,
+                            });
+                            None
+                        }
+                        ForcedPlan::Proceed(o) => Some(o),
+                    };
+                    if let Some(PartitionLookupOutcome::Targeted(ref pk_bytes)) = lookup {
                         // Issue #960: the streaming analogue of the materializing
                         // partition-targeted lookup. Epic #951 (honest paths): the
                         // `tombstones` build's `scan_partition` is a full-scan +
@@ -103,6 +122,13 @@ impl SelectExecutor {
                         // claim `StreamingPartitionLookup` when it really pruned.
                         let (rows, engaged) =
                             storage.scan_partition(table, pk_bytes, schema_opt).await?;
+                        // Issue #1918: `point` fails closed on the tombstones-build
+                        // no-prune rather than silently full-scanning.
+                        point_requires_engaged(
+                            mode,
+                            engaged,
+                            FallbackReason::TombstonesBuildNoPrune,
+                        )?;
                         crate::query::access_path::record(honest_targeted_path(
                             AccessPath::StreamingPartitionLookup,
                             engaged,
@@ -166,7 +192,7 @@ impl SelectExecutor {
                     // union of N partition-targeted lookups. Gather them, sort by
                     // token to match full-scan order, then drive the same per-row
                     // pipeline (predicates, PER PARTITION LIMIT, OFFSET, LIMIT).
-                    if let PartitionLookupOutcome::MultiTargeted(ref pk_keys) = lookup {
+                    if let Some(PartitionLookupOutcome::MultiTargeted(ref pk_keys)) = lookup {
                         // Epic #951 (honest paths): each lookup reports whether it
                         // pruned. On the `tombstones` build every call full-scans
                         // (`engaged == false`); claim `MultiPartitionLookup` only when
@@ -179,6 +205,13 @@ impl SelectExecutor {
                             all_engaged &= engaged;
                             combined.extend(rows);
                         }
+                        // Issue #1918: `point` fails closed when the fan-out did not
+                        // prune (tombstones build).
+                        point_requires_engaged(
+                            mode,
+                            all_engaged,
+                            FallbackReason::TombstonesBuildNoPrune,
+                        )?;
                         crate::query::access_path::record(honest_targeted_path(
                             AccessPath::MultiPartitionLookup,
                             all_engaged,
@@ -243,8 +276,10 @@ impl SelectExecutor {
                     // Issue #960: the streaming path did not take a targeted
                     // lookup; report the honest fallback reason. `lookup` is the
                     // `Fallback` arm here (the `Targeted`/`MultiTargeted` arms
-                    // returned above via `continue`).
-                    if let PartitionLookupOutcome::Fallback(reason) = lookup {
+                    // returned above via `continue`). Issue #1918: forced `full`
+                    // (`lookup == None`) already recorded `ForcedFullScan` above, so
+                    // it falls straight through to the full scan without re-recording.
+                    if let Some(PartitionLookupOutcome::Fallback(reason)) = lookup {
                         crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
                     }
 

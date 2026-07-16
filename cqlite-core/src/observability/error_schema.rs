@@ -143,6 +143,10 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         Error::QueryExecution(_)
         | Error::ResultTooLarge { .. }
         | Error::UnsupportedQuery(_)
+        // Issue #1918: the read-path forcing knob failing closed is a query-time
+        // outcome (`point` unavailable / invalid knob value).
+        | Error::ForcedReadPathUnavailable { .. }
+        | Error::InvalidReadPath { .. }
         | Error::InvalidInput(_) => ErrorCategory::Query,
 
         // Issue #2264: a cooperative cancellation is an expected outcome, not a

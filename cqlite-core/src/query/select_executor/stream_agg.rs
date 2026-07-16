@@ -14,9 +14,9 @@ use super::aggregation::{
 };
 use super::row_build::parse_cql_type_str;
 use super::{
-    build_row_from_scan_cached, classify_partition_lookup, evaluate_predicates,
-    validate_token_predicates, AccessPath, ExecutionContext, ExecutionStep, PartitionKeyCache,
-    PartitionLookupOutcome, SelectExecutor,
+    apply_forcing, build_row_from_scan_cached, classify_partition_lookup, evaluate_predicates,
+    validate_token_predicates, AccessPath, ExecutionContext, ExecutionStep, FallbackReason,
+    ForcedPlan, PartitionKeyCache, PartitionLookupOutcome, SelectExecutor,
 };
 use crate::query::result::QueryRow;
 use crate::query::select_ast::WhereExpression;
@@ -185,9 +185,21 @@ impl SelectExecutor {
         // Only a full scan is folded. A targeted / multi-targeted lookup reads one
         // or a few small partitions, so the buffered path's memory is already
         // O(partition) — fall back and let it run unchanged.
-        let reason = match classify_partition_lookup(predicates, schema_opt) {
-            PartitionLookupOutcome::Fallback(reason) => reason,
-            PartitionLookupOutcome::Targeted(_) | PartitionLookupOutcome::MultiTargeted(_) => {
+        //
+        // Issue #1918: apply the single forcing gate here too. Forced `full` folds
+        // over a full scan regardless of classification (recorded as
+        // `ForcedFullScan`); forced `point` fails closed on a `Fallback` (a global
+        // full-scan aggregate is not a partition-targeted lookup) via `apply_forcing`;
+        // a `Targeted`/`MultiTargeted` outcome defers to the buffered path
+        // (`execute_sstable_scan`), which applies the same forcing gate.
+        let mode = self.resolved_read_path_mode()?;
+        let outcome = classify_partition_lookup(predicates, schema_opt);
+        let reason = match apply_forcing(outcome, mode)? {
+            ForcedPlan::ForceFullScan => FallbackReason::ForcedFullScan,
+            ForcedPlan::Proceed(PartitionLookupOutcome::Fallback(reason)) => reason,
+            ForcedPlan::Proceed(
+                PartitionLookupOutcome::Targeted(_) | PartitionLookupOutcome::MultiTargeted(_),
+            ) => {
                 return Ok(None);
             }
         };

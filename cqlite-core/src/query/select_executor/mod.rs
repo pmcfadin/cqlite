@@ -41,6 +41,7 @@
 
 mod aggregation;
 mod execute;
+mod forcing;
 mod limit_pushdown;
 mod lookup;
 mod numeric_acc;
@@ -76,6 +77,10 @@ use tokio::sync::mpsc;
 
 // Issue #1577 (D1): LIMIT/OFFSET pushdown cap helper (the `capped_fallback_scan`
 // method it pairs with is an `impl SelectExecutor` block in the same submodule).
+use forcing::{
+    apply_forcing, full_forbids_schemaless_seek, point_forbids_fallback, point_requires_engaged,
+    resolve_read_path_mode, ForcedPlan,
+};
 use limit_pushdown::{collect_capped_materialized, scan_pushdown_cap};
 use lookup::{
     classify_partition_lookup, honest_targeted_path, sort_rows_by_token, PartitionLookupOutcome,
@@ -298,6 +303,14 @@ pub struct SelectExecutor {
     /// [`crate::config::QueryConfig::max_result_rows`] by the query engine;
     /// defaults to 1,000,000 for the bare constructors.
     max_result_rows: usize,
+    /// Explicit read-path forcing override (issue #1918).
+    ///
+    /// `Some(mode)` forces every SELECT this executor runs down that access path
+    /// and takes precedence over the `CQLITE_READ_PATH` env var; `None` (the
+    /// default) leaves routing to the classifier + env knob. Wired from
+    /// [`crate::config::QueryConfig::forced_read_path`] by the query engine. A
+    /// test/debug control — see [`crate::config::ReadPathMode`].
+    forced_read_path: Option<crate::config::ReadPathMode>,
 }
 
 impl std::fmt::Debug for SelectExecutor {
@@ -357,6 +370,7 @@ impl SelectExecutor {
             max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
                 .unwrap_or(usize::MAX),
             max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            forced_read_path: None,
         }
     }
 
@@ -381,6 +395,28 @@ impl SelectExecutor {
         self
     }
 
+    /// Set the read-path forcing override (issue #1918).
+    ///
+    /// Builder-style: the query engine calls this with
+    /// [`crate::config::QueryConfig::forced_read_path`] so the config knob is
+    /// load-bearing on the read path. `Some(mode)` takes precedence over the
+    /// `CQLITE_READ_PATH` env var; `None` leaves routing to the classifier + env.
+    pub fn with_forced_read_path(
+        mut self,
+        forced_read_path: Option<crate::config::ReadPathMode>,
+    ) -> Self {
+        self.forced_read_path = forced_read_path;
+        self
+    }
+
+    /// Resolve the effective [`crate::config::ReadPathMode`] for a query on this
+    /// executor: the config override wins, else the once-read `CQLITE_READ_PATH`
+    /// env, else `Auto` (issue #1918). Returns [`Error::InvalidReadPath`] when the
+    /// env is the decision source and holds an unrecognized value.
+    fn resolved_read_path_mode(&self) -> Result<crate::config::ReadPathMode> {
+        resolve_read_path_mode(self.forced_read_path)
+    }
+
     /// Create a SELECT executor with a custom clock (for deterministic tests).
     #[cfg(test)]
     pub fn with_clock(
@@ -395,6 +431,7 @@ impl SelectExecutor {
             max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
                 .unwrap_or(usize::MAX),
             max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+            forced_read_path: None,
         }
     }
 
@@ -547,6 +584,12 @@ impl SelectExecutor {
             }
         }
 
+        // Issue #1918: resolve the read-path forcing mode synchronously here (like
+        // the token-predicate validation above), so an invalid `CQLITE_READ_PATH`
+        // fails the query loudly from `execute_streaming` rather than inside the
+        // spawned task (whose error would only reach the consumer as a channel item).
+        let mode = self.resolved_read_path_mode()?;
+
         // Clone what we need for the background task.
         let storage = Arc::clone(&self.storage);
         let buffer_size = config.buffer_size;
@@ -573,6 +616,7 @@ impl SelectExecutor {
                 execution_steps,
                 tx,
                 buffer_size,
+                mode,
             )
             .await
             {

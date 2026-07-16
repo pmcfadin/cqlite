@@ -53,6 +53,30 @@ env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 fixture a **hard failure**; without it, a minimal checkout that lacks the committed
 `test_compaction_tombstone_ttl` fixtures SKIPs loudly.
 
+### Point-vs-full differential lane (CQLite-vs-CQLite, issue #1918)
+
+A third lane complements the two oracles above by comparing CQLite to *itself* across
+its two read access paths. `cqlite-core/tests/point_vs_full_differential.rs` runs each
+point-read-eligible corpus query under forced `CQLITE_READ_PATH=point` (a
+partition-targeted lookup) and forced `CQLITE_READ_PATH=full` (a full scan +
+reconciliation) — via the `QueryConfig::forced_read_path` knob — and asserts the two
+paths return byte-identical rows/values/**order** at a **pinned `now`**
+(`CQLITE_TTL_NOW_OVERRIDE_SECS`). The corpus deliberately includes multi-generation,
+tombstone, and TTL fixtures — the reconciliation classes #1741 hid — so a divergence
+between the point and full paths (invisible to a physical dump, which retains the
+shadowed rows on both sides) fails the lane and names the diverging query. Same
+fail-closed/SKIP contract as the query-semantics oracle:
+
+```bash
+env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test -p cqlite-core --features "state_machine cli-helpers" \
+  --test point_vs_full_differential -- --nocapture
+```
+
+The `CQLITE_READ_PATH` knob is a **test/debug** control (not a perf recommendation);
+`point` fails closed rather than silently full-scanning. See the CLI reference for the
+user-facing knob docs.
+
 ## Golden JSONL files
 
 Every Data.db in the dataset has a companion `.jsonl` file containing
