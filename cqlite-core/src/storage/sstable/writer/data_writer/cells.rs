@@ -59,25 +59,8 @@ impl DataWriter {
             return Ok(());
         }
 
-        // Value
-        let value_bytes = serialize_value(value)?;
-
-        // Bounds check: value length must fit in i64
-        if value_bytes.len() > i64::MAX as usize {
-            return Err(Error::InvalidInput(format!(
-                "Value too large for column '{}': {} bytes (max {})",
-                column,
-                value_bytes.len(),
-                i64::MAX
-            )));
-        }
-
-        if cell_value_uses_length_prefix(value) {
-            encode_unsigned(value_bytes.len() as u64, buf);
-        }
-
-        // Write value bytes
-        buf.extend_from_slice(&value_bytes);
+        // Value — fixed-width scalars go straight into `buf` (issue #1672).
+        write_cell_value_into(buf, column, value)?;
 
         Ok(())
     }
@@ -122,21 +105,7 @@ impl DataWriter {
             return Ok(());
         }
 
-        let value_bytes = serialize_value(value)?;
-        if value_bytes.len() > i64::MAX as usize {
-            return Err(Error::InvalidInput(format!(
-                "Value too large for column '{}': {} bytes (max {})",
-                column,
-                value_bytes.len(),
-                i64::MAX
-            )));
-        }
-
-        if cell_value_uses_length_prefix(value) {
-            encode_unsigned(value_bytes.len() as u64, buf);
-        }
-
-        buf.extend_from_slice(&value_bytes);
+        write_cell_value_into(buf, column, value)?;
         Ok(())
     }
 
@@ -227,25 +196,8 @@ impl DataWriter {
             return Ok(());
         }
 
-        // Value
-        let value_bytes = serialize_value(value)?;
-
-        // Bounds check: value length must fit in i64
-        if value_bytes.len() > i64::MAX as usize {
-            return Err(Error::InvalidInput(format!(
-                "Value too large for column '{}': {} bytes (max {})",
-                column,
-                value_bytes.len(),
-                i64::MAX
-            )));
-        }
-
-        if cell_value_uses_length_prefix(value) {
-            encode_unsigned(value_bytes.len() as u64, buf);
-        }
-
-        // Write value bytes
-        buf.extend_from_slice(&value_bytes);
+        // Value — fixed-width scalars go straight into `buf` (issue #1672).
+        write_cell_value_into(buf, column, value)?;
 
         Ok(())
     }
@@ -275,21 +227,7 @@ impl DataWriter {
             return Ok(());
         }
 
-        let value_bytes = serialize_value(value)?;
-        if value_bytes.len() > i64::MAX as usize {
-            return Err(Error::InvalidInput(format!(
-                "Value too large for column '{}': {} bytes (max {})",
-                column,
-                value_bytes.len(),
-                i64::MAX
-            )));
-        }
-
-        if cell_value_uses_length_prefix(value) {
-            encode_unsigned(value_bytes.len() as u64, buf);
-        }
-
-        buf.extend_from_slice(&value_bytes);
+        write_cell_value_into(buf, column, value)?;
         Ok(())
     }
 
