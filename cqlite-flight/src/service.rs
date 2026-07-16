@@ -738,6 +738,12 @@ impl CqliteFlightService {
         let resolve_cancel = cancel.clone();
 
         tokio::task::spawn_blocking(move || -> Result<DoGetSetup, Status> {
+            // Issue #2419 (WS2, roborev job 1733 fix 3): account this
+            // flight-managed blocking task on `cqlite.flight.blocking_tasks_in_use`
+            // for the whole closure — the guard is the FIRST act, mirroring the
+            // `streaming.rs` merge/aggregate sites, so the gauge reflects EVERY
+            // flight-managed blocking task (resolve included), not merge-only.
+            let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
             let producer = svc.build_producer(&ticket)?;
             let schema_ref = Arc::new(producer.arrow_schema()?);
             // Spec Req 8: reuse a cached LIVE-mode resolution on a warm hit instead
@@ -829,9 +835,15 @@ impl CqliteFlightService {
         // SSTables / slow storage cannot stall unrelated Flight RPCs — mirroring the
         // `do_get` merge offload above. Outer `?` maps a task panic; inner `?` keeps
         // the `StatsError` -> `Status` mapping (`From<StatsError> for Status`).
-        let stats = tokio::task::spawn_blocking(move || gather_table_stats(&dir))
-            .await
-            .map_err(|e| Status::internal(format!("table_stats task panicked: {e}")))??;
+        let stats = tokio::task::spawn_blocking(move || {
+            // Issue #2419 (WS2, roborev job 1733 fix 3): same accounting as the
+            // `do_get_resolve` blocking closure above — the gauge must reflect
+            // every flight-managed blocking task, not merge-only.
+            let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
+            gather_table_stats(&dir)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("table_stats task panicked: {e}")))??;
         let body = stats
             .to_bytes()
             .map_err(|e| Status::internal(format!("encode table_stats response: {e}")))?;

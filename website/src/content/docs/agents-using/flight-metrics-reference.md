@@ -14,7 +14,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **62**.
+Total instruments: **67**.
 
 ## All instruments
 
@@ -39,15 +39,20 @@ Total instruments: **62**.
 | `cqlite.flight.admission.rejected_total` | counter | `1` | _(none)_ | do_get requests rejected (gRPC UNAVAILABLE) because no permit freed within the wait timeout. | Should stay 0 under normal load; any sustained increase means clients are being shed and should fail over. |
 | `cqlite.flight.admission.wait_seconds` | histogram | `s` | _(none)_ | How long a do_get waited on acquire before it was admitted or rejected. | A near-zero distribution is healthy; a rising tail means requests are increasingly queuing for permits. |
 | `cqlite.flight.admission.waiting` | gauge | `1` | _(none)_ | do_get requests parked waiting for an admission permit — the backpressure signal. | Zero is healthy; a sustained non-zero value means offered concurrency exceeds the ceiling and requests are queuing. |
+| `cqlite.flight.blocking_tasks_in_use` | gauge | `{thread}` | _(none)_ | Flight spawn_blocking tasks currently outstanding (flight-managed proxy, NOT the global tokio pool queue depth). | Rises with concurrent do_get scans and returns to baseline; a level pinned near the blocking-pool size with flat rpc.rows is blocking-pool saturation. Distinct from admission.in_use. |
 | `cqlite.flush.bytes` | counter | `By` | _(none)_ | Data.db bytes produced by memtable flushes. | Write volume landing on disk from flush; use with flush.duration for flush throughput. |
 | `cqlite.flush.duration` | histogram | `s` | _(none)_ | Memtable-to-SSTable flush durations. | A rising tail alongside a climbing memtable size means flush cannot drain the memtable fast enough. |
 | `cqlite.flush.rows` | counter | `{row}` | _(none)_ | Rows flushed from the memtable to L0 SSTables. | Should track write.mutations over time; a lag is the flush-behind signal. |
 | `cqlite.flush.sstables` | counter | `{sstable}` | _(none)_ | L0 SSTables created by memtable flushes. | Feeds compaction.lag; a high rate with rising lag means L0 is accumulating faster than compaction clears it. |
 | `cqlite.memtable.rows` | gauge | `{row}` | _(none)_ | Buffered rows in the active memtable. | Same sawtooth shape as memtable.size_bytes; a rising floor signals flush pressure. |
 | `cqlite.memtable.size_bytes` | gauge | `By` | _(none)_ | Current approximate in-memory size of the active memtable. | Sawtooth (rise then drop at flush) is healthy; a monotonic climb means flush is not keeping up. |
+| `cqlite.merge.egress_channel_depth` | gauge | `{entry}` | _(none)_ | Live occupancy of the bounded merge egress sync_channel (cap 256) feeding do_get / compaction. | Near zero = consumer keeping up (or a stalled producer); riding near capacity = producer outrunning a slower consumer (back-pressured egress). |
 | `cqlite.merge.producer_threads` | gauge | `{thread}` | _(none)_ | Live OS producer threads the k-way merge currently holds (one per input SSTable). | Bounded by O(M) inputs and returns to baseline at merge completion; a stuck-high value is a thread leak (#2316). |
 | `cqlite.merge.rows_in` | counter | `{row}` | _(none)_ | Input rows consumed at the k-way merge reconcile boundary (once per merge). | Compare with merge.rows_out; the gap is rows removed by last-write-wins collapse and tombstone suppression. |
 | `cqlite.merge.rows_out` | counter | `{row}` | _(none)_ | Rows emitted by the merge reconcile boundary post-reconciliation. | See merge.rows_in; rows_out much smaller than rows_in means heavy reconciliation. |
+| `cqlite.proc.fds` | gauge | `{fd}` | _(none)_ | Process open fd count sampled from /proc/self/fd (Linux; absent off-/proc, never 0). | Rises as concurrent scans open SSTables (no reader pool, #815); a level nearing the container ulimit is the fd-exhaustion binding point. |
+| `cqlite.proc.rss_bytes` | gauge | `By` | _(none)_ | Process resident set size from /proc/self/status VmRSS (Linux; absent off-/proc, never 0). | Rises with concurrent scan payloads (Flight bypasses the result-byte budget); a level nearing the memory limit is the OOMKill risk. |
+| `cqlite.proc.threads` | gauge | `{thread}` | _(none)_ | Process OS thread count sampled from /proc/self/task (Linux; absent off-/proc, never 0). | Rises with concurrent scans and settles to baseline; a level climbing toward the thread ceiling is thread/scheduler collapse. |
 | `cqlite.query.degraded_path.total` | counter | `1` | `cqlite.query.fallback_reason` | SELECTs that took a soundness fallback to a full-scan read path, tagged by fallback reason. | Should stay near 0 for targeted queries; a climbing value means queries are silently degrading to full scans. |
 | `cqlite.query.duration` | histogram | `s` | `cqlite.subsystem` | End-to-end query execution durations. | Watch p99; a rising tail is the top-level query-latency alarm. |
 | `cqlite.query.rows` | counter | `{row}` | `cqlite.query.access_path`<br>`cqlite.query.plan_type` | Rows returned to callers by the query engine. | Compare with query.rows_scanned; a large gap is read amplification. |
@@ -96,7 +101,12 @@ Metrics a #2399 round-template scoreboard item consumes. Round handoffs (#2367-s
 | `cqlite.flight.admission.rejected_total` | admission saturation (#2420/#2399) |
 | `cqlite.flight.admission.wait_seconds` | admission saturation (#2420/#2399) |
 | `cqlite.flight.admission.waiting` | admission saturation (#2420/#2399) |
+| `cqlite.flight.blocking_tasks_in_use` | blocking-pool pressure watch (#2419/#2313) |
+| `cqlite.merge.egress_channel_depth` | egress backpressure watch (#2419/#2399) |
 | `cqlite.merge.producer_threads` | thread-budget watch (#2313/#2399) |
+| `cqlite.proc.fds` | fd-exhaustion watch (#2419/#2313) |
+| `cqlite.proc.rss_bytes` | memory-pressure watch (#2419/#2313) |
+| `cqlite.proc.threads` | thread-budget watch (#2419/#2313) |
 | `cqlite.rpc.duration` | do_get latency (#2367/#2399) |
 | `cqlite.rpc.phase.active` | do_get hang detection (#2361/#2399) |
 | `cqlite.rpc.phase.duration` | do_get phase breakdown (#2398/#2399) |
