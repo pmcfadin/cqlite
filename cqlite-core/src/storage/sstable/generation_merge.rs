@@ -36,6 +36,9 @@
 //!
 //! The whole module is gated on `write-support` at its `mod` declaration in the
 //! parent (`sstable/mod.rs`).
+//!
+//! NOTE (#1116 file-size): already over the 800-line target on `origin/main`; the
+//! #2063 admission acquires add a few lines. Splitting is tracked under epic #1116.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -243,6 +246,10 @@ pub(super) async fn merge_generations_for_read(
     limit: Option<usize>,
     target_key: Option<&RowKey>,
 ) -> Result<Vec<(RowKey, ScanRow)>> {
+    // Issue #2063: one operation-level scan-admission permit; rationale + cancellation
+    // shape in `scan_admission.rs` `# Scope`. Moved into the closure below.
+    let admission = reader::scan_stream_windowed::scan_admission::admit().await;
+
     // Own the bounds/target so the merge body can use them without borrowing
     // across the await; cheap clone of the key bytes.
     let start_key = start_key.cloned();
@@ -253,7 +260,8 @@ pub(super) async fn merge_generations_for_read(
     let schema = schema.clone();
 
     let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
-        // Issue #1849: capture the read-time TTL clock ONCE per scan.
+        let _admission = admission; // #2063: hold across the detached blocking work.
+                                    // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let mut merger = KWayMerger::new(paths, &schema)?;
         let mut out = Vec::new();
@@ -322,6 +330,11 @@ pub(super) async fn seek_merge_generations_for_read(
     use crate::storage::scan_cancel::ScanCancel;
     use crate::storage::write_engine::merge::build_single_partition_merger_from_readers;
 
+    // Issue #2063: one operation-level scan-admission permit; ONLY call site is the
+    // top-level `scan_partition_clustering`, never nested. Rationale + cancellation
+    // shape in `scan_admission.rs` `# Scope`.
+    let admission = reader::scan_stream_windowed::scan_admission::admit().await;
+
     // NEWEST→OLDEST like `ordered_generation_paths`, so the seeking merger's
     // run_index (= position) equals the full-scan merger's LWW tie-break rank.
     let mut ordered: Vec<Arc<reader::SSTableReader>> = candidates.to_vec();
@@ -331,8 +344,9 @@ pub(super) async fn seek_merge_generations_for_read(
     let target_bytes = target_key.as_bytes().to_vec();
 
     let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
-        // Issue #1849: same read-visibility kernel `merge_generations_for_read`
-        // applies (read-time TTL clock captured ONCE), REQUIRED for byte-identity.
+        let _admission = admission; // #2063: hold across the detached blocking work.
+                                    // Issue #1849: same read-visibility kernel `merge_generations_for_read`
+                                    // applies (read-time TTL clock captured ONCE), REQUIRED for byte-identity.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let keys = [target_bytes.clone()];
         let Some(mut merger) =
@@ -392,6 +406,14 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     limit: Option<usize>,
     target_key: Option<&RowKey>,
 ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
+    // Issue #2063: one operation-level scan-admission permit. Held as an OUTER future
+    // guard across the async per-reader `scan_with_cell_metadata` loop (cancellation
+    // there is clean — no detached blocking work exists yet, so early release is
+    // harmless), THEN MOVED into the `spawn_blocking` merge closure below so the permit
+    // is held until the detached blocking work TERMINATES. This matches the plain/seek
+    // helpers: no phase both runs detached blocking work AND has released the permit.
+    let admission = reader::scan_stream_windowed::scan_admission::admit().await;
+
     // Own the bounds so the merge body can use them without borrowing across the
     // await; cheap clone of the key bytes. Mirrors the plain helper.
     let owned_start = start_key.cloned();
@@ -434,7 +456,8 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     let target_for_merge = target_bytes;
 
     let merged_rows = tokio::task::spawn_blocking(move || -> Result<Vec<MergedMetaRow>> {
-        // Issue #1849: capture the read-time TTL clock ONCE per scan.
+        let _admission = admission; // #2063: hold across the detached blocking work.
+                                    // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&merge_schema, now_epoch_secs());
         let mut merger = KWayMerger::new(paths, &merge_schema)?;
         let mut out = Vec::new();

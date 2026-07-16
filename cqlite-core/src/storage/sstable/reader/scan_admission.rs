@@ -50,12 +50,46 @@
 //!
 //! # Scope
 //!
-//! Admission covers the LAZY/WINDOWED scan path only. The write-support
-//! multi-generation EAGER-materialize branch (`merge_generations_for_read` in
-//! `storage/sstable/mod.rs`, which drains a `KWayMerger` inside a single
-//! `spawn_blocking`) does NOT pass through admission — it predates F4 and is not
-//! the `spawn_blocking`-windowed target. Do not assume ALL reads are throttled by
-//! this semaphore; wiring that eager path in would be a separate change.
+//! Admission covers BOTH the LAZY/WINDOWED scan path AND the write-support
+//! multi-generation EAGER-materialize path (issue #2063). The eager path is THREE
+//! helpers in `storage/sstable/generation_merge.rs`, each draining a `KWayMerger`
+//! inside a single `spawn_blocking`, each acquiring exactly ONE operation-level
+//! permit at the top of the function through this same process-wide semaphore:
+//!
+//! - `merge_generations_for_read` — the materializing plain read (`scan` / range /
+//!   partition-targeted point read).
+//! - `seek_merge_generations_for_read` — the partition-SEEKING point-read merge
+//!   (`scan_partition_clustering`, multi-candidate `WHERE pk = ?`). Its only call
+//!   site is that top-level manager operation, never nested under another admitted
+//!   operation.
+//! - `merge_generations_for_read_with_metadata` — the `WRITETIME`/`TTL` projection
+//!   sibling.
+//!
+//! That is the precise fit for the eager shape (one `spawn_blocking`, no async
+//! fan-out, no sub-scans) and cannot reintroduce the #1594 hold-and-wait deadlock:
+//! each is a single top-level once-only `admit()` with no nested acquisition (the
+//! KWayMerger's producer OS threads never call [`admit`]).
+//!
+//! CANCELLATION (issue #2063): ALL THREE helpers hold the permit until the detached
+//! `spawn_blocking` merge TERMINATES, so no phase both runs detached blocking work AND
+//! has already released the permit — repeated cancels can never exceed the bound. The
+//! two PURE-blocking helpers (`merge_generations_for_read`,
+//! `seek_merge_generations_for_read`) MOVE the permit INTO the `spawn_blocking` closure
+//! directly. The METADATA helper holds the permit as an OUTER future guard across its
+//! async per-reader `scan_with_cell_metadata` loop (cancellation there is clean — no
+//! detached blocking work exists yet, so early release is harmless), THEN MOVES it into
+//! the `spawn_blocking` merge closure for the detached phase. The three helpers are
+//! therefore UNIFORMLY cancellation-safe.
+//!
+//! KNOWN LIMITATION (documented, not solved here): the shared semaphore bounds
+//! eager *operation* concurrency, NOT the eager path's per-operation resource
+//! footprint. Unlike the windowed path (tokio blocking-pool threads), each eager
+//! operation drives `M` `std::thread` producer threads (M = generation count;
+//! KWayMerger, #2316), so `cap` admitted eager operations can still spawn up to
+//! `cap × M` producer OS threads. The bound limits how many eager operations run
+//! at once, consistent with #1594's "operation concurrency, not total blocking
+//! threads" semantic; sizing the eager path's thread footprint separately is a
+//! future issue (see the change's Non-goals).
 //!
 //! # Deadlock-freedom
 //!
