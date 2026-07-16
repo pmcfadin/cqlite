@@ -339,6 +339,13 @@ async fn stale_index_offset_degrades_to_scan_fallback_and_finds_the_row() {
 
     // Layer 1: the primitive itself.
     let reader = open_reader(&data_path).await;
+    // The fixture's diagnostic reads (pre-corruption) populated the PROCESS-GLOBAL
+    // key cache (issue #2059) with pk=2's CORRECT offset under this Data.db's
+    // identity (Data.db is unchanged — only Index.db was corrupted). Clear it so
+    // this read genuinely consults the corrupted Index.db and exercises the
+    // degradation path under test (a cache hit would benignly return the still-valid
+    // remembered offset, which is not the scenario here).
+    reader.invalidate_key_cache_entries();
     let outcome = reader
         .read_single_partition_for_compaction(
             &target_key_bytes,
@@ -488,6 +495,10 @@ async fn big_foreign_partition_offset_degrades_to_scan_fallback_not_empty_rows()
 
     // Layer 1: the primitive itself.
     let reader = open_reader(&data_path).await;
+    // Clear the fixture's pre-corruption diagnostic-read pollution from the
+    // process-global key cache (issue #2059) so the corrupted Index.db is genuinely
+    // consulted (see the sibling stale-offset test for the full rationale).
+    reader.invalidate_key_cache_entries();
     let outcome = reader
         .read_single_partition_for_compaction(&key2, Some(&schema), &ScanCancel::default())
         .await

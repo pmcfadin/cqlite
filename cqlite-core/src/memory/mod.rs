@@ -163,24 +163,35 @@ pub struct MemoryStats {
     /// it was measured under; `0` when no cache is wired / block caching disabled.
     pub block_cache_capacity_bytes: usize,
 
-    /// Key cache hits: aggregate across the per-reader B4 key→partition-offset
-    /// caches (issue #1571, B5). A hit lets a repeated point read skip the
-    /// `Index.db`/trie descent. Real summed counter; `0` when no reader is open.
+    /// Key cache hits (issue #1571/#2059). A hit lets a repeated point read skip the
+    /// `Index.db` interval parse. Since #2059 the key cache is ONE process-global
+    /// instance shared by every open reader, so these counters are PROCESS-GLOBAL: they
+    /// aggregate activity across ALL `Database` instances in the process, not one
+    /// reader's slice (a semantic change from the retired per-reader counters). Real
+    /// counter; `0` before any reader touches the cache.
     pub key_cache_hits: u64,
 
-    /// Key cache misses: aggregate across the per-reader B4 caches (issue #1571).
+    /// Key cache misses (issue #1571/#2059). Process-global, like
+    /// [`key_cache_hits`](Self::key_cache_hits) — summed across all `Database`
+    /// instances in the process.
     pub key_cache_misses: u64,
 
-    /// Key cache evictions: aggregate across the per-reader B4 caches (issue
-    /// #1571) — entries evicted to stay within each reader's byte budget.
+    /// Key cache evictions: entries evicted from the process-global key cache to
+    /// stay within its byte budget (issue #1571/#2059) — DISTINCT from
+    /// [`key_cache_invalidations`](Self::key_cache_invalidations).
     pub key_cache_evictions: u64,
 
-    /// Key cache resident bytes: aggregate approximate resident footprint of the
-    /// per-reader B4 caches (issue #1571).
+    /// Key cache invalidations: entries dropped from the process-global key cache on
+    /// generation removal / compaction / warm-registry evict (issue #2059) — a
+    /// distinct counter from budget-driven [`key_cache_evictions`](Self::key_cache_evictions).
+    pub key_cache_invalidations: u64,
+
+    /// Key cache resident bytes: approximate resident footprint of the process-global
+    /// key cache (issue #1571/#2059).
     pub key_cache_resident_bytes: usize,
 
-    /// Key cache capacity bytes: summed configured byte budget across the
-    /// per-reader B4 caches (issue #1571).
+    /// Key cache capacity bytes: the process-global key cache's fixed configured byte
+    /// budget (issue #1571/#2059), or `0` when block caching is disabled.
     pub key_cache_capacity_bytes: usize,
 
     /// Row cache hits. Retained for shape compatibility; the row cache was
@@ -258,6 +269,8 @@ mod tests {
         assert_eq!(stats.key_cache_hits, 0);
         assert_eq!(stats.key_cache_misses, 0);
         assert_eq!(stats.key_cache_evictions, 0);
+        // Issue #2059: the invalidations counter is distinct from evictions.
+        assert_eq!(stats.key_cache_invalidations, 0);
         assert_eq!(stats.key_cache_resident_bytes, 0);
         assert_eq!(stats.key_cache_capacity_bytes, 0);
         assert_eq!(stats.key_cache_hit_rate(), 0.0);

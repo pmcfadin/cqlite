@@ -14,12 +14,18 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **67**.
+Total instruments: **73**.
 
 ## All instruments
 
 | Metric | Type | Unit | Attributes | Operator meaning | Healthy vs alarming |
 |---|---|---|---|---|---|
+| `cqlite.cache.key.capacity_bytes` | gauge | `By` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). The global key cache's fixed byte budget (0 when block caching is disabled). | A fixed named constant inside the <128MB envelope; not a user knob. Zero means the read caches are disabled. |
+| `cqlite.cache.key.evictions` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Global key-cache entries evicted to stay within the byte budget (budget-driven; distinct from invalidations). | Sustained growth means the hot location set exceeds the fixed budget; expected to be flat on a small working set. |
+| `cqlite.cache.key.hits` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Hits on the process-global key→partition-offset cache (a point read skips the Index.db interval parse / trie descent). | A high hit rate means hot partitions are resolving from cache; near-zero on a cold or highly-random point-read workload. |
+| `cqlite.cache.key.invalidations` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Global key-cache entries dropped on generation removal/compaction/warm-evict (distinct from budget evictions). | Tracks generation turnover (compaction/refresh); a #2383 rebind over a byte-identical generation does NOT invalidate. |
+| `cqlite.cache.key.misses` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Misses on the global key cache (incl. fail-closed identity mismatch); each pays one interval parse / trie descent then populates. | Rises with working-set churn or eviction pressure; a persistently high miss ratio suggests the budget is small vs the hot set. |
+| `cqlite.cache.key.resident_bytes` | gauge | `By` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Approximate resident footprint of the process-global key cache. | Bounded above by capacity_bytes; a single global cap regardless of how many readers are open. |
 | `cqlite.compaction.budget.consumed` | histogram | `s` | _(none)_ | Maintenance budget actually consumed per maintenance_step call. | Consumed materially exceeding requested means maintenance is overrunning its budget. |
 | `cqlite.compaction.budget.requested` | histogram | `s` | _(none)_ | Maintenance budget requested per maintenance_step call. | Compare against budget.consumed to confirm the scheduler honors its ~10% tolerance. |
 | `cqlite.compaction.bytes_written` | counter | `By` | _(none)_ | Bytes written to compaction output SSTables. | Compare with write.bytes/flush.bytes to reason about write amplification from compaction. |
@@ -94,6 +100,12 @@ Metrics a #2399 round-template scoreboard item consumes. Round handoffs (#2367-s
 
 | Metric | Scoreboard item |
 |---|---|
+| `cqlite.cache.key.capacity_bytes` | read-path perf (#2059) |
+| `cqlite.cache.key.evictions` | read-path perf (#2059) |
+| `cqlite.cache.key.hits` | read-path perf (#2059) |
+| `cqlite.cache.key.invalidations` | read-path perf (#2059) |
+| `cqlite.cache.key.misses` | read-path perf (#2059) |
+| `cqlite.cache.key.resident_bytes` | read-path perf (#2059) |
 | `cqlite.compaction.lag` | compaction-lag watch (#2399) |
 | `cqlite.errors.total` | error-rate watch (#2193/#2399) |
 | `cqlite.flight.admission.in_use` | admission saturation (#2420/#2399) |

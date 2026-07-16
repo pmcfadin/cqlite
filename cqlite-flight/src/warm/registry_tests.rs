@@ -607,6 +607,87 @@ fn lru_evicts_when_over_budget() {
     );
 }
 
+/// Issue #2059 fix round (review Medium finding): a CAPACITY eviction from the
+/// warm registry must NOT invalidate the process-global key cache. The evicted
+/// generation is still fully present on disk (memory pressure is why it left the
+/// warm set, not deletion), so dropping its shared key-cache entries here is a
+/// pure effectiveness regression — it evicts entries exactly under the memory
+/// pressure where the cache is most valuable and pulls cache state out from under
+/// any other live reader of the same physical file. This proves A's key-cache
+/// entry SURVIVES a capacity eviction (the old code dropped it via
+/// `invalidate_key_cache_entries()`). Genuine generation removal still invalidates
+/// — see `removed_generation_is_evicted_immediately` and the core `refresh.rs`
+/// removal branch.
+#[test]
+fn capacity_eviction_preserves_global_key_cache() {
+    use cqlite_core::storage::cache::{GenerationIdentity, GlobalKeyOffsetCache, PartitionLoc};
+
+    let schema = simple_schema();
+    let (_t_a, _d_a, dir_a) = build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+    let (_t_b, _d_b, dir_b) = build_sstables(&schema, vec![vec![write_row(1, "b", 1, 100)]]);
+
+    let key_a = TableKey::new(KS, "cap_evict_table_a");
+    let key_b = TableKey::new(KS, "cap_evict_table_b");
+
+    // Budget = one generation's footprint (measured on a throwaway registry): B
+    // fits, so warming A+B forces A out via the CAPACITY-eviction path.
+    let probe = WarmTableRegistry::new();
+    probe
+        .warm_readers(&key_b, ddl(), &schema, &dir_b, None, &CancelFlag::new())
+        .expect("probe warm");
+    let one_gen = probe.debug_used_bytes();
+    assert!(one_gen > 0, "a generation's footprint is non-zero");
+
+    let reg = WarmTableRegistry::with_budget(one_gen);
+    let cancel = CancelFlag::new();
+
+    let wa = reg
+        .warm_readers(&key_a, ddl(), &schema, &dir_a, None, &cancel)
+        .expect("warm A");
+    let reader_a = Arc::clone(&wa.readers[0]);
+
+    // Reader A's authoritative generation identity — a single flush → generation 1,
+    // resolved from the SAME Data.db path/filename the reader parsed, so it matches
+    // the reader's own identity exactly (the identity the OLD capacity-eviction code
+    // would have invalidated).
+    let identity_a =
+        GenerationIdentity::resolve(&reader_a.file_path(), 1).expect("A's Data.db must stat");
+    let sentinel_key = b"cap-evict-sentinel-key".as_slice();
+    let loc = PartitionLoc::new(4242, 0);
+
+    // Populate the process-global key cache for A's identity (fresh-slate first so a
+    // prior test run of the shared singleton can't confuse the assertion).
+    let cache = GlobalKeyOffsetCache::global();
+    cache.invalidate(identity_a);
+    cache.insert(identity_a, sentinel_key, loc);
+    assert_eq!(
+        cache.get(identity_a, sentinel_key),
+        Some(loc),
+        "sentinel entry is resident before the capacity eviction"
+    );
+
+    // Warm B past the one-generation budget → CAPACITY-evicts A from the warm set.
+    reg.warm_readers(&key_b, ddl(), &schema, &dir_b, None, &cancel)
+        .expect("warm B capacity-evicts A");
+    assert!(
+        reg.metrics().snapshot().evicts >= 1,
+        "warming B past the one-generation budget capacity-evicts A"
+    );
+
+    // The fix: A's entry SURVIVES the capacity eviction. Under the old behavior the
+    // warm registry called `reader_a.invalidate_key_cache_entries()` here and this
+    // would be `None`.
+    assert_eq!(
+        cache.get(identity_a, sentinel_key),
+        Some(loc),
+        "capacity eviction must NOT invalidate the global key cache — A's generation \
+         is still on disk and likely re-read soon"
+    );
+
+    // Keep the shared singleton tidy for other tests in this process.
+    cache.invalidate(identity_a);
+}
+
 /// Requirement 3 (snapshot manifest fast path), corrected for issue #2352: a
 /// byte-identical snapshot `manifest.json` serves the cached set WITHOUT relisting
 /// the directory — proven by planting a THIRD `Data.db` on disk that the manifest

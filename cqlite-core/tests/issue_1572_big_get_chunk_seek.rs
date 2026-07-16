@@ -137,32 +137,48 @@ async fn present_key_get_does_not_sequential_scan() {
     // silently neuter the scan-counter guard (roborev #1572 Medium).
     let reader = open_reader(&dd).await;
     let oracle = scan_oracle(&reader).await;
-    let present_key = oracle.keys().next().expect("at least one key").clone();
 
-    // Sanity: the raw-key Index.db map resolves this present key (fast path arms).
-    assert!(
-        reader
-            .lookup_partition_with_index(&present_key)
+    // Check EVERY present key, not just `oracle.keys().next()`. The old
+    // single-key form was HashMap-iteration-order dependent, so it only
+    // intermittently exercised the partitions whose bodies STRADDLE a chunk
+    // boundary — the exact partitions the chunk-targeted decode used to soft-miss
+    // (parsing a garbage entry from the truncated window tail) and fall back to a
+    // whole-file `scan_for_key`, violating #1572. Iterating every key makes the
+    // scan-counter invariant DETERMINISTIC and guards the straddle regression for
+    // all partitions, head-of-chunk and boundary-crossing alike.
+    for present_key in oracle.keys() {
+        // Sanity: the raw-key Index.db map resolves this present key (fast path arms).
+        assert!(
+            reader
+                .lookup_partition_with_index(present_key)
+                .await
+                .expect("index lookup must not error")
+                .is_some(),
+            "index_reader must resolve present key {present_key:02x?} for the fast path"
+        );
+
+        let before = SSTableReader::scan_for_key_call_count();
+        let got = reader
+            .get(&table_id(), &RowKey::new(present_key.clone()))
             .await
-            .expect("index lookup must not error")
-            .is_some(),
-        "index_reader must resolve a present key for the fast path"
-    );
+            .expect("get() must not error");
+        let after = SSTableReader::scan_for_key_call_count();
 
-    let before = SSTableReader::scan_for_key_call_count();
-    let got = reader
-        .get(&table_id(), &RowKey::new(present_key.clone()))
-        .await
-        .expect("get() must not error");
-    let after = SSTableReader::scan_for_key_call_count();
-
-    assert!(got.is_some(), "get() for a present key must return a row");
-    assert_eq!(
-        before, after,
-        "BIG get() for a present key must NOT invoke scan_for_key \
-         (whole-file decompress); count went {before} -> {after}"
+        assert!(
+            got.is_some(),
+            "get() for present key {present_key:02x?} must return a row"
+        );
+        assert_eq!(
+            before, after,
+            "BIG get() for present key {present_key:02x?} must NOT invoke scan_for_key \
+             (whole-file decompress); count went {before} -> {after}. A non-zero delta \
+             is the chunk-straddle soft-miss regression (issue #1572)."
+        );
+    }
+    eprintln!(
+        "present_key_get_does_not_sequential_scan PASSED (scan_for_key delta 0 for all {} keys)",
+        oracle.len()
     );
-    eprintln!("present_key_get_does_not_sequential_scan PASSED (scan_for_key delta 0)");
 }
 
 // -------------------------------------------------------------------------

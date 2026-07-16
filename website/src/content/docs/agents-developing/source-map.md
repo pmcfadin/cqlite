@@ -98,6 +98,7 @@ SSTable data. `schema/` manages CREATE TABLE DDL and maps column names to CQL ty
 | Query returns nothing | `cqlite-core/src/query/` — filter evaluation |
 | Write corruption | `storage/sstable/writer/data_writer.rs` |
 | Compaction issues | `storage/write_engine/merge.rs` |
+| Read caches | `storage/cache/` — `mod.rs` (decompressed-chunk cache) + `global_key_offset.rs` (the process-global, byte-bounded, generation-identity-keyed key→partition-offset cache, #2059) |
 
 ## Python bindings (`bindings/python/`)
 

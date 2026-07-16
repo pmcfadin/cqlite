@@ -194,6 +194,37 @@ pub const INDEX_PARSES_TOTAL: &str = "cqlite.sstable.index_parses_total";
 /// scale-free work-probe for #2412. No high-cardinality attributes.
 pub const INDEX_INTERVAL_PARSES_TOTAL: &str = "cqlite.sstable.index_interval_parses_total";
 
+/// `cqlite.cache.key.hits` — counter `1` (issue #2059).
+///
+/// Hits on the process-global key→partition-offset cache: a repeated point read
+/// whose `(generation identity, raw key)` is resident, so it resolves the partition
+/// location WITHOUT reading the Summary-guided `Index.db` interval (post-#2412) or
+/// walking the BTI trie. Reported through `Database::stats().memory_stats`.
+pub const KEY_CACHE_HITS: &str = "cqlite.cache.key.hits";
+
+/// `cqlite.cache.key.misses` — counter `1` (issue #2059). Misses on the global key
+/// cache (including a fail-closed identity mismatch), each paying one interval
+/// parse / trie descent then populating.
+pub const KEY_CACHE_MISSES: &str = "cqlite.cache.key.misses";
+
+/// `cqlite.cache.key.evictions` — counter `1` (issue #2059). Entries evicted from
+/// the global key cache to stay within its byte budget (budget-driven), DISTINCT
+/// from [`KEY_CACHE_INVALIDATIONS`].
+pub const KEY_CACHE_EVICTIONS: &str = "cqlite.cache.key.evictions";
+
+/// `cqlite.cache.key.invalidations` — counter `1` (issue #2059). Entries dropped on
+/// generation removal / compaction / warm-registry evict — DISTINCT from
+/// budget-driven [`KEY_CACHE_EVICTIONS`]. A #2383 rebind does NOT invalidate.
+pub const KEY_CACHE_INVALIDATIONS: &str = "cqlite.cache.key.invalidations";
+
+/// `cqlite.cache.key.resident_bytes` — gauge `By` (issue #2059). Approximate
+/// resident footprint of the global key cache.
+pub const KEY_CACHE_RESIDENT_BYTES: &str = "cqlite.cache.key.resident_bytes";
+
+/// `cqlite.cache.key.capacity_bytes` — gauge `By` (issue #2059). The global key
+/// cache's fixed byte budget, or `0` when block caching is disabled.
+pub const KEY_CACHE_CAPACITY_BYTES: &str = "cqlite.cache.key.capacity_bytes";
+
 /// `cqlite.storage.open.sstables` — counter `{sstable}`.
 ///
 /// SSTables discovered and opened by a single [`StorageEngine`] open, summed
@@ -783,6 +814,13 @@ pub const ALL_METRICS: &[&str] = &[
     QUERY_DEGRADED_PATH,
     INDEX_PARSES_TOTAL,
     INDEX_INTERVAL_PARSES_TOTAL,
+    // Global key→partition-offset cache (#2059)
+    KEY_CACHE_HITS,
+    KEY_CACHE_MISSES,
+    KEY_CACHE_EVICTIONS,
+    KEY_CACHE_INVALIDATIONS,
+    KEY_CACHE_RESIDENT_BYTES,
+    KEY_CACHE_CAPACITY_BYTES,
     STORAGE_OPEN_SSTABLES,
     STORAGE_OPEN_BYTES,
     STORAGE_OPEN_TABLES,
@@ -965,6 +1003,28 @@ mod tests {
         // Distinct from the full-parse counter — the two must never collapse to one
         // name (a lazy-open regression must stay visible on INDEX_PARSES_TOTAL).
         assert_ne!(INDEX_INTERVAL_PARSES_TOTAL, INDEX_PARSES_TOTAL);
+    }
+
+    #[test]
+    fn global_key_cache_counters_are_registered_and_namespaced() {
+        // Issue #2059 spec Requirement "Real, cqlite-namespaced observability
+        // counters": every key-cache counter/gauge name is in the catalog and rooted
+        // under `cqlite.`, with evictions and invalidations kept DISTINCT.
+        for name in [
+            KEY_CACHE_HITS,
+            KEY_CACHE_MISSES,
+            KEY_CACHE_EVICTIONS,
+            KEY_CACHE_INVALIDATIONS,
+            KEY_CACHE_RESIDENT_BYTES,
+            KEY_CACHE_CAPACITY_BYTES,
+        ] {
+            assert!(ALL_METRICS.contains(&name), "{name} must be catalogued");
+            assert!(name.starts_with("cqlite."), "{name} must be namespaced");
+        }
+        assert_ne!(
+            KEY_CACHE_EVICTIONS, KEY_CACHE_INVALIDATIONS,
+            "budget evictions and generation invalidations are distinct counters"
+        );
     }
 
     #[test]

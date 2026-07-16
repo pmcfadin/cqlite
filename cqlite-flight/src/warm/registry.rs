@@ -511,6 +511,13 @@ impl WarmTableRegistry {
                         freed = freed.saturating_add(r.footprint);
                         if !current_set.contains(&r.id) {
                             removed_count += 1;
+                            // Issue #2059 §C: a generation truly gone from disk —
+                            // drop its process-global key-cache entries. A
+                            // present-but-dead-path generation (#2352, re-opened
+                            // from the live dir with the SAME inode identity) is a
+                            // refresh, NOT a removal, so it is deliberately NOT
+                            // invalidated — its entries stay valid across the rebind.
+                            r.reader.invalidate_key_cache_entries();
                         }
                     }
                 }
@@ -519,6 +526,9 @@ impl WarmTableRegistry {
                 for r in prev.readers {
                     freed = freed.saturating_add(r.footprint);
                     removed_count += 1;
+                    // Issue #2059 §C: drop each dropped generation's global
+                    // key-cache entries.
+                    r.reader.invalidate_key_cache_entries();
                 }
             }
         }
@@ -608,6 +618,23 @@ impl WarmTableRegistry {
                 break;
             };
             if let Some(t) = inner.tables.get_mut(&vkey) {
+                // Issue #2059 fix round (review Medium): a CAPACITY eviction here is
+                // NOT a generation removal — the victim generation is still fully
+                // present on disk and will likely be re-read soon (memory pressure,
+                // not deletion, is precisely why it was evicted from the warm set).
+                // Deliberately do NOT invalidate the process-global key cache: doing
+                // so would drop shared cache entries exactly under the memory pressure
+                // where the cache is most valuable, and would pull cache state out
+                // from under any OTHER live reader of the same physical file (a
+                // co-resident `SSTableManager`, another warm entry, or this same
+                // generation re-opened on the next `do_get` miss). Correctness is
+                // preserved by the cache's fail-closed identity match + repopulation;
+                // we only release this warm entry's reader pin/retention and let the
+                // key cache's own byte-budget LRU reclaim entries on its own schedule
+                // if/when memory pressure requires it. GENUINE generation removal
+                // (compaction/drop, DDL change) still invalidates — see `refresh.rs`
+                // and the delta-rebuild removal branches above, which invalidate only
+                // disk-absent generations.
                 t.readers.retain(|r| r.id != vid);
                 if t.readers.is_empty() {
                     inner.tables.remove(&vkey);

@@ -91,7 +91,22 @@ fn da_data_db_path() -> Option<PathBuf> {
 }
 
 async fn open_reader(data_db: &Path) -> SSTableReader {
-    let config = Config::default();
+    // Disable the block cache so `build_key_offset_cache` hands each reader a
+    // `disabled()` no-op key→offset cache instead of the process-global one
+    // (issue #2059). The reader-level fan-out below simulates N distinct SSTable
+    // generations by opening N readers on the SAME fixture file, so they resolve
+    // to the SAME inode-stable generation identity and would otherwise SHARE the
+    // one global key cache: the first candidate's `might_contain_partition` would
+    // cache PRESENT_KEY's resolution under that shared identity and every later
+    // candidate would hit the cache, skipping BOTH the trie walk AND the Murmur3
+    // encode — collapsing the very per-candidate work this test measures (32 hashes
+    // on the old path, 32 walks on the new). Bypassing the cache restores each
+    // candidate's independent miss, isolating the C4 hash-hoist property (encode
+    // once, not once-per-candidate) from the orthogonal #2059 cache-sharing layer.
+    // The manager-path test (`manager_point_read_hashes_key_once`) deliberately
+    // keeps the cache enabled — it exercises the real end-to-end read path.
+    let mut config = Config::default();
+    config.memory.block_cache.enabled = false;
     let platform = std::sync::Arc::new(
         cqlite_core::platform::Platform::new(&config)
             .await
@@ -102,8 +117,9 @@ async fn open_reader(data_db: &Path) -> SSTableReader {
         .expect("SSTableReader::open must succeed for BTI Data.db with Partitions.db present")
 }
 
-/// Open `n` INDEPENDENT readers (fresh, empty C3 memos each) on the same fixture —
-/// a faithful stand-in for `n` distinct SSTable generations of the same table.
+/// Open `n` INDEPENDENT readers (fresh, empty C3 memos each; key cache bypassed) on
+/// the same fixture — a faithful stand-in for `n` distinct SSTable generations of
+/// the same table, each of which independently hashes/encodes the candidate key.
 async fn open_fanout(data_db: &Path, n: usize) -> Vec<SSTableReader> {
     let mut readers = Vec::with_capacity(n);
     for _ in 0..n {
