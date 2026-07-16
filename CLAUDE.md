@@ -189,6 +189,10 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   component `query-semantics-oracle`, test `query_semantics_oracle_parity.rs`) records the
   post-reconciliation result set of a canonical `SELECT` at a PINNED `now` (never wall-clock). Add
   the correct oracle for the property under test; correctness of `SELECT` output needs the semantic one.
+  The CQLite-vs-CQLite complement is the *point-vs-full differential lane* (issue #1918,
+  `cqlite-core/tests/point_vs_full_differential.rs`): it runs the same point-eligible query under
+  forced `CQLITE_READ_PATH=point` and `=full` and asserts identical rows/values/order at a PINNED
+  `now` — catching a divergence between the two read paths that a physical dump cannot see.
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate

@@ -403,6 +403,10 @@ mod tests {
                 Error::QueryExecution(_) => { /* Maps to QueryError */ }
                 Error::ResultTooLarge { .. } => { /* Maps to QueryError (issue #1582) */ }
                 Error::UnsupportedQuery(_) => { /* Maps to QueryError */ }
+                // Issue #1918: read-path forcing knob errors fall through to the
+                // base CqliteError like every other query-shaped variant below.
+                Error::InvalidReadPath { .. } => { /* Maps to CqliteError */ }
+                Error::ForcedReadPathUnavailable { .. } => { /* Maps to CqliteError */ }
                 Error::CqlParse(_) => { /* Maps to ParseError */ }
                 Error::Configuration(_) => { /* Maps to PyValueError */ }
                 Error::InvalidInput(_) => { /* Maps to PyValueError */ }
