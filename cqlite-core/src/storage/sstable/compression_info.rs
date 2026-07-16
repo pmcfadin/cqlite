@@ -215,6 +215,19 @@ impl CompressionInfo {
 
         // 5. writeInt(max_compressed_length) — present for all Cassandra 5.0 (version >= "na") files
         let max_compressed_length = read_u32(&mut cursor, "max_compressed_length")?;
+        // A zero max_compressed_length is corrupt authoritative metadata: every
+        // downstream incompressible/raw-chunk fallback (`compressed.len() >=
+        // max_compressed_length`) would treat EVERY chunk as raw, silently returning
+        // still-compressed bytes as plaintext instead of a typed error (fail-open). The
+        // CRC32 check cannot catch this — it is computed over the genuinely-on-disk
+        // bytes. Reject it ONCE here at parse time so no consumer (e.g.
+        // ChunkSource::chunk, decode_scan_chunk, the #1869/#2524 windows) can ever
+        // observe an unguarded zero (issues #28 no-heuristics, #2529).
+        if max_compressed_length == 0 {
+            return Err(Error::InvalidFormat(
+                "max_compressed_length cannot be zero".to_string(),
+            ));
+        }
 
         // 6. writeLong(data_length)
         let data_length = read_u64(&mut cursor, "data_length")?;
@@ -470,6 +483,42 @@ mod tests {
             i32::MAX as u32,
             "Bug #638: max_compressed_length field must be exposed for incompressible-chunk fallback"
         );
+    }
+
+    #[test]
+    fn test_parse_rejects_zero_max_compressed_length() {
+        // Issue #2529: a corrupt CompressionInfo.db with max_compressed_length == 0
+        // must be rejected AT PARSE TIME, not silently tolerated. Otherwise every
+        // downstream `compressed.len() >= max_compressed_length` fallback (e.g.
+        // ChunkSource::chunk, decode_scan_chunk, the #1869/#2524 windows) treats every
+        // chunk as raw/incompressible and returns still-compressed bytes as plaintext
+        // (fail-open) — the CRC32 check cannot catch it. Rejecting once here closes the
+        // whole class transitively (no-heuristics mandate, issue #28).
+        let blob = make_compression_info_blob(
+            "LZ4Compressor",
+            &[],
+            16384,
+            0, // corrupt: max_compressed_length == 0
+            32768,
+            &[0, 8200],
+        );
+
+        let result = CompressionInfo::parse(&blob);
+        assert!(
+            result.is_err(),
+            "parse must reject max_compressed_length == 0 as corrupt, got {:?}",
+            result
+        );
+        match result {
+            Err(Error::InvalidFormat(msg)) => {
+                assert!(
+                    msg.contains("max_compressed_length"),
+                    "error should name the offending field, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Error::InvalidFormat, got {:?}", other),
+        }
     }
 
     #[test]
