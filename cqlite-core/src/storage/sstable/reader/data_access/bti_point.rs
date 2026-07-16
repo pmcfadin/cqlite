@@ -347,16 +347,27 @@ impl SSTableReader {
 
             // Attempt to parse the FIRST partition at window[within..]. The parser
             // detects the next partition boundary / 0x01 end-of-partition marker and
-            // stops; we break after the first emitted entry. A complete partition
-            // means: parse returned Ok AND the closure fired.
+            // stops; we break after the first emitted entry. A COMPLETE partition
+            // means: parse returned Ok AND the closure emitted OUR queried partition
+            // key (see `emitted_our_key` below).
             let mut found: Option<ScanRow> = None;
-            let mut emitted = false;
+            let mut emitted_our_key = false;
             let parse_result = parser.parse_block_emit(
                 &window[within..],
                 schema_opt,
                 self,
                 |(tid, entry_key, entry_value)| {
-                    emitted = true;
+                    // Did the parser decode OUR queried partition key? This is the
+                    // authoritative "the partition was fully buffered and parsed
+                    // cleanly" signal: `bti_partition_key_matches` already confirmed
+                    // our key's raw bytes sit at `within`, so a COMPLETE parse must
+                    // re-decode exactly those bytes. A DIFFERENT decoded key means the
+                    // window tail was truncated mid-partition and the parser resynced
+                    // onto garbage (the chunk-straddle case handled below).
+                    let is_our_key = entry_key.as_bytes() == key.as_bytes();
+                    if is_our_key {
+                        emitted_our_key = true;
+                    }
                     // Verify BOTH the emitted table id is consistent with the
                     // queried table AND the parser-decoded partition key equals the
                     // queried key. The table check is resolution-mode-aware (issue
@@ -367,7 +378,7 @@ impl SSTableReader {
                     // never return another keyspace's same-named rows. A genuinely
                     // different table name is always rejected (issue #831).
                     if table_header_consistent_for_seek(&tid, table_id, fully_qualified_match)
-                        && entry_key.as_bytes() == key.as_bytes()
+                        && is_our_key
                     {
                         found = Some(entry_value);
                     }
@@ -376,14 +387,27 @@ impl SSTableReader {
             );
 
             match parse_result {
-                Ok(()) if emitted => {
-                    // A COMPLETE partition was decoded — accept it and stop.
+                Ok(()) if emitted_our_key => {
+                    // The partition at `within` parsed COMPLETELY: the parser decoded
+                    // our queried partition key from a fully-buffered window. Return
+                    // the row when the table guard also passed (`found`), else `None`
+                    // — a genuine soft-miss (schema-unavailable / benign table-guard
+                    // rejection) the caller resolves via `scan_for_key`.
                     return Ok(found);
                 }
                 _ => {
-                    // Either Err (truncated mid-partition) or the closure never
-                    // fired (no complete partition yet). For the chunk-targeted
-                    // path, pull the next chunk and retry; never accept a partial.
+                    // Reached when the parse did NOT decode our queried key: an Err
+                    // (truncated mid-partition), the closure never firing, OR a
+                    // partition emitted whose decoded key is NOT ours. We only parse
+                    // after `bti_partition_key_matches` authoritatively confirmed our
+                    // key's bytes sit at `within`, so a non-matching / failed parse is
+                    // the chunk-STRADDLE case (issue #1572): the partition body crosses
+                    // the chunk boundary and the parser produced a garbage entry from
+                    // the truncated window tail. Pull the next chunk and re-parse the
+                    // now-larger window rather than mistaking truncation for absence —
+                    // treating it as absence wrongly falls back to a whole-file
+                    // `scan_for_key` for a PRESENT key, violating #1572. Terminates at
+                    // EOF, where `chunk_source.chunk()` returns `None` -> `Ok(None)`.
                     if chunk_targeted {
                         continue;
                     }
