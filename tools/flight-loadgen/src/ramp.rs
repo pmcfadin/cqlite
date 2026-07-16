@@ -190,9 +190,19 @@ pub fn parse_ramp(s: &str) -> Result<Vec<usize>, String> {
 /// Parse a duration like `30s`, `500ms`, `2m` (default unit: seconds if bare).
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
+    // Validate the parsed number before constructing a Duration: negative, NaN,
+    // and infinite values all make Duration::from_secs_f64 panic, so reject them
+    // here and return the Err the signature promises instead.
     let parse_num = |num: &str| -> Result<f64, String> {
-        num.parse::<f64>()
-            .map_err(|_| format!("bad duration {s:?}"))
+        let n = num
+            .parse::<f64>()
+            .map_err(|_| format!("bad duration {s:?}"))?;
+        if !n.is_finite() || n < 0.0 {
+            return Err(format!(
+                "bad duration {s:?}: must be a finite, non-negative number"
+            ));
+        }
+        Ok(n)
     };
     if let Some(ms) = s.strip_suffix("ms") {
         Ok(Duration::from_secs_f64(parse_num(ms)? / 1000.0))
@@ -232,5 +242,17 @@ mod tests {
         assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_duration("5").unwrap(), Duration::from_secs(5));
         assert!(parse_duration("nope").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_non_finite_and_negative_without_panicking() {
+        // Regression: these previously reached Duration::from_secs_f64, which
+        // panics on negative/NaN/infinite input instead of returning Err.
+        for bad in ["-5s", "-1", "nan", "inf", "-inf", "infms", "-2m"] {
+            assert!(
+                parse_duration(bad).is_err(),
+                "expected Err for {bad:?}, got Ok"
+            );
+        }
     }
 }
