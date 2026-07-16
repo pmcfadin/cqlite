@@ -611,5 +611,33 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       already have DEBUG/tracing spans). Applies as precedent for any future
       "should the read path emit a default-posture INFO signal" question —
       the answer is no, unless the owner revisits this explicitly.
+  20. **2026-07-16 — Two `flow-closer` subagents launched concurrent full
+      gates despite both being explicitly told to check-and-wait for the
+      one-gate slot.** Closer A (#1676) hit a confirmed-flaky, confirmed-
+      diff-unrelated FAIL (`bti_absent_key_never_cached_rewalks_trie` /
+      TRIE_WALKS contamination — the same #1071 process-global-counter class
+      as lessons in #2428/#2470/#2500) and was told to re-run its full gate
+      for a clean PASS-of-record. Closer B (#1673) was dispatched with an
+      explicit instruction to `ps aux | grep agent-gate.sh` first and wait if
+      one was running. Both gates' top-level processes nonetheless started in
+      the SAME minute — the two closers' pre-launch checks raced each other
+      (B's check likely ran in the gap between A's decision-to-rerun and A's
+      process actually appearing in `ps`, or before the lead's resume message
+      reached A). Caught only because the lead's own standing 30-minute
+      self-check happened to `ps aux` at the right moment, not because either
+      closer detected the collision itself. **Standing lesson:** a
+      textual "check ps first" instruction to an independent subagent is a
+      TOCTOU race, not a lock — it narrows the collision window but does not
+      close it. When dispatching two closers back-to-back (or resuming one
+      that's about to relaunch a gate), the LEAD must verify no double-launch
+      actually occurred via a direct process check shortly after both are
+      in flight, not just trust that the instruction was followed. On
+      collision: kill the less-progressed gate (compare log line count /
+      last-component-reached, not just start time) and tell that closer to
+      re-check before relaunching — never kill the further-along one just
+      because it's "in the way." A real lock (e.g. a lockfile keyed to a
+      well-known path, checked+created atomically) would close this race
+      properly; the ad-hoc `ps`-and-hope pattern used all session is a
+      mitigation, not a fix, and should be revisited if this recurs.
 
 
