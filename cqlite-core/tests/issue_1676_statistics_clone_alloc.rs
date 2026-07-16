@@ -37,6 +37,19 @@
 //! proves both that the counting allocator works AND that a reintroduced
 //! per-partition clone would allocate ≥1 block/partition — i.e. this guard would
 //! then observe ≥1,000 allocations and fail, catching the regression.
+//!
+//! ## Single-test-binary invariant (why the strict `== 0` is not flaky)
+//!
+//! `CountingAlloc` is the process-global allocator and increments while `COUNTING`
+//! is on regardless of which thread allocates. This file therefore contains
+//! **exactly one `#[test]`**, so libtest spawns no sibling test threads that could
+//! allocate concurrently, and the measured window is a tight synchronous loop that
+//! spawns no threads and has no `.await` points — between the two `ALLOCS` loads
+//! only the measuring thread is live. Under that invariant the global counter
+//! observes only this thread's allocations, so the exact `== 0` assertion is
+//! deterministic (the same guarantee the precedent guard
+//! `tests/test_issue_1660_write_path_allocs.rs` relies on). Do NOT add a second
+//! `#[test]` to this binary without making the counter thread-scoped first.
 
 #![cfg(feature = "write-support")]
 
@@ -47,7 +60,9 @@ use cqlite_core::storage::sstable::writer::data_writer::DataWriter;
 use cqlite_core::storage::sstable::writer::stats_writer::StatisticsMetadata;
 
 /// Counts every allocation/reallocation (never deallocation) while `COUNTING` is
-/// on, so the window is scoped exactly to the operation under test.
+/// on, so the window is scoped exactly to the operation under test. Process-global:
+/// it counts on any thread, which is safe here only because this binary holds
+/// exactly one `#[test]` (see the module-level "Single-test-binary invariant").
 struct CountingAlloc;
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
