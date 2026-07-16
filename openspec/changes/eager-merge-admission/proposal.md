@@ -33,15 +33,25 @@ cannot reintroduce the #1594 hold-and-wait deadlock (there is exactly one thing 
 permit; the KWayMerger's producer threads are plain OS threads that never call `admit()`).
 
 Concretely:
-1. Acquire `scan_admission::admit().await` at the top of `merge_generations_for_read`
-   (`generation_merge.rs:238`) **and** its metadata sibling `merge_generations_for_read_with_metadata`
-   (`generation_merge.rs:319`) — both have the identical single-`spawn_blocking(KWayMerger)` shape and
-   are equally unadmitted today.
-2. Update the `scan_admission.rs` `# Scope` doc comment to reflect that the eager path is now admitted
-   (and fix its stale `storage/sstable/mod.rs` reference → `generation_merge.rs`).
-3. Add an eager-path admission bound + deadlock-freedom regression guard (a `scan-offload-probe`-gated
+1. Acquire `scan_admission::admit().await` at the top of ALL THREE eager helpers, each of which has the
+   identical single-`spawn_blocking(KWayMerger)` shape and was equally unadmitted:
+   - `merge_generations_for_read` — the materializing plain read (`scan` / range / point read).
+   - `seek_merge_generations_for_read` — the partition-SEEKING point-read merge (multi-candidate
+     `WHERE pk = ?`, via `scan_partition_clustering`); its sole call site is a top-level manager
+     operation, never nested under another admitted operation, so admitting it is deadlock-safe.
+   - `merge_generations_for_read_with_metadata` — the `WRITETIME`/`TTL` projection sibling.
+2. Cancellation safety: the two PURE-blocking helpers (`merge_generations_for_read`,
+   `seek_merge_generations_for_read`) MOVE the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure,
+   so a cancelled/dropped join holds the slot until the detached blocking work terminates (repeated
+   cancels can never exceed the bound). The metadata helper's permit must span an async per-reader loop
+   OUTSIDE `spawn_blocking`, so it stays an outer future guard with a documented weaker residual.
+3. Update the `scan_admission.rs` `# Scope` doc comment to reflect that the eager path is now admitted
+   (naming all three helpers + the cancellation shapes) and fix its stale `storage/sstable/mod.rs`
+   reference → `generation_merge.rs`.
+4. Add an eager-path admission bound + deadlock-freedom regression guard (a `scan-offload-probe`-gated
    test mirroring `issue_1594_scan_admission_bound.rs`, driving the eager branch via a multi-generation
-   fixture WITH a schema present).
+   fixture WITH a schema present), including end-to-end coverage of the metadata sibling and the seek
+   helper. The `scan-offload-guard` gate component runs the new test target.
 
 ## Non-goals
 - **Not** making the core admission semaphore operator-tunable. It stays auto-sized from

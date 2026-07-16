@@ -4,15 +4,17 @@
 
 ### Requirement: The eager multi-generation merge path acquires a scan-admission permit
 
-The eager path SHALL acquire exactly one operation-level `ScanAdmissionPermit` from the same
-process-wide admission semaphore the windowed/lazy scan path uses (#1594), covering both
-`merge_generations_for_read` and `merge_generations_for_read_with_metadata`
-(`cqlite-core/src/storage/sstable/generation_merge.rs`). The permit SHALL be acquired before the
-`KWayMerger` `spawn_blocking` work and held for the full operation (across the join `.await`), and
-SHALL be released on every exit path — success, merge error, and cancellation — via the RAII `Drop` on
-`ScanAdmissionPermit`. Acquisition SHALL be a single, top-level, once-only `admit()` with no nested
-permit acquisition inside the merge (the KWayMerger's producer threads do not acquire admission
-permits).
+Each of the THREE eager multi-generation merge helpers SHALL acquire exactly one operation-level
+`ScanAdmissionPermit` from the same process-wide admission semaphore the windowed/lazy scan path uses
+(#1594). The three helpers, in `cqlite-core/src/storage/sstable/generation_merge.rs`, are
+`merge_generations_for_read` (the materializing plain read), `seek_merge_generations_for_read` (the
+partition-seeking point read), and `merge_generations_for_read_with_metadata` (the WRITETIME/TTL
+sibling). The permit SHALL be acquired before the `KWayMerger` `spawn_blocking` work and
+held for the full operation (across the join `.await`), and SHALL be released on every exit path —
+success, merge error, and cancellation — via the RAII `Drop` on `ScanAdmissionPermit`. Acquisition SHALL
+be a single, top-level, once-only `admit()` with no nested permit acquisition inside the merge (the
+KWayMerger's producer threads do not acquire admission permits), and the seek helper's sole call site
+SHALL be a top-level manager operation that holds no outer permit (no cross-path hold-and-wait).
 
 #### Scenario: Concurrent eager multi-gen scans are bounded by the admission limit
 
@@ -26,6 +28,14 @@ permits).
   never-acquiring path would leave `max_in_flight == 0`)
 - **AND** after all reads complete, `current_in_flight == 0` — every permit was released across the
   `spawn_blocking` join (no leak on the success path).
+
+#### Scenario: The metadata sibling is bounded end-to-end
+
+- **WHEN** `N > LIMIT` concurrent `scan_with_cell_metadata` reads (WRITETIME/TTL projection) are issued
+  against the multi-generation + schema fixture, so each routes through
+  `merge_generations_for_read_with_metadata`
+- **THEN** `max_in_flight >= 1` (the metadata acquire is wired, non-vacuous), `max_in_flight <= LIMIT`
+  (the bound covers the metadata path), and `current_in_flight == 0` after (RAII release).
 
 #### Scenario: A permit is released when the eager merge errors and falls back
 
@@ -55,6 +65,25 @@ Admitting the eager path under the SAME semaphore as the windowed/lazy path SHAL
 - **AND** the observed `max_in_flight <= CAP` throughout (the bound held while all N eventually
   completed).
 
+### Requirement: The pure-blocking eager helpers hold the permit until the detached blocking work ends
+
+The pure-blocking eager helpers SHALL move the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure
+so that, on cancellation (the awaiting future dropped), the admission slot is held until the detached
+blocking work actually terminates rather than released while the KWayMerger producer threads keep
+running. This applies to `merge_generations_for_read` and `seek_merge_generations_for_read`. The
+metadata helper `merge_generations_for_read_with_metadata` MAY hold the permit as an
+outer future guard instead — because its permit must span an async per-reader loop outside
+`spawn_blocking` — and its consequently weaker cancellation property (immediate release while a detached
+in-flight merge runs permit-free) SHALL be documented in the module scope doc, not silently claimed as
+equivalent.
+
+#### Scenario: A pure-blocking helper's permit is captured by the blocking closure, not the outer future
+
+- **WHEN** the source of `merge_generations_for_read` / `seek_merge_generations_for_read` is inspected
+- **THEN** the `ScanAdmissionPermit` is moved into the `spawn_blocking` closure (bound to a `let` inside
+  it), so a dropped `JoinHandle` cannot release the permit before the detached blocking work ends
+- **AND** the metadata helper's scope-doc comment states its outer-guard cancellation residual honestly.
+
 ### Requirement: The admission scope documentation reflects eager-path coverage
 
 The `# Scope` doc comment on the admission module SHALL state that the eager multi-generation merge
@@ -67,6 +96,9 @@ file-location reference in that doc SHALL point at the eager path's actual locat
 
 - **WHEN** the `scan_admission` module `# Scope` doc comment is read
 - **THEN** it does not state that `merge_generations_for_read` is outside admission coverage
+- **AND** it names all three eager helpers (`merge_generations_for_read`,
+  `seek_merge_generations_for_read`, `merge_generations_for_read_with_metadata`) as admitted
 - **AND** it correctly locates the eager path in `generation_merge.rs`
 - **AND** it documents the known limitation that the shared bound limits eager *operation* concurrency,
-  not the eager path's per-operation producer-thread footprint.
+  not the eager path's per-operation producer-thread footprint, and the metadata helper's weaker
+  cancellation residual.

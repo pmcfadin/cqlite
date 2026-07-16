@@ -9,11 +9,14 @@ reached through a free function `admit() -> ScanAdmissionPermit` (RAII; releases
 operation** (`ScanAdmission::Acquire`) and mark cross-generation sub-scans `Exempt` so a fan-out merge
 holds exactly one permit (`mod.rs:2226-2242`, `sequential.rs:377-380`).
 
-The eager path — `merge_generations_for_read` (`generation_merge.rs:238-297`) and its metadata sibling
-`merge_generations_for_read_with_metadata` (`generation_merge.rs:319`) — was explicitly carved out
-(scope doc `scan_admission.rs:51-58`). It is chosen when `reader_list.len() > 1` AND a schema is present
-(`mod.rs:1135`, `1646`, `1482`, `1853`), and drains a `KWayMerger` in a **single** `spawn_blocking`
-(`generation_merge.rs:255`), awaiting the join at line 287.
+The eager path is THREE helpers in `generation_merge.rs`, each explicitly carved out (scope doc
+`scan_admission.rs:51-58`), each chosen when `reader_list.len() > 1` (or `candidates.len() > 1` for the
+point read) AND a schema is present, and each draining a `KWayMerger` in a **single** `spawn_blocking`:
+
+- `merge_generations_for_read` — the materializing plain read (`mod.rs:1135`, `1646`).
+- `seek_merge_generations_for_read` — the partition-SEEKING point-read merge (`mod.rs:1650`, reached
+  via `scan_partition_clustering`); `#[cfg(all(write-support, not(tombstones)))]`.
+- `merge_generations_for_read_with_metadata` — the WRITETIME/TTL sibling (`mod.rs:1482`, `1854`).
 
 ## Goals / constraints
 - Bound concurrent eager multi-gen operations under the SAME operation-concurrency semaphore as the
@@ -61,11 +64,27 @@ sub-scans → no permit ever frees. The eager path has **none of that topology**
 
 Therefore one top-level, once-only `admit()` with no nested acquire is deadlock-safe.
 
-## Decision 3 — scope: include the metadata sibling
-**Chosen: yes.** `merge_generations_for_read_with_metadata` (`generation_merge.rs:319`, called at
-`mod.rs:1482`, `1853`) has the identical single-`spawn_blocking(KWayMerger)` shape and is equally
-unadmitted. Fixing only the non-metadata variant would leave a twin gap that silently defeats the bound
-on the metadata read path. Both get the same one-line acquire.
+## Decision 3 — scope: ALL THREE eager helpers
+**Chosen: admit all three.** Beyond `merge_generations_for_read`, both
+`merge_generations_for_read_with_metadata` (the WRITETIME/TTL sibling) and
+`seek_merge_generations_for_read` (the partition-SEEKING point read) have the identical
+single-`spawn_blocking(KWayMerger)` shape and were equally unadmitted. Fixing only one would leave a
+twin/triplet gap that silently defeats the bound on the metadata and point-read paths. All three get the
+same operation-level acquire. `seek_merge_generations_for_read`'s only call site
+(`SSTableManager::scan_partition_clustering`, `mod.rs:1650`) is a top-level manager operation that holds
+no outer permit, so admitting it introduces no cross-path hold-and-wait (verified: no nested acquire).
+
+## Decision 4 — cancellation: hold the permit until the detached blocking work terminates
+Dropping a `spawn_blocking` `JoinHandle` DETACHES the closure — the KWayMerger producer OS threads keep
+running — while a permit guard bound to the OUTER future would already be released, so repeated cancels
+could exceed the bound. **Chosen: for the two PURE-blocking helpers (`merge_generations_for_read`,
+`seek_merge_generations_for_read`) MOVE the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure**
+(`Send + 'static`), so the permit is released only when the detached blocking work actually finishes.
+The METADATA helper cannot do this — its permit must span the async per-reader `scan_with_cell_metadata`
+loop that runs OUTSIDE `spawn_blocking` — so it keeps the outer future guard. That is an honestly weaker
+cancellation property (a cancelled metadata read releases immediately while a detached in-flight merge's
+producer threads run permit-free), documented in the scope doc + Known-limitation rather than
+over-engineered away.
 
 ## Known limitation (documented, not solved)
 The shared semaphore bounds *operation concurrency*. The eager path's real resource footprint is
@@ -74,6 +93,12 @@ path). So `cap` admitted eager operations can still spawn up to `cap × M` produ
 bound limits how many eager *operations* run at once, not their aggregate thread count. This matches
 #1594's stated semantic ("operation concurrency, not total blocking threads") and is called out in the
 scope doc; sizing the eager path's thread footprint separately is explicitly a Non-goal / future issue.
+
+Additionally, the METADATA helper (`merge_generations_for_read_with_metadata`) has a weaker CANCELLATION
+property than the two pure-blocking helpers (Decision 4): its permit is an outer future guard, so on
+cancellation it releases immediately while a detached in-flight merge's producer threads run permit-free.
+Repeated mid-merge cancels of the metadata path can transiently exceed the bound. Documented, not solved
+— the two-phase (async TTL scan + blocking merge) shape cannot move the permit into a single closure.
 
 ## Test / verification plan
 - **Bound guard** (new `tests/issue_2063_eager_merge_admission_bound.rs`, `scan-offload-probe`-gated):
