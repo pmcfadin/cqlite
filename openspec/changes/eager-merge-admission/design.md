@@ -77,14 +77,15 @@ no outer permit, so admitting it introduces no cross-path hold-and-wait (verifie
 ## Decision 4 — cancellation: hold the permit until the detached blocking work terminates
 Dropping a `spawn_blocking` `JoinHandle` DETACHES the closure — the KWayMerger producer OS threads keep
 running — while a permit guard bound to the OUTER future would already be released, so repeated cancels
-could exceed the bound. **Chosen: for the two PURE-blocking helpers (`merge_generations_for_read`,
-`seek_merge_generations_for_read`) MOVE the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure**
-(`Send + 'static`), so the permit is released only when the detached blocking work actually finishes.
-The METADATA helper cannot do this — its permit must span the async per-reader `scan_with_cell_metadata`
-loop that runs OUTSIDE `spawn_blocking` — so it keeps the outer future guard. That is an honestly weaker
-cancellation property (a cancelled metadata read releases immediately while a detached in-flight merge's
-producer threads run permit-free), documented in the scope doc + Known-limitation rather than
-over-engineered away.
+could exceed the bound. **Chosen: ALL THREE helpers hold the permit until the detached `spawn_blocking`
+merge TERMINATES.** The two PURE-blocking helpers (`merge_generations_for_read`,
+`seek_merge_generations_for_read`) MOVE the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure
+directly (`Send + 'static`). The METADATA helper holds the permit as an OUTER future guard across its
+async per-reader `scan_with_cell_metadata` loop — where cancellation is clean because no detached
+blocking work exists yet, so an early release is harmless — THEN MOVES the permit into the
+`spawn_blocking` merge closure for the detached phase. No phase both runs detached blocking work AND has
+already released the permit, so repeated cancels can never exceed the bound. The three helpers are
+uniformly cancellation-safe.
 
 ## Known limitation (documented, not solved)
 The shared semaphore bounds *operation concurrency*. The eager path's real resource footprint is
@@ -93,12 +94,6 @@ path). So `cap` admitted eager operations can still spawn up to `cap × M` produ
 bound limits how many eager *operations* run at once, not their aggregate thread count. This matches
 #1594's stated semantic ("operation concurrency, not total blocking threads") and is called out in the
 scope doc; sizing the eager path's thread footprint separately is explicitly a Non-goal / future issue.
-
-Additionally, the METADATA helper (`merge_generations_for_read_with_metadata`) has a weaker CANCELLATION
-property than the two pure-blocking helpers (Decision 4): its permit is an outer future guard, so on
-cancellation it releases immediately while a detached in-flight merge's producer threads run permit-free.
-Repeated mid-merge cancels of the metadata path can transiently exceed the bound. Documented, not solved
-— the two-phase (async TTL scan + blocking merge) shape cannot move the permit into a single closure.
 
 ## Test / verification plan
 - **Bound guard** (new `tests/issue_2063_eager_merge_admission_bound.rs`, `scan-offload-probe`-gated):

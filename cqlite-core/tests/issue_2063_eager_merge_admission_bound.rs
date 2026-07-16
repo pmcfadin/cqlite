@@ -72,6 +72,12 @@ const CONCURRENT_SCANS: usize = 6;
 /// Partitions written per generation — enough rows that each materializing scan
 /// does real work and concurrent scans can overlap under the shared semaphore.
 const PARTITIONS_PER_GEN: i32 = 64;
+/// Partition key targeted by the seek/point-read test. It is written into BOTH
+/// generations (see `build_multigen_fixture`) so a `WHERE id = SEEK_TARGET_ID`
+/// point read genuinely resolves to >1 candidate generation and takes the
+/// multi-candidate `seek_merge_generations_for_read` branch (not a single-candidate
+/// permit-free seek).
+const SEEK_TARGET_ID: i32 = 0;
 
 fn make_schema() -> TableSchema {
     TableSchema {
@@ -141,12 +147,18 @@ async fn build_multigen_fixture(schema: &TableSchema) -> (TempDir, std::path::Pa
     }
     engine.flush().await.expect("flush 1").expect("gen1");
 
-    // Gen 2 (ts=200): odd ids (distinct partitions, so both generations contribute).
+    // Gen 2 (ts=200): odd ids (distinct partitions, so both generations contribute)
+    // PLUS a re-write of the seek target (an even id already in gen 1) so that key is
+    // present in BOTH generations — a `WHERE id = SEEK_TARGET_ID` point read then
+    // resolves to >1 candidate and drives the multi-candidate seek merge branch.
     for id in (1..PARTITIONS_PER_GEN).step_by(2) {
         engine
             .write(write_name(id, &format!("g2-{id}"), 200))
             .expect("write gen2");
     }
+    engine
+        .write(write_name(SEEK_TARGET_ID, &format!("g2-{SEEK_TARGET_ID}"), 200))
+        .expect("write seek target into gen2");
     engine.flush().await.expect("flush 2").expect("gen2");
 
     engine.close().await.expect("close engine");
@@ -406,15 +418,25 @@ async fn concurrent_eager_seek_point_reads_never_exceed_admission_limit() {
     let schema = Arc::new(schema);
     let table_id = CqlTableId::from(format!("{KS}.{TBL}").as_str());
 
+    // The fixture wrote SEEK_TARGET_ID into BOTH generations, so the point-read
+    // resolves to 2 candidate generations and the multi-candidate seek merge branch is
+    // genuinely taken (not a single-candidate permit-free seek). Confirm the fixture is
+    // a 2-generation directory, as the other cases do.
+    let sstable_dir = data_dir.join(KS).join(TBL);
+    assert_eq!(
+        count_data_files(&sstable_dir),
+        2,
+        "seek fixture MUST hold 2 generations so `WHERE id = SEEK_TARGET_ID` (present \
+         in both) resolves to >1 candidate and drives `seek_merge_generations_for_read`"
+    );
+
     admission::set_test_limit(LIMIT);
 
-    // Point-read the SAME partition key concurrently. To make the seeking merge take
-    // the multi-candidate (>1 generation) branch, target a key present in BOTH
-    // generations is not required — the prune only needs >1 candidate to admit it;
-    // we target an even id (written in gen 1) but both generations' bloom/BTI are
-    // consulted, so `candidates.len() > 1` drives `seek_merge_generations_for_read`.
-    let pk_bytes =
-        encode_partition_key_columns(&[Value::Integer(0)], &schema).expect("encode partition key");
+    // Point-read the SAME partition key concurrently. SEEK_TARGET_ID is present in BOTH
+    // generations, so both blooms report it present → `candidates.len() > 1` → the
+    // multi-candidate `seek_merge_generations_for_read` branch runs (and admits).
+    let pk_bytes = encode_partition_key_columns(&[Value::Integer(SEEK_TARGET_ID)], &schema)
+        .expect("encode partition key");
     let pk = Arc::new(pk_bytes);
 
     let mut handles = Vec::with_capacity(CONCURRENT_SCANS);
@@ -441,10 +463,15 @@ async fn concurrent_eager_seek_point_reads_never_exceed_admission_limit() {
     let residual = admission::current_in_flight();
     admission::clear_test_limit();
 
-    // The point read may or may not route through the multi-candidate seek merge
-    // depending on prune outcome; if it did NOT admit at all we cannot assert wiring
-    // here (the single-candidate seek path is permit-free by design). Only assert the
-    // SAFETY bound + release, which must hold unconditionally.
+    // The target key is present in BOTH generations, so the point read routes through
+    // the multi-candidate `seek_merge_generations_for_read` branch, which admits.
+    // Non-vacuous: a never-admitting path leaves `max_admitted == 0`.
+    assert!(
+        max_admitted >= 1,
+        "Issue #2063: seek eager path never admitted — the acquire in \
+         `seek_merge_generations_for_read` is not wired (or the fixture failed to place \
+         the target key in >1 candidate generation)"
+    );
     assert!(
         max_admitted <= LIMIT,
         "Issue #2063 REGRESSION: {max_admitted} eager seek merge operations were admitted \

@@ -12,9 +12,10 @@
       site (`scan_partition_clustering`, `mod.rs:1650`) is a top-level manager operation holding no
       outer permit, so admission introduces no cross-path hold-and-wait.
       *Surface exercised:* the seeking merge branch at `mod.rs:1650`.
-- [x] 1.3 Apply the acquire at the top of `merge_generations_for_read_with_metadata`. This helper's
-      permit must span the async per-reader `scan_with_cell_metadata` loop OUTSIDE `spawn_blocking`, so
-      it stays an OUTER future guard; document the consequently weaker cancellation residual honestly.
+- [x] 1.3 Apply the acquire at the top of `merge_generations_for_read_with_metadata`. Hold the permit as
+      an OUTER future guard across the async per-reader `scan_with_cell_metadata` loop (cancellation
+      there is clean — no detached blocking work yet), THEN move it into the `spawn_blocking` merge
+      closure for the detached phase, so it is uniformly cancellation-safe with the other two helpers.
       *Surface exercised:* the metadata eager branch at `mod.rs:1482`, `1854`.
 - [x] 1.4 Confirm no nested `admit()` is introduced (the KWayMerger producer threads must not acquire
       permits) and no `unwrap`/`expect` added to library code.
@@ -23,7 +24,7 @@
 - [x] 2.1 Rewrite the `# Scope` doc comment in `scan_admission.rs`: state the eager path is now
       admitted, NAME all three helpers, remove the out-of-scope claim, fix the file reference to
       `generation_merge.rs`, and document the known limitations (shared bound = eager *operation*
-      concurrency, not the per-op producer-thread footprint; metadata helper's weaker cancellation).
+      concurrency, not the per-op producer-thread footprint; all three helpers uniformly cancel-safe).
 
 ## 3. Regression guard (admission bound + deadlock-freedom for the eager path)
 - [x] 3.1 Add `cqlite-core/tests/issue_2063_eager_merge_admission_bound.rs`, `scan-offload-probe`-gated,

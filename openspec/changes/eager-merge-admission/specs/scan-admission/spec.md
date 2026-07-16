@@ -65,24 +65,29 @@ Admitting the eager path under the SAME semaphore as the windowed/lazy path SHAL
 - **AND** the observed `max_in_flight <= CAP` throughout (the bound held while all N eventually
   completed).
 
-### Requirement: The pure-blocking eager helpers hold the permit until the detached blocking work ends
+### Requirement: All eager helpers hold the permit until the detached blocking work ends
 
-The pure-blocking eager helpers SHALL move the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure
-so that, on cancellation (the awaiting future dropped), the admission slot is held until the detached
-blocking work actually terminates rather than released while the KWayMerger producer threads keep
-running. This applies to `merge_generations_for_read` and `seek_merge_generations_for_read`. The
-metadata helper `merge_generations_for_read_with_metadata` MAY hold the permit as an
-outer future guard instead — because its permit must span an async per-reader loop outside
-`spawn_blocking` — and its consequently weaker cancellation property (immediate release while a detached
-in-flight merge runs permit-free) SHALL be documented in the module scope doc, not silently claimed as
-equivalent.
+Every eager helper SHALL hold the `ScanAdmissionPermit` until the detached `spawn_blocking` merge work
+actually terminates, so that on cancellation (the awaiting future dropped) the admission slot is not
+released while the KWayMerger producer threads keep running. The two pure-blocking helpers
+(`merge_generations_for_read`, `seek_merge_generations_for_read`) SHALL move the permit INTO the
+`spawn_blocking` closure directly. The metadata helper `merge_generations_for_read_with_metadata` SHALL
+hold the permit as an outer future guard across its async per-reader `scan_with_cell_metadata` loop —
+where cancellation is clean because no detached blocking work exists yet, so early release is harmless —
+and SHALL THEN move the permit into its `spawn_blocking` merge closure for the detached phase. No phase
+both runs detached blocking work AND has already released the permit; the three helpers are uniformly
+cancellation-safe.
 
-#### Scenario: A pure-blocking helper's permit is captured by the blocking closure, not the outer future
+#### Scenario: Every eager helper's permit is held into the blocking closure, not released before it ends
 
-- **WHEN** the source of `merge_generations_for_read` / `seek_merge_generations_for_read` is inspected
-- **THEN** the `ScanAdmissionPermit` is moved into the `spawn_blocking` closure (bound to a `let` inside
-  it), so a dropped `JoinHandle` cannot release the permit before the detached blocking work ends
-- **AND** the metadata helper's scope-doc comment states its outer-guard cancellation residual honestly.
+- **WHEN** the source of `merge_generations_for_read` / `seek_merge_generations_for_read` /
+  `merge_generations_for_read_with_metadata` is inspected
+- **THEN** the `ScanAdmissionPermit` is moved into each helper's `spawn_blocking` closure (bound to a
+  `let` inside it), so a dropped `JoinHandle` cannot release the permit before the detached blocking
+  work ends
+- **AND** the metadata helper additionally holds the permit as an outer future guard across its async
+  per-reader loop before moving it into the closure, and the module scope doc states that all three
+  helpers are uniformly cancellation-safe.
 
 ### Requirement: The admission scope documentation reflects eager-path coverage
 
@@ -100,5 +105,5 @@ file-location reference in that doc SHALL point at the eager path's actual locat
   `seek_merge_generations_for_read`, `merge_generations_for_read_with_metadata`) as admitted
 - **AND** it correctly locates the eager path in `generation_merge.rs`
 - **AND** it documents the known limitation that the shared bound limits eager *operation* concurrency,
-  not the eager path's per-operation producer-thread footprint, and the metadata helper's weaker
-  cancellation residual.
+  not the eager path's per-operation producer-thread footprint, and states that all three eager helpers
+  are uniformly cancellation-safe.

@@ -40,11 +40,12 @@ Concretely:
      `WHERE pk = ?`, via `scan_partition_clustering`); its sole call site is a top-level manager
      operation, never nested under another admitted operation, so admitting it is deadlock-safe.
    - `merge_generations_for_read_with_metadata` — the `WRITETIME`/`TTL` projection sibling.
-2. Cancellation safety: the two PURE-blocking helpers (`merge_generations_for_read`,
-   `seek_merge_generations_for_read`) MOVE the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure,
-   so a cancelled/dropped join holds the slot until the detached blocking work terminates (repeated
-   cancels can never exceed the bound). The metadata helper's permit must span an async per-reader loop
-   OUTSIDE `spawn_blocking`, so it stays an outer future guard with a documented weaker residual.
+2. Cancellation safety: ALL THREE helpers hold the permit until the detached `spawn_blocking` merge
+   terminates. The two PURE-blocking helpers (`merge_generations_for_read`,
+   `seek_merge_generations_for_read`) MOVE the `OwnedSemaphorePermit` INTO the `spawn_blocking` closure
+   directly. The metadata helper holds it as an outer future guard across its async per-reader loop
+   (cancellation there is clean — no detached blocking work yet), THEN MOVES it into the `spawn_blocking`
+   merge closure for the detached phase. Repeated cancels can never exceed the bound on any helper.
 3. Update the `scan_admission.rs` `# Scope` doc comment to reflect that the eager path is now admitted
    (naming all three helpers + the cancellation shapes) and fix its stale `storage/sstable/mod.rs`
    reference → `generation_merge.rs`.

@@ -70,15 +70,16 @@
 //! each is a single top-level once-only `admit()` with no nested acquisition (the
 //! KWayMerger's producer OS threads never call [`admit`]).
 //!
-//! CANCELLATION (issue #2063): the two PURE-blocking helpers
-//! (`merge_generations_for_read`, `seek_merge_generations_for_read`) MOVE the permit
-//! INTO the `spawn_blocking` closure, so a cancelled/dropped join holds the slot until
-//! the detached blocking work actually terminates — repeated cancels can never exceed
-//! the bound. The METADATA helper cannot (its permit must span an async per-reader
-//! `scan_with_cell_metadata` loop OUTSIDE `spawn_blocking`), so it holds the permit as
-//! an outer future guard; on cancellation it releases immediately while a detached
-//! in-flight merge keeps its producer threads running permit-free — a weaker property
-//! (repeated mid-merge cancels of the metadata path can transiently exceed the bound).
+//! CANCELLATION (issue #2063): ALL THREE helpers hold the permit until the detached
+//! `spawn_blocking` merge TERMINATES, so no phase both runs detached blocking work AND
+//! has already released the permit — repeated cancels can never exceed the bound. The
+//! two PURE-blocking helpers (`merge_generations_for_read`,
+//! `seek_merge_generations_for_read`) MOVE the permit INTO the `spawn_blocking` closure
+//! directly. The METADATA helper holds the permit as an OUTER future guard across its
+//! async per-reader `scan_with_cell_metadata` loop (cancellation there is clean — no
+//! detached blocking work exists yet, so early release is harmless), THEN MOVES it into
+//! the `spawn_blocking` merge closure for the detached phase. The three helpers are
+//! therefore UNIFORMLY cancellation-safe.
 //!
 //! KNOWN LIMITATION (documented, not solved here): the shared semaphore bounds
 //! eager *operation* concurrency, NOT the eager path's per-operation resource
