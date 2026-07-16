@@ -1144,11 +1144,19 @@ impl Value {
 ///   always copied into a tight standalone `Bytes`, regardless of `capacity()`.
 ///   This guarantees no small value pins a large parent no matter WHERE it sits
 ///   in the original chunk (closes both the low-offset and high-offset cases).
-/// - **Large payloads (`len() > RETENTION_SLACK`) — best-effort**: kept unless
-///   the ahead-capacity heuristic `capacity() > len() + RETENTION_SLACK` fires.
-///   A full copy of a large value is expensive, and any leading-offset waste
-///   the heuristic cannot see is proportionally small relative to the payload's
-///   own size, so the imperfect signal is an acceptable tradeoff here.
+/// - **Large payloads (`len() > RETENTION_SLACK`) — best-effort, BOUNDED not
+///   proportional**: kept unless the ahead-capacity heuristic `capacity() >
+///   len() + RETENTION_SLACK` fires. This heuristic is blind to leading-offset
+///   waste: a large payload sole-owned near the END of its backing chunk can
+///   still pin the WHOLE chunk (the leftover waste can be many multiples of the
+///   payload's own size, not merely "proportionally small" — e.g. a 5 KiB
+///   payload at offset 59 KiB of a 64 KiB chunk still pins the full 64 KiB).
+///   The residual leak is nonetheless BOUNDED — at most one chunk's worth of
+///   retention per affected large value, never unbounded growth — and a full
+///   copy of a large value is comparatively expensive, so this is accepted as
+///   a known, tracked limitation (issue #2597) rather than fixed here; closing
+///   it fully needs provenance tracking (whether a `Bytes` originated from a
+///   window borrow) that the current `bytes` API alone cannot express.
 pub const RETENTION_SLACK: usize = 4 * 1024;
 
 impl Value {
