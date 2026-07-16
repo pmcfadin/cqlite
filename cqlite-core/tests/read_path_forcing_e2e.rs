@@ -2,9 +2,8 @@
 //!
 //! These tests exercise the knob through the REAL public read surface
 //! (`Database::execute`, config-wired via `QueryConfig::forced_read_path`) — not a
-//! helper-only unit test — and assert the observable contract via the public
-//! `AccessPath` probe (`cqlite_core::query::access_path::last`) and the public
-//! `Error` surface:
+//! helper-only unit test — and assert the observable contract via the per-query
+//! `QueryResult.metadata.access_path` and the public `Error` surface:
 //!
 //!   * forced `full` on a targeted query records `FallbackFullScan{ForcedFullScan}`
 //!     and returns the SAME rows as `auto`;
@@ -12,9 +11,10 @@
 //!     closed with `Error::ForcedReadPathUnavailable`, returning NO rows;
 //!   * forced `point` on a fully-constrained `WHERE pk = ?` runs the targeted path.
 //!
-//! Cases run sequentially in ONE test each (the `AccessPath` probe is
-//! process-global), against a committed INT-partition-key fixture. SKIP-loud when
-//! the fixture is absent, fail-closed under `CQLITE_REQUIRE_FIXTURES=1`.
+//! Assertions read the PER-QUERY `metadata.access_path` (not the process-global
+//! `access_path::last()` probe), so the three `#[tokio::test]`s are safe to run in
+//! parallel. Against a committed INT-partition-key fixture; SKIP-loud when the
+//! fixture is absent, fail-closed under `CQLITE_REQUIRE_FIXTURES=1`.
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
 use std::collections::BTreeMap;
