@@ -165,11 +165,15 @@ fn parse_value_with_comparator_at_depth(
             }
         }
         ComparatorType::Text => {
-            let text = String::from_utf8(value_data.to_vec())
+            std::str::from_utf8(value_data)
                 .map_err(|_| Error::corruption("Invalid UTF-8 in text value"))?;
-            Ok(Value::Text(text.into()))
+            Ok(Value::Text(
+                crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+            ))
         }
-        ComparatorType::Blob => Ok(Value::blob(value_data.to_vec())),
+        ComparatorType::Blob => Ok(Value::Blob(
+            crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+        )),
         ComparatorType::Timestamp => {
             if value_data.len() == 8 {
                 let val = i64::from_be_bytes([
@@ -213,7 +217,9 @@ fn parse_value_with_comparator_at_depth(
                 Err(Error::corruption("Invalid DATE value length"))
             }
         }
-        ComparatorType::Varint => Ok(Value::varint(value_data.to_vec())),
+        ComparatorType::Varint => Ok(Value::Varint(
+            crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+        )),
         ComparatorType::Decimal => {
             // Decimal format: 4-byte scale + variable-length unscaled value
             if value_data.len() < 4 {

@@ -136,15 +136,20 @@ impl V5CompressedLegacyParser {
             | "org.apache.cassandra.db.marshal.utf8type"
             | "org.apache.cassandra.db.marshal.asciitype"
             | "org.apache.cassandra.db.marshal.varchartype" => {
-                let text = String::from_utf8(data.to_vec()).map_err(|e| {
+                // Issue #1644 (K5 stage 2): validate in place, borrow if possible.
+                std::str::from_utf8(data).map_err(|e| {
                     Error::corruption(format!(
                         "Frozen element '{}': invalid UTF-8 in text value: {}",
                         column_name, e
                     ))
                 })?;
-                Ok(Value::Text(text.into()))
+                Ok(Value::Text(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
-            "blob" | "bytes" => Ok(Value::blob(data.to_vec())),
+            "blob" | "bytes" => Ok(Value::Blob(
+                crate::storage::sstable::reader::value_borrow::borrow_active(data),
+            )),
             "int" => {
                 if data.len() < 4 {
                     return Err(Error::corruption(format!(
@@ -321,7 +326,9 @@ impl V5CompressedLegacyParser {
                     nanos,
                 })
             }
-            "varint" => Ok(Value::varint(data.to_vec())),
+            "varint" => Ok(Value::Varint(
+                crate::storage::sstable::reader::value_borrow::borrow_active(data),
+            )),
             "decimal" => {
                 if data.len() < 4 {
                     return Err(Error::corruption(format!(
@@ -334,7 +341,9 @@ impl V5CompressedLegacyParser {
                 let unscaled = data[4..].to_vec();
                 Ok(Value::Decimal { scale, unscaled })
             }
-            "inet" => Ok(Value::inet(data.to_vec())),
+            "inet" => Ok(Value::Inet(
+                crate::storage::sstable::reader::value_borrow::borrow_active(data),
+            )),
             // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>).
             //
             // Issue #1081: the guards accept BOTH the CQL short form (`list<...>`)
@@ -477,7 +486,9 @@ impl V5CompressedLegacyParser {
                     column_name,
                     data.len()
                 );
-                Ok(Value::blob(data.to_vec()))
+                Ok(Value::Blob(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
         }
     }

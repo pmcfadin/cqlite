@@ -1511,9 +1511,11 @@ impl V5CompressedLegacyParser {
             | "text"
             | "varchar"
             | "ascii" => {
-                let text = String::from_utf8(data.to_vec())
+                std::str::from_utf8(data)
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in map key: {}", e)))?;
-                Ok(Value::Text(text.into()))
+                Ok(Value::Text(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
 
             // UUID types: 16 bytes
@@ -1595,7 +1597,9 @@ impl V5CompressedLegacyParser {
                     column_name,
                     data.len()
                 );
-                Ok(Value::blob(data.to_vec()))
+                Ok(Value::Blob(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
         }
     }

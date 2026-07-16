@@ -45,7 +45,9 @@ pub(super) fn decode_custom_scalar(name: &str, value_data: &[u8]) -> Result<Valu
             // (Cassandra `InetAddressType`); reject any other length as corruption
             // rather than surfacing a malformed address (mirrors the `time` arm).
             if value_data.len() == 4 || value_data.len() == 16 {
-                Ok(Value::inet(value_data.to_vec()))
+                Ok(Value::Inet(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+                ))
             } else {
                 Err(Error::corruption("Invalid inet value length"))
             }
@@ -61,7 +63,9 @@ pub(super) fn decode_custom_scalar(name: &str, value_data: &[u8]) -> Result<Valu
             Ok(Value::Json(Box::new(json_value)))
         }
         // Genuinely-unknown custom type: preserve raw bytes verbatim.
-        _ => Ok(Value::blob(value_data.to_vec())),
+        _ => Ok(Value::Blob(
+            crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+        )),
     }
 }
 

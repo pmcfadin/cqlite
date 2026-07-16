@@ -298,9 +298,15 @@ impl V5CompressedLegacyParser {
                 )));
             }
 
-            let blob_bytes = data[*offset..*offset + blob_len].to_vec();
+            // Issue #1644 (K5 stage 2): borrow a zero-copy view of the active
+            // scan window's Bytes when this slice lies within it (the common
+            // streaming case); falls back to an owned copy outside a windowed
+            // scan (get()/compaction) or across a chunk straddle.
+            let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                &data[*offset..*offset + blob_len],
+            );
             *offset += blob_len;
-            Ok(Value::Blob(blob_bytes.into()))
+            Ok(Value::Blob(blob_bytes))
         };
 
         // At this point, we have a live cell with value data.
@@ -365,16 +371,21 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
+                // Issue #1644 (K5 stage 2): validate UTF-8 IN PLACE on the
+                // borrowed slice, then store the (possibly zero-copy) Bytes —
+                // no separate owned-String detour.
                 let text_bytes = &data[offset..offset + text_len];
-                let text = String::from_utf8(text_bytes.to_vec()).map_err(|e| {
+                std::str::from_utf8(text_bytes).map_err(|e| {
                     Error::corruption(format!(
                         "Cell '{}': invalid UTF-8 in text value: {}",
                         column.name, e
                     ))
                 })?;
+                let borrowed =
+                    crate::storage::sstable::reader::value_borrow::borrow_active(text_bytes);
 
                 offset += text_len;
-                Value::Text(text.into())
+                Value::Text(borrowed)
             }
 
             CellKind::Uuid => {
@@ -920,9 +931,12 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let bytes = data[offset..offset + len].to_vec();
+                // Issue #1644 (K5 stage 2): borrow, see the blob arm above.
+                let bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                    &data[offset..offset + len],
+                );
                 offset += len;
-                Value::Inet(bytes.into())
+                Value::Inet(bytes)
             }
 
             // Complex types: frozen, tuple, non-frozen collection, marshal-UDT, and
