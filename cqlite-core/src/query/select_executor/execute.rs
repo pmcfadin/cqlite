@@ -17,10 +17,10 @@
 use super::schemaless_point::classify_schemaless_point_lookup;
 use super::{
     apply_forcing, build_row_from_scan_cached, classify_partition_lookup,
-    collect_capped_materialized, column_info_from_type_str, honest_targeted_path, parse_table_id,
-    point_forbids_fallback, point_requires_engaged, project_expr_reshapes_row, scan_pushdown_cap,
-    select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates, ForcedPlan,
-    PartitionLookupOutcome, SSTablePredicate,
+    collect_capped_materialized, column_info_from_type_str, full_forbids_schemaless_seek,
+    honest_targeted_path, parse_table_id, point_forbids_fallback, point_requires_engaged,
+    project_expr_reshapes_row, scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token,
+    validate_token_predicates, ForcedPlan, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
@@ -481,20 +481,30 @@ impl SelectExecutor {
         // non-pk column) keeps the honest full-scan path, which correctly matches
         // regular-column equalities. Resolved only when there is no CQL schema and no
         // WRITETIME/TTL metadata projection (the two branches below own those).
-        // Issue #1918: under forced `full` the schemaless targeted seek is skipped
-        // so the query takes the full-scan path (recorded as `ForcedFullScan` by
-        // the main branch below). `point`/`auto` keep the seek; `point` adds the
-        // post-call engaged check in the seek branch.
-        let schemaless_seek: Option<super::schemaless_point::SchemalessPointSeek> = if schema_opt
-            .is_none()
-            && !context.projection_flags.include_cell_metadata
-            && mode != crate::config::ReadPathMode::Full
-        {
-            let shape = self.storage.partition_key_shape(table).await;
-            classify_schemaless_point_lookup(predicates, shape.as_ref())
-        } else {
-            None
-        };
+        // Issue #1918: `point`/`auto` keep the schema-less sole-pk targeted seek
+        // (#1750). Under forced `full` the query cannot take the general full-scan
+        // path for THIS shape: with no schema the per-row predicate backstop in
+        // `collect_capped_materialized` cannot reconstruct the pk column to match
+        // the literal, so a full scan would silently return 0 rows instead of the
+        // row `auto` returns — violating the spec's "identical to `auto`" SHALL.
+        // Fail closed with a clear error (mirror of `point_forbids_fallback`: full
+        // forbidding a shape only the specialized non-full seek can serve).
+        let schemaless_seek: Option<super::schemaless_point::SchemalessPointSeek> =
+            if schema_opt.is_none() && !context.projection_flags.include_cell_metadata {
+                let shape = self.storage.partition_key_shape(table).await;
+                let seek = classify_schemaless_point_lookup(predicates, shape.as_ref());
+                full_forbids_schemaless_seek(mode, seek.is_some())?;
+                // Under `auto`/`point` keep the seek; under `full` `seek` is `None`
+                // here only when the query did not qualify (the qualifying case
+                // errored above), so it correctly falls through to the full scan.
+                if mode == crate::config::ReadPathMode::Full {
+                    None
+                } else {
+                    seek
+                }
+            } else {
+                None
+            };
 
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.

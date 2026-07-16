@@ -154,6 +154,24 @@ pub(super) fn point_forbids_fallback(mode: ReadPathMode, reason: FallbackReason)
     Ok(())
 }
 
+/// The mirror image of [`point_forbids_fallback`]: under `Full`, fail closed when
+/// the query qualifies ONLY for the specialized schema-less sole-pk targeted seek
+/// (issue #1750). With no CQL schema the full-scan path's per-row predicate
+/// backstop cannot reconstruct the partition-key column to match the literal, so a
+/// forced full scan would silently return 0 rows instead of the row `auto`
+/// returns — violating the spec's "identical to `auto`" SHALL. Rather than diverge
+/// silently, fail loud with the same clear error. A no-op in every other mode and
+/// whenever the query does not qualify for the schema-less seek.
+pub(super) fn full_forbids_schemaless_seek(mode: ReadPathMode, seek_eligible: bool) -> Result<()> {
+    if mode == ReadPathMode::Full && seek_eligible {
+        return Err(Error::forced_read_path_unavailable(
+            "full",
+            "schema_less_sole_pk_lookup_requires_targeted_seek",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +336,24 @@ mod tests {
         assert!(
             point_forbids_fallback(ReadPathMode::Full, FallbackReason::MetadataScanPath).is_ok()
         );
+    }
+
+    #[test]
+    fn full_forbids_schemaless_seek_errors_only_under_full_when_eligible() {
+        // Only forced `full` on a seek-eligible query fails closed.
+        let err = full_forbids_schemaless_seek(ReadPathMode::Full, true)
+            .expect_err("forced full on a schema-less sole-pk seek must fail closed");
+        match err {
+            Error::ForcedReadPathUnavailable { forced, reason } => {
+                assert_eq!(forced, "full");
+                assert_eq!(reason, "schema_less_sole_pk_lookup_requires_targeted_seek");
+            }
+            other => panic!("expected ForcedReadPathUnavailable, got {other:?}"),
+        }
+        // Not eligible under full -> no error (falls through to the full scan).
+        assert!(full_forbids_schemaless_seek(ReadPathMode::Full, false).is_ok());
+        // Auto/point never trip this guard (they keep the specialized seek).
+        assert!(full_forbids_schemaless_seek(ReadPathMode::Auto, true).is_ok());
+        assert!(full_forbids_schemaless_seek(ReadPathMode::Point, true).is_ok());
     }
 }

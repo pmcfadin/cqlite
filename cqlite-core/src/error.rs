@@ -103,18 +103,23 @@ pub enum Error {
     /// Forced `point` read path could not run a partition-targeted lookup (issue
     /// #1918).
     ///
-    /// Raised under `CQLITE_READ_PATH=point` (or the equivalent `QueryConfig`
-    /// field) whenever the executor would not run a genuinely partition-targeted
-    /// lookup — a classification fallback, an unwired targeted surface (e.g. a
-    /// metadata `IN` fan-out), or a build/path that does not actually prune. The
-    /// query fails closed instead of silently full-scanning; `reason` names the
-    /// concrete fallback reason.
+    /// Raised whenever a forced read path cannot serve a query without silently
+    /// diverging from the `auto` result. Under `CQLITE_READ_PATH=point` (or the
+    /// equivalent `QueryConfig` field) this fires when the executor would not run
+    /// a genuinely partition-targeted lookup — a classification fallback, an
+    /// unwired targeted surface (e.g. a metadata `IN` fan-out), or a build/path
+    /// that does not actually prune. Under `CQLITE_READ_PATH=full` it fires for a
+    /// schema-less sole-pk point lookup, which only the specialized targeted seek
+    /// can serve correctly (a full scan would return 0 rows instead of the row
+    /// `auto` returns). Either way the query fails closed instead of silently
+    /// returning a wrong result; `reason` names the concrete cause.
     #[error(
-        "forced read path '{forced}' unavailable: {reason}. The query cannot run a \
-         partition-targeted lookup under CQLITE_READ_PATH={forced}; use 'auto' or 'full'"
+        "forced read path '{forced}' unavailable: {reason}. This query cannot be \
+         served under CQLITE_READ_PATH={forced} without diverging from the 'auto' \
+         result; use 'auto' to let CQLite choose the read path"
     )]
     ForcedReadPathUnavailable {
-        /// The forced mode that could not be satisfied (always `"point"` today).
+        /// The forced mode that could not be satisfied (`"point"` or `"full"`).
         forced: &'static str,
         /// The concrete fallback reason label (e.g. `partition_key_not_fully_constrained`).
         reason: String,
@@ -267,7 +272,6 @@ impl Error {
         Self::QueryExecution(msg.into())
     }
 
-    /// Create a type conversion error
     /// Create an invalid-read-path error (issue #1918).
     pub fn invalid_read_path(value: impl Into<String>) -> Self {
         Self::InvalidReadPath {
@@ -276,7 +280,7 @@ impl Error {
     }
 
     /// Create a forced-read-path-unavailable error (issue #1918). `forced` is the
-    /// forced mode (`"point"`); `reason` is the concrete fallback-reason label.
+    /// forced mode (`"point"` or `"full"`); `reason` is the concrete cause label.
     pub fn forced_read_path_unavailable(forced: &'static str, reason: impl Into<String>) -> Self {
         Self::ForcedReadPathUnavailable {
             forced,
@@ -284,6 +288,7 @@ impl Error {
         }
     }
 
+    /// Create a type conversion error
     pub fn type_conversion(msg: impl Into<String>) -> Self {
         Self::TypeConversion(msg.into())
     }
