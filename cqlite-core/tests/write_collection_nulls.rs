@@ -113,7 +113,7 @@ async fn test_tuple_with_null_element_roundtrip() {
     let val = Value::Tuple(vec![
         Value::Integer(1),
         Value::Null,
-        Value::Text("x".to_string()),
+        Value::text("x".to_string()),
     ]);
     engine
         .write_async(mutation_with_column(1, "my_tuple", val))
@@ -163,7 +163,7 @@ async fn test_list_with_null_element_rejected() {
 async fn test_set_with_null_element_rejected() {
     let temp = TempDir::new().unwrap();
     let mut engine = make_engine(&temp);
-    let val = Value::Set(vec![Value::Text("a".to_string()), Value::Null]);
+    let val = Value::Set(vec![Value::text("a".to_string()), Value::Null]);
     engine
         .write_async(mutation_with_column(4, "my_set", val))
         .await
@@ -206,7 +206,7 @@ async fn test_map_with_null_key_rejected() {
 async fn test_map_with_null_value_allowed() {
     let temp = TempDir::new().unwrap();
     let mut engine = make_engine(&temp);
-    let val = Value::Map(vec![(Value::Text("k".to_string()), Value::Null)]);
+    let val = Value::Map(vec![(Value::text("k".to_string()), Value::Null)]);
     engine
         .write_async(mutation_with_column(6, "my_map", val))
         .await
@@ -287,7 +287,7 @@ async fn test_frozen_map_null_value_allowed() {
     let temp = TempDir::new().unwrap();
     let mut engine = make_engine(&temp);
     let val = Value::Frozen(Box::new(Value::Map(vec![(
-        Value::Text("k".to_string()),
+        Value::text("k".to_string()),
         Value::Null,
     )])));
     engine

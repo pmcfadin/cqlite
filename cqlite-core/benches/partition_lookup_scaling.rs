@@ -65,7 +65,7 @@ mod scaling {
         let ops = vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(format!("name-{id}")),
+                value: Value::text(format!("name-{id}")),
             },
             CellOperation::Write {
                 column: "score".to_string(),

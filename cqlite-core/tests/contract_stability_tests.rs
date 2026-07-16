@@ -47,7 +47,7 @@ fn contract_query_result_empty() {
 fn contract_query_result_with_rows() {
     let mut row = QueryRow::new(RowKey::new(vec![1, 2, 3]));
     row.set("id".to_string(), Value::Integer(42));
-    row.set("name".to_string(), Value::Text("test".to_string()));
+    row.set("name".to_string(), Value::text("test".to_string()));
 
     let mut result = QueryResult::with_rows(vec![row]);
     result.metadata.columns = vec![
@@ -228,12 +228,12 @@ fn contract_value_float() {
 
 #[test]
 fn contract_value_text() {
-    insta::assert_json_snapshot!(Value::Text("hello world".to_string()));
+    insta::assert_json_snapshot!(Value::text("hello world".to_string()));
 }
 
 #[test]
 fn contract_value_blob() {
-    insta::assert_json_snapshot!(Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    insta::assert_json_snapshot!(Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn contract_value_uuid() {
 
 #[test]
 fn contract_value_varint() {
-    insta::assert_json_snapshot!(Value::Varint(vec![0x01, 0x00]));
+    insta::assert_json_snapshot!(Value::varint(vec![0x01, 0x00]));
 }
 
 #[test]
@@ -320,16 +320,16 @@ fn contract_value_list() {
 #[test]
 fn contract_value_set() {
     insta::assert_json_snapshot!(Value::Set(vec![
-        Value::Text("a".to_string()),
-        Value::Text("b".to_string()),
+        Value::text("a".to_string()),
+        Value::text("b".to_string()),
     ]));
 }
 
 #[test]
 fn contract_value_map() {
     insta::assert_json_snapshot!(Value::Map(vec![
-        (Value::Text("key1".to_string()), Value::Integer(1)),
-        (Value::Text("key2".to_string()), Value::Integer(2)),
+        (Value::text("key1".to_string()), Value::Integer(1)),
+        (Value::text("key2".to_string()), Value::Integer(2)),
     ]));
 }
 
@@ -337,7 +337,7 @@ fn contract_value_map() {
 fn contract_value_tuple() {
     insta::assert_json_snapshot!(Value::Tuple(vec![
         Value::Integer(1),
-        Value::Text("test".to_string()),
+        Value::text("test".to_string()),
         Value::Boolean(true),
     ]));
 }
@@ -345,7 +345,7 @@ fn contract_value_tuple() {
 #[test]
 fn contract_value_udt() {
     let udt = UdtValue::new("Person".to_string(), "test_keyspace".to_string())
-        .with_field("name".to_string(), Some(Value::Text("John".to_string())))
+        .with_field("name".to_string(), Some(Value::text("John".to_string())))
         .with_field("age".to_string(), Some(Value::Integer(30)));
     insta::assert_json_snapshot!(Value::Udt(Box::new(udt)));
 }
@@ -365,12 +365,12 @@ fn contract_value_tombstone() {
 
 #[test]
 fn contract_value_inet_ipv4() {
-    insta::assert_json_snapshot!(Value::Inet(vec![192, 168, 1, 1]));
+    insta::assert_json_snapshot!(Value::inet(vec![192, 168, 1, 1]));
 }
 
 #[test]
 fn contract_value_inet_ipv6() {
-    insta::assert_json_snapshot!(Value::Inet(vec![
+    insta::assert_json_snapshot!(Value::inet(vec![
         0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01,
     ]));

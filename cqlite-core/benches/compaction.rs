@@ -250,7 +250,7 @@ fn build_wide(
                     Some(ClusteringKey::single("ck", Value::Integer(ck))),
                     vec![CellOperation::Write {
                         column: "val".to_string(),
-                        value: Value::Text(format!("wide-{val}")),
+                        value: Value::text(format!("wide-{val}")),
                     }],
                     1_000_000 + ck as i64,
                     None,
@@ -332,7 +332,7 @@ fn build_tombstone_heavy(
                     Some(ClusteringKey::single("ck", Value::Integer(ck as i32))),
                     vec![CellOperation::Write {
                         column: "val".to_string(),
-                        value: Value::Text(format!("live-{gen}-{val}")),
+                        value: Value::text(format!("live-{gen}-{val}")),
                     }],
                     1_000_000 + (gen * TOMB_CK + ck) as i64,
                     None,

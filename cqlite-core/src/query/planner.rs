@@ -807,7 +807,7 @@ mod tests {
         let condition = Condition {
             column: "name".to_string(),
             operator: ComparisonOperator::Equal,
-            value: crate::Value::Text("test".to_string()),
+            value: crate::Value::text("test".to_string()),
         };
 
         let selectivity = planner.estimate_selectivity(&condition);

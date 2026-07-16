@@ -518,8 +518,8 @@ mod tests {
 
     #[test]
     fn test_values_match_exact() {
-        let value1 = Value::Text("test".to_string());
-        let value2 = Value::Text("test".to_string());
+        let value1 = Value::text("test".to_string());
+        let value2 = Value::text("test".to_string());
         let criteria = vec![ValidationCriteria::ExactMatch];
 
         assert!(values_match(&value1, &value2, &criteria));
@@ -527,8 +527,8 @@ mod tests {
 
     #[test]
     fn test_values_match_contains() {
-        let value1 = Value::Text("test_string".to_string());
-        let value2 = Value::Text("test".to_string());
+        let value1 = Value::text("test_string".to_string());
+        let value2 = Value::text("test".to_string());
         let criteria = vec![ValidationCriteria::Contains("test".to_string())];
 
         assert!(values_match(&value1, &value2, &criteria));

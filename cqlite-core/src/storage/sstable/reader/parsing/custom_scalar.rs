@@ -45,7 +45,7 @@ pub(super) fn decode_custom_scalar(name: &str, value_data: &[u8]) -> Result<Valu
             // (Cassandra `InetAddressType`); reject any other length as corruption
             // rather than surfacing a malformed address (mirrors the `time` arm).
             if value_data.len() == 4 || value_data.len() == 16 {
-                Ok(Value::Inet(value_data.to_vec()))
+                Ok(Value::inet(value_data.to_vec()))
             } else {
                 Err(Error::corruption("Invalid inet value length"))
             }
@@ -61,7 +61,7 @@ pub(super) fn decode_custom_scalar(name: &str, value_data: &[u8]) -> Result<Valu
             Ok(Value::Json(Box::new(json_value)))
         }
         // Genuinely-unknown custom type: preserve raw bytes verbatim.
-        _ => Ok(Value::Blob(value_data.to_vec())),
+        _ => Ok(Value::blob(value_data.to_vec())),
     }
 }
 
@@ -87,12 +87,12 @@ mod tests {
     fn inet_ipv4_and_ipv6_preserved() {
         assert_eq!(
             decode_custom_scalar("inet", &[10, 0, 0, 1]).unwrap(),
-            Value::Inet(vec![10, 0, 0, 1])
+            Value::inet(vec![10, 0, 0, 1])
         );
         let v6 = vec![0u8; 16];
         assert_eq!(
             decode_custom_scalar("inet", &v6).unwrap(),
-            Value::Inet(v6.clone())
+            Value::inet(v6.clone())
         );
     }
 
@@ -130,7 +130,7 @@ mod tests {
     fn unknown_custom_falls_back_to_blob() {
         assert_eq!(
             decode_custom_scalar("some_udt_marshaller", &[1, 2, 3]).unwrap(),
-            Value::Blob(vec![1, 2, 3])
+            Value::blob(vec![1, 2, 3])
         );
     }
 }

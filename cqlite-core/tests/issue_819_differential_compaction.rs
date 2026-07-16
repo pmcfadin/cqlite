@@ -281,7 +281,7 @@ fn value_to_bytes(value: &Value) -> Vec<u8> {
         }
         Value::Text(s) => {
             out.push(0x08);
-            out.extend_from_slice(s.as_bytes());
+            out.extend_from_slice(s.as_ref());
         }
         Value::Blob(b) => {
             out.push(0x09);
@@ -1091,7 +1091,7 @@ fn write_row(id: i32, ck: i32, name: &str, score: i32, ts: i64) -> Mutation {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(name.to_string()),
+                value: Value::text(name.to_string()),
             },
             CellOperation::Write {
                 column: "score".to_string(),
@@ -1821,7 +1821,7 @@ fn write_name_only(id: i32, ck: i32, name: &str, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }],
         ts,
         None,

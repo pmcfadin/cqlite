@@ -93,7 +93,7 @@ impl std::fmt::Display for ParsedValue {
 impl From<&ParsedValue> for Value {
     fn from(pv: &ParsedValue) -> Self {
         match pv {
-            ParsedValue::Text(s) => Value::Text(s.clone()),
+            ParsedValue::Text(s) => Value::text(s.clone()),
             ParsedValue::Integer(i) => Value::BigInt(*i),
             ParsedValue::Float(f) => Value::Float(*f),
             ParsedValue::Boolean(b) => Value::Boolean(*b),
@@ -119,7 +119,7 @@ impl From<&ParsedValue> for Value {
             ParsedValue::Map(map) => {
                 let pairs: Vec<(Value, Value)> = map
                     .iter()
-                    .map(|(k, v)| (Value::Text(k.clone()), Value::from(v)))
+                    .map(|(k, v)| (Value::text(k.clone()), Value::from(v)))
                     .collect();
                 Value::Map(pairs)
             }
@@ -143,7 +143,7 @@ fn parse_uuid_string_to_value(s: &str) -> Value {
         }
     }
     // Fallback: store as text if parsing fails
-    Value::Text(s.to_string())
+    Value::text(s.to_string())
 }
 
 /// Parse ISO timestamp string to Value::Timestamp (milliseconds since epoch)
@@ -153,7 +153,7 @@ fn parse_timestamp_string_to_value(s: &str) -> Value {
         return Value::Timestamp(dt.timestamp_millis());
     }
     // Fallback: store as text if parsing fails
-    Value::Text(s.to_string())
+    Value::text(s.to_string())
 }
 
 /// Real data parser that converts binary SSTable data to readable format
@@ -412,7 +412,7 @@ impl RealDataParser {
             ScanRow::RawRow(bytes) => {
                 columns.insert(
                     "data".to_string(),
-                    Self::core_value_to_parsed(&Value::Blob(bytes.clone())),
+                    Self::core_value_to_parsed(&Value::blob(bytes.clone())),
                 );
             }
             ScanRow::Marker(_) => {

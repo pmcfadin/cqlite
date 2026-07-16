@@ -710,7 +710,7 @@ mod tests {
         let (_, value) = parse_list_v5_format(&data).expect("parse list");
         assert_eq!(
             value,
-            Value::List(vec![Value::Text("alpha".to_string()), Value::Integer(7)])
+            Value::List(vec![Value::text("alpha".to_string()), Value::Integer(7)])
         );
     }
 
@@ -750,8 +750,8 @@ mod tests {
         assert_eq!(
             value,
             Value::Map(vec![
-                (Value::Integer(1), Value::Text("one".to_string())),
-                (Value::Integer(2), Value::Text("two".to_string())),
+                (Value::Integer(1), Value::text("one".to_string())),
+                (Value::Integer(2), Value::text("two".to_string())),
             ])
         );
     }

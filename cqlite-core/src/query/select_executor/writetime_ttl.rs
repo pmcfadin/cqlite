@@ -147,7 +147,7 @@ mod tests {
         let write_ts = 1_700_000_000_000_000_i64;
         let row = row_with_cell_meta(
             "name",
-            Value::Text("Alice".to_string()),
+            Value::text("Alice".to_string()),
             Some(CellWriteMetadata {
                 write_timestamp_micros: write_ts,
                 expiration: None,
@@ -226,7 +226,7 @@ mod tests {
     fn test_ttl_returns_null_when_no_expiration() {
         let row = row_with_cell_meta(
             "name",
-            Value::Text("Bob".to_string()),
+            Value::text("Bob".to_string()),
             Some(CellWriteMetadata {
                 write_timestamp_micros: 100,
                 expiration: None, // no TTL written
@@ -253,7 +253,7 @@ mod tests {
         // Cell expires at epoch 100; now is epoch 200 → expired.
         let row = row_with_cell_meta(
             "token",
-            Value::Text("abc".to_string()),
+            Value::text("abc".to_string()),
             Some(CellWriteMetadata {
                 write_timestamp_micros: 0,
                 expiration: Some(CellExpiration {

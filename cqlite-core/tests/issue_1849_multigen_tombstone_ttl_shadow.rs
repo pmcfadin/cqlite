@@ -94,11 +94,11 @@ fn write_name_plus_expired_token(id: i32, name: &str, token: &str, ts: i64) -> M
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::WriteWithTtl {
             column: "token".to_string(),
-            value: Value::Text(token.to_string()),
+            value: Value::text(token.to_string()),
             // Any positive TTL; expiry is pinned by the explicit past LDT below.
             ttl_seconds: 60,
             local_deletion_time: Some(PAST_EXPIRY_SECS),
@@ -112,7 +112,7 @@ fn write_name_only(id: i32, name: &str, ts: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text(name.to_string()),
+        value: Value::text(name.to_string()),
     }];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)
 }
@@ -210,7 +210,7 @@ fn multigen_select_hides_ttl_expired_cells_across_generations() {
     );
 
     let row1 = by_pk.get(&pk(1)).expect("PK1 present");
-    assert_eq!(col(row1, "name"), Some(&Value::Text("keep1".to_string())));
+    assert_eq!(col(row1, "name"), Some(&Value::text("keep1".to_string())));
     assert!(
         col(row1, "token").is_none(),
         "issue #1849: PK1 token expired (past localDeletionTime) — a multi-gen \
@@ -219,10 +219,10 @@ fn multigen_select_hides_ttl_expired_cells_across_generations() {
     );
 
     let row2 = by_pk.get(&pk(2)).expect("PK2 present");
-    assert_eq!(col(row2, "name"), Some(&Value::Text("keep2".to_string())));
+    assert_eq!(col(row2, "name"), Some(&Value::text("keep2".to_string())));
 
     let row3 = by_pk.get(&pk(3)).expect("PK3 present");
-    assert_eq!(col(row3, "name"), Some(&Value::Text("keep3".to_string())));
+    assert_eq!(col(row3, "name"), Some(&Value::text("keep3".to_string())));
     assert!(
         col(row3, "token").is_none(),
         "issue #1849: PK3 token expired (past localDeletionTime) — a multi-gen \

@@ -618,12 +618,12 @@ impl QueryExecutor {
             // Simplified IN / NOT IN: treat as equality / inequality for now.
             ComparisonOperator::In => Ok(row_value == &condition.value),
             ComparisonOperator::NotIn => Ok(row_value != &condition.value),
-            ComparisonOperator::Like => match (row_value, &condition.value) {
-                (Value::Text(row_text), Value::Text(pattern)) => Ok(row_text.contains(pattern)),
+            ComparisonOperator::Like => match (row_value.as_str(), condition.value.as_str()) {
+                (Some(row_text), Some(pattern)) => Ok(row_text.contains(pattern)),
                 _ => Ok(false),
             },
-            ComparisonOperator::NotLike => match (row_value, &condition.value) {
-                (Value::Text(row_text), Value::Text(pattern)) => Ok(!row_text.contains(pattern)),
+            ComparisonOperator::NotLike => match (row_value.as_str(), condition.value.as_str()) {
+                (Some(row_text), Some(pattern)) => Ok(!row_text.contains(pattern)),
                 _ => Ok(true),
             },
         }
@@ -697,7 +697,7 @@ impl QueryExecutor {
     fn value_to_row_key(&self, value: &Value) -> Result<RowKey> {
         match value {
             Value::Integer(i) => Ok(RowKey::new(i.to_be_bytes().to_vec())),
-            Value::Text(s) => Ok(RowKey::new(s.as_bytes().to_vec())),
+            Value::Text(s) => Ok(RowKey::new(s.to_vec())),
             Value::Float(f) => Ok(RowKey::new(f.to_be_bytes().to_vec())),
             Value::Boolean(b) => Ok(RowKey::new(vec![u8::from(*b)])),
             Value::Null => Ok(RowKey::new(vec![0])),
@@ -734,7 +734,7 @@ impl QueryExecutor {
     fn value_to_raw_pk_bytes(&self, value: &Value) -> Result<Vec<u8>> {
         match value {
             Value::Integer(i) => Ok(i.to_be_bytes().to_vec()),
-            Value::Text(s) => Ok(s.as_bytes().to_vec()),
+            Value::Text(s) => Ok(s.to_vec()),
             Value::Float(f) => Ok(f.to_be_bytes().to_vec()),
             Value::Boolean(b) => Ok(vec![u8::from(*b)]),
             Value::Null => Ok(Vec::new()),
@@ -776,14 +776,14 @@ impl QueryExecutor {
                 }
             }
             ScanRow::RawRow(bytes) => {
-                values.insert(Arc::from("data"), Value::Blob(bytes));
+                values.insert(Arc::from("data"), Value::Blob(bytes.into()));
             }
             ScanRow::Marker(_) => {}
         }
 
         // If no values were extracted, surface the row key for visibility.
         if values.is_empty() {
-            values.insert(Arc::from("id"), Value::Text(format!("{:?}", key)));
+            values.insert(Arc::from("id"), Value::text(format!("{:?}", key)));
         }
 
         Ok(QueryRow::with_interned_values(key.clone(), values))
@@ -831,7 +831,7 @@ impl QueryExecutor {
                 value_map.insert("id".to_string(), Value::Integer(inserted_count as i32 + 1));
                 value_map.insert(
                     "name".to_string(),
-                    Value::Text(format!("TestUser{}", inserted_count + 1)),
+                    Value::text(format!("TestUser{}", inserted_count + 1)),
                 );
             }
 
@@ -847,7 +847,7 @@ impl QueryExecutor {
             let row_key = RowKey::new(b"default_test_key".to_vec());
             let mut value_map = HashMap::new();
             value_map.insert("id".to_string(), Value::Integer(1));
-            value_map.insert("name".to_string(), Value::Text("DefaultUser".to_string()));
+            value_map.insert("name".to_string(), Value::text("DefaultUser".to_string()));
 
             self.storage
                 .put(table_id, row_key, map_to_value(value_map))
@@ -932,8 +932,8 @@ mod tests {
 
         let result = executor
             .compare_values(
-                &Value::Text("apple".to_string()),
-                &Value::Text("banana".to_string()),
+                &Value::text("apple".to_string()),
+                &Value::text("banana".to_string()),
             )
             .unwrap();
         assert_eq!(result, Ordering::Less);
@@ -973,7 +973,7 @@ mod tests {
 
         let mut row_values = HashMap::new();
         row_values.insert("id".to_string(), Value::Integer(1));
-        row_values.insert("name".to_string(), Value::Text("test".to_string()));
+        row_values.insert("name".to_string(), Value::text("test".to_string()));
         let row = QueryRow::with_values(RowKey::new(vec![1]), row_values);
 
         let condition = Condition {
@@ -986,7 +986,7 @@ mod tests {
         let condition = Condition {
             column: "name".to_string(),
             operator: ComparisonOperator::Like,
-            value: Value::Text("test".to_string()),
+            value: Value::text("test".to_string()),
         };
         assert!(executor.evaluate_condition(&row, &condition).unwrap());
     }
@@ -1066,7 +1066,7 @@ mod tests {
         let mk = |d: f64| {
             let mut m = HashMap::new();
             m.insert("d".to_string(), Value::Float(d));
-            m.insert("name".to_string(), Value::Text("aaa".to_string()));
+            m.insert("name".to_string(), Value::text("aaa".to_string()));
             QueryRow::with_values(RowKey::new(vec![1]), m)
         };
         let rows = vec![mk(f64::NAN), mk(2.0), mk(0.5)];
@@ -1350,7 +1350,7 @@ mod tests {
         let name_condition = Condition {
             column: "username".to_string(),
             operator: ComparisonOperator::Equal,
-            value: Value::Text("carol".to_string()),
+            value: Value::text("carol".to_string()),
         };
         let key = executor
             .condition_to_row_key(&name_condition)
@@ -1379,14 +1379,14 @@ mod tests {
             .expect("raw offset-read row must convert");
         assert_eq!(
             row.values.get("data"),
-            Some(&Value::Blob(raw.clone())),
+            Some(&Value::blob(raw.clone())),
             "a live offset/indexed read must surface its raw value as the \"data\" column"
         );
 
         // Marker (the pre-fix producer output): the blob is dropped; the row
         // falls back to an id-only shape with NO "data" column — proving a Marker
         // here would lose data that previously reached SELECT/export.
-        let marker = ScanRow::Marker(Value::Blob(raw));
+        let marker = ScanRow::Marker(Value::Blob(raw.into()));
         let suppressed = executor
             .storage_data_to_query_row(marker, &key)
             .expect("marker row must still convert");

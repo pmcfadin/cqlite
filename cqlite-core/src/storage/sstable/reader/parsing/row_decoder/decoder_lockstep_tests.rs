@@ -215,7 +215,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "text",
-            value: Value::Text("hi".to_string()),
+            value: Value::text("hi".to_string()),
             value_bytes: b"hi".to_vec(),
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -223,7 +223,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "ascii",
-            value: Value::Text("abc".to_string()),
+            value: Value::text("abc".to_string()),
             value_bytes: b"abc".to_vec(),
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -231,7 +231,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "varchar",
-            value: Value::Text("vc".to_string()),
+            value: Value::text("vc".to_string()),
             value_bytes: b"vc".to_vec(),
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -239,7 +239,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "blob",
-            value: Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]),
+            value: Value::blob(vec![0xde, 0xad, 0xbe, 0xef]),
             value_bytes: vec![0xde, 0xad, 0xbe, 0xef],
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -301,7 +301,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         // KNOWN DIVERGENCE (J2): block -> Varint, v5 ladder blobs it (no arm).
         ScalarCase {
             cql_type: "varint",
-            value: Value::Varint(vec![0x01, 0x00]),
+            value: Value::varint(vec![0x01, 0x00]),
             value_bytes: vec![0x01, 0x00],
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -310,8 +310,8 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
                 note: "CQL varint: block path decodes Value::Varint; v5 ladder has no \
                        varint arm and falls through to its blob default (Value::Blob). \
                        Mirror of I4 (block side fixed by #1627); v5 gap owned by J2.",
-                block: Value::Varint(vec![0x01, 0x00]),
-                v5: Value::Blob(vec![0x01, 0x00]),
+                block: Value::varint(vec![0x01, 0x00]),
+                v5: Value::blob(vec![0x01, 0x00]),
             }),
         },
         ScalarCase {
@@ -331,7 +331,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "inet",
-            value: Value::Inet(vec![10, 0, 0, 1]),
+            value: Value::inet(vec![10, 0, 0, 1]),
             value_bytes: vec![10, 0, 0, 1],
             framing: V5Framing::VintLen,
             arbitrary_len: false,
@@ -523,7 +523,7 @@ async fn synthetic_reader() -> SSTableReader {
         None,
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text("x".to_string()),
+            value: Value::text("x".to_string()),
         }],
         1_000_000,
         None,

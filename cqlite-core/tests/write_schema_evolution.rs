@@ -131,7 +131,7 @@ async fn test_add_column_writes_succeed() {
                 "add_col",
                 "id",
                 Value::Integer(i),
-                vec![("name", Value::Text(format!("user_{i}")))],
+                vec![("name", Value::text(format!("user_{i}")))],
                 1_000_000 + i as i64,
             );
             engine.write_async(m).await.unwrap();
@@ -164,8 +164,8 @@ async fn test_add_column_writes_succeed() {
                 "id",
                 Value::Integer(i),
                 vec![
-                    ("name", Value::Text(format!("user_{i}"))),
-                    ("email", Value::Text(format!("user_{i}@example.com"))),
+                    ("name", Value::text(format!("user_{i}"))),
+                    ("email", Value::text(format!("user_{i}@example.com"))),
                 ],
                 2_000_000 + i as i64,
             );
@@ -206,7 +206,7 @@ async fn test_remove_column_writes_succeed() {
                 "id",
                 Value::Integer(i),
                 vec![
-                    ("name", Value::Text(format!("item_{i}"))),
+                    ("name", Value::text(format!("item_{i}"))),
                     ("value", Value::Integer(i * 10)),
                 ],
                 1_000_000 + i as i64,
@@ -235,7 +235,7 @@ async fn test_remove_column_writes_succeed() {
                 "rm_col",
                 "id",
                 Value::Integer(i),
-                vec![("name", Value::Text(format!("item_{i}")))],
+                vec![("name", Value::text(format!("item_{i}")))],
                 2_000_000 + i as i64,
             );
             engine.write_async(m).await.unwrap();
@@ -270,8 +270,8 @@ async fn test_multiple_flushes_mixed_schemas() {
                 "id",
                 Value::Integer(i),
                 vec![
-                    ("col_a", Value::Text(format!("a_{i}"))),
-                    ("col_b", Value::Text(format!("b_{i}"))),
+                    ("col_a", Value::text(format!("a_{i}"))),
+                    ("col_b", Value::text(format!("b_{i}"))),
                 ],
                 1_000_000 + i as i64,
             );
@@ -304,9 +304,9 @@ async fn test_multiple_flushes_mixed_schemas() {
                 "id",
                 Value::Integer(i),
                 vec![
-                    ("col_a", Value::Text(format!("a_{i}"))),
-                    ("col_b", Value::Text(format!("b_{i}"))),
-                    ("col_c", Value::Text(format!("c_{i}"))),
+                    ("col_a", Value::text(format!("a_{i}"))),
+                    ("col_b", Value::text(format!("b_{i}"))),
+                    ("col_c", Value::text(format!("c_{i}"))),
                 ],
                 2_000_000 + i as i64,
             );
@@ -360,7 +360,7 @@ async fn test_add_clustering_column() {
                 "ck_evo",
                 "id",
                 Value::Integer(i),
-                vec![("name", Value::Text(format!("name_{i}")))],
+                vec![("name", Value::text(format!("name_{i}")))],
                 1_000_000 + i as i64,
             );
             engine.write_async(m).await.unwrap();
@@ -394,7 +394,7 @@ async fn test_add_clustering_column() {
                 Value::Integer(i),
                 "ck",
                 Value::Integer(i * 100),
-                vec![("name", Value::Text(format!("name_v2_{i}")))],
+                vec![("name", Value::text(format!("name_v2_{i}")))],
                 2_000_000 + i as i64,
             );
             engine.write_async(m).await.unwrap();
@@ -432,7 +432,7 @@ async fn test_reopen_same_schema() {
                 "reopen",
                 "id",
                 Value::Integer(i),
-                vec![("name", Value::Text(format!("s1_user_{i}")))],
+                vec![("name", Value::text(format!("s1_user_{i}")))],
                 1_000_000 + i as i64,
             );
             engine.write_async(m).await.unwrap();
@@ -453,7 +453,7 @@ async fn test_reopen_same_schema() {
                 "reopen",
                 "id",
                 Value::Integer(i),
-                vec![("name", Value::Text(format!("s2_user_{i}")))],
+                vec![("name", Value::text(format!("s2_user_{i}")))],
                 2_000_000 + i as i64,
             );
             engine.write_async(m).await.unwrap();

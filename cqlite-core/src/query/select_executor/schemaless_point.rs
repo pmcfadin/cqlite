@@ -286,7 +286,7 @@ mod tests {
         let text_on_uuid = SSTablePredicate::column(
             "id",
             SSTableFilterOp::Equal,
-            vec![Value::Text("not-a-uuid".to_string())],
+            vec![Value::text("not-a-uuid".to_string())],
         );
         assert_eq!(
             classify_schemaless_point_lookup(std::slice::from_ref(&text_on_uuid), Some(&shape)),
@@ -304,7 +304,7 @@ mod tests {
         let name_eq = SSTablePredicate::column(
             "name",
             SSTableFilterOp::Equal,
-            vec![Value::Text("Mr. James Hoffman".to_string())],
+            vec![Value::text("Mr. James Hoffman".to_string())],
         );
         assert_eq!(
             classify_schemaless_point_lookup(std::slice::from_ref(&name_eq), Some(&shape)),
@@ -415,7 +415,7 @@ mod tests {
         let blob = SSTablePredicate::column(
             "id",
             SSTableFilterOp::Equal,
-            vec![Value::Blob(vec![1, 2, 3])],
+            vec![Value::blob(vec![1, 2, 3])],
         );
         assert_eq!(
             classify_schemaless_point_lookup(std::slice::from_ref(&blob), s),
@@ -445,7 +445,7 @@ mod tests {
             pk_cql_type: "int".to_string(),
         };
         let key = RowKey::new(42i32.to_be_bytes().to_vec());
-        let value = scan_row(&[("v", Value::Text("hi".to_string()))]);
+        let value = scan_row(&[("v", Value::text("hi".to_string()))]);
 
         // Predicate on the pk name → matches → row returned, pk reconstructed.
         let pk_pred = vec![Pred::column(
@@ -457,7 +457,7 @@ mod tests {
             finalize_schemaless_seek_row(key.clone(), value.clone(), &[], &pk_pred, &seek)
                 .expect("pk-name predicate must match the reconstructed row");
         assert_eq!(row.values.get("partition_key"), Some(&Value::Integer(42)));
-        assert_eq!(row.values.get("v"), Some(&Value::Text("hi".to_string())));
+        assert_eq!(row.values.get("v"), Some(&Value::text("hi".to_string())));
 
         // Predicate on a nonexistent column → Unknown against the materialised row
         // → row REJECTED (the FINDING 1 over-firing this removes).
@@ -482,7 +482,7 @@ mod tests {
             pk_cql_type: "int".to_string(),
         };
         let key = RowKey::new(7i32.to_be_bytes().to_vec());
-        let value = scan_row(&[("v", Value::Text("x".to_string()))]);
+        let value = scan_row(&[("v", Value::text("x".to_string()))]);
         let pk_pred = vec![Pred::column(
             "partition_key",
             SSTableFilterOp::Equal,
@@ -495,6 +495,6 @@ mod tests {
             !row.values.contains_key("partition_key"),
             "pk excluded from projection must not appear in output",
         );
-        assert_eq!(row.values.get("v"), Some(&Value::Text("x".to_string())));
+        assert_eq!(row.values.get("v"), Some(&Value::text("x".to_string())));
     }
 }

@@ -45,7 +45,7 @@ use crate::types::{UdtTypeDef, Value};
 /// assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x2A]);
 ///
 /// // Text (no length prefix for cell values)
-/// let bytes = serializer.serialize_value(&Value::Text("hello".to_string()), "text").unwrap();
+/// let bytes = serializer.serialize_value(&Value::text("hello".to_string()), "text").unwrap();
 /// assert_eq!(bytes, b"hello");
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -192,7 +192,7 @@ impl TypeSerializer {
     /// Serialize text types (no length prefix for cell values)
     fn serialize_text(&self, value: &Value) -> Result<Vec<u8>> {
         match value {
-            Value::Text(s) => Ok(s.as_bytes().to_vec()),
+            Value::Text(s) => Ok(s.to_vec()),
             _ => Err(Error::type_conversion(format!(
                 "Expected Text value, got {:?}",
                 value
@@ -203,7 +203,7 @@ impl TypeSerializer {
     /// Serialize blob (no length prefix for cell values)
     fn serialize_blob(&self, value: &Value) -> Result<Vec<u8>> {
         match value {
-            Value::Blob(bytes) => Ok(bytes.clone()),
+            Value::Blob(bytes) => Ok(bytes.to_vec()),
             _ => Err(Error::type_conversion(format!(
                 "Expected Blob value, got {:?}",
                 value
@@ -254,7 +254,7 @@ impl TypeSerializer {
     fn serialize_numeric(&self, value: &Value, cql_type: &CqlType) -> Result<Vec<u8>> {
         match (value, cql_type) {
             // Varint: minimal two's complement big-endian
-            (Value::Varint(bytes), CqlType::Varint) => Ok(bytes.clone()),
+            (Value::Varint(bytes), CqlType::Varint) => Ok(bytes.to_vec()),
 
             // Decimal: 4-byte BE scale + varint unscaled value
             (Value::Decimal { scale, unscaled }, CqlType::Decimal) => {
@@ -273,7 +273,7 @@ impl TypeSerializer {
     /// Serialize inet address
     fn serialize_inet(&self, value: &Value) -> Result<Vec<u8>> {
         match value {
-            Value::Inet(bytes) => Ok(bytes.clone()),
+            Value::Inet(bytes) => Ok(bytes.to_vec()),
             _ => Err(Error::type_conversion(format!(
                 "Expected Inet value, got {:?}",
                 value
@@ -536,8 +536,8 @@ impl TypeSerializer {
     ///
     /// // Create UDT value
     /// let udt = UdtValue::new("address".to_string(), "ks".to_string())
-    ///     .with_field("street".to_string(), Some(Value::Text("Main St".to_string())))
-    ///     .with_field("city".to_string(), Some(Value::Text("NYC".to_string())));
+    ///     .with_field("street".to_string(), Some(Value::text("Main St".to_string())))
+    ///     .with_field("city".to_string(), Some(Value::text("NYC".to_string())));
     ///
     /// let bytes = serializer.serialize_udt(&Value::Udt(Box::new(udt)), &schema).unwrap();
     /// ```
@@ -665,13 +665,13 @@ mod tests {
         let ser = TypeSerializer::new();
 
         let bytes = ser
-            .serialize_value(&Value::Text("hello".to_string()), "text")
+            .serialize_value(&Value::text("hello".to_string()), "text")
             .unwrap();
         assert_eq!(bytes, b"hello");
 
         // UTF-8
         let bytes = ser
-            .serialize_value(&Value::Text("日本語".to_string()), "text")
+            .serialize_value(&Value::text("日本語".to_string()), "text")
             .unwrap();
         assert_eq!(bytes, "日本語".as_bytes());
     }
@@ -681,7 +681,7 @@ mod tests {
         let ser = TypeSerializer::new();
 
         let bytes = ser
-            .serialize_value(&Value::Blob(vec![0x01, 0x02, 0x03]), "blob")
+            .serialize_value(&Value::blob(vec![0x01, 0x02, 0x03]), "blob")
             .unwrap();
         assert_eq!(bytes, vec![0x01, 0x02, 0x03]);
     }
@@ -761,7 +761,7 @@ mod tests {
         let ser = TypeSerializer::new();
 
         let bytes = ser
-            .serialize_value(&Value::Varint(vec![0x01, 0x02, 0x03]), "varint")
+            .serialize_value(&Value::varint(vec![0x01, 0x02, 0x03]), "varint")
             .unwrap();
         assert_eq!(bytes, vec![0x01, 0x02, 0x03]);
     }
@@ -788,7 +788,7 @@ mod tests {
 
         // IPv4
         let bytes = ser
-            .serialize_value(&Value::Inet(vec![192, 168, 1, 1]), "inet")
+            .serialize_value(&Value::inet(vec![192, 168, 1, 1]), "inet")
             .unwrap();
         assert_eq!(bytes, vec![192, 168, 1, 1]);
 
@@ -798,7 +798,7 @@ mod tests {
             0x00, 0x01,
         ];
         let bytes = ser
-            .serialize_value(&Value::Inet(ipv6.clone()), "inet")
+            .serialize_value(&Value::inet(ipv6.clone()), "inet")
             .unwrap();
         assert_eq!(bytes, ipv6);
     }
@@ -834,8 +834,8 @@ mod tests {
         let ser = TypeSerializer::new();
 
         let set = Value::Set(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ]);
 
         let bytes = ser.serialize_value(&set, "set<text>").unwrap();
@@ -856,8 +856,8 @@ mod tests {
         let ser = TypeSerializer::new();
 
         let map = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(100)),
-            (Value::Text("key2".to_string()), Value::Integer(200)),
+            (Value::text("key1".to_string()), Value::Integer(100)),
+            (Value::text("key2".to_string()), Value::Integer(200)),
         ]);
 
         let bytes = ser.serialize_value(&map, "map<text, int>").unwrap();
@@ -885,7 +885,7 @@ mod tests {
 
         let tuple = Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Null,
         ]);
 
@@ -915,10 +915,10 @@ mod tests {
 
         // Create UDT value (fields in different order than schema)
         let udt = UdtValue::new("address".to_string(), "test_ks".to_string())
-            .with_field("city".to_string(), Some(Value::Text("NYC".to_string())))
+            .with_field("city".to_string(), Some(Value::text("NYC".to_string())))
             .with_field(
                 "street".to_string(),
-                Some(Value::Text("Main St".to_string())),
+                Some(Value::text("Main St".to_string())),
             );
 
         let bytes = ser
@@ -946,11 +946,11 @@ mod tests {
             .with_field("email".to_string(), CqlType::Text, true);
 
         let udt = UdtValue::new("person".to_string(), "test_ks".to_string())
-            .with_field("name".to_string(), Some(Value::Text("John".to_string())))
+            .with_field("name".to_string(), Some(Value::text("John".to_string())))
             .with_field("age".to_string(), None) // NULL
             .with_field(
                 "email".to_string(),
-                Some(Value::Text("john@example.com".to_string())),
+                Some(Value::text("john@example.com".to_string())),
             );
 
         let bytes = ser
@@ -991,12 +991,12 @@ mod tests {
         let address = UdtValue::new("address".to_string(), "test_ks".to_string())
             .with_field(
                 "street".to_string(),
-                Some(Value::Text("Main St".to_string())),
+                Some(Value::text("Main St".to_string())),
             )
-            .with_field("city".to_string(), Some(Value::Text("NYC".to_string())));
+            .with_field("city".to_string(), Some(Value::text("NYC".to_string())));
 
         let _person = UdtValue::new("person".to_string(), "test_ks".to_string())
-            .with_field("name".to_string(), Some(Value::Text("John".to_string())))
+            .with_field("name".to_string(), Some(Value::text("John".to_string())))
             .with_field(
                 "address".to_string(),
                 Some(Value::Udt(Box::new(address.clone()))),
@@ -1067,12 +1067,12 @@ mod tests {
             );
 
         let udt = UdtValue::new("user".to_string(), "test_ks".to_string())
-            .with_field("name".to_string(), Some(Value::Text("Alice".to_string())))
+            .with_field("name".to_string(), Some(Value::text("Alice".to_string())))
             .with_field(
                 "tags".to_string(),
                 Some(Value::List(vec![
-                    Value::Text("admin".to_string()),
-                    Value::Text("user".to_string()),
+                    Value::text("admin".to_string()),
+                    Value::text("user".to_string()),
                 ])),
             );
 
@@ -1144,19 +1144,19 @@ mod tests {
             );
 
         let phone = UdtValue::new("phone_number".to_string(), "test_ks".to_string())
-            .with_field("label".to_string(), Some(Value::Text("mobile".to_string())))
+            .with_field("label".to_string(), Some(Value::text("mobile".to_string())))
             .with_field(
                 "number".to_string(),
-                Some(Value::Text("+1-555-0101".to_string())),
+                Some(Value::text("+1-555-0101".to_string())),
             );
         let address = UdtValue::new("address".to_string(), "test_ks".to_string())
             .with_field(
                 "street".to_string(),
-                Some(Value::Text("Main St".to_string())),
+                Some(Value::text("Main St".to_string())),
             )
-            .with_field("city".to_string(), Some(Value::Text("Seattle".to_string())));
+            .with_field("city".to_string(), Some(Value::text("Seattle".to_string())));
         let person = UdtValue::new("person".to_string(), "test_ks".to_string())
-            .with_field("name".to_string(), Some(Value::Text("Alice".to_string())))
+            .with_field("name".to_string(), Some(Value::text("Alice".to_string())))
             .with_field(
                 "phone_numbers".to_string(),
                 Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
@@ -1170,7 +1170,7 @@ mod tests {
                 ))))),
             );
         let company = UdtValue::new("company".to_string(), "test_ks".to_string())
-            .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
+            .with_field("name".to_string(), Some(Value::text("Acme".to_string())))
             .with_field(
                 "employees".to_string(),
                 Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
@@ -1180,7 +1180,7 @@ mod tests {
             .with_field(
                 "departments".to_string(),
                 Some(Value::Map(vec![(
-                    Value::Text("platform".to_string()),
+                    Value::text("platform".to_string()),
                     Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
                         Value::Udt(Box::new(person.clone())),
                     ))]))),
@@ -1208,7 +1208,7 @@ mod tests {
         let departments_bytes = ser
             .serialize_typed_value(
                 &Value::Map(vec![(
-                    Value::Text("platform".to_string()),
+                    Value::text("platform".to_string()),
                     Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
                         Value::Udt(Box::new(person)),
                     ))]))),
@@ -1252,27 +1252,27 @@ mod tests {
         let address = UdtValue::new("address".to_string(), "test_ks".to_string())
             .with_field(
                 "street".to_string(),
-                Some(Value::Text("Rua Sao Joao".to_string())),
+                Some(Value::text("Rua Sao Joao".to_string())),
             )
             .with_field(
                 "city".to_string(),
-                Some(Value::Text("Sao Paulo".to_string())),
+                Some(Value::text("Sao Paulo".to_string())),
             );
         let address_bytes = ser
             .serialize_udt(&Value::Udt(Box::new(address)), &address_schema)
             .unwrap();
 
         let value = Value::Map(vec![(
-            Value::Text("cidade_日本".to_string()),
+            Value::text("cidade_日本".to_string()),
             Value::Frozen(Box::new(Value::Udt(Box::new(
                 UdtValue::new("address".to_string(), "test_ks".to_string())
                     .with_field(
                         "street".to_string(),
-                        Some(Value::Text("Rua Sao Joao".to_string())),
+                        Some(Value::text("Rua Sao Joao".to_string())),
                     )
                     .with_field(
                         "city".to_string(),
-                        Some(Value::Text("Sao Paulo".to_string())),
+                        Some(Value::text("Sao Paulo".to_string())),
                     ),
             )))),
         )]);
@@ -1306,7 +1306,7 @@ mod tests {
         let ser = TypeSerializer::new();
 
         let value = Value::Tuple(vec![
-            Value::Text("phase3".to_string()),
+            Value::text("phase3".to_string()),
             Value::List(vec![
                 Value::Integer(1),
                 Value::Integer(2),
@@ -1314,12 +1314,12 @@ mod tests {
             ]),
             Value::Map(vec![
                 (
-                    Value::Text("emoji".to_string()),
-                    Value::Text("snowman".to_string()),
+                    Value::text("emoji".to_string()),
+                    Value::text("snowman".to_string()),
                 ),
                 (
-                    Value::Text("plain".to_string()),
-                    Value::Text("ascii".to_string()),
+                    Value::text("plain".to_string()),
+                    Value::text("ascii".to_string()),
                 ),
             ]),
         ]);
@@ -1342,12 +1342,12 @@ mod tests {
             .serialize_value(
                 &Value::Map(vec![
                     (
-                        Value::Text("emoji".to_string()),
-                        Value::Text("snowman".to_string()),
+                        Value::text("emoji".to_string()),
+                        Value::text("snowman".to_string()),
                     ),
                     (
-                        Value::Text("plain".to_string()),
-                        Value::Text("ascii".to_string()),
+                        Value::text("plain".to_string()),
+                        Value::text("ascii".to_string()),
                     ),
                 ]),
                 "map<text, text>",
@@ -1402,7 +1402,7 @@ mod tests {
 
         // Wrong type for int
         assert!(ser
-            .serialize_value(&Value::Text("hello".to_string()), "int")
+            .serialize_value(&Value::text("hello".to_string()), "int")
             .is_err());
 
         // Wrong type for boolean
@@ -1426,7 +1426,7 @@ mod tests {
 
         let udt = UdtValue::new("person".to_string(), "test_ks".to_string()).with_field(
             "street".to_string(),
-            Some(Value::Text("Main St".to_string())),
+            Some(Value::text("Main St".to_string())),
         );
 
         let result = ser.serialize_udt(&Value::Udt(Box::new(udt)), &schema);

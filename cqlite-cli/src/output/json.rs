@@ -158,7 +158,7 @@ impl JSONWriter {
             Value::Float32(f) => serde_json::Number::from_f64(*f as f64)
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null),
-            Value::Text(s) => JsonValue::String(s.clone()),
+            Value::Text(s) => JsonValue::String(String::from_utf8_lossy(s).into_owned()),
             // Use ValueFormatter for human-readable Blob formatting (0x... hex)
             Value::Blob(_) => JsonValue::String(ValueFormatter::format_value(value)),
             // Use ValueFormatter for human-readable Timestamp (YYYY-MM-DD HH:MM:SS.fff+0000)
@@ -499,7 +499,7 @@ mod tests {
         ];
         let mut values = HashMap::new();
         values.insert("id".to_string(), Value::Integer(7));
-        values.insert("name".to_string(), Value::Text("null".to_string()));
+        values.insert("name".to_string(), Value::text("null".to_string()));
         result
             .rows
             .push(QueryRow::with_values(RowKey::new(vec![7]), values));
@@ -664,7 +664,7 @@ mod tests {
 
         let mut values = HashMap::new();
         values.insert("int_col".to_string(), Value::Integer(42));
-        values.insert("text_col".to_string(), Value::Text("hello".to_string()));
+        values.insert("text_col".to_string(), Value::text("hello".to_string()));
         values.insert("bool_col".to_string(), Value::Boolean(true));
 
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
@@ -779,8 +779,8 @@ mod tests {
     #[test]
     fn test_map_value() {
         let map_value = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key2".to_string()), Value::Integer(2)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key2".to_string()), Value::Integer(2)),
         ]);
 
         let json_val = JSONWriter::value_to_json(&map_value);
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_blob_formatting() {
-        let blob = Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let blob = Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
         let json_val = JSONWriter::value_to_json(&blob);
         // Should be 0x hex format, not base64
         assert_eq!(json_val.as_str().unwrap(), "0xdeadbeef");
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_varint_formatting() {
-        let varint = Value::Varint(vec![0x01, 0x00]); // 256
+        let varint = Value::varint(vec![0x01, 0x00]); // 256
         let json_val = JSONWriter::value_to_json(&varint);
         // Should be decimal string, not base64
         assert_eq!(json_val.as_str().unwrap(), "256");

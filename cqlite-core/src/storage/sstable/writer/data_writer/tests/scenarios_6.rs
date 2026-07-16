@@ -32,7 +32,7 @@ fn merge_row_group_keeps_strictly_newer_complex_element_on_row_tombstone() {
             CellOperation::WriteComplexElement {
                 column: "tags".to_string(),
                 cell_path: vec![0u8; 16],
-                value: Some(Value::Text("shadowed".to_string())),
+                value: Some(Value::text("shadowed".to_string())),
                 timestamp_micros: SHADOWED_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -41,7 +41,7 @@ fn merge_row_group_keeps_strictly_newer_complex_element_on_row_tombstone() {
             CellOperation::WriteComplexElement {
                 column: "tags".to_string(),
                 cell_path: vec![1u8; 16],
-                value: Some(Value::Text("live".to_string())),
+                value: Some(Value::text("live".to_string())),
                 timestamp_micros: LIVE_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -143,7 +143,7 @@ fn merge_row_group_shadows_complex_element_on_normal_path_by_floor() {
             CellOperation::WriteComplexElement {
                 column: "tags".to_string(),
                 cell_path: vec![0u8; 16],
-                value: Some(Value::Text("covered-eq".to_string())),
+                value: Some(Value::text("covered-eq".to_string())),
                 timestamp_micros: COVERED_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -152,7 +152,7 @@ fn merge_row_group_shadows_complex_element_on_normal_path_by_floor() {
             CellOperation::WriteComplexElement {
                 column: "tags".to_string(),
                 cell_path: vec![1u8; 16],
-                value: Some(Value::Text("covered-below".to_string())),
+                value: Some(Value::text("covered-below".to_string())),
                 timestamp_micros: BELOW_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -161,7 +161,7 @@ fn merge_row_group_shadows_complex_element_on_normal_path_by_floor() {
             CellOperation::WriteComplexElement {
                 column: "tags".to_string(),
                 cell_path: vec![2u8; 16],
-                value: Some(Value::Text("live".to_string())),
+                value: Some(Value::text("live".to_string())),
                 timestamp_micros: LIVE_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -277,7 +277,7 @@ fn merge_row_group_shadows_complex_element_against_surviving_marker() {
     let covered_elem = || CellOperation::WriteComplexElement {
         column: "tags".to_string(),
         cell_path: vec![0u8; 16],
-        value: Some(Value::Text("covered".to_string())),
+        value: Some(Value::text("covered".to_string())),
         timestamp_micros: COVERED_ELEM_TS,
         ttl_seconds: None,
         local_deletion_time: None,
@@ -286,7 +286,7 @@ fn merge_row_group_shadows_complex_element_against_surviving_marker() {
     let live_elem = || CellOperation::WriteComplexElement {
         column: "tags".to_string(),
         cell_path: vec![1u8; 16],
-        value: Some(Value::Text("live".to_string())),
+        value: Some(Value::text("live".to_string())),
         timestamp_micros: LIVE_ELEM_TS,
         ttl_seconds: None,
         local_deletion_time: None,
@@ -392,7 +392,7 @@ fn merge_row_group_drops_liveness_when_all_complex_elements_shadowed() {
     let shadowed_elem = || CellOperation::WriteComplexElement {
         column: "tags".to_string(),
         cell_path: vec![0u8; 16],
-        value: Some(Value::Text("shadowed".to_string())),
+        value: Some(Value::text("shadowed".to_string())),
         timestamp_micros: SHADOWED_ELEM_TS,
         ttl_seconds: None,
         local_deletion_time: None,
@@ -401,7 +401,7 @@ fn merge_row_group_drops_liveness_when_all_complex_elements_shadowed() {
     let live_elem = || CellOperation::WriteComplexElement {
         column: "tags".to_string(),
         cell_path: vec![1u8; 16],
-        value: Some(Value::Text("live".to_string())),
+        value: Some(Value::text("live".to_string())),
         timestamp_micros: LIVE_ELEM_TS,
         ttl_seconds: None,
         local_deletion_time: None,
@@ -469,7 +469,7 @@ fn merge_row_group_drops_liveness_when_all_complex_elements_shadowed() {
             CellOperation::WriteComplexElement {
                 column: "tags".to_string(),
                 cell_path: vec![0u8; 16],
-                value: Some(Value::Text("shadowed".to_string())),
+                value: Some(Value::text("shadowed".to_string())),
                 timestamp_micros: SHADOWED_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -477,7 +477,7 @@ fn merge_row_group_drops_liveness_when_all_complex_elements_shadowed() {
             },
             CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text("alive".to_string()),
+                value: Value::text("alive".to_string()),
             },
         ],
         SHADOWED_ELEM_TS,
@@ -516,7 +516,7 @@ fn merge_row_group_element_own_ts_wins_mixed_stream_over_older_row_ts() {
         None,
         vec![CellOperation::Write {
             column: "tags".to_string(),
-            value: Value::Text("whole".to_string()),
+            value: Value::text("whole".to_string()),
         }],
         WHOLE_TS,
         None,
@@ -528,7 +528,7 @@ fn merge_row_group_element_own_ts_wins_mixed_stream_over_older_row_ts() {
         vec![CellOperation::WriteComplexElement {
             column: "tags".to_string(),
             cell_path: vec![0u8; 16],
-            value: Some(Value::Text("new-elem".to_string())),
+            value: Some(Value::text("new-elem".to_string())),
             timestamp_micros: ELEM_OWN_TS,
             ttl_seconds: None,
             local_deletion_time: None,
@@ -591,7 +591,7 @@ fn merge_row_group_complex_deletion_mfda_wins_mixed_stream_over_older_row_ts() {
         None,
         vec![CellOperation::Write {
             column: "tags".to_string(),
-            value: Value::Text("whole".to_string()),
+            value: Value::text("whole".to_string()),
         }],
         WHOLE_TS,
         None,
@@ -675,7 +675,7 @@ fn merge_row_group_complex_deletion_mfda_wins_mixed_stream_shadowed_path() {
         None,
         vec![CellOperation::Write {
             column: "tags".to_string(),
-            value: Value::Text("whole".to_string()),
+            value: Value::text("whole".to_string()),
         }],
         WHOLE_TS,
         None,
@@ -735,7 +735,7 @@ fn merge_row_group_no_liveness_from_element_dropped_by_whole_column_delete() {
         vec![CellOperation::WriteComplexElement {
             column: "tags".to_string(),
             cell_path: vec![0u8; 16],
-            value: Some(Value::Text("a-live".to_string())),
+            value: Some(Value::text("a-live".to_string())),
             timestamp_micros: A_ELEM_TS,
             ttl_seconds: None,
             local_deletion_time: None,
@@ -770,7 +770,7 @@ fn merge_row_group_no_liveness_from_element_dropped_by_whole_column_delete() {
             CellOperation::WriteComplexElement {
                 column: "notes".to_string(),
                 cell_path: vec![1u8; 16],
-                value: Some(Value::Text("b-shadowed".to_string())),
+                value: Some(Value::text("b-shadowed".to_string())),
                 timestamp_micros: B_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -848,7 +848,7 @@ fn merge_row_group_no_liveness_from_element_dropped_by_whole_column_live_write()
         vec![CellOperation::WriteComplexElement {
             column: "tags".to_string(),
             cell_path: vec![0u8; 16],
-            value: Some(Value::Text("a-live".to_string())),
+            value: Some(Value::text("a-live".to_string())),
             timestamp_micros: A_ELEM_TS,
             ttl_seconds: None,
             local_deletion_time: None,
@@ -863,7 +863,7 @@ fn merge_row_group_no_liveness_from_element_dropped_by_whole_column_live_write()
         None,
         vec![CellOperation::Write {
             column: "tags".to_string(),
-            value: Value::Text("a-whole".to_string()),
+            value: Value::text("a-whole".to_string()),
         }],
         A_WRITE_TS,
         None,
@@ -881,7 +881,7 @@ fn merge_row_group_no_liveness_from_element_dropped_by_whole_column_live_write()
             CellOperation::WriteComplexElement {
                 column: "notes".to_string(),
                 cell_path: vec![1u8; 16],
-                value: Some(Value::Text("b-shadowed".to_string())),
+                value: Some(Value::text("b-shadowed".to_string())),
                 timestamp_micros: B_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -953,7 +953,7 @@ fn merge_row_group_no_liveness_when_whole_column_write_loses_to_complex_marker()
         None,
         vec![CellOperation::Write {
             column: "tags".to_string(),
-            value: Value::Text("whole".to_string()),
+            value: Value::text("whole".to_string()),
         }],
         WRITE_TS,
         None,
@@ -1011,7 +1011,7 @@ fn merge_row_group_surviving_whole_column_write_sets_liveness() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("alive".to_string()),
+            value: Value::text("alive".to_string()),
         }],
         WRITE_TS,
         None,
@@ -1090,7 +1090,7 @@ fn merge_row_group_row_tombstone_all_complex_shadowed_carries_no_liveness() {
             CellOperation::WriteComplexElement {
                 column: "tags".to_string(),
                 cell_path: vec![0u8; 16],
-                value: Some(Value::Text("covered".to_string())),
+                value: Some(Value::text("covered".to_string())),
                 timestamp_micros: COVERED_ELEM_TS,
                 ttl_seconds: None,
                 local_deletion_time: None,
@@ -1422,8 +1422,8 @@ fn bare_udt_with_registry_roundtrips_sparse_out_of_order() {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![
-            udt_field("email", Some(Value::Text("a@b.com".to_string()))),
-            udt_field("name", Some(Value::Text("Alice".to_string()))),
+            udt_field("email", Some(Value::text("a@b.com".to_string()))),
+            udt_field("name", Some(Value::text("Alice".to_string()))),
         ],
     }));
 
@@ -1457,13 +1457,13 @@ fn bare_udt_with_registry_roundtrips_sparse_out_of_order() {
             assert_eq!(out.keyspace, "test_ks");
             assert_eq!(out.fields.len(), 3, "all DECLARED fields present");
             assert_eq!(out.fields[0].name, "name");
-            assert_eq!(out.fields[0].value, Some(Value::Text("Alice".to_string())));
+            assert_eq!(out.fields[0].value, Some(Value::text("Alice".to_string())));
             assert_eq!(out.fields[1].name, "age");
             assert_eq!(out.fields[1].value, None, "omitted field stays null");
             assert_eq!(out.fields[2].name, "email");
             assert_eq!(
                 out.fields[2].value,
-                Some(Value::Text("a@b.com".to_string()))
+                Some(Value::text("a@b.com".to_string()))
             );
         }
         other => panic!("expected Value::Udt, got {:?}", other),
@@ -1506,7 +1506,7 @@ fn bare_udt_without_registry_is_single_simple_cell() {
     let udt = Value::Udt(Box::new(crate::types::UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
-        fields: vec![udt_field("name", Some(Value::Text("Alice".to_string())))],
+        fields: vec![udt_field("name", Some(Value::text("Alice".to_string())))],
     }));
     let mut buf = Vec::new();
     let res = writer.write_cell(&mut buf, &col.name, &udt, 1_005_000);
@@ -1667,7 +1667,7 @@ fn frozen_list_of_udt_value_is_canonicalized_after_normalization() {
         keyspace: "test_compactionparityudt".to_string(),
         fields: vec![
             udt_field("age", Some(Value::Integer(41))),
-            udt_field("first_name", Some(Value::Text("Alan".to_string()))),
+            udt_field("first_name", Some(Value::text("Alan".to_string()))),
         ],
     }));
     let v = Value::Frozen(Box::new(Value::List(vec![element])));
@@ -1695,7 +1695,7 @@ fn frozen_list_of_udt_value_is_canonicalized_after_normalization() {
         vec![
             (
                 "first_name".to_string(),
-                Some(Value::Text("Alan".to_string()))
+                Some(Value::text("Alan".to_string()))
             ),
             ("last_name".to_string(), None),
             ("age".to_string(), Some(Value::Integer(41))),

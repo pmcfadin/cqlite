@@ -432,13 +432,14 @@ impl EdgeCaseDataTypeTests {
         let start_time = std::time::Instant::now();
 
         let result = match std::panic::catch_unwind(|| {
-            let text_value = Value::Text(text.to_string());
+            let text_value = Value::text(text.to_string());
             match serialize_cql_value(&text_value) {
                 Ok(serialized) => {
                     if serialized.len() > 1 {
                         match parse_cql_value(&serialized[1..], CqlTypeId::Varchar) {
                             Ok((_, parsed)) => match parsed {
                                 Value::Text(parsed_text) => {
+                                    let parsed_text = String::from_utf8_lossy(&parsed_text);
                                     if parsed_text == text {
                                         Ok(serialized.len())
                                     } else {
@@ -519,7 +520,7 @@ impl EdgeCaseDataTypeTests {
         // Convert HashMap to Vec<(Value, Value)>
         let map_vec: Vec<(Value, Value)> = large_map
             .into_iter()
-            .map(|(k, v)| (Value::Text(k), v))
+            .map(|(k, v)| (Value::Text(k.into()), v))
             .collect();
         let map_value = Value::Map(map_vec);
 
@@ -583,7 +584,7 @@ impl EdgeCaseDataTypeTests {
 
         // Create 10MB blob
         let large_blob: Vec<u8> = (0..10_000_000).map(|i| (i % 256) as u8).collect();
-        let blob_value = Value::Blob(large_blob);
+        let blob_value = Value::Blob(large_blob.into());
 
         let result = match std::panic::catch_unwind(|| match serialize_cql_value(&blob_value) {
             Ok(serialized) => Ok(serialized.len()),
@@ -623,7 +624,7 @@ impl EdgeCaseDataTypeTests {
             let start_time = std::time::Instant::now();
 
             let test_string = "A".repeat(length);
-            let text_value = Value::Text(test_string);
+            let text_value = Value::Text(test_string.into());
 
             let result = match std::panic::catch_unwind(|| match serialize_cql_value(&text_value) {
                 Ok(serialized) => Ok(serialized.len()),
@@ -656,7 +657,7 @@ impl EdgeCaseDataTypeTests {
     // Additional helper methods for corruption testing
 
     fn create_valid_serialized_data(&self) -> Result<Vec<u8>> {
-        let test_value = Value::Text("Hello, World!".to_string());
+        let test_value = Value::text("Hello, World!".to_string());
         serialize_cql_value(&test_value)
     }
 

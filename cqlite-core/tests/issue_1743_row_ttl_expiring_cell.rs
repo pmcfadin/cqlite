@@ -85,7 +85,7 @@ fn insert_using_ttl(id: i32, name: &str, ttl_seconds: u32, ts: i64) -> Mutation 
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text(name.to_string()),
+        value: Value::text(name.to_string()),
     }];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, Some(ttl_seconds))
 }

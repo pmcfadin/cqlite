@@ -209,9 +209,9 @@ impl KeyDigestComputer {
             ComparatorType::Text => {
                 let text = String::from_utf8(bytes.to_vec())
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in text: {}", e)))?;
-                Ok(Value::Text(text))
+                Ok(Value::Text(text.into()))
             }
-            ComparatorType::Blob => Ok(Value::Blob(bytes.to_vec())),
+            ComparatorType::Blob => Ok(Value::blob(bytes.to_vec())),
             ComparatorType::Timestamp => {
                 if bytes.len() != 8 {
                     return Err(Error::corruption("Invalid timestamp bytes".to_string()));
@@ -256,7 +256,7 @@ impl KeyDigestComputer {
                     "Complex type {} in partition key - using blob fallback",
                     comparator.type_name()
                 );
-                Ok(Value::Blob(bytes.to_vec()))
+                Ok(Value::blob(bytes.to_vec()))
             }
         }
     }

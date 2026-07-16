@@ -42,8 +42,8 @@ async fn main() -> Result<()> {
     
     // Add test data
     let test_entries = vec![
-        (TableId::new("users"), RowKey::from("user:1"), Value::Text("John Doe".to_string())),
-        (TableId::new("users"), RowKey::from("user:2"), Value::Text("Jane Smith".to_string())),
+        (TableId::new("users"), RowKey::from("user:1"), Value::text("John Doe".to_string())),
+        (TableId::new("users"), RowKey::from("user:2"), Value::text("Jane Smith".to_string())),
         (TableId::new("orders"), RowKey::from("order:100"), Value::Integer(1500)),
         (TableId::new("orders"), RowKey::from("order:101"), Value::Float(29.99)),
     ];
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
     for i in 0..1000 {
         let table_id = TableId::new("large_table");
         let key = RowKey::from(format!("key_{:06}", i));
-        let value = Value::Text(format!("This is test data entry number {} with some repetitive content to ensure compression works effectively", i));
+        let value = Value::text(format!("This is test data entry number {} with some repetitive content to ensure compression works effectively", i));
         compressed_writer.add_entry(&table_id, key, value).await?;
     }
     
@@ -208,7 +208,7 @@ async fn run_performance_benchmark(config: &Config, platform: &Arc<Platform>, te
     for i in 0..entry_count {
         let table_id = TableId::new("benchmark_table");
         let key = RowKey::from(format!("benchmark_key_{:08}", i));
-        let value = Value::Text(format!("Benchmark value {} with some additional content to make it realistic", i));
+        let value = Value::text(format!("Benchmark value {} with some additional content to make it realistic", i));
         writer.add_entry(&table_id, key, value).await?;
     }
     

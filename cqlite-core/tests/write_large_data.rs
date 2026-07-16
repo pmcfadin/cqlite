@@ -155,7 +155,7 @@ async fn test_10k_clustering_rows_single_partition() -> cqlite_core::error::Resu
         let ck = ClusteringKey::single("ck", Value::Integer(ck_val));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("row_{}", ck_val)),
+            value: Value::text(format!("row_{}", ck_val)),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -250,7 +250,7 @@ async fn test_10k_element_set_roundtrip() -> cqlite_core::error::Result<()> {
 
     let large_set = Value::Set(
         (0..10_000_i32)
-            .map(|i| Value::Text(format!("item_{}", i)))
+            .map(|i| Value::text(format!("item_{}", i)))
             .collect(),
     );
 
@@ -297,7 +297,7 @@ async fn test_10k_element_map_roundtrip() -> cqlite_core::error::Result<()> {
 
     let large_map = Value::Map(
         (0..10_000_i32)
-            .map(|i| (Value::Integer(i), Value::Text(format!("val_{}", i))))
+            .map(|i| (Value::Integer(i), Value::text(format!("val_{}", i))))
             .collect(),
     );
 
@@ -352,7 +352,7 @@ async fn test_10mb_blob_roundtrip() -> cqlite_core::error::Result<()> {
     let table_id = TableId::new("test_large", "blob_10mb");
 
     const BLOB_SIZE: usize = 10 * 1024 * 1024; // 10 MB
-    let blob = Value::Blob(vec![0xAB_u8; BLOB_SIZE]);
+    let blob = Value::blob(vec![0xAB_u8; BLOB_SIZE]);
 
     let pk = PartitionKey::single("pk", Value::Integer(1));
     let ops = vec![CellOperation::Write {
@@ -433,7 +433,7 @@ async fn test_500_columns_roundtrip() -> cqlite_core::error::Result<()> {
     let ops: Vec<CellOperation> = (0..500)
         .map(|i| CellOperation::Write {
             column: format!("col_{:03}", i),
-            value: Value::Text(format!("value_{}", i)),
+            value: Value::text(format!("value_{}", i)),
         })
         .collect();
 
@@ -477,7 +477,7 @@ async fn test_1000_partitions_roundtrip() -> cqlite_core::error::Result<()> {
         let pk = PartitionKey::single("pk", Value::Integer(i));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(format!("partition_{}", i)),
+            value: Value::text(format!("partition_{}", i)),
         }];
         let mutation = Mutation::new(table_id.clone(), pk, None, ops, timestamp + i as i64, None);
         engine.write_async(mutation).await?;

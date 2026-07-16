@@ -185,7 +185,10 @@ impl ByteComparableEncoder {
             Value::Counter(c) => self.encode_bigint(*c), // Counter encoded as bigint
             Value::Float32(f) => self.encode_float32(*f),
             Value::Float(f) => self.encode_double(*f),
-            Value::Text(s) => self.encode_text(s),
+            Value::Text(s) => self
+                .encode_text(std::str::from_utf8(s).map_err(|e| {
+                    crate::Error::corruption(format!("invalid UTF-8 in text: {e}"))
+                })?),
             Value::Blob(bytes) => self.encode_blob(bytes),
             Value::Uuid(uuid) => self.encode_uuid_bytes(uuid),
             Value::Timestamp(ts) => self.encode_timestamp(*ts),
@@ -874,10 +877,10 @@ mod tests {
     fn test_text_encoding() {
         let mut encoder = ByteComparableEncoder::new();
 
-        let encoded_a = encoder.encode_value(&Value::Text("a".to_string())).unwrap();
-        let encoded_b = encoder.encode_value(&Value::Text("b".to_string())).unwrap();
+        let encoded_a = encoder.encode_value(&Value::text("a".to_string())).unwrap();
+        let encoded_b = encoder.encode_value(&Value::text("b".to_string())).unwrap();
         let encoded_aa = encoder
-            .encode_value(&Value::Text("aa".to_string()))
+            .encode_value(&Value::text("aa".to_string()))
             .unwrap();
 
         // Lexicographic comparison should match string comparison
@@ -931,9 +934,9 @@ mod tests {
     fn test_composite_key_encoding() {
         let mut encoder = ByteComparableEncoder::new();
 
-        let key1 = vec![Value::Text("partition1".to_string()), Value::Integer(1)];
-        let key2 = vec![Value::Text("partition1".to_string()), Value::Integer(2)];
-        let key3 = vec![Value::Text("partition2".to_string()), Value::Integer(1)];
+        let key1 = vec![Value::text("partition1".to_string()), Value::Integer(1)];
+        let key2 = vec![Value::text("partition1".to_string()), Value::Integer(2)];
+        let key3 = vec![Value::text("partition2".to_string()), Value::Integer(1)];
 
         let encoded1 = encoder.encode_composite_key(&key1).unwrap();
         let encoded2 = encoder.encode_composite_key(&key2).unwrap();
@@ -997,10 +1000,10 @@ mod tests {
         let mut encoder = ByteComparableEncoder::new();
 
         let encoded1 = encoder
-            .encode_value(&Value::Text("test1".to_string()))
+            .encode_value(&Value::text("test1".to_string()))
             .unwrap();
         let encoded2 = encoder
-            .encode_value(&Value::Text("test2".to_string()))
+            .encode_value(&Value::text("test2".to_string()))
             .unwrap();
 
         // Each encoding should be independent
@@ -1047,7 +1050,7 @@ mod tests {
 
         let values = vec![
             Value::Integer(1),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
         ];
 
@@ -1070,7 +1073,7 @@ mod tests {
         let null_val = encoder.encode_value(&Value::Null).unwrap();
         let bool_val = encoder.encode_value(&Value::Boolean(false)).unwrap();
         let int_val = encoder.encode_value(&Value::Integer(0)).unwrap();
-        let text_val = encoder.encode_value(&Value::Text("".to_string())).unwrap();
+        let text_val = encoder.encode_value(&Value::text("".to_string())).unwrap();
 
         // Null should come first, then booleans, then numbers, then text
         assert!(null_val < bool_val);
@@ -1106,7 +1109,7 @@ mod tests {
 
         // Encode something
         encoder
-            .encode_value(&Value::Text("test".to_string()))
+            .encode_value(&Value::text("test".to_string()))
             .unwrap();
         let stats_after = encoder.get_stats();
         assert!(stats_after.buffer_size > 0);
@@ -1135,13 +1138,13 @@ mod tests {
         let mut encoder = ByteComparableEncoder::new();
 
         let blob1 = encoder
-            .encode_value(&Value::Blob(vec![0x01, 0x02]))
+            .encode_value(&Value::blob(vec![0x01, 0x02]))
             .unwrap();
         let blob2 = encoder
-            .encode_value(&Value::Blob(vec![0x01, 0x03]))
+            .encode_value(&Value::blob(vec![0x01, 0x03]))
             .unwrap();
         let blob_with_null = encoder
-            .encode_value(&Value::Blob(vec![0x01, 0x00, 0x02]))
+            .encode_value(&Value::blob(vec![0x01, 0x00, 0x02]))
             .unwrap();
 
         // Should start with blob prefix
@@ -1179,10 +1182,10 @@ mod tests {
             Value::Float32(1.0),
             Value::Float(-1.0),
             Value::Float(1.0),
-            Value::Text("a".to_string()),
-            Value::Text("z".to_string()),
-            Value::Blob(vec![0x01]),
-            Value::Blob(vec![0xFF]),
+            Value::text("a".to_string()),
+            Value::text("z".to_string()),
+            Value::blob(vec![0x01]),
+            Value::blob(vec![0xFF]),
             Value::Uuid([0u8; 16]),
             Value::Uuid([0xFFu8; 16]),
             Value::Timestamp(-1000),

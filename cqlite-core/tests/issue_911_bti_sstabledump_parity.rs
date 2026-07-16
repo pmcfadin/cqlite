@@ -256,7 +256,7 @@ fn row(pk: i32, ck: i32, payload: &str, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "payload".to_string(),
-            value: Value::Text(payload.to_string()),
+            value: Value::text(payload.to_string()),
         }],
         ts,
         None,
@@ -468,7 +468,7 @@ async fn bti_narrow_only_writer_output_reads_under_cassandra5_sstabledump() {
                 None,
                 vec![CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text(format!("n{i}")),
+                    value: Value::text(format!("n{i}")),
                 }],
                 1_000_000 + i as i64,
                 None,

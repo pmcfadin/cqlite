@@ -166,7 +166,7 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
                     }
                 }
                 if let Ok(text) = String::from_utf8(input.to_vec()) {
-                    return Ok((&[], Value::Text(text)));
+                    return Ok((&[], Value::Text(text.into())));
                 }
                 parse_text(input)
             }
@@ -176,7 +176,7 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
                 let text = String::from_utf8(input.to_vec()).map_err(|_| {
                     nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
                 })?;
-                Ok((&[], Value::Text(text)))
+                Ok((&[], Value::Text(text.into())))
             }
         }
         CqlTypeId::Blob => {
@@ -190,7 +190,7 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
             // issues #28 / #1630). The genuinely VInt-framed decode lives in
             // parse_blob (used by parse_cql_value_with_schema and the write
             // side's tagged serialization), not here.
-            Ok((&[], Value::Blob(input.to_vec())))
+            Ok((&[], Value::blob(input.to_vec())))
         }
         CqlTypeId::Uuid | CqlTypeId::Timeuuid => parse_uuid(input),
         CqlTypeId::Timestamp => parse_timestamp(input),
@@ -231,11 +231,11 @@ pub fn parse_cql_value_raw(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], V
             let text = String::from_utf8(input.to_vec()).map_err(|_| {
                 nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
             })?;
-            Ok((&[], Value::Text(text)))
+            Ok((&[], Value::Text(text.into())))
         }
         CqlTypeId::Blob => {
             // For blob, use all input as blob data
-            Ok((&[], Value::Blob(input.to_vec())))
+            Ok((&[], Value::blob(input.to_vec())))
         }
         CqlTypeId::Uuid | CqlTypeId::Timeuuid => parse_uuid(input),
         CqlTypeId::Timestamp => parse_timestamp(input),
@@ -252,7 +252,7 @@ pub fn parse_cql_value_raw(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], V
         CqlTypeId::Tombstone => parse_tombstone(input),
         CqlTypeId::Custom => {
             // Custom types require additional metadata, return as blob for now
-            Ok((&[], Value::Blob(input.to_vec())))
+            Ok((&[], Value::blob(input.to_vec())))
         }
     }
 }
@@ -267,8 +267,8 @@ pub(super) fn create_empty_value_for_cql_type(cql_type: &CqlType) -> Result<Valu
         CqlType::BigInt => Ok(Value::BigInt(0)),
         CqlType::Float => Ok(Value::Float32(0.0)),
         CqlType::Double => Ok(Value::Float(0.0)),
-        CqlType::Text | CqlType::Ascii | CqlType::Varchar => Ok(Value::Text(String::new())),
-        CqlType::Blob => Ok(Value::Blob(Vec::new())),
+        CqlType::Text | CqlType::Ascii | CqlType::Varchar => Ok(Value::text(String::new())),
+        CqlType::Blob => Ok(Value::blob(Vec::new())),
         CqlType::Uuid | CqlType::TimeUuid => Ok(Value::Uuid([0; 16])),
         CqlType::Timestamp => Ok(Value::Timestamp(0)),
         CqlType::Date => Ok(Value::Timestamp(0)),
@@ -329,8 +329,8 @@ pub(super) fn create_empty_value(type_id: CqlTypeId) -> Result<Value> {
         CqlTypeId::Counter => Ok(Value::Counter(0)),
         CqlTypeId::Float => Ok(Value::Float32(0.0)),
         CqlTypeId::Double => Ok(Value::Float(0.0)),
-        CqlTypeId::Ascii | CqlTypeId::Varchar => Ok(Value::Text(String::new())),
-        CqlTypeId::Blob => Ok(Value::Blob(Vec::new())),
+        CqlTypeId::Ascii | CqlTypeId::Varchar => Ok(Value::text(String::new())),
+        CqlTypeId::Blob => Ok(Value::blob(Vec::new())),
         CqlTypeId::Uuid | CqlTypeId::Timeuuid => Ok(Value::Uuid([0; 16])),
         CqlTypeId::Timestamp => Ok(Value::Timestamp(0)),
         CqlTypeId::List => Ok(Value::List(Vec::new())),
@@ -373,7 +373,7 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
         Value::Text(s) => {
             result.push(CqlTypeId::Varchar as u8);
             result.extend_from_slice(&encode_vint(s.len() as i64));
-            result.extend_from_slice(s.as_bytes());
+            result.extend_from_slice(s.as_ref());
         }
         Value::Blob(b) => {
             result.push(CqlTypeId::Blob as u8);
@@ -636,7 +636,7 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
         Value::Text(s) => {
             // For raw serialization without type prefix, just include the string bytes
             // The length will be handled by the map format itself
-            Ok(s.as_bytes().to_vec())
+            Ok(s.to_vec())
         }
         Value::Blob(b) => {
             // For raw serialization without type prefix, just include the blob bytes
@@ -651,7 +651,7 @@ fn serialize_value_without_type_prefix(value: &Value) -> Result<Vec<u8>> {
         Value::Time(nanos) => Ok(nanos.to_be_bytes().to_vec()),
         Value::Uuid(uuid) => Ok(uuid.to_vec()),
         Value::TinyInt(i) => Ok(vec![*i as u8]),
-        Value::Inet(bytes) => Ok(bytes.clone()),
+        Value::Inet(bytes) => Ok(bytes.to_vec()),
         Value::SmallInt(i) => Ok(i.to_be_bytes().to_vec()),
         Value::Float32(f) => Ok(f.to_be_bytes().to_vec()),
         // For complex types, fall back to full serialization and strip type byte
@@ -818,8 +818,8 @@ mod tests {
             Value::Integer(42),
             Value::BigInt(1000),
             Value::Float(std::f64::consts::PI),
-            Value::Text("test".to_string()),
-            Value::Blob(vec![1, 2, 3, 4]),
+            Value::text("test".to_string()),
+            Value::blob(vec![1, 2, 3, 4]),
         ];
 
         for value in test_values {

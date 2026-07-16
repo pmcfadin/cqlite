@@ -78,7 +78,7 @@ fn pinned_ttl_row(id: i32, ck: i32, name: &str) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::WriteWithTtl {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
             ttl_seconds: TTL_SECONDS,
             local_deletion_time: Some(PINNED_LDT),
         }],
@@ -202,7 +202,7 @@ fn write_with_ttl_stamps_authoritative_local_deletion_time() {
 
     let cells = read_name_cells(&inputs, &schema);
     assert_eq!(cells.len(), 1, "expected exactly one name cell");
-    assert_eq!(cells[0].value, Value::Text("alive".to_string()));
+    assert_eq!(cells[0].value, Value::text("alive".to_string()));
     assert_eq!(cells[0].ttl, Some(TTL_SECONDS), "TTL preserved");
     // The on-disk localDeletionTime is the AUTHORITATIVE pinned value, NOT a
     // wall-clock-derived `now + ttl`.
@@ -262,7 +262,7 @@ fn surviving_live_ttl_cell_ldt_preserved_through_compaction() {
     assert_eq!(cells.len(), 1, "live TTL cell must survive compaction");
     assert_eq!(
         cells[0].value,
-        Value::Text("alive".to_string()),
+        Value::text("alive".to_string()),
         "value survives live"
     );
     assert_eq!(cells[0].ttl, Some(TTL_SECONDS), "TTL preserved");

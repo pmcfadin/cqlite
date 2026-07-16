@@ -217,6 +217,7 @@ async fn param_text_pk_matches_literal() {
         eprintln!("Skipping: counters returned 0 rows or id not text");
         return;
     };
+    let id = String::from_utf8_lossy(&id).into_owned();
 
     let literal = db
         .execute(&format!(
@@ -227,7 +228,7 @@ async fn param_text_pk_matches_literal() {
     let param = db
         .execute_with_params(
             "SELECT id, view_count FROM test_basic.counters WHERE id = ?",
-            &[Value::Text(id.clone())],
+            &[Value::text(id.clone())],
         )
         .await
         .expect("parameterized lookup must succeed");
@@ -303,6 +304,8 @@ async fn param_composite_pk_matches_literal() {
         eprintln!("Skipping: app_metrics returned 0 rows or composite key not text");
         return;
     };
+    let app = String::from_utf8_lossy(&app).into_owned();
+    let metric = String::from_utf8_lossy(&metric).into_owned();
 
     let literal = db
         .execute(&format!(
@@ -315,7 +318,7 @@ async fn param_composite_pk_matches_literal() {
         .execute_with_params(
             "SELECT application_id, metric_name, value FROM test_timeseries.app_metrics \
              WHERE application_id = ? AND metric_name = ?",
-            &[Value::Text(app.clone()), Value::Text(metric.clone())],
+            &[Value::text(app.clone()), Value::text(metric.clone())],
         )
         .await
         .expect("parameterized composite lookup must succeed");

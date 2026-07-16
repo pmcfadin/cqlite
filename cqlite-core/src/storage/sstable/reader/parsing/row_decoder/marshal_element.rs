@@ -270,7 +270,7 @@ mod tests {
         let val = parser
             .parse_value_from_raw_bytes(&bytes, "some_unregistered_udt", "col", 0)
             .expect("unresolved UDT must not error");
-        assert_eq!(val, Value::Blob(bytes.to_vec()));
+        assert_eq!(val, Value::blob(bytes.to_vec()));
     }
 
     #[test]

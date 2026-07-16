@@ -251,8 +251,8 @@ impl V5CompressedLegacyParser {
             // every other declared type → NULL), byte-identical to the pre-J1
             // `match normalized_type.as_str()` empty arm.
             let empty_value = match kind {
-                CellKind::Text => Value::Text(String::new()),
-                CellKind::Blob => Value::Blob(Vec::new()),
+                CellKind::Text => Value::text(String::new()),
+                CellKind::Blob => Value::blob(Vec::new()),
                 _ => {
                     tracing::warn!(
                         "V5CompressedLegacy: EMPTY value for cell '{}' (type {}), treating as NULL",
@@ -300,7 +300,7 @@ impl V5CompressedLegacyParser {
 
             let blob_bytes = data[*offset..*offset + blob_len].to_vec();
             *offset += blob_len;
-            Ok(Value::Blob(blob_bytes))
+            Ok(Value::Blob(blob_bytes.into()))
         };
 
         // At this point, we have a live cell with value data.
@@ -374,7 +374,7 @@ impl V5CompressedLegacyParser {
                 })?;
 
                 offset += text_len;
-                Value::Text(text)
+                Value::Text(text.into())
             }
 
             CellKind::Uuid => {
@@ -922,7 +922,7 @@ impl V5CompressedLegacyParser {
 
                 let bytes = data[offset..offset + len].to_vec();
                 offset += len;
-                Value::Inet(bytes)
+                Value::Inet(bytes.into())
             }
 
             // Complex types: frozen, tuple, non-frozen collection, marshal-UDT, and

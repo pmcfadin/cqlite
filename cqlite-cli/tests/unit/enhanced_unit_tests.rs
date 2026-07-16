@@ -316,15 +316,15 @@ mod formatter_tests {
             Row {
                 columns: vec![
                     ("id".to_string(), Value::Int(1)),
-                    ("name".to_string(), Value::Text("John".to_string())),
-                    ("email".to_string(), Value::Text("john@example.com".to_string())),
+                    ("name".to_string(), Value::text("John".to_string())),
+                    ("email".to_string(), Value::text("john@example.com".to_string())),
                 ],
             },
             Row {
                 columns: vec![
                     ("id".to_string(), Value::Int(2)),
-                    ("name".to_string(), Value::Text("Jane".to_string())),
-                    ("email".to_string(), Value::Text("jane@example.com".to_string())),
+                    ("name".to_string(), Value::text("Jane".to_string())),
+                    ("email".to_string(), Value::text("jane@example.com".to_string())),
                 ],
             },
         ]
@@ -369,7 +369,7 @@ mod formatter_tests {
     #[test_case(config::OutputFormat::Csv)]
     #[test_case(config::OutputFormat::Table)]
     fn test_format_dispatch(format: config::OutputFormat) {
-        let rows = vec![Row { columns: vec![("test".to_string(), Value::Text("value".to_string()))] }];
+        let rows = vec![Row { columns: vec![("test".to_string(), Value::text("value".to_string()))] }];
         let result = formatter::format_rows(&rows, format);
         assert!(result.is_ok());
     }
@@ -402,7 +402,7 @@ mod formatter_tests {
             Row {
                 columns: vec![
                     ("id".to_string(), Value::Int(1)),
-                    ("name".to_string(), Value::Text("Test User".to_string())),
+                    ("name".to_string(), Value::text("Test User".to_string())),
                 ],
             }
         ];

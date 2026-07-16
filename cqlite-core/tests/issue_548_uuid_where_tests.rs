@@ -433,7 +433,7 @@ mod integration {
 
         // Count rows that match the UUID value using the same comparison logic
         // as the query engine's compare_values / evaluate_condition.
-        // Before fix: uuid_value = Value::Text("...") → no match with Value::Uuid
+        // Before fix: uuid_value = Value::text("...") → no match with Value::Uuid
         // After fix: uuid_value = Value::Uuid(bytes) → matches Value::Uuid(same_bytes)
         let matching_rows: Vec<_> = scan_result
             .rows

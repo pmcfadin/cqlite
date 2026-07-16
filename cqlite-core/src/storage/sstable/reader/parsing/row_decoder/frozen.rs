@@ -838,7 +838,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             val,
-            Value::Map(vec![(Value::Text("x".to_string()), Value::Integer(42))])
+            Value::Map(vec![(Value::text("x".to_string()), Value::Integer(42))])
         );
         assert_eq!(end_offset, data.len());
     }
@@ -914,7 +914,7 @@ mod tests {
 
         assert_eq!(elements.len(), 2);
         assert_eq!(elements[0], Value::Integer(42));
-        assert_eq!(elements[1], Value::Text("hi".to_string()));
+        assert_eq!(elements[1], Value::text("hi".to_string()));
         assert_eq!(
             offset, blob_end,
             "offset should reach blob_end after parsing all elements"
@@ -935,7 +935,7 @@ mod tests {
 
         assert_eq!(elements2.len(), 2);
         assert_eq!(elements2[0], Value::Null);
-        assert_eq!(elements2[1], Value::Text("ok".to_string()));
+        assert_eq!(elements2[1], Value::text("ok".to_string()));
     }
 
     #[test]

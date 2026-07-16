@@ -34,7 +34,7 @@ fn framed_blob_exact_fixture_roundtrips_verbatim() {
     ];
     let (rem, value) = parse_cql_value(&content, CqlTypeId::Blob).expect("blob must decode");
     assert!(rem.is_empty(), "framed blob must consume the whole slice");
-    assert_eq!(value, Value::Blob(content.to_vec()));
+    assert_eq!(value, Value::blob(content.to_vec()));
 }
 
 /// Adversarial: a 16-byte blob that is NOT the exact fixture (last byte 0x10)
@@ -49,7 +49,7 @@ fn framed_blob_near_fixture_is_not_special_cased() {
     ];
     let (rem, value) = parse_cql_value(&content, CqlTypeId::Blob).expect("blob must decode");
     assert!(rem.is_empty());
-    assert_eq!(value, Value::Blob(content.to_vec()));
+    assert_eq!(value, Value::blob(content.to_vec()));
 }
 
 /// Adversarial: a blob whose first four bytes spell a plausible big-endian
@@ -60,7 +60,7 @@ fn framed_blob_with_be_length_prefix_is_not_reframed() {
     let content = [0x00u8, 0x00, 0x00, 0x02, 0xAA, 0xBB, 0xCC];
     let (rem, value) = parse_cql_value(&content, CqlTypeId::Blob).expect("blob must decode");
     assert!(rem.is_empty(), "must not leave a trailing byte");
-    assert_eq!(value, Value::Blob(content.to_vec()));
+    assert_eq!(value, Value::blob(content.to_vec()));
 }
 
 /// An empty framed blob decodes to an empty blob.
@@ -68,7 +68,7 @@ fn framed_blob_with_be_length_prefix_is_not_reframed() {
 fn framed_blob_empty_roundtrips() {
     let (rem, value) = parse_cql_value(&[], CqlTypeId::Blob).expect("empty blob must decode");
     assert!(rem.is_empty());
-    assert_eq!(value, Value::Blob(Vec::new()));
+    assert_eq!(value, Value::blob(Vec::new()));
 }
 
 /// The genuinely VInt-framed path (write-side tagged serialization → skip the
@@ -87,11 +87,11 @@ fn vint_framed_blob_write_side_roundtrips() {
         ],
     ] {
         let serialized =
-            serialize_cql_value(&Value::Blob(content.clone())).expect("serialize must succeed");
+            serialize_cql_value(&Value::blob(content.clone())).expect("serialize must succeed");
         assert_eq!(serialized[0], CqlTypeId::Blob as u8);
         let (rem, value) = parse_blob(&serialized[1..]).expect("vint-framed blob must decode");
         assert!(rem.is_empty());
-        assert_eq!(value, Value::Blob(content));
+        assert_eq!(value, Value::Blob(content.into()));
     }
 }
 
@@ -102,7 +102,7 @@ proptest! {
     fn prop_framed_blob_roundtrips_verbatim(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
         let (rem, value) = parse_cql_value(&bytes, CqlTypeId::Blob).expect("blob must decode");
         prop_assert!(rem.is_empty());
-        prop_assert_eq!(value, Value::Blob(bytes));
+        prop_assert_eq!(value, Value::Blob(bytes.into()));
     }
 
     /// Write-side VInt-framed path: encode with `serialize_cql_value`, strip the
@@ -113,6 +113,6 @@ proptest! {
         framed.extend_from_slice(&bytes);
         let (rem, value) = parse_blob(&framed).expect("vint-framed blob must decode");
         prop_assert!(rem.is_empty());
-        prop_assert_eq!(value, Value::Blob(bytes));
+        prop_assert_eq!(value, Value::Blob(bytes.into()));
     }
 }

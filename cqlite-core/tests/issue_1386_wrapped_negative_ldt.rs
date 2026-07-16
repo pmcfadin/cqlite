@@ -250,7 +250,7 @@ fn write_older_live_row(ck: i32, old_value: &str, ts: i64) -> Mutation {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(old_value.to_string()),
+                value: Value::text(old_value.to_string()),
             },
             CellOperation::Write {
                 column: "score".to_string(),
@@ -271,7 +271,7 @@ fn write_older_tags_row(ck: i32, element: &str, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "tags".to_string(),
-            value: Value::Set(vec![Value::Text(element.to_string())]),
+            value: Value::Set(vec![Value::text(element.to_string())]),
         }],
         ts,
         None,
@@ -432,7 +432,7 @@ fn wrapped_ldt_at_i32_min_cell_tombstone_retained() {
                     }
                     assert_ne!(
                         cell.value,
-                        Value::Text("secret".to_string()),
+                        Value::text("secret".to_string()),
                         "older `name` must stay shadowed at the wrap boundary"
                     );
                 }
@@ -517,7 +517,7 @@ fn wrapped_ldt_row_tombstone_retained_and_shadows() {
                     );
                 }
                 for cell in simple {
-                    if cell.column == "name" && cell.value == Value::Text("secret".to_string()) {
+                    if cell.column == "name" && cell.value == Value::text("secret".to_string()) {
                         saw_resurrected = true;
                     }
                 }

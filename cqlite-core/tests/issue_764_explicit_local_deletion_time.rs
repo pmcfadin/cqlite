@@ -590,7 +590,7 @@ async fn older_static_live_write_keeps_its_own_timestamp() {
         None,
         vec![CellOperation::Write {
             column: "s_old".to_string(),
-            value: Value::Text("old".to_string()),
+            value: Value::text("old".to_string()),
         }],
         T0,
         None,
@@ -602,7 +602,7 @@ async fn older_static_live_write_keeps_its_own_timestamp() {
         None,
         vec![CellOperation::Write {
             column: "s_new".to_string(),
-            value: Value::Text("new".to_string()),
+            value: Value::text("new".to_string()),
         }],
         T0 + 2_000_000,
         None,

@@ -394,7 +394,7 @@ pub fn int_clustering_schema() -> TableSchema {
 pub fn write_op(column: &str, text: &str) -> CellOperation {
     CellOperation::Write {
         column: column.to_string(),
-        value: Value::Text(text.to_string()),
+        value: Value::text(text.to_string()),
     }
 }
 

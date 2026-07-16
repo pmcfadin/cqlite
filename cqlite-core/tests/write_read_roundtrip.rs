@@ -225,7 +225,7 @@ pub fn create_simple_mutation(id: i32, name: &str, value: i32, timestamp: i64) -
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "value".to_string(),
@@ -240,10 +240,10 @@ pub fn create_simple_mutation(id: i32, name: &str, value: i32, timestamp: i64) -
 pub fn create_clustered_mutation(pk: i32, ck: &str, data: &str, timestamp: i64) -> Mutation {
     let table_id = TableId::new("test_roundtrip", "clustered");
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
-    let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+    let clustering_key = Some(ClusteringKey::single("ck", Value::text(ck.to_string())));
     let ops = vec![CellOperation::Write {
         column: "data".to_string(),
-        value: Value::Text(data.to_string()),
+        value: Value::text(data.to_string()),
     }];
 
     Mutation::new(
@@ -260,12 +260,12 @@ pub fn create_clustered_mutation(pk: i32, ck: &str, data: &str, timestamp: i64) 
 pub fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutation {
     let table_id = TableId::new("test_roundtrip", "all_types");
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
-    let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+    let clustering_key = Some(ClusteringKey::single("ck", Value::text(ck.to_string())));
 
     let ops = vec![
         CellOperation::Write {
             column: "text_col".to_string(),
-            value: Value::Text(format!("Text for {}-{}", pk, ck)),
+            value: Value::text(format!("Text for {}-{}", pk, ck)),
         },
         CellOperation::Write {
             column: "int_col".to_string(),
@@ -305,7 +305,7 @@ pub fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutat
         },
         CellOperation::Write {
             column: "blob_col".to_string(),
-            value: Value::Blob(vec![0xDE, 0xAD, (pk & 0xFF) as u8]),
+            value: Value::blob(vec![0xDE, 0xAD, (pk & 0xFF) as u8]),
         },
         CellOperation::Write {
             column: "date_col".to_string(),
@@ -317,11 +317,11 @@ pub fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutat
         },
         CellOperation::Write {
             column: "inet_col".to_string(),
-            value: Value::Inet(vec![192, 168, 1, (pk & 0xFF) as u8]),
+            value: Value::inet(vec![192, 168, 1, (pk & 0xFF) as u8]),
         },
         CellOperation::Write {
             column: "varint_col".to_string(),
-            value: Value::Varint(vec![(pk & 0xFF) as u8]),
+            value: Value::varint(vec![(pk & 0xFF) as u8]),
         },
         CellOperation::Write {
             column: "decimal_col".to_string(),
@@ -342,7 +342,7 @@ pub fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutat
             column: "tuple_col".to_string(),
             value: Value::Tuple(vec![
                 Value::Integer(pk),
-                Value::Text(format!("tuple_{}", pk)),
+                Value::text(format!("tuple_{}", pk)),
             ]),
         },
         CellOperation::Write {

@@ -59,7 +59,7 @@ pub fn write_row(id: i32, name: &str, score: i32, ts: i64) -> Mutation {
         vec![
             CellOperation::Write {
                 column: "name".into(),
-                value: Value::Text(name.into()),
+                value: Value::text(name),
             },
             CellOperation::Write {
                 column: "score".into(),
@@ -79,7 +79,7 @@ pub fn write_name_only(id: i32, name: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "name".into(),
-            value: Value::Text(name.into()),
+            value: Value::text(name),
         }],
         ts,
         None,
@@ -148,7 +148,7 @@ pub fn write_clustered(pk: i32, ck: &str, val: i32, ts: i64) -> Mutation {
     Mutation::new(
         TableId::new(KS, WIDE_TBL),
         PartitionKey::single("pk", Value::Integer(pk)),
-        Some(ClusteringKey::single("ck", Value::Text(ck.into()))),
+        Some(ClusteringKey::single("ck", Value::text(ck))),
         vec![CellOperation::Write {
             column: "val".into(),
             value: Value::Integer(val),
@@ -164,7 +164,7 @@ pub fn delete_clustered(pk: i32, ck: &str, ts: i64) -> Mutation {
     Mutation::new(
         TableId::new(KS, WIDE_TBL),
         PartitionKey::single("pk", Value::Integer(pk)),
-        Some(ClusteringKey::single("ck", Value::Text(ck.into()))),
+        Some(ClusteringKey::single("ck", Value::text(ck))),
         vec![CellOperation::DeleteRow],
         ts,
         None,
@@ -199,7 +199,7 @@ pub fn write_uuid_row(id: [u8; 16], name: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "name".into(),
-            value: Value::Text(name.into()),
+            value: Value::text(name),
         }],
         ts,
         None,

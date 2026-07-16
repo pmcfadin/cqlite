@@ -135,7 +135,7 @@ impl SSTableRowIterator for LazyWideRun {
             RowData::Live {
                 cells: vec![CellData::new(
                     "payload".to_string(),
-                    Value::Text(payload_for(ck)),
+                    Value::text(payload_for(ck)),
                     ts,
                 )],
             },

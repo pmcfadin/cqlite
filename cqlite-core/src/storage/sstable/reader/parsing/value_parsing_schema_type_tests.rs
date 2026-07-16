@@ -132,7 +132,7 @@ async fn scalar_types_decode_typed_not_blob() {
         reader
             .parse_value_with_schema_type(&varint_bytes, "varint")
             .unwrap(),
-        Value::Varint(varint_bytes.clone()),
+        Value::varint(varint_bytes.clone()),
         "CQL varint must decode to Value::Varint, not Value::Blob"
     );
 
@@ -179,7 +179,7 @@ async fn scalar_types_decode_typed_not_blob() {
     let ip = vec![10u8, 0, 0, 1];
     assert_eq!(
         reader.parse_value_with_schema_type(&ip, "inet").unwrap(),
-        Value::Inet(ip.clone()),
+        Value::inet(ip.clone()),
         "CQL inet must decode to Value::Inet, not Value::Blob"
     );
 }
@@ -300,7 +300,7 @@ mod always_run {
         let varint_bytes = vec![0x01, 0x00];
         assert_eq!(
             parse_value_with_comparator(&varint_bytes, &ComparatorType::Varint).unwrap(),
-            Value::Varint(varint_bytes.clone()),
+            Value::varint(varint_bytes.clone()),
         );
 
         // Decimal: 4-byte scale + unscaled bytes.
@@ -341,11 +341,11 @@ mod always_run {
         // inet: 4-byte IPv4 / 16-byte IPv6 raw address bytes (Custom("inet")).
         assert_eq!(
             decode_custom_scalar("inet", &[10u8, 0, 0, 1]).unwrap(),
-            Value::Inet(vec![10, 0, 0, 1]),
+            Value::inet(vec![10, 0, 0, 1]),
         );
         assert_eq!(
             decode_custom_scalar("inet", &[0u8; 16]).unwrap(),
-            Value::Inet(vec![0u8; 16]),
+            Value::inet(vec![0u8; 16]),
         );
 
         // json: schema type "json" resolves to Custom("json"), so the block-path

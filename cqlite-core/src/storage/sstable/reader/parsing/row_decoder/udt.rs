@@ -549,7 +549,7 @@ impl V5CompressedLegacyParser {
             CqlType::Text | CqlType::Ascii => {
                 let s = String::from_utf8(data.to_vec())
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
-                Ok(Value::Text(s))
+                Ok(Value::Text(s.into()))
             }
             CqlType::Int => {
                 if data.len() != 4 {
@@ -638,8 +638,8 @@ impl V5CompressedLegacyParser {
                 let days = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
                 Ok(Value::Date(days as i32))
             }
-            CqlType::Blob => Ok(Value::Blob(data.to_vec())),
-            CqlType::Inet => Ok(Value::Inet(data.to_vec())),
+            CqlType::Blob => Ok(Value::blob(data.to_vec())),
+            CqlType::Inet => Ok(Value::inet(data.to_vec())),
             CqlType::Frozen(inner) => {
                 // Parse the inner type and wrap in Frozen
                 let inner_value = self.parse_udt_field_value(data, inner)?;
@@ -669,7 +669,7 @@ impl V5CompressedLegacyParser {
                     field_type,
                     data.len()
                 );
-                Ok(Value::Blob(data.to_vec()))
+                Ok(Value::blob(data.to_vec()))
             }
         }
     }
@@ -677,12 +677,12 @@ impl V5CompressedLegacyParser {
     /// Create an empty value for a given CQL type.
     pub(super) fn create_empty_value_for_type(cql_type: &CqlType) -> Value {
         match cql_type {
-            CqlType::Text | CqlType::Ascii => Value::Text(String::new()),
-            CqlType::Blob => Value::Blob(Vec::new()),
+            CqlType::Text | CqlType::Ascii => Value::text(String::new()),
+            CqlType::Blob => Value::blob(Vec::new()),
             CqlType::List(_) => Value::List(Vec::new()),
             CqlType::Set(_) => Value::Set(Vec::new()),
             CqlType::Map(_, _) => Value::Map(Vec::new()),
-            _ => Value::Blob(Vec::new()),
+            _ => Value::blob(Vec::new()),
         }
     }
 
@@ -832,7 +832,7 @@ impl V5CompressedLegacyParser {
             CqlType::Text | CqlType::Ascii => {
                 let s = String::from_utf8(data.to_vec())
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in UDT field: {}", e)))?;
-                Ok(Value::Text(s))
+                Ok(Value::Text(s.into()))
             }
             CqlType::Int => {
                 if data.len() != 4 {
@@ -911,7 +911,7 @@ impl V5CompressedLegacyParser {
                 ]);
                 Ok(Value::Timestamp(millis))
             }
-            CqlType::Blob => Ok(Value::Blob(data.to_vec())),
+            CqlType::Blob => Ok(Value::blob(data.to_vec())),
             _ => {
                 // For complex types (nested UDTs, collections, etc.), return as blob
                 // These require SSTableReader for full parsing
@@ -920,7 +920,7 @@ impl V5CompressedLegacyParser {
                     field_type,
                     data.len()
                 );
-                Ok(Value::Blob(data.to_vec()))
+                Ok(Value::blob(data.to_vec()))
             }
         }
     }
@@ -986,7 +986,7 @@ impl V5CompressedLegacyParser {
                         if let Some(nested_udt) = registry.get_udt(&self.keyspace, lookup_name) {
                             self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
                         } else {
-                            Value::Blob(field_data.to_vec())
+                            Value::blob(field_data.to_vec())
                         }
                     }
                     CqlType::Udt(udt_name, inline_fields) => {
@@ -997,7 +997,7 @@ impl V5CompressedLegacyParser {
                             // Issue #239: Use inline field definitions for nested UDTs
                             self.parse_inline_udt_value(field_data, udt_name, inline_fields, 1)?
                         } else {
-                            Value::Blob(field_data.to_vec())
+                            Value::blob(field_data.to_vec())
                         }
                     }
                     CqlType::Frozen(inner) => {
@@ -1016,7 +1016,7 @@ impl V5CompressedLegacyParser {
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else {
-                                    Value::Frozen(Box::new(Value::Blob(field_data.to_vec())))
+                                    Value::Frozen(Box::new(Value::blob(field_data.to_vec())))
                                 }
                             }
                             CqlType::Udt(udt_name, inline_fields) => {
@@ -1037,7 +1037,7 @@ impl V5CompressedLegacyParser {
                                     )?;
                                     Value::Frozen(Box::new(inner_value))
                                 } else {
-                                    Value::Frozen(Box::new(Value::Blob(field_data.to_vec())))
+                                    Value::Frozen(Box::new(Value::blob(field_data.to_vec())))
                                 }
                             }
                             _ => {
@@ -1520,7 +1520,7 @@ mod tests {
         );
         assert_eq!(
             udt.fields[0].value,
-            Some(Value::Text("Ada".to_string())),
+            Some(Value::text("Ada".to_string())),
             "name field decodes to Text"
         );
         assert_eq!(

@@ -1109,7 +1109,7 @@ impl SSTableRowIteratorAdapter {
                 let mut cells = Vec::with_capacity(map_entries.len());
                 for (key, val) in map_entries {
                     let column = match key {
-                        crate::types::Value::Text(s) => s.clone(),
+                        crate::types::Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
                         other => format!("{:?}", other),
                     };
                     // Cell tombstones carry their own deletion_time (Issue #505);
@@ -4373,7 +4373,7 @@ mod tests {
         let live = RowData::Live {
             cells: vec![CellData {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
                 timestamp: 1000,
                 ttl: None,
                 cell_path: None,
@@ -4457,7 +4457,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "name".to_string(),
-                    value: Value::Text("Alice".to_string()),
+                    value: Value::text("Alice".to_string()),
                     timestamp: 1000,
                     ttl: None,
                     cell_path: None,
@@ -4517,7 +4517,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "name".to_string(),
-                    value: Value::Text("Newer".to_string()),
+                    value: Value::text("Newer".to_string()),
                     timestamp: 1000,
                     ttl: None,
                     cell_path: None,
@@ -4537,7 +4537,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "name".to_string(),
-                    value: Value::Text("Older".to_string()),
+                    value: Value::text("Older".to_string()),
                     timestamp: 1000,
                     ttl: None,
                     cell_path: None,
@@ -4627,7 +4627,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "value".to_string(),
-                    value: Value::Text("survivor-if-buggy".to_string()),
+                    value: Value::text("survivor-if-buggy".to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
                     cell_path: None,
@@ -4741,7 +4741,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "name".to_string(),
-                    value: Value::Text("alice".to_string()),
+                    value: Value::text("alice".to_string()),
                     timestamp: 100,
                     ttl: None,
                     cell_path: None,
@@ -4812,7 +4812,7 @@ mod tests {
         );
         assert_eq!(
             name.unwrap().value,
-            Value::Text("alice".to_string()),
+            Value::text("alice".to_string()),
             "`name` must carry A's value"
         );
         assert_eq!(
@@ -5040,7 +5040,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "v".to_string(),
-                    value: Value::Text(newer_file_value.to_string()),
+                    value: Value::text(newer_file_value.to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
                     cell_path: None,
@@ -5060,7 +5060,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "v".to_string(),
-                    value: Value::Text(older_file_value.to_string()),
+                    value: Value::text(older_file_value.to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
                     cell_path: None,
@@ -5102,7 +5102,7 @@ mod tests {
             .expect("column `v` must survive")
             .value
         {
-            Value::Text(s) => s.clone(),
+            Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
             other => panic!("expected Text value, got {:?}", other),
         };
 
@@ -5177,7 +5177,7 @@ mod tests {
                 cells: vec![
                     CellData {
                         column: "name".to_string(),
-                        value: Value::Text("old".to_string()),
+                        value: Value::text("old".to_string()),
                         timestamp: 100,
                         ttl: None,
                         cell_path: None,
@@ -5188,7 +5188,7 @@ mod tests {
                     },
                     CellData {
                         column: "extra".to_string(),
-                        value: Value::Text("a-only".to_string()),
+                        value: Value::text("a-only".to_string()),
                         timestamp: 100,
                         ttl: None,
                         cell_path: None,
@@ -5209,7 +5209,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "name".to_string(),
-                    value: Value::Text("new".to_string()),
+                    value: Value::text("new".to_string()),
                     timestamp: 200,
                     ttl: None,
                     cell_path: None,
@@ -5254,12 +5254,12 @@ mod tests {
 
         assert_eq!(
             name.value,
-            Value::Text("new".to_string()),
+            Value::text("new".to_string()),
             "same-column conflict must resolve to the higher-timestamp value"
         );
         assert_eq!(
             extra.value,
-            Value::Text("a-only".to_string()),
+            Value::text("a-only".to_string()),
             "disjoint column from the older file must survive the conflict merge"
         );
     }
@@ -5314,7 +5314,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "name".to_string(),
-                    value: Value::Text("old".to_string()),
+                    value: Value::text("old".to_string()),
                     timestamp: 100,
                     ttl: None,
                     cell_path: None,
@@ -5429,7 +5429,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData {
                     column: "name".to_string(),
-                    value: Value::Text("doomed".to_string()),
+                    value: Value::text("doomed".to_string()),
                     timestamp: 100,
                     ttl: None,
                     cell_path: None,
@@ -5503,7 +5503,7 @@ mod tests {
         // Two cells with different timestamps
         let cell1 = CellData {
             column: "name".to_string(),
-            value: Value::Text("Old".to_string()),
+            value: Value::text("Old".to_string()),
             timestamp: 1000,
             ttl: None,
             cell_path: None,
@@ -5515,7 +5515,7 @@ mod tests {
 
         let cell2 = CellData {
             column: "name".to_string(),
-            value: Value::Text("New".to_string()),
+            value: Value::text("New".to_string()),
             timestamp: 2000, // Higher timestamp wins
             ttl: None,
             cell_path: None,
@@ -5572,7 +5572,7 @@ mod tests {
                 cells: vec![
                     CellData {
                         column: "name".to_string(),
-                        value: Value::Text("Alice".to_string()),
+                        value: Value::text("Alice".to_string()),
                         timestamp: 999_000_000,
                         ttl: None,
                         cell_path: None,
@@ -5649,7 +5649,7 @@ mod tests {
 
         let cell = |column: &str, ts: i64| CellData {
             column: column.to_string(),
-            value: Value::Text(column.to_string()),
+            value: Value::text(column.to_string()),
             timestamp: ts,
             ttl: None,
             cell_path: None,
@@ -5711,7 +5711,7 @@ mod tests {
 
         let cell = |column: &str| CellData {
             column: column.to_string(),
-            value: Value::Text(column.to_string()),
+            value: Value::text(column.to_string()),
             timestamp: 555,
             ttl: None,
             cell_path: None,
@@ -7254,7 +7254,7 @@ mod issue_823_complex_column_merge {
     }
 
     fn scalar_cell(column: &str, value: &str, ts: i64) -> CellData {
-        CellData::new(column.to_string(), Value::Text(value.to_string()), ts)
+        CellData::new(column.to_string(), Value::text(value.to_string()), ts)
     }
 
     // ── Issue #847: dropped-column cell filtering during compaction ──────────
@@ -7305,7 +7305,7 @@ mod issue_823_complex_column_merge {
         };
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].column, "legacy");
-        assert_eq!(cells[0].value, Value::Text("fresh".to_string()));
+        assert_eq!(cells[0].value, Value::text("fresh".to_string()));
     }
 
     /// Equal timestamp (cell ts == drop_time) is discarded — the `<=` boundary.
@@ -7415,7 +7415,7 @@ mod issue_823_complex_column_merge {
             200,
             vec![CellData {
                 column: "tags".to_string(),
-                value: Value::List(vec![Value::Text("b".to_string())]),
+                value: Value::List(vec![Value::text("b".to_string())]),
                 timestamp: 200,
                 ttl: None,
                 cell_path: None,
@@ -7430,7 +7430,7 @@ mod issue_823_complex_column_merge {
             100,
             vec![CellData {
                 column: "tags".to_string(),
-                value: Value::List(vec![Value::Text("a".to_string())]),
+                value: Value::List(vec![Value::text("a".to_string())]),
                 timestamp: 100,
                 ttl: None,
                 cell_path: None,
@@ -7464,7 +7464,7 @@ mod issue_823_complex_column_merge {
         assert_eq!(cells[0].column, "tags");
         assert_eq!(
             cells[0].value,
-            Value::List(vec![Value::Text("b".to_string())]),
+            Value::List(vec![Value::text("b".to_string())]),
             "winner is the higher-timestamp WHOLE collection value, not a union \
              of [a, b] — confirms whole-group collapse, NOT per-path merge (#18)"
         );
@@ -7484,7 +7484,7 @@ mod issue_823_complex_column_merge {
                 keyspace: "ks".to_string(),
                 fields: vec![UdtField {
                     name: field.to_string(),
-                    value: Some(Value::Text(v.to_string())),
+                    value: Some(Value::text(v.to_string())),
                 }],
             }))
         };
@@ -7558,13 +7558,13 @@ mod issue_823_complex_column_merge {
     #[test]
     fn adapter_produces_one_cell_per_top_level_column() {
         let row = Value::Map(vec![
-            (Value::Text("id".to_string()), Value::Text("k1".to_string())),
+            (Value::text("id".to_string()), Value::text("k1".to_string())),
             (
-                Value::Text("tags".to_string()),
+                Value::text("tags".to_string()),
                 // Whole collection nested under a single column.
                 Value::List(vec![
-                    Value::Text("a".to_string()),
-                    Value::Text("b".to_string()),
+                    Value::text("a".to_string()),
+                    Value::text("b".to_string()),
                 ]),
             ),
         ]);
@@ -7584,8 +7584,8 @@ mod issue_823_complex_column_merge {
         assert_eq!(
             tags.value,
             Value::List(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string())
+                Value::text("a".to_string()),
+                Value::text("b".to_string())
             ]),
             "the collection arrives as ONE nested Value, never as per-path cells"
         );
@@ -7670,7 +7670,7 @@ mod issue_823_complex_column_merge {
     fn expiring_cell(value: &str, ts: i64, ttl: u32, ldt: i32) -> CellData {
         CellData {
             column: "v".to_string(),
-            value: Value::Text(value.to_string()),
+            value: Value::text(value.to_string()),
             timestamp: ts,
             ttl: Some(ttl),
             cell_path: None,
@@ -7804,7 +7804,7 @@ mod issue_823_complex_column_merge {
             "a strictly NEWER expiring cell (ts=200) beats the older tombstone \
              (ts=100); the deletion tie-break only fires at equal ts"
         );
-        assert_eq!(cells[0].value, Value::Text("survives".to_string()));
+        assert_eq!(cells[0].value, Value::text("survives".to_string()));
     }
 }
 
@@ -7847,7 +7847,7 @@ mod issue_886_merge_entry_enrichment {
     fn enriched_celldata_round_trips_through_merge_entry() {
         let cell = CellData {
             column: "m".to_string(),
-            value: Value::Text("v".to_string()),
+            value: Value::text("v".to_string()),
             timestamp: 500,
             ttl: Some(3600),
             local_deletion_time: Some(1_700_000_000),
@@ -7885,8 +7885,8 @@ mod issue_886_merge_entry_enrichment {
     fn value_to_row_data_threads_enriched_fields_as_none() {
         // Map case: top-level columns surfaced as a map (key = column name).
         let map = Value::Map(vec![(
-            Value::Text("name".to_string()),
-            Value::Text("alice".to_string()),
+            Value::text("name".to_string()),
+            Value::text("alice".to_string()),
         )]);
         let row_data = SSTableRowIteratorAdapter::value_to_row_data(&map, 100)
             .expect("value_to_row_data must succeed");
@@ -7928,7 +7928,7 @@ mod issue_886_merge_entry_enrichment {
         // Plumbing-only: reconcile_cluster does NOT consult complex_deletions.
         // A cell written at the same ts as the complex deletion still survives,
         // proving no shadowing behavior was introduced (#844 owns that).
-        let cell = CellData::new("tags".to_string(), Value::Text("a".to_string()), 1234);
+        let cell = CellData::new("tags".to_string(), Value::text("a".to_string()), 1234);
         let live = MergeEntry::new(0, dk(1), None, 1234, RowData::Live { cells: vec![cell] })
             .with_complex_deletions(vec![ComplexDeletion {
                 column: "tags".to_string(),
@@ -8289,7 +8289,7 @@ mod issue_886_merge_entry_enrichment {
             RowData::Live {
                 cells: vec![CellData::new(
                     "name".to_string(),
-                    Value::Text("v".to_string()),
+                    Value::text("v".to_string()),
                     100,
                 )],
             },
@@ -8360,7 +8360,7 @@ mod issue_899_per_element_merge {
     fn element(path: &[u8], val: &str, ts: i64) -> ComplexElement {
         ComplexElement {
             cell_path: path.to_vec(),
-            value: Some(Value::Text(val.to_string())),
+            value: Some(Value::text(val.to_string())),
             decoded_key: None,
             timestamp: ts,
             ttl: None,
@@ -8395,9 +8395,9 @@ mod issue_899_per_element_merge {
                 complex_deletion: None,
                 elements,
                 collapsed_value: Value::Set(vec![
-                    Value::Text("a".to_string()),
-                    Value::Text("b".to_string()),
-                    Value::Text("c".to_string()),
+                    Value::text("a".to_string()),
+                    Value::text("b".to_string()),
+                    Value::text("c".to_string()),
                 ]),
             }],
             row_deletion: None,
@@ -8425,9 +8425,9 @@ mod issue_899_per_element_merge {
             .map(|c| (c.cell_path.expect("path"), c.timestamp, c.value))
             .collect();
         by_path.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(by_path[0], (vec![0xAA], 100, Value::Text("a".to_string())));
-        assert_eq!(by_path[1], (vec![0xBB], 200, Value::Text("b".to_string())));
-        assert_eq!(by_path[2], (vec![0xCC], 300, Value::Text("c".to_string())));
+        assert_eq!(by_path[0], (vec![0xAA], 100, Value::text("a".to_string())));
+        assert_eq!(by_path[1], (vec![0xBB], 200, Value::text("b".to_string())));
+        assert_eq!(by_path[2], (vec![0xCC], 300, Value::text("c".to_string())));
     }
 
     /// (b) FOUNDATION: a real complex deletion reaches `MergeEntry.complex_deletions`
@@ -8441,7 +8441,7 @@ mod issue_899_per_element_merge {
                 column: "tags".to_string(),
                 complex_deletion: Some((12_345, 1_700_000_000)),
                 elements: vec![element(&[0xAB], "x", 20_000)],
-                collapsed_value: Value::Set(vec![Value::Text("x".to_string())]),
+                collapsed_value: Value::Set(vec![Value::text("x".to_string())]),
             }],
             row_deletion: None,
         };
@@ -8467,7 +8467,7 @@ mod issue_899_per_element_merge {
             RowData::Live {
                 cells: vec![CellData {
                     column: "tags".to_string(),
-                    value: Value::Text("b".to_string()),
+                    value: Value::text("b".to_string()),
                     timestamp: 200,
                     ttl: None,
                     cell_path: Some(vec![0xBB]),
@@ -8486,7 +8486,7 @@ mod issue_899_per_element_merge {
             RowData::Live {
                 cells: vec![CellData {
                     column: "tags".to_string(),
-                    value: Value::Text("a".to_string()),
+                    value: Value::text("a".to_string()),
                     timestamp: 100,
                     ttl: None,
                     cell_path: Some(vec![0xAA]),
@@ -8535,7 +8535,7 @@ mod issue_899_per_element_merge {
             RowData::Live {
                 cells: vec![CellData {
                     column: "tags".to_string(),
-                    value: Value::Text("old".to_string()),
+                    value: Value::text("old".to_string()),
                     timestamp: 100,
                     ttl: None,
                     cell_path: Some(vec![0x01]),
@@ -8554,7 +8554,7 @@ mod issue_899_per_element_merge {
             RowData::Live {
                 cells: vec![CellData {
                     column: "tags".to_string(),
-                    value: Value::Text("new".to_string()),
+                    value: Value::text("new".to_string()),
                     timestamp: 300,
                     ttl: None,
                     cell_path: Some(vec![0x02]),
@@ -8624,7 +8624,7 @@ mod issue_899_per_element_merge {
             RowData::Live {
                 cells: vec![CellData {
                     column: "tags".to_string(),
-                    value: Value::Text("at-mfda".to_string()),
+                    value: Value::text("at-mfda".to_string()),
                     timestamp: 200,
                     ttl: None,
                     cell_path: Some(vec![0x01]),
@@ -8648,7 +8648,7 @@ mod issue_899_per_element_merge {
             RowData::Live {
                 cells: vec![CellData {
                     column: "tags".to_string(),
-                    value: Value::Text("after".to_string()),
+                    value: Value::text("after".to_string()),
                     timestamp: 300,
                     ttl: None,
                     cell_path: Some(vec![0x02]),
@@ -8725,7 +8725,7 @@ mod issue_899_per_element_merge {
                 cells: vec![
                     CellData {
                         column: "tags".to_string(),
-                        value: Value::Text("ancient".to_string()),
+                        value: Value::text("ancient".to_string()),
                         timestamp: 50,
                         ttl: None,
                         cell_path: Some(vec![0x01]),
@@ -8736,7 +8736,7 @@ mod issue_899_per_element_merge {
                     },
                     CellData {
                         column: "tags".to_string(),
-                        value: Value::Text("survivor".to_string()),
+                        value: Value::text("survivor".to_string()),
                         timestamp: 500,
                         ttl: None,
                         cell_path: Some(vec![0x03]),
@@ -8763,7 +8763,7 @@ mod issue_899_per_element_merge {
             RowData::Live {
                 cells: vec![CellData {
                     column: "tags".to_string(),
-                    value: Value::Text("covered".to_string()),
+                    value: Value::text("covered".to_string()),
                     timestamp: 300,
                     ttl: None,
                     cell_path: Some(vec![0x02]),
@@ -8865,7 +8865,7 @@ mod issue_899_per_element_merge {
                 cells: vec![
                     CellData {
                         column: "tags".to_string(),
-                        value: Value::Text("shadowed_by_row".to_string()),
+                        value: Value::text("shadowed_by_row".to_string()),
                         timestamp: T_LOW,
                         ttl: None,
                         cell_path: Some(vec![0x01]),
@@ -8876,7 +8876,7 @@ mod issue_899_per_element_merge {
                     },
                     CellData {
                         column: "tags".to_string(),
-                        value: Value::Text("shadowed_by_complex".to_string()),
+                        value: Value::text("shadowed_by_complex".to_string()),
                         timestamp: T_HIGH,
                         ttl: None,
                         cell_path: Some(vec![0x02]),
@@ -8887,7 +8887,7 @@ mod issue_899_per_element_merge {
                     },
                     CellData {
                         column: "tags".to_string(),
-                        value: Value::Text("survivor".to_string()),
+                        value: Value::text("survivor".to_string()),
                         timestamp: T_HIGH + 200,
                         ttl: None,
                         cell_path: Some(vec![0x03]),
@@ -9186,7 +9186,7 @@ mod issue_822_merge_ordering_semantics {
 
     fn ck_text(col: &str, s: &str) -> ClusteringKey {
         ClusteringKey {
-            columns: vec![(col.to_string(), Value::Text(s.to_string()))],
+            columns: vec![(col.to_string(), Value::text(s.to_string()))],
         }
     }
 
@@ -9255,7 +9255,7 @@ mod issue_822_merge_ordering_semantics {
                 RowData::Live {
                     cells: vec![CellData {
                         column: "v".to_string(),
-                        value: Value::Text(format!("row-{ck}")),
+                        value: Value::text(format!("row-{ck}")),
                         timestamp: TS,
                         ttl: None,
                         cell_path: None,
@@ -9278,7 +9278,7 @@ mod issue_822_merge_ordering_semantics {
             .iter()
             .map(|e| match &e.clustering_key {
                 Some(ck) => match &ck.columns[0].1 {
-                    Value::Text(s) => s.clone(),
+                    Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
                     other => format!("{other:?}"),
                 },
                 None => "<none>".to_string(),
@@ -9312,7 +9312,7 @@ mod issue_822_merge_ordering_semantics {
         // include the clustering column "ck" plus the data column "v".
         let ck_cell = || CellData {
             column: "ck".to_string(),
-            value: Value::Text("c".to_string()),
+            value: Value::text("c".to_string()),
             timestamp: TS,
             ttl: None,
             cell_path: None,
@@ -9335,7 +9335,7 @@ mod issue_822_merge_ordering_semantics {
                     ck_cell(),
                     CellData {
                         column: "v".to_string(),
-                        value: Value::Text("expiring-if-buggy".to_string()),
+                        value: Value::text("expiring-if-buggy".to_string()),
                         timestamp: TS,
                         ttl: Some(3600),
                         cell_path: None,
@@ -9420,7 +9420,7 @@ mod issue_822_merge_ordering_semantics {
 
         let ck_cell = || CellData {
             column: "ck".to_string(),
-            value: Value::Text("c".to_string()),
+            value: Value::text("c".to_string()),
             timestamp: TS,
             ttl: None,
             cell_path: None,
@@ -9470,7 +9470,7 @@ mod issue_822_merge_ordering_semantics {
                     ck_cell(),
                     CellData {
                         column: "v".to_string(),
-                        value: Value::Text("expiring-if-buggy".to_string()),
+                        value: Value::text("expiring-if-buggy".to_string()),
                         timestamp: TS,
                         ttl: Some(3600),
                         cell_path: None,
@@ -9553,7 +9553,7 @@ mod issue_822_merge_ordering_semantics {
             Some(ClusteringKey::single("ck", Value::Integer(7))),
             vec![CellOperation::WriteWithTtl {
                 column: "v".to_string(),
-                value: Value::Text("expiring-if-buggy".to_string()),
+                value: Value::text("expiring-if-buggy".to_string()),
                 ttl_seconds: 3600,
                 local_deletion_time: None,
             }],
@@ -9706,7 +9706,7 @@ mod issue_822_merge_ordering_semantics {
             Some(ClusteringKey::single("ck", Value::Integer(7))),
             vec![CellOperation::WriteWithTtl {
                 column: "v".to_string(),
-                value: Value::Text("expiring-if-buggy".to_string()),
+                value: Value::text("expiring-if-buggy".to_string()),
                 ttl_seconds: 3600,
                 local_deletion_time: None,
             }],
@@ -9793,7 +9793,7 @@ mod issue_822_merge_ordering_semantics {
 
         let expiring = CellData {
             column: "v".to_string(),
-            value: Value::Text("x".to_string()),
+            value: Value::text("x".to_string()),
             timestamp: 1,
             ttl: Some(60),
             cell_path: None,
@@ -9893,11 +9893,11 @@ mod issue_822_merge_ordering_semantics {
                 vec![
                     CellOperation::Write {
                         column: "s".to_string(),
-                        value: Value::Text("static-val".to_string()),
+                        value: Value::text("static-val".to_string()),
                     },
                     CellOperation::Write {
                         column: "v".to_string(),
-                        value: Value::Text("row-val".to_string()),
+                        value: Value::text("row-val".to_string()),
                     },
                 ],
                 2_000_000,
@@ -10117,7 +10117,7 @@ mod issue_886_empty_partition_skip {
             RowData::Live {
                 cells: vec![CellData::new(
                     "name".to_string(),
-                    Value::Text("survivor".to_string()),
+                    Value::text("survivor".to_string()),
                     100,
                 )],
             },
@@ -10177,7 +10177,7 @@ mod issue_886_empty_partition_skip {
             RowData::Live {
                 cells: vec![CellData::new(
                     "name".to_string(),
-                    Value::Text("keep-me".to_string()),
+                    Value::text("keep-me".to_string()),
                     200,
                 )],
             },
@@ -10574,7 +10574,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             RowData::Live {
                 cells: vec![CellData::new(
                     "value".to_string(),
-                    Value::Text("alive".to_string()),
+                    Value::text("alive".to_string()),
                     100,
                 )],
             },
@@ -10607,7 +10607,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             RowData::Live {
                 cells: vec![CellData::new(
                     "name".to_string(),
-                    Value::Text("new".to_string()),
+                    Value::text("new".to_string()),
                     300,
                 )],
             },
@@ -10657,7 +10657,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             RowData::Live {
                 cells: vec![CellData::new(
                     "name".to_string(),
-                    Value::Text("new".to_string()),
+                    Value::text("new".to_string()),
                     300,
                 )],
             },
@@ -10701,7 +10701,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             RowData::Live {
                 cells: vec![CellData::new(
                     "name".to_string(),
-                    Value::Text("new".to_string()),
+                    Value::text("new".to_string()),
                     300,
                 )],
             },
@@ -11020,7 +11020,7 @@ mod issue_845_gc_grace_purge {
         // A live cell on a SEPARATE column keeps the row alive so we observe the
         // tombstone cell being dropped (not the row collapsing). Its ts is well
         // above any tombstone ts so row-tombstone shadowing is irrelevant here.
-        let keep = CellData::new("name".to_string(), Value::Text("alive".to_string()), 500);
+        let keep = CellData::new("name".to_string(), Value::text("alive".to_string()), 500);
 
         let count_tombstone_cells = |ldt: i32| -> usize {
             let merged = KWayMerger::reconcile_cluster(
@@ -11087,7 +11087,7 @@ mod issue_845_gc_grace_purge {
         // ts == MFDA, so it is shadowed (`ts <= mfda`) by the marker.
         let covered = CellData {
             column: "tags".to_string(),
-            value: Value::Text("ghost".to_string()),
+            value: Value::text("ghost".to_string()),
             timestamp: MFDA,
             ttl: None,
             cell_path: Some(vec![1, 2, 3]),
@@ -11256,7 +11256,7 @@ mod issue_845_gc_grace_purge {
         );
 
         // (c) Cell tombstone with the far-future LDT must be RETAINED.
-        let keep = CellData::new("name".to_string(), Value::Text("alive".to_string()), 500);
+        let keep = CellData::new("name".to_string(), Value::text("alive".to_string()), 500);
         let cell = KWayMerger::reconcile_cluster(
             None,
             vec![live(
@@ -11503,12 +11503,12 @@ mod issue_845_gc_grace_purge {
         const GC_BEFORE: i64 = 1_700_000_000;
         // Clustering key column `ck` (a pseudo-cell that stays in the cell list).
         let ck = ClusteringKey {
-            columns: vec![("ck".to_string(), Value::Text("c1".to_string()))],
+            columns: vec![("ck".to_string(), Value::text("c1".to_string()))],
         };
         // The clustering-key pseudo-cell carried alongside the data cells (mirrors
         // `extract_clustering_key` keeping CK columns in the cell list for
         // read-back). It is NOT a data cell (its column name is in `ck_names`).
-        let ck_cell = CellData::new("ck".to_string(), Value::Text("c1".to_string()), 100);
+        let ck_cell = CellData::new("ck".to_string(), Value::text("c1".to_string()), 100);
 
         let make = |extra: Vec<CellData>| {
             let mut cells = vec![ck_cell.clone()];
@@ -11536,7 +11536,7 @@ mod issue_845_gc_grace_purge {
         let kept = KWayMerger::reconcile_cluster(
             Some(ck.clone()),
             vec![make(vec![
-                CellData::new("v".to_string(), Value::Text("real".to_string()), 60),
+                CellData::new("v".to_string(), Value::text("real".to_string()), 60),
                 cell_tombstone(50, (GC_BEFORE - 1) as i32),
             ])],
             &::std::collections::HashMap::new(),
@@ -11679,7 +11679,7 @@ mod issue_845_gc_grace_purge {
                 0,
                 100,
                 vec![
-                    CellData::new("keep".to_string(), Value::Text("x".to_string()), 9_000),
+                    CellData::new("keep".to_string(), Value::text("x".to_string()), 9_000),
                     cell_tombstone(BOUND - 1, (GC_BEFORE - 1) as i32),
                 ],
             )],
@@ -11703,7 +11703,7 @@ mod issue_845_gc_grace_purge {
                 0,
                 100,
                 vec![
-                    CellData::new("keep".to_string(), Value::Text("x".to_string()), 9_000),
+                    CellData::new("keep".to_string(), Value::text("x".to_string()), 9_000),
                     cell_tombstone(BOUND, (GC_BEFORE - 1) as i32),
                 ],
             )],
@@ -12031,7 +12031,7 @@ mod issue_929_bare_udt_compaction {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("Alice".to_string())),
+                    value: Some(Value::text("Alice".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -12131,7 +12131,7 @@ mod issue_929_bare_udt_compaction {
                         addr.elements.iter().map(|e| e.value.clone()).collect();
                     let name_ok = values.iter().any(|v| {
                         matches!(v, Some(Value::Text(s)) if s == "Alice")
-                            || matches!(v, Some(Value::Blob(b)) if b == b"Alice")
+                            || matches!(v, Some(Value::Blob(b)) if b.as_ref() == b"Alice")
                     });
                     assert!(
                         name_ok,
@@ -12139,7 +12139,7 @@ mod issue_929_bare_udt_compaction {
                     );
                     let age_ok = values.iter().any(|v| {
                         matches!(v, Some(Value::Integer(30)))
-                            || matches!(v, Some(Value::Blob(b)) if b.as_slice() == 30i32.to_be_bytes())
+                            || matches!(v, Some(Value::Blob(b)) if b.as_ref() == 30i32.to_be_bytes())
                     });
                     assert!(
                         age_ok,
@@ -12179,7 +12179,7 @@ mod issue_929_bare_udt_compaction {
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text("Bob".to_string())),
+                value: Some(Value::text("Bob".to_string())),
             }],
         }));
         let mutation = Mutation::new(
@@ -12256,7 +12256,7 @@ mod issue_929_bare_udt_compaction {
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text("Carol".to_string())),
+                value: Some(Value::text("Carol".to_string())),
             }],
         }));
         let ma = Mutation::new(
@@ -12318,7 +12318,7 @@ mod issue_929_bare_udt_compaction {
             None,
             vec![CellOperation::Write {
                 column: "note".to_string(),
-                value: Value::Text("x".to_string()),
+                value: Value::text("x".to_string()),
             }],
             1_000_000,
             None,
@@ -12383,7 +12383,7 @@ mod issue_929_bare_udt_compaction {
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text("Dave".to_string())),
+                value: Some(Value::text("Dave".to_string())),
             }],
         }));
         let ma = Mutation::new(
@@ -12415,7 +12415,7 @@ mod issue_929_bare_udt_compaction {
             keyspace: "test_ks".to_string(),
             fields: vec![UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text("Eve".to_string())),
+                value: Some(Value::text("Eve".to_string())),
             }],
         }));
         let mb = Mutation::new(
@@ -12631,7 +12631,7 @@ mod issue_929_bare_udt_compaction {
             None,
             vec![CellOperation::Write {
                 column: "note".to_string(),
-                value: Value::Text("x".to_string()),
+                value: Value::text("x".to_string()),
             }],
             1_000_000,
             None,

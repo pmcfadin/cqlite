@@ -859,7 +859,7 @@ impl RowCellStateMachine {
                                         )));
                                     }
                                     // Legacy formats can use blob fallback
-                                    Value::Blob(value_data.to_vec())
+                                    Value::blob(value_data.to_vec())
                                 }
                             }
                         }
@@ -881,7 +881,7 @@ impl RowCellStateMachine {
                                     column.data_type, column_name, self.version
                                 )));
                             }
-                            Value::Blob(value_data.to_vec())
+                            Value::blob(value_data.to_vec())
                         }
                     }
                 } else {
@@ -902,7 +902,7 @@ impl RowCellStateMachine {
                             column_name, self.version
                         )));
                     }
-                    Value::Blob(value_data.to_vec())
+                    Value::blob(value_data.to_vec())
                 }
             } else {
                 // For modern formats, schema is required
@@ -922,7 +922,7 @@ impl RowCellStateMachine {
                         self.version
                     )));
                 }
-                Value::Blob(value_data.to_vec())
+                Value::blob(value_data.to_vec())
             }
         };
 
@@ -1449,7 +1449,7 @@ impl RowCellStateMachine {
                         // Legacy formats can use blob fallback
                         #[cfg(any(feature = "legacy-heuristics", test))]
                         {
-                            Value::Blob(value_data.to_vec())
+                            Value::blob(value_data.to_vec())
                         }
                         #[cfg(not(any(feature = "legacy-heuristics", test)))]
                         {

@@ -111,7 +111,7 @@ fn as_udt(v: &Value) -> &UdtValue {
 fn udt_text(u: &UdtValue, field: &str) -> Option<String> {
     match u.fields.iter().find(|f| f.name == field) {
         Some(f) => match &f.value {
-            Some(Value::Text(s)) => Some(s.clone()),
+            Some(Value::Text(s)) => Some(String::from_utf8_lossy(s).into_owned()),
             None => None,
             Some(other) => panic!("field '{field}': expected text/null, got {other:?}"),
         },
@@ -146,7 +146,7 @@ fn as_map(v: &Value) -> &[(Value, Value)] {
 
 fn text_of(v: &Value) -> String {
     match v {
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         Value::Frozen(inner) => text_of(inner),
         other => panic!("expected text, got {other:?}"),
     }

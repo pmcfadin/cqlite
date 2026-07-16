@@ -73,9 +73,9 @@ async fn test_basic_write_read(
     let mut writer = SSTableWriter::create(&test_path, config, platform.clone()).await?;
     
     let test_data = vec![
-        (TableId::new("users"), RowKey::from("user1"), Value::Text("Alice".to_string())),
-        (TableId::new("users"), RowKey::from("user2"), Value::Text("Bob".to_string())),
-        (TableId::new("posts"), RowKey::from("post1"), Value::Text("Hello World".to_string())),
+        (TableId::new("users"), RowKey::from("user1"), Value::text("Alice".to_string())),
+        (TableId::new("users"), RowKey::from("user2"), Value::text("Bob".to_string())),
+        (TableId::new("posts"), RowKey::from("post1"), Value::text("Hello World".to_string())),
     ];
 
     for (table_id, key, value) in &test_data {
@@ -147,10 +147,10 @@ async fn test_data_types(
         ("bigint_large", Value::BigInt(9223372036854775807)),
         ("float_pi", Value::Float(3.14159)),
         ("float_negative", Value::Float(-3.14159)),
-        ("text_simple", Value::Text("Hello, World!".to_string())),
-        ("text_empty", Value::Text("".to_string())),
-        ("blob_simple", Value::Blob(vec![1, 2, 3, 4, 5])),
-        ("blob_empty", Value::Blob(vec![])),
+        ("text_simple", Value::text("Hello, World!".to_string())),
+        ("text_empty", Value::text("".to_string())),
+        ("blob_simple", Value::blob(vec![1, 2, 3, 4, 5])),
+        ("blob_empty", Value::blob(vec![])),
         ("timestamp", Value::Timestamp(
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
         )),
@@ -201,7 +201,7 @@ async fn test_file_format(
 
     // Create minimal SSTable
     let mut writer = SSTableWriter::create(&test_path, config, platform).await?;
-    writer.add_entry(&TableId::new("test"), RowKey::from("key"), Value::Text("value".to_string())).await?;
+    writer.add_entry(&TableId::new("test"), RowKey::from("key"), Value::text("value".to_string())).await?;
     writer.finish().await?;
 
     // Read file as binary and validate basic format
@@ -259,11 +259,11 @@ async fn test_large_data(
     
     // Create large text value
     let large_text = "A".repeat(10000); // 10KB of 'A's
-    writer.add_entry(&table_id, RowKey::from("large_text"), Value::Text(large_text.clone())).await?;
+    writer.add_entry(&table_id, RowKey::from("large_text"), Value::text(large_text.clone())).await?;
 
     // Create large binary value
     let large_binary: Vec<u8> = (0..5000).map(|i| (i % 256) as u8).collect();
-    writer.add_entry(&table_id, RowKey::from("large_binary"), Value::Blob(large_binary.clone())).await?;
+    writer.add_entry(&table_id, RowKey::from("large_binary"), Value::blob(large_binary.clone())).await?;
 
     writer.finish().await?;
 
@@ -333,7 +333,7 @@ async fn test_unicode_data(
 
     // Write Unicode data
     for (key, text) in &unicode_test_data {
-        writer.add_entry(&table_id, RowKey::from(*key), Value::Text(text.to_string())).await?;
+        writer.add_entry(&table_id, RowKey::from(*key), Value::text(text.to_string())).await?;
     }
 
     writer.finish().await?;

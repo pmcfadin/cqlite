@@ -158,7 +158,7 @@ fn test_json_output_key_order_deterministic() {
 fn test_csv_escapes_commas_in_values() {
     let result = create_single_value_result(
         "text_col",
-        Value::Text("hello, world".to_string()),
+        Value::text("hello, world".to_string()),
         DataType::Text,
     );
 
@@ -175,7 +175,7 @@ fn test_csv_escapes_commas_in_values() {
 fn test_csv_escapes_quotes_in_values() {
     let result = create_single_value_result(
         "text_col",
-        Value::Text("say \"hello\"".to_string()),
+        Value::text("say \"hello\"".to_string()),
         DataType::Text,
     );
 
@@ -192,7 +192,7 @@ fn test_csv_escapes_quotes_in_values() {
 fn test_csv_escapes_newlines_in_values() {
     let result = create_single_value_result(
         "text_col",
-        Value::Text("line1\nline2".to_string()),
+        Value::text("line1\nline2".to_string()),
         DataType::Text,
     );
 
@@ -222,10 +222,10 @@ fn test_json_serializes_all_value_variants() {
         ("counter_val", Value::Counter(100), DataType::Integer), // Counter uses Integer display
         ("float_val", Value::Float(1.23456), DataType::Float),
         ("float32_val", Value::Float32(9.87), DataType::Float32),
-        ("text_val", Value::Text("hello".to_string()), DataType::Text),
+        ("text_val", Value::text("hello".to_string()), DataType::Text),
         (
             "blob_val",
-            Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             DataType::Blob,
         ),
         ("tinyint_val", Value::TinyInt(127), DataType::TinyInt),
@@ -258,13 +258,13 @@ fn test_json_serializes_all_value_variants() {
         ),
         (
             "inet_val",
-            Value::Inet(vec![192, 168, 1, 1]),
+            Value::inet(vec![192, 168, 1, 1]),
             DataType::Text, // Inet uses Text for display
         ),
         // Numeric extended types
         (
             "varint_val",
-            Value::Varint(vec![0x01, 0x00]),
+            Value::varint(vec![0x01, 0x00]),
             DataType::Text, // Varint uses Text for display
         ),
         (
@@ -293,12 +293,12 @@ fn test_json_serializes_all_value_variants() {
         ),
         (
             "map_val",
-            Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(5))]),
+            Value::Map(vec![(Value::text("key".to_string()), Value::Integer(5))]),
             DataType::Map,
         ),
         (
             "tuple_val",
-            Value::Tuple(vec![Value::Integer(1), Value::Text("two".to_string())]),
+            Value::Tuple(vec![Value::Integer(1), Value::text("two".to_string())]),
             DataType::Tuple,
         ),
         // Complex types
@@ -310,11 +310,11 @@ fn test_json_serializes_all_value_variants() {
                 fields: vec![
                     UdtField {
                         name: "street".to_string(),
-                        value: Some(Value::Text("123 Main St".to_string())),
+                        value: Some(Value::text("123 Main St".to_string())),
                     },
                     UdtField {
                         name: "city".to_string(),
-                        value: Some(Value::Text("Springfield".to_string())),
+                        value: Some(Value::text("Springfield".to_string())),
                     },
                 ],
             })),
@@ -376,10 +376,10 @@ fn test_csv_serializes_all_value_variants() {
         ("counter_val", Value::Counter(100), DataType::Integer),
         ("float_val", Value::Float(1.23456), DataType::Float),
         ("float32_val", Value::Float32(9.87), DataType::Float32),
-        ("text_val", Value::Text("hello".to_string()), DataType::Text),
+        ("text_val", Value::text("hello".to_string()), DataType::Text),
         (
             "blob_val",
-            Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             DataType::Blob,
         ),
         ("tinyint_val", Value::TinyInt(127), DataType::TinyInt),
@@ -410,12 +410,12 @@ fn test_csv_serializes_all_value_variants() {
         ),
         (
             "inet_val",
-            Value::Inet(vec![192, 168, 1, 1]),
+            Value::inet(vec![192, 168, 1, 1]),
             DataType::Text,
         ),
         (
             "varint_val",
-            Value::Varint(vec![0x01, 0x00]),
+            Value::varint(vec![0x01, 0x00]),
             DataType::Text,
         ),
         (
@@ -443,12 +443,12 @@ fn test_csv_serializes_all_value_variants() {
         ),
         (
             "map_val",
-            Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(5))]),
+            Value::Map(vec![(Value::text("key".to_string()), Value::Integer(5))]),
             DataType::Map,
         ),
         (
             "tuple_val",
-            Value::Tuple(vec![Value::Integer(1), Value::Text("two".to_string())]),
+            Value::Tuple(vec![Value::Integer(1), Value::text("two".to_string())]),
             DataType::Tuple,
         ),
         (
@@ -459,11 +459,11 @@ fn test_csv_serializes_all_value_variants() {
                 fields: vec![
                     UdtField {
                         name: "street".to_string(),
-                        value: Some(Value::Text("123 Main St".to_string())),
+                        value: Some(Value::text("123 Main St".to_string())),
                     },
                     UdtField {
                         name: "city".to_string(),
-                        value: Some(Value::Text("Springfield".to_string())),
+                        value: Some(Value::text("Springfield".to_string())),
                     },
                 ],
             })),
@@ -598,7 +598,7 @@ fn test_missing_column_treated_as_null() {
 fn test_nested_collection_json_structure() {
     // List<Map<Text, Set<Int>>> - deeply nested structure from issue
     let nested = Value::List(vec![Value::Map(vec![(
-        Value::Text("key".to_string()),
+        Value::text("key".to_string()),
         Value::Set(vec![Value::Integer(1), Value::Integer(2)]),
     )])]);
 
@@ -627,9 +627,9 @@ fn test_nested_collection_json_structure() {
 fn test_deeply_nested_map_of_lists() {
     // Map<Text, List<Map<Text, Int>>> - another deep nesting pattern
     let nested = Value::Map(vec![(
-        Value::Text("outer_key".to_string()),
+        Value::text("outer_key".to_string()),
         Value::List(vec![Value::Map(vec![(
-            Value::Text("inner_key".to_string()),
+            Value::text("inner_key".to_string()),
             Value::Integer(42),
         )])]),
     )]);
@@ -660,11 +660,11 @@ fn test_udt_renders_field_names_not_indices() {
         fields: vec![
             UdtField {
                 name: "street".to_string(),
-                value: Some(Value::Text("123 Main St".to_string())),
+                value: Some(Value::text("123 Main St".to_string())),
             },
             UdtField {
                 name: "city".to_string(),
-                value: Some(Value::Text("Springfield".to_string())),
+                value: Some(Value::text("Springfield".to_string())),
             },
             UdtField {
                 name: "zip_code".to_string(),
@@ -721,7 +721,7 @@ fn test_udt_with_null_field() {
         fields: vec![
             UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text("John".to_string())),
+                value: Some(Value::text("John".to_string())),
             },
             UdtField {
                 name: "nickname".to_string(),
@@ -804,9 +804,9 @@ fn test_json_column_order_matches_metadata() {
             ("second", DataType::Text),
         ],
         vec![
-            ("third", Value::Text("c".to_string())),
-            ("first", Value::Text("a".to_string())),
-            ("second", Value::Text("b".to_string())),
+            ("third", Value::text("c".to_string())),
+            ("first", Value::text("a".to_string())),
+            ("second", Value::text("b".to_string())),
         ],
     );
 

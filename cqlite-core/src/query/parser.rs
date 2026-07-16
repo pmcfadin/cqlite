@@ -349,7 +349,7 @@ impl QueryParser {
 
         // String values (single-quoted)
         if value_str.starts_with('\'') && value_str.ends_with('\'') && value_str.len() >= 2 {
-            return Ok(Value::Text(value_str[1..value_str.len() - 1].to_string()));
+            return Ok(Value::text(value_str[1..value_str.len() - 1].to_string()));
         }
 
         // Integer values
@@ -383,7 +383,7 @@ impl QueryParser {
         }
 
         // Default to text
-        Ok(Value::Text(value_str.to_string()))
+        Ok(Value::text(value_str.to_string()))
     }
 
     /// Parse VALUES clause
@@ -626,7 +626,7 @@ mod tests {
         }
         assert_eq!(
             parser.parse_value("'hello'").unwrap(),
-            Value::Text("hello".to_string())
+            Value::text("hello".to_string())
         );
         assert_eq!(parser.parse_value("true").unwrap(), Value::Boolean(true));
         assert_eq!(parser.parse_value("NULL").unwrap(), Value::Null);

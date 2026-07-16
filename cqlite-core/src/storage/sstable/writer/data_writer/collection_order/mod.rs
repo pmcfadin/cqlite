@@ -184,17 +184,17 @@ mod tests {
     #[test]
     fn text_keeps_byte_order() {
         let mut v = vec![
-            Value::Text("c".to_string()),
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("c".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ];
         v.sort_by(compare_collection_elements);
         assert_eq!(
             v,
             vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
-                Value::Text("c".to_string()),
+                Value::text("a".to_string()),
+                Value::text("b".to_string()),
+                Value::text("c".to_string()),
             ]
         );
     }

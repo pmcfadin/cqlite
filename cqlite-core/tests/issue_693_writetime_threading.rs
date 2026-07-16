@@ -284,7 +284,7 @@ async fn writetime_matches_sstabledump_golden() {
                     u64::from_be_bytes([0, 0, b[10], b[11], b[12], b[13], b[14], b[15]])
                 )
             }
-            Some(Value::Text(s)) => s.clone(),
+            Some(Value::Text(s)) => String::from_utf8_lossy(s).into_owned(),
             Some(other) => format!("{:?}", other),
             None => continue,
         };

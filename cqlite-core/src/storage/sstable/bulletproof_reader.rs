@@ -489,7 +489,7 @@ impl BulletproofReader {
 
         let entry = SSTableEntry {
             key: crate::RowKey::from(key_data.to_vec()),
-            values: vec![crate::Value::Text(key_str)],
+            values: vec![crate::Value::Text(key_str.into())],
             timestamp: Some(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

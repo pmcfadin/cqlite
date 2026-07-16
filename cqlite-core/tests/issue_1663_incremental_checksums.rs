@@ -76,7 +76,7 @@ fn mutations(schema: &TableSchema) -> Vec<(DecoratedKey, Vec<Mutation>)> {
                 None,
                 vec![CellOperation::Write {
                     column: "name".into(),
-                    value: Value::Text(format!("name{i}")),
+                    value: Value::text(format!("name{i}")),
                 }],
                 T_WRITE,
                 None,

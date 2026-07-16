@@ -58,7 +58,7 @@ fn test_column_subset_65_static_columns_uses_missing_indexes_when_present_majori
         }
         operations.push(CellOperation::Write {
             column: format!("scol_{:03}", i),
-            value: Value::Text(format!("value-{}", i)),
+            value: Value::text(format!("value-{}", i)),
         });
     }
 
@@ -123,7 +123,7 @@ fn test_column_subset_under_64_regular_columns_uses_bitmap() {
         None,
         vec![CellOperation::Write {
             column: "col_1".to_string(),
-            value: Value::Text("present".to_string()),
+            value: Value::text("present".to_string()),
         }],
         1001000,
         None,
@@ -296,7 +296,7 @@ fn static_using_ttl_write_emits_expiring_cell_1196() {
     let static_op = StaticMergedOp {
         op: CellOperation::Write {
             column: "s".to_string(),
-            value: Value::Text("v".to_string()),
+            value: Value::text("v".to_string()),
         },
         timestamp_micros: 1_001_000,
         cell_local_deletion_time: 0,
@@ -348,7 +348,7 @@ fn static_write_without_ttl_stays_non_expiring_1196() {
     let static_op = StaticMergedOp {
         op: CellOperation::Write {
             column: "s".to_string(),
-            value: Value::Text("v".to_string()),
+            value: Value::text("v".to_string()),
         },
         timestamp_micros: 1_001_000,
         cell_local_deletion_time: 0,
@@ -418,7 +418,7 @@ fn static_using_ttl_write_byte_parity_1210() {
 
     let ttl = 3_600u32;
     let timestamp = 1_001_000i64;
-    let value = Value::Text("v".to_string());
+    let value = Value::text("v".to_string());
 
     // Capture a tight wall-clock window around the write for the LDT bound.
     let before = std::time::SystemTime::now()
@@ -640,11 +640,11 @@ fn collect_static_operations_preserves_per_cell_writetimes_1018() {
         vec![
             CellOperation::Write {
                 column: "s1".to_string(),
-                value: Value::Text("old".to_string()),
+                value: Value::text("old".to_string()),
             },
             CellOperation::Write {
                 column: "s2".to_string(),
-                value: Value::Text("new".to_string()),
+                value: Value::text("new".to_string()),
             },
         ],
         row_ts,
@@ -740,11 +740,11 @@ fn write_static_row_preserves_per_cell_writetimes_1018() {
         vec![
             CellOperation::Write {
                 column: "s1".to_string(),
-                value: Value::Text("old".to_string()),
+                value: Value::text("old".to_string()),
             },
             CellOperation::Write {
                 column: "s2".to_string(),
-                value: Value::Text("new".to_string()),
+                value: Value::text("new".to_string()),
             },
         ],
         row_ts,
@@ -835,7 +835,7 @@ fn write_static_row_preserves_cell_tombstone_writetime_1018() {
             },
             CellOperation::Write {
                 column: "s2".to_string(),
-                value: Value::Text("new".to_string()),
+                value: Value::text("new".to_string()),
             },
         ],
         row_ts,
@@ -970,11 +970,11 @@ fn merge_row_group_shadows_low_per_cell_ts_simple_cell_1018() {
         vec![
             CellOperation::Write {
                 column: "c1".to_string(),
-                value: Value::Text("shadowed".to_string()),
+                value: Value::text("shadowed".to_string()),
             },
             CellOperation::Write {
                 column: "c2".to_string(),
-                value: Value::Text("survivor".to_string()),
+                value: Value::text("survivor".to_string()),
             },
         ],
         row_ts,
@@ -1036,11 +1036,11 @@ fn collect_static_operations_shadows_low_per_cell_ts_1018() {
         vec![
             CellOperation::Write {
                 column: "s1".to_string(),
-                value: Value::Text("shadowed".to_string()),
+                value: Value::text("shadowed".to_string()),
             },
             CellOperation::Write {
                 column: "s2".to_string(),
-                value: Value::Text("survivor".to_string()),
+                value: Value::text("survivor".to_string()),
             },
         ],
         row_ts,
@@ -1104,7 +1104,7 @@ fn test_write_column_bitmap_zero_when_all_columns_present() {
     let operations: Vec<_> = (0..65)
         .map(|i| CellOperation::Write {
             column: format!("col_{:03}", i),
-            value: Value::Text(format!("value-{}", i)),
+            value: Value::text(format!("value-{}", i)),
         })
         .collect();
 
@@ -1161,8 +1161,8 @@ fn test_serialize_single_element_list() {
 #[test]
 fn test_serialize_set() {
     let set = Value::Set(vec![
-        Value::Text("alpha".to_string()),
-        Value::Text("beta".to_string()),
+        Value::text("alpha".to_string()),
+        Value::text("beta".to_string()),
     ]);
     let bytes = serialize_value(&set).unwrap();
     // Count = 2
@@ -1174,7 +1174,7 @@ fn test_serialize_set() {
 
 #[test]
 fn test_serialize_single_element_set() {
-    let set = Value::Set(vec![Value::Text("alpha".to_string())]);
+    let set = Value::Set(vec![Value::text("alpha".to_string())]);
     let bytes = serialize_value(&set).unwrap();
     assert_eq!(
         bytes,
@@ -1195,7 +1195,7 @@ fn test_serialize_empty_set() {
 
 #[test]
 fn test_serialize_map() {
-    let map = Value::Map(vec![(Value::Text("key1".to_string()), Value::Integer(100))]);
+    let map = Value::Map(vec![(Value::text("key1".to_string()), Value::Integer(100))]);
     let bytes = serialize_value(&map).unwrap();
     // Count = 1
     assert_eq!(&bytes[0..4], &1i32.to_be_bytes());
@@ -1220,7 +1220,7 @@ fn test_serialize_empty_map() {
 fn test_serialize_tuple() {
     let tuple = Value::Tuple(vec![
         Value::Integer(42),
-        Value::Text("hello".to_string()),
+        Value::text("hello".to_string()),
         Value::Null,
     ]);
     let bytes = serialize_value(&tuple).unwrap();
@@ -1236,7 +1236,7 @@ fn test_serialize_tuple() {
 
 #[test]
 fn test_serialize_single_element_tuple() {
-    let tuple = Value::Tuple(vec![Value::Text("solo".to_string())]);
+    let tuple = Value::Tuple(vec![Value::text("solo".to_string())]);
     let bytes = serialize_value(&tuple).unwrap();
     assert_eq!(
         bytes,
@@ -1262,9 +1262,9 @@ fn test_serialize_frozen() {
 
 #[test]
 fn test_serialize_single_element_frozen() {
-    let frozen = Value::Frozen(Box::new(Value::List(vec![Value::Text("solo".to_string())])));
+    let frozen = Value::Frozen(Box::new(Value::List(vec![Value::text("solo".to_string())])));
     let frozen_bytes = serialize_value(&frozen).unwrap();
-    let list_bytes = serialize_value(&Value::List(vec![Value::Text("solo".to_string())])).unwrap();
+    let list_bytes = serialize_value(&Value::List(vec![Value::text("solo".to_string())])).unwrap();
     assert_eq!(frozen_bytes, list_bytes);
 }
 
@@ -1272,7 +1272,7 @@ fn test_serialize_single_element_frozen() {
 fn test_serialize_nested_collection() {
     // MAP<TEXT, FROZEN<LIST<INT>>>
     let nested = Value::Map(vec![(
-        Value::Text("nums".to_string()),
+        Value::text("nums".to_string()),
         Value::Frozen(Box::new(Value::List(vec![
             Value::Integer(1),
             Value::Integer(2),
@@ -1310,7 +1310,7 @@ fn test_serialize_collection_containing_nested_udts() {
         .unwrap();
 
     let value = Value::Map(vec![(
-        Value::Text("empresa_日本".to_string()),
+        Value::text("empresa_日本".to_string()),
         Value::Frozen(Box::new(Value::Udt(Box::new(company)))),
     )]);
     let bytes = serialize_value(&value).unwrap();
@@ -1345,14 +1345,14 @@ fn test_serialize_tuple_with_collection_fields_and_udt() {
         .unwrap();
 
     let tuple = Value::Tuple(vec![
-        Value::Text("phase3".to_string()),
+        Value::text("phase3".to_string()),
         Value::Frozen(Box::new(Value::List(vec![
             Value::Integer(3),
             Value::Integer(5),
             Value::Integer(8),
         ]))),
         Value::Frozen(Box::new(Value::Map(vec![(
-            Value::Text("home".to_string()),
+            Value::text("home".to_string()),
             Value::Frozen(Box::new(Value::Udt(Box::new(address)))),
         )]))),
         Value::Frozen(Box::new(Value::Udt(Box::new(person)))),
@@ -1392,10 +1392,10 @@ fn test_serialize_tuple_with_collection_fields_and_udt() {
 #[test]
 fn test_serialize_high_complexity_nested_collection() {
     let nested = Value::Map(vec![(
-        Value::Text("outer".to_string()),
+        Value::text("outer".to_string()),
         Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
             Value::Map(vec![(
-                Value::Text("inner".to_string()),
+                Value::text("inner".to_string()),
                 Value::Frozen(Box::new(Value::List(vec![
                     Value::Integer(1),
                     Value::Integer(2),

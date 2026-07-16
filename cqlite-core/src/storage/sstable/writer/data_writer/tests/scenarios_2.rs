@@ -21,7 +21,12 @@ fn test_value_length_bounds_check() {
     // by checking that reasonable values pass
     let mut buf = Vec::new();
     let large_text = "x".repeat(1000);
-    let result = writer.write_cell(&mut buf, "test_col", &Value::Text(large_text), 1001000);
+    let result = writer.write_cell(
+        &mut buf,
+        "test_col",
+        &Value::Text(large_text.into()),
+        1001000,
+    );
     assert!(result.is_ok(), "Reasonable-sized values should succeed");
 }
 
@@ -79,7 +84,7 @@ fn test_column_bitmap_skips_nulls() {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             },
             CellOperation::Write {
                 column: "age".to_string(),
@@ -119,7 +124,7 @@ fn test_row_with_null_values() {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             },
             CellOperation::Write {
                 column: "age".to_string(),
@@ -160,7 +165,7 @@ fn test_multiple_partitions() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Alice".to_string()),
+            value: Value::text("Alice".to_string()),
         }],
         1001000,
         None,
@@ -180,7 +185,7 @@ fn test_multiple_partitions() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Bob".to_string()),
+            value: Value::text("Bob".to_string()),
         }],
         1002000,
         None,
@@ -535,7 +540,7 @@ fn test_complete_partition_with_range_tombstone() {
         Some(ClusteringKey::single("ts", Value::Timestamp(1000))),
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Alice".to_string()),
+            value: Value::text("Alice".to_string()),
         }],
         1001000,
         None,
@@ -580,7 +585,7 @@ fn test_write_cell_with_ttl() {
         .write_cell_with_ttl(
             &mut buf,
             "test_col",
-            &Value::Text("test".to_string()),
+            &Value::text("test".to_string()),
             timestamp,
             ttl_seconds,
             None,
@@ -630,7 +635,7 @@ fn test_row_with_ttl_cells() {
         vec![
             CellOperation::WriteWithTtl {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
                 ttl_seconds: 7200,
                 local_deletion_time: None,
             },
@@ -680,7 +685,7 @@ fn test_row_with_multiple_ttl_cells() {
         vec![
             CellOperation::WriteWithTtl {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
                 ttl_seconds: 3600, // 1 hour
                 local_deletion_time: None,
             },
@@ -722,7 +727,7 @@ fn test_mixed_ttl_and_regular_cells() {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             },
             CellOperation::WriteWithTtl {
                 column: "age".to_string(),
@@ -761,7 +766,7 @@ fn test_ttl_zero_special_case() {
         .write_cell_with_ttl(
             &mut buf,
             "test_col",
-            &Value::Text("test".to_string()),
+            &Value::text("test".to_string()),
             timestamp,
             ttl_seconds,
             None,
@@ -830,7 +835,7 @@ fn test_ttl_cell_local_deletion_time_calculation() {
         .write_cell_with_ttl(
             &mut buf,
             "test_col",
-            &Value::Text("test".to_string()),
+            &Value::text("test".to_string()),
             timestamp,
             ttl_seconds,
             None,
@@ -866,7 +871,7 @@ fn test_row_ttl_uses_row_ttl_cell_flags() {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             },
             CellOperation::Write {
                 column: "age".to_string(),
@@ -923,7 +928,7 @@ fn test_write_partition_emits_static_row_before_regular_rows() {
         None,
         vec![CellOperation::Write {
             column: "static_val".to_string(),
-            value: Value::Text("static".to_string()),
+            value: Value::text("static".to_string()),
         }],
         1001000,
         None,
@@ -934,7 +939,7 @@ fn test_write_partition_emits_static_row_before_regular_rows() {
         Some(ClusteringKey::single("ck", Value::Integer(1))),
         vec![CellOperation::Write {
             column: "regular_val".to_string(),
-            value: Value::Text("regular".to_string()),
+            value: Value::text("regular".to_string()),
         }],
         1002000,
         None,
@@ -1001,11 +1006,11 @@ fn test_column_subset_exactly_64_regular_columns_uses_large_subset_encoding() {
         vec![
             CellOperation::Write {
                 column: "col_000".to_string(),
-                value: Value::Text("first".to_string()),
+                value: Value::text("first".to_string()),
             },
             CellOperation::Write {
                 column: "col_063".to_string(),
-                value: Value::Text("last".to_string()),
+                value: Value::text("last".to_string()),
             },
         ],
         1001000,

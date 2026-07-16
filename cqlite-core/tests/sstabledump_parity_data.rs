@@ -196,10 +196,10 @@ async fn test_data_db_ttl_parity() -> CqliteResult<()> {
     let table_id = TableId::new("test_parity", "clustered");
     for (pk, ck, ttl) in &ttl_values {
         let partition_key = PartitionKey::single("pk", Value::Integer(*pk));
-        let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+        let clustering_key = Some(ClusteringKey::single("ck", Value::text(ck.to_string())));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("ttl={}", ttl)),
+            value: Value::text(format!("ttl={}", ttl)),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -251,12 +251,12 @@ async fn test_data_db_tombstone_parity() -> CqliteResult<()> {
 
     // Write a row then delete it
     let pk = PartitionKey::single("pk", Value::Integer(1));
-    let ck = ClusteringKey::single("ck", Value::Text("row1".to_string()));
+    let ck = ClusteringKey::single("ck", Value::text("row1".to_string()));
 
     // Initial write
     let write_ops = vec![CellOperation::Write {
         column: "data".to_string(),
-        value: Value::Text("original".to_string()),
+        value: Value::text("original".to_string()),
     }];
     let write_mutation = Mutation::new(
         table_id.clone(),
@@ -285,7 +285,7 @@ async fn test_data_db_tombstone_parity() -> CqliteResult<()> {
 
     // Row tombstone on different row
     let pk2 = PartitionKey::single("pk", Value::Integer(2));
-    let ck2 = ClusteringKey::single("ck", Value::Text("row2".to_string()));
+    let ck2 = ClusteringKey::single("ck", Value::text("row2".to_string()));
     let delete_row_ops = vec![CellOperation::DeleteRow];
     let delete_row_mutation =
         Mutation::new(table_id, pk2, Some(ck2), delete_row_ops, 1000002, None);
@@ -321,10 +321,10 @@ async fn test_data_db_timestamp_delta_encoding() -> CqliteResult<()> {
     let pk = PartitionKey::single("pk", Value::Integer(1));
 
     for i in 0..100 {
-        let ck = ClusteringKey::single("ck", Value::Text(format!("row_{:03}", i)));
+        let ck = ClusteringKey::single("ck", Value::text(format!("row_{:03}", i)));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("data_{}", i)),
+            value: Value::text(format!("data_{}", i)),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -667,7 +667,7 @@ fn create_test_mutation(id: i32, name: &str, value: i32, timestamp: i64) -> Muta
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "value".to_string(),

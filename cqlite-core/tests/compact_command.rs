@@ -68,7 +68,7 @@ fn write_row(id: i32, name: &str, timestamp: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text(name.to_string()),
+        value: Value::text(name.to_string()),
     }];
     Mutation::new(table_id, pk, None, ops, timestamp, None)
 }
@@ -420,7 +420,7 @@ fn write_clustered_row(id: i32, ck: i32, v: &str, timestamp: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text(v.to_string()),
+            value: Value::text(v.to_string()),
         }],
         timestamp,
         None,

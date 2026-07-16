@@ -314,7 +314,7 @@ async fn small_oa_live_partition_survives_sliding_parsers() {
         None,
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text("x".to_string()),
+            value: Value::text("x".to_string()),
         }],
         1_000_000,
         None,

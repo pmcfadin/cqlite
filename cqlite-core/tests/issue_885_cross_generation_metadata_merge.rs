@@ -79,7 +79,7 @@ fn write_row(id: i32, name: &str, score: i32, ts: i64) -> Mutation {
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "score".to_string(),
@@ -94,7 +94,7 @@ fn write_name_only_ttl(id: i32, name: &str, ttl_seconds: u32, ts: i64) -> Mutati
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::WriteWithTtl {
         column: "name".to_string(),
-        value: Value::Text(name.to_string()),
+        value: Value::text(name.to_string()),
         ttl_seconds,
         local_deletion_time: None,
     }];
@@ -253,7 +253,7 @@ fn metadata_scan_merges_generations_with_lww_and_tombstone_suppression() {
     let (v1, m1) = row(1);
     assert_eq!(
         col(v1, "name"),
-        Some(&Value::Text("n1-v2".to_string())),
+        Some(&Value::text("n1-v2".to_string())),
         "PK1 name must be the gen2 (newer) value"
     );
     assert_eq!(
@@ -292,14 +292,14 @@ fn metadata_scan_merges_generations_with_lww_and_tombstone_suppression() {
 
     // PK3: full overwrite — gen2 (ts=200) wins both columns.
     let (v3, m3) = row(3);
-    assert_eq!(col(v3, "name"), Some(&Value::Text("n3-v2".to_string())));
+    assert_eq!(col(v3, "name"), Some(&Value::text("n3-v2".to_string())));
     assert_eq!(col(v3, "score"), Some(&Value::Integer(333)));
     assert_eq!(writetime(m3, "name"), 200);
     assert_eq!(writetime(m3, "score"), 200);
 
     // PK4: cell-delete of score in gen3 shadows gen1's score; name survives at ts=100.
     let (v4, m4) = row(4);
-    assert_eq!(col(v4, "name"), Some(&Value::Text("n4-v1".to_string())));
+    assert_eq!(col(v4, "name"), Some(&Value::text("n4-v1".to_string())));
     assert!(
         col(v4, "score").is_none(),
         "PK4 score was cell-deleted in a later generation; it must be absent, got {:?}",

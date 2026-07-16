@@ -86,11 +86,11 @@ pub fn keyvalue_schema() -> TableSchema {
 pub fn keyvalue_write(key: &str, value: &str) -> Mutation {
     Mutation::new(
         TableId::new(KEYVALUE_KS, KEYVALUE_TBL),
-        PartitionKey::single("key", Value::Text(key.into())),
+        PartitionKey::single("key", Value::text(key)),
         None,
         vec![CellOperation::Write {
             column: "value".into(),
-            value: Value::Text(value.into()),
+            value: Value::text(value),
         }],
         KEYVALUE_TIMESTAMP,
         None,

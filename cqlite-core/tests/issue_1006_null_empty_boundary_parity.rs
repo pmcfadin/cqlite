@@ -509,12 +509,12 @@ async fn null_empty_text_blob_three_way_distinct() {
             };
             assert_eq!(
                 get("before_col"),
-                Some(Some(Value::Text("before".to_string()))),
+                Some(Some(Value::text("before".to_string()))),
                 "ck={ck}: before_col neighbour corrupted (target value mis-consumed bytes?)"
             );
             assert_eq!(
                 get("after_col"),
-                Some(Some(Value::Text("after".to_string()))),
+                Some(Some(Value::text("after".to_string()))),
                 "ck={ck}: after_col neighbour corrupted (target value mis-consumed bytes?)"
             );
 

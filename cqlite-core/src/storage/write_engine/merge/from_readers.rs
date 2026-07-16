@@ -453,7 +453,7 @@ mod tests {
                     1000,
                     CellOperation::Write {
                         column: "name".to_string(),
-                        value: Value::Text(name.to_string()),
+                        value: Value::text(name.to_string()),
                     },
                 ))
                 .unwrap();
@@ -470,7 +470,7 @@ mod tests {
                 2000,
                 CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("g2-1-10".to_string()),
+                    value: Value::text("g2-1-10".to_string()),
                 },
             ))
             .unwrap();
@@ -508,7 +508,7 @@ mod tests {
                 2000,
                 CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("g2-3-20".to_string()),
+                    value: Value::text("g2-3-20".to_string()),
                 },
             ))
             .unwrap();

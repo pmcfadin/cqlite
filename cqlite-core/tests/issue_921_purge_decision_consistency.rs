@@ -436,7 +436,7 @@ fn surviving_cell_tombstone_preserves_source_ldt() {
             // `data` stays live so the row is not reduced to an empty/absent row.
             CellOperation::Write {
                 column: "data".to_string(),
-                value: Value::Text("keep".to_string()),
+                value: Value::text("keep".to_string()),
             },
             CellOperation::Delete {
                 column: "name".to_string(),

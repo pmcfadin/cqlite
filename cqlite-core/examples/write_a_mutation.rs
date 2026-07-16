@@ -66,7 +66,7 @@ fn main() -> cqlite_core::error::Result<()> {
         None, // no clustering key on this table
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Alice".to_string()),
+            value: Value::text("Alice".to_string()),
         }],
         1_704_067_200_000_000, // write timestamp, microseconds since Unix epoch
         None,                  // no TTL

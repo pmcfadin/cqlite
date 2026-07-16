@@ -499,7 +499,7 @@ mod tests {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("John".to_string())),
+                    value: Some(Value::text("John".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -523,7 +523,7 @@ mod tests {
     fn test_tuple_serialization() {
         // Test tuple serialization
         let tuple = vec![
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Integer(42),
             Value::Boolean(true),
         ];

@@ -130,10 +130,10 @@ async fn test_edge_large_partition() {
     let table_id = TableId::new("test_edge", "edge_cases");
     for i in 0..500 {
         let pk = PartitionKey::single("pk", Value::Integer(1));
-        let ck = ClusteringKey::single("ck", Value::Text(format!("row_{:05}", i)));
+        let ck = ClusteringKey::single("ck", Value::text(format!("row_{:05}", i)));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("Data for row {}", i)),
+            value: Value::text(format!("Data for row {}", i)),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -198,10 +198,10 @@ async fn test_edge_unicode() {
     let table_id = TableId::new("test_edge", "edge_cases");
     for (i, unicode_str) in unicode_strings.iter().enumerate() {
         let pk = PartitionKey::single("pk", Value::Integer(1));
-        let ck = ClusteringKey::single("ck", Value::Text(unicode_str.to_string()));
+        let ck = ClusteringKey::single("ck", Value::text(unicode_str.to_string()));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("Unicode data: {}", unicode_str)),
+            value: Value::text(format!("Unicode data: {}", unicode_str)),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -255,10 +255,10 @@ async fn test_edge_special_characters() {
     let table_id = TableId::new("test_edge", "edge_cases");
     for (i, special_str) in special_strings.iter().enumerate() {
         let pk = PartitionKey::single("pk", Value::Integer(i as i32));
-        let ck = ClusteringKey::single("ck", Value::Text(format!("key_{}", i)));
+        let ck = ClusteringKey::single("ck", Value::text(format!("key_{}", i)));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(special_str.to_string()),
+            value: Value::text(special_str.to_string()),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -390,10 +390,10 @@ async fn test_edge_long_clustering_key() {
 
     let table_id = TableId::new("test_edge", "edge_cases");
     let pk = PartitionKey::single("pk", Value::Integer(1));
-    let ck = ClusteringKey::single("ck", Value::Text(long_ck.clone()));
+    let ck = ClusteringKey::single("ck", Value::text(long_ck.clone()));
     let ops = vec![CellOperation::Write {
         column: "data".to_string(),
-        value: Value::Text("Data with long CK".to_string()),
+        value: Value::text("Data with long CK".to_string()),
     }];
     let mutation = Mutation::new(table_id, pk, Some(ck), ops, 1000000, None);
 
@@ -433,10 +433,10 @@ async fn test_edge_ttl_values() {
     let table_id = TableId::new("test_edge", "edge_cases");
     for (i, &ttl) in ttl_values.iter().enumerate() {
         let pk = PartitionKey::single("pk", Value::Integer(i as i32));
-        let ck = ClusteringKey::single("ck", Value::Text(format!("ttl_{}", ttl)));
+        let ck = ClusteringKey::single("ck", Value::text(format!("ttl_{}", ttl)));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("TTL={}", ttl)),
+            value: Value::text(format!("TTL={}", ttl)),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -488,10 +488,10 @@ async fn test_edge_delete_operations() {
 
     // Write a row
     let pk = PartitionKey::single("pk", Value::Integer(1));
-    let ck = ClusteringKey::single("ck", Value::Text("row1".to_string()));
+    let ck = ClusteringKey::single("ck", Value::text("row1".to_string()));
     let ops = vec![CellOperation::Write {
         column: "data".to_string(),
-        value: Value::Text("Original data".to_string()),
+        value: Value::text("Original data".to_string()),
     }];
     let mutation = Mutation::new(
         table_id.clone(),
@@ -526,7 +526,7 @@ async fn test_edge_delete_operations() {
 
     // Write another row with DeleteRow
     let pk2 = PartitionKey::single("pk", Value::Integer(2));
-    let ck2 = ClusteringKey::single("ck", Value::Text("row2".to_string()));
+    let ck2 = ClusteringKey::single("ck", Value::text("row2".to_string()));
     let delete_row_ops = vec![CellOperation::DeleteRow];
     let delete_row_mutation =
         Mutation::new(table_id, pk2, Some(ck2), delete_row_ops, 1000002, None);
@@ -594,7 +594,7 @@ async fn test_edge_single_byte_values() {
     let pk = PartitionKey::single("pk", Value::Integer(1));
     let ops = vec![CellOperation::Write {
         column: "text_col".to_string(),
-        value: Value::Text("X".to_string()),
+        value: Value::text("X".to_string()),
     }];
     let mutation = Mutation::new(table_id, pk, None, ops, 1000000, None);
 
@@ -633,10 +633,10 @@ async fn test_edge_partition_tombstone() {
 
     // Write some rows first
     let pk = PartitionKey::single("pk", Value::Integer(1));
-    let ck1 = ClusteringKey::single("ck", Value::Text("row1".to_string()));
+    let ck1 = ClusteringKey::single("ck", Value::text("row1".to_string()));
     let ops1 = vec![CellOperation::Write {
         column: "data".to_string(),
-        value: Value::Text("Data row 1".to_string()),
+        value: Value::text("Data row 1".to_string()),
     }];
     let mutation1 = Mutation::new(table_id.clone(), pk.clone(), Some(ck1), ops1, 1000000, None);
     engine
@@ -644,10 +644,10 @@ async fn test_edge_partition_tombstone() {
         .await
         .expect("Write should succeed");
 
-    let ck2 = ClusteringKey::single("ck", Value::Text("row2".to_string()));
+    let ck2 = ClusteringKey::single("ck", Value::text("row2".to_string()));
     let ops2 = vec![CellOperation::Write {
         column: "data".to_string(),
-        value: Value::Text("Data row 2".to_string()),
+        value: Value::text("Data row 2".to_string()),
     }];
     let mutation2 = Mutation::new(table_id.clone(), pk.clone(), Some(ck2), ops2, 1000001, None);
     engine
@@ -729,10 +729,10 @@ async fn test_edge_range_tombstone() {
         ("row_b", 1000001),
         ("row_c", 1000002),
     ] {
-        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ck = ClusteringKey::single("ck", Value::text(suffix.to_string()));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("Data for {suffix}")),
+            value: Value::text(format!("Data for {suffix}")),
         }];
         let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
         engine
@@ -753,11 +753,11 @@ async fn test_edge_range_tombstone() {
     range_mutation.range_tombstones.push(RangeTombstone {
         start: ClusteringBound::Inclusive(ClusteringKey::single(
             "ck",
-            Value::Text("row_a".to_string()),
+            Value::text("row_a".to_string()),
         )),
         end: ClusteringBound::Inclusive(ClusteringKey::single(
             "ck",
-            Value::Text("row_b".to_string()),
+            Value::text("row_b".to_string()),
         )),
         deletion_time: 1000003,
         local_deletion_time: 2_000_000_000,
@@ -812,10 +812,10 @@ async fn test_edge_range_tombstone_full_partition() {
 
     // Write some rows
     for (suffix, ts) in [("a", 1000000i64), ("b", 1000001), ("c", 1000002)] {
-        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ck = ClusteringKey::single("ck", Value::text(suffix.to_string()));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("Data {suffix}")),
+            value: Value::text(format!("Data {suffix}")),
         }];
         let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
         engine
@@ -909,10 +909,10 @@ fn test_edge_tombstone_compaction_merge() {
         ("row_d", 1_000_003),
         ("row_e", 1_000_004),
     ] {
-        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ck = ClusteringKey::single("ck", Value::text(suffix.to_string()));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("Data for {suffix}")),
+            value: Value::text(format!("Data for {suffix}")),
         }];
         let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
         rt.block_on(engine.write_async(mutation))
@@ -932,7 +932,7 @@ fn test_edge_tombstone_compaction_merge() {
 
     // ---- Generation 2: row-level deletes for row_b and row_d ----
     for (suffix, ts) in [("row_b", 2_000_000i64), ("row_d", 2_000_001)] {
-        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ck = ClusteringKey::single("ck", Value::text(suffix.to_string()));
         let ops = vec![CellOperation::DeleteRow];
         let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
         rt.block_on(engine.write_async(mutation))
@@ -1087,13 +1087,13 @@ async fn test_frozen_list_clustering_key_uniqueness() {
     let table_id = TableId::new("test_ck", "frozen_ck");
     for (i, ck_val) in ck_values.iter().enumerate() {
         let ck = Value::Frozen(Box::new(Value::List(
-            ck_val.iter().map(|s| Value::Text(s.to_string())).collect(),
+            ck_val.iter().map(|s| Value::text(s.to_string())).collect(),
         )));
         let partition_key = PartitionKey::single("pk", pk.clone());
         let clustering_key = Some(ClusteringKey::single("ck", ck));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("row_{i}")),
+            value: Value::text(format!("row_{i}")),
         }];
         let mutation = Mutation::new(
             table_id.clone(),
@@ -1174,10 +1174,10 @@ fn test_edge_cell_tombstone_compaction_merge() {
         ("row_y", 1_000_001),
         ("row_z", 1_000_002),
     ] {
-        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ck = ClusteringKey::single("ck", Value::text(suffix.to_string()));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("Value for {suffix}")),
+            value: Value::text(format!("Value for {suffix}")),
         }];
         let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
         rt.block_on(engine.write_async(mutation))
@@ -1193,7 +1193,7 @@ fn test_edge_cell_tombstone_compaction_merge() {
 
     // ---- Generation 2: cell-level deletes for row_x and row_z ----
     for (suffix, ts) in [("row_x", 2_000_000i64), ("row_z", 2_000_001)] {
-        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ck = ClusteringKey::single("ck", Value::text(suffix.to_string()));
         let ops = vec![CellOperation::Delete {
             column: "data".to_string(),
             local_deletion_time: None,

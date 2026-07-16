@@ -88,7 +88,7 @@ fn write_row_with_ttl(id: i32, name: &str, score: i32, ttl_seconds: u32, ts: i64
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::WriteWithTtl {
             column: "score".to_string(),

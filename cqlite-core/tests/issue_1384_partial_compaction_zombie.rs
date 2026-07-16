@@ -199,11 +199,11 @@ fn live_v(value: &str, ts: i64) -> Mutation {
         vec![
             CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text(value.to_string()),
+                value: Value::text(value.to_string()),
             },
             CellOperation::Write {
                 column: "w".to_string(),
-                value: Value::Text("anchor".to_string()),
+                value: Value::text("anchor".to_string()),
             },
         ],
         ts,
@@ -220,7 +220,7 @@ fn sibling_live_v(ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(SIBLING_CK))),
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text("sibling".to_string()),
+            value: Value::text("sibling".to_string()),
         }],
         ts,
         None,
@@ -257,7 +257,7 @@ fn cell_tomb_v() -> Mutation {
             },
             CellOperation::Write {
                 column: "w".to_string(),
-                value: Value::Text("anchor".to_string()),
+                value: Value::text("anchor".to_string()),
             },
         ],
         TS_TOMB,
@@ -487,7 +487,7 @@ fn entry_ck(entry: &MergeEntry) -> Option<i32> {
 fn observe_cell(c: &CellData, obs: &mut Observed) {
     match c.column.as_str() {
         "v" => match &c.value {
-            Value::Text(t) => obs.v_live = Some(t.clone()),
+            Value::Text(t) => obs.v_live = Some(String::from_utf8_lossy(t).into_owned()),
             Value::Tombstone(info) if info.tombstone_type == TombstoneType::CellTombstone => {
                 obs.v_cell_tombstone = true;
             }
@@ -495,7 +495,7 @@ fn observe_cell(c: &CellData, obs: &mut Observed) {
         },
         "w" => {
             if let Value::Text(t) = &c.value {
-                obs.w_live = Some(t.clone());
+                obs.w_live = Some(String::from_utf8_lossy(t).into_owned());
             }
         }
         "tags" => {

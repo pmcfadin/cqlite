@@ -94,7 +94,7 @@ async fn setup_timeseries_db() -> Option<Database> {
 /// don't depend on the exact `Value` variant).
 fn col_as_string(row: &QueryRow, name: &str) -> Option<String> {
     row.values.get(name).map(|v| match v {
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         other => format!("{}", other),
     })
 }

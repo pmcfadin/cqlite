@@ -364,7 +364,7 @@ impl AdvancedEdgeCaseTests {
 
             for injection_pattern in injection_patterns {
                 // Test injection in text values
-                let text_value = Value::Text(String::from_utf8_lossy(&injection_pattern).into_owned());
+                let text_value = Value::text(String::from_utf8_lossy(&injection_pattern).into_owned());
                 let serialized = serialize_cql_value(&text_value)?;
                 
                 // Verify round-trip maintains data integrity (no interpretation)
@@ -386,7 +386,7 @@ impl AdvancedEdgeCaseTests {
                 }
 
                 // Test injection in blob values
-                let blob_value = Value::Blob(injection_pattern.clone());
+                let blob_value = Value::blob(injection_pattern.clone());
                 let serialized = serialize_cql_value(&blob_value)?;
                 
                 if serialized.len() > 1 {
@@ -450,12 +450,12 @@ impl AdvancedEdgeCaseTests {
                 (
                     cqlite_core::types::TableId::new("test_table".to_string()),
                     RowKey::from("key1"),
-                    Value::Text("value1".to_string()),
+                    Value::text("value1".to_string()),
                 ),
                 (
                     cqlite_core::types::TableId::new("test_table".to_string()),
                     RowKey::from("key2"),
-                    Value::Text("value2".to_string()),
+                    Value::text("value2".to_string()),
                 ),
             ];
 
@@ -549,7 +549,7 @@ impl AdvancedEdgeCaseTests {
                 (
                     cqlite_core::types::TableId::new("test_table".to_string()),
                     RowKey::from("key1"),
-                    Value::Text("value1".to_string()),
+                    Value::text("value1".to_string()),
                 ),
             ];
 

@@ -125,7 +125,7 @@ fn write_row(table_id: &TableId, pk: &PartitionKey, ck: i32, ts: i64) -> Mutatio
         vec![
             CellOperation::Write {
                 column: "a".to_string(),
-                value: Value::Text("v".to_string()),
+                value: Value::text("v".to_string()),
             },
             CellOperation::Write {
                 column: "b".to_string(),

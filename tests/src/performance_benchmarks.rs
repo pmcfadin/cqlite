@@ -359,7 +359,7 @@ impl PerformanceBenchmarks {
         let start = Instant::now();
         for i in 0..dataset_size {
             let key = RowKey::from(format!("bench_key_{:08}", i));
-            let value = Value::Text(format!(
+            let value = Value::text(format!(
                 "benchmark_value_{}_with_some_extra_data_for_realism",
                 i
             ));
@@ -443,7 +443,7 @@ impl PerformanceBenchmarks {
                 let mut successful_ops = 0;
                 for i in 0..ops_per_task {
                     let key = RowKey::from(format!("concurrent_{}_{:04}", task_id, i));
-                    let value = Value::Text(format!("concurrent_value_{}_{}", task_id, i));
+                    let value = Value::text(format!("concurrent_value_{}_{}", task_id, i));
 
                     if engine_clone.put(&table_id_clone, key, value).await.is_ok() {
                         successful_ops += 1;
@@ -511,7 +511,7 @@ impl PerformanceBenchmarks {
         for batch in 0..(dataset_size / batch_size) {
             for i in 0..batch_size {
                 let key = RowKey::from(format!("large_key_{:08}_{:04}", batch, i));
-                let value = Value::Text(format!(
+                let value = Value::text(format!(
                     "Large dataset value {} batch {} with substantial content to test realistic scenarios",
                     i, batch
                 ));
@@ -630,7 +630,7 @@ impl PerformanceBenchmarks {
 
         // Simulate stress operations
         for i in 0..stress_ops {
-            let value = Value::Text(format!("stress_test_value_{}", i));
+            let value = Value::text(format!("stress_test_value_{}", i));
             if serialize_cql_value(&value).is_ok() {
                 successful_ops += 1;
             }
@@ -817,14 +817,14 @@ impl PerformanceBenchmarks {
             Value::BigInt(9223372036854775807),
             Value::Float(3.14159),
             Value::Float(-2.718281828),
-            Value::Text("Short text".to_string()),
-            Value::Text(
+            Value::text("Short text".to_string()),
+            Value::text(
                 "Much longer text value that would be more representative of real-world data"
                     .to_string(),
             ),
-            Value::Text("🚀 Unicode text with émojis and spëcial chars: αβγδε".to_string()),
-            Value::Blob(vec![0x01, 0x02, 0x03, 0xFF]),
-            Value::Blob((0..255).collect()),
+            Value::text("🚀 Unicode text with émojis and spëcial chars: αβγδε".to_string()),
+            Value::blob(vec![0x01, 0x02, 0x03, 0xFF]),
+            Value::blob((0..255).collect()),
             Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             Value::Timestamp(1640995200000000),
             Value::List(vec![
@@ -834,7 +834,7 @@ impl PerformanceBenchmarks {
             ]),
             Value::Map({
                 let mut map = HashMap::new();
-                map.insert("key1".to_string(), Value::Text("value1".to_string()));
+                map.insert("key1".to_string(), Value::text("value1".to_string()));
                 map.insert("key2".to_string(), Value::Integer(42));
                 // Convert HashMap to Vec<(Value, Value)>
                 let map_vec: Vec<(Value, Value)> =

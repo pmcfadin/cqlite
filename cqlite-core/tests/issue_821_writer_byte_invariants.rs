@@ -301,7 +301,7 @@ fn finding2_first_normal_row_prev_size_is_header_size() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("alice".to_string()),
+            value: Value::text("alice".to_string()),
         }],
         2_000_000,
         None,
@@ -336,7 +336,7 @@ fn finding2_second_normal_row_prev_size_is_first_row_total() {
             Some(ClusteringKey::single("ck", Value::Integer(ck))),
             vec![CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text(v.to_string()),
+                value: Value::text(v.to_string()),
             }],
             2_000_000,
             None,
@@ -385,11 +385,11 @@ fn finding2_static_row_hardcodes_zero_and_does_not_advance_chain() {
         vec![
             CellOperation::Write {
                 column: "sdata".to_string(),
-                value: Value::Text("static-val".to_string()),
+                value: Value::text("static-val".to_string()),
             },
             CellOperation::Write {
                 column: "rdata".to_string(),
-                value: Value::Text("row-val".to_string()),
+                value: Value::text("row-val".to_string()),
             },
         ],
         2_000_000,

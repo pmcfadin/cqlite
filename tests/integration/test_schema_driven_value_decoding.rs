@@ -448,8 +448,8 @@ mod tests {
         let text_comparator = ComparatorType::Text;
         
         for i in 0..text_values.len()-1 {
-            let val1 = Value::Text(text_values[i].to_string());
-            let val2 = Value::Text(text_values[i+1].to_string());
+            let val1 = Value::text(text_values[i].to_string());
+            let val2 = Value::text(text_values[i+1].to_string());
             
             let ordering = text_comparator.compare(&val1, &val2).unwrap();
             assert_eq!(ordering, std::cmp::Ordering::Less, 

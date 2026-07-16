@@ -252,7 +252,7 @@ impl SchemaParser {
         }
         let text = String::from_utf8(data[4..4 + len].to_vec())
             .map_err(|e| Error::schema(format!("Invalid UTF-8: {}", e)))?;
-        Ok((Value::Text(text), 4 + len))
+        Ok((Value::Text(text.into()), 4 + len))
     }
 
     fn parse_blob(&self, data: &[u8]) -> Result<(Value, usize)> {
@@ -268,7 +268,7 @@ impl SchemaParser {
                 "Insufficient data for blob content".to_string(),
             ));
         }
-        Ok((Value::Blob(data[4..4 + len].to_vec()), 4 + len))
+        Ok((Value::blob(data[4..4 + len].to_vec()), 4 + len))
     }
 
     fn parse_timestamp(&self, data: &[u8]) -> Result<(Value, usize)> {

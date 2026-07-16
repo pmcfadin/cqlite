@@ -560,7 +560,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: ScanRow::Marker(Value::Text("newer_value".to_string())),
+                value: ScanRow::Marker(Value::text("newer_value".to_string())),
                 metadata: EntryMetadata {
                     write_time: 3000,
                     generation: 3,
@@ -576,7 +576,7 @@ mod tests {
         // The newer value should survive the row tombstone
         assert_eq!(
             result,
-            Some(ScanRow::Marker(Value::Text("newer_value".to_string())))
+            Some(ScanRow::Marker(Value::text("newer_value".to_string())))
         );
     }
 
@@ -867,7 +867,7 @@ mod tests {
         // TTL of 1000 µs written at write_time=5_000 → expires at 6_000.
         // current_time=100_000 > 6_000, so expired.
         let values = vec![GenerationValue {
-            value: ScanRow::Marker(Value::Text("expiring".to_string())),
+            value: ScanRow::Marker(Value::text("expiring".to_string())),
             metadata: EntryMetadata {
                 write_time: 5_000,
                 generation: 1,

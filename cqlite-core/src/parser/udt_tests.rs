@@ -19,11 +19,11 @@ mod tests {
             fields: vec![
                 UdtField {
                     name: "first_name".to_string(),
-                    value: Some(Value::Text("John".to_string())),
+                    value: Some(Value::text("John".to_string())),
                 },
                 UdtField {
                     name: "last_name".to_string(),
-                    value: Some(Value::Text("Doe".to_string())),
+                    value: Some(Value::text("Doe".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -31,7 +31,7 @@ mod tests {
                 },
                 UdtField {
                     name: "email".to_string(),
-                    value: Some(Value::Text("john.doe@example.com".to_string())),
+                    value: Some(Value::text("john.doe@example.com".to_string())),
                 },
             ],
         }
@@ -46,23 +46,23 @@ mod tests {
             fields: vec![
                 UdtField {
                     name: "street".to_string(),
-                    value: Some(Value::Text("123 Main St".to_string())),
+                    value: Some(Value::text("123 Main St".to_string())),
                 },
                 UdtField {
                     name: "city".to_string(),
-                    value: Some(Value::Text("Anytown".to_string())),
+                    value: Some(Value::text("Anytown".to_string())),
                 },
                 UdtField {
                     name: "state".to_string(),
-                    value: Some(Value::Text("CA".to_string())),
+                    value: Some(Value::text("CA".to_string())),
                 },
                 UdtField {
                     name: "zip_code".to_string(),
-                    value: Some(Value::Text("12345".to_string())),
+                    value: Some(Value::text("12345".to_string())),
                 },
                 UdtField {
                     name: "country".to_string(),
-                    value: Some(Value::Text("USA".to_string())),
+                    value: Some(Value::text("USA".to_string())),
                 },
             ],
         }
@@ -124,7 +124,7 @@ mod tests {
         match value {
             Value::Text(s) => {
                 // For UDT fields, don't include length prefix as it's handled at the UDT level
-                s.as_bytes().to_vec()
+                s.to_vec()
             }
             Value::Integer(i) => i.to_be_bytes().to_vec(),
             Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
@@ -340,11 +340,11 @@ mod tests {
                 },
                 UdtField {
                     name: "first_name".to_string(),
-                    value: Some(Value::Text("John".to_string())),
+                    value: Some(Value::text("John".to_string())),
                 },
                 UdtField {
                     name: "last_name".to_string(),
-                    value: Some(Value::Text("Doe".to_string())),
+                    value: Some(Value::text("Doe".to_string())),
                 },
             ],
         };
@@ -367,11 +367,11 @@ mod tests {
                 let mut addr = create_sample_address_udt();
                 addr.set_field(
                     "street".to_string(),
-                    Some(Value::Text("456 Oak Ave".to_string())),
+                    Some(Value::text("456 Oak Ave".to_string())),
                 );
                 addr.set_field(
                     "city".to_string(),
-                    Some(Value::Text("Other City".to_string())),
+                    Some(Value::text("Other City".to_string())),
                 );
                 Box::new(addr)
             }),
@@ -401,20 +401,20 @@ mod tests {
         // Create a map with text keys and person UDT values
         let people_map = vec![
             (
-                Value::Text("employee1".to_string()),
+                Value::text("employee1".to_string()),
                 Value::Udt(Box::new(create_sample_person_udt())),
             ),
             (
-                Value::Text("employee2".to_string()),
+                Value::text("employee2".to_string()),
                 Value::Udt({
                     let mut person = create_sample_person_udt();
                     person.set_field(
                         "first_name".to_string(),
-                        Some(Value::Text("Jane".to_string())),
+                        Some(Value::text("Jane".to_string())),
                     );
                     person.set_field(
                         "last_name".to_string(),
-                        Some(Value::Text("Smith".to_string())),
+                        Some(Value::text("Smith".to_string())),
                     );
                     Box::new(person)
                 }),
@@ -441,8 +441,8 @@ mod tests {
     #[test]
     fn test_empty_value_creation_for_cql_types() {
         // Test empty value creation for various CQL types
-        let empty_text = Value::Text(String::new());
-        assert_eq!(empty_text, Value::Text(String::new()));
+        let empty_text = Value::text(String::new());
+        assert_eq!(empty_text, Value::text(String::new()));
 
         let empty_int = Value::Integer(0);
         assert_eq!(empty_int, Value::Integer(0));

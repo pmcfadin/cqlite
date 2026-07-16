@@ -653,7 +653,7 @@ async fn test_summary_via_write_engine() -> CqliteResult<()> {
         let pk = PartitionKey::single("id", Value::Integer(i));
         let ops = vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(format!("user{}", i)),
+            value: Value::text(format!("user{}", i)),
         }];
         let mutation = Mutation::new(table_id, pk, None, ops, 1000000 + i as i64, None);
         engine.write_async(mutation).await?;

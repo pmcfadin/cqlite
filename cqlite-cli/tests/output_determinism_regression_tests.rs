@@ -138,9 +138,9 @@ fn test_json_preserves_non_alphabetical_column_order() {
             ("m_field", DataType::Text),
         ],
         vec![vec![
-            ("z_field", Value::Text("zzz".to_string())),
-            ("a_field", Value::Text("aaa".to_string())),
-            ("m_field", Value::Text("mmm".to_string())),
+            ("z_field", Value::text("zzz".to_string())),
+            ("a_field", Value::text("aaa".to_string())),
+            ("m_field", Value::text("mmm".to_string())),
         ]],
     );
 
@@ -225,8 +225,8 @@ fn test_json_ordering_with_complex_types() {
             (
                 "m_map",
                 Value::Map(vec![(
-                    Value::Text("key".to_string()),
-                    Value::Text("val".to_string()),
+                    Value::text("key".to_string()),
+                    Value::text("val".to_string()),
                 )]),
             ),
         ]],
@@ -354,14 +354,14 @@ fn test_json_ordering_with_null_and_missing_values() {
         vec![
             // Row with explicit null
             vec![
-                ("z_col", Value::Text("z1".to_string())),
+                ("z_col", Value::text("z1".to_string())),
                 ("a_col", Value::Null),
-                ("m_col", Value::Text("m1".to_string())),
+                ("m_col", Value::text("m1".to_string())),
             ],
             // Row with missing column (a_col not in HashMap)
             vec![
-                ("z_col", Value::Text("z2".to_string())),
-                ("m_col", Value::Text("m2".to_string())),
+                ("z_col", Value::text("z2".to_string())),
+                ("m_col", Value::text("m2".to_string())),
             ],
         ],
     );
@@ -540,9 +540,9 @@ fn test_csv_ordering_remains_stable_across_result_sets() {
             ("col_2", DataType::Text),
         ],
         vec![vec![
-            ("col_3", Value::Text("c".to_string())),
-            ("col_1", Value::Text("a".to_string())),
-            ("col_2", Value::Text("b".to_string())),
+            ("col_3", Value::text("c".to_string())),
+            ("col_1", Value::text("a".to_string())),
+            ("col_2", Value::text("b".to_string())),
         ]],
     );
 
@@ -553,9 +553,9 @@ fn test_csv_ordering_remains_stable_across_result_sets() {
             ("col_2", DataType::Text),
         ],
         vec![vec![
-            ("col_1", Value::Text("x".to_string())),
-            ("col_2", Value::Text("y".to_string())),
-            ("col_3", Value::Text("z".to_string())),
+            ("col_1", Value::text("x".to_string())),
+            ("col_2", Value::text("y".to_string())),
+            ("col_3", Value::text("z".to_string())),
         ]],
     );
 
@@ -593,8 +593,8 @@ fn test_csv_ordering_with_complex_types() {
             (
                 "m_set",
                 Value::Set(vec![
-                    Value::Text("x".to_string()),
-                    Value::Text("y".to_string()),
+                    Value::text("x".to_string()),
+                    Value::text("y".to_string()),
                 ]),
             ),
         ]],
@@ -689,9 +689,9 @@ fn test_json_and_csv_have_consistent_column_order() {
             ("m_col", DataType::Text),
         ],
         vec![vec![
-            ("z_col", Value::Text("z".to_string())),
-            ("a_col", Value::Text("a".to_string())),
-            ("m_col", Value::Text("m".to_string())),
+            ("z_col", Value::text("z".to_string())),
+            ("a_col", Value::text("a".to_string())),
+            ("m_col", Value::text("m".to_string())),
         ]],
     );
 

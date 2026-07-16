@@ -298,7 +298,7 @@ fn values_match(parser_value: &Value, jsonl_value: &JsonlValue) -> bool {
             }
             for (key, val) in parser_map {
                 if let Value::Text(key_str) = key {
-                    match jsonl_obj.get(key_str) {
+                    match jsonl_obj.get(std::str::from_utf8(key_str).unwrap_or_default()) {
                         Some(jsonl_val) if values_match(val, jsonl_val) => continue,
                         _ => return false,
                     }

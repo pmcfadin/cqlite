@@ -8,9 +8,55 @@ mod comparator_test;
 pub use comparator::ComparatorType;
 
 use crate::schema::CqlType;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
+
+/// Zero-copy Bytes-backed value serde helpers (issue #1644, K5).
+///
+/// The byte-carrying `Value` variants (`Text`/`Blob`/`Varint`/`Inet`) are backed
+/// by [`bytes::Bytes`] so a decoded value can be a refcounted view of the
+/// decompressed chunk (no per-cell copy). `Bytes`'s derived serde form is NOT the
+/// same wire shape as the former `String`/`Vec<u8>`, so these modules pin the wire
+/// format byte-identical: `Text` serializes as a UTF-8 string exactly as
+/// `String` did, and `Blob`/`Varint`/`Inet` serialize as a byte sequence exactly
+/// as `Vec<u8>` did. This keeps every JSONL golden and serde round-trip unchanged
+/// (a parity-pinned requirement, not a nicety).
+mod text_serde {
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+        // `Text` bytes are UTF-8-validated at construction, so this cannot fail in
+        // practice; surface any (impossible) invalid byte as a serde error rather
+        // than lossily, so a corrupt value can never silently change the wire form.
+        let as_str = std::str::from_utf8(b).map_err(serde::ser::Error::custom)?;
+        as_str.serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Bytes::from(s.into_bytes()))
+    }
+}
+
+mod bytes_serde {
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+        // Serialize the raw slice, which produces the identical seq-of-`u8` wire
+        // form that `Vec<u8>`/`&[u8]` produce (JSON array, bincode len+bytes).
+        let slice: &[u8] = b;
+        slice.serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        let v = Vec::<u8>::deserialize(d)?;
+        Ok(Bytes::from(v))
+    }
+}
 
 // Size constants for fixed-size types
 const BOOL_SIZE: usize = 1;
@@ -40,10 +86,11 @@ pub enum Value {
     Counter(i64),
     /// 64-bit floating point number
     Float(f64),
-    /// UTF-8 string
-    Text(String),
-    /// Binary data
-    Blob(Vec<u8>),
+    /// UTF-8 string (Bytes-backed zero-copy view — issue #1644; UTF-8-validated
+    /// at construction so `as_str` is a cheap borrow).
+    Text(#[serde(with = "text_serde")] Bytes),
+    /// Binary data (Bytes-backed zero-copy view — issue #1644).
+    Blob(#[serde(with = "bytes_serde")] Bytes),
     /// Timestamp (milliseconds since Unix epoch)
     Timestamp(i64),
     /// Date (days since Unix epoch: 1970-01-01)
@@ -52,8 +99,8 @@ pub enum Value {
     Time(i64),
     /// UUID as 16 bytes
     Uuid([u8; 16]),
-    /// Variable-length integer
-    Varint(Vec<u8>),
+    /// Variable-length integer (Bytes-backed zero-copy view — issue #1644).
+    Varint(#[serde(with = "bytes_serde")] Bytes),
     /// Decimal value with scale and unscaled value
     Decimal { scale: i32, unscaled: Vec<u8> },
     /// Duration value with months, days, and nanoseconds
@@ -80,16 +127,21 @@ pub enum Value {
     Frozen(Box<Value>),
     /// Tombstone marker indicating deleted data (boxed: rare/large cold variant — #1583)
     Tombstone(Box<TombstoneInfo>),
-    /// IP address (4 bytes for IPv4, 16 bytes for IPv6)
-    Inet(Vec<u8>),
+    /// IP address (4 bytes for IPv4, 16 bytes for IPv6) — Bytes-backed
+    /// zero-copy view (issue #1644).
+    Inet(#[serde(with = "bytes_serde")] Bytes),
 }
 
 // size_of::<Value>() layout pin (issue #1565, Epic A A4 ratchet; tightened by
-// Epic E #1583 / value-representation-v2 D1). The three fat cold variants
-// (`Tombstone`, `Udt`, `Json`) are boxed so every hot `Value` slot/clone stays
-// small. Measured 32 bytes after boxing (`Text(String)`/`Blob(Vec<u8>)` are the
-// 24-byte inline floor + tag). If Value grows past this ceiling the build fails
-// — measure and box the next-widest variant, do not just bump the pin.
+// Epic E #1583 / value-representation-v2 D1; re-measured for K5 #1644). The three
+// fat cold variants (`Tombstone`, `Udt`, `Json`) are boxed so every hot `Value`
+// slot/clone stays small. After K5 the byte-carrying variants (`Text`, `Blob`,
+// `Varint`, `Inet`) are `bytes::Bytes`-backed: `Bytes` is 32 bytes (4 words) vs
+// the former 24-byte `String`/`Vec<u8>`, so a Bytes variant is 32 + 8-byte tag =
+// 40 — exactly the ceiling. `Decimal.unscaled` is deliberately kept an owned
+// `Vec<u8>` (D3): a `Bytes` field there would pad the `Decimal` variant to 48 and
+// blow this pin. If Value grows past this ceiling the build fails — measure and
+// box the next-widest variant, do not just bump the pin.
 //
 // Epic H/H3 (issue #1616) deliberately does NOT duplicate this `Value` pin —
 // the parser-side struct-size guards live next to their own types
@@ -162,9 +214,10 @@ impl ScanRow {
     pub fn into_cells(self) -> Option<RowCells> {
         match self {
             ScanRow::Row(cells) => Some(cells),
-            ScanRow::RawRow(bytes) => {
-                Some(vec![(std::sync::Arc::from("data"), Value::Blob(bytes))])
-            }
+            ScanRow::RawRow(bytes) => Some(vec![(
+                std::sync::Arc::from("data"),
+                Value::Blob(bytes.into()),
+            )]),
             ScanRow::Marker(_) => None,
         }
     }
@@ -183,7 +236,10 @@ impl ScanRow {
             ScanRow::Row(cells) => Some(cells),
             ScanRow::RawRow(bytes) => {
                 let name = fallback_column?;
-                Some(vec![(std::sync::Arc::from(name), Value::Blob(bytes))])
+                Some(vec![(
+                    std::sync::Arc::from(name),
+                    Value::Blob(bytes.into()),
+                )])
             }
             ScanRow::Marker(_) => None,
         }
@@ -821,10 +877,14 @@ impl Value {
         }
     }
 
-    /// Try to convert this value to a string
+    /// Try to convert this value to a string.
+    ///
+    /// `Text`'s backing `Bytes` is UTF-8-validated at construction (issue #1644),
+    /// so this is a cheap borrowed view: `from_utf8` re-checks the invariant but
+    /// never copies, and returns `None` only if the invariant were ever violated.
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::Text(s) => Some(s),
+            Value::Text(s) => std::str::from_utf8(s).ok(),
             _ => None,
         }
     }
@@ -832,8 +892,8 @@ impl Value {
     /// Try to convert this value to bytes
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            Value::Blob(b) => Some(b),
-            Value::Text(s) => Some(s.as_bytes()),
+            Value::Blob(b) => Some(b.as_ref()),
+            Value::Text(s) => Some(s.as_ref()),
             _ => None,
         }
     }
@@ -841,7 +901,7 @@ impl Value {
     /// Try to convert this value to IP address bytes
     pub fn as_inet_bytes(&self) -> Option<&[u8]> {
         match self {
-            Value::Inet(bytes) => Some(bytes),
+            Value::Inet(bytes) => Some(bytes.as_ref()),
             _ => None,
         }
     }
@@ -1045,6 +1105,91 @@ impl Value {
     }
 }
 
+/// Retention force-copy slack (issue #1644, D2).
+///
+/// A borrowed [`Value`] payload is a refcounted `slice_ref` view of a whole
+/// decompression chunk, so a tiny value can pin a large (e.g. 64 KB) chunk alive.
+/// [`Value::into_owned`] compacts (copies to a tight standalone allocation) any
+/// borrowed payload whose backing is *materially* larger than the payload —
+/// `backing.len() > payload.len() + RETENTION_SLACK` — at every retention
+/// boundary, bounding retained RSS to `O(retained value bytes + N * slack)`. A
+/// payload whose backing is already close to its own size stays borrowed (no
+/// wasteful copy). Tunable; measured. 4 KiB is small enough to release big chunks
+/// yet large enough that near-tight payloads never re-allocate.
+pub const RETENTION_SLACK: usize = 4 * 1024;
+
+impl Value {
+    /// Construct a `Value::Text` from any UTF-8 string source (issue #1644, K5).
+    ///
+    /// Ergonomic replacement for the former `Value::Text(String)` tuple
+    /// construction now that the variant is [`bytes::Bytes`]-backed. The input is
+    /// already valid UTF-8 (it comes from a `String`/`&str`), so the stored
+    /// `Bytes` upholds the `Text` UTF-8 invariant with no separate check.
+    pub fn text(s: impl Into<String>) -> Value {
+        Value::Text(Bytes::from(s.into().into_bytes()))
+    }
+
+    /// Construct a `Value::Blob` from any byte source.
+    pub fn blob(b: impl Into<Vec<u8>>) -> Value {
+        Value::Blob(Bytes::from(b.into()))
+    }
+
+    /// Construct a `Value::Varint` from any byte source.
+    pub fn varint(b: impl Into<Vec<u8>>) -> Value {
+        Value::Varint(Bytes::from(b.into()))
+    }
+
+    /// Construct a `Value::Inet` from any byte source.
+    pub fn inet(b: impl Into<Vec<u8>>) -> Value {
+        Value::Inet(Bytes::from(b.into()))
+    }
+
+    /// Construct a `Value::Text` from `Bytes` that MAY be a zero-copy view of a
+    /// decoded chunk, validating UTF-8 in place (issue #1644, K5).
+    ///
+    /// This is the streaming-decode entry point: `str::from_utf8` validates the
+    /// borrowed slice WITHOUT copying, then the (unchanged) `Bytes` is stored, so a
+    /// text value that survives to a copying sink is copied exactly once (at the
+    /// sink), and a predicate-rejected value is never copied at all. Returns an
+    /// error on invalid UTF-8 (the value is never inferred from byte patterns —
+    /// no-heuristics, issue #28).
+    pub fn text_from_bytes(b: Bytes) -> crate::Result<Value> {
+        std::str::from_utf8(&b)
+            .map_err(|e| crate::Error::corruption(format!("invalid UTF-8 in text value: {e}")))?;
+        Ok(Value::Text(b))
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::text(s)
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::text(s)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(b: &[u8]) -> Self {
+        Value::Blob(Bytes::copy_from_slice(b))
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(b: Vec<u8>) -> Self {
+        Value::Blob(Bytes::from(b))
+    }
+}
+
+impl From<Bytes> for Value {
+    fn from(b: Bytes) -> Self {
+        Value::Blob(b)
+    }
+}
+
 /// Ordering for `Value`.
 ///
 /// NOTE (contract split, #1870/#2010): this `PartialOrd` INTENTIONALLY diverges
@@ -1101,14 +1246,16 @@ impl fmt::Display for Value {
             Value::Float(fl) => write!(f, "{}", fl),
             Value::Float32(fl) => write!(f, "{}", fl),
             Value::Counter(i) => write!(f, "counter:{}", i),
-            Value::Text(s) => write!(f, "'{}'", s),
+            // `Text`'s bytes are UTF-8-validated at construction, so lossy decode
+            // is exact here; formats byte-identically to the former `String`.
+            Value::Text(s) => write!(f, "'{}'", String::from_utf8_lossy(s)),
             Value::Blob(b) => write!(f, "BLOB({} bytes)", b.len()),
             Value::Timestamp(ts) => Self::fmt_typed(f, "TIMESTAMP", ts),
             Value::Date(days) => Self::fmt_typed(f, "DATE", days),
             Value::Time(nanos) => Self::fmt_time(f, *nanos),
             Value::Uuid(uuid) => Self::fmt_typed(f, "UUID", hex::encode(uuid)),
             Value::Json(json) => Self::fmt_typed(f, "JSON", json),
-            Value::Inet(bytes) => Self::fmt_inet(f, bytes),
+            Value::Inet(bytes) => Self::fmt_inet(f, bytes.as_ref()),
             Value::Varint(data) => write!(f, "VARINT(0x{})", hex::encode(data)),
             Value::Decimal { scale, unscaled } => {
                 write!(f, "DECIMAL(scale={}, unscaled={:?})", scale, unscaled)
@@ -1318,8 +1465,8 @@ impl DataType {
             DataType::BigInt => Value::BigInt(0),
             DataType::Float32 => Value::Float32(0.0),
             DataType::Float => Value::Float(0.0),
-            DataType::Text => Value::Text(String::new()),
-            DataType::Blob => Value::Blob(Vec::new()),
+            DataType::Text => Value::text(String::new()),
+            DataType::Blob => Value::blob(Vec::new()),
             DataType::Timestamp => Value::Timestamp(0),
             DataType::Uuid => Value::Uuid([0; 16]),
             DataType::Json => Value::Json(Box::new(serde_json::Value::Null)),
@@ -1543,13 +1690,19 @@ impl std::hash::Hash for Value {
             Value::BigInt(i) => i.hash(state),
             Value::Counter(i) => i.hash(state),
             Value::Float(f) => f.to_bits().hash(state),
-            Value::Text(s) => s.hash(state),
-            Value::Blob(b) => b.hash(state),
+            // Hash byte-identically to the pre-#1644 `String`/`Vec<u8>`: `Text`
+            // hashes as a `str` (validated bytes + str terminator), the byte
+            // variants hash as a `[u8]` slice.
+            Value::Text(s) => match std::str::from_utf8(s) {
+                Ok(st) => st.hash(state),
+                Err(_) => s.as_ref().hash(state),
+            },
+            Value::Blob(b) => b.as_ref().hash(state),
             Value::Timestamp(t) => t.hash(state),
             Value::Time(t) => t.hash(state),
             Value::Date(d) => d.hash(state),
             Value::Uuid(u) => u.hash(state),
-            Value::Varint(v) => v.hash(state),
+            Value::Varint(v) => v.as_ref().hash(state),
             Value::Decimal { scale, unscaled } => {
                 scale.hash(state);
                 unscaled.hash(state);
@@ -1574,7 +1727,7 @@ impl std::hash::Hash for Value {
             Value::Udt(u) => u.hash(state),
             Value::Frozen(f) => f.hash(state),
             Value::Tombstone(t) => t.hash(state),
-            Value::Inet(i) => i.hash(state),
+            Value::Inet(i) => i.as_ref().hash(state),
         }
     }
 }
@@ -1637,7 +1790,7 @@ mod tests {
     fn boxed_variants_preserve_serde_and_display() {
         let udt = Value::Udt(Box::new(
             UdtValue::new("Person".to_string(), "ks".to_string())
-                .with_field("name".to_string(), Some(Value::Text("Jo".to_string()))),
+                .with_field("name".to_string(), Some(Value::text("Jo".to_string()))),
         ));
         let json = Value::Json(Box::new(serde_json::json!({"a": 1, "b": [true, null]})));
         let tomb = Value::row_tombstone(1234);
@@ -1676,10 +1829,92 @@ mod tests {
         assert_eq!(vals[0], Value::Integer(5));
     }
 
+    /// Issue #1644 (K5): the byte-carrying variants are now `bytes::Bytes`-backed,
+    /// but their serde wire format MUST stay byte-identical to the former
+    /// `String`/`Vec<u8>` so every JSONL golden and serde round-trip is unchanged.
+    /// `Text` serializes as a JSON string; `Blob`/`Varint`/`Inet` as a JSON array
+    /// of byte integers (exactly what `String`/`Vec<u8>` produced).
+    #[test]
+    fn bytes_backed_variants_serde_is_byte_identical() {
+        let text = Value::text("hÉllo");
+        let blob = Value::blob(vec![0u8, 1, 2, 255]);
+        let varint = Value::varint(vec![0x80u8, 0x00]);
+        let inet = Value::inet(vec![127u8, 0, 0, 1]);
+
+        // Exact JSON wire form (the pre-#1644 String/Vec<u8> form).
+        assert_eq!(
+            serde_json::to_string(&text).unwrap(),
+            "{\"Text\":\"hÉllo\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&blob).unwrap(),
+            "{\"Blob\":[0,1,2,255]}"
+        );
+        assert_eq!(
+            serde_json::to_string(&varint).unwrap(),
+            "{\"Varint\":[128,0]}"
+        );
+        assert_eq!(
+            serde_json::to_string(&inet).unwrap(),
+            "{\"Inet\":[127,0,0,1]}"
+        );
+
+        // serde round-trip identity (JSON + bincode, the RowKey path).
+        for v in [&text, &blob, &varint, &inet] {
+            let j = serde_json::to_string(v).unwrap();
+            assert_eq!(&serde_json::from_str::<Value>(&j).unwrap(), v);
+            let b = bincode::serialize(v).unwrap();
+            assert_eq!(&bincode::deserialize::<Value>(&b).unwrap(), v);
+        }
+    }
+
+    /// Issue #1644: ergonomic constructors and `From` conversions keep idiomatic
+    /// construction source-compatible, and the accessors return the same views the
+    /// pre-change `String`/`Vec<u8>` variants did.
+    #[test]
+    fn bytes_backed_constructors_and_accessors() {
+        // Constructors from common source types.
+        assert_eq!(Value::text("hi"), Value::text(String::from("hi")));
+        assert_eq!(Value::blob(vec![1u8, 2]), Value::blob(&[1u8, 2][..]));
+
+        // From conversions: &str/String → Text, Vec<u8>/&[u8]/Bytes → Blob.
+        assert_eq!(Value::from("x"), Value::text("x"));
+        assert_eq!(Value::from(String::from("x")), Value::text("x"));
+        assert_eq!(Value::from(vec![9u8, 8]), Value::blob(vec![9u8, 8]));
+        assert_eq!(Value::from(&[9u8, 8][..]), Value::blob(vec![9u8, 8]));
+        assert_eq!(
+            Value::from(Bytes::from_static(b"z")),
+            Value::blob(vec![b'z'])
+        );
+
+        // Accessors: same &str / &[u8] / length / emptiness as before.
+        let t = Value::text("abc");
+        assert_eq!(t.as_str(), Some("abc"));
+        assert_eq!(t.as_bytes(), Some(&b"abc"[..]));
+        assert_eq!(t.len(), 3);
+        assert!(!t.is_empty());
+        assert!(Value::text("").is_empty());
+
+        let b = Value::blob(vec![1u8, 2, 3]);
+        assert_eq!(b.as_bytes(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(b.len(), 3);
+        assert_eq!(
+            Value::inet(vec![10u8, 0, 0, 1]).as_inet_bytes(),
+            Some(&[10u8, 0, 0, 1][..])
+        );
+
+        // text_from_bytes validates UTF-8 in place (no-heuristics decode entry).
+        assert_eq!(
+            Value::text_from_bytes(Bytes::from_static(b"ok")).unwrap(),
+            Value::text("ok")
+        );
+        assert!(Value::text_from_bytes(Bytes::from_static(&[0xff, 0xfe])).is_err());
+    }
+
     #[test]
     fn test_value_types() {
         assert_eq!(Value::Integer(42).data_type(), CqlType::Int);
-        assert_eq!(Value::Text("hello".to_string()).data_type(), CqlType::Text);
+        assert_eq!(Value::text("hello".to_string()).data_type(), CqlType::Text);
         assert_eq!(Value::Boolean(true).data_type(), CqlType::Boolean);
     }
 
@@ -1706,7 +1941,7 @@ mod tests {
             "payload",
             "a RawRow sample must use the header column name, never a synthetic \"data\" column"
         );
-        assert_eq!(sampled[0].1, Value::Blob(vec![1, 2, 3]));
+        assert_eq!(sampled[0].1, Value::blob(vec![1, 2, 3]));
     }
 
     #[test]
@@ -1745,7 +1980,7 @@ mod tests {
     fn test_value_display() {
         assert_eq!(Value::Null.to_string(), "NULL");
         assert_eq!(Value::Integer(42).to_string(), "42");
-        assert_eq!(Value::Text("hello".to_string()).to_string(), "'hello'");
+        assert_eq!(Value::text("hello".to_string()).to_string(), "'hello'");
     }
 
     #[test]
@@ -1753,7 +1988,7 @@ mod tests {
         // Test Tuple
         let tuple = Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
         ]);
         assert!(matches!(tuple.data_type(), CqlType::Tuple(_)));
@@ -1766,7 +2001,7 @@ mod tests {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("John".to_string())),
+                    value: Some(Value::text("John".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -1820,11 +2055,11 @@ mod tests {
             Value::BigInt(9223372036854775807i64),
             Value::Counter(1000000i64),
             Value::Float(std::f64::consts::PI),
-            Value::Text("test string".to_string()),
-            Value::Blob(vec![1, 2, 3, 4]),
+            Value::text("test string".to_string()),
+            Value::blob(vec![1, 2, 3, 4]),
             Value::Timestamp(1234567890),
             Value::Uuid([0u8; 16]),
-            Value::Varint(vec![1, 2, 3]),
+            Value::varint(vec![1, 2, 3]),
             Value::Decimal {
                 scale: 2,
                 unscaled: vec![1, 2, 3],
@@ -1840,11 +2075,11 @@ mod tests {
             Value::Float32(std::f32::consts::PI),
             Value::List(vec![Value::Integer(1), Value::Integer(2)]),
             Value::Set(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
+                Value::text("a".to_string()),
+                Value::text("b".to_string()),
             ]),
-            Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(42))]),
-            Value::Tuple(vec![Value::Integer(1), Value::Text("test".to_string())]),
+            Value::Map(vec![(Value::text("key".to_string()), Value::Integer(42))]),
+            Value::Tuple(vec![Value::Integer(1), Value::text("test".to_string())]),
             Value::Udt(Box::new(UdtValue::new(
                 "TestType".to_string(),
                 "test_ks".to_string(),
@@ -1936,32 +2171,32 @@ mod tests {
         assert_eq!(valid_list.collection_len(), Some(3));
         assert!(!valid_list.is_empty_collection());
 
-        let mixed_list = Value::List(vec![Value::Integer(1), Value::Text("two".to_string())]);
+        let mixed_list = Value::List(vec![Value::Integer(1), Value::text("two".to_string())]);
         assert!(mixed_list.validate_collection_types().is_err());
 
         // Test set validation
         let valid_set = Value::Set(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ]);
         assert!(valid_set.validate_collection_types().is_ok());
 
         let duplicate_set = Value::Set(vec![
-            Value::Text("a".to_string()),
-            Value::Text("a".to_string()),
+            Value::text("a".to_string()),
+            Value::text("a".to_string()),
         ]);
         assert!(duplicate_set.validate_collection_types().is_err());
 
         // Test map validation
         let valid_map = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key2".to_string()), Value::Integer(2)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key2".to_string()), Value::Integer(2)),
         ]);
         assert!(valid_map.validate_collection_types().is_ok());
 
         let duplicate_key_map = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key1".to_string()), Value::Integer(2)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key1".to_string()), Value::Integer(2)),
         ]);
         assert!(duplicate_key_map.validate_collection_types().is_err());
 
@@ -1980,13 +2215,13 @@ mod tests {
         let mut udt = UdtValue::new("Person".to_string(), "test_ks".to_string());
 
         // Test field operations
-        udt = udt.with_field("name".to_string(), Some(Value::Text("John".to_string())));
+        udt = udt.with_field("name".to_string(), Some(Value::text("John".to_string())));
         udt = udt.with_field("age".to_string(), Some(Value::Integer(30)));
 
         assert_eq!(udt.field_count(), 2);
         assert_eq!(
             udt.get_field("name"),
-            Some(&Value::Text("John".to_string()))
+            Some(&Value::text("John".to_string()))
         );
         assert_eq!(udt.get_field("age"), Some(&Value::Integer(30)));
         assert_eq!(udt.get_field("nonexistent"), None);
@@ -2002,7 +2237,7 @@ mod tests {
         // Test new field addition via set_field
         udt.set_field(
             "email".to_string(),
-            Some(Value::Text("john@example.com".to_string())),
+            Some(Value::text("john@example.com".to_string())),
         );
         assert_eq!(udt.field_count(), 3);
     }
@@ -2021,7 +2256,7 @@ mod tests {
 
         // Test validation of matching UDT value
         let valid_udt = UdtValue::new("Person".to_string(), "test_ks".to_string())
-            .with_field("name".to_string(), Some(Value::Text("John".to_string())))
+            .with_field("name".to_string(), Some(Value::text("John".to_string())))
             .with_field("age".to_string(), Some(Value::Integer(30)));
 
         assert!(type_def.validate_value(&valid_udt).is_ok());
@@ -2038,13 +2273,13 @@ mod tests {
     fn test_tuple_functionality() {
         let mut tuple = TupleValue::new(vec![
             Some(Value::Integer(1)),
-            Some(Value::Text("test".to_string())),
+            Some(Value::text("test".to_string())),
             None,
         ]);
 
         assert_eq!(tuple.field_count(), 3);
         assert_eq!(tuple.get_field(0), Some(&Value::Integer(1)));
-        assert_eq!(tuple.get_field(1), Some(&Value::Text("test".to_string())));
+        assert_eq!(tuple.get_field(1), Some(&Value::text("test".to_string())));
         assert_eq!(tuple.get_field(2), None);
         assert_eq!(tuple.get_field(3), None);
 
@@ -2073,7 +2308,7 @@ mod tests {
         assert_eq!(DataType::Null.default_value(), Value::Null);
         assert_eq!(DataType::Boolean.default_value(), Value::Boolean(false));
         assert_eq!(DataType::Integer.default_value(), Value::Integer(0));
-        assert_eq!(DataType::Text.default_value(), Value::Text(String::new()));
+        assert_eq!(DataType::Text.default_value(), Value::text(String::new()));
 
         // Test string representation
         assert_eq!(DataType::Boolean.to_string(), "BOOLEAN");
@@ -2094,7 +2329,7 @@ mod tests {
         assert_eq!(key1.as_bytes(), &[1, 2, 3, 4]);
 
         // Test creation from value
-        let value = Value::Text("test".to_string());
+        let value = Value::text("test".to_string());
         let key2 = RowKey::from_value(&value).unwrap();
         assert!(!key2.is_empty());
 
@@ -2121,12 +2356,12 @@ mod tests {
 
         // Test same-type comparisons
         assert!(Value::Integer(1) < Value::Integer(2));
-        assert!(Value::Text("a".to_string()) < Value::Text("b".to_string()));
+        assert!(Value::text("a".to_string()) < Value::text("b".to_string()));
         assert!(Value::Boolean(false) < Value::Boolean(true));
 
         // Test mixed-type comparisons (fall back to string comparison)
         let int_val = Value::Integer(42);
-        let text_val = Value::Text("hello".to_string());
+        let text_val = Value::text("hello".to_string());
         assert!(int_val.partial_cmp(&text_val).is_some());
     }
 

@@ -265,11 +265,11 @@ fn person_inner(first: &str, last: &str, age: i32) -> Value {
         fields: vec![
             UdtField {
                 name: "first_name".into(),
-                value: Some(Value::Text(first.into())),
+                value: Some(Value::text(first)),
             },
             UdtField {
                 name: "last_name".into(),
-                value: Some(Value::Text(last.into())),
+                value: Some(Value::text(last)),
             },
             UdtField {
                 name: "age".into(),
@@ -286,15 +286,15 @@ fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
         fields: vec![
             UdtField {
                 name: "street".into(),
-                value: Some(Value::Text(street.into())),
+                value: Some(Value::text(street)),
             },
             UdtField {
                 name: "city".into(),
-                value: city.map(|s| Value::Text(s.into())),
+                value: city.map(|s| Value::text(s)),
             },
             UdtField {
                 name: "zip".into(),
-                value: Some(Value::Text(zip.into())),
+                value: Some(Value::text(zip)),
             },
         ],
     }))
@@ -309,7 +309,7 @@ fn flist(ns: &[i32]) -> Value {
 fn fmap(kvs: &[(&str, i32)]) -> Value {
     Value::Frozen(Box::new(Value::Map(
         kvs.iter()
-            .map(|(k, v)| (Value::Text((*k).into()), Value::Integer(*v)))
+            .map(|(k, v)| (Value::text(*k), Value::Integer(*v)))
             .collect(),
     )))
 }
@@ -320,9 +320,7 @@ fn flist_persons(ps: Vec<Value>) -> Value {
 
 fn fmap_addrs(kvs: Vec<(&str, Value)>) -> Value {
     Value::Frozen(Box::new(Value::Map(
-        kvs.into_iter()
-            .map(|(k, v)| (Value::Text(k.into()), v))
-            .collect(),
+        kvs.into_iter().map(|(k, v)| (Value::text(k), v)).collect(),
     )))
 }
 
@@ -530,7 +528,7 @@ fn person_null_last(first: &str, age: i32) -> Value {
         fields: vec![
             UdtField {
                 name: "first_name".into(),
-                value: Some(Value::Text(first.into())),
+                value: Some(Value::text(first)),
             },
             UdtField {
                 name: "last_name".into(),
@@ -844,7 +842,7 @@ fn assert_map_structure(pk: &str, v: &Value) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     for (k, val) in entries {
         let key = match peel_frozen(&k) {
-            Value::Text(s) => s,
+            Value::Text(s) => String::from_utf8_lossy(s.as_ref()).into_owned(),
             other => panic!("ma[pk={pk}]: map key is {other:?}, expected text"),
         };
         out.insert(key, element_value(&val));
@@ -870,7 +868,7 @@ fn as_udt(v: &Value) -> &UdtValue {
 fn udt_text(u: &UdtValue, field: &str) -> Option<String> {
     match u.fields.iter().find(|f| f.name == field) {
         Some(f) => match &f.value {
-            Some(Value::Text(s)) => Some(s.clone()),
+            Some(Value::Text(s)) => Some(String::from_utf8_lossy(s).into_owned()),
             None => None,
             Some(other) => panic!(
                 "UDT '{}' field '{field}': expected text or null, got {other:?}",

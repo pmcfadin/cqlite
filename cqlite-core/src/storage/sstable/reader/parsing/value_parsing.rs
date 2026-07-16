@@ -411,7 +411,7 @@ impl SSTableReader {
                 // Legacy formats can use blob fallback as last resort
                 #[cfg(feature = "legacy-heuristics")]
                 {
-                    Ok(Value::Blob(value_data.to_vec()))
+                    Ok(Value::blob(value_data.to_vec()))
                 }
                 #[cfg(not(feature = "legacy-heuristics"))]
                 {

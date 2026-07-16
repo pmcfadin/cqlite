@@ -31,7 +31,7 @@ impl ValueFormatter {
     /// bare string `"null"`), so `is_null` unwraps `Value::Frozen` recursively
     /// before checking for `Value::Null`. This restores the pre-#1499 CSV
     /// null-output contract for frozen columns without re-introducing the original
-    /// bug: a literal text value `Value::Text("null")` is NOT null and still emits
+    /// bug: a literal text value `Value::text("null")` is NOT null and still emits
     /// `"null"`. `Value::Null` and `Value::Frozen(..)` are the only genuine-null
     /// representations that format to the bare string `"null"` (a UDT/collection
     /// with null members formats as `{field: null}`/`[null]`, not `"null"`).
@@ -71,7 +71,9 @@ impl ValueFormatter {
             Value::Counter(i) => {
                 let _ = write!(out, "{}", i);
             }
-            Value::Text(s) => out.push_str(s),
+            // `Text`'s bytes are UTF-8-validated at construction (issue #1644),
+            // so the lossy decode is exact — identical output to the former String.
+            Value::Text(s) => out.push_str(&String::from_utf8_lossy(s)),
             Value::Uuid(bytes) => Self::format_uuid_into(bytes, out),
             // Complex / rarer types: single append via the owned formatter. This
             // keeps output byte-identical without duplicating their logic.
@@ -121,8 +123,9 @@ impl ValueFormatter {
             Value::Float32(f) => Self::format_float32(*f),
             Value::Float(f) => Self::format_float64(*f),
 
-            // Text: output as-is (no quotes for CLI display)
-            Value::Text(s) => s.clone(),
+            // Text: output as-is (no quotes for CLI display). `Text`'s bytes are
+            // UTF-8-validated at construction, so lossy decode is exact.
+            Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
 
             // Blob: 0x-prefixed lowercase hex
             Value::Blob(bytes) => format!("0x{}", hex::encode(bytes)),
@@ -518,21 +521,21 @@ mod tests {
     #[test]
     fn test_text() {
         assert_eq!(
-            ValueFormatter::format_value(&Value::Text("hello world".to_string())),
+            ValueFormatter::format_value(&Value::text("hello world".to_string())),
             "hello world"
         );
         assert_eq!(
-            ValueFormatter::format_value(&Value::Text("".to_string())),
+            ValueFormatter::format_value(&Value::text("".to_string())),
             ""
         );
     }
 
     #[test]
     fn test_blob() {
-        let blob = Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let blob = Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
         assert_eq!(ValueFormatter::format_value(&blob), "0xdeadbeef");
 
-        let empty_blob = Value::Blob(vec![]);
+        let empty_blob = Value::blob(vec![]);
         assert_eq!(ValueFormatter::format_value(&empty_blob), "0x");
     }
 
@@ -626,8 +629,8 @@ mod tests {
     #[test]
     fn test_set() {
         let set = Value::Set(vec![
-            Value::Text("apple".to_string()),
-            Value::Text("banana".to_string()),
+            Value::text("apple".to_string()),
+            Value::text("banana".to_string()),
         ]);
         assert_eq!(ValueFormatter::format_value(&set), "{apple, banana}");
 
@@ -638,8 +641,8 @@ mod tests {
     #[test]
     fn test_map() {
         let map = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(100)),
-            (Value::Text("key2".to_string()), Value::Integer(200)),
+            (Value::text("key1".to_string()), Value::Integer(100)),
+            (Value::text("key2".to_string()), Value::Integer(200)),
         ]);
         assert_eq!(ValueFormatter::format_value(&map), "{key1: 100, key2: 200}");
 
@@ -651,7 +654,7 @@ mod tests {
     fn test_tuple() {
         let tuple = Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
         ]);
         assert_eq!(ValueFormatter::format_value(&tuple), "(42, hello, true)");
@@ -665,7 +668,7 @@ mod tests {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("Alice".to_string())),
+                    value: Some(Value::text("Alice".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -695,11 +698,11 @@ mod tests {
     #[test]
     fn test_inet() {
         // IPv4
-        let ipv4 = Value::Inet(vec![192, 168, 1, 1]);
+        let ipv4 = Value::inet(vec![192, 168, 1, 1]);
         assert_eq!(ValueFormatter::format_value(&ipv4), "192.168.1.1");
 
         // IPv6
-        let ipv6 = Value::Inet(vec![
+        let ipv6 = Value::inet(vec![
             0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x01,
         ]);
@@ -718,7 +721,7 @@ mod tests {
 
         // Map with complex values
         let complex_map = Value::Map(vec![(
-            Value::Text("data".to_string()),
+            Value::text("data".to_string()),
             Value::Set(vec![Value::Integer(1), Value::Integer(2)]),
         )]);
         assert_eq!(ValueFormatter::format_value(&complex_map), "{data: {1, 2}}");
@@ -738,12 +741,12 @@ mod tests {
     #[test]
     fn test_varint() {
         // Positive varint
-        let varint = Value::Varint(vec![0x01, 0x00]);
+        let varint = Value::varint(vec![0x01, 0x00]);
         let formatted = ValueFormatter::format_value(&varint);
         assert_eq!(formatted, "256");
 
         // Zero
-        let zero = Value::Varint(vec![]);
+        let zero = Value::varint(vec![]);
         assert_eq!(ValueFormatter::format_value(&zero), "0");
     }
 
@@ -870,9 +873,9 @@ mod tests {
     fn test_is_null_only_matches_null_variant() {
         // Issue #1499: is_null must be exact — a literal text "null" is NOT null.
         assert!(ValueFormatter::is_null(&Value::Null));
-        assert!(!ValueFormatter::is_null(&Value::Text("null".to_string())));
+        assert!(!ValueFormatter::is_null(&Value::text("null".to_string())));
         assert!(!ValueFormatter::is_null(&Value::Integer(0)));
-        assert!(!ValueFormatter::is_null(&Value::Text(String::new())));
+        assert!(!ValueFormatter::is_null(&Value::text(String::new())));
     }
 
     #[test]
@@ -892,7 +895,7 @@ mod tests {
         ))));
         // A frozen literal text "null" is still NOT a genuine null.
         assert!(!ValueFormatter::is_null(&Value::Frozen(Box::new(
-            Value::Text("null".to_string())
+            Value::text("null".to_string())
         ))));
     }
 
@@ -909,20 +912,20 @@ mod tests {
             Value::Integer(-2147483648),
             Value::BigInt(9223372036854775807),
             Value::Counter(42),
-            Value::Text("hello".to_string()),
-            Value::Text("null".to_string()),
-            Value::Text(String::new()),
+            Value::text("hello".to_string()),
+            Value::text("null".to_string()),
+            Value::text(String::new()),
             Value::Uuid([
                 0xa8, 0xf1, 0x67, 0xf0, 0xeb, 0xe7, 0x4f, 0x20, 0xa3, 0x86, 0x31, 0xff, 0x13, 0x8b,
                 0xec, 0x3b,
             ]),
             Value::Float32(3.25),
             Value::Float(2.75),
-            Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             Value::List(vec![Value::Integer(1), Value::Integer(2)]),
-            Value::Set(vec![Value::Text("a".to_string())]),
-            Value::Map(vec![(Value::Text("k".to_string()), Value::Integer(1))]),
-            Value::Varint(vec![0x01, 0x00]),
+            Value::Set(vec![Value::text("a".to_string())]),
+            Value::Map(vec![(Value::text("k".to_string()), Value::Integer(1))]),
+            Value::varint(vec![0x01, 0x00]),
         ];
         for v in &samples {
             let mut buf = String::new();
@@ -961,7 +964,7 @@ mod tests {
     fn test_format_varint_negative() {
         // Test negative varint: -1 in big-endian two's complement
         let negative_bytes = vec![0xFF];
-        let formatted = ValueFormatter::format_value(&Value::Varint(negative_bytes));
+        let formatted = ValueFormatter::format_value(&Value::Varint(negative_bytes.into()));
         assert_eq!(
             formatted, "-1",
             "Negative varint -1 should format correctly"
@@ -969,7 +972,7 @@ mod tests {
 
         // Test larger negative number: -256
         let negative_256 = vec![0xFF, 0x00];
-        let formatted_256 = ValueFormatter::format_value(&Value::Varint(negative_256));
+        let formatted_256 = ValueFormatter::format_value(&Value::Varint(negative_256.into()));
         assert_eq!(
             formatted_256, "-256",
             "Negative varint -256 should format correctly"

@@ -516,7 +516,7 @@ fn benchmark_latency_distribution_test(c: &mut Criterion) {
                 // Perform 1000 operations and collect latencies
                 for i in 0..1000 {
                     let key = RowKey::from(format!("latency_key_{}", i));
-                    let value = Value::Text(format!("latency_value_{}", i));
+                    let value = Value::text(format!("latency_value_{}", i));
 
                     let start = Instant::now();
                     engine.put(&table_id, key, value).await.unwrap();
@@ -561,7 +561,7 @@ fn benchmark_failure_recovery_test(c: &mut Criterion) {
                     // Insert initial data
                     for i in 0..1000 {
                         let key = RowKey::from(format!("recovery_key_{}", i));
-                        let value = Value::Text(format!("recovery_value_{}", i));
+                        let value = Value::text(format!("recovery_value_{}", i));
                         engine.put(&table_id, key, value).await.unwrap();
                     }
 

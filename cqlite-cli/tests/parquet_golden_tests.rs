@@ -102,7 +102,7 @@ fn make_fixture() -> QueryResult {
         if i == 2 {
             values.insert("name".to_string(), Value::Null);
         } else {
-            values.insert("name".to_string(), Value::Text(format!("row-{i}")));
+            values.insert("name".to_string(), Value::text(format!("row-{i}")));
         }
         values.insert(
             "uid".to_string(),
@@ -115,13 +115,13 @@ fn make_fixture() -> QueryResult {
         values.insert(
             "tags".to_string(),
             Value::List(vec![
-                Value::Text(format!("a{i}")),
-                Value::Text(format!("b{i}")),
+                Value::text(format!("a{i}")),
+                Value::text(format!("b{i}")),
             ]),
         );
         values.insert(
             "attrs".to_string(),
-            Value::Map(vec![(Value::Text("k".to_string()), Value::Integer(i * 10))]),
+            Value::Map(vec![(Value::text("k".to_string()), Value::Integer(i * 10))]),
         );
         result
             .rows

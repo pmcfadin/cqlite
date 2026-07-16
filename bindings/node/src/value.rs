@@ -185,7 +185,7 @@ pub fn value_to_napi(ctx: &ConvCtx, value: &Value) -> Result<JsUnknown> {
         Value::Float(f) => env.create_double(*f).map(|n| n.into_unknown()),
 
         // Text
-        Value::Text(s) => env.create_string(s).map(|s| s.into_unknown()),
+        Value::Text(s) => env.create_string(std::str::from_utf8(s).unwrap_or_default()).map(|s| s.into_unknown()),
 
         // Blob -> Buffer
         Value::Blob(bytes) => env.create_buffer_copy(bytes).map(|b| b.into_unknown()),

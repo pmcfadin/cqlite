@@ -499,7 +499,7 @@ mod tests {
         let mut values = HashMap::new();
         values.insert(
             "text_col".to_string(),
-            Value::Text("Hello, Parquet!".to_string()),
+            Value::text("Hello, Parquet!".to_string()),
         );
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
         result.rows.push(row);
@@ -527,7 +527,7 @@ mod tests {
         let mut values = HashMap::new();
         values.insert(
             "blob_col".to_string(),
-            Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         );
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
         result.rows.push(row);
@@ -609,7 +609,7 @@ mod tests {
         let mut values1 = HashMap::new();
         values1.insert(
             "nullable_col".to_string(),
-            Value::Text("present".to_string()),
+            Value::text("present".to_string()),
         );
         result
             .rows
@@ -675,8 +675,8 @@ mod tests {
         values.insert(
             "map_col".to_string(),
             Value::Map(vec![
-                (Value::Text("key1".to_string()), Value::Integer(1)),
-                (Value::Text("key2".to_string()), Value::Integer(2)),
+                (Value::text("key1".to_string()), Value::Integer(1)),
+                (Value::text("key2".to_string()), Value::Integer(2)),
             ]),
         );
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
@@ -734,7 +734,7 @@ mod tests {
         for i in 1..=5 {
             let mut values = HashMap::new();
             values.insert("id".to_string(), Value::Integer(i));
-            values.insert("name".to_string(), Value::Text(format!("row_{i}")));
+            values.insert("name".to_string(), Value::text(format!("row_{i}")));
             let row = QueryRow::with_values(RowKey::new(vec![i as u8]), values);
             result.rows.push(row);
         }

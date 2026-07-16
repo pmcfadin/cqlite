@@ -418,7 +418,7 @@ fn convert_entry_to_query_row(
         // A raw undecoded fallback row surfaces its bytes as a single "data" blob
         // so it is never silently dropped from the export.
         ScanRow::RawRow(bytes) => {
-            values.insert("data".to_string(), Value::Blob(bytes.clone()));
+            values.insert("data".to_string(), Value::blob(bytes.clone()));
         }
         // A marker (row tombstone / null row) contributes no cells.
         ScanRow::Marker(_) => {}

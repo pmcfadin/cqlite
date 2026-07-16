@@ -31,7 +31,16 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
         Value::Counter(i) => Ok(i.into_pyobject(py)?.into_any().unbind()),
         Value::Float32(f) => Ok((*f as f64).into_pyobject(py)?.into_any().unbind()),
         Value::Float(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
-        Value::Text(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        // Text → Python `str` (NOT `bytes`). The variant is now `Bytes`-backed
+        // (issue #1644); its bytes are UTF-8-validated at construction, so lossy
+        // decode is exact. Converting through an owned `String` guarantees a
+        // Python `str` (a `&Bytes`/`&[u8]` would surface as `bytes`) and copies at
+        // the FFI boundary so the Python object owns its memory.
+        Value::Text(s) => Ok(String::from_utf8_lossy(s)
+            .into_owned()
+            .into_pyobject(py)?
+            .into_any()
+            .unbind()),
         Value::Blob(b) => Ok(PyBytes::new(py, b).into_any().unbind()),
         Value::Timestamp(ts) => timestamp_to_datetime(py, *ts),
         Value::Date(d) => date_to_pydate(py, *d),

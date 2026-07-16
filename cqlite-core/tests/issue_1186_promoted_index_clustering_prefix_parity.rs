@@ -97,7 +97,7 @@ fn mutation(ck: i32, payload: &str, ts: i64) -> Mutation {
     let cluster = ClusteringKey::single("ck", Value::Integer(ck));
     let ops = vec![CellOperation::Write {
         column: "blob_col".to_string(),
-        value: Value::Text(payload.to_string()),
+        value: Value::text(payload.to_string()),
     }];
     Mutation::new(table_id, pk, Some(cluster), ops, ts, None)
 }

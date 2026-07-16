@@ -209,7 +209,7 @@ fn test_parquet_varint_values() {
     // Representing a large integer: 123456789012345678901234567890
     let varint_bytes = vec![0x00, 0x5E, 0xCE, 0x0E, 0x6A, 0xEB, 0xBC, 0x22, 0xD2, 0xD2];
     let result =
-        create_single_value_result("varint_col", Value::Varint(varint_bytes), DataType::Text);
+        create_single_value_result("varint_col", Value::Varint(varint_bytes.into()), DataType::Text);
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     verify_parquet_magic(&bytes);
@@ -309,9 +309,9 @@ fn test_parquet_frozen_values() {
 fn test_parquet_set_values() {
     // Set is similar to List but with unique values
     let set_value = Value::Set(vec![
-        Value::Text("apple".to_string()),
-        Value::Text("banana".to_string()),
-        Value::Text("cherry".to_string()),
+        Value::text("apple".to_string()),
+        Value::text("banana".to_string()),
+        Value::text("cherry".to_string()),
     ]);
     let result = create_single_value_result("set_col", set_value, DataType::Set);
 
@@ -333,10 +333,10 @@ fn test_parquet_nested_collections() {
     // List of maps: list<map<text, int>>
     let nested = Value::List(vec![
         Value::Map(vec![
-            (Value::Text("a".to_string()), Value::Integer(1)),
-            (Value::Text("b".to_string()), Value::Integer(2)),
+            (Value::text("a".to_string()), Value::Integer(1)),
+            (Value::text("b".to_string()), Value::Integer(2)),
         ]),
-        Value::Map(vec![(Value::Text("c".to_string()), Value::Integer(3))]),
+        Value::Map(vec![(Value::text("c".to_string()), Value::Integer(3))]),
     ]);
     let result = create_single_value_result("nested_col", nested, DataType::List);
 
@@ -399,7 +399,7 @@ fn test_parquet_tuple_values() {
     // Tuple with heterogeneous types
     let tuple = Value::Tuple(vec![
         Value::Integer(42),
-        Value::Text("hello".to_string()),
+        Value::text("hello".to_string()),
         Value::Boolean(true),
     ]);
     let result = create_single_value_result("tuple_col", tuple, DataType::Tuple);
@@ -426,11 +426,11 @@ fn test_parquet_udt_values() {
         fields: vec![
             UdtField {
                 name: "street".to_string(),
-                value: Some(Value::Text("123 Main St".to_string())),
+                value: Some(Value::text("123 Main St".to_string())),
             },
             UdtField {
                 name: "city".to_string(),
-                value: Some(Value::Text("Springfield".to_string())),
+                value: Some(Value::text("Springfield".to_string())),
             },
             UdtField {
                 name: "zip".to_string(),
@@ -466,13 +466,13 @@ fn test_parquet_udt_with_collections() {
         fields: vec![
             UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text("Alice".to_string())),
+                value: Some(Value::text("Alice".to_string())),
             },
             UdtField {
                 name: "tags".to_string(),
                 value: Some(Value::List(vec![
-                    Value::Text("admin".to_string()),
-                    Value::Text("user".to_string()),
+                    Value::text("admin".to_string()),
+                    Value::text("user".to_string()),
                 ])),
             },
         ],
@@ -516,7 +516,7 @@ fn test_parquet_many_rows() {
         .map(|i| {
             vec![
                 ("id", Value::Integer(i)),
-                ("value", Value::Text(format!("row_{i}"))),
+                ("value", Value::text(format!("row_{i}"))),
             ]
         })
         .collect();
@@ -542,7 +542,7 @@ fn test_parquet_large_blob() {
     let large_blob = vec![0xAB; 1_500_000]; // 1.5 MB of 0xAB bytes
     let result = create_single_value_result(
         "large_blob",
-        Value::Blob(large_blob.clone()),
+        Value::blob(large_blob.clone()),
         DataType::Blob,
     );
 
@@ -572,7 +572,7 @@ fn test_parquet_column_order_matches_metadata() {
         ],
         vec![vec![
             ("first", Value::Integer(1)),
-            ("second", Value::Text("two".to_string())),
+            ("second", Value::text("two".to_string())),
             ("third", Value::Boolean(true)),
             ("fourth", Value::Float(4.0)),
         ]],
@@ -642,7 +642,7 @@ fn test_parquet_compression_snappy_applied() {
         .map(|_| {
             vec![(
                 "data",
-                Value::Text(
+                Value::text(
                     "This is repetitive test data that should compress very well. ".repeat(10),
                 ),
             )]
@@ -697,8 +697,8 @@ fn test_parquet_roundtrip_all_primitive_types() {
             ("big_col", Value::BigInt(9223372036854775807)),
             ("f32_col", Value::Float32(3.125)), // Use exact float, not approx constant
             ("f64_col", Value::Float(2.71)),    // Use exact float, not approx constant
-            ("text_col", Value::Text("Hello, Parquet!".to_string())),
-            ("blob_col", Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+            ("text_col", Value::text("Hello, Parquet!".to_string())),
+            ("blob_col", Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF])),
             ("ts_col", Value::Timestamp(1673778645123)), // 2023-01-15 10:30:45.123 UTC
             (
                 "uuid_col",
@@ -812,7 +812,7 @@ fn test_parquet_schema_matches_metadata() {
         ],
         vec![vec![
             ("alpha", Value::Integer(1)),
-            ("beta", Value::Text("test".to_string())),
+            ("beta", Value::text("test".to_string())),
             ("gamma", Value::Boolean(false)),
         ]],
     );
@@ -1335,7 +1335,7 @@ fn test_cql_varint_schema() {
         cqlite_core::schema::CqlType::Varint,
     );
     let bigint = num_bigint::BigInt::from(42i32);
-    let result = single_cql_typed_result(col, Value::Varint(bigint.to_signed_bytes_be()));
+    let result = single_cql_typed_result(col, Value::varint(bigint.to_signed_bytes_be()));
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     let batch = read_parquet_back(&bytes).unwrap();
@@ -1352,7 +1352,7 @@ fn test_cql_varint_roundtrip_positive() {
 
     let col = col_with_cql_type("n", DataType::BigInt, cqlite_core::schema::CqlType::Varint);
     let bigint = num_bigint::BigInt::from(1_234_567_890i64);
-    let result = single_cql_typed_result(col, Value::Varint(bigint.to_signed_bytes_be()));
+    let result = single_cql_typed_result(col, Value::varint(bigint.to_signed_bytes_be()));
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     let batch = read_parquet_back(&bytes).unwrap();
@@ -1372,7 +1372,7 @@ fn test_cql_varint_roundtrip_negative() {
 
     let col = col_with_cql_type("n", DataType::BigInt, cqlite_core::schema::CqlType::Varint);
     let bigint = num_bigint::BigInt::from(-999i32);
-    let result = single_cql_typed_result(col, Value::Varint(bigint.to_signed_bytes_be()));
+    let result = single_cql_typed_result(col, Value::varint(bigint.to_signed_bytes_be()));
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     let batch = read_parquet_back(&bytes).unwrap();
@@ -1632,7 +1632,7 @@ fn test_cql_uuid_null() {
 fn test_cql_inet_ipv4_roundtrip() {
     let col = col_with_cql_type("ip", DataType::Text, cqlite_core::schema::CqlType::Inet);
     // 192.168.1.1
-    let result = single_cql_typed_result(col, Value::Inet(vec![192, 168, 1, 1]));
+    let result = single_cql_typed_result(col, Value::inet(vec![192, 168, 1, 1]));
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     let batch = read_parquet_back(&bytes).unwrap();
@@ -1651,7 +1651,7 @@ fn test_cql_inet_ipv6_roundtrip() {
     let mut ipv6 = [0u8; 16];
     ipv6[15] = 1;
     let col = col_with_cql_type("ip", DataType::Text, cqlite_core::schema::CqlType::Inet);
-    let result = single_cql_typed_result(col, Value::Inet(ipv6.to_vec()));
+    let result = single_cql_typed_result(col, Value::inet(ipv6.to_vec()));
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     let batch = read_parquet_back(&bytes).unwrap();
@@ -1901,8 +1901,8 @@ fn test_list_text_roundtrip() {
     let result = single_cql_typed_result(
         col,
         Value::List(vec![
-            Value::Text("hello".to_string()),
-            Value::Text("world".to_string()),
+            Value::text("hello".to_string()),
+            Value::text("world".to_string()),
         ]),
     );
 
@@ -1931,7 +1931,7 @@ fn test_list_text_element_is_utf8_not_stringified() {
         "words",
         cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Text)),
     );
-    let result = single_cql_typed_result(col, Value::List(vec![Value::Text("abc".to_string())]));
+    let result = single_cql_typed_result(col, Value::List(vec![Value::text("abc".to_string())]));
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
     let batch = read_parquet_back(&bytes).unwrap();
@@ -2340,8 +2340,8 @@ fn test_set_text_roundtrip() {
     let result = single_cql_typed_result(
         col,
         Value::Set(vec![
-            Value::Text("alpha".to_string()),
-            Value::Text("beta".to_string()),
+            Value::text("alpha".to_string()),
+            Value::text("beta".to_string()),
         ]),
     );
 
@@ -2519,10 +2519,10 @@ fn test_set_frozen_set_text_roundtrip() {
         col,
         Value::Set(vec![
             Value::Set(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
+                Value::text("a".to_string()),
+                Value::text("b".to_string()),
             ]),
-            Value::Set(vec![Value::Text("c".to_string())]),
+            Value::Set(vec![Value::text("c".to_string())]),
         ]),
     );
 
@@ -2626,8 +2626,8 @@ fn test_map_text_int_schema() {
     let result = single_cql_typed_result(
         col,
         Value::Map(vec![
-            (Value::Text("a".to_string()), Value::Integer(1)),
-            (Value::Text("b".to_string()), Value::Integer(2)),
+            (Value::text("a".to_string()), Value::Integer(1)),
+            (Value::text("b".to_string()), Value::Integer(2)),
         ]),
     );
 
@@ -2665,9 +2665,9 @@ fn test_map_text_int_roundtrip() {
     let result = single_cql_typed_result(
         col,
         Value::Map(vec![
-            (Value::Text("alice".to_string()), Value::Integer(100)),
-            (Value::Text("bob".to_string()), Value::Integer(200)),
-            (Value::Text("carol".to_string()), Value::Integer(300)),
+            (Value::text("alice".to_string()), Value::Integer(100)),
+            (Value::text("bob".to_string()), Value::Integer(200)),
+            (Value::text("carol".to_string()), Value::Integer(300)),
         ]),
     );
 
@@ -2719,8 +2719,8 @@ fn test_map_int_text_roundtrip() {
     let result = single_cql_typed_result(
         col,
         Value::Map(vec![
-            (Value::Integer(1), Value::Text("one".to_string())),
-            (Value::Integer(2), Value::Text("two".to_string())),
+            (Value::Integer(1), Value::text("one".to_string())),
+            (Value::Integer(2), Value::text("two".to_string())),
         ]),
     );
 
@@ -2866,7 +2866,7 @@ fn test_map_null_vs_empty_preserved_distinctly() {
         col,
         vec![
             // Row 0: non-null, non-empty map
-            Value::Map(vec![(Value::Text("k".to_string()), Value::Integer(1))]),
+            Value::Map(vec![(Value::text("k".to_string()), Value::Integer(1))]),
             // Row 1: null map (Value::Null)
             Value::Null,
             // Row 2: non-null empty map (Value::Map(vec![]))
@@ -2915,7 +2915,7 @@ fn test_map_text_frozen_list_int_schema() {
     let result = single_cql_typed_result(
         col,
         Value::Map(vec![(
-            Value::Text("k".to_string()),
+            Value::text("k".to_string()),
             Value::List(vec![Value::Integer(1), Value::Integer(2)]),
         )]),
     );
@@ -2970,11 +2970,11 @@ fn test_map_text_frozen_list_int_roundtrip() {
         col,
         Value::Map(vec![
             (
-                Value::Text("alpha".to_string()),
+                Value::text("alpha".to_string()),
                 Value::List(vec![Value::Integer(10), Value::Integer(20)]),
             ),
             (
-                Value::Text("beta".to_string()),
+                Value::text("beta".to_string()),
                 Value::List(vec![Value::Integer(30)]),
             ),
         ]),
@@ -3039,8 +3039,8 @@ fn test_map_text_int_nullable_value() {
     let result = single_cql_typed_result(
         col,
         Value::Map(vec![
-            (Value::Text("present".to_string()), Value::Integer(42)),
-            (Value::Text("absent".to_string()), Value::Null),
+            (Value::text("present".to_string()), Value::Integer(42)),
+            (Value::text("absent".to_string()), Value::Null),
         ]),
     );
 
@@ -3095,11 +3095,11 @@ fn test_map_text_int_multi_row() {
         col,
         vec![
             Value::Map(vec![
-                (Value::Text("x".to_string()), Value::Integer(1)),
-                (Value::Text("y".to_string()), Value::Integer(2)),
+                (Value::text("x".to_string()), Value::Integer(1)),
+                (Value::text("y".to_string()), Value::Integer(2)),
             ]),
             Value::Null,
-            Value::Map(vec![(Value::Text("z".to_string()), Value::Integer(99))]),
+            Value::Map(vec![(Value::text("z".to_string()), Value::Integer(99))]),
         ],
     );
 
@@ -3181,7 +3181,7 @@ fn test_frozen_map_text_int_roundtrip() {
 
     let result = single_cql_typed_result(
         col,
-        Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(7))]),
+        Value::Map(vec![(Value::text("key".to_string()), Value::Integer(7))]),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3241,8 +3241,8 @@ fn test_map_legacy_path_no_cql_type() {
     values.insert(
         "m".into(),
         Value::Map(vec![
-            (Value::Text("a".to_string()), Value::Integer(1)),
-            (Value::Text("b".to_string()), Value::Integer(2)),
+            (Value::text("a".to_string()), Value::Integer(1)),
+            (Value::text("b".to_string()), Value::Integer(2)),
         ]),
     );
     let row = QueryRow {
@@ -3335,7 +3335,7 @@ fn test_tuple_int_text_schema() {
     );
     let result = single_cql_typed_result(
         col,
-        Value::Tuple(vec![Value::Integer(42), Value::Text("hello".to_string())]),
+        Value::Tuple(vec![Value::Integer(42), Value::text("hello".to_string())]),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3375,7 +3375,7 @@ fn test_tuple_int_text_roundtrip() {
     );
     let result = single_cql_typed_result(
         col,
-        Value::Tuple(vec![Value::Integer(99), Value::Text("world".to_string())]),
+        Value::Tuple(vec![Value::Integer(99), Value::text("world".to_string())]),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -3425,7 +3425,7 @@ fn test_tuple_three_field_roundtrip() {
         col,
         Value::Tuple(vec![
             Value::Integer(7),
-            Value::Text("foo".to_string()),
+            Value::text("foo".to_string()),
             Value::Boolean(true),
         ]),
     );
@@ -3508,9 +3508,9 @@ fn test_tuple_multi_row_null_and_value() {
     let result = single_col_multi_row_result(
         col,
         vec![
-            Value::Tuple(vec![Value::Integer(1), Value::Text("a".to_string())]),
+            Value::Tuple(vec![Value::Integer(1), Value::text("a".to_string())]),
             Value::Null,
-            Value::Tuple(vec![Value::Integer(3), Value::Text("c".to_string())]),
+            Value::Tuple(vec![Value::Integer(3), Value::text("c".to_string())]),
         ],
     );
 
@@ -3566,7 +3566,7 @@ fn test_tuple_short_value_trailing_null() {
     );
     let result = single_cql_typed_result(
         col,
-        Value::Tuple(vec![Value::Integer(10), Value::Text("ok".to_string())]),
+        Value::Tuple(vec![Value::Integer(10), Value::text("ok".to_string())]),
         // No third element
     );
 
@@ -3617,7 +3617,7 @@ fn test_frozen_tuple_schema_and_roundtrip() {
         col,
         Value::Tuple(vec![
             Value::Integer(5),
-            Value::Text("frozen_ok".to_string()),
+            Value::text("frozen_ok".to_string()),
         ]),
     );
 
@@ -3701,7 +3701,7 @@ fn test_udt_schema_has_named_fields() {
             fields: vec![
                 UdtField {
                     name: "street".to_string(),
-                    value: Some(Value::Text("123 Main St".to_string())),
+                    value: Some(Value::text("123 Main St".to_string())),
                 },
                 UdtField {
                     name: "zip".to_string(),
@@ -3758,7 +3758,7 @@ fn test_udt_roundtrip_named_fields() {
             fields: vec![
                 UdtField {
                     name: "street".to_string(),
-                    value: Some(Value::Text("456 Elm Ave".to_string())),
+                    value: Some(Value::text("456 Elm Ave".to_string())),
                 },
                 UdtField {
                     name: "zip".to_string(),
@@ -3854,7 +3854,7 @@ fn test_udt_unset_field_is_null() {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("Alice".to_string())),
+                    value: Some(Value::text("Alice".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -4149,13 +4149,13 @@ fn test_udt_with_list_field_roundtrip() {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("Bob".to_string())),
+                    value: Some(Value::text("Bob".to_string())),
                 },
                 UdtField {
                     name: "tags".to_string(),
                     value: Some(Value::List(vec![
-                        Value::Text("admin".to_string()),
-                        Value::Text("editor".to_string()),
+                        Value::text("admin".to_string()),
+                        Value::text("editor".to_string()),
                     ])),
                 },
             ],
@@ -4240,7 +4240,7 @@ fn test_tuple_is_not_stringified_with_cql_type() {
     );
     let result = single_cql_typed_result(
         col,
-        Value::Tuple(vec![Value::Integer(1), Value::Text("x".to_string())]),
+        Value::Tuple(vec![Value::Integer(1), Value::text("x".to_string())]),
     );
 
     let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
@@ -4319,7 +4319,7 @@ fn test_tuple_legacy_path_no_cql_type() {
     let mut values = HashMap::new();
     values.insert(
         "t".into(),
-        Value::Tuple(vec![Value::Integer(1), Value::Text("a".to_string())]),
+        Value::Tuple(vec![Value::Integer(1), Value::text("a".to_string())]),
     );
     let row = QueryRow {
         values,
@@ -4565,9 +4565,9 @@ fn make_parity_fixture() -> QueryResult {
         },
     );
     // inet: 4-byte IPv4 127.0.0.1
-    values.insert("ip".into(), Value::Inet(vec![127, 0, 0, 1]));
+    values.insert("ip".into(), Value::inet(vec![127, 0, 0, 1]));
     values.insert("cnt".into(), Value::Counter(42));
-    values.insert("txt".into(), Value::Text("hello".to_string()));
+    values.insert("txt".into(), Value::text("hello".to_string()));
     values.insert(
         "li".into(),
         Value::List(vec![
@@ -4579,20 +4579,20 @@ fn make_parity_fixture() -> QueryResult {
     values.insert(
         "se".into(),
         Value::Set(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ]),
     );
     values.insert(
         "mp".into(),
         Value::Map(vec![
-            (Value::Text("k1".to_string()), Value::Integer(10)),
-            (Value::Text("k2".to_string()), Value::Integer(20)),
+            (Value::text("k1".to_string()), Value::Integer(10)),
+            (Value::text("k2".to_string()), Value::Integer(20)),
         ]),
     );
     values.insert(
         "tup".into(),
-        Value::Tuple(vec![Value::Integer(99), Value::Text("t".to_string())]),
+        Value::Tuple(vec![Value::Integer(99), Value::text("t".to_string())]),
     );
     values.insert(
         "udt_col".into(),
@@ -4606,7 +4606,7 @@ fn make_parity_fixture() -> QueryResult {
                 },
                 UdtField {
                     name: "y".to_string(),
-                    value: Some(Value::Text("north".to_string())),
+                    value: Some(Value::text("north".to_string())),
                 },
             ],
         })),

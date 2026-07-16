@@ -128,7 +128,7 @@ async fn tombstone_cell_sets_has_empty_value_flag() {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("x".to_string()),
+                value: Value::text("x".to_string()),
             },
             CellOperation::Write {
                 column: "age".to_string(),
@@ -242,7 +242,7 @@ async fn partition_tombstone_in_header_and_shadowed_row_dropped() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("doomed".to_string()),
+            value: Value::text("doomed".to_string()),
         }],
         T0,
         None,
@@ -291,7 +291,7 @@ async fn newer_row_survives_partition_tombstone() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("alive".to_string()),
+            value: Value::text("alive".to_string()),
         }],
         T1,
         None,

@@ -268,19 +268,19 @@ mod tests {
     #[test]
     fn varints_sort_signed_across_lengths() {
         let mut v = vec![
-            Value::Varint(vec![0x01, 0x00]), // 256
-            Value::Varint(vec![0xFF]),       // -1
-            Value::Varint(vec![0x00]),       // 0
-            Value::Varint(vec![0x7F]),       // 127
+            Value::varint(vec![0x01, 0x00]), // 256
+            Value::varint(vec![0xFF]),       // -1
+            Value::varint(vec![0x00]),       // 0
+            Value::varint(vec![0x7F]),       // 127
         ];
         v.sort_by(compare_collection_elements);
         assert_eq!(
             v,
             vec![
-                Value::Varint(vec![0xFF]),
-                Value::Varint(vec![0x00]),
-                Value::Varint(vec![0x7F]),
-                Value::Varint(vec![0x01, 0x00]),
+                Value::varint(vec![0xFF]),
+                Value::varint(vec![0x00]),
+                Value::varint(vec![0x7F]),
+                Value::varint(vec![0x01, 0x00]),
             ]
         );
     }

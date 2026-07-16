@@ -396,7 +396,7 @@ async fn test_simple_table_parsing_parity() {
     let result = parser.parse_column_value("name", &name_data);
     assert!(result.is_ok());
     let (value, _bytes_read) = result.unwrap();
-    assert_eq!(value, Value::Text("John Doe".to_string()));
+    assert_eq!(value, Value::text("John Doe".to_string()));
 
     // Test 4: Parse integer column
     let age_data = 30i32.to_be_bytes().to_vec();
@@ -433,7 +433,7 @@ async fn test_collections_table_parsing_parity() {
     assert!(result.is_ok());
     let values = result.unwrap();
     assert_eq!(values.len(), 2);
-    assert_eq!(values[0], Value::Text("tenant_1".to_string()));
+    assert_eq!(values[0], Value::text("tenant_1".to_string()));
     assert_eq!(values[1], Value::Integer(42));
 
     // Test 2: Multi-component clustering key (timestamp + bigint)
@@ -519,8 +519,8 @@ async fn test_udt_frozen_table_parsing_parity() {
     assert!(result.is_ok());
     let values = result.unwrap();
     assert_eq!(values.len(), 3);
-    assert_eq!(values[0], Value::Text("us-west-2".to_string()));
-    assert_eq!(values[1], Value::Text("dc1".to_string()));
+    assert_eq!(values[0], Value::text("us-west-2".to_string()));
+    assert_eq!(values[1], Value::text("dc1".to_string()));
     assert_eq!(values[2], Value::Integer(5));
 
     // Test 2: Triple-component clustering key (date + tinyint + tinyint)

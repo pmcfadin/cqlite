@@ -120,10 +120,10 @@ fn make_schema() -> TableSchema {
 fn build_mutation(seq: i64) -> Mutation {
     let table_id = TableId::new(KEYSPACE, TABLE);
     // Same single-component partition key on every write (see module docs).
-    let pk = PartitionKey::single("id", Value::Text(PK.to_string()));
+    let pk = PartitionKey::single("id", Value::text(PK.to_string()));
     let ops = vec![CellOperation::Write {
         column: "val".to_string(),
-        value: Value::Text(format!("value-{seq:08}")),
+        value: Value::text(format!("value-{seq:08}")),
     }];
     Mutation::new(table_id, pk, None, ops, 1_000 + seq, None)
 }

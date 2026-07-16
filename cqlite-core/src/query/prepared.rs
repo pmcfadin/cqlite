@@ -692,7 +692,7 @@ mod tests {
     fn test_type_matching() {
         assert!(type_matches(&Value::Integer(42), &DataType::Integer));
         assert!(type_matches(
-            &Value::Text("test".to_string()),
+            &Value::text("test".to_string()),
             &DataType::Text
         ));
         // Null matches any expected type.

@@ -661,7 +661,7 @@ async fn nonaggregate_select_value_parity_with_golden() {
 
         assert_eq!(
             row.values.get("name"),
-            Some(&Value::Text(expected_name.to_string())),
+            Some(&Value::text(expected_name.to_string())),
             "name for tenant_id {tid} must match the golden value"
         );
         // The preserved partition key must embed the tenant_id bytes (composite

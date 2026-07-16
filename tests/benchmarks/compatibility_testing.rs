@@ -338,7 +338,7 @@ fn benchmark_data_type_compatibility(c: &mut Criterion) {
                 // Text/VARCHAR
                 (
                     RowKey::from("text_key"),
-                    Value::Text("Hello, World!".to_string()),
+                    Value::text("Hello, World!".to_string()),
                 ),
                 // Integer
                 (RowKey::from("int_key"), Value::Integer(42)),
@@ -354,12 +354,12 @@ fn benchmark_data_type_compatibility(c: &mut Criterion) {
                 // Blob
                 (
                     RowKey::from("blob_key"),
-                    Value::Blob(vec![0x01, 0x02, 0x03, 0xFF]),
+                    Value::blob(vec![0x01, 0x02, 0x03, 0xFF]),
                 ),
                 // UUID (represented as text for now)
                 (
                     RowKey::from("uuid_key"),
-                    Value::Text("550e8400-e29b-41d4-a716-446655440000".to_string()),
+                    Value::text("550e8400-e29b-41d4-a716-446655440000".to_string()),
                 ),
                 // Timestamp
                 (
@@ -424,7 +424,7 @@ fn benchmark_sstable_format_compatibility(c: &mut Criterion) {
             // Insert data in a way that should be compatible with Cassandra
             for i in 0..100 {
                 let key = RowKey::from(format!("cassandra_key_{:04}", i));
-                let value = Value::Text(format!("cassandra_value_{}", i));
+                let value = Value::text(format!("cassandra_value_{}", i));
                 engine.put(&table_id, key, value).await.unwrap();
             }
 
@@ -473,7 +473,7 @@ fn benchmark_compression_compatibility(c: &mut Criterion) {
                     .repeat(100);
             for i in 0..100 {
                 let key = RowKey::from(format!("compress_key_{:04}", i));
-                let value = Value::Text(format!("{}{}", test_data, i));
+                let value = Value::text(format!("{}{}", test_data, i));
                 engine.put(&table_id, key, value).await.unwrap();
             }
 
@@ -511,7 +511,7 @@ fn benchmark_index_compatibility(c: &mut Criterion) {
             // Insert test data
             for i in 0..1000 {
                 let key = RowKey::from(format!("bloom_key_{:04}", i));
-                let value = Value::Text(format!("bloom_value_{}", i));
+                let value = Value::text(format!("bloom_value_{}", i));
                 engine.put(&table_id, key, value).await.unwrap();
             }
 
@@ -560,7 +560,7 @@ fn benchmark_multi_version_compatibility(c: &mut Criterion) {
 
             // Insert multiple versions with different timestamps
             for i in 0..10 {
-                let value = Value::Text(format!("version_{}", i));
+                let value = Value::text(format!("version_{}", i));
                 engine.put(&table_id, key.clone(), value).await.unwrap();
 
                 // Small delay to ensure different timestamps
@@ -569,7 +569,7 @@ fn benchmark_multi_version_compatibility(c: &mut Criterion) {
 
             // The latest version should be returned
             let result = engine.get(&table_id, &key).await.unwrap();
-            let expected = Value::Text("version_9".to_string());
+            let expected = Value::text("version_9".to_string());
 
             black_box(result == Some(expected));
         });
@@ -598,7 +598,7 @@ fn benchmark_large_scale_compatibility(c: &mut Criterion) {
 
             for i in 0..10000 {
                 let key = RowKey::from(format!("large_key_{:08}", i));
-                let value = Value::Text(format!(
+                let value = Value::text(format!(
                     "large_value_{}_with_extra_data_to_simulate_real_usage",
                     i
                 ));

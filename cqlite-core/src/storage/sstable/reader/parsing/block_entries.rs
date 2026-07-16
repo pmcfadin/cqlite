@@ -988,7 +988,7 @@ mod tests {
 
         // Create ParsedRow with static columns
         let mut static_cols = HashMap::new();
-        static_cols.insert("static_col1".to_string(), Value::Text("value1".to_string()));
+        static_cols.insert("static_col1".to_string(), Value::text("value1".to_string()));
         static_cols.insert("static_col2".to_string(), Value::Integer(42));
 
         let parsed_row =
@@ -1022,7 +1022,7 @@ mod tests {
 
         // Create ParsedRow with one clustering row
         let mut cols = HashMap::new();
-        cols.insert("col1".to_string(), Value::Text("text_value".to_string()));
+        cols.insert("col1".to_string(), Value::text("text_value".to_string()));
         cols.insert("col2".to_string(), Value::Integer(123));
 
         let clustering_rows = vec![(b"clustering_key1".to_vec(), cols)];
@@ -1121,7 +1121,7 @@ mod tests {
         };
 
         let mut cols = HashMap::new();
-        cols.insert("name".to_string(), Value::Text("alice".to_string()));
+        cols.insert("name".to_string(), Value::text("alice".to_string()));
         let clustering_rows = vec![(b"ck".to_vec(), cols)];
         let parsed_row = create_test_parsed_row(b"pk".to_vec(), None, clustering_rows);
 
@@ -1141,7 +1141,7 @@ mod tests {
             .expect("roborev H: a live row must NOT be suppressed by into_cells()");
         assert_eq!(
             row.values.get("name"),
-            Some(&Value::Text("alice".to_string())),
+            Some(&Value::text("alice".to_string())),
             "the real column value must survive the scan->query carrier"
         );
     }
@@ -1158,11 +1158,11 @@ mod tests {
             ),
             "a null cell must stay a suppressed marker"
         );
-        match live_cell_scan_row("name", &Value::Text("bob".to_string())) {
+        match live_cell_scan_row("name", &Value::text("bob".to_string())) {
             ScanRow::Row(cells) => {
                 assert_eq!(cells.len(), 1);
                 assert_eq!(&*cells[0].0, "name", "interned real column name");
-                assert_eq!(cells[0].1, Value::Text("bob".to_string()));
+                assert_eq!(cells[0].1, Value::text("bob".to_string()));
             }
             ScanRow::RawRow(_) => {
                 panic!("classify_cell never yields a RawRow; a decoded value must be a live Row")
@@ -1221,7 +1221,7 @@ mod tests {
     fn fallback_without_name_stays_raw_and_null_is_marker() {
         let raw = vec![0xde, 0xad, 0xbe, 0xef];
         assert_eq!(
-            fallback_value_scan_row(None, Value::Blob(raw.clone()), &raw),
+            fallback_value_scan_row(None, Value::blob(raw.clone()), &raw),
             ScanRow::RawRow(raw.clone()),
             "no resolvable column name -> undecoded RAW provenance"
         );
@@ -1257,7 +1257,7 @@ mod tests {
             .expect("a raw fallback row must NOT be suppressed by into_cells()");
         assert_eq!(
             row.values.get("data"),
-            Some(&Value::Blob(raw)),
+            Some(&Value::Blob(raw.into())),
             "the raw fallback bytes must surface as the \"data\" column in SELECT/export"
         );
     }

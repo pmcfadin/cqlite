@@ -1505,11 +1505,11 @@ mod tests {
         // Write 25 records with a row-group size of 10 → 3 row groups.
         let records: Vec<DeltaRecord> = (0..25i32)
             .map(|i| DeltaRecord::Upsert {
-                keys: RowKeys::new(vec![Value::Integer(i)], vec![Value::Text(format!("ck{i}"))]),
+                keys: RowKeys::new(vec![Value::Integer(i)], vec![Value::text(format!("ck{i}"))]),
                 liveness: None,
                 cells: vec![(
                     ColumnId::new("val"),
-                    CellDelta::value(Value::Text(format!("v{i}")), i as i64 * 1000),
+                    CellDelta::value(Value::text(format!("v{i}")), i as i64 * 1000),
                 )],
             })
             .collect();

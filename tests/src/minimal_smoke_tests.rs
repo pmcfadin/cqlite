@@ -35,7 +35,7 @@ fn test_basic_value_types() {
     let null_val = Value::Null;
     let bool_val = Value::Boolean(true);
     let int_val = Value::Integer(42);
-    let text_val = Value::Text("test".to_string());
+    let text_val = Value::text("test".to_string());
 
     assert!(matches!(null_val, Value::Null));
     assert!(matches!(bool_val, Value::Boolean(true)));
@@ -48,8 +48,8 @@ fn test_basic_value_types() {
 fn test_collection_value_types() {
     // Test Map with Vec<(Value, Value)> format
     let map_pairs = vec![
-        (Value::Text("key1".to_string()), Value::Integer(1)),
-        (Value::Text("key2".to_string()), Value::Integer(2)),
+        (Value::text("key1".to_string()), Value::Integer(1)),
+        (Value::text("key2".to_string()), Value::Integer(2)),
     ];
     let map_val = Value::Map(map_pairs);
 
@@ -58,7 +58,7 @@ fn test_collection_value_types() {
     let list_val = Value::List(list_items);
 
     // Test Set
-    let set_items = vec![Value::Text("a".to_string()), Value::Text("b".to_string())];
+    let set_items = vec![Value::text("a".to_string()), Value::text("b".to_string())];
     let set_val = Value::Set(set_items);
 
     assert!(matches!(map_val, Value::Map(_)));
@@ -106,8 +106,8 @@ fn test_performance_baseline() {
 #[test]
 fn test_memory_baseline() {
     // Create structures that would typically use memory
-    let large_text = Value::Text("x".repeat(1000));
-    let large_blob = Value::Blob(vec![0u8; 1000]);
+    let large_text = Value::text("x".repeat(1000));
+    let large_blob = Value::blob(vec![0u8; 1000]);
 
     // Basic checks that they're created properly
     if let Value::Text(s) = &large_text {

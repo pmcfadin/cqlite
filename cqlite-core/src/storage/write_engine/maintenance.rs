@@ -1058,7 +1058,7 @@ mod tests {
                 Some(ClusteringKey::single("ck", Value::Integer(ck))),
                 vec![CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text(format!("row-{ck}")),
+                    value: Value::text(format!("row-{ck}")),
                 }],
                 ts,
                 None,
@@ -1646,7 +1646,7 @@ mod tests {
                 let ck_key = ClusteringKey::single("ck", Value::Integer(ck));
                 let ops = vec![CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text(format!("row-{ck}")),
+                    value: Value::text(format!("row-{ck}")),
                 }];
                 let mutation = Mutation::new(
                     table_id,
@@ -1822,7 +1822,7 @@ mod tests {
                 let ck_key = ClusteringKey::single("ck", Value::Integer(ck));
                 let ops = vec![CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text(format!("row-{ck}")),
+                    value: Value::text(format!("row-{ck}")),
                 }];
                 let mutation = Mutation::new(
                     table_id,

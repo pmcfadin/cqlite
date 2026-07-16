@@ -882,8 +882,8 @@ mod tests {
 
         // Test text comparison
         let text_comparator = ComparatorType::Text;
-        let left_text = Value::Text("apple".to_string());
-        let right_text = Value::Text("banana".to_string());
+        let left_text = Value::text("apple".to_string());
+        let right_text = Value::text("banana".to_string());
         assert_eq!(
             text_comparator.compare(&left_text, &right_text).unwrap(),
             Ordering::Less

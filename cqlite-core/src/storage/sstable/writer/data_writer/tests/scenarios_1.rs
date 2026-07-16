@@ -36,7 +36,7 @@ fn merge_row_group_excludes_primary_key_columns_from_ops() {
             },
             CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text("hello".to_string()),
+                value: Value::text("hello".to_string()),
             },
         ],
         2000,
@@ -78,7 +78,7 @@ fn merge_row_group_excludes_partition_key_column_from_ops() {
             },
             CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text("hello".to_string()),
+                value: Value::text("hello".to_string()),
             },
         ],
         2000,
@@ -106,7 +106,7 @@ fn merge_row_group_keeps_all_regular_ops_for_direct_mutation() {
         Some(ClusteringKey::single("ck", Value::Integer(7))),
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text("hello".to_string()),
+            value: Value::text("hello".to_string()),
         }],
         2000,
         None,
@@ -196,7 +196,7 @@ fn test_write_simple_row() {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             },
             CellOperation::Write {
                 column: "age".to_string(),
@@ -248,7 +248,7 @@ fn test_write_row_with_clustering() {
         Some(ck),
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Bob".to_string()),
+            value: Value::text("Bob".to_string()),
         }],
         1001000,
         None,
@@ -281,7 +281,7 @@ fn test_write_partition_complete() {
             None,
             vec![CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             }],
             1001000,
             None,
@@ -292,7 +292,7 @@ fn test_write_partition_complete() {
             None,
             vec![CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Bob".to_string()),
+                value: Value::text("Bob".to_string()),
             }],
             1002000,
             None,
@@ -350,7 +350,7 @@ fn test_delta_encoding_unsigned_vint_fix_644() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Test".to_string()),
+            value: Value::text("Test".to_string()),
         }],
         1_005_000,  // timestamp_micros; delta from min_timestamp(1_000_000) = 5_000
         Some(7200), // ttl; delta from min_ttl(3_600) = 3_600
@@ -404,7 +404,7 @@ fn test_delta_encoding() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Test".to_string()),
+            value: Value::text("Test".to_string()),
         }],
         1005000,    // timestamp (delta = 5000)
         Some(7200), // TTL (delta = 3600)
@@ -427,7 +427,7 @@ fn test_serialize_value_types() {
     assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x2A]);
 
     // Text
-    let bytes = serialize_value(&Value::Text("hello".to_string())).unwrap();
+    let bytes = serialize_value(&Value::text("hello".to_string())).unwrap();
     assert_eq!(bytes, b"hello");
 
     // BigInt
@@ -457,7 +457,7 @@ fn test_column_bitmap() {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Alice".to_string()),
+            value: Value::text("Alice".to_string()),
         }],
         1001000,
         None,
@@ -545,7 +545,7 @@ fn test_serialize_clustering_value_fixed_width() {
 fn test_serialize_clustering_value_variable_width() {
     // Text (variable-width, VInt length prefix)
     let bytes =
-        serialize_value_for_clustering(&Value::Text("test".to_string()), &ComparatorType::Text)
+        serialize_value_for_clustering(&Value::text("test".to_string()), &ComparatorType::Text)
             .unwrap();
     assert!(!bytes.is_empty());
     // First byte(s) should be VInt length (4), followed by "test"
@@ -570,14 +570,14 @@ fn test_serialize_clustering_date_includes_length_prefix() {
 
 #[test]
 fn test_serialize_clustering_frozen_list_text() {
-    let value = Value::Frozen(Box::new(Value::List(vec![Value::Text("solo".to_string())])));
+    let value = Value::Frozen(Box::new(Value::List(vec![Value::text("solo".to_string())])));
     let comparator = ComparatorType::Frozen(Box::new(ComparatorType::List(Box::new(
         ComparatorType::Text,
     ))));
 
     let bytes = serialize_value_for_clustering(&value, &comparator).unwrap();
     let expected_inner =
-        serialize_value(&Value::List(vec![Value::Text("solo".to_string())])).unwrap();
+        serialize_value(&Value::List(vec![Value::text("solo".to_string())])).unwrap();
 
     let mut expected = vec![expected_inner.len() as u8];
     expected.extend_from_slice(&expected_inner);
@@ -601,7 +601,7 @@ fn test_null_vs_empty_string() {
     // Test empty string - should have HAS_EMPTY_VALUE flag
     let mut buf = Vec::new();
     writer
-        .write_cell(&mut buf, "test_col", &Value::Text(String::new()), 1001000)
+        .write_cell(&mut buf, "test_col", &Value::text(String::new()), 1001000)
         .unwrap();
 
     assert!(!buf.is_empty());
@@ -618,7 +618,7 @@ fn test_null_vs_empty_string() {
         .write_cell(
             &mut buf2,
             "test_col",
-            &Value::Text("test".to_string()),
+            &Value::text("test".to_string()),
             1001000,
         )
         .unwrap();
@@ -653,7 +653,7 @@ fn test_variable_width_cell_keeps_length_prefix() {
     let mut buf = Vec::new();
 
     writer
-        .write_cell(&mut buf, "value", &Value::Text("abc".to_string()), 1001000)
+        .write_cell(&mut buf, "value", &Value::text("abc".to_string()), 1001000)
         .unwrap();
 
     assert_eq!(buf, vec![CELL_USE_ROW_TIMESTAMP, 0x03, b'a', b'b', b'c']);

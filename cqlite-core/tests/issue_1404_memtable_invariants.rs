@@ -83,7 +83,7 @@ fn text_write_mutation(pk_value: Value, text: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text(text.to_string()),
+            value: Value::text(text.to_string()),
         }],
         ts,
         None,
@@ -286,7 +286,7 @@ fn estimate_within_documented_factor_for_representative_corpus() {
         fields: vec![
             UdtField {
                 name: "street".to_string(),
-                value: Some(Value::Text("100 Main Street".to_string())),
+                value: Some(Value::text("100 Main Street".to_string())),
             },
             UdtField {
                 name: "zip".to_string(),
@@ -314,7 +314,7 @@ fn estimate_within_documented_factor_for_representative_corpus() {
                 None,
                 vec![CellOperation::Write {
                     column: "b".to_string(),
-                    value: Value::Blob(vec![0u8; 256]),
+                    value: Value::blob(vec![0u8; 256]),
                 }],
                 1,
                 None,
@@ -344,7 +344,7 @@ fn estimate_within_documented_factor_for_representative_corpus() {
                     column: "m".to_string(),
                     value: Value::Map(
                         (0..10)
-                            .map(|i| (Value::Integer(i), Value::Text(format!("val{i}"))))
+                            .map(|i| (Value::Integer(i), Value::text(format!("val{i}"))))
                             .collect(),
                     ),
                 }],
@@ -443,7 +443,7 @@ fn iter_yields_nondecreasing_token_order_across_pk_types() {
                 let s: String = (0..len)
                     .map(|_| rng.gen_range(b'a'..=b'z') as char)
                     .collect();
-                (Value::Text(s), &text_schema)
+                (Value::Text(s.into()), &text_schema)
             }
             3 => {
                 let mut b = [0u8; 16];
@@ -453,7 +453,7 @@ fn iter_yields_nondecreasing_token_order_across_pk_types() {
             _ => {
                 let len = rng.gen_range(1..20);
                 let bytes: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
-                (Value::Blob(bytes), &blob_schema)
+                (Value::Blob(bytes.into()), &blob_schema)
             }
         };
 
@@ -476,7 +476,7 @@ fn iter_yields_nondecreasing_token_order_across_pk_types() {
             None,
             vec![CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text("x".to_string()),
+                value: Value::text("x".to_string()),
             }],
             1,
             None,

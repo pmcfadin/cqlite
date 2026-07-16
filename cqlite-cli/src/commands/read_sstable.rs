@@ -311,7 +311,7 @@ fn format_value(value: &ScanRow, raw: bool) -> String {
         }
         // A raw undecoded fallback row renders its bytes as a single "data" blob.
         ScanRow::RawRow(bytes) => {
-            format!("{{data: {}}}", cqlite_core::Value::Blob(bytes.clone()))
+            format!("{{data: {}}}", cqlite_core::Value::blob(bytes.clone()))
         }
         ScanRow::Marker(v) => format!("{}", v),
     }

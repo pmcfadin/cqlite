@@ -107,7 +107,7 @@ impl CompactionRow {
             ScanRow::RawRow(bytes) => CompactionRowData::Live {
                 simple: vec![SimpleCell {
                     column: "value".to_string(),
-                    value: Value::Blob(bytes),
+                    value: Value::Blob(bytes.into()),
                     timestamp: row_timestamp,
                     ttl: None,
                     local_deletion_time: None,

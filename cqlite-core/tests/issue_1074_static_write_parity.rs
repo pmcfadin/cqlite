@@ -70,7 +70,7 @@ fn value_to_string(v: &Value) -> String {
     match v {
         Value::Integer(i) => i.to_string(),
         Value::BigInt(i) => i.to_string(),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         other => format!("{other:?}"),
     }
 }
@@ -209,11 +209,11 @@ async fn static_cell_lands_in_partition_static_row_not_clustering_row() {
         vec![
             CellOperation::Write {
                 column: "stat_col".to_string(),
-                value: Value::Text("S".to_string()),
+                value: Value::text("S".to_string()),
             },
             CellOperation::Write {
                 column: "row_col".to_string(),
-                value: Value::Text("V".to_string()),
+                value: Value::text("V".to_string()),
             },
         ],
         1_000_000,
@@ -280,11 +280,11 @@ async fn row_delete_does_not_shadow_partition_static_cell() {
         vec![
             CellOperation::Write {
                 column: "stat_col".to_string(),
-                value: Value::Text("S".to_string()),
+                value: Value::text("S".to_string()),
             },
             CellOperation::Write {
                 column: "row_col".to_string(),
-                value: Value::Text("V".to_string()),
+                value: Value::text("V".to_string()),
             },
         ],
         1_000_000,
@@ -356,7 +356,7 @@ async fn static_only_partition_survives_compaction() {
         None,
         vec![CellOperation::Write {
             column: "stat_col".to_string(),
-            value: Value::Text("ONLY".to_string()),
+            value: Value::text("ONLY".to_string()),
         }],
         1_000_000,
         None,
@@ -452,7 +452,7 @@ async fn static_cell_keeps_own_write_timestamp_under_lww() {
             None,
             vec![CellOperation::Write {
                 column: "stat_col".to_string(),
-                value: Value::Text("OLD".to_string()),
+                value: Value::text("OLD".to_string()),
             }],
             1_000_000, // static ts: LOW
             None,
@@ -463,7 +463,7 @@ async fn static_cell_keeps_own_write_timestamp_under_lww() {
             Some(ClusteringKey::single("ck", Value::Integer(1))),
             vec![CellOperation::Write {
                 column: "row_col".to_string(),
-                value: Value::Text("V1".to_string()),
+                value: Value::text("V1".to_string()),
             }],
             9_000_000, // clustering ts: HIGHEST in the test
             None,
@@ -481,7 +481,7 @@ async fn static_cell_keeps_own_write_timestamp_under_lww() {
             None,
             vec![CellOperation::Write {
                 column: "stat_col".to_string(),
-                value: Value::Text("NEW".to_string()),
+                value: Value::text("NEW".to_string()),
             }],
             5_000_000, // static ts: HIGHER than gen-1's static (1_000_000)
             None,
@@ -492,7 +492,7 @@ async fn static_cell_keeps_own_write_timestamp_under_lww() {
             Some(ClusteringKey::single("ck", Value::Integer(2))),
             vec![CellOperation::Write {
                 column: "row_col".to_string(),
-                value: Value::Text("V2".to_string()),
+                value: Value::text("V2".to_string()),
             }],
             2_000_000, // clustering ts: LOWER than gen-1's clustering row
             None,
@@ -565,7 +565,7 @@ async fn static_cell_tombstone_deletes_and_resurrects_under_lww() {
         None,
         vec![CellOperation::Write {
             column: "stat_col".to_string(),
-            value: Value::Text("S".to_string()),
+            value: Value::text("S".to_string()),
         }],
         1_000_000,
         None,
@@ -645,7 +645,7 @@ async fn static_cell_tombstone_deletes_and_resurrects_under_lww() {
         None,
         vec![CellOperation::Write {
             column: "stat_col".to_string(),
-            value: Value::Text("R".to_string()),
+            value: Value::text("R".to_string()),
         }],
         3_000_000, // newer than the Delete (2_000_000)
         None,
@@ -712,11 +712,11 @@ async fn multiple_static_columns_reconcile_independently() {
             vec![
                 CellOperation::Write {
                     column: "stat_a".to_string(),
-                    value: Value::Text("A1".to_string()),
+                    value: Value::text("A1".to_string()),
                 },
                 CellOperation::Write {
                     column: "stat_b".to_string(),
-                    value: Value::Text("B1".to_string()),
+                    value: Value::text("B1".to_string()),
                 },
             ],
             1_000_000,
@@ -728,7 +728,7 @@ async fn multiple_static_columns_reconcile_independently() {
             Some(ClusteringKey::single("ck", Value::Integer(1))),
             vec![CellOperation::Write {
                 column: "row_col".to_string(),
-                value: Value::Text("V".to_string()),
+                value: Value::text("V".to_string()),
             }],
             1_000_000,
             None,
@@ -743,7 +743,7 @@ async fn multiple_static_columns_reconcile_independently() {
         None,
         vec![CellOperation::Write {
             column: "stat_a".to_string(),
-            value: Value::Text("A2".to_string()),
+            value: Value::text("A2".to_string()),
         }],
         2_000_000,
         None,
@@ -815,7 +815,7 @@ async fn static_not_folded_into_any_of_multiple_clustering_rows() {
             None,
             vec![CellOperation::Write {
                 column: "stat_col".to_string(),
-                value: Value::Text("S".to_string()),
+                value: Value::text("S".to_string()),
             }],
             1_000_000,
             None,
@@ -826,7 +826,7 @@ async fn static_not_folded_into_any_of_multiple_clustering_rows() {
             Some(ClusteringKey::single("ck", Value::Integer(1))),
             vec![CellOperation::Write {
                 column: "row_col".to_string(),
-                value: Value::Text("V1".to_string()),
+                value: Value::text("V1".to_string()),
             }],
             1_000_000,
             None,
@@ -837,7 +837,7 @@ async fn static_not_folded_into_any_of_multiple_clustering_rows() {
             Some(ClusteringKey::single("ck", Value::Integer(2))),
             vec![CellOperation::Write {
                 column: "row_col".to_string(),
-                value: Value::Text("V2".to_string()),
+                value: Value::text("V2".to_string()),
             }],
             1_000_000,
             None,

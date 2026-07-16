@@ -851,7 +851,7 @@ impl SelectParser {
             }
             Some(Token::String(s)) => {
                 self.advance()?;
-                Ok(SelectExpression::Literal(Value::Text(s)))
+                Ok(SelectExpression::Literal(Value::Text(s.into())))
             }
             Some(Token::Uuid(bytes)) => {
                 self.advance()?;
@@ -859,7 +859,7 @@ impl SelectParser {
             }
             Some(Token::Blob(bytes)) => {
                 self.advance()?;
-                Ok(SelectExpression::Literal(Value::Blob(bytes)))
+                Ok(SelectExpression::Literal(Value::Blob(bytes.into())))
             }
             Some(Token::Boolean(b)) => {
                 self.advance()?;
@@ -1658,19 +1658,19 @@ mod tests {
     #[test]
     fn test_blob_hex_literal() {
         let v = where_equal_literal("SELECT * FROM ks.tbl WHERE data = 0xdeadbeef");
-        assert_eq!(v, Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(v, Value::blob(vec![0xde, 0xad, 0xbe, 0xef]));
     }
 
     #[test]
     fn test_blob_hex_literal_uppercase_prefix_and_digits() {
         let v = where_equal_literal("SELECT * FROM ks.tbl WHERE data = 0XDEADBEEF");
-        assert_eq!(v, Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(v, Value::blob(vec![0xde, 0xad, 0xbe, 0xef]));
     }
 
     #[test]
     fn test_empty_blob_literal() {
         let v = where_equal_literal("SELECT * FROM ks.tbl WHERE data = 0x");
-        assert_eq!(v, Value::Blob(vec![]));
+        assert_eq!(v, Value::blob(vec![]));
     }
 
     #[test]

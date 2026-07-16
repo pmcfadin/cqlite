@@ -94,7 +94,7 @@ fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiRes
         }
         // text / ascii — OSS50 variable-length byte-comparable encoding.
         Value::Text(s) => {
-            encode_varlen_oss50(s.as_bytes(), out);
+            encode_varlen_oss50(s.as_ref(), out);
             Ok(())
         }
         // blob / inet — OSS50 variable-length byte-comparable encoding.
@@ -217,7 +217,7 @@ mod tests {
         // Multi-component: int(1) + text("ab") joined with 0x40 NEXT_COMPONENT,
         // text terminated by the OSS50 end marker 0x00 0xFF.
         assert_eq!(
-            encode_clustering_bound_oss50(&[Value::Integer(1), Value::Text("ab".to_string())])
+            encode_clustering_bound_oss50(&[Value::Integer(1), Value::text("ab".to_string())])
                 .unwrap(),
             vec![0x80, 0x00, 0x00, 0x01, 0x40, b'a', b'b', 0x00, 0xFF]
         );
@@ -225,16 +225,16 @@ mod tests {
         // Variable-length OSS50: text terminates with 0x00 0xFF; a literal 0x00
         // byte is escaped as 0x00 0xFE so it never collides with the terminator.
         assert_eq!(
-            encode_clustering_bound_oss50(&[Value::Text("a".to_string())]).unwrap(),
+            encode_clustering_bound_oss50(&[Value::text("a".to_string())]).unwrap(),
             vec![b'a', 0x00, 0xFF]
         );
         assert_eq!(
-            encode_clustering_bound_oss50(&[Value::Blob(vec![0x01, 0x00, 0x02])]).unwrap(),
+            encode_clustering_bound_oss50(&[Value::blob(vec![0x01, 0x00, 0x02])]).unwrap(),
             vec![0x01, 0x00, 0xFE, 0x02, 0x00, 0xFF]
         );
         // Prefix-free ordering: "a" sorts before "ab".
-        let a = encode_clustering_bound_oss50(&[Value::Text("a".to_string())]).unwrap();
-        let ab = encode_clustering_bound_oss50(&[Value::Text("ab".to_string())]).unwrap();
+        let a = encode_clustering_bound_oss50(&[Value::text("a".to_string())]).unwrap();
+        let ab = encode_clustering_bound_oss50(&[Value::text("ab".to_string())]).unwrap();
         assert!(a < ab);
 
         // Unsupported clustering type errors out explicitly.

@@ -32,7 +32,7 @@ fn celldata_carries_cell_path_and_local_deletion_time() {
     // Simple cell as built today: both new fields absent.
     let simple = CellData {
         column: "name".to_string(),
-        value: Value::Text("v".to_string()),
+        value: Value::text("v".to_string()),
         timestamp: 100,
         ttl: None,
         cell_path: None,
@@ -48,7 +48,7 @@ fn celldata_carries_cell_path_and_local_deletion_time() {
     // local deletion time through the struct.
     let element = CellData {
         column: "tags".to_string(),
-        value: Value::Text("element".to_string()),
+        value: Value::text("element".to_string()),
         timestamp: 200,
         ttl: Some(3600),
         cell_path: Some(vec![0x00, 0x01, 0xAB]),

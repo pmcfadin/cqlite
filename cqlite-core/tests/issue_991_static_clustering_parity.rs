@@ -625,7 +625,7 @@ fn multi_column_clustering_prefix_byte_parity_writer() {
     let ck = ClusteringKey {
         columns: vec![
             ("c1".to_string(), Value::Integer(0x0A0B0C0D)),
-            ("c2".to_string(), Value::Text("mid".to_string())),
+            ("c2".to_string(), Value::text("mid".to_string())),
             ("c3".to_string(), Value::Integer(0x11121314)),
         ],
     };
@@ -889,7 +889,7 @@ fn null_vs_empty_clustering_value_byte_distinction() {
     // (a) EMPTY text clustering: a clustered row with ck = "" → clustering
     //     header PRESENT (0) followed by a ZERO-length VInt, then row_size.
     let schema = text_clustering_schema();
-    let ck_empty = ClusteringKey::single("ck", Value::Text(String::new()));
+    let ck_empty = ClusteringKey::single("ck", Value::text(String::new()));
     let m_empty = Mutation::new(
         TableId::new("issue991", "tc"),
         PartitionKey::single("id", Value::Integer(1)),

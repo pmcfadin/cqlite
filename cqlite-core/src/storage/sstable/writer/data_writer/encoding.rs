@@ -170,8 +170,8 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
         Value::Counter(n) => Ok(n.to_be_bytes().to_vec()),
         Value::Float32(f) => Ok(f.to_bits().to_be_bytes().to_vec()),
         Value::Float(f) => Ok(f.to_bits().to_be_bytes().to_vec()),
-        Value::Text(s) => Ok(s.as_bytes().to_vec()),
-        Value::Blob(bytes) => Ok(bytes.clone()),
+        Value::Text(s) => Ok(s.to_vec()),
+        Value::Blob(bytes) => Ok(bytes.to_vec()),
         Value::Timestamp(millis) => Ok(millis.to_be_bytes().to_vec()),
         Value::Date(days) => {
             // Cassandra DATE: stored as unsigned int with Integer.MIN_VALUE offset
@@ -180,8 +180,8 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
         }
         Value::Time(nanos) => Ok(nanos.to_be_bytes().to_vec()),
         Value::Uuid(bytes) => Ok(bytes.to_vec()),
-        Value::Inet(bytes) => Ok(bytes.clone()),
-        Value::Varint(bytes) => Ok(bytes.clone()),
+        Value::Inet(bytes) => Ok(bytes.to_vec()),
+        Value::Varint(bytes) => Ok(bytes.to_vec()),
         Value::Decimal { scale, unscaled } => {
             let mut result = Vec::new();
             result.extend_from_slice(&scale.to_be_bytes());
@@ -571,7 +571,7 @@ pub(crate) fn serialize_value_for_clustering(
 
         // Variable-width types (VInt length + bytes)
         (Value::Text(s), ComparatorType::Text) => {
-            let bytes = s.as_bytes();
+            let bytes = s.as_ref();
             let mut result = Vec::new();
             encode_unsigned(bytes.len() as u64, &mut result);
             result.extend_from_slice(bytes);

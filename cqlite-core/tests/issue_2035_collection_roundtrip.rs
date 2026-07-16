@@ -159,8 +159,8 @@ fn nonfrozen_collection_plus_trailing_simple_column_roundtrips() {
         CellOperation::Write {
             column: "attrs".to_string(),
             value: Value::Map(vec![
-                (Value::Text("a".to_string()), Value::Integer(10)),
-                (Value::Text("b".to_string()), Value::Integer(20)),
+                (Value::text("a".to_string()), Value::Integer(10)),
+                (Value::text("b".to_string()), Value::Integer(20)),
             ]),
         },
         CellOperation::Write {

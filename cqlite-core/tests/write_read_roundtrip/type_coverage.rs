@@ -101,7 +101,7 @@ fn assert_single_partition_written(info: &cqlite_core::storage::sstable::writer:
 async fn test_type_text_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("text_col", "text");
-    let original = Value::Text("Hello, CQLite! 你好世界 🎉".to_string());
+    let original = Value::text("Hello, CQLite! 你好世界 🎉".to_string());
 
     let info = write_single_value(&temp_dir, &schema, "text_col", original.clone()).await;
 
@@ -115,7 +115,7 @@ async fn test_type_text_roundtrip() {
 async fn test_type_text_empty() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("text_col", "text");
-    let original = Value::Text(String::new());
+    let original = Value::text(String::new());
 
     let info = write_single_value(&temp_dir, &schema, "text_col", original.clone()).await;
 
@@ -131,7 +131,7 @@ async fn test_type_text_long() {
     let schema = create_type_test_schema("text_col", "text");
 
     // Create a 10KB string
-    let original = Value::Text("A".repeat(10 * 1024));
+    let original = Value::text("A".repeat(10 * 1024));
 
     let info = write_single_value(&temp_dir, &schema, "text_col", original.clone()).await;
 
@@ -540,7 +540,7 @@ async fn test_type_double_min_max() {
 async fn test_type_blob_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("blob_col", "blob");
-    let original = Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    let original = Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]);
     let info = write_single_value(&temp_dir, &schema, "blob_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "blob_col").await;
@@ -552,7 +552,7 @@ async fn test_type_blob_roundtrip() {
 async fn test_type_blob_empty() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("blob_col", "blob");
-    let original = Value::Blob(vec![]);
+    let original = Value::blob(vec![]);
     let info = write_single_value(&temp_dir, &schema, "blob_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "blob_col").await;
@@ -564,7 +564,7 @@ async fn test_type_blob_empty() {
 async fn test_type_blob_large() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("blob_col", "blob");
-    let original = Value::Blob(vec![0xAB; 10240]);
+    let original = Value::blob(vec![0xAB; 10240]);
 
     let info = write_single_value(&temp_dir, &schema, "blob_col", original.clone()).await;
 
@@ -843,7 +843,7 @@ fn test_execute_counter_insert_cql_returns_error() {
 async fn test_type_inet_ipv4() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("inet_col", "inet");
-    let original = Value::Inet(vec![192, 168, 1, 1]);
+    let original = Value::inet(vec![192, 168, 1, 1]);
 
     let info = write_single_value(&temp_dir, &schema, "inet_col", original.clone()).await;
 
@@ -857,7 +857,7 @@ async fn test_type_inet_ipv4() {
 async fn test_type_inet_ipv6() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("inet_col", "inet");
-    let original = Value::Inet(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    let original = Value::inet(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
     let info = write_single_value(&temp_dir, &schema, "inet_col", original.clone()).await;
 
@@ -871,7 +871,7 @@ async fn test_type_inet_ipv6() {
 async fn test_type_inet_loopback() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("inet_col", "inet");
-    let original = Value::Inet(vec![127, 0, 0, 1]);
+    let original = Value::inet(vec![127, 0, 0, 1]);
 
     let info = write_single_value(&temp_dir, &schema, "inet_col", original.clone()).await;
 
@@ -885,7 +885,7 @@ async fn test_type_inet_loopback() {
 async fn test_type_varint_small() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("varint_col", "varint");
-    let original = Value::Varint(vec![0x2A]);
+    let original = Value::varint(vec![0x2A]);
 
     let info = write_single_value(&temp_dir, &schema, "varint_col", original.clone()).await;
 
@@ -908,7 +908,7 @@ async fn test_type_varint_small() {
 async fn test_type_varint_large() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("varint_col", "varint");
-    let original = Value::Varint(vec![0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    let original = Value::varint(vec![0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
 
     let info = write_single_value(&temp_dir, &schema, "varint_col", original.clone()).await;
 
@@ -931,7 +931,7 @@ async fn test_type_varint_large() {
 async fn test_type_varint_negative() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("varint_col", "varint");
-    let original = Value::Varint(vec![0xFF]);
+    let original = Value::varint(vec![0xFF]);
 
     let info = write_single_value(&temp_dir, &schema, "varint_col", original.clone()).await;
 
@@ -1107,7 +1107,7 @@ async fn test_type_duration_negative() {
 async fn test_type_tuple_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("tuple_col", "tuple<int, text>");
-    let original = Value::Tuple(vec![Value::Integer(42), Value::Text("hello".to_string())]);
+    let original = Value::Tuple(vec![Value::Integer(42), Value::text("hello".to_string())]);
 
     let info = write_single_value(&temp_dir, &schema, "tuple_col", original.clone()).await;
 
@@ -1140,7 +1140,7 @@ async fn test_type_tuple_nested() {
     let schema = create_type_test_schema("tuple_col", "tuple<int, tuple<int, text>>");
     let original = Value::Tuple(vec![
         Value::Integer(1),
-        Value::Tuple(vec![Value::Integer(2), Value::Text("nested".to_string())]),
+        Value::Tuple(vec![Value::Integer(2), Value::text("nested".to_string())]),
     ]);
 
     let info = write_single_value(&temp_dir, &schema, "tuple_col", original.clone()).await;
@@ -1184,7 +1184,7 @@ async fn test_type_frozen_list() {
 async fn test_type_frozen_map() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("frozen_col", "frozen<map<text, int>>");
-    let inner = Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(42))]);
+    let inner = Value::Map(vec![(Value::text("key".to_string()), Value::Integer(42))]);
     let original = Value::Frozen(Box::new(inner.clone()));
 
     let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;
@@ -1311,7 +1311,7 @@ async fn test_types_multiple_rows() {
 async fn test_type_ascii_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("ascii_col", "ascii");
-    let original = Value::Text("hello_ascii".to_string());
+    let original = Value::text("hello_ascii".to_string());
 
     let info = write_single_value(&temp_dir, &schema, "ascii_col", original.clone()).await;
 
@@ -1325,7 +1325,7 @@ async fn test_type_ascii_roundtrip() {
 async fn test_type_varchar_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("varchar_col", "varchar");
-    let original = Value::Text("hello_varchar".to_string());
+    let original = Value::text("hello_varchar".to_string());
 
     let info = write_single_value(&temp_dir, &schema, "varchar_col", original.clone()).await;
 
@@ -1363,7 +1363,7 @@ async fn test_type_tuple_int_text_uuid() {
     let known_uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
     let original = Value::Tuple(vec![
         Value::Integer(99),
-        Value::Text("hello".to_string()),
+        Value::text("hello".to_string()),
         Value::Uuid(*known_uuid.as_bytes()),
     ]);
 
@@ -1405,7 +1405,7 @@ async fn test_type_frozen_udt() {
         fields: vec![
             UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text("Alice".to_string())),
+                value: Some(Value::text("Alice".to_string())),
             },
             UdtField {
                 name: "age".to_string(),

@@ -529,7 +529,7 @@ mod type_validation_tests {
         text_data.extend_from_slice(test_text.as_bytes());
 
         let (_, value) = parse_text(&text_data).expect("Failed to parse text");
-        assert_eq!(value, Value::Text(test_text.to_string()));
+        assert_eq!(value, Value::text(test_text.to_string()));
 
         // Blob parsing
         let test_blob = vec![0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD];
@@ -538,7 +538,7 @@ mod type_validation_tests {
         blob_data.extend_from_slice(&test_blob);
 
         let (_, value) = parse_blob(&blob_data).expect("Failed to parse blob");
-        assert_eq!(value, Value::Blob(test_blob));
+        assert_eq!(value, Value::Blob(test_blob.into()));
     }
 
     #[test]
@@ -579,10 +579,10 @@ mod type_validation_tests {
             Value::BigInt(-1000000000),
             Value::Float(3.14159),
             Value::Float(-2.71828),
-            Value::Text("Hello, World!".to_string()),
-            Value::Text("".to_string()),
-            Value::Blob(vec![1, 2, 3, 4, 5]),
-            Value::Blob(vec![]),
+            Value::text("Hello, World!".to_string()),
+            Value::text("".to_string()),
+            Value::blob(vec![1, 2, 3, 4, 5]),
+            Value::blob(vec![]),
             Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             Value::Timestamp(1642781400000000), // microseconds
         ];

@@ -28,11 +28,11 @@ fn test_table_format_basic() {
     // Add sample rows
     let mut row1 = QueryRow::new(RowKey::new(vec![1]));
     row1.set("id".to_string(), Value::Integer(1));
-    row1.set("name".to_string(), Value::Text("Alice".to_string()));
+    row1.set("name".to_string(), Value::text("Alice".to_string()));
 
     let mut row2 = QueryRow::new(RowKey::new(vec![2]));
     row2.set("id".to_string(), Value::Integer(2));
-    row2.set("name".to_string(), Value::Text("Bob".to_string()));
+    row2.set("name".to_string(), Value::text("Bob".to_string()));
 
     result.rows = vec![row1, row2];
 
@@ -170,7 +170,7 @@ fn test_table_format_column_alignment() {
     let mut row = QueryRow::new(RowKey::new(vec![1]));
     row.set("id".to_string(), Value::Integer(1));
     row.set("score".to_string(), Value::Integer(95));
-    row.set("name".to_string(), Value::Text("Alice".to_string()));
+    row.set("name".to_string(), Value::text("Alice".to_string()));
 
     result.rows = vec![row];
 
@@ -236,11 +236,11 @@ fn test_cqlsh_compatibility() {
 
     let mut row1 = QueryRow::new(RowKey::new(vec![1]));
     row1.set("id".to_string(), Value::Integer(1));
-    row1.set("name".to_string(), Value::Text("Alice".to_string()));
+    row1.set("name".to_string(), Value::text("Alice".to_string()));
 
     let mut row2 = QueryRow::new(RowKey::new(vec![2]));
     row2.set("id".to_string(), Value::Integer(2));
-    row2.set("name".to_string(), Value::Text("Bob".to_string()));
+    row2.set("name".to_string(), Value::text("Bob".to_string()));
 
     result.rows = vec![row1, row2];
 
@@ -310,7 +310,7 @@ fn test_table_format_multiple_data_types() {
 
     let mut row = QueryRow::new(RowKey::new(vec![1]));
     row.set("id".to_string(), Value::Integer(42));
-    row.set("name".to_string(), Value::Text("Test".to_string()));
+    row.set("name".to_string(), Value::text("Test".to_string()));
     row.set("active".to_string(), Value::Boolean(true));
     row.set("score".to_string(), Value::Float(98.5));
 
@@ -346,7 +346,7 @@ fn test_table_format_null_values() {
     let mut row = QueryRow::new(RowKey::new(vec![1]));
     row.set("id".to_string(), Value::Integer(1));
     // "optional" is not set - should be treated as null/empty
-    row.set("name".to_string(), Value::Text("Alice".to_string()));
+    row.set("name".to_string(), Value::text("Alice".to_string()));
 
     result.rows = vec![row];
 
@@ -380,7 +380,7 @@ fn test_table_format_column_order() {
 
     // Add row with values (HashMap order doesn't matter)
     let mut row = QueryRow::new(RowKey::new(vec![1]));
-    row.set("a_first".to_string(), Value::Text("first".to_string()));
+    row.set("a_first".to_string(), Value::text("first".to_string()));
     row.set("z_last".to_string(), Value::Integer(999));
 
     result.rows = vec![row];
@@ -412,7 +412,7 @@ fn test_table_format_single_row() {
     let mut row = QueryRow::new(RowKey::new(vec![1]));
     row.set(
         "message".to_string(),
-        Value::Text("Hello, World!".to_string()),
+        Value::text("Hello, World!".to_string()),
     );
 
     result.rows = vec![row];
@@ -536,7 +536,7 @@ fn test_table_format_long_text() {
     row.set("id".to_string(), Value::Integer(1));
     row.set(
         "description".to_string(),
-        Value::Text(long_text.to_string()),
+        Value::text(long_text.to_string()),
     );
 
     result.rows = vec![row];
@@ -568,11 +568,11 @@ fn test_cqlsh_format_snapshot() {
 
     let mut row1 = QueryRow::new(RowKey::new(vec![1]));
     row1.set("id".to_string(), Value::Integer(1));
-    row1.set("name".to_string(), Value::Text("Alice".to_string()));
+    row1.set("name".to_string(), Value::text("Alice".to_string()));
 
     let mut row2 = QueryRow::new(RowKey::new(vec![2]));
     row2.set("id".to_string(), Value::Integer(2));
-    row2.set("name".to_string(), Value::Text("Bob".to_string()));
+    row2.set("name".to_string(), Value::text("Bob".to_string()));
 
     result.rows = vec![row1, row2];
 

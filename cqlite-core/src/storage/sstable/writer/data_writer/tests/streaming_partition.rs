@@ -34,7 +34,7 @@ fn row_mutation(schema: &TableSchema, ck: i32, value: &str, ts: i64) -> Mutation
     };
     let ops = vec![CellOperation::Write {
         column: column.to_string(),
-        value: Value::Text(value.to_string()),
+        value: Value::text(value.to_string()),
     }];
     Mutation::new(table_id, pk, Some(ck_key), ops, ts, None)
 }
@@ -44,7 +44,7 @@ fn static_mutation(schema: &TableSchema, value: &str, ts: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(1));
     let ops = vec![CellOperation::Write {
         column: "static_val".to_string(),
-        value: Value::Text(value.to_string()),
+        value: Value::text(value.to_string()),
     }];
     Mutation::new(table_id, pk, None, ops, ts, None)
 }

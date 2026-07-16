@@ -68,7 +68,7 @@ fn int_mutation(id: i32, name: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }],
         ts,
         None,

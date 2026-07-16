@@ -386,7 +386,7 @@ mod tests {
                     },
                     UdtField {
                         name: "b".into(),
-                        value: Some(Value::Text(b.into())),
+                        value: Some(Value::text(b)),
                     },
                 ],
             }))

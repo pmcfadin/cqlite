@@ -159,7 +159,7 @@ fn write_subset(table_id: &TableId, pk: &PartitionKey, present: &[usize]) -> Mut
         .iter()
         .map(|&i| CellOperation::Write {
             column: format!("c{:02}", i),
-            value: Value::Text(format!("v{}", i)),
+            value: Value::text(format!("v{}", i)),
         })
         .collect();
     Mutation::new(table_id.clone(), pk.clone(), None, ops, T0, None)

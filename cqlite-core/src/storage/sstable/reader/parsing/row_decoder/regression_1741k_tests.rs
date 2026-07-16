@@ -237,7 +237,7 @@ async fn da_reader() -> (
         None,
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text("x".to_string()),
+            value: Value::text("x".to_string()),
         }],
         1_000_000,
         None,

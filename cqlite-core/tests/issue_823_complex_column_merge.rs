@@ -45,7 +45,7 @@ fn celldata_carries_per_element_substrate() {
     // cell_path, per-element timestamp/ttl/ldt, and the per-element flags.
     let cell = CellData {
         column: "tags".to_string(),
-        value: Value::Text("a".to_string()),
+        value: Value::text("a".to_string()),
         timestamp: 1,
         ttl: Some(3600),
         cell_path: Some(vec![0x00, 0x01, 0xAB]),
@@ -96,8 +96,8 @@ fn multicell_collection_is_one_nested_cell_value() {
         cells: vec![CellData {
             column: "tags".to_string(),
             value: Value::List(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
+                Value::text("a".to_string()),
+                Value::text("b".to_string()),
             ]),
             timestamp: 10,
             ttl: None,
@@ -136,11 +136,11 @@ fn nonfrozen_udt_is_one_nested_cell_value() {
                 fields: vec![
                     UdtField {
                         name: "city".to_string(),
-                        value: Some(Value::Text("SF".to_string())),
+                        value: Some(Value::text("SF".to_string())),
                     },
                     UdtField {
                         name: "zip".to_string(),
-                        value: Some(Value::Text("94105".to_string())),
+                        value: Some(Value::text("94105".to_string())),
                     },
                 ],
             })),

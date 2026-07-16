@@ -112,11 +112,11 @@ mod tests {
         // Add rows
         let mut row1 = QueryRow::new(RowKey::new(vec![1]));
         row1.set("id".to_string(), Value::Integer(1));
-        row1.set("name".to_string(), Value::Text("Alice".to_string()));
+        row1.set("name".to_string(), Value::text("Alice".to_string()));
 
         let mut row2 = QueryRow::new(RowKey::new(vec![2]));
         row2.set("id".to_string(), Value::Integer(2));
-        row2.set("name".to_string(), Value::Text("Bob".to_string()));
+        row2.set("name".to_string(), Value::text("Bob".to_string()));
 
         result.rows = vec![row1, row2];
 
@@ -153,7 +153,7 @@ mod tests {
 
         // Add row with values (order in HashMap doesn't matter)
         let mut row = QueryRow::new(RowKey::new(vec![1]));
-        row.set("a_first".to_string(), Value::Text("first".to_string()));
+        row.set("a_first".to_string(), Value::text("first".to_string()));
         row.set("z_last".to_string(), Value::Integer(999));
 
         result.rows = vec![row];

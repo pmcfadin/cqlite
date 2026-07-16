@@ -27,7 +27,7 @@ fn test_map_complex_column_with_ttl() {
         is_static: false,
     };
 
-    let value = Value::Map(vec![(Value::Text("key1".to_string()), Value::Integer(100))]);
+    let value = Value::Map(vec![(Value::text("key1".to_string()), Value::Integer(100))]);
 
     let mut buf = Vec::new();
     writer
@@ -160,7 +160,7 @@ fn test_complex_column_no_ttl_uses_row_timestamp() {
         is_static: false,
     };
 
-    let value = Value::Set(vec![Value::Text("x".to_string())]);
+    let value = Value::Set(vec![Value::text("x".to_string())]);
 
     let mut buf = Vec::new();
     writer
@@ -232,7 +232,7 @@ fn test_bitmap_includes_deleted_columns() {
             },
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             },
         ],
         1001000,
@@ -1283,8 +1283,8 @@ fn udt_whole_write_roundtrips_sparse_out_of_order() {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![
-            udt_field("email", Some(Value::Text("a@b.com".to_string()))),
-            udt_field("name", Some(Value::Text("Alice".to_string()))),
+            udt_field("email", Some(Value::text("a@b.com".to_string()))),
+            udt_field("name", Some(Value::text("Alice".to_string()))),
         ],
     }));
 
@@ -1321,13 +1321,13 @@ fn udt_whole_write_roundtrips_sparse_out_of_order() {
             assert_eq!(out.keyspace, "test_ks");
             assert_eq!(out.fields.len(), 3, "all DECLARED fields present");
             assert_eq!(out.fields[0].name, "name");
-            assert_eq!(out.fields[0].value, Some(Value::Text("Alice".to_string())));
+            assert_eq!(out.fields[0].value, Some(Value::text("Alice".to_string())));
             assert_eq!(out.fields[1].name, "age");
             assert_eq!(out.fields[1].value, None, "omitted field stays null");
             assert_eq!(out.fields[2].name, "email");
             assert_eq!(
                 out.fields[2].value,
-                Some(Value::Text("a@b.com".to_string()))
+                Some(Value::text("a@b.com".to_string()))
             );
         }
         other => panic!("expected Value::Udt, got {:?}", other),
@@ -1355,7 +1355,7 @@ fn udt_whole_write_propagates_row_ttl() {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
         fields: vec![
-            udt_field("name", Some(Value::Text("Bob".to_string()))),
+            udt_field("name", Some(Value::text("Bob".to_string()))),
             udt_field("age", Some(Value::Integer(42))),
         ],
     }));
@@ -1402,7 +1402,7 @@ fn udt_whole_write_rejects_unknown_field() {
     let udt = Value::Udt(Box::new(crate::types::UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_ks".to_string(),
-        fields: vec![udt_field("nope", Some(Value::Text("x".to_string())))],
+        fields: vec![udt_field("nope", Some(Value::text("x".to_string())))],
     }));
     let mut buf = Vec::new();
     let err = writer
@@ -1474,7 +1474,7 @@ fn udt_mixed_stream_reconciliation_newer_wins() {
             value: Value::Udt(Box::new(crate::types::UdtValue {
                 type_name: "person".to_string(),
                 keyspace: "test_ks".to_string(),
-                fields: vec![udt_field("name", Some(Value::Text("Old".to_string())))],
+                fields: vec![udt_field("name", Some(Value::text("Old".to_string())))],
             })),
         }],
         1_000_000,
@@ -1488,7 +1488,7 @@ fn udt_mixed_stream_reconciliation_newer_wins() {
         vec![CellOperation::WriteComplexElement {
             column: "addr".to_string(),
             cell_path: 0u16.to_be_bytes().to_vec(),
-            value: Some(Value::Text("New".to_string())),
+            value: Some(Value::text("New".to_string())),
             timestamp_micros: 2_000_000,
             ttl_seconds: None,
             local_deletion_time: None,

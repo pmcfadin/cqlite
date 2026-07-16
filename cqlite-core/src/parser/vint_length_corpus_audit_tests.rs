@@ -212,8 +212,8 @@ fn extract_length_prefixes(
                 return;
             }
             let vbytes: &[u8] = match value {
-                Value::Text(s) => s.as_bytes(),
-                Value::Blob(b) => b.as_slice(),
+                Value::Text(s) => s.as_ref(),
+                Value::Blob(b) => b.as_ref(),
                 _ => continue,
             };
             let expected_len = vbytes.len();

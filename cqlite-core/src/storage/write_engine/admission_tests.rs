@@ -25,7 +25,7 @@ fn create_sized_mutation(id: i32, bytes: usize, timestamp: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text("x".repeat(bytes)),
+        value: Value::text("x".repeat(bytes)),
     }];
     Mutation::new(table_id, pk, None, ops, timestamp, None)
 }
@@ -158,7 +158,7 @@ fn test_deeply_nested_mutation_trips_gate() {
 
     // 32 single-element wrapper lists around a wide list of 500 × 200-byte
     // strings (~100KB of real payload).
-    let mut nested = Value::List((0..500).map(|_| Value::Text("y".repeat(200))).collect());
+    let mut nested = Value::List((0..500).map(|_| Value::text("y".repeat(200))).collect());
     for _ in 0..32 {
         nested = Value::List(vec![nested]);
     }
@@ -208,7 +208,7 @@ fn test_deep_narrow_collection_with_large_scalar_trips_gate() {
     // Innermost: a single-element list holding one 128KB text scalar. Wrapped in
     // 32 single-element lists so the `List([Text(128KB)])` lands exactly at the
     // recursion depth cap (its Text child is a DIRECT child of the capped node).
-    let mut nested = Value::List(vec![Value::Text("x".repeat(128 * 1024))]);
+    let mut nested = Value::List(vec![Value::text("x".repeat(128 * 1024))]);
     for _ in 0..32 {
         nested = Value::List(vec![nested]);
     }
@@ -271,7 +271,7 @@ fn test_large_scalar_two_levels_deep_rejected() {
     let (_tmp, mut engine) = engine_with_64k_limit();
 
     // List([List([Text(128KB)])]).
-    let value = wrap_in_lists(Value::List(vec![Value::Text("x".repeat(128 * 1024))]), 1);
+    let value = wrap_in_lists(Value::List(vec![Value::text("x".repeat(128 * 1024))]), 1);
     let mutation = mutation_with_value(value);
 
     // Estimate must be ~128KB (real size), NOT the ~1KB floor.
@@ -298,7 +298,7 @@ fn test_large_scalar_three_levels_deep_rejected() {
     let (_tmp, mut engine) = engine_with_64k_limit();
 
     // List([List([List([Text(128KB)])])]).
-    let value = wrap_in_lists(Value::List(vec![Value::Text("x".repeat(128 * 1024))]), 2);
+    let value = wrap_in_lists(Value::List(vec![Value::text("x".repeat(128 * 1024))]), 2);
     let mutation = mutation_with_value(value);
 
     let estimate = engine.memtable.estimate_mutation_size(&mutation);
@@ -325,7 +325,7 @@ fn test_large_scalar_below_old_depth_cap_rejected() {
 
     // 33 wrapper lists around Text(128KB): innermost scalar is well past the
     // old MAX_NESTING_DEPTH (32).
-    let value = wrap_in_lists(Value::Text("x".repeat(128 * 1024)), 33);
+    let value = wrap_in_lists(Value::text("x".repeat(128 * 1024)), 33);
     let mutation = mutation_with_value(value);
 
     let estimate = engine.memtable.estimate_mutation_size(&mutation);

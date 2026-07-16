@@ -111,7 +111,7 @@ fn create_simple_mutation(id: i32, value: &str, timestamp: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "value".to_string(),
-        value: Value::Text(value.to_string()),
+        value: Value::text(value.to_string()),
     }];
 
     Mutation::new(table_id, pk, None, ops, timestamp, None)
@@ -231,8 +231,8 @@ async fn test_all_cql_primitive_types() -> Result<()> {
         ("BigInt", Value::BigInt(9223372036854775807)),
         ("Float32", Value::Float32(1.234567_f32)), // Arbitrary f32 value
         ("Float", Value::Float(9.876543210123456)), // Arbitrary f64 value
-        ("Text", Value::Text("Hello, World!".to_string())),
-        ("Blob", Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+        ("Text", Value::text("Hello, World!".to_string())),
+        ("Blob", Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF])),
         ("Timestamp", Value::Timestamp(1234567890000)),
         ("Date", Value::Date(18000)),
         ("Time", Value::Time(43200000000000)), // Noon in nanoseconds
@@ -328,9 +328,9 @@ async fn test_collection_types() -> Result<()> {
         let ops = vec![CellOperation::Write {
             column: "items".to_string(),
             value: Value::List(vec![
-                Value::Text("item1".to_string()),
-                Value::Text("item2".to_string()),
-                Value::Text("item3".to_string()),
+                Value::text("item1".to_string()),
+                Value::text("item2".to_string()),
+                Value::text("item3".to_string()),
             ]),
         }];
         Mutation::new(table_id, pk, None, ops, 1000000, None)
@@ -344,9 +344,9 @@ async fn test_collection_types() -> Result<()> {
         let ops = vec![CellOperation::Write {
             column: "tags".to_string(),
             value: Value::Set(vec![
-                Value::Text("zebra".to_string()),
-                Value::Text("alpha".to_string()),
-                Value::Text("mango".to_string()),
+                Value::text("zebra".to_string()),
+                Value::text("alpha".to_string()),
+                Value::text("mango".to_string()),
             ]),
         }];
         Mutation::new(table_id, pk, None, ops, 1000001, None)
@@ -360,8 +360,8 @@ async fn test_collection_types() -> Result<()> {
         let ops = vec![CellOperation::Write {
             column: "props".to_string(),
             value: Value::Map(vec![
-                (Value::Text("key1".to_string()), Value::Integer(100)),
-                (Value::Text("key2".to_string()), Value::Integer(200)),
+                (Value::text("key1".to_string()), Value::Integer(100)),
+                (Value::text("key2".to_string()), Value::Integer(200)),
             ]),
         }];
         Mutation::new(table_id, pk, None, ops, 1000002, None)
@@ -398,11 +398,11 @@ async fn test_udt_types() -> Result<()> {
         fields: vec![
             UdtField {
                 name: "street".to_string(),
-                value: Some(Value::Text("123 Main St".to_string())),
+                value: Some(Value::text("123 Main St".to_string())),
             },
             UdtField {
                 name: "city".to_string(),
-                value: Some(Value::Text("Springfield".to_string())),
+                value: Some(Value::text("Springfield".to_string())),
             },
             UdtField {
                 name: "zip".to_string(),
@@ -450,7 +450,7 @@ async fn test_ttl_cells() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text("expires in 1 hour".to_string()),
+            value: Value::text("expires in 1 hour".to_string()),
         }];
         Mutation::new(table_id, pk, None, ops, 1000000, Some(3600)) // 1 hour TTL
     };
@@ -462,7 +462,7 @@ async fn test_ttl_cells() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(2));
         let ops = vec![CellOperation::WriteWithTtl {
             column: "value".to_string(),
-            value: Value::Text("expires in 5 minutes".to_string()),
+            value: Value::text("expires in 5 minutes".to_string()),
             ttl_seconds: 300, // 5 minutes
             local_deletion_time: None,
         }];
@@ -476,7 +476,7 @@ async fn test_ttl_cells() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(3));
         let ops = vec![CellOperation::WriteWithTtl {
             column: "value".to_string(),
-            value: Value::Text("cell TTL overrides mutation TTL".to_string()),
+            value: Value::text("cell TTL overrides mutation TTL".to_string()),
             ttl_seconds: 60, // 1 minute (overrides mutation TTL)
             local_deletion_time: None,
         }];
@@ -971,7 +971,7 @@ async fn test_mixed_operations_in_partition() -> Result<()> {
         None,
         vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text("version 1".to_string()),
+            value: Value::text("version 1".to_string()),
         }],
         1000000,
         None,
@@ -985,7 +985,7 @@ async fn test_mixed_operations_in_partition() -> Result<()> {
         None,
         vec![CellOperation::WriteWithTtl {
             column: "value".to_string(),
-            value: Value::Text("version 2 with TTL".to_string()),
+            value: Value::text("version 2 with TTL".to_string()),
             ttl_seconds: 3600,
             local_deletion_time: None,
         }],
@@ -1015,7 +1015,7 @@ async fn test_mixed_operations_in_partition() -> Result<()> {
         None,
         vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text("version 3 resurrected".to_string()),
+            value: Value::text("version 3 resurrected".to_string()),
         }],
         1000003,
         None,
@@ -1049,7 +1049,7 @@ async fn test_large_value_handling() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(large_text),
+            value: Value::Text(large_text.into()),
         }];
         Mutation::new(table_id, pk, None, ops, 1000000, None)
     };
@@ -1268,7 +1268,7 @@ async fn test_wal_recovery_after_crash() -> Result<()> {
             let pk = PartitionKey::single("id", Value::Integer(i));
             let ops = vec![CellOperation::Write {
                 column: "value".to_string(),
-                value: Value::Text(format!("Row{}", i)),
+                value: Value::text(format!("Row{}", i)),
             }];
             let mutation = Mutation::new(table_id, pk, None, ops, 1000000 + i as i64, None);
             engine.write_async(mutation).await?;
@@ -1318,7 +1318,7 @@ async fn test_wal_recovery_partial_writes() -> Result<()> {
             let pk = PartitionKey::single("id", Value::Integer(i));
             let ops = vec![CellOperation::Write {
                 column: "value".to_string(),
-                value: Value::Text(format!("Batch1_{}", i)),
+                value: Value::text(format!("Batch1_{}", i)),
             }];
             let mutation = Mutation::new(table_id, pk, None, ops, 1000000 + i as i64, None);
             engine.write_async(mutation).await?;
@@ -1333,7 +1333,7 @@ async fn test_wal_recovery_partial_writes() -> Result<()> {
             let pk = PartitionKey::single("id", Value::Integer(i));
             let ops = vec![CellOperation::Write {
                 column: "value".to_string(),
-                value: Value::Text(format!("Batch2_{}", i)),
+                value: Value::text(format!("Batch2_{}", i)),
             }];
             let mutation = Mutation::new(table_id, pk, None, ops, 1000000 + i as i64, None);
             engine.write_async(mutation).await?;
@@ -1383,7 +1383,7 @@ async fn test_wal_truncated_after_flush() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(i));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(format!("Row{}", i)),
+            value: Value::text(format!("Row{}", i)),
         }];
         let mutation = Mutation::new(table_id, pk, None, ops, 1000000 + i as i64, None);
         engine.write_async(mutation).await?;
@@ -1437,7 +1437,7 @@ async fn test_write_throughput() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(i));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(format!("value{}", i)),
+            value: Value::text(format!("value{}", i)),
         }];
         let mutation = Mutation::new(table_id, pk, None, ops, 1000000 + i as i64, None);
         engine.write_async(mutation).await?;
@@ -1484,7 +1484,7 @@ async fn test_flush_throughput() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(i));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(large_value.clone()),
+            value: Value::text(large_value.clone()),
         }];
         let mutation = Mutation::new(table_id, pk, None, ops, 1000000 + i as i64, None);
         engine.write_async(mutation).await?;

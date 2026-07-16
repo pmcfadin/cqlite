@@ -517,17 +517,17 @@ impl ParserBenchmarks {
             ),
             (
                 types::CqlTypeId::Varchar,
-                crate::Value::Text("benchmark_string".to_string()),
+                crate::Value::text("benchmark_string".to_string()),
             ),
             (
                 types::CqlTypeId::Varchar,
-                crate::Value::Text("".to_string()),
+                crate::Value::text("".to_string()),
             ),
             (
                 types::CqlTypeId::Blob,
-                crate::Value::Blob(vec![1, 2, 3, 4, 5, 6, 7, 8]),
+                crate::Value::blob(vec![1, 2, 3, 4, 5, 6, 7, 8]),
             ),
-            (types::CqlTypeId::Blob, crate::Value::Blob(vec![])),
+            (types::CqlTypeId::Blob, crate::Value::blob(vec![])),
             (
                 types::CqlTypeId::Uuid,
                 crate::Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),

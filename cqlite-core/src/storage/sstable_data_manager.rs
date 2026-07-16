@@ -654,7 +654,7 @@ impl SSTableDataManager {
                 // pre-#1334 shape a bare `Value::Blob` produced via this manager's
                 // fallback arm.
                 ScanRow::RawRow(bytes) => {
-                    HashMap::from([("value".to_string(), Value::Blob(bytes))])
+                    HashMap::from([("value".to_string(), Value::Blob(bytes.into()))])
                 }
                 // Markers (row tombstone / null row) carry no columns.
                 ScanRow::Marker(marker) => {

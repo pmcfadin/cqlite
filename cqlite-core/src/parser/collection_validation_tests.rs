@@ -282,8 +282,8 @@ mod cassandra_format_tests {
 
         if let Value::List(elements) = value {
             assert_eq!(elements.len(), 2);
-            assert_eq!(elements[0], Value::Text("hello".to_string()));
-            assert_eq!(elements[1], Value::Text("world".to_string()));
+            assert_eq!(elements[0], Value::text("hello".to_string()));
+            assert_eq!(elements[1], Value::text("world".to_string()));
         } else {
             panic!("Expected list value");
         }

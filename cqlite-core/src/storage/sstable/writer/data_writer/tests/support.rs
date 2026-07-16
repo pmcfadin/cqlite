@@ -197,23 +197,23 @@ pub(super) fn phase3_address_value() -> UdtValue {
     UdtValue::new("address".to_string(), "test_ks".to_string())
         .with_field(
             "street".to_string(),
-            Some(Value::Text("Main St".to_string())),
+            Some(Value::text("Main St".to_string())),
         )
-        .with_field("city".to_string(), Some(Value::Text("Seattle".to_string())))
+        .with_field("city".to_string(), Some(Value::text("Seattle".to_string())))
 }
 
 pub(super) fn phase3_phone_value() -> UdtValue {
     UdtValue::new("phone_number".to_string(), "test_ks".to_string())
-        .with_field("label".to_string(), Some(Value::Text("mobile".to_string())))
+        .with_field("label".to_string(), Some(Value::text("mobile".to_string())))
         .with_field(
             "number".to_string(),
-            Some(Value::Text("+1-555-0101".to_string())),
+            Some(Value::text("+1-555-0101".to_string())),
         )
 }
 
 pub(super) fn phase3_person_value(name: &str) -> UdtValue {
     UdtValue::new("person".to_string(), "test_ks".to_string())
-        .with_field("name".to_string(), Some(Value::Text(name.to_string())))
+        .with_field("name".to_string(), Some(Value::text(name.to_string())))
         .with_field(
             "phone_numbers".to_string(),
             Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
@@ -231,7 +231,7 @@ pub(super) fn phase3_person_value(name: &str) -> UdtValue {
 pub(super) fn phase3_company_value() -> UdtValue {
     let person = phase3_person_value("Alice");
     UdtValue::new("company".to_string(), "test_ks".to_string())
-        .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
+        .with_field("name".to_string(), Some(Value::text("Acme".to_string())))
         .with_field(
             "employees".to_string(),
             Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
@@ -241,7 +241,7 @@ pub(super) fn phase3_company_value() -> UdtValue {
         .with_field(
             "departments".to_string(),
             Some(Value::Map(vec![(
-                Value::Text("platform".to_string()),
+                Value::text("platform".to_string()),
                 Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
                     Value::Udt(Box::new(person)),
                 ))]))),
@@ -497,7 +497,7 @@ pub(super) fn streaming_test_partitions() -> Vec<(DecoratedKey, Vec<Mutation>)> 
                 None,
                 vec![CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text(format!("partition-{i}")),
+                    value: Value::text(format!("partition-{i}")),
                 }],
                 1_001_000 + i as i64,
                 None,

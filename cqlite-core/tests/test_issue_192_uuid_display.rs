@@ -125,7 +125,7 @@ async fn test_uuid_partition_key_parsing() {
                                 }
                                 Value::Blob(bytes) => {
                                     panic!(
-                                        "❌ Column '{}' is Value::Blob({} bytes) instead of Value::Uuid!\n\
+                                        "❌ Column '{}' is Value::blob({} bytes) instead of Value::Uuid!\n\
                                          UUID should be parsed as Value::Uuid([u8; 16]), not blob.",
                                         name,
                                         bytes.len()
