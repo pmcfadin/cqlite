@@ -80,7 +80,7 @@ async fn write_single_cell_fixture(temp: &TempDir, value: String) -> std::path::
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(value),
+            value: Value::text(value),
         }],
         1_000_000,
         None,
@@ -105,7 +105,9 @@ fn name_text(row: &ScanRow) -> Option<String> {
         for (col, val) in cells {
             if col.as_ref() == "name" {
                 if let Value::Text(s) = val {
-                    return Some(s.clone());
+                    // Issue #1644: Text is Bytes-backed; the invariant guarantees
+                    // valid UTF-8, so recover the String from the borrowed bytes.
+                    return Some(String::from_utf8_lossy(s).into_owned());
                 }
             }
         }

@@ -123,7 +123,7 @@ fn write_row(id: i32, ck: i32, timestamp: i64) -> Mutation {
     let ck_key = ClusteringKey::single("ck", Value::Integer(ck));
     let ops = vec![CellOperation::Write {
         column: "payload".to_string(),
-        value: Value::Text(payload_for(ck)),
+        value: Value::text(payload_for(ck)),
     }];
     Mutation::new(table_id, pk, Some(ck_key), ops, timestamp, None)
 }
@@ -193,7 +193,9 @@ fn read_back_id_ck_payload(data_dir: &Path, schema: &TableSchema) -> BTreeMap<(i
                         }
                         "payload" => {
                             if let Value::Text(t) = value {
-                                payload = Some(t.clone());
+                                // Issue #1644: Text is Bytes-backed; the invariant
+                                // guarantees valid UTF-8.
+                                payload = Some(String::from_utf8_lossy(t).into_owned());
                             }
                         }
                         _ => {}
@@ -411,7 +413,7 @@ fn write_clustering_row(table: &str, id: i32, ck: i32, timestamp: i64) -> Mutati
     let ck_key = ClusteringKey::single("ck", Value::Integer(ck));
     let ops = vec![CellOperation::Write {
         column: "payload".to_string(),
-        value: Value::Text(payload_for(ck)),
+        value: Value::text(payload_for(ck)),
     }];
     Mutation::new(table_id, pk, Some(ck_key), ops, timestamp, None)
 }
@@ -426,7 +428,7 @@ fn write_static_region(table: &str, id: i32, region: &str, timestamp: i64) -> Mu
         None,
         vec![CellOperation::Write {
             column: "region".to_string(),
-            value: Value::Text(region.to_string()),
+            value: Value::text(region.to_string()),
         }],
         timestamp,
         None,
@@ -487,7 +489,8 @@ fn decode_output_rows(data_path: &Path, schema: &TableSchema) -> Vec<DecodedRow2
 
 fn text_cell(row: &DecodedRow2299, column: &str) -> Option<String> {
     match row.cells.get(column) {
-        Some(Value::Text(s)) => Some(s.clone()),
+        // Issue #1644: Text is Bytes-backed; the invariant guarantees valid UTF-8.
+        Some(Value::Text(s)) => Some(String::from_utf8_lossy(s).into_owned()),
         _ => None,
     }
 }
