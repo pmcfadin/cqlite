@@ -14,6 +14,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -99,6 +100,14 @@ public final class SnapshotManager {
     private final long reuseWindowNanos;
     private final long retireGraceNanos;
     private final Clock clock;
+    /**
+     * Where superseded-window retirement sweeps run (issue #2452 item 2). Default is
+     * {@link SnapshotRetireScheduler.InlineRetireScheduler} (synchronous, thread-free); production
+     * ({@link CqliteFlightConnector}) injects {@link SnapshotRetireScheduler.BackgroundRetireScheduler}
+     * so the DELETE fan-out is offloaded off the split-planning path and a periodic tick prunes
+     * quiet tables.
+     */
+    private final SnapshotRetireScheduler retireScheduler;
 
     /** The current reused snapshot window per {@code (keyspace, table)}. */
     private final Map<TableRef, Window> windows = new ConcurrentHashMap<>();
@@ -149,6 +158,17 @@ public final class SnapshotManager {
         final long createdNanos;
         final long generationFingerprint;
         final Map<String, CompletableFuture<String>> hostCreates = new ConcurrentHashMap<>();
+        /**
+         * In-flight queries that resolved (created or reused) this window (issue #2452 item 1,
+         * ref-counted rollback retirement). Incremented atomically under the {@code windows.compute}
+         * bin lock when a query resolves the window; consulted ONLY on a fresh-window fail-closed
+         * rollback so a concurrent reuser that committed this window to its tickets is never
+         * stranded by another query deleting the shared hardlinks. A successful query keeps its hold
+         * for its lifetime (there is no read-completion hook), so the count is conservatively high —
+         * which only ever SUPPRESSES a rollback delete (never strands), the safe direction. Grace /
+         * invalidate / shutdown retirement is unaffected (those paths never consult holders).
+         */
+        final AtomicInteger holders = new AtomicInteger();
 
         Window(String name, long epoch, long createdNanos, long generationFingerprint) {
             this.name = name;
@@ -173,12 +193,30 @@ public final class SnapshotManager {
     public SnapshotManager(
             HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
             long reuseWindowNanos, long retireGraceNanos, Clock clock) {
+        this(sidecars, readMode, ttl, reuseWindowNanos, retireGraceNanos, clock,
+                new SnapshotRetireScheduler.InlineRetireScheduler());
+    }
+
+    /**
+     * DI constructor (issue #2452 item 2): the caller supplies the {@link SnapshotRetireScheduler}.
+     * Production passes {@link SnapshotRetireScheduler.BackgroundRetireScheduler} (offload +
+     * periodic quiet-table sweep); tests pass a controllable or inline scheduler for determinism.
+     * Registers the periodic sweep so a quiet table (no further queries) still prunes its superseded
+     * backlog (the #2367 accumulation fix) — a no-op for the inline scheduler.
+     */
+    public SnapshotManager(
+            HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
+            long reuseWindowNanos, long retireGraceNanos, Clock clock,
+            SnapshotRetireScheduler retireScheduler) {
         this.sidecars = sidecars;
         this.readMode = readMode;
         this.ttl = ttl;
         this.reuseWindowNanos = Math.max(0L, reuseWindowNanos);
         this.retireGraceNanos = Math.max(0L, retireGraceNanos);
         this.clock = clock;
+        this.retireScheduler = retireScheduler;
+        // Quiet-table pruning: sweep due retirements on a background cadence even without a query.
+        retireScheduler.startPeriodic(() -> sweepRetireDue(clock.nanoTime()));
     }
 
     /**
@@ -270,8 +308,19 @@ public final class SnapshotManager {
             // never fully materialized) nor count a create/flush that did not complete. Roll back
             // the fresh window so the next query recomputes; a REUSED window is left intact (a
             // transient host error on an added fallback host must not nuke a live shared window).
-            if (!resolved.reused()) {
-                windows.remove(ref, window);
+            boolean removedFresh = !resolved.reused() && windows.remove(ref, window);
+            // Ref-counted retirement (issue #2452 item 1, roborev job 1721): release THIS query's
+            // hold and, when the fresh window was actually removed from the live map AND no
+            // concurrent query still holds it, ACTIVELY retire the partial hardlinks this fan-out
+            // created (else they leak to the ~6h TTL). A concurrent query that REUSED this same
+            // fresh window and committed it to its tickets is a holder — deleting the shared
+            // hardlinks would strand it (NotFound), so a remaining holder leaves the partial creates
+            // to the grace/TTL backstop (the pre-#2452 bounded leak, now only on the contended
+            // path). A reused-window rollback (removedFresh false) never retires here: a live shared
+            // window must survive a transient added-fallback error.
+            int remaining = window.holders.decrementAndGet();
+            if (removedFresh && remaining == 0) {
+                retire(window, ref);
             }
             throw e;
         }
@@ -351,6 +400,15 @@ public final class SnapshotManager {
     }
 
     /**
+     * Release the background retirement scheduler (issue #2452 item 2). Called from the connector's
+     * shutdown after {@link #retireAll} has drained the live + pending snapshots; idempotent and a
+     * no-op for the inline scheduler.
+     */
+    public void close() {
+        retireScheduler.close();
+    }
+
+    /**
      * Resolve the current reused window for {@code ref}, reusing an existing fresh window or
      * creating a new one (bumping the epoch) atomically. Counting is done by the caller AFTER the
      * per-host fan-out succeeds (issue #2356 roborev), not here.
@@ -370,6 +428,9 @@ public final class SnapshotManager {
         Window[] superseded = {null};
         Window window = windows.compute(ref, (k, existing) -> {
             if (existing != null && isFresh(existing, generationFingerprint, now)) {
+                // Ref-count this query's hold under the bin lock (issue #2452 item 1), atomic with
+                // the reuse decision so a concurrent creator's rollback sees this reuser as a holder.
+                existing.holders.incrementAndGet();
                 reused[0] = true;
                 return existing;
             }
@@ -377,12 +438,18 @@ public final class SnapshotManager {
                 superseded[0] = existing;
             }
             long epoch = epochs.computeIfAbsent(k, r -> new AtomicLong()).getAndIncrement();
-            return new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
+            Window fresh = new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
+            fresh.holders.incrementAndGet();
+            return fresh;
         });
         if (superseded[0] != null) {
             pendingRetire.add(new PendingRetire(ref, superseded[0], now));
         }
-        sweepRetireDue(now);
+        // Offload the due-retirement sweep off the split-planning path (issue #2452 item 2, roborev
+        // job 1722): a hot table must not pay a synchronous multi-host DELETE fan-out in planning
+        // latency. The inline scheduler still runs it now (deterministic tests); the background
+        // scheduler hands it to a bounded best-effort executor.
+        retireScheduler.submitSweep(() -> sweepRetireDue(clock.nanoTime()));
         return new Resolved(window, reused[0]);
     }
 
