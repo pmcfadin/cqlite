@@ -16,10 +16,11 @@
 
 use super::schemaless_point::classify_schemaless_point_lookup;
 use super::{
-    build_row_from_scan_cached, classify_partition_lookup, collect_capped_materialized,
-    column_info_from_type_str, honest_targeted_path, parse_table_id, project_expr_reshapes_row,
+    apply_forcing, build_row_from_scan_cached, classify_partition_lookup,
+    collect_capped_materialized, column_info_from_type_str, honest_targeted_path,
+    parse_table_id, point_forbids_fallback, point_requires_engaged, project_expr_reshapes_row,
     scan_pushdown_cap, select_has_writetime_ttl, sort_rows_by_token, validate_token_predicates,
-    PartitionLookupOutcome, SSTablePredicate,
+    ForcedPlan, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
@@ -435,6 +436,11 @@ impl SelectExecutor {
         // wrong. Reject (Cassandra-style) before scanning/evaluating.
         validate_token_predicates(predicates, schema_opt)?;
 
+        // Issue #1918: resolve the read-path forcing mode ONCE for this scan step
+        // (config over env over auto). An invalid env value fails the query loudly
+        // here rather than silently running under auto.
+        let mode = self.resolved_read_path_mode()?;
+
         // Data-safety (issue #1694): log the SHAPE of the scan — predicate count
         // and the constrained column names — never the predicate literals/values.
         tracing::debug!(
@@ -475,8 +481,15 @@ impl SelectExecutor {
         // non-pk column) keeps the honest full-scan path, which correctly matches
         // regular-column equalities. Resolved only when there is no CQL schema and no
         // WRITETIME/TTL metadata projection (the two branches below own those).
+        // Issue #1918: under forced `full` the schemaless targeted seek is skipped
+        // so the query takes the full-scan path (recorded as `ForcedFullScan` by
+        // the main branch below). `point`/`auto` keep the seek; `point` adds the
+        // post-call engaged check in the seek branch.
         let schemaless_seek: Option<super::schemaless_point::SchemalessPointSeek> =
-            if schema_opt.is_none() && !context.projection_flags.include_cell_metadata {
+            if schema_opt.is_none()
+                && !context.projection_flags.include_cell_metadata
+                && mode != crate::config::ReadPathMode::Full
+            {
                 let shape = self.storage.partition_key_shape(table).await;
                 classify_schemaless_point_lookup(predicates, shape.as_ref())
             } else {
@@ -494,8 +507,22 @@ impl SelectExecutor {
             // partition-lookup representation). The per-row predicate evaluation
             // below is unchanged, so the pk equality itself is still applied as a
             // correctness backstop and any bloom/BTI over-inclusion is filtered out.
-            let scan_results = match classify_partition_lookup(predicates, schema_opt) {
-                PartitionLookupOutcome::Targeted(pk_bytes) => {
+            // Issue #1918: the single forcing gate wraps the classifier outcome.
+            let outcome = classify_partition_lookup(predicates, schema_opt);
+            let scan_results = match apply_forcing(outcome, mode)? {
+                // Forced `full`: run the same full metadata scan the organic
+                // fallback uses, recorded with the distinct forced reason.
+                ForcedPlan::ForceFullScan => {
+                    let path = AccessPath::FallbackFullScan {
+                        reason: FallbackReason::ForcedFullScan,
+                    };
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
+                    self.storage
+                        .scan_with_cell_metadata(table, None, None, None, schema_opt)
+                        .await?
+                }
+                ForcedPlan::Proceed(PartitionLookupOutcome::Targeted(pk_bytes)) => {
                     tracing::debug!(
                         "SSTableScan(metadata): partition-key point lookup (key len={}) for \"{}\"",
                         pk_bytes.len(),
@@ -511,6 +538,10 @@ impl SelectExecutor {
                         .storage
                         .scan_partition_with_cell_metadata(table, &pk_bytes, schema_opt)
                         .await?;
+                    // Issue #1918: under `point` a post-call no-prune (`engaged ==
+                    // false`, tombstones build) is a non-targeted execution → fail
+                    // closed rather than silently full-scanning.
+                    point_requires_engaged(mode, engaged, FallbackReason::TombstonesBuildNoPrune)?;
                     let path = honest_targeted_path(AccessPath::MetadataPartitionLookup, engaged);
                     context.access_path = Some(path.clone());
                     crate::query::access_path::record(path);
@@ -520,7 +551,14 @@ impl SelectExecutor {
                 // fanned out to N targeted metadata lookups; it still full-scans.
                 // Report that honestly (MetadataScanPath) rather than faking a
                 // targeted path — the IN-metadata fan-out is a documented follow-up.
-                PartitionLookupOutcome::MultiTargeted(_) | PartitionLookupOutcome::Fallback(_) => {
+                // Issue #1918: under `point` this unwired targeted surface is a
+                // non-targeted execution → fail closed (a classification `Fallback`
+                // already errored up front in `apply_forcing`, so only a
+                // `MultiTargeted` reaches here under `point`).
+                ForcedPlan::Proceed(
+                    PartitionLookupOutcome::MultiTargeted(_) | PartitionLookupOutcome::Fallback(_),
+                ) => {
+                    point_forbids_fallback(mode, FallbackReason::MetadataScanPath)?;
                     let metadata_path = AccessPath::FallbackFullScan {
                         reason: FallbackReason::MetadataScanPath,
                     };
@@ -599,6 +637,9 @@ impl SelectExecutor {
                 .storage
                 .scan_partition(table, &seek.bytes, None)
                 .await?;
+            // Issue #1918: `point` fails closed on a post-call no-prune. (`full`
+            // never reaches here — the seek is skipped above under forced `full`.)
+            point_requires_engaged(mode, engaged, FallbackReason::TombstonesBuildNoPrune)?;
             let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
             context.access_path = Some(path.clone());
             crate::query::access_path::record(path);
@@ -621,8 +662,31 @@ impl SelectExecutor {
             // pinned or can't be encoded. The per-row predicate evaluation below is
             // unchanged, so clustering predicates and the pk equality itself are
             // still applied (and any over-inclusion is filtered out).
-            let scan_results = match classify_partition_lookup(predicates, schema_opt) {
-                PartitionLookupOutcome::Targeted(pk_bytes) => {
+            // Issue #1918: the single forcing gate wraps the classifier outcome.
+            let outcome = classify_partition_lookup(predicates, schema_opt);
+            let scan_results = match apply_forcing(outcome, mode)? {
+                // Forced `full`: run the SAME full-scan + reconciliation code the
+                // organic fallback uses (so rows/order match `auto`), recorded with
+                // the distinct `ForcedFullScan` reason so it is never mistaken for
+                // an organic fallback.
+                ForcedPlan::ForceFullScan => {
+                    let path = AccessPath::FallbackFullScan {
+                        reason: FallbackReason::ForcedFullScan,
+                    };
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
+                    if let Some(cap) = scan_cap {
+                        return self
+                            .capped_fallback_scan(
+                                table, predicates, projection, schema_opt, cap, context,
+                            )
+                            .await;
+                    }
+                    self.storage
+                        .scan(table, None, None, None, schema_opt)
+                        .await?
+                }
+                ForcedPlan::Proceed(PartitionLookupOutcome::Targeted(pk_bytes)) => {
                     tracing::debug!(
                         "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
                         pk_bytes.len(),
@@ -660,13 +724,20 @@ impl SelectExecutor {
                             .storage
                             .scan_partition(table, &pk_bytes, schema_opt)
                             .await?;
+                        // Issue #1918: `point` fails closed on the tombstones-build
+                        // no-prune rather than silently full-scanning.
+                        point_requires_engaged(
+                            mode,
+                            engaged,
+                            FallbackReason::TombstonesBuildNoPrune,
+                        )?;
                         let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
                         context.access_path = Some(path.clone());
                         crate::query::access_path::record(path);
                         rows
                     }
                 }
-                PartitionLookupOutcome::MultiTargeted(pk_keys) => {
+                ForcedPlan::Proceed(PartitionLookupOutcome::MultiTargeted(pk_keys)) => {
                     tracing::debug!(
                         "SSTableScan: multi-partition lookup ({} keys) for \"{}\"",
                         pk_keys.len(),
@@ -689,6 +760,9 @@ impl SelectExecutor {
                         all_engaged &= engaged;
                         combined.extend(rows);
                     }
+                    // Issue #1918: `point` fails closed when the fan-out did not
+                    // prune (tombstones build) rather than silently full-scanning.
+                    point_requires_engaged(mode, all_engaged, FallbackReason::TombstonesBuildNoPrune)?;
                     let path = honest_targeted_path(AccessPath::MultiPartitionLookup, all_engaged);
                     context.access_path = Some(path.clone());
                     crate::query::access_path::record(path);
@@ -700,8 +774,10 @@ impl SelectExecutor {
                     sort_rows_by_token(&mut combined);
                     combined
                 }
-                PartitionLookupOutcome::Fallback(reason) => {
+                ForcedPlan::Proceed(PartitionLookupOutcome::Fallback(reason)) => {
                     // Issue #960: report the honest reason a full scan was chosen.
+                    // (Under `point` a `Fallback` already errored in `apply_forcing`,
+                    // so this arm is reached only under `auto`.)
                     context.access_path = Some(AccessPath::FallbackFullScan { reason });
                     crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
                     // Issue #1577 (D1): when the plan is LIMIT-pushdown safe, stop

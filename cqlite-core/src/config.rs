@@ -355,11 +355,47 @@ fn default_max_result_rows() -> u64 {
     1_000_000
 }
 
+/// Forced SELECT access path (issue #1918).
+///
+/// A **test/debug** control that removes doubt about which access path serves a
+/// `SELECT`. It never changes value decoding, tombstone/timestamp reconciliation,
+/// or WRITETIME/TTL semantics — it governs *routing only* — and is chosen
+/// exclusively from explicit operator config/env, never inferred from data bytes
+/// (no-heuristics mandate). Set programmatically via
+/// [`QueryConfig::forced_read_path`] or per-process via the `CQLITE_READ_PATH`
+/// environment variable (`auto|point|full`, case-insensitive), with config taking
+/// precedence over env. **Not a performance recommendation.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadPathMode {
+    /// Today's behavior: the classifier chooses point-vs-full per query. An unset
+    /// knob is byte-for-byte this mode.
+    #[default]
+    Auto,
+    /// Force a genuinely partition-targeted lookup. **Fails closed** with
+    /// [`crate::Error::ForcedReadPathUnavailable`] whenever the executor would not
+    /// run a partition-targeted lookup — never a silent full scan.
+    Point,
+    /// Force the full-scan + reconciliation path regardless of classification,
+    /// recording [`crate::query::access_path::FallbackReason::ForcedFullScan`].
+    Full,
+}
+
 /// Query engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
     /// Maximum query execution time
     pub max_execution_time: Duration,
+
+    /// Force the SELECT access-path decision (issue #1918).
+    ///
+    /// `None` (the default) leaves routing to the per-query classifier and the
+    /// `CQLITE_READ_PATH` env knob; `Some(mode)` forces that mode and takes
+    /// precedence over the env var. A **test/debug** control — see
+    /// [`ReadPathMode`]. `#[serde(default)]` keeps configs serialized before this
+    /// field existed deserializing successfully (absent = `None`).
+    #[serde(default)]
+    pub forced_read_path: Option<ReadPathMode>,
 
     /// Maximum number of rows to return in a result set.
     ///
@@ -418,6 +454,7 @@ impl Default for QueryConfig {
     fn default() -> Self {
         Self {
             max_execution_time: Duration::from_secs(300), // 5 minutes
+            forced_read_path: None,
             max_result_rows: 1_000_000,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
             plan_cache_size: 1000,
@@ -799,6 +836,39 @@ mod tests {
         config = Config::default();
         config.memory.block_cache.max_size = config.memory.max_memory + 1;
         assert!(config.validate().is_err());
+    }
+
+    /// Issue #1918: `forced_read_path` defaults to `None` (auto), round-trips its
+    /// lowercase encoding, and a config serialized before the field existed still
+    /// deserializes (absent → `None`).
+    #[test]
+    fn forced_read_path_defaults_absent_and_roundtrips() {
+        // Default is None (auto).
+        assert_eq!(QueryConfig::default().forced_read_path, None);
+
+        // A config predating the field (key absent) deserializes to None.
+        let mut value = serde_json::to_value(QueryConfig::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("forced_read_path")
+            .expect("field present when serialized");
+        let restored: QueryConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.forced_read_path, None);
+
+        // Explicit values round-trip via the lowercase serde encoding.
+        for (mode, tag) in [
+            (ReadPathMode::Point, "point"),
+            (ReadPathMode::Full, "full"),
+            (ReadPathMode::Auto, "auto"),
+        ] {
+            let mut cfg = QueryConfig::default();
+            cfg.forced_read_path = Some(mode);
+            let json = serde_json::to_string(&cfg).unwrap();
+            assert!(json.contains(tag), "mode {mode:?} must serialize as {tag:?}: {json}");
+            let restored: QueryConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.forced_read_path, Some(mode));
+        }
     }
 
     #[test]

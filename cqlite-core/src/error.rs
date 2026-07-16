@@ -89,6 +89,37 @@ pub enum Error {
         rows: usize,
     },
 
+    /// An unrecognized `CQLITE_READ_PATH` value was supplied (issue #1918).
+    ///
+    /// Resolving the read-path forcing knob returns this distinct error rather
+    /// than silently falling through to `auto`, so a typo'd knob is loud instead
+    /// of a no-op. Names the invalid value and the allowed set.
+    #[error("invalid CQLITE_READ_PATH value '{value}': expected one of auto, point, full")]
+    InvalidReadPath {
+        /// The unrecognized value supplied to the knob.
+        value: String,
+    },
+
+    /// Forced `point` read path could not run a partition-targeted lookup (issue
+    /// #1918).
+    ///
+    /// Raised under `CQLITE_READ_PATH=point` (or the equivalent `QueryConfig`
+    /// field) whenever the executor would not run a genuinely partition-targeted
+    /// lookup — a classification fallback, an unwired targeted surface (e.g. a
+    /// metadata `IN` fan-out), or a build/path that does not actually prune. The
+    /// query fails closed instead of silently full-scanning; `reason` names the
+    /// concrete fallback reason.
+    #[error(
+        "forced read path '{forced}' unavailable: {reason}. The query cannot run a \
+         partition-targeted lookup under CQLITE_READ_PATH={forced}; use 'auto' or 'full'"
+    )]
+    ForcedReadPathUnavailable {
+        /// The forced mode that could not be satisfied (always `"point"` today).
+        forced: &'static str,
+        /// The concrete fallback reason label (e.g. `partition_key_not_fully_constrained`).
+        reason: String,
+    },
+
     /// Type conversion errors
     #[error("Type conversion error: {0}")]
     TypeConversion(String),
@@ -237,6 +268,22 @@ impl Error {
     }
 
     /// Create a type conversion error
+    /// Create an invalid-read-path error (issue #1918).
+    pub fn invalid_read_path(value: impl Into<String>) -> Self {
+        Self::InvalidReadPath {
+            value: value.into(),
+        }
+    }
+
+    /// Create a forced-read-path-unavailable error (issue #1918). `forced` is the
+    /// forced mode (`"point"`); `reason` is the concrete fallback-reason label.
+    pub fn forced_read_path_unavailable(forced: &'static str, reason: impl Into<String>) -> Self {
+        Self::ForcedReadPathUnavailable {
+            forced,
+            reason: reason.into(),
+        }
+    }
+
     pub fn type_conversion(msg: impl Into<String>) -> Self {
         Self::TypeConversion(msg.into())
     }
@@ -357,6 +404,9 @@ impl Error {
             // Not recoverable by retry: the same query would re-materialize the
             // same oversized result. The user must add LIMIT or stream.
             Error::ResultTooLarge { .. } => false,
+            // A knob misconfiguration re-fails identically until the operator fixes it.
+            Error::InvalidReadPath { .. } => false,
+            Error::ForcedReadPathUnavailable { .. } => false,
             Error::TypeConversion(_) => false,
             Error::NotFound(_) => false,
             Error::AlreadyExists(_) => false,
@@ -402,6 +452,8 @@ impl Error {
             Error::CqlParse(_) => ErrorCategory::Query,
             Error::QueryExecution(_) => ErrorCategory::Query,
             Error::ResultTooLarge { .. } => ErrorCategory::Query,
+            Error::InvalidReadPath { .. } => ErrorCategory::Configuration,
+            Error::ForcedReadPathUnavailable { .. } => ErrorCategory::Query,
             Error::TypeConversion(_) => ErrorCategory::Data,
             Error::Configuration(_) => ErrorCategory::Configuration,
             Error::Storage(_) => ErrorCategory::Storage,

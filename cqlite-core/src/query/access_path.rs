@@ -167,6 +167,14 @@ pub enum FallbackReason {
     /// executor) and #961 (param binding).
     LegacyExecutorPath,
 
+    /// The operator forced the full-scan path via the read-path forcing knob
+    /// (`CQLITE_READ_PATH=full` or [`crate::config::ReadPathMode::Full`], issue
+    /// #1918). This is a *forced* fallback, distinct from every organic reason so
+    /// a deliberately-forced full scan is never mistaken for one the classifier
+    /// chose on its own. The rows are byte-identical to the `auto` result for the
+    /// same query — forcing governs routing only, never decoding.
+    ForcedFullScan,
+
     /// The `tombstones` build compiles out the partition-targeted prune. On that
     /// build the targeted storage surfaces (`scan_partition`,
     /// `scan_partition_with_cell_metadata`) are full-scan + retain fallbacks with
@@ -188,6 +196,7 @@ impl FallbackReason {
             }
             FallbackReason::PartitionKeyEncodingFailed => "partition_key_encoding_failed",
             FallbackReason::MetadataScanPath => "metadata_scan_path",
+            FallbackReason::ForcedFullScan => "forced_full_scan",
             FallbackReason::LegacyExecutorPath => "legacy_executor_path",
             FallbackReason::TombstonesBuildNoPrune => "tombstones_build_no_prune",
         }
