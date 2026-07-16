@@ -9,6 +9,7 @@ members = [
     "tests/format-compatibility",
     "examples",
     "tools/*",
+    "xtask",
 ]
 # The cargo-fuzz crate (issue #1614) is its own workspace (`fuzz/Cargo.toml` has
 # an empty `[workspace]` table). Exclude it here too so no default `cargo
