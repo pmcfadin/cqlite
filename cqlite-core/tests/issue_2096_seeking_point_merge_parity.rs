@@ -113,7 +113,7 @@ fn write_row(id: i32, ck: i32, name: &str, score: i32, ts: i64) -> Mutation {
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "score".to_string(),
@@ -129,7 +129,7 @@ fn write_name_only(id: i32, ck: i32, name: &str, ts: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text(name.to_string()),
+        value: Value::text(name.to_string()),
     }];
     Mutation::new(TableId::new(KS, TBL), pk, clustering(ck), ops, ts, None)
 }
@@ -336,11 +336,11 @@ fn seeking_point_read_is_byte_identical_to_full_scan_oracle() {
     );
     // ck=1 overwrite: gen2 name wins, gen1 score survives (disjoint merge).
     let r1 = &target_rows[0].1;
-    assert_eq!(col(r1, "name"), Some(&Value::Text("a2".to_string())));
+    assert_eq!(col(r1, "name"), Some(&Value::text("a2".to_string())));
     assert_eq!(col(r1, "score"), Some(&Value::Integer(10)));
     // ck=3 cell tombstone: name survives, score gone.
     let r3 = &target_rows[1].1;
-    assert_eq!(col(r3, "name"), Some(&Value::Text("c1".to_string())));
+    assert_eq!(col(r3, "name"), Some(&Value::text("c1".to_string())));
     assert!(col(r3, "score").is_none(), "score cell-deleted in gen3");
 
     // PTOMB: only the resurrecting gen3 row survives the gen2 partition tombstone.
@@ -356,7 +356,7 @@ fn seeking_point_read_is_byte_identical_to_full_scan_oracle() {
     let rp = &ptomb_rows[0].1;
     assert_eq!(
         col(rp, "name"),
-        Some(&Value::Text("p_new".to_string())),
+        Some(&Value::text("p_new".to_string())),
         "gen1 row must stay shadowed by the partition tombstone; gen3 resurrects"
     );
     assert_eq!(col(rp, "score"), Some(&Value::Integer(9)));

@@ -102,7 +102,7 @@ fn write_row(pk: i32, ck: i32, payload: &str, ts: i64) -> Mutation {
     let clustering_key = Some(ClusteringKey::single("ck", Value::Integer(ck)));
     let ops = vec![CellOperation::Write {
         column: "payload".to_string(),
-        value: Value::Text(payload.to_string()),
+        value: Value::text(payload.to_string()),
     }];
     Mutation::new(table_id, partition_key, clustering_key, ops, ts, None)
 }
