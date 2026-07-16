@@ -397,6 +397,12 @@ public final class SnapshotManager {
             // HAZARD (roborev job 1754 f.1 / job 1755 f.4): retire() below CAN run more than once for
             // the same window, BY DESIGN — see the {@code Window#retired} javadoc for why it is a
             // tracked fact, not a run-once gate, and why re-invocation is always safe.
+            //
+            // LOAD-BEARING (roborev job 1757): remaining==0 proves no-stranding ONLY because
+            // successful holds never release. #2580 (release-on-success hook) MUST move this retire
+            // decision under a single windows.compute(ref, ...) critical section (removal decision +
+            // activeHolds read inside the lambda) or this becomes a TOCTOU — constraint also recorded
+            // on #2580.
             if (!resolved.reused() && remaining == 0 && windows.get(ref) != window) {
                 retire(window, ref);
             }
