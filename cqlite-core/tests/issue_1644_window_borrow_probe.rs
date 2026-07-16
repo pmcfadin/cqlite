@@ -24,13 +24,19 @@
 //!   `bytes_copied_into_values > 0` is EXPECTED here — proving the straddle
 //!   path fired — while the scan STILL returns byte-identical rows (parity
 //!   against `execute()`, the same check issue #1143's dedicated test makes).
+//! - **Predicate-rejection** (task 2.4, isolated from the whole-scan proof
+//!   above): a low-selectivity `WHERE ... ALLOW FILTERING` scan over the same
+//!   single-chunk fixture still copies EXACTLY 0 bytes, even though the
+//!   predicate rejects the large majority of decoded Text cells — the decode
+//!   borrow happens BEFORE predicate evaluation, so a rejected cell's payload
+//!   is a refcount bump dropped with the row, never an allocation
+//!   (value-zero-copy-decode spec).
 //!
-//! Both scenarios run inside ONE `#[tokio::test]` function, sequentially
+//! All three scenarios run inside ONE `#[tokio::test]` function, sequentially
 //! (arm/measure/disarm around each), because
-//! `window_cursor::probe`'s counters are process-global atomics — two
-//! separate test functions racing in the same binary would corrupt each
-//! other's counts (the same constraint issue #1589's own probe test
-//! documents).
+//! `window_cursor::probe`'s counters are process-global atomics — separate
+//! test functions racing in the same binary would corrupt each other's counts
+//! (the same constraint issue #1589's own probe test documents).
 //!
 //! ## Scope note: collection-element decode is a separate, larger lift
 //! The multicell/frozen-collection element-extraction path
@@ -201,13 +207,88 @@ async fn drain_streaming(db: &Database, sql: &str) -> usize {
     n
 }
 
-/// Both the non-straddling (zero-copy) and straddling (correctness-preserving
-/// copy) scenarios, run sequentially in ONE test function so the process-global
-/// probe counters never race across concurrently-scheduled tokio tests.
+/// The non-straddling (zero-copy), straddling (correctness-preserving copy),
+/// and predicate-rejection scenarios, run sequentially in ONE test function so
+/// the process-global probe counters never race across concurrently-scheduled
+/// tokio tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn window_borrow_zero_copy_and_straddle_fallback() {
     single_chunk_scan_copies_zero_value_bytes().await;
     straddling_scan_falls_back_to_copy_and_stays_correct().await;
+    predicate_rejected_value_copies_nothing().await;
+}
+
+/// Issue #1644 (task 2.4), isolated from the whole-scan zero-copy proof above:
+/// a scan with a predicate that REJECTS the large majority of decoded Text
+/// cells must still copy ZERO bytes — the borrow happens at decode time,
+/// before the predicate ever runs, so a rejected value's payload is a
+/// refcount bump dropped with the row, never an allocation
+/// (value-zero-copy-decode spec, "A predicate-rejected value is never
+/// copied").
+async fn predicate_rejected_value_copies_nothing() {
+    const KEYSPACE: &str = "test_basic";
+    const TABLE: &str = "multi_partition_table";
+
+    if !fixture_present(KEYSPACE, TABLE) {
+        eprintln!(
+            "Skipping {KEYSPACE}.{TABLE}: no Data.db present (run fetch-datasets.sh). \
+             This guard is non-vacuous only with the real fixture."
+        );
+        return;
+    }
+
+    let db = setup_db(KEYSPACE, "basic-types.cql").await;
+
+    // Learn one present `name` value, then filter on it: matches a small
+    // minority of rows, rejecting the decoded Text `name`/`metadata` cells of
+    // every other row.
+    let baseline = db
+        .execute(&format!("SELECT name FROM {KEYSPACE}.{TABLE} LIMIT 1"))
+        .await
+        .expect("predicate baseline scan");
+    let total_rows = db
+        .execute(&format!("SELECT name FROM {KEYSPACE}.{TABLE}"))
+        .await
+        .expect("predicate total-row scan")
+        .rows
+        .len();
+    let needle = match baseline.rows.first().and_then(|r| r.values.get("name")) {
+        Some(v) => v.as_str().expect("name decodes as Text").to_string(),
+        None => {
+            eprintln!("Skipping: {KEYSPACE}.{TABLE} returned no rows for `name`");
+            return;
+        }
+    };
+    let sql = format!(
+        "SELECT name, metadata FROM {KEYSPACE}.{TABLE} WHERE name = '{needle}' ALLOW FILTERING"
+    );
+
+    probe::arm();
+    let matched = drain_streaming(&db, &sql).await;
+    let appended = probe::recorded_bytes_appended();
+    let copied = probe::recorded_bytes_copied_into_values();
+    probe::disarm();
+
+    assert!(
+        matched > 0 && matched < total_rows,
+        "Issue #1644: predicate matched {matched} of {total_rows} rows on {KEYSPACE}.{TABLE} — \
+         expected a low-selectivity match (>=1, <all) so the predicate genuinely rejects the \
+         majority of decoded Text cells; guard would be vacuous otherwise"
+    );
+    assert!(appended > 0, "chunk-stitching path did not run");
+    eprintln!(
+        "Issue #1644 [predicate-rejected] matched={matched}/{total_rows} bytes_appended={appended} \
+         bytes_copied_into_values={copied}"
+    );
+    assert_eq!(
+        copied,
+        0,
+        "Issue #1644 REGRESSION: a scan whose predicate rejected {}/{total_rows} rows still \
+         copied {copied} bytes into rejected Text values — the decode-time borrow must happen \
+         BEFORE predicate evaluation so a rejected value's payload is a refcount bump, never a \
+         copy",
+        total_rows - matched
+    );
 }
 
 /// Non-straddling scan: every Text/Blob/Inet value must be a zero-copy borrow

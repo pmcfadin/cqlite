@@ -218,6 +218,16 @@ harness = false
 name = "read"
 harness = false
 
+# Predicate-eval / sort throughput micro-benches (issue #1644, K5, task 6.4).
+# `predicate_sort/reject_most_rows` proves a predicate-rejected Bytes-backed
+# Text value is never copied; `predicate_sort/order_by_text` proves the
+# comparator borrow (stage 3) does not regress ORDER BY throughput. Needs
+# `cli-helpers`; without it compiles to an empty criterion main.
+[[bench]]
+name = "predicate_sort"
+path = "benches/predicate_sort_bench.rs"
+harness = false
+
 # Export / conversion throughput micro-benches (issue #1494, AD5). STRICT
 # perf-gate entries (`export/rows_to_record_batch`, `export/json`,
 # `export/parquet`, `export/delta`). Needs `cli-helpers` + `arrow` for the
