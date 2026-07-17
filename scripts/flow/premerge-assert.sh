@@ -21,6 +21,9 @@
 # mismatch, on a closed/merged PR, or on a gh/network failure — FAIL CLOSED,
 # never "assume ok".
 #
+# We parse with gh's built-in `--jq` (jq expression run inside gh), so gh's JSON
+# serialization is NOT load-bearing — we never read raw JSON with sed/regex.
+#
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha>
 #
@@ -55,8 +58,29 @@ if [ -z "$pr" ] || [ -z "$certified" ]; then
   exit 3
 fi
 
-# Fetch head + state in one call. On any gh/network failure -> exit 3 (fail closed).
-if ! json=$(gh pr view "$pr" --repo "$repo" --json headRefOid,state 2>/dev/null); then
+# Normalize the certified SHA to lowercase and require a full 40-char hex SHA —
+# an abbreviated or malformed value can never be safely compared to headRefOid.
+certified=$(printf '%s' "$certified" | tr '[:upper:]' '[:lower:]')
+case "$certified" in
+  *[!0-9a-f]* | "")
+    printf 'error: certified SHA must be 40 hex chars (got: %s)\n' "$2" >&2
+    usage
+    exit 3
+    ;;
+esac
+if [ "${#certified}" -ne 40 ]; then
+  printf 'error: certified SHA must be a full 40-char hex SHA (got %d chars: %s)\n' \
+    "${#certified}" "$2" >&2
+  usage
+  exit 3
+fi
+
+# Fetch head + state in ONE call, extracted by gh's built-in jq into two
+# whitespace-separated tokens: "<headRefOid> <state>". Because gh runs the jq
+# expression, its JSON serialization (compact vs pretty) is irrelevant. On any
+# gh/network failure -> exit 3 (fail closed).
+if ! out=$(gh pr view "$pr" --repo "$repo" --json headRefOid,state \
+  --jq '.headRefOid + " " + .state' 2>/dev/null); then
   printf '========================================================\n' >&2
   printf 'PREMERGE: GH-FAILURE\n' >&2
   printf '  gh pr view %s --repo %s failed (auth/network/no-such-PR).\n' "$pr" "$repo" >&2
@@ -65,14 +89,15 @@ if ! json=$(gh pr view "$pr" --repo "$repo" --json headRefOid,state 2>/dev/null)
   exit 3
 fi
 
-# Parse fields without jq (bash 3.2 / minimal deps). gh emits compact JSON.
-actual=$(printf '%s\n' "$json" | sed -n 's/.*"headRefOid":"\([0-9a-fA-F]*\)".*/\1/p')
-state=$(printf '%s\n' "$json" | sed -n 's/.*"state":"\([A-Za-z]*\)".*/\1/p')
+# Split the two tokens. Empty or malformed --jq output -> exit 3 (fail closed).
+actual=$(printf '%s' "$out" | awk '{print $1}')
+state=$(printf '%s' "$out" | awk '{print $2}')
+actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
 
 if [ -z "$actual" ] || [ -z "$state" ]; then
   printf '========================================================\n' >&2
   printf 'PREMERGE: GH-FAILURE\n' >&2
-  printf '  Could not parse headRefOid/state from gh output.\n' >&2
+  printf '  Could not parse headRefOid/state from gh --jq output.\n' >&2
   printf '  Refusing to merge (fail closed).\n' >&2
   printf '========================================================\n' >&2
   exit 3
