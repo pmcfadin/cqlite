@@ -792,14 +792,9 @@ impl DataWriter {
         // WriteComplexElement/ComplexDeletion would NOT set
         // ROW_HAS_COMPLEX_DELETION and the reader would parse the column with the
         // wrong (simple-cell) layout.
-        let op_targets_complex = |col_name: &str| {
-            schema
-                .columns
-                .iter()
-                .find(|c| c.name == col_name)
-                .map(|c| is_complex_column(&c.data_type))
-                .unwrap_or(false)
-        };
+        // Issue #1674 (R3): read complexity from the per-writer cache instead of
+        // re-lowercasing each op's column type per row.
+        let op_targets_complex = |col_name: &str| self.column_is_complex(schema, col_name);
         let has_complex = row.ops.iter().any(|mop| {
             let col_name = match mop.op {
                 CellOperation::Write { column, .. }
@@ -1125,42 +1120,6 @@ impl DataWriter {
 
         let regular_columns = self.regular_columns(schema);
         self.write_column_subset(buf, &regular_columns, &present_columns)
-    }
-
-    /// Get regular (non-PK, non-CK, non-static) columns from schema.
-    ///
-    /// Cassandra's column bitmap only covers regular columns — partition key
-    /// and clustering key columns are serialized separately in the partition
-    /// header and clustering prefix. Within the regular set, simple columns
-    /// sort before complex columns, then by name.
-    pub(super) fn regular_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
-        self.ordered_columns(schema, |column| {
-            !column.is_static
-                && !schema.is_partition_key(&column.name)
-                && !schema.is_clustering_key(&column.name)
-        })
-    }
-
-    /// Get static columns from schema in Cassandra serialization-header order.
-    pub(super) fn static_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
-        self.ordered_columns(schema, |column| column.is_static)
-    }
-
-    pub(super) fn ordered_columns<'a, F>(
-        &self,
-        schema: &'a TableSchema,
-        predicate: F,
-    ) -> Vec<&'a Column>
-    where
-        F: Fn(&Column) -> bool,
-    {
-        let mut columns: Vec<&'a Column> = schema
-            .columns
-            .iter()
-            .filter(|column| predicate(column))
-            .collect();
-        columns.sort_by_key(|column| column_order_key(column));
-        columns
     }
 
     pub(super) fn write_column_subset(

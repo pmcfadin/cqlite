@@ -65,17 +65,18 @@ impl DataWriter {
 
         // ONE schema-ordered emission pass (issue #930): for each regular column
         // emit its whole-column op and/or its per-element complex column, walking
-        // `regular_columns(schema)` — the exact order the header bitmap /
+        // `regular_columns` order — the exact order the header bitmap /
         // `write_column_subset` use. A previous two-pass design emitted every
         // whole-column op first and every per-element column second, which
         // inverted the wire order whenever a row mixed a whole-column write for
-        // one column with per-element ops for another column that sorts earlier,
-        // misaligning the bodies against the bitmap for strict positional readers.
+        // one column with per-element ops for another column that sorts earlier.
         let mut cells_written: u64 = 0;
-        for col in self.regular_columns(schema) {
+        // Issue #1674 (R3): `is_complex` from the per-writer cache — no per-row sort.
+        for (col, is_complex) in self.regular_columns_with_complex(schema) {
             let name = col.name.as_str();
             if let Some(mop) = whole_by_col.get(name) {
-                cells_written += self.emit_whole_column_op(buf, row, col, mop, now_seconds)?;
+                cells_written +=
+                    self.emit_whole_column_op(buf, row, col, mop, is_complex, now_seconds)?;
             }
             if let Some((complex_deletion, elements)) = per_element_by_col.remove(name) {
                 self.write_complex_column_per_element(
@@ -95,19 +96,18 @@ impl DataWriter {
     /// Emit a single reconciled WHOLE-COLUMN op (`Write` / `WriteWithTtl` /
     /// `Delete`) for `col`. Returns the number of cells serialized: 0 for a
     /// skipped NULL write (represented by absence in the bitmap), else 1.
+    /// `is_complex` is supplied from the per-writer column cache (issue #1674, R3)
+    /// so this hot path never re-lowercases `col`'s type.
     pub(super) fn emit_whole_column_op(
         &self,
         buf: &mut Vec<u8>,
         row: &RowWrite<'_>,
         col: &Column,
         mop: &MergedOp<'_>,
+        is_complex: bool,
         now_seconds: i32,
     ) -> Result<u64> {
         use crate::storage::write_engine::mutation::CellOperation;
-
-        // `col` is the schema column for this op, so the complex check needs no
-        // second lookup.
-        let is_complex = is_complex_column(&col.data_type);
 
         match mop.op {
             CellOperation::Write { column, value } => {
