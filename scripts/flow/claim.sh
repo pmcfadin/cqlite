@@ -57,7 +57,9 @@
 #   claim  <N> [--actor <id>]                 acquire the lock (CLAIM HELD / CLAIM LOST / CLAIM ERROR)
 #   verify <N> [--actor <id>]                 exit 0 iff we hold it (this machine+actor)
 #   adopt  <N> --expect <old-sha> [--actor <id>]  compare-and-swap the ref (adoption/resume)
-#   release <N> [--force]                     delete the ref (refuses under an open PR w/o --force)
+#   release <N> [--force] [--actor <id>]      delete the ref; without --force requires holder identity
+#                                             (machine+actor) + no open PR, and deletes via CAS lease.
+#                                             --force = reaper/adopt: unconditional delete.
 #   status [<N>]                              render claim ref(s) with holder + age
 #   smoke                                     one-time preflight: prove refs/claims/* is pushable on origin
 #
@@ -239,9 +241,7 @@ legacy_lock_blocks() {
     if ! holder_is_us "$sha" "$actor"; then
       found_other=1
     fi
-  done <<EOF
-$raw
-EOF
+  done <<< "$raw"
   [ "$found_any" -eq 1 ] && [ "$found_other" -eq 1 ]
 }
 
@@ -371,24 +371,25 @@ cmd_adopt() {
 
   local sha
   sha="$(build_claim_commit "$issue" "$actor")"
-  # Compare-and-swap: replace ONLY if origin is still at <old-sha>.
-  if git push --force-with-lease="refs/claims/issue-${issue}:${expect}" \
-        "$REMOTE" "${sha}:refs/claims/issue-${issue}" >/dev/null 2>&1; then
-    local confirmed
-    confirmed="$(remote_claim_sha "$issue")"
-    if [ "$confirmed" = "$sha" ]; then
-      emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$sha machine=$(this_machine) actor=$actor from=$expect"
-      return 0
-    fi
-  fi
-  # Fallback: the CAS did not land. Distinguish an infra failure (origin
-  # unreachable) from a genuine ADOPT-LOST (the ref moved off <old-sha>) — a
-  # network blip must NOT be reported as a lost adoption.
+  # Compare-and-swap: replace the ref ONLY if origin is still at <old-sha>. We
+  # ignore the push exit here and let the infra-AWARE confirm read below decide —
+  # mirroring cmd_claim exactly, so a lease-mismatch, a TOCTOU, and an infra blip
+  # are told apart by the READ, never by the push's opaque non-zero.
+  git push --force-with-lease="refs/claims/issue-${issue}:${expect}" \
+        "$REMOTE" "${sha}:refs/claims/issue-${issue}" >/dev/null 2>&1 || true
+
+  # Confirm via the infra-AWARE lookup: a lookup failure is infra (retryable,
+  # exit 1), NEVER a false ADOPT-LOST on a claim we actually landed. If the read
+  # SHA equals OUR new sha, we hold it → ADOPTED, in every path.
   if ! remote_claim_lookup "$issue"; then
-    emit_infra "issue=$issue detail=adopt-cas-failed-and-ls-remote-unreachable-on-$REMOTE"
+    emit_infra "issue=$issue detail=adopt-cas-and-confirm-ls-remote-unreachable-on-$REMOTE"
     return 1
   fi
   local now="$REPLY_SHA"
+  if [ "$now" = "$sha" ]; then
+    emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$sha machine=$(this_machine) actor=$actor from=$expect"
+    return 0
+  fi
   fetch_claim "$issue"
   emit "ADOPT-LOST issue=$issue ref=refs/claims/issue-$issue expected=$expect actual=${now:-<gone>} $(holder_token "$now")"
   return 2
@@ -421,17 +422,16 @@ open_pr_count() {
     case "$name" in
       "issue-${issue}" | "issue-${issue}-"*) count=$((count + 1)) ;;
     esac
-  done <<EOF
-$refs
-EOF
+  done <<< "$refs"
   printf '%s\n' "$count"
 }
 
 cmd_release() {
-  local issue="" force=0
+  local issue="" force=0 actor="${CLAIM_ACTOR:-flow}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --force) force=1; shift ;;
+      --actor) [ "$#" -ge 2 ] || die_usage "--actor requires a value"; actor="$2"; shift 2 ;;
       -*) die_usage "release: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "release: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -451,6 +451,14 @@ cmd_release() {
   fi
 
   if [ "$force" -eq 0 ]; then
+    # A non-forced release is a HOLDER releasing its OWN finished claim. You may
+    # not release a ref you do not hold — that is the reaper's job, and the reaper
+    # uses --force (which skips BOTH this identity gate and the open-PR guard).
+    fetch_claim "$issue"
+    if ! holder_is_us "$sha" "$actor"; then
+      emit "RELEASE-REFUSED issue=$issue reason=not-holder sha=$sha holder-$(holder_desc "$sha") wanted-machine=$(this_machine) wanted-actor=$actor (only the holder may release without --force)"
+      return 2
+    fi
     local prs
     prs="$(open_pr_count "$issue")"
     if [ "$prs" = "-1" ]; then
@@ -461,13 +469,24 @@ cmd_release() {
       emit "RELEASE-REFUSED issue=$issue reason=open-pr open-prs=$prs (orphan-endgame hazard; use --force to override)"
       return 2
     fi
+    # Compare-and-swap delete: remove the ref ONLY if it is still at <sha> we just
+    # read and own — a ref that changed under us (adopted/reaped) fails the lease.
+    if git push "$REMOTE" --force-with-lease="refs/claims/issue-${issue}:${sha}" \
+          ":refs/claims/issue-${issue}" >/dev/null 2>&1; then
+      emit "RELEASED issue=$issue ref=refs/claims/issue-$issue sha=$sha (cas)"
+      return 0
+    fi
+    # CAS delete failed: the ref changed under us OR the remote is unreachable —
+    # either way a retryable ERROR (exit 1), never a silent success.
+    emit_infra "issue=$issue detail=cas-delete-failed-on-$REMOTE (ref changed or remote unreachable) sha=$sha"
+    return 1
   fi
 
+  # --force: reaper/adopt semantics — unconditional delete, no identity/PR gate.
   if git push "$REMOTE" --delete "refs/claims/issue-${issue}" >/dev/null 2>&1; then
-    emit "RELEASED issue=$issue ref=refs/claims/issue-$issue sha=$sha"
+    emit "RELEASED issue=$issue ref=refs/claims/issue-$issue sha=$sha (force)"
     return 0
   fi
-  # A failed delete is an infra/git failure (exit 1), not a policy refusal (exit 2).
   emit_infra "issue=$issue detail=delete-failed-on-$REMOTE sha=$sha"
   return 1
 }
@@ -509,9 +528,7 @@ cmd_status() {
       age="unknown"
     fi
     emit "STATUS issue=$issue ref=$ref sha=$sha machine=$machine actor=$actor ts=$ts age=$age"
-  done <<EOF
-$raw
-EOF
+  done <<< "$raw"
   return 0
 }
 
@@ -533,7 +550,9 @@ cmd_smoke() {
     emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=push-rejected (does $REMOTE permit the refs/claims/* namespace?)"
     return 1
   fi
-  seen="$(git ls-remote "$REMOTE" "$ref" 2>/dev/null | awk '{print $1}' | head -1)"
+  # `|| true`: an ls-remote failure here must NOT abort before the cleanup delete
+  # below (a stranded smoke ref is the worst outcome). A "" seen → SMOKE-FAIL.
+  seen="$(git ls-remote "$REMOTE" "$ref" 2>/dev/null | awk '{print $1}' | head -1 || true)"
   # Always clean up the throwaway ref, whatever the ls-remote said.
   git push "$REMOTE" --delete "$ref" >/dev/null 2>&1 || note "WARNING: could not delete $ref on $REMOTE — remove it manually"
   if [ "$seen" = "$sha" ]; then

@@ -385,6 +385,99 @@ $outWin"
 fi
 
 # ===========================================================================
+echo "TEST 15: adopt CAS lands but the confirm ls-remote fails → ERROR infra (exit 1), never ADOPT-LOST"
+# ===========================================================================
+# A holds issue 15; B adopts with the correct --expect under the ls-remote-fail
+# shim (reused from TEST 14). force-with-lease carries the expected sha, so the
+# CAS push lands WITHOUT an ls-remote; the post-CAS confirm read then fails →
+# infra (exit 1), never a false ADOPT-LOST on a ref B actually adopted.
+runA claim 15 >/dev/null
+oldsha15=$(ref_sha 15)
+rc=0; outAdoptInfra=$( cd "$B" && PATH="$SHIMF:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" adopt 15 --expect "$oldsha15" ) || rc=$?
+rcAdoptInfra=$rc
+newsha15=$(ref_sha 15)
+if [ "$rcAdoptInfra" -eq 1 ] && printf '%s\n' "$outAdoptInfra" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outAdoptInfra" | grep -q 'infra' \
+   && ! printf '%s\n' "$outAdoptInfra" | grep -q 'ADOPT-LOST' \
+   && [ -n "$newsha15" ] && [ "$newsha15" != "$oldsha15" ]; then
+  ok "adopt CAS lands + confirm-read failure → ERROR infra exit 1 (not ADOPT-LOST; ref actually adopted)"
+else
+  bad "expected adopt ERROR infra exit 1 (no ADOPT-LOST) with ref changed; got rc=$rcAdoptInfra old=$oldsha15 new=$newsha15
+$outAdoptInfra"
+fi
+
+# ===========================================================================
+echo "TEST 16: release without --force is holder-gated + CAS; --force overrides identity"
+# ===========================================================================
+runA claim 16 >/dev/null   # A (machineA) holds issue 16
+# (a) a non-holder (machineB) releasing without --force is refused (ref intact).
+rc=0; outNH=$( cd "$B" && CLAIM_MACHINE=machineB bash "$CLAIM" release 16 ) || rc=$?
+rcNH=$rc; ref16a=$(ref_sha 16)
+if [ "$rcNH" -eq 2 ] && printf '%s\n' "$outNH" | grep -q 'RELEASE-REFUSED' \
+   && printf '%s\n' "$outNH" | grep -q 'reason=not-holder' && [ -n "$ref16a" ]; then
+  ok "(a) non-holder release without --force refused (exit 2, ref intact)"
+else
+  bad "(a) expected not-holder refusal exit 2, ref intact; got rc=$rcNH intact=$ref16a
+$outNH"
+fi
+# (b) the holder (machineA), no open PR, releases via CAS → RELEASED (ref gone).
+NOPR="$T/shim-nopr"
+mkdir -p "$NOPR"
+cat >"$NOPR/gh" <<'SHIM'
+#!/usr/bin/env bash
+# No open PRs at all.
+printf ''
+SHIM
+chmod +x "$NOPR/gh"
+rc=0; outH=$( cd "$A" && PATH="$NOPR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 16 ) || rc=$?
+rcH=$rc; ref16b=$(ref_sha 16)
+if [ "$rcH" -eq 0 ] && printf '%s\n' "$outH" | grep -q 'RELEASED' && [ -z "$ref16b" ]; then
+  ok "(b) holder release (no open PR) via CAS → RELEASED exit 0 (ref gone)"
+else
+  bad "(b) expected RELEASED exit 0, ref gone; got rc=$rcH gone='$ref16b'
+$outH"
+fi
+# (c) --force lets a NON-holder (machineB) delete unconditionally (reaper).
+runA claim 16 >/dev/null
+rc=0; outF=$( cd "$B" && CLAIM_MACHINE=machineB bash "$CLAIM" release 16 --force ) || rc=$?
+rcF=$rc; ref16c=$(ref_sha 16)
+if [ "$rcF" -eq 0 ] && printf '%s\n' "$outF" | grep -q 'RELEASED' && [ -z "$ref16c" ]; then
+  ok "(c) --force overrides identity — non-holder reaper delete succeeds (exit 0, ref gone)"
+else
+  bad "(c) expected --force RELEASED exit 0, ref gone; got rc=$rcF gone='$ref16c'
+$outF"
+fi
+
+# ===========================================================================
+echo "TEST 17: a malicious ref name never executes a command substitution"
+# ===========================================================================
+# A git shim emits an ls-remote line whose refname contains \$(touch ...). If any
+# code path expanded remote output unquoted, the file would appear. It must NOT.
+PWNMARK="$T/claimpwn"
+rm -f "$PWNMARK"
+FAKESHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+PWNDIR="$T/shim-pwn"
+mkdir -p "$PWNDIR"
+cat >"$PWNDIR/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "ls-remote" ]; then
+    printf '%s\trefs/claims/issue-99\$(touch $PWNMARK)-evil\n' "$FAKESHA"
+    exit 0
+  fi
+done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$PWNDIR/git"
+( cd "$A" && PATH="$PWNDIR:$PATH" bash "$CLAIM" status >/dev/null 2>&1 ) || true
+if [ ! -e "$PWNMARK" ]; then
+  ok "status over a \$(...)-laden refname did not execute the payload"
+else
+  bad "SECURITY: refname command substitution EXECUTED — $PWNMARK was created"
+  rm -f "$PWNMARK"
+fi
+
+# ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
