@@ -90,7 +90,7 @@ fn flush_ids(engine: &mut WriteEngine, ids: &[i32], ts: i64) {
             None,
             vec![CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(format!("row-{id}")),
+                value: Value::Text(format!("row-{id}").into()),
             }],
             ts,
             None,
