@@ -367,6 +367,25 @@ pub(super) fn sort_rows_by_token(rows: &mut [(RowKey, ScanRow)]) {
     });
 }
 
+/// The metadata-carrying analogue of [`sort_rows_by_token`] for the WRITETIME/TTL
+/// `WHERE pk IN (...)` fan-out (Issue #1916). Uses the IDENTICAL token-then-raw-bytes
+/// ordering (`cmp_partition_keys_by_token`) so the metadata IN union is byte-identical
+/// to the plain `MultiTargeted` union and to a full scan filtered to the same keys —
+/// no new ordering is invented. The extra per-cell metadata element rides along
+/// untouched; the *stable* sort keeps each partition's clustering order intact
+/// (one key's rows arrive contiguously from a single `scan_partition_with_cell_metadata`).
+pub(super) fn sort_metadata_rows_by_token(
+    rows: &mut [(
+        RowKey,
+        ScanRow,
+        std::collections::HashMap<String, crate::types::CellWriteMetadata>,
+    )],
+) {
+    rows.sort_by(|a, b| {
+        crate::util::cassandra_murmur3::cmp_partition_keys_by_token(&a.0 .0, &b.0 .0)
+    });
+}
+
 /// True when `ORDER BY` is a single item on the FIRST clustering column whose
 /// requested direction is the REVERSE of that column's stored clustering order
 /// (Issue #1184) — i.e. a true reverse partition traversal is needed. A query that

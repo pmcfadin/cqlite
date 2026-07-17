@@ -134,6 +134,26 @@ async fn one_present_uuid(db: &Database) -> Option<[u8; 16]> {
     uuid_value(first, "id")
 }
 
+/// Learn two DISTINCT real UUID partition keys, for the `WHERE pk IN (...)` cases.
+async fn two_present_uuids(db: &Database) -> Option<([u8; 16], [u8; 16])> {
+    let full = db
+        .execute(&format!("SELECT id FROM {QUALIFIED_TABLE} LIMIT 8"))
+        .await
+        .ok()?;
+    let mut seen: Vec<[u8; 16]> = Vec::new();
+    for row in &full.rows {
+        if let Some(id) = uuid_value(row, "id") {
+            if !seen.contains(&id) {
+                seen.push(id);
+            }
+        }
+        if seen.len() == 2 {
+            return Some((seen[0], seen[1]));
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // 1. WHERE pk = <literal> reports PartitionLookup (NOT a full scan).
 // ---------------------------------------------------------------------------
@@ -278,6 +298,55 @@ async fn writetime_metadata_path_reports_metadata_partition_lookup() {
     assert!(
         !result.metadata.access_path.as_ref().unwrap().is_full_scan(),
         "a metadata partition-targeted lookup must NOT be classified as a full scan",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Issue #1916: the WRITETIME/TTL metadata `WHERE pk IN (...)` projection is
+//     now a partition-targeted fan-out (mirroring the plain MultiTargeted union),
+//     NOT a full scan. It must report MultiPartitionLookup — replacing the old
+//     MetadataScanPath fallback for this case.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn writetime_metadata_in_reports_multi_partition_lookup() {
+    let _probe_guard = PROBE_LOCK.lock().await;
+    let db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+    let Some((a, b)) = two_present_uuids(&db).await else {
+        eprintln!("Skipping: simple_table has < 2 distinct rows (Data.db not fetched?)");
+        return;
+    };
+    let (la, lb) = (uuid_to_literal(&a), uuid_to_literal(&b));
+
+    access_path::reset();
+    let result = db
+        .execute(&format!(
+            "SELECT id, WRITETIME(name) FROM {QUALIFIED_TABLE} WHERE id IN ({la}, {lb})"
+        ))
+        .await
+        .expect("WRITETIME metadata IN query must succeed");
+
+    assert_eq!(
+        result.metadata.access_path,
+        Some(AccessPath::MultiPartitionLookup),
+        "Issue #1916: a WHERE pk IN (..) WRITETIME/TTL projection must report \
+         MultiPartitionLookup (the metadata IN fan-out), not the MetadataScanPath full-scan \
+         fallback. Got {:?}",
+        result.metadata.access_path
+    );
+    assert_eq!(access_path::last(), Some(AccessPath::MultiPartitionLookup),);
+    assert_ne!(
+        result.metadata.access_path,
+        Some(AccessPath::FallbackFullScan {
+            reason: FallbackReason::MetadataScanPath,
+        }),
+        "Issue #1916: the metadata IN case must no longer record MetadataScanPath",
     );
 }
 

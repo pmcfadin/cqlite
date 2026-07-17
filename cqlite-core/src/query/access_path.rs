@@ -32,10 +32,10 @@
 //! # Scope (per #960)
 //!
 //! #960 only *exposes and reports* the path; it does not make every path
-//! targeted (that is #962). The reported path must be **honest** — if the
-//! WRITETIME/TTL metadata path still full-scans today, it reports
-//! [`AccessPath::FullScan`], and a test pins that current reality so #962 can
-//! later flip it.
+//! targeted (that is #962 for the single-key metadata lookup and #1916 for the
+//! metadata `IN (...)` fan-out). The reported path must be **honest** — a metadata
+//! projection with no usable restriction still reports an honest
+//! [`AccessPath::FallbackFullScan`], never a faked targeted path.
 
 use arc_swap::ArcSwapOption;
 use serde::{Deserialize, Serialize};
@@ -73,8 +73,8 @@ pub enum AccessPath {
     ClusteringSlice,
 
     /// The WRITETIME/TTL metadata-projection path resolved a single fully
-    /// constrained partition via a targeted lookup. Reserved for #962 — the
-    /// metadata path full-scans today (see [`FallbackReason::MetadataScanPath`]).
+    /// constrained partition via a targeted lookup (#962). The `WHERE pk IN (...)`
+    /// metadata fan-out reports [`Self::MultiPartitionLookup`] instead (#1916).
     MetadataPartitionLookup,
 
     /// The streaming SELECT path served a single fully-constrained partition via a
@@ -154,9 +154,12 @@ pub enum FallbackReason {
     /// on-disk key form (e.g. a type mismatch). A full scan is the safe fallback.
     PartitionKeyEncodingFailed,
 
-    /// The WRITETIME/TTL metadata-projection path always full-scans today; it
-    /// does not yet route through a partition-targeted lookup. Pinned by tests
-    /// so #962 can flip it to [`AccessPath::MetadataPartitionLookup`].
+    /// A WRITETIME/TTL metadata projection with NO usable partition-key
+    /// restriction full-scans (there is no key to target). A fully-constrained
+    /// `WHERE pk = ?` now routes through [`AccessPath::MetadataPartitionLookup`]
+    /// (#962) and `WHERE pk IN (...)` fans out to [`AccessPath::MultiPartitionLookup`]
+    /// (#1916); this reason is reserved for the genuinely unclassifiable metadata
+    /// scan that remains.
     MetadataScanPath,
 
     /// The legacy `QueryExecutor` issues an unconditional `storage.scan`; it does

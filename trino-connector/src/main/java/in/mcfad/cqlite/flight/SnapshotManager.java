@@ -14,6 +14,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -99,6 +101,17 @@ public final class SnapshotManager {
     private final long reuseWindowNanos;
     private final long retireGraceNanos;
     private final Clock clock;
+    /**
+     * Where superseded-window retirement sweeps run (issue #2452 item 2). Default is
+     * {@link SnapshotRetireScheduler.InlineRetireScheduler} (synchronous, thread-free); production
+     * ({@link CqliteFlightConnector}) injects {@link SnapshotRetireScheduler.BackgroundRetireScheduler}
+     * so the DELETE fan-out is offloaded off the split-planning path and a periodic tick prunes
+     * quiet tables.
+     */
+    private final SnapshotRetireScheduler retireScheduler;
+    /** Guards {@link #start()} so a second call cannot double-register the periodic cadence
+     * (roborev job 1754 finding 6). */
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
     /** The current reused snapshot window per {@code (keyspace, table)}. */
     private final Map<TableRef, Window> windows = new ConcurrentHashMap<>();
@@ -149,6 +162,39 @@ public final class SnapshotManager {
         final long createdNanos;
         final long generationFingerprint;
         final Map<String, CompletableFuture<String>> hostCreates = new ConcurrentHashMap<>();
+        /**
+         * NOT a true refcount (roborev job 1755 finding 2, renamed from {@code holders}) — a
+         * one-shot safety latch: incremented atomically under the {@code windows.compute} bin lock
+         * when a query resolves (creates or reuses) this window, but decremented ONLY by a query's
+         * OWN failing rollback and NEVER by a successful one, since there is no query/read-completion
+         * hook to release a success (tracked as follow-up issue #2580). It guards only the CREATOR's
+         * own rollback against stranding a concurrent reuser that already committed this window to
+         * its tickets — it is not a general liveness/usage count.
+         *
+         * <p><b>ACCEPTED hot-table active-retire degradation, pinned so it is discoverable in
+         * code+test rather than the field:</b> because a successful hold is never released,
+         * {@code activeHolds} is permanently &ge;1 the moment ANY second query has ever resolved a
+         * given window — so on essentially any table with real concurrent traffic, the active
+         * rollback-retire this field enables degrades to a permanent no-op: the failing query's own
+         * rollback always finds {@code remaining > 0} and leaves its partial per-host creates to the
+         * grace/TTL backstop. This is the deliberately SAFE direction (a suppressed retire only ever
+         * costs a bounded, already-covered leak; an unconditional retire could strand a live reader).
+         * See issue #2580 for the read-completion-hook follow-up, and
+         * {@code SnapshotManagerRetireHardeningTest
+         * #successfulReuseHoldIsPermanentSoRollbackRetireDegradesToNoOpOnHotTables}, which pins both
+         * the suppression and its permanence.
+         */
+        final AtomicInteger activeHolds = new AtomicInteger();
+        /**
+         * Set (not a run-once gate) the first time {@link #retire} is invoked for this window —
+         * tracked for tests/observability, per roborev job 1755 finding 4. {@code retire()} MAY
+         * legitimately run more than once for the same window (see the hazard note on the rollback
+         * catch block in {@code resolveSnapshot}); this flag intentionally does NOT skip a repeat
+         * invocation, since doing so would silently reintroduce the finding-1 leak (a later call can
+         * still need to clear hosts a racing {@link #invalidate}/{@link #retireAll} created before it
+         * ran).
+         */
+        final AtomicBoolean retired = new AtomicBoolean(false);
 
         Window(String name, long epoch, long createdNanos, long generationFingerprint) {
             this.name = name;
@@ -173,12 +219,54 @@ public final class SnapshotManager {
     public SnapshotManager(
             HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
             long reuseWindowNanos, long retireGraceNanos, Clock clock) {
+        this(sidecars, readMode, ttl, reuseWindowNanos, retireGraceNanos, clock,
+                new SnapshotRetireScheduler.InlineRetireScheduler());
+    }
+
+    /**
+     * DI constructor (issue #2452 item 2): the caller supplies the {@link SnapshotRetireScheduler}.
+     * Production passes {@link SnapshotRetireScheduler.BackgroundRetireScheduler} (offload +
+     * periodic quiet-table sweep); tests pass a controllable or inline scheduler for determinism.
+     *
+     * <p>Does NOT register the periodic sweep itself — call {@link #start()} once construction
+     * (and, in production, the caller's own field assignment) has fully completed. Registering the
+     * periodic hook here would pass a lambda closing over {@code this} to the scheduler BEFORE the
+     * constructor returns (a partial-construction / this-escape hazard, Java reviewer nit on #2452):
+     * the background thread could invoke {@code sweepRetireDue} on a not-yet-fully-initialized
+     * instance. {@link #start()} is a no-op for the inline scheduler either way.
+     */
+    public SnapshotManager(
+            HostSnapshotApis sidecars, ReadMode readMode, Optional<String> ttl,
+            long reuseWindowNanos, long retireGraceNanos, Clock clock,
+            SnapshotRetireScheduler retireScheduler) {
         this.sidecars = sidecars;
         this.readMode = readMode;
         this.ttl = ttl;
         this.reuseWindowNanos = Math.max(0L, reuseWindowNanos);
         this.retireGraceNanos = Math.max(0L, retireGraceNanos);
         this.clock = clock;
+        this.retireScheduler = retireScheduler;
+    }
+
+    /**
+     * Start the periodic quiet-table sweep (issue #2452 item 2, #2367 accumulation fix): a table
+     * that receives no further query must still have its superseded-window backlog pruned rather
+     * than accumulating until the multi-hour TTL. Call ONCE, after the instance (and, in production,
+     * every field of the owning object) is fully constructed — never from within the constructor
+     * itself (this-escape). A no-op for a scheduler whose {@code startPeriodic} does not tick (e.g.
+     * {@link SnapshotRetireScheduler.InlineRetireScheduler}).
+     *
+     * <p>Idempotent (roborev job 1754 finding 6): a second call is a silent no-op so double-starting
+     * (e.g. a duplicate wiring mistake) cannot double the periodic sweep cadence.
+     */
+    public void start() {
+        if (!started.compareAndSet(false, true)) {
+            return;
+        }
+        // Deliberate semantic shift (roborev job 1754 finding 5): the periodic tick evaluates grace
+        // due-ness against `clock.nanoTime()` read AT TICK TIME, not any `now` captured at start()
+        // call time — each tick must see the CURRENT clock, not a stale snapshot from registration.
+        retireScheduler.startPeriodic(() -> sweepRetireDue(clock.nanoTime()));
     }
 
     /**
@@ -260,6 +348,13 @@ public final class SnapshotManager {
         TableRef ref = new TableRef(keyspace, table);
         Resolved resolved = resolveWindow(ref, generationFingerprint);
         Window window = resolved.window();
+        // resolveWindow ALWAYS increments window.activeHolds exactly once for THIS call before
+        // returning (both the reuse and the fresh-create branch of its compute() do) — captured here,
+        // right where the increment contract is established, rather than left as something the catch
+        // block below must infer from control flow alone (roborev job 1756 finding 1): the pairing is
+        // now structural (gated on this local), and any future code path that returns from
+        // resolveWindow WITHOUT incrementing must flip this to false or the WARNING below will fire.
+        boolean heldByMe = true;
         try {
             for (String host : hosts) {
                 createOnHost(window, host, keyspace, table);
@@ -267,11 +362,49 @@ public final class SnapshotManager {
         } catch (RuntimeException e) {
             // Roborev (issue #2356, half-created window): a fail-closed fan-out must not leave a
             // freshly-created window cached as "fresh" (a later query would reuse a snapshot that
-            // never fully materialized) nor count a create/flush that did not complete. Roll back
-            // the fresh window so the next query recomputes; a REUSED window is left intact (a
-            // transient host error on an added fallback host must not nuke a live shared window).
+            // never fully materialized) nor count a create/flush that did not complete. A REUSED
+            // window is left entirely alone here (never removed, never retired): a transient host
+            // error on an added fallback host must not nuke a live shared window.
             if (!resolved.reused()) {
+                // Best-effort: a no-op if invalidate()/retireAll() already removed this EXACT window
+                // out from under this in-flight resolve — see the liveness check below, which is what
+                // actually decides whether to retire, not whether THIS call's removal won.
                 windows.remove(ref, window);
+            }
+            // Release THIS query's hold ONLY if resolveWindow actually incremented it for us (see
+            // `heldByMe` above) — a structural pairing, not an inferred one (roborev job 1756
+            // finding 1). A negative result means a decrement ran without a matching increment
+            // somewhere: a pairing-invariant break that would otherwise silently corrupt every later
+            // rollback decision on this window, so it is logged loudly rather than swallowed.
+            int remaining = heldByMe ? window.activeHolds.decrementAndGet() : window.activeHolds.get();
+            if (remaining < 0) {
+                LOG.log(Level.WARNING, () -> "activeHolds went negative for " + ref.keyspace() + "."
+                        + ref.table() + " window=" + window.name()
+                        + " — a decrement ran without a matching increment (pairing invariant "
+                        + "broken); this is a bug, please file an issue");
+            }
+            // Retire once nobody can still JOIN this window as a holder: true whenever `window` is no
+            // longer the live `windows[ref]` entry — whether *I* just removed it above, or
+            // invalidate()/retireAll() removed it earlier while my OWN fan-out was still adding hosts
+            // (issue #2452 roborev job 1755 finding 1: the prior `removedFresh`-only gate — "did MY
+            // OWN remove call win" — missed exactly this: an ordinary invalidate() racing an in-flight
+            // creator retires whatever existed at THAT moment and returns, then the creator goes on to
+            // create MORE hosts that nobody ever cleans up). `remaining == 0` alone already proves no
+            // reader can be stranded (a live successful hold never releases — see `activeHolds`), so
+            // checking liveness too only adds "retire promptly" cases, never an unsafe one. A REUSED
+            // window's rollback never reaches here (guarded above).
+            //
+            // HAZARD (roborev job 1754 f.1 / job 1755 f.4): retire() below CAN run more than once for
+            // the same window, BY DESIGN — see the {@code Window#retired} javadoc for why it is a
+            // tracked fact, not a run-once gate, and why re-invocation is always safe.
+            //
+            // LOAD-BEARING (roborev job 1757): remaining==0 proves no-stranding ONLY because
+            // successful holds never release. #2580 (release-on-success hook) MUST move this retire
+            // decision under a single windows.compute(ref, ...) critical section (removal decision +
+            // activeHolds read inside the lambda) or this becomes a TOCTOU — constraint also recorded
+            // on #2580.
+            if (!resolved.reused() && remaining == 0 && windows.get(ref) != window) {
+                retire(window, ref);
             }
             throw e;
         }
@@ -351,6 +484,27 @@ public final class SnapshotManager {
     }
 
     /**
+     * Release the background retirement scheduler (issue #2452 item 2). Called from the connector's
+     * shutdown BEFORE {@link #retireAll} (roborev job 1755 finding 3): {@link #retireAll} runs its
+     * own retirement synchronously on the CALLER's thread (it never goes through the scheduler), so
+     * closing the scheduler first ensures no background sweep can still be running concurrently with
+     * (or after) {@link #retireAll}'s drain — no argued-safe race to reason about, just none possible.
+     * Idempotent (including under concurrent callers, roborev job 1756 finding 2) and a no-op for the
+     * inline scheduler.
+     *
+     * <p><b>Honest caveat:</b> this is a graceful-then-forceful shutdown of the scheduler's executor,
+     * NOT a hard guarantee. If the calling thread is interrupted while waiting for the executor to
+     * drain, the fallback is an immediate forceful {@code shutdownNow()} with no further wait for
+     * genuine termination — {@code close()} still returns promptly, but does NOT guarantee every
+     * in-flight sweep fully drained first. This is safe (retirement is best-effort and the Sidecar
+     * TTL backstop reclaims anything left mid-flight) but callers must not treat a returned
+     * {@code close()} as proof of a completed drain in that specific (interrupted) path.
+     */
+    public void close() {
+        retireScheduler.close();
+    }
+
+    /**
      * Resolve the current reused window for {@code ref}, reusing an existing fresh window or
      * creating a new one (bumping the epoch) atomically. Counting is done by the caller AFTER the
      * per-host fan-out succeeds (issue #2356 roborev), not here.
@@ -370,6 +524,9 @@ public final class SnapshotManager {
         Window[] superseded = {null};
         Window window = windows.compute(ref, (k, existing) -> {
             if (existing != null && isFresh(existing, generationFingerprint, now)) {
+                // Latch this query's hold under the bin lock (issue #2452 item 1), atomic with
+                // the reuse decision so a concurrent creator's rollback sees this reuser as a holder.
+                existing.activeHolds.incrementAndGet();
                 reused[0] = true;
                 return existing;
             }
@@ -377,12 +534,22 @@ public final class SnapshotManager {
                 superseded[0] = existing;
             }
             long epoch = epochs.computeIfAbsent(k, r -> new AtomicLong()).getAndIncrement();
-            return new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
+            Window fresh = new Window(nameFor(k, epoch), epoch, now, generationFingerprint);
+            fresh.activeHolds.incrementAndGet();
+            return fresh;
         });
         if (superseded[0] != null) {
             pendingRetire.add(new PendingRetire(ref, superseded[0], now));
         }
-        sweepRetireDue(now);
+        // Offload the due-retirement sweep off the split-planning path (issue #2452 item 2, roborev
+        // job 1722): a hot table must not pay a synchronous multi-host DELETE fan-out in planning
+        // latency. The inline scheduler still runs it now (deterministic tests); the background
+        // scheduler hands it to a bounded best-effort executor. Deliberate semantic shift (roborev
+        // job 1754 finding 5): the lambda re-reads `clock.nanoTime()` when the sweep actually EXECUTES
+        // — NOT the `now` captured above for THIS resolve's supersede decision — since a background
+        // sweep can run an arbitrary (possibly long) delay later and must judge grace due-ness
+        // against the CURRENT clock, not a stale reading from enqueue time.
+        retireScheduler.submitSweep(() -> sweepRetireDue(clock.nanoTime()));
         return new Resolved(window, reused[0]);
     }
 
@@ -491,6 +658,7 @@ public final class SnapshotManager {
      * swallowed — the Sidecar TTL backstop covers a miss.
      */
     private void retire(Window window, TableRef ref) {
+        window.retired.set(true); // tracked fact, not a gate — see the Window#retired javadoc.
         for (Map.Entry<String, CompletableFuture<String>> e : window.hostCreates.entrySet()) {
             String host = e.getKey();
             String name;
@@ -510,6 +678,20 @@ public final class SnapshotManager {
                                 + " (TTL backstop will reclaim it): " + ex.getMessage());
             }
         }
+    }
+
+    /**
+     * Test-support hook (roborev job 1754 finding 1): directly invoke the best-effort retire logic
+     * for an already-resolved {@link Window}, so a test can pin that retiring the SAME window TWICE
+     * — the rollback-races-a-sweep / hits-an-already-cleared-snapshot hazard roborev raised — never
+     * throws and converges on the same logical outcome. Production code never needs this: {@link
+     * #invalidate}, {@link #retireAll}, and the grace-sweep are the only retire entry points, and
+     * (per the hazard-downgrade note on the rollback catch block above) the {@code windows} map's
+     * identity-based conditional removal already makes a genuine double-retire of the SAME
+     * {@code Window} instance from two DIFFERENT production code paths structurally impossible.
+     */
+    void retireForTest(Window window, String keyspace, String table) {
+        retire(window, new TableRef(keyspace, table));
     }
 
     /** The reused-window snapshot name {@code cqlite-<ks>-<table>-<epoch>}. */
