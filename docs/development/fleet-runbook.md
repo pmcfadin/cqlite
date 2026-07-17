@@ -32,7 +32,15 @@ git clone https://github.com/pmcfadin/cqlite && cd cqlite
 bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nextest, bash>=4.3
 bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED (see below)
 gh auth status                                  # must include the 'project' scope (board access)
+bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
 ```
+
+**Claim-ref preflight (#2665):** the cross-machine lock is a push to the `refs/claims/*` ref
+namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a throwaway
+`refs/claims/smoke-<nonce>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
+**verified working on github.com/pmcfadin/cqlite** (2026-07-17). Run it **once when adopting a new
+remote or host** — a managed Git host that restricts custom ref namespaces would make the whole
+claim mechanism unusable, and that must be caught before the fleet relies on it.
 
 Sanity check: `bash scripts/agent-gate.sh --lite` should pass in ~1–5 min, and the SUMMARY's
 `accelerators:` line should read `sccache=on nextest=on lanes=parallel`. If anything says

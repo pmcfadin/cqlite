@@ -46,12 +46,20 @@
 #     never the commit date. The author/committer date is stamped to `ts` so the
 #     commit metadata agrees with the message.
 #
+# REMOTE REQUIREMENT (verified)
+#   origin MUST accept pushes to the `refs/claims/*` namespace. Confirmed working
+#   on github.com/pmcfadin/cqlite on 2026-07-17 (created, ls-remote'd, and deleted
+#   refs/claims/smoke-test). When adopting a NEW remote or host, run the one-time
+#   preflight `claim.sh smoke` FIRST — a host that restricts custom ref namespaces
+#   makes the whole claim mechanism unusable, and that must be caught up front.
+#
 # SUBCOMMANDS
-#   claim  <N> [--actor <id>]                 acquire the lock (CLAIM HELD / CLAIM LOST)
+#   claim  <N> [--actor <id>]                 acquire the lock (CLAIM HELD / CLAIM LOST / CLAIM ERROR)
 #   verify <N> [--actor <id>]                 exit 0 iff we hold it (this machine+actor)
 #   adopt  <N> --expect <old-sha> [--actor <id>]  compare-and-swap the ref (adoption/resume)
 #   release <N> [--force]                     delete the ref (refuses under an open PR w/o --force)
 #   status [<N>]                              render claim ref(s) with holder + age
+#   smoke                                     one-time preflight: prove refs/claims/* is pushable on origin
 #
 # IDENTITY
 #   machine  CLAIM_MACHINE (default `hostname -s`) — tests override to simulate
@@ -71,9 +79,12 @@
 #   single line prefixed `CLAIM:`.
 #
 # EXIT CODES
-#   0  success (CLAIM HELD, VERIFY-OK, ADOPTED, RELEASED, status render)
+#   0  success (CLAIM HELD, VERIFY-OK, ADOPTED, RELEASED, SMOKE-OK, status render)
 #   2  lost / refused (CLAIM LOST, VERIFY-FAIL, ADOPT-LOST, RELEASE-REFUSED)
-#   1  git/gh operation failed unexpectedly
+#   1  infra / git / gh failure — retryable, NOT a race-loss (CLAIM ERROR reason=infra,
+#      SMOKE-FAIL). `claim` NEVER reports LOST when nobody holds the ref: a failed
+#      push whose re-read finds the ref absent, or an ls-remote that itself errors,
+#      is ERROR (exit 1) so the caller retries rather than skipping the item.
 #   64 usage error
 #
 # ---END-HELP---
@@ -129,8 +140,27 @@ msg_field() {
 }
 
 # remote_claim_sha <N> — SHA of refs/claims/issue-<N> on origin ("" if absent).
+# Best-effort: an ls-remote failure yields "" (not a hard error) so callers that
+# only need "is there a holder" never trip `set -e`; use remote_claim_lookup when
+# the infra-vs-absent distinction matters.
 remote_claim_sha() {
-  git ls-remote "$REMOTE" "refs/claims/issue-$1" 2>/dev/null | awk '{print $1}' | head -1
+  git ls-remote "$REMOTE" "refs/claims/issue-$1" 2>/dev/null | awk '{print $1}' | head -1 || true
+}
+
+# remote_claim_lookup <N> — like remote_claim_sha but distinguishes an infra
+# failure (ls-remote itself errors) from a legitimately-absent ref. Sets the
+# global REPLY_SHA (the holder sha, or "" if the ref is absent) and returns:
+#   0  ls-remote SUCCEEDED (REPLY_SHA is "" when the ref does not exist)
+#   1  ls-remote FAILED (remote unreachable / auth — an infra error, NOT a race)
+REPLY_SHA=""
+remote_claim_lookup() {
+  local out
+  if ! out="$(git ls-remote "$REMOTE" "refs/claims/issue-$1" 2>/dev/null)"; then
+    REPLY_SHA=""
+    return 1
+  fi
+  REPLY_SHA="$(printf '%s' "$out" | awk '{print $1}' | head -1)"
+  return 0
 }
 
 # build_claim_commit <N> <actor> — create a UNIQUE root commit (empty tree, no
@@ -175,6 +205,18 @@ holder_desc() {
     "$(msg_field "$msg" machine)" "$(msg_field "$msg" actor)"
 }
 
+# holder_token <sha-or-empty> — the holder field for an emit line. A real sha
+# renders "holder-machine=<m> actor=<a>"; an EMPTY read renders an explicit
+# "holder=unknown" — never fall back to our OWN commit (which would falsely name
+# us as the holder on a lost/empty race).
+holder_token() {
+  if [ -z "$1" ]; then
+    printf 'holder=unknown'
+  else
+    printf 'holder-%s' "$(holder_desc "$1")"
+  fi
+}
+
 # legacy_lock_blocks <N> — 0 (blocks) iff a refs/heads/issue-<N>-* branch exists
 # on origin whose tip is NOT our own claim. Re-entrancy: all-ours -> no block.
 legacy_lock_blocks() {
@@ -217,7 +259,7 @@ cmd_claim() {
       emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$existing $(holder_desc "$existing") (re-entrant)"
       return 0
     fi
-    emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=$existing holder-$(holder_desc "$existing")"
+    emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=$existing $(holder_token "$existing")"
     return 2
   fi
 
@@ -233,15 +275,26 @@ cmd_claim() {
   if git push "$REMOTE" "${sha}:refs/claims/issue-${issue}" >/dev/null 2>&1; then
     : # push accepted — confirm below.
   else
-    # Rejected (non-ff): someone won between our pre-check and push. Re-read.
-    local now
-    now="$(remote_claim_sha "$issue")"
+    # Push failed. Distinguish a genuine race-loss (another holder present) from
+    # an infra failure (remote unreachable, or a push error with NO holder) — a
+    # LOST verdict must NEVER be emitted when nobody actually holds the ref.
+    if ! remote_claim_lookup "$issue"; then
+      emit "ERROR issue=$issue reason=infra detail=push-failed-and-ls-remote-unreachable-on-$REMOTE (transient — retry)"
+      return 1
+    fi
+    local now="$REPLY_SHA"
+    if [ -z "$now" ]; then
+      # Push was rejected yet the ref is absent: not a lost race — a push/infra
+      # error. Fail as ERROR (exit 1, retryable), never a bogus LOST.
+      emit "ERROR issue=$issue reason=infra detail=push-rejected-but-ref-absent-on-$REMOTE (transient — retry)"
+      return 1
+    fi
     fetch_claim "$issue"
-    if [ -n "$now" ] && holder_is_us "$now" "$actor"; then
+    if holder_is_us "$now" "$actor"; then
       emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") (re-entrant)"
       return 0
     fi
-    emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=${now:-<race>} holder-$(holder_desc "${now:-$sha}")"
+    emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_token "$now")"
     return 2
   fi
 
@@ -253,7 +306,7 @@ cmd_claim() {
     return 0
   fi
   fetch_claim "$issue"
-  emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=${confirmed:-<gone>} holder-$(holder_desc "${confirmed:-$sha}")"
+  emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=${confirmed:-<gone>} $(holder_token "$confirmed")"
   return 2
 }
 
@@ -313,24 +366,38 @@ cmd_adopt() {
   local now
   now="$(remote_claim_sha "$issue")"
   fetch_claim "$issue"
-  emit "ADOPT-LOST issue=$issue ref=refs/claims/issue-$issue expected=$expect actual=${now:-<gone>} holder-$(holder_desc "${now:-$sha}")"
+  emit "ADOPT-LOST issue=$issue ref=refs/claims/issue-$issue expected=$expect actual=${now:-<gone>} $(holder_token "$now")"
   return 2
 }
 
 # ---------------------------------------------------------------------------
-# open_pr_count <N> — number of open PRs for the issue via gh. Prints -1 and a
-# loud note if gh is unavailable (fail loud, never silently pretend "0 open").
+# open_pr_count <N> — number of open PRs whose HEAD BRANCH is this issue's
+# (`issue-<N>` exact, or the `issue-<N>-<slug>` PR-plumbing prefix). Prints -1
+# and a loud note when gh is unavailable/errors (fail loud, never silently
+# pretend "0 open"). Deliberately NOT a free-text `--search` on "issue-<N>":
+# body-text matching false-positives (#2665 vs #266) and false-negatives (a PR
+# that never mentions the issue in prose) — the head-branch name is the exact,
+# structural link.
 open_pr_count() {
-  local issue="$1" count
+  local issue="$1" refs name count=0
   if ! command -v gh >/dev/null 2>&1; then
     note "gh not found — cannot check for an open PR on issue #$issue"
     printf '%s\n' -1
     return 0
   fi
-  count="$(gh pr list --state open --search "issue-$issue" --json number --jq 'length' 2>/dev/null || printf '%s' -1)"
-  case "$count" in
-    ''|*[!0-9-]*) count=-1 ;;
-  esac
+  if ! refs="$(gh pr list --state open --json headRefName --jq '.[].headRefName' 2>/dev/null)"; then
+    note "gh pr list failed — cannot check for an open PR on issue #$issue"
+    printf '%s\n' -1
+    return 0
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      "issue-${issue}" | "issue-${issue}-"*) count=$((count + 1)) ;;
+    esac
+  done <<EOF
+$refs
+EOF
   printf '%s\n' "$count"
 }
 
@@ -412,6 +479,35 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# cmd_smoke — ONE-TIME preflight for a new remote/host: prove that origin accepts
+# a push to the `refs/claims/*` namespace (create + ls-remote + delete a throwaway
+# `refs/claims/smoke-<nonce>` ref). Some managed Git hosts restrict custom ref
+# namespaces; if this fails, the whole claim mechanism is unusable on that remote
+# and MUST be caught before the fleet relies on it. NOT part of the hermetic test
+# suite — it mutates the REAL origin. (Verified on github.com/pmcfadin/cqlite
+# 2026-07-17: refs/claims/* is pushable.)
+cmd_smoke() {
+  local nonce ref sha seen
+  nonce="$$-${RANDOM}-$(date -u +%s)"
+  ref="refs/claims/smoke-${nonce}"
+  note "smoke preflight: does $REMOTE accept a push to refs/claims/* ? (ref=$ref)"
+  sha="$(build_claim_commit "smoke" "smoke")" || { emit "SMOKE-FAIL remote=$REMOTE reason=commit-build"; return 1; }
+  if ! git push "$REMOTE" "${sha}:${ref}" >/dev/null 2>&1; then
+    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=push-rejected (does $REMOTE permit the refs/claims/* namespace?)"
+    return 1
+  fi
+  seen="$(git ls-remote "$REMOTE" "$ref" 2>/dev/null | awk '{print $1}' | head -1)"
+  # Always clean up the throwaway ref, whatever the ls-remote said.
+  git push "$REMOTE" --delete "$ref" >/dev/null 2>&1 || note "WARNING: could not delete $ref on $REMOTE — remove it manually"
+  if [ "$seen" = "$sha" ]; then
+    emit "SMOKE-OK remote=$REMOTE namespace=refs/claims/* (create + ls-remote + delete verified)"
+    return 0
+  fi
+  emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=ls-remote-mismatch seen=${seen:-<none>} expected=$sha"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
   claim)   shift; cmd_claim   "$@" ;;
@@ -419,7 +515,8 @@ case "$SUBCOMMAND" in
   adopt)   shift; cmd_adopt   "$@" ;;
   release) shift; cmd_release "$@" ;;
   status)  shift; cmd_status  "${1:-}" ;;
+  smoke)   shift; cmd_smoke ;;
   -h | --help) print_help ;;
-  "") die_usage "a subcommand is required: claim <N> | verify <N> | adopt <N> --expect <sha> | release <N> [--force] | status [<N>]" ;;
-  *)  die_usage "unknown subcommand: $SUBCOMMAND (expected claim|verify|adopt|release|status)" ;;
+  "") die_usage "a subcommand is required: claim <N> | verify <N> | adopt <N> --expect <sha> | release <N> [--force] | status [<N>] | smoke" ;;
+  *)  die_usage "unknown subcommand: $SUBCOMMAND (expected claim|verify|adopt|release|status|smoke)" ;;
 esac

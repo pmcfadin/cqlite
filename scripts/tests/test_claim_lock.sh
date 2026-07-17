@@ -14,6 +14,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAIM="$SCRIPT_DIR/../flow/claim.sh"
+REALGIT="$(command -v git)"   # absolute git, for the ls-remote shim in TEST 10
 
 PASS=0
 FAIL=0
@@ -137,13 +138,14 @@ echo "TEST 5: release refuses under an open PR (gh shim), succeeds with --force"
 # ===========================================================================
 runA claim 5 >/dev/null   # A holds issue 5
 
-# gh shim that reports ONE open PR for the issue.
+# gh shim that reports an open PR whose HEAD BRANCH is this issue's (issue-5-*),
+# matching the head-branch guard (never free-text search).
 SHIMDIR="$T/shim-open"
 mkdir -p "$SHIMDIR"
 cat >"$SHIMDIR/gh" <<'SHIM'
 #!/usr/bin/env bash
-# Fake gh: `pr list ... --jq length` -> 1 (an open PR exists).
-printf '1\n'
+# Fake gh: `pr list ... --json headRefName --jq '.[].headRefName'` -> one head.
+printf 'issue-5-some-slug\n'
 SHIM
 chmod +x "$SHIMDIR/gh"
 
@@ -219,6 +221,94 @@ if [ "$rcNoGh" -eq 2 ] && printf '%s\n' "$outNoGh" | grep -q 'open-pr-check-unav
 else
   bad "expected fail-loud refusal exit 2 with ref intact; got rc=$rcNoGh intact=$intact
 $outNoGh"
+fi
+
+# ===========================================================================
+echo "TEST 9: infra failure (origin unreachable) reports ERROR infra (exit 1), never LOST"
+# ===========================================================================
+# Rename origin so BOTH the push AND the follow-up ls-remote fail — a genuine
+# infra outage, NOT a race-loss. claim.sh must exit 1 with CLAIM: ERROR infra,
+# and must NOT claim someone else holds a ref that nobody holds.
+mv "$ORIGIN" "$ORIGIN.bak"
+rc=0; outInfra=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" claim 99 ) || rc=$?
+rcInfra=$rc
+mv "$ORIGIN.bak" "$ORIGIN"
+if [ "$rcInfra" -eq 1 ] && printf '%s\n' "$outInfra" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outInfra" | grep -q 'infra' \
+   && ! printf '%s\n' "$outInfra" | grep -q 'CLAIM: LOST'; then
+  ok "unreachable origin → CLAIM ERROR infra exit 1 (not a bogus LOST)"
+else
+  bad "expected CLAIM ERROR infra exit 1, no LOST; got rc=$rcInfra
+$outInfra"
+fi
+
+# ===========================================================================
+echo "TEST 10: LOST with an empty remote read prints holder=unknown (never our own commit)"
+# ===========================================================================
+# A git shim makes every ls-remote return EMPTY while push passes through. The
+# push creates the ref, but the post-push confirm read comes back empty, so the
+# verdict is LOST — and the holder MUST be reported as unknown, never our own sha.
+SHIMG="$T/shim-git"
+mkdir -p "$SHIMG"
+cat >"$SHIMG/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "ls-remote" ]; then exit 0; fi   # simulate: ls-remote returns nothing
+done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMG/git"
+rc=0; outUnk=$( cd "$A" && PATH="$SHIMG:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 10 ) || rc=$?
+rcUnk=$rc
+if [ "$rcUnk" -eq 2 ] && printf '%s\n' "$outUnk" | grep -q 'CLAIM: LOST' \
+   && printf '%s\n' "$outUnk" | grep -q 'holder=unknown'; then
+  ok "empty-read LOST path prints holder=unknown (exit 2), not our own commit"
+else
+  bad "expected LOST holder=unknown exit 2; got rc=$rcUnk
+$outUnk"
+fi
+
+# ===========================================================================
+echo "TEST 11: release PR guard matches the HEAD BRANCH exactly, not free-text"
+# ===========================================================================
+# gh shim returns head-branch names. A PR on a DIFFERENT issue's branch (issue-266,
+# issue-99) must NOT block release of issue 11; a real issue-11-* branch must.
+runA claim 11 >/dev/null
+OTHERDIR="$T/shim-other-pr"
+mkdir -p "$OTHERDIR"
+cat >"$OTHERDIR/gh" <<'SHIM'
+#!/usr/bin/env bash
+# Only ever answers `pr list ... --json headRefName --jq ...` — echo unrelated heads.
+printf 'issue-266-substring-trap\nissue-99-unrelated\n'
+SHIM
+chmod +x "$OTHERDIR/gh"
+rc=0; outOther=$( cd "$A" && PATH="$OTHERDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 11 ) || rc=$?
+rcOther=$rc
+goneOther=$(ref_sha 11)
+if [ "$rcOther" -eq 0 ] && printf '%s\n' "$outOther" | grep -q 'RELEASED' && [ -z "$goneOther" ]; then
+  ok "release ignores non-matching head branches (issue-266/issue-99 do not block issue 11)"
+else
+  bad "expected RELEASED exit 0 (unrelated PRs ignored); got rc=$rcOther gone='$goneOther'
+$outOther"
+fi
+
+runA claim 11 >/dev/null   # re-claim to test the blocking case
+MATCHDIR="$T/shim-match-pr"
+mkdir -p "$MATCHDIR"
+cat >"$MATCHDIR/gh" <<'SHIM'
+#!/usr/bin/env bash
+printf 'issue-11-real-work\n'
+SHIM
+chmod +x "$MATCHDIR/gh"
+rc=0; outMatch=$( cd "$A" && PATH="$MATCHDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 11 ) || rc=$?
+rcMatch=$rc
+intactMatch=$(ref_sha 11)
+if [ "$rcMatch" -eq 2 ] && printf '%s\n' "$outMatch" | grep -q 'RELEASE-REFUSED' \
+   && printf '%s\n' "$outMatch" | grep -q 'reason=open-pr' && [ -n "$intactMatch" ]; then
+  ok "release refuses when a matching issue-11-* head branch has an open PR (exit 2)"
+else
+  bad "expected RELEASE-REFUSED open-pr exit 2 (matching head branch); got rc=$rcMatch intact=$intactMatch
+$outMatch"
 fi
 
 # ===========================================================================
