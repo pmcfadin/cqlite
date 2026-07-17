@@ -355,6 +355,36 @@ $(cat "$T/gh-argcap.txt")"
 fi
 
 # ===========================================================================
+echo "TEST 14: push WINS but the confirm ls-remote fails → ERROR infra (exit 1), never a false LOST"
+# ===========================================================================
+# A git shim passes `push` through (the claim really lands) but fails every
+# ls-remote — so the post-push WIN confirmation cannot read the ref. That must be
+# treated as infra (retryable, exit 1), NOT a bogus LOST on a claim we hold.
+SHIMF="$T/shim-git-lsfail"
+mkdir -p "$SHIMF"
+cat >"$SHIMF/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "ls-remote" ]; then exit 1; fi   # simulate: ls-remote unreachable
+done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMF/git"
+rc=0; outWin=$( cd "$A" && PATH="$SHIMF:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 14 ) || rc=$?
+rcWin=$rc
+# Sanity: the push really landed — the ref exists when read with real git.
+wonRef=$(ref_sha 14)
+if [ "$rcWin" -eq 1 ] && printf '%s\n' "$outWin" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outWin" | grep -q 'infra' \
+   && ! printf '%s\n' "$outWin" | grep -q 'CLAIM: LOST' \
+   && [ -n "$wonRef" ]; then
+  ok "won push + confirm-read failure → ERROR infra exit 1 (not a false LOST; ref actually landed)"
+else
+  bad "expected ERROR infra exit 1 (no LOST) with ref landed; got rc=$rcWin wonRef=$wonRef
+$outWin"
+fi
+
+# ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

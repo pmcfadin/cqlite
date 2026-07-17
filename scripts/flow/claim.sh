@@ -306,8 +306,14 @@ cmd_claim() {
   fi
 
   # Post-push re-read: the ref MUST be our SHA (a TOCTOU winner could differ).
-  local confirmed
-  confirmed="$(remote_claim_sha "$issue")"
+  # Confirm via the infra-AWARE lookup — an ls-remote failure right after a
+  # SUCCESSFUL push is infra (retryable, exit 1), NEVER a false LOST on a claim we
+  # actually won. Only a successfully-read non-matching sha is a genuine LOST.
+  if ! remote_claim_lookup "$issue"; then
+    emit_infra "issue=$issue detail=push-succeeded-but-confirm-ls-remote-unreachable-on-$REMOTE"
+    return 1
+  fi
+  local confirmed="$REPLY_SHA"
   if [ "$confirmed" = "$sha" ]; then
     emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$sha machine=$(this_machine) actor=$actor"
     return 0
