@@ -73,9 +73,24 @@ impl DataWriter {
     /// (issue #1674, R3). The schema is fixed for the writer's lifetime, so this
     /// runs the filter + sort + `is_complex_column` classification exactly ONCE;
     /// every later row read is `O(C)` index resolution with no `to_lowercase`.
+    ///
+    /// Invariant: a `DataWriter` sees exactly ONE schema for its lifetime
+    /// (`SSTableWriter` owns one `schema` and threads it into every call). The
+    /// cache is built from the FIRST schema and reused; since `is_complex` /
+    /// index resolution below assumes the passed `schema` matches, the
+    /// `debug_assert` fails loudly in debug/test if a caller ever swaps schemas
+    /// (a differently-sized column list) rather than emitting wrong bytes.
     pub(super) fn cached_cols(&self, schema: &TableSchema) -> &OrderedCols {
-        self.column_cache
-            .get_or_init(|| Self::build_ordered_cols(schema))
+        let cols = self
+            .column_cache
+            .get_or_init(|| Self::build_ordered_cols(schema));
+        debug_assert_eq!(
+            cols.is_complex.len(),
+            schema.columns.len(),
+            "DataWriter column cache built from a different schema than now passed \
+             (one-schema-per-writer invariant, issue #1674)"
+        );
+        cols
     }
 
     /// Compute the ordered regular/static column index lists + per-column
