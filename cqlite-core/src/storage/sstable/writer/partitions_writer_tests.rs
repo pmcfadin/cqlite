@@ -6,7 +6,9 @@
 
 use super::*;
 use crate::storage::sstable::bti::sized_ints;
-use crate::storage::sstable::bti::{lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation};
+use crate::storage::sstable::bti::{
+    encode_partition_key_for_bti_trie, lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation,
+};
 use std::io::Cursor;
 
 /// `sized_ints_non_zero_size` must agree with the reader's `non_zero_size`.
