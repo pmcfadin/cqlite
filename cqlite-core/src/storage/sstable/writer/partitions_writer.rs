@@ -249,11 +249,13 @@ impl PartitionsTrieWriter {
         let last_key = self.last_raw.map(|(_, k)| k).unwrap_or_default();
         let key_count = entries.len() as i64;
 
-        // 1. Serialize the trie nodes; `root` is the absolute offset of the root
-        //    node within the buffer (post-order write, backward-delta pointers).
-        let root = build_trie(&entries);
+        // 1. Serialize the trie nodes in a single left-to-right sweep, holding
+        //    only the root-to-current-leaf path resident (bounded depth-≤9 stack,
+        //    never an `O(partitions)` in-memory tree — issue #1679). `root_offset`
+        //    is the absolute offset of the root node within the buffer (post-order
+        //    write, backward-delta pointers).
         let mut buf = Vec::new();
-        let root_offset = write_node(&root, &mut buf)?;
+        let root_offset = emit_partitions_trie(&entries, &mut buf)?;
 
         // 2. firstPos marks the start of the first/last-key region.
         let first_pos = buf.len() as i64;
@@ -306,10 +308,166 @@ fn filter_hash_byte(raw_key_bytes: &[u8]) -> u8 {
 }
 
 // ---------------------------------------------------------------------------
-// Trie construction (in-memory)
+// Trie construction + serialization — single-sweep incremental emitter (#1679)
 // ---------------------------------------------------------------------------
 
-/// An in-memory trie node prior to serialization.
+/// Number of bytes in every partition trie key
+/// (`[0x40] ++ be8(token ^ 0x8000_0000_0000_0000)`). Because keys are
+/// fixed-length AND arrive pre-sorted, the trie can be emitted in a single
+/// left-to-right sweep holding only the root-to-current-leaf path — a stack
+/// bounded by this constant, never an `O(partitions)` in-memory tree.
+const PARTITION_TRIE_KEY_LEN: usize = 9;
+
+/// A pending internal trie node held on the single-sweep emit stack.
+///
+/// One entry exists per trie depth on the current root-to-leaf path, so the
+/// stack is bounded by [`PARTITION_TRIE_KEY_LEN`] (9) regardless of partition
+/// count — this is the whole point of issue #1679 (no resident nested tree).
+struct PendingNode {
+    /// Transition byte in the PARENT node that leads into this node (`key[depth
+    /// − 1]`). Every key routed through a depth-`d` node shares bytes `0..d`, so
+    /// this byte is invariant for the node's lifetime. Unused for the root
+    /// (depth 0), which has no parent.
+    transition_byte: u8,
+    /// Children completed so far, in ascending transition-byte order. Bounded by
+    /// 256 (the full byte alphabet), so a single node is also bounded in size.
+    child_offsets: Vec<(u8, usize)>,
+}
+
+/// Serialize a completed internal node, choosing `Dense` for a full 256-child
+/// node and `Sparse` otherwise. This is the SAME node-type chooser the recursive
+/// post-order writer used, so the emitted bytes are identical.
+fn emit_internal(node: &PendingNode, buf: &mut Vec<u8>) -> Result<usize> {
+    if node.child_offsets.len() == 256 {
+        write_dense(&node.child_offsets, buf)
+    } else {
+        write_sparse(&node.child_offsets, buf)
+    }
+}
+
+/// Pop the deepest pending node, serialize it, and register its offset as a
+/// child of its parent (the next stack entry) under its transition byte.
+///
+/// Only ever called when a strictly-deeper node than the parent exists, so the
+/// pop and the parent lookup are both guaranteed present; the `if let` guards
+/// keep the library free of `unwrap`/`expect`.
+fn pop_and_link(stack: &mut Vec<PendingNode>, buf: &mut Vec<u8>) -> Result<()> {
+    if let Some(node) = stack.pop() {
+        let off = emit_internal(&node, buf)?;
+        if let Some(parent) = stack.last_mut() {
+            parent.child_offsets.push((node.transition_byte, off));
+        }
+    }
+    Ok(())
+}
+
+/// Emit the partition trie via a single left-to-right sweep of the sorted,
+/// de-duplicated entries, holding only the current root-to-leaf path resident.
+///
+/// Returns the absolute offset of the root node within `buf`.
+///
+/// ## Why this is byte-identical to the old whole-tree post-order walk
+///
+/// The recursive writer performed a depth-first **post-order** traversal that,
+/// at each internal node, visited children in ascending transition-byte order
+/// and wrote every child (and its subtree) before the node itself. Because the
+/// keys are **fixed-length (9 bytes)** and **pre-sorted**, a left-to-right sweep
+/// visits the leaves in exactly the order that post-order walk reaches them, and
+/// the longest-common-prefix (LCP) between consecutive keys tells us precisely
+/// which nodes have just become complete (every pending node deeper than the
+/// LCP). Popping those deepest-first, serializing via the same
+/// `write_sparse`/`write_dense` chooser, and registering each under its parent
+/// reproduces the exact write order — hence byte-for-byte identical output.
+///
+/// `entries` must be non-empty, sorted ascending by `key`, with unique
+/// fixed-length (9-byte) keys — the invariants [`PartitionsTrieWriter::finish`]
+/// establishes before calling this.
+fn emit_partitions_trie(entries: &[PartitionTrieEntry], buf: &mut Vec<u8>) -> Result<usize> {
+    if entries.is_empty() {
+        return Err(Error::InvalidInput(
+            "cannot emit an empty partition trie".to_string(),
+        ));
+    }
+
+    // Bounded by trie depth (≤ PARTITION_TRIE_KEY_LEN), never partition count.
+    let mut stack: Vec<PendingNode> = Vec::with_capacity(PARTITION_TRIE_KEY_LEN);
+    let mut prev_key: Option<[u8; PARTITION_TRIE_KEY_LEN]> = None;
+
+    for entry in entries {
+        let key = entry.key;
+
+        // Longest common prefix with the previous key (0 for the first key).
+        // Distinct fixed-length keys ⇒ lcp ∈ [0, PARTITION_TRIE_KEY_LEN − 1].
+        let lcp = match prev_key {
+            None => 0,
+            Some(prev) => {
+                let mut l = 0usize;
+                while l < PARTITION_TRIE_KEY_LEN && key[l] == prev[l] {
+                    l += 1;
+                }
+                l
+            }
+        };
+
+        // Complete every pending internal node deeper than the LCP (deepest
+        // first). The new key diverges at byte `lcp`, so those subtrees can
+        // receive no further children and are final. This keeps the stack
+        // bounded and empties nodes as soon as they are done.
+        while stack.len() > lcp + 1 {
+            pop_and_link(&mut stack, buf)?;
+        }
+
+        // Extend the path back down to the leaf's parent (depth
+        // PARTITION_TRIE_KEY_LEN − 1), pushing one fresh internal node per
+        // newly-diverged byte. Depth 0 is the root and carries no transition
+        // byte; every deeper node's transition byte is `key[depth − 1]`.
+        while stack.len() < PARTITION_TRIE_KEY_LEN {
+            let depth = stack.len();
+            let transition_byte = if depth == 0 { 0 } else { key[depth - 1] };
+            stack.push(PendingNode {
+                transition_byte,
+                child_offsets: Vec::new(),
+            });
+        }
+
+        // Write the leaf and register it under the deepest internal node, keyed
+        // by the final byte. (Leaves are the "depth 9" children of the depth-8
+        // internal node.)
+        let leaf_off = write_leaf(entry.hash_byte, entry.payload, buf)?;
+        if let Some(deepest) = stack.last_mut() {
+            deepest
+                .child_offsets
+                .push((key[PARTITION_TRIE_KEY_LEN - 1], leaf_off));
+        }
+
+        prev_key = Some(key);
+    }
+
+    // Unwind the surviving root-to-leaf path (depths 8..=1), linking each node to
+    // its parent, then serialize the root (depth 0) and return its offset.
+    while stack.len() > 1 {
+        pop_and_link(&mut stack, buf)?;
+    }
+    match stack.pop() {
+        Some(root) => emit_internal(&root, buf),
+        None => Err(Error::InvalidInput(
+            "partition trie produced no root node".to_string(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reference whole-tree builder + post-order writer (TEST ORACLE, #1679)
+// ---------------------------------------------------------------------------
+//
+// This is the pre-#1679 implementation, retained ONLY as a byte-identity oracle
+// for the incremental emitter above: the tests assert `emit_partitions_trie`
+// produces exactly the bytes this recursive whole-tree walk does over the same
+// entries (see `emit_matches_reference_*`). It is `#[cfg(test)]` so production
+// builds never materialize the `O(partitions)` nested `BTreeMap` tree it builds.
+
+/// An in-memory trie node prior to serialization (reference oracle only).
+#[cfg(test)]
 enum TrieBuildNode {
     /// Leaf: a single partition's payload.
     Leaf {
@@ -322,11 +480,13 @@ enum TrieBuildNode {
     },
 }
 
-/// Build a radix-1 (byte-per-edge) trie from the sorted, de-duplicated entries.
+/// Build a radix-1 (byte-per-edge) trie from the sorted, de-duplicated entries
+/// (reference oracle only).
 ///
 /// Each entry's 9-byte key is inserted byte-by-byte; the terminal node is a
 /// `Leaf`. Because all keys share length and are unique, no key is a prefix of
 /// another, so every leaf sits at depth 9.
+#[cfg(test)]
 fn build_trie(entries: &[PartitionTrieEntry]) -> TrieBuildNode {
     let mut root = TrieBuildNode::Internal {
         children: BTreeMap::new(),
@@ -337,6 +497,7 @@ fn build_trie(entries: &[PartitionTrieEntry]) -> TrieBuildNode {
     root
 }
 
+#[cfg(test)]
 fn insert(node: &mut TrieBuildNode, key: &[u8], hash_byte: u8, payload: PartitionPayload) {
     match node {
         TrieBuildNode::Internal { children } => {
@@ -393,6 +554,10 @@ fn serialize_trie(root: &TrieBuildNode) -> Result<Vec<u8>> {
 
 /// Write one node (and, recursively, its subtree) to `buf`, returning the
 /// absolute offset at which this node's header byte was written.
+///
+/// Reference-oracle post-order walk (see `serialize_trie`); `#[cfg(test)]` since
+/// production emits the trie incrementally via [`emit_partitions_trie`] (#1679).
+#[cfg(test)]
 fn write_node(node: &TrieBuildNode, buf: &mut Vec<u8>) -> Result<usize> {
     match node {
         TrieBuildNode::Leaf { hash_byte, payload } => write_leaf(*hash_byte, *payload, buf),
@@ -1071,597 +1236,5 @@ fn write_da_deletion_time(buf: &mut Vec<u8>, deletion: Option<(i32, i64)>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::sstable::bti::sized_ints;
-    use crate::storage::sstable::bti::{lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation};
-    use std::io::Cursor;
-
-    /// `sized_ints_non_zero_size` must agree with the reader's `non_zero_size`.
-    #[test]
-    fn sized_int_size_matches_reader() {
-        let values = [
-            0i64,
-            1,
-            -1,
-            127,
-            -128,
-            128,
-            -129,
-            255,
-            -256,
-            32767,
-            -32768,
-            32768,
-            -32769,
-            i64::MAX,
-            i64::MIN,
-            !0i64,
-            !63i64,
-            !125i64,
-            !1000i64,
-            !1_000_000i64,
-            !300_000_000_000i64,
-        ];
-        for v in values {
-            assert_eq!(
-                sized_ints_non_zero_size(v),
-                sized_ints::non_zero_size(v),
-                "size mismatch for {v}"
-            );
-        }
-    }
-
-    /// A written SizedInt round-trips through the reader's `read`.
-    #[test]
-    fn sized_int_write_read_roundtrip() {
-        for v in [0i64, !0i64, !63i64, !125i64, !1_000_000i64, i64::MIN] {
-            let n = sized_ints_non_zero_size(v);
-            let mut buf = Vec::new();
-            write_sized_int_be(&mut buf, v, n);
-            assert_eq!(buf.len(), n);
-            let mut cur = Cursor::new(buf);
-            let got = sized_ints::read(&mut cur, n).unwrap();
-            assert_eq!(got, v, "SizedInt roundtrip failed for {v}");
-        }
-    }
-
-    /// Build a trie from raw keys, then look every key back up through the
-    /// reader and assert the resolved Data.db offset matches.
-    fn assert_roundtrip(keys_and_offsets: &[(Vec<u8>, u64)]) {
-        let mut w = PartitionsTrieWriter::new();
-        for (k, off) in keys_and_offsets {
-            w.add_partition(k, *off);
-        }
-        let bytes = w.finish().expect("finish trie");
-        assert!(bytes.len() >= 8, "trie must include 8-byte footer");
-
-        for (k, expected) in keys_and_offsets {
-            let mut cur = Cursor::new(bytes.clone());
-            let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, k)
-                .expect("lookup")
-                .unwrap_or_else(|| panic!("key {k:?} not found in written trie"));
-            match loc {
-                BtiPartitionLocation::DataOffset(got) => assert_eq!(
-                    got, *expected,
-                    "key {k:?}: expected DataOffset({expected}) got DataOffset({got})"
-                ),
-                BtiPartitionLocation::RowsOffset(r) => {
-                    panic!("key {k:?}: phase-1 writer must emit DataOffset, got RowsOffset({r})")
-                }
-            }
-        }
-    }
-
-    /// Finding 1 (roborev #908): the partition leaf hash byte must be the
-    /// **canonical** Cassandra value — `(byte) DecoratedKey.filterHashLowerBits()`,
-    /// i.e. the low 8 bits of `h2` (the second 64-bit Murmur3 word) — NOT the
-    /// byte-comparable token's high byte that the phase-1 placeholder emitted.
-    ///
-    /// These expected bytes are read directly from the real, Cassandra-produced
-    /// `da-2-bti-Partitions.db` fixture at
-    /// `test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11`.
-    /// Its three PayloadOnly leaves store:
-    ///   UUID 2222… → hash byte 0x24 (Data.db offset 0)
-    ///   UUID 1111… → hash byte 0x22 (Data.db offset 63)
-    ///   UUID 3333… → hash byte 0xf4 (Data.db offset 125)
-    /// (hexdump: `08 24 ff | 08 22 c0 | 08 f4 82 …`).
-    #[test]
-    fn canonical_filter_hash_byte_matches_real_bti_fixture() {
-        // (raw partition key bytes, expected canonical hash byte from the fixture)
-        let vectors: [(Vec<u8>, u8); 3] = [
-            (vec![0x22u8; 16], 0x24),
-            (vec![0x11u8; 16], 0x22),
-            (vec![0x33u8; 16], 0xf4),
-        ];
-        for (raw_key, expected) in vectors {
-            let got = filter_hash_byte(&raw_key);
-            assert_eq!(
-                got, expected,
-                "canonical hash byte mismatch for key {raw_key:02x?}: \
-                 expected 0x{expected:02x} (from real da-2-bti-Partitions.db), got 0x{got:02x}"
-            );
-        }
-
-        // And confirm the placeholder it replaced (token/h1 high byte) would have
-        // produced *different*, non-canonical values — guarding against a regression
-        // that reintroduces the token-derived byte.
-        for (raw_key, expected) in [(vec![0x22u8; 16], 0x90u8), (vec![0x11u8; 16], 0xbc)] {
-            let token = crate::util::cassandra_murmur3::cassandra_murmur3_token(&raw_key);
-            let placeholder = (((token as u64) ^ 0x8000_0000_0000_0000u64) >> 56) as u8;
-            assert_eq!(placeholder, expected, "placeholder reference value drifted");
-            assert_ne!(
-                placeholder,
-                filter_hash_byte(&raw_key),
-                "canonical hash byte must differ from the old token-derived placeholder"
-            );
-        }
-    }
-
-    /// The canonical hash byte the writer emits round-trips: building a trie that
-    /// includes these partitions yields leaf payloads whose first byte equals the
-    /// canonical hash byte (decoded straight from the serialized bytes).
-    #[test]
-    fn written_leaf_hash_byte_is_canonical() {
-        let raw_key = vec![0x22u8; 16];
-        let mut w = PartitionsTrieWriter::new();
-        w.add_partition(&raw_key, 0);
-        let bytes = w.finish().expect("finish trie");
-        // The first written node is the only leaf (PayloadOnly). Its layout is
-        // [header=0x08][hash_byte][SizedInts position…]; header 0x08 = payloadBits 8.
-        assert_eq!(
-            bytes[0], 0x08,
-            "expected PayloadOnly leaf with payloadBits=8"
-        );
-        assert_eq!(
-            bytes[1],
-            filter_hash_byte(&raw_key),
-            "serialized leaf hash byte must be the canonical value"
-        );
-        assert_eq!(bytes[1], 0x24, "canonical hash byte for UUID 2222… is 0x24");
-    }
-
-    #[test]
-    fn empty_trie_is_empty_bytes() {
-        let w = PartitionsTrieWriter::new();
-        assert!(w.finish().unwrap().is_empty());
-    }
-
-    #[test]
-    fn single_partition_roundtrip() {
-        assert_roundtrip(&[(vec![0x11u8; 16], 0)]);
-    }
-
-    #[test]
-    fn three_uuid_partitions_roundtrip() {
-        assert_roundtrip(&[
-            (vec![0x11u8; 16], 63),
-            (vec![0x22u8; 16], 0),
-            (vec![0x33u8; 16], 125),
-        ]);
-    }
-
-    /// Issue #1678: interior partition raw keys must NOT be retained. Only the two
-    /// boundary raw keys (min/max trie key) are kept for the first/last-key region.
-    /// On `main` (per-entry `raw_key`) the accessor reported `N × keylen`; here it
-    /// is bounded by first+last only.
-    #[test]
-    fn interior_raw_keys_are_not_retained() {
-        let mut w = PartitionsTrieWriter::new();
-        for i in 0u64..1000 {
-            let mut k = vec![0u8; 16];
-            k[0..8].copy_from_slice(&i.to_be_bytes());
-            w.add_partition(&k, i);
-        }
-        // Only the first and last (16 bytes each) may be retained.
-        assert!(
-            w.retained_raw_key_bytes() <= 32,
-            "retained {} raw-key bytes; expected <= 32 (first+last only)",
-            w.retained_raw_key_bytes()
-        );
-    }
-
-    /// Issue #1678: the boundary raw keys tracked incrementally by min/max trie
-    /// key must equal what `entries.first()/last()` would yield after the sort, so
-    /// `finish` emits an unchanged first/last-key region. Partitions are added in a
-    /// deliberately scrambled order (not token order) to prove first/last follow
-    /// the trie-key sort, not insertion order.
-    #[test]
-    fn boundary_raw_keys_match_sorted_first_last() {
-        let raws: Vec<Vec<u8>> = [0x33u8, 0x11, 0x88, 0x22, 0x55, 0x44]
-            .iter()
-            .map(|b| vec![*b; 16])
-            .collect();
-        let mut w = PartitionsTrieWriter::new();
-        for (i, r) in raws.iter().enumerate() {
-            w.add_partition(r, i as u64);
-        }
-
-        // Oracle: sort the same keys by trie key and take first/last raw bytes.
-        let mut sorted: Vec<(_, Vec<u8>)> = raws
-            .iter()
-            .map(|r| (encode_partition_key_for_bti_trie(r), r.clone()))
-            .collect();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        let expect_first = sorted.first().map(|(_, r)| r.clone()).unwrap();
-        let expect_last = sorted.last().map(|(_, r)| r.clone()).unwrap();
-
-        assert_eq!(
-            w.first_raw.as_ref().map(|(_, k)| k.clone()),
-            Some(expect_first),
-            "first boundary raw key must be the min-trie-key partition"
-        );
-        assert_eq!(
-            w.last_raw.as_ref().map(|(_, k)| k.clone()),
-            Some(expect_last),
-            "last boundary raw key must be the max-trie-key partition"
-        );
-    }
-
-    #[test]
-    fn large_offsets_roundtrip() {
-        assert_roundtrip(&[
-            (vec![0xA1u8; 16], 1_000_000),
-            (vec![0xB2u8; 16], 300_000_000_000),
-            (vec![0xC3u8; 16], 5),
-        ]);
-    }
-
-    #[test]
-    fn many_partitions_roundtrip() {
-        // Exercise multi-level fan-out and varied token bytes.
-        let mut data = Vec::new();
-        for i in 0u64..200 {
-            let mut key = vec![0u8; 16];
-            key[0..8].copy_from_slice(&i.to_be_bytes());
-            key[8..16].copy_from_slice(&(i.wrapping_mul(2654435761)).to_be_bytes());
-            data.push((key, i * 37));
-        }
-        assert_roundtrip(&data);
-    }
-
-    #[test]
-    fn duplicate_key_is_rejected() {
-        let mut w = PartitionsTrieWriter::new();
-        // Identical raw key bytes ⇒ identical token ⇒ identical trie key.
-        w.add_partition(&[0x55u8; 16], 0);
-        w.add_partition(&[0x55u8; 16], 100);
-        assert!(w.finish().is_err());
-    }
-
-    /// Finding 1 (issue #766 review): an internal node whose fan-out covers all
-    /// 256 possible transition bytes must serialize (as a Dense node) and round-
-    /// trip through the reader. Previously the serializer rejected count == 256.
-    ///
-    /// We construct the trie directly so we can guarantee a full 256-byte fan-out
-    /// at one node, independent of Murmur3 token distribution.
-    #[test]
-    fn full_256_fanout_internal_node_serializes_and_roundtrips() {
-        use std::collections::BTreeMap;
-
-        // Build a two-level trie: root has one child byte 0xFF leading to an
-        // internal node with all 256 transition bytes, each pointing at a leaf.
-        let mut inner_children: BTreeMap<u8, TrieBuildNode> = BTreeMap::new();
-        for b in 0u16..=255 {
-            inner_children.insert(
-                b as u8,
-                TrieBuildNode::Leaf {
-                    hash_byte: b as u8,
-                    payload: PartitionPayload::DataOffset((b as u64) * 17),
-                },
-            );
-        }
-        let inner = TrieBuildNode::Internal {
-            children: inner_children,
-        };
-        let mut root_children: BTreeMap<u8, TrieBuildNode> = BTreeMap::new();
-        root_children.insert(0xFF, inner);
-        let root = TrieBuildNode::Internal {
-            children: root_children,
-        };
-
-        let bytes = serialize_trie(&root).expect("256-fan-out node must serialize");
-
-        // Walk the trie via the reader's node parser for each terminal byte,
-        // following root[0xFF] then inner[b], and confirm the resolved leaf
-        // payload offset matches what we wrote.
-        for b in 0u16..=255 {
-            let key = [0xFFu8, b as u8];
-            let loc = lookup_key_in_trie(&bytes, &key)
-                .unwrap_or_else(|| panic!("byte {b} not found in 256-fan-out trie"));
-            assert_eq!(
-                loc,
-                (b as u64) * 17,
-                "byte {b}: wrong Data.db offset resolved"
-            );
-        }
-    }
-
-    /// Resolve a raw trie key (the byte-comparable bytes traversed from the
-    /// root) to its leaf's decoded Data.db offset, using the production BTI
-    /// parser/lookup path. `key` is the already-encoded trie key (no Murmur3
-    /// transform applied), so `lookup_partition_in_bti_file` walks it directly.
-    fn lookup_key_in_trie(bytes: &[u8], key: &[u8]) -> Option<u64> {
-        use crate::storage::sstable::bti::lookup_partition_in_bti_file;
-        let mut cur = Cursor::new(bytes.to_vec());
-        match lookup_partition_in_bti_file(&mut cur, key).ok()?? {
-            BtiPartitionLocation::DataOffset(o) => Some(o),
-            BtiPartitionLocation::RowsOffset(_) => None,
-        }
-    }
-
-    // ── Rows.db writer (#910) ────────────────────────────────────────────
-
-    /// The unsigned-VInt writer must be the exact inverse of the reader's
-    /// `read_unsigned_vint_from_slice` for a wide spread of values, including
-    /// the 1-/2-/.../9-byte boundaries.
-    #[test]
-    fn unsigned_vint_roundtrips_through_reader() {
-        use crate::storage::sstable::bti::parser::read_unsigned_vint_from_slice_for_test as read_u;
-        let values: [u64; 20] = [
-            0,
-            1,
-            63,
-            64,
-            127,
-            128,
-            255,
-            256,
-            16_383,
-            16_384,
-            65_535,
-            65_536,
-            1_000_000,
-            300_000_000_000,
-            (1u64 << 35) - 1,
-            1u64 << 35,
-            (1u64 << 49) - 1,
-            1u64 << 49,
-            u64::MAX - 1,
-            u64::MAX,
-        ];
-        for v in values {
-            let mut buf = Vec::new();
-            write_unsigned_vint(&mut buf, v);
-            let (got, n) = read_u(&buf).expect("read");
-            assert_eq!(got, v, "unsigned vint roundtrip failed for {v}: {buf:02x?}");
-            assert_eq!(n, buf.len(), "consumed all bytes for {v}");
-        }
-    }
-
-    /// The signed-VInt (ZigZag) writer must be the exact inverse of the reader's
-    /// `read_signed_vint_from_slice` for positive, negative and zero deltas.
-    #[test]
-    fn signed_vint_roundtrips_through_reader() {
-        use crate::storage::sstable::bti::parser::read_signed_vint_from_slice_for_test as read_s;
-        for v in [
-            0i64,
-            1,
-            -1,
-            10,
-            -10,
-            127,
-            -128,
-            1000,
-            -1000,
-            i32::MIN as i64,
-            i64::MAX,
-            i64::MIN,
-        ] {
-            let mut buf = Vec::new();
-            write_signed_vint(&mut buf, v);
-            let (got, _n) = read_s(&buf).expect("read");
-            assert_eq!(got, v, "signed vint roundtrip failed for {v}: {buf:02x?}");
-        }
-    }
-
-    /// A wide partition's Rows.db trie must round-trip through the production
-    /// reader: `resolve_rows_db_entry` recovers the trie root + metadata, and
-    /// `iterate_rows_in_bti_trie` yields the exact separators + block offsets we
-    /// wrote, in ascending order.
-    #[test]
-    fn rows_db_single_wide_partition_roundtrips() {
-        use crate::storage::sstable::bti::{iterate_rows_in_bti_trie, resolve_rows_db_entry};
-
-        // int clustering separators ck = 8,16,24 → OSS50 sign-flipped 4 bytes.
-        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
-        let blocks = vec![
-            RowIndexBlock {
-                separator_key: sep(8),
-                block_offset: 16_512,
-                open_marker: None,
-            },
-            RowIndexBlock {
-                separator_key: sep(16),
-                block_offset: 33_024,
-                open_marker: None,
-            },
-            RowIndexBlock {
-                separator_key: sep(24),
-                block_offset: 49_536,
-                open_marker: None,
-            },
-        ];
-
-        let raw_pk = 1i32.to_be_bytes().to_vec();
-        let mut w = RowsTrieWriter::new();
-        w.add_partition_row_index(&raw_pk, 0, blocks.clone(), None);
-        let (rows_db, offsets) = w.finish().expect("finish Rows.db");
-        assert_eq!(offsets.len(), 1);
-        let rows_offset = offsets[0] as usize;
-
-        // Feeding RowsOffset directly as a trie root must FAIL (it is the entry).
-        assert!(
-            iterate_rows_in_bti_trie(&rows_db, rows_offset).is_err(),
-            "RowsOffset is a TrieIndexEntry, not a trie root"
-        );
-
-        // resolve_rows_db_entry recovers the header.
-        let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve entry");
-        assert_eq!(header.data_position, 0);
-        assert_eq!(header.block_count, blocks.len() as u32);
-        assert_eq!(header.partition_deletion, None, "LIVE sentinel → None");
-
-        // Traversal from the recovered root yields our separators + offsets.
-        let entries =
-            iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse from root");
-        assert_eq!(entries.len(), blocks.len());
-        for (got, expected) in entries.iter().zip(blocks.iter()) {
-            assert_eq!(got.0, expected.separator_key, "separator key");
-            assert_eq!(got.1.data_offset, expected.block_offset, "block offset");
-            assert_eq!(got.1.open_marker, None);
-        }
-    }
-
-    /// Multiple wide partitions concatenate in Rows.db; each RowsOffset resolves
-    /// to its OWN trie root and metadata (no cross-talk between partitions).
-    #[test]
-    fn rows_db_multiple_wide_partitions_roundtrip() {
-        use crate::storage::sstable::bti::{iterate_rows_in_bti_trie, resolve_rows_db_entry};
-
-        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
-        let mk = |base: u64| {
-            vec![
-                RowIndexBlock {
-                    separator_key: sep(8),
-                    block_offset: base + 16_512,
-                    open_marker: None,
-                },
-                RowIndexBlock {
-                    separator_key: sep(16),
-                    block_offset: base + 33_024,
-                    open_marker: None,
-                },
-            ]
-        };
-
-        let mut w = RowsTrieWriter::new();
-        w.add_partition_row_index(&1i32.to_be_bytes(), 0, mk(0), None);
-        w.add_partition_row_index(&2i32.to_be_bytes(), 700_000, mk(0), None);
-        w.add_partition_row_index(&3i32.to_be_bytes(), 1_400_000, mk(0), None);
-        let (rows_db, offsets) = w.finish().expect("finish");
-        assert_eq!(offsets.len(), 3);
-
-        let data_positions = [0u64, 700_000, 1_400_000];
-        for (i, &ro) in offsets.iter().enumerate() {
-            let header = resolve_rows_db_entry(&rows_db, ro as usize).expect("resolve");
-            assert_eq!(
-                header.data_position, data_positions[i],
-                "partition {i} data position"
-            );
-            assert_eq!(header.block_count, 2);
-            let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
-            assert_eq!(entries.len(), 2, "partition {i} block count");
-            assert_eq!(entries[0].0, sep(8));
-            assert_eq!(entries[1].0, sep(16));
-        }
-    }
-
-    /// An empty RowsTrieWriter yields 0-byte Rows.db with no offsets — exactly
-    /// what Cassandra emits for a narrow-only BTI SSTable (verified against the
-    /// real `simple_table`/`collection_table`/`ttl_table` 0-byte `da-2-bti-Rows.db`
-    /// fixtures), and the reader accepts it.
-    #[test]
-    fn rows_db_empty_writer_is_zero_bytes() {
-        let w = RowsTrieWriter::new();
-        let (bytes, offsets) = w.finish().expect("finish empty");
-        assert!(bytes.is_empty(), "empty Rows.db must be 0 bytes");
-        assert!(offsets.is_empty());
-    }
-
-    /// A wide partition with an open-marker block round-trips the DeletionTime.
-    #[test]
-    fn rows_db_open_marker_roundtrips() {
-        use crate::storage::sstable::bti::{iterate_rows_in_bti_trie, resolve_rows_db_entry};
-        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
-        let blocks = vec![
-            RowIndexBlock {
-                separator_key: sep(8),
-                block_offset: 16_512,
-                open_marker: Some((1_700_000_000, 1_700_000_000_000_000)),
-            },
-            RowIndexBlock {
-                separator_key: sep(16),
-                block_offset: 33_024,
-                open_marker: None,
-            },
-        ];
-        let mut w = RowsTrieWriter::new();
-        w.add_partition_row_index(&7i32.to_be_bytes(), 0, blocks.clone(), None);
-        let (rows_db, offsets) = w.finish().expect("finish");
-        let header = resolve_rows_db_entry(&rows_db, offsets[0] as usize).expect("resolve");
-        let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
-        assert_eq!(
-            entries[0].1.open_marker,
-            Some((1_700_000_000, 1_700_000_000_000_000))
-        );
-        assert_eq!(entries[1].1.open_marker, None);
-    }
-
-    /// Partition-level deletion (non-LIVE) round-trips through the TrieIndexEntry.
-    #[test]
-    fn rows_db_partition_deletion_roundtrips() {
-        use crate::storage::sstable::bti::resolve_rows_db_entry;
-        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
-        let blocks = vec![
-            RowIndexBlock {
-                separator_key: sep(8),
-                block_offset: 16_512,
-                open_marker: None,
-            },
-            RowIndexBlock {
-                separator_key: sep(16),
-                block_offset: 33_024,
-                open_marker: None,
-            },
-        ];
-        let mut w = RowsTrieWriter::new();
-        w.add_partition_row_index(&9i32.to_be_bytes(), 0, blocks, Some((1234, 5678)));
-        let (rows_db, offsets) = w.finish().expect("finish");
-        let header = resolve_rows_db_entry(&rows_db, offsets[0] as usize).expect("resolve");
-        assert_eq!(header.partition_deletion, Some((1234, 5678)));
-    }
-
-    /// A non-ascending separator set is rejected (the trie cannot encode it and
-    /// DFS expects strict order).
-    #[test]
-    fn rows_db_rejects_non_ascending_separators() {
-        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
-        let blocks = vec![
-            RowIndexBlock {
-                separator_key: sep(16),
-                block_offset: 16_512,
-                open_marker: None,
-            },
-            RowIndexBlock {
-                separator_key: sep(8),
-                block_offset: 33_024,
-                open_marker: None,
-            },
-        ];
-        let mut w = RowsTrieWriter::new();
-        w.add_partition_row_index(&1i32.to_be_bytes(), 0, blocks, None);
-        assert!(w.finish().is_err());
-    }
-
-    /// A partition leaf with a positive RowsOffset payload decodes back to the
-    /// SAME RowsOffset via the reader (`BtiPartitionLocation::RowsOffset`).
-    #[test]
-    fn partition_leaf_rows_offset_roundtrips() {
-        let raw_key = vec![0x11u8; 16];
-        let mut w = PartitionsTrieWriter::new();
-        w.add_partition_with_payload(&raw_key, PartitionPayload::RowsOffset(242));
-        let bytes = w.finish().expect("finish");
-
-        let mut cur = Cursor::new(bytes);
-        let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, &raw_key)
-            .expect("lookup")
-            .expect("found");
-        match loc {
-            BtiPartitionLocation::RowsOffset(o) => assert_eq!(o, 242),
-            BtiPartitionLocation::DataOffset(o) => {
-                panic!("expected RowsOffset(242), got DataOffset({o})")
-            }
-        }
-    }
-}
+#[path = "partitions_writer_tests.rs"]
+mod tests;
