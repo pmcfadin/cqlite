@@ -75,12 +75,15 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    gh pr list --state open --json number,headRefName,title,reviewDecision,url --limit 100
    ```
    For each `issue-*` PR, check required CI; an `In Review` PR is only owner-actionable once CI is green.
-3. **Worktrees + claim branches:** `git worktree list` — confirm each in-flight issue maps 1:1:1:1
-   (issue ↔ worktree ↔ change ↔ PR); flag orphans. List the claim locks on origin:
+3. **Worktrees + claim refs:** `git worktree list` — confirm each in-flight issue maps 1:1:1:1
+   (issue ↔ worktree ↔ change ↔ PR); flag orphans. List the claim locks on origin — the slugless
+   fixed-name **claim refs** are now THE lock (#2665); the `issue-<N>-<slug>` branch is only PR plumbing:
    ```bash
-   git ls-remote --heads origin "issue-*"
+   bash scripts/flow/claim.sh status               # active claim refs: refs/claims/issue-<N> + holder + age
+   git ls-remote --heads origin "issue-*"          # legacy branch-locks (older workers) + PR heads
    ```
-   Each `issue-<N>-<slug>` branch on origin is an active claim.
+   Each `CLAIM: STATUS issue=<N>` line is an active claim (holder machine/actor + age); a matching
+   legacy `issue-<N>-<slug>` branch, if any, is that claim's PR head (or an old-fleet branch-lock).
 3a. **Fleet view (issue #2089).** For each `In Progress` item, join the claim against the shared
    heartbeat refs — a cheap origin git ref, never a GitHub API call — to show which machine holds it and
    whether it is alive:
@@ -119,11 +122,16 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
        2. Clear the assignee.
        3. Set board `Status` → `Ready`.
        4. Clear the dead machine's heartbeat ref: `scripts/flow/claim-heartbeat.sh clear <machine>`.
-       5. **NEVER delete the `issue-<N>-*` claim branch if it carries commits.** The branch is preserved
-          on origin exactly as-is; picking the issue back up means resuming that branch (`git fetch` +
-          continue), not starting a fresh `flow-activate`. Only a branch with zero commits beyond its
-          base (never actually started) is a candidate for removal, and even then prefer leaving it for
-          the owner to clear explicitly.
+       5. **NEVER delete the `issue-<N>-*` branch if it carries commits.** The branch (PR plumbing) is
+          preserved on origin exactly as-is; picking the issue back up means resuming that branch
+          (`git fetch` + continue), not starting a fresh `flow-activate`. Only a branch with zero commits
+          beyond its base (never actually started) is a candidate for removal, and even then prefer
+          leaving it for the owner to clear explicitly.
+       6. **The reaped claim ref is `claim.sh adopt`-eligible (#2665).** Leave the `refs/claims/issue-<N>`
+          ref in place and note its current SHA (from `claim.sh status <N>`); the next worker adopts it
+          via compare-and-swap — `bash scripts/flow/claim.sh adopt <N> --expect <that-sha>` — so a
+          resurrected original holder loses the lease and detects the loss immediately (#2467/#2499). Do
+          not `claim.sh release` a reaped-but-non-dead claim. (Full reap-logic hardening is #2667's scope.)
      - An item with a fresh heartbeat (age ≤ 4h) or an open PR is **not** reaped — surface it as
        in-progress/in-review as normal. Do not silently steal a live claim.
 5. **Surface ONE next thing.** Pick the furthest-along item waiting on the owner — in order: a
@@ -131,8 +139,8 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    then an item just reaped by step 4 (now `Status=Ready`, ready to reclaim). Drive that one (render the
    spec inline / show the PR), or — if nothing waits — offer a short **claim-aware** pick-list: only items
    whose **board `Status=Ready`** AND
-   have **no** `issue-<N>-*` branch on origin (already-claimed items are not offered) to `flow-activate`,
-   highest priority first. Selection is by **board `Status` only** — never by `status:ready` label.
+   have **no** `refs/claims/issue-<N>` claim ref and **no** legacy `issue-<N>-*` branch on origin
+   (already-claimed items are not offered) to `flow-activate`, highest priority first. Selection is by **board `Status` only** — never by `status:ready` label.
    **An empty board Ready column means no work is ready → say so and STOP.** Do NOT fall back to the
    `status:*` label set to find more (near a release, Ready is *supposed* to drain to zero; dredging
    labels is the exact wrong-grab bug). Don't dump the whole backlog; show the one, mention the rest.
