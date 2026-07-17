@@ -5,6 +5,10 @@ mod collection_order_serialize;
 /// Correctness proof for `IncrementalPartitionWriter` (issue #1668, stage
 /// 5c-iv part 1) against today's whole-slice `write_partition_with_index_blocks`.
 mod incremental_partition;
+/// Work-counter guard proving the schema-constant ordered column lists +
+/// per-column `is_complex` classification are computed once per writer, never
+/// per row (issue #1674, R3).
+mod issue_1674_column_cache;
 mod scenarios_1;
 mod scenarios_2;
 mod scenarios_3;
