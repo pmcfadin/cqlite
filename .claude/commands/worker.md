@@ -61,33 +61,43 @@ onto its own branch). Rules, non-negotiable:
    Cross-*machine* concurrency is fine — it's coordinated by the origin branch lock.
 2. **Resume THIS machine's own claim FIRST (crash recovery, #2090), else pick up a new one.** Before
    touching the Ready column, rehydrate from the board and check whether this machine already holds a live
-   claim from a prior (possibly crashed) session — an `issue-<N>-*` branch on origin pushed under this
-   machine, and/or a `~/projects/cqlite-wt/issue-*` worktree you can resume. If one exists, **resume it**
+   claim from a prior (possibly crashed) session — a `refs/claims/issue-<N>` claim ref this machine
+   holds (`bash scripts/flow/claim.sh verify <N>` exits 0), and/or a `~/projects/cqlite-wt/issue-*`
+   worktree you can resume. If one exists, **resume it**
    (`git fetch` the branch, `cd` the worktree, continue from its last commit — no re-claim, no dup work) and
    do NOT touch the Ready column this session. Only if there is no own resumable claim do you **pick up** a
    new one (`flow-board` pickup rule): the **oldest issue whose board `Status=Ready`** with **no**
-   `issue-N-*` lock on origin. **Any-slug lock check (#1930):** test for **ANY** claim branch on the
-   issue, not your exact slug — `git ls-remote --heads origin "issue-<N>-*"`; if it returns anything,
-   the issue is already claimed (a peer may have used a different slug, e.g.
-   `issue-1632-parser-hardening` vs `issue-1632-parser-hardening-bundle`, which defeats an exact-slug
-   push race) → skip it. **Select by board `Status` ONLY — never by the `status:ready` label**
+   claim on origin. **Eligibility check (#2665):** the lock is now the slugless fixed-name ref
+   `refs/claims/issue-<N>` — a model-chosen slug is NEVER the lock, so a different-slug or
+   identical-SHA push can no longer double-claim (field: #1632). Check both the ref AND the legacy
+   branch glob (older workers may still branch-lock):
+   `bash scripts/flow/claim.sh status <N>` (any `CLAIM: STATUS issue=<N>` line ⇒ already claimed) and
+   `git ls-remote --heads origin "issue-<N>-*"` (any hit ⇒ a legacy branch-lock holds it) → skip it if
+   either fires. **Select by board `Status` ONLY — never by the `status:ready` label**
    (Path A, #1886: labels are decorative; the board is the sole dispatch authority). If the board is
    unreachable, STOP and report — do NOT fall back to labels to find work. **Empty Ready (and no own
    resumable claim) → write a `no-work` iteration marker (see step 9) and EXIT** — a cheap no-op iteration;
    the supervisor backs off before the next one (near a release the Ready column is *meant* to drain to
    zero; that is "done," not a cue to dredge labels for more). Refresh this machine's heartbeat on claim/
    resume: `scripts/flow/claim-heartbeat.sh beat <N>` (#2089).
-3. **Claim it — in an isolated worktree branched from `origin/main` (this NEVER changes the root's branch):**
+3. **Claim it — the `claim.sh` ref is THE lock; acquire it FIRST, then create the worktree/branch as PR plumbing:**
    ```
-   git -C ~/projects/cqlite fetch origin main
+   git -C ~/projects/cqlite fetch origin
+   bash scripts/flow/claim.sh claim <N>          # THE lock: atomic push of refs/claims/issue-<N>
+   #   → CLAIM HELD (exit 0) = you won; CLAIM LOST (exit 2) = another worker holds it → back to step 2.
+   # Only after CLAIM HELD, set up the worktree + branch (naming/PR plumbing — NOT the lock):
    git -C ~/projects/cqlite worktree add ~/projects/cqlite-wt/issue-<N> -b issue-<N>-<slug> origin/main
-   git -C ~/projects/cqlite-wt/issue-<N> push -u origin issue-<N>-<slug>   # cross-machine lock
+   git -C ~/projects/cqlite-wt/issue-<N> push -u origin issue-<N>-<slug>   # PR head, NOT the lock
    cd ~/projects/cqlite-wt/issue-<N>
    ```
-   `worktree add` leaves the root checkout untouched — that is the entire point. If the push is rejected
-   (another worker won the race), `git worktree remove ~/projects/cqlite-wt/issue-<N>`, drop it, and go
-   back to step 2. Run the gate with `CQLITE_DATASETS_ROOT=~/projects/cqlite/test-data/datasets` (worktrees
-   lack the gitignored Data.db binaries).
+   The claim ref — not the branch — arbitrates the race (git server-side, per-issue, slug-independent):
+   a UNIQUE root-commit push means a different-slug or identical-base competitor can no longer
+   double-claim (#2665). `worktree add` leaves the root checkout untouched — that is the entire point.
+   If `claim.sh claim` reports `CLAIM LOST`, do NOT create the worktree; go back to step 2. If you are
+   adopting a reaped claim (flow-board marked it), acquire it with `bash scripts/flow/claim.sh adopt
+   <N> --expect <old-sha>` instead. Run the gate with
+   `CQLITE_DATASETS_ROOT=~/projects/cqlite/test-data/datasets` (worktrees lack the gitignored Data.db
+   binaries).
 4. **Read manager orders** on the issue: `🧭 MANAGER <!-- MGR:... -->` comments. Note the latest
    `GO` / `HOLD: merge after #N` / `ORDER` + any instructions.
 5. **Route — spec-first for anything new.** Read the issue's oracle-vs-design routing (set at grooming):
