@@ -332,14 +332,21 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   (`Backlog/Ready/In Progress/In Review/Done`); exactly one `P0`–`P3` per issue. `status:*` labels
   are decorative, NEVER a selection source. New issues auto-land at `Backlog`. Empty Ready column =
   no work ready → STOP. Board unreachable (auth/scope) → STOP and fix auth; never label-dispatch.
-- **Claim protocol (cross-machine)**: claim = push the `issue-<N>-<slug>` branch to origin (THE
-  lock — assignee alone is not), set assignee + `Status=In Progress`, then re-read and proceed only
-  if you hold the branch. Maintain the liveness heartbeat
+- **Claim protocol (cross-machine, #2665)**: THE lock is the slugless fixed-name ref
+  `refs/claims/issue-<N>`, acquired via `bash scripts/flow/claim.sh claim <N>` — an atomic unique
+  root-commit push that git arbitrates server-side, so a model-chosen slug or an identical-SHA base
+  can no longer double-claim (the #1632 slug-pair + identical-SHA-no-op hazards are closed). The
+  `issue-<N>-<slug>` branch is now **PR plumbing, NOT the lock**. Acquire the claim ref FIRST, then
+  worktree+branch; set assignee + `Status=In Progress`. `claim.sh verify <N>` confirms you hold it;
+  adopting a reaped claim = `claim.sh adopt <N> --expect <old-sha>` (compare-and-swap, so a
+  resurrected original holder loses the lease immediately — #2467/#2499); `claim.sh release <N>`
+  deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
 - **One worker per machine (#1930)**: one lead/worker session owns a box; it fans out subagents but
   **serializes its own full gates** (the #1825 machine cap is a backstop, not a license) and
-  pre-claims by checking for ANY `issue-<N>-*` branch. Multiple independent sessions → separate
+  pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
+  `issue-<N>-*` branch. Multiple independent sessions → separate
   machines, each claim-protocol-gated; NEVER N bare leads without the protocol. Unattended runs:
   `scripts/local/worker-supervisor.sh` (#2090) recycles ONE worker process per issue (hard context
   bound = process exit; the worker writes `.worker-last-iteration.json` then EXITs — never a second
