@@ -14,7 +14,7 @@ pub use node::{
     BtiError, BtiNode, BtiNodeData, BtiNodeType, BtiResult, PayloadRef, SizedPointer, Transition,
 };
 pub use parser::{
-    decode_bti_partition_payload, encode_clustering_bound_oss50,
+    decode_bti_partition_payload, encode_bti_trie_key_from_token, encode_clustering_bound_oss50,
     encode_clustering_bound_oss50_with_order, encode_partition_key_for_bti_trie,
     iterate_partition_locations_in_bti_file, iterate_partitions_in_bti_file,
     iterate_rows_for_partition, iterate_rows_in_bti_file, iterate_rows_in_bti_trie,

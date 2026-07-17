@@ -6,7 +6,9 @@
 
 use super::*;
 use crate::storage::sstable::bti::sized_ints;
-use crate::storage::sstable::bti::{lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation};
+use crate::storage::sstable::bti::{
+    encode_partition_key_for_bti_trie, lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation,
+};
 use std::io::Cursor;
 
 /// `sized_ints_non_zero_size` must agree with the reader's `non_zero_size`.
@@ -151,6 +153,29 @@ fn written_leaf_hash_byte_is_canonical() {
         "serialized leaf hash byte must be the canonical value"
     );
     assert_eq!(bytes[1], 0x24, "canonical hash byte for UUID 2222… is 0x24");
+}
+
+/// Issue #1681 (S4): each partition key is hashed with Murmur3 exactly ONCE.
+/// Pre-fold this read 2N (128 for 64 keys: token + filter hash) and FAILED.
+/// The counter is thread-local, so `add_partition` (synchronous) records only
+/// this thread's hashes — deterministic under parallel test runs.
+#[test]
+fn one_murmur3_per_partition_key() {
+    use crate::util::cassandra_murmur3::{murmur3_call_count, reset_murmur3_call_count};
+
+    reset_murmur3_call_count();
+    let mut w = PartitionsTrieWriter::new();
+    for i in 0u64..64 {
+        let mut k = vec![0u8; 16];
+        k[0..8].copy_from_slice(&i.to_be_bytes());
+        w.add_partition(&k, i);
+    }
+    assert_eq!(
+        murmur3_call_count(),
+        64,
+        "expected 1 murmur3 per key (got {}); pre-#1681 this was 128 (2N)",
+        murmur3_call_count()
+    );
 }
 
 #[test]

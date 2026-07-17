@@ -69,7 +69,8 @@ mod traversal;
 // Public surface — re-exported unchanged so `bti::parser::X` paths keep working.
 pub use encoding::{encode_clustering_bound_oss50, encode_clustering_bound_oss50_with_order};
 pub use partitions::{
-    decode_bti_partition_payload, encode_partition_key_for_bti_trie, lookup_partition_in_bti_file,
+    decode_bti_partition_payload, encode_bti_trie_key_from_token,
+    encode_partition_key_for_bti_trie, lookup_partition_in_bti_file,
     lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation, FLAG_HAS_HASH_BYTE,
 };
 // Crate-internal uncounted encoder (issue #2058): the successor walk encodes the SAME

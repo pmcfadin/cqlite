@@ -20,6 +20,31 @@ const H2_ADD: u64 = 0x3849_5ab5;
 const FMIX_C1: u64 = 0xff51_afd7_ed55_8ccd;
 const FMIX_C2: u64 = 0xc4ce_b9fe_1a85_ec53;
 
+// Gated to the exact condition of the ONLY caller (the `partitions_writer`
+// counter test, which lives behind `write-support`). Without the feature gate
+// these test-only helpers compile but go unused under a `--no-default-features`
+// (write-support off) test build, tripping the `-D warnings` dead_code error
+// the minimal-build gate component enforces (issue #1681).
+#[cfg(all(test, feature = "write-support"))]
+thread_local! {
+    /// Per-thread count of [`cassandra_murmur3_x64_128`] invocations (issue #1681).
+    /// Thread-local (not a global atomic) so a counter test is unaffected by other
+    /// tests hashing on other threads in the same process.
+    static MURMUR3_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the current thread's Murmur3 call counter to zero (test-only, #1681).
+#[cfg(all(test, feature = "write-support"))]
+pub(crate) fn reset_murmur3_call_count() {
+    MURMUR3_CALLS.with(|c| c.set(0));
+}
+
+/// Read the current thread's Murmur3 call count (test-only, #1681).
+#[cfg(all(test, feature = "write-support"))]
+pub(crate) fn murmur3_call_count() -> u64 {
+    MURMUR3_CALLS.with(|c| c.get())
+}
+
 /// Compute Cassandra's `MurmurHash.hash3_x64_128` with seed 0.
 ///
 /// Returns `(h1, h2)` matching `result[0]` and `result[1]` from the Java implementation.
@@ -27,6 +52,15 @@ const FMIX_C2: u64 = 0xc4ce_b9fe_1a85_ec53;
 /// This differs from standard Murmur3 in that tail bytes are sign-extended
 /// (Java's `byte` is signed), not zero-extended.
 pub fn cassandra_murmur3_x64_128(data: &[u8]) -> (i64, i64) {
+    // Work counter (issue #1681, S4): count every 128-bit Murmur3 pass so a test
+    // can prove the write path hashes each partition key exactly ONCE (not twice:
+    // token + filter hash). Thread-local so it is immune to other test threads
+    // hashing concurrently in the same process; compiled out entirely in release.
+    // Gated to match the counter's declaration (and its only caller under
+    // `write-support`) so a write-support-off test build has no dangling ref.
+    #[cfg(all(test, feature = "write-support"))]
+    MURMUR3_CALLS.with(|c| c.set(c.get().wrapping_add(1)));
+
     let mut h1: u64 = 0;
     let mut h2: u64 = 0;
 
@@ -113,6 +147,18 @@ pub fn cassandra_murmur3_x64_128(data: &[u8]) -> (i64, i64) {
 /// maps `i64::MIN` to `i64::MAX` (Cassandra excludes the minimum token value).
 pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
     let (h1, _) = cassandra_murmur3_x64_128(data);
+    cassandra_murmur3_normalize_token(h1)
+}
+
+/// Apply Cassandra's `Murmur3Partitioner` token normalization to the first
+/// 64-bit word (`h1`) of a 128-bit hash: `i64::MIN` maps to `i64::MAX` (the
+/// minimum token value is excluded from the ring).
+///
+/// Exposed so a caller that already holds `(h1, h2)` from a single
+/// [`cassandra_murmur3_x64_128`] pass can derive the token without re-hashing
+/// the key (issue #1681). `cassandra_murmur3_token(data)` is exactly
+/// `cassandra_murmur3_normalize_token(cassandra_murmur3_x64_128(data).0)`.
+pub fn cassandra_murmur3_normalize_token(h1: i64) -> i64 {
     normalize(h1)
 }
 
