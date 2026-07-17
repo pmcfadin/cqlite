@@ -11,7 +11,7 @@ use super::maintenance::{ActiveMerge, MaintenanceReport};
 use super::{merge, KWayMerger, WriteEngine};
 use crate::error::{Error, Result};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // Test-only crash-injection seam (issue #1393).
 //
@@ -207,17 +207,33 @@ impl WriteEngine {
         // merger below so the two make IDENTICAL purge decisions — a tombstone
         // purged in the write pass is also purged here and never counted as a
         // surviving cell. Reuses the exact helper `compact_sstables` uses.
+        //
+        // BUDGET HONESTY (issue #1667): this pre-pass is a FULL, unbudgeted merge
+        // scan over every input — it is NOT incremental and always runs to
+        // completion before the first partition is emitted. `maintenance_step`'s
+        // time budget therefore cannot bound it. We MEASURE its wall-clock cost
+        // here and surface it (via `ActiveMerge::pre_pass_time` →
+        // `MaintenanceReport::pre_pass_time`) so the caller can SEE the cost, and
+        // `maintenance_step_inner` short-circuits the partition loop when this
+        // pre-pass alone already consumed the budget (so it cannot silently
+        // precede an unbudgeted partition loop). Making the pre-pass itself
+        // incremental is deferred to Q5 (streaming `step()`); this issue is
+        // accounting + docs only and does NOT change what is compacted.
+        let mut pre_pass_time = Duration::ZERO;
         let retained_dropped = if effective_schema.dropped_columns.is_empty() {
             std::collections::HashSet::new()
         } else {
-            merge::compute_surviving_dropped_columns(
+            let pre_pass_start = Instant::now();
+            let surviving = merge::compute_surviving_dropped_columns(
                 input_paths.clone(),
                 &effective_schema,
                 gc_before_secs,
                 Some(now_secs),
                 purge_safe,
                 max_purgeable_timestamp,
-            )?
+            )?;
+            pre_pass_time = pre_pass_start.elapsed();
+            surviving
         };
         // `write_schema` inherits the #929 UDT normalization from the already-
         // normalized `effective_schema` (for_compaction_output clones columns).
@@ -333,6 +349,11 @@ impl WriteEngine {
             // Issue #2299: stream rows straight to the writer session (no
             // whole-partition buffer) when no input carries any deletion.
             stream_rows_directly: no_deletions_in_any_input,
+            // Issue #1667: wall-clock cost of the (unbudgeted, one-shot)
+            // dropped-column survivor pre-pass above. `Duration::ZERO` when the
+            // table has no dropped columns (the pre-pass was skipped). Surfaced
+            // in the first step's `MaintenanceReport::pre_pass_time`.
+            pre_pass_time,
         });
 
         Ok(())

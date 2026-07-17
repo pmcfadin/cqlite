@@ -347,7 +347,7 @@ pub enum Commands {
     },
     /// Run background maintenance (compaction) - requires --writable mode
     #[command(
-        long_about = "Perform incremental background compaction work within a time budget. Call repeatedly from a background task for continuous compaction. Example: cqlite maintenance --budget-ms 100 --writable --write-dir /path/to/data"
+        long_about = "Perform incremental background compaction work within a time budget. The budget is a TARGET checked at cluster-group boundaries, not a hard cap: a step can overshoot honestly (an indivisible cluster group, the per-partition write, or a table's one-shot dropped-column survivor pre-pass each run to completion once started). Call repeatedly from a background task for continuous compaction — a step left pending resumes on the next call. Mid-partition (hard) bounding lands with Q5's streaming step(). Example: cqlite maintenance --budget-ms 100 --writable --write-dir /path/to/data"
     )]
     Maintenance(MaintenanceArgs),
     /// Display write engine statistics - requires --writable mode
@@ -490,7 +490,10 @@ pub enum BenchCommands {
 // Arguments for the maintenance subcommand (Issue #392)
 #[derive(Args, Debug, Clone)]
 pub struct MaintenanceArgs {
-    /// Time budget in milliseconds for this maintenance step
+    /// Time budget (ms) for this maintenance step. A TARGET checked at
+    /// cluster-group boundaries, not a hard cap — a step may overshoot honestly
+    /// (issue #1667); call repeatedly to drain pending work. Hard mid-partition
+    /// bounding is deferred to Q5.
     #[arg(long, default_value = "100")]
     pub budget_ms: u64,
 }

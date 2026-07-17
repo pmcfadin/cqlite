@@ -12,7 +12,13 @@
 //! absolute-offset / mid-partition-flush changes) grew it further. Splitting it
 //! was judged out of scope for that fix (owner-approved,
 //! `CQLITE_ALLOW_FILE_GROWTH=1`); a follow-up split by responsibility remains
-//! tracked under #1116.
+//! tracked under #1116. Issue #1667 (budget-honesty accounting) added ~100 more
+//! lines of production+rustdoc here (the `MaintenanceReport::pre_pass_time` /
+//! `pre_pass_short_circuited` fields, `ActiveMerge::pre_pass_time`, the honest
+//! budget-contract rustdoc, and the pre-pass short-circuit); its TDD tests were
+//! placed OUT of this file in `tests/issue_1667_budget_honesty.rs` to keep the
+//! growth minimal, and it likewise runs under `CQLITE_ALLOW_FILE_GROWTH=1`
+//! pending the #1116 split.
 
 use super::merge;
 // `Mutation` is named in production again (issue #1383 fix): a partition's
@@ -170,6 +176,31 @@ pub struct MaintenanceReport {
     /// so it cannot distinguish them) — roborev job 1723. `0` when every partition
     /// used the buffered path.
     pub direct_stream_partitions: u64,
+    /// Wall-clock time spent in the dropped-column survivor pre-pass during THIS
+    /// step (issue #1667, budget honesty). Non-zero only on the step that STARTS
+    /// a merge for a table with dropped columns — the pre-pass
+    /// (`compute_surviving_dropped_columns`) is a FULL, one-shot merge scan over
+    /// every input that runs before any partition is emitted and is NOT bounded
+    /// by `budget` (making it incremental is deferred to Q5). It is nonetheless
+    /// counted inside `time_spent` (the budget `Instant` starts before
+    /// `start_merge`), and when the pre-pass alone exhausts the budget the
+    /// partition loop is short-circuited for this step so the pre-pass cannot
+    /// silently precede an unbudgeted partition loop. `Duration::ZERO` on every
+    /// step that does not run the pre-pass (no dropped columns, or a step that
+    /// resumes an already-started merge). Always `<= time_spent`.
+    pub pre_pass_time: Duration,
+    /// `true` when this step OPENED a fresh merge whose dropped-column survivor
+    /// pre-pass ([`pre_pass_time`]) ALONE met or exceeded the budget, so the
+    /// partition loop was SKIPPED for this step and the merge left pending
+    /// (issue #1667). This makes the budget-honesty guarantee observable: an
+    /// over-budget pre-pass can never silently precede a partition pass in the
+    /// same step. `false` on every step that ran (or resumed) the partition
+    /// loop, on a table with no dropped columns (no pre-pass runs, so #1668's
+    /// mid-partition pause still governs a tiny-budget first step), and on a
+    /// freshly-started merge whose pre-pass fit inside the budget.
+    ///
+    /// [`pre_pass_time`]: Self::pre_pass_time
+    pub pre_pass_short_circuited: bool,
 }
 
 /// Active merge state for incremental compaction (M5.2, Issue #384)
@@ -268,6 +299,17 @@ pub(crate) struct ActiveMerge {
     /// no range tombstones falls back to buffering (still correct, just not
     /// bounded), which is acceptable.
     pub(crate) stream_rows_directly: bool,
+    /// Issue #1667 (budget honesty): wall-clock cost of the dropped-column
+    /// survivor pre-pass (`compute_surviving_dropped_columns`) that ran inside
+    /// `start_merge` when this merge was created. `Duration::ZERO` when the
+    /// table declares no dropped columns (the pre-pass was skipped). The
+    /// pre-pass is a FULL, one-shot, non-incremental merge scan over every
+    /// input, so `maintenance_step`'s budget cannot bound it; recording its
+    /// cost here lets the first step surface it in
+    /// `MaintenanceReport::pre_pass_time` and lets `maintenance_step_inner`
+    /// short-circuit the partition loop when the pre-pass alone already
+    /// exhausted the budget. Read exactly once (into that first step's report).
+    pub(crate) pre_pass_time: Duration,
 }
 
 impl WriteEngine {
@@ -341,14 +383,47 @@ impl WriteEngine {
     ///   never re-computes or loses a row, and the writer always still
     ///   receives one partition's mutations in one `write_partition` call.
     ///
-    /// ## Budget Enforcement
+    /// ## Budget Enforcement — the HONEST contract (issue #1667)
     ///
-    /// The budget is honored within approximately 10% tolerance, checked
-    /// BETWEEN CLUSTER GROUPS (issue #1668 stage 4) rather than only between
-    /// whole partitions — a fat partition can now yield control back to the
-    /// budget check partway through its own drain instead of running to
-    /// completion regardless of elapsed time. The tolerance ensures forward
-    /// progress on each call while remaining responsive to time constraints.
+    /// The budget is a **target checked at boundaries, not a hard cap**. It is
+    /// honored within approximately 10% tolerance, checked BETWEEN CLUSTER
+    /// GROUPS (issue #1668 stage 4) rather than only between whole partitions —
+    /// a fat partition can yield control back to the budget check partway
+    /// through its own drain instead of running to completion regardless of
+    /// elapsed time. The tolerance ensures forward progress on each call while
+    /// remaining responsive to time constraints.
+    ///
+    /// Because the check fires only at those boundaries, a step can OVERSHOOT
+    /// the budget honestly (`time_spent` reports the real elapsed time, never a
+    /// value clamped to `budget`). Three residual sources of overshoot are NOT
+    /// bounded by this issue and each is deferred to Q5's fully-streaming
+    /// `step()`:
+    ///
+    /// 1. **A single indivisible cluster group.** The budget is checked between
+    ///    cluster groups, so one very large cluster group (e.g. a single wide
+    ///    clustering row, or an unclustered partition's sole row) runs to
+    ///    completion once started.
+    /// 2. **The per-partition WRITE.** On the buffered path the whole partition
+    ///    is written in one `PartitionEnd` pass; that write is not sub-divided
+    ///    by the budget.
+    /// 3. **The dropped-column survivor pre-pass** (issue #1667). When the table
+    ///    has dropped columns, `start_merge` runs a FULL, one-shot merge scan
+    ///    (`compute_surviving_dropped_columns`) over every input BEFORE the
+    ///    first partition is emitted. It is not incremental, so it cannot be
+    ///    bounded by `budget`. This issue makes it HONEST rather than silent:
+    ///    its cost is measured, counted inside `time_spent`, reported distinctly
+    ///    as [`MaintenanceReport::pre_pass_time`], and — critically — when the
+    ///    pre-pass alone already exhausts the budget, the partition loop is
+    ///    SHORT-CIRCUITED for that step (the merge stays pending and resumes on
+    ///    the next call). The pre-pass can therefore never silently precede an
+    ///    unbudgeted partition loop within the same step. Making the pre-pass
+    ///    itself incremental is Q5-adjacent follow-up work, explicitly out of
+    ///    scope here.
+    ///
+    /// This issue (#1667) is documentation + accounting only: it does NOT change
+    /// WHAT is compacted, so compaction output stays byte-identical (#921).
+    /// Mid-partition bounding of sources 1 and 2 lands with Q5's streaming
+    /// `step()` and is NOT claimed to be fixed here.
     ///
     /// # Arguments
     ///
@@ -429,6 +504,8 @@ impl WriteEngine {
             pending_compaction: false,
             dropped_whole: Vec::new(),
             direct_stream_partitions: 0,
+            pre_pass_time: Duration::ZERO,
+            pre_pass_short_circuited: false,
         };
 
         // If no merge policy is set, no maintenance work to do
@@ -510,6 +587,15 @@ impl WriteEngine {
                 // `start_merge` can compute the fully-expired drop-set (issue #1388)
                 // with the correct overlap gate.
                 self.start_merge(selected, purge_safe, max_purgeable_timestamp, non_included)?;
+                // Issue #1667: surface the dropped-column survivor pre-pass cost
+                // that `start_merge` just measured. Non-zero only when the table
+                // has dropped columns; `time_spent` already includes it because
+                // `start` was taken before `start_merge`. Set ONLY on the step
+                // that opens a merge, so a non-zero `report.pre_pass_time`
+                // uniquely identifies "a pre-pass ran this step".
+                if let Some(m) = &self.active_merge {
+                    report.pre_pass_time = m.pre_pass_time;
+                }
             } else {
                 // No work selected by policy
                 report.time_spent = start.elapsed();
@@ -538,6 +624,32 @@ impl WriteEngine {
         // partition yields control mid-drain even though its WRITE is
         // deferred to the end.
         let budget_tolerance = budget.mul_f32(1.1); // 10% tolerance
+
+        // Budget-honesty short-circuit (issue #1667). The dropped-column
+        // survivor pre-pass is a FULL, one-shot merge scan run inside
+        // `start_merge` before any partition is emitted; it is unbudgeted and
+        // counted in both `report.pre_pass_time` and `start.elapsed()`. When the
+        // PRE-PASS ALONE already met or exceeded the budget, return NOW without
+        // entering the partition loop, so the pre-pass can never silently precede
+        // an (also-over-budget) partition pass in the same step. The merge is
+        // left pending and resumes on the next call — where `pre_pass_time` is
+        // zero (no pre-pass) and the normal "at least one cluster group per
+        // call" floor governs — so this never starves forward progress, and it
+        // changes only WHEN work happens, never WHAT is compacted (output stays
+        // byte-identical, #921).
+        //
+        // Gated on the PRE-PASS time specifically (not total `start_merge`
+        // setup): a table with NO dropped columns has `pre_pass_time == ZERO`
+        // and never short-circuits, preserving #1668 stage 4's guarantee that a
+        // tiny-budget first step still enters the loop and pauses mid-partition.
+        // Making the pre-pass itself incremental is deferred to Q5.
+        if report.pre_pass_time > Duration::ZERO && report.pre_pass_time >= budget_tolerance {
+            report.pre_pass_short_circuited = true;
+            report.pending_compaction = self.active_merge.is_some();
+            report.time_spent = start.elapsed();
+            return Ok(report);
+        }
+
         let mut partitions_processed = 0u64;
 
         /// Outcome of draining one partition's cluster groups, bounded by
@@ -1300,6 +1412,8 @@ mod tests {
             pending_compaction: true,
             dropped_whole: Vec::new(),
             direct_stream_partitions: 0,
+            pre_pass_time: Duration::ZERO,
+            pre_pass_short_circuited: false,
         };
 
         assert_eq!(report.time_spent.as_millis(), 250);
