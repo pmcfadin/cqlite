@@ -152,27 +152,40 @@ no work is ready (near a release it is *meant* to drain to zero), not a cue to d
 
 Before working an item, a session claims it so no two sessions — **including two sessions authenticated
 as the same GitHub user on different machines** — work the same item. Because assignee `@me` is identical
-for the same user on two machines, the assignee is *not* the lock; the deciding lock is the
-**`issue-<N>-<slug>` branch pushed to origin** (server-side, per-machine-distinct, the natural 1:1:1:1
-artifact).
+for the same user on two machines, the assignee is *not* the lock; the deciding lock is the **slugless
+fixed-name ref `refs/claims/issue-<N>`**, acquired through `scripts/flow/claim.sh` (issue #2665).
+`claim.sh claim <N>` pushes a **unique root commit** to that fixed-name ref; git arbitrates the ref
+update server-side, so the winner is decided purely by the push result — regardless of slug or base.
+This closes two field hazards the earlier slug-named branch lock left open: two sessions on **different
+slugs** (`issue-<N>-a` vs `issue-<N>-b`) both succeeded (the #1632 slug pair), and two sessions branching
+the **same `origin/main` tip** pushed an identical SHA, so git reported "up-to-date" to the loser and
+both thought they won. The `issue-<N>-<slug>` branch survives only as **worktree/PR plumbing — never the
+lock**.
 
-1. **Eligibility** — the item is `Ready` AND has **no** existing `issue-<N>-*` branch on origin
-   (`git ls-remote --heads origin "issue-<N>-*"`).
-2. **Claim** — push the `issue-<N>-<slug>` branch to origin (the cross-machine lock), then set assignee
-   `@me` + `Status=In Progress` for board visibility. `flow-activate` pushes the branch immediately —
-   before any spec work — as the claim; oracle-driven issues claim in `flow-implement`.
-3. **Re-read** — confirm origin's branch is your commit (you won the race) and proceed only if you hold
-   it; otherwise back off and take the next eligible item.
+1. **Eligibility** — the item is `Ready` AND has **no** `refs/claims/issue-<N>` claim ref
+   (`bash scripts/flow/claim.sh status <N>`) and **no** legacy `issue-<N>-*` branch on origin (mixed-fleet
+   safety; older workers still branch-lock).
+2. **Claim** — `bash scripts/flow/claim.sh claim <N>` acquires the lock (`CLAIM HELD` exit 0 / `CLAIM LOST`
+   exit 2); only then create the worktree + branch and set assignee `@me` + `Status=In Progress` for board
+   visibility. `flow-activate` claims immediately — before any spec work; oracle-driven issues claim in
+   `flow-implement`.
+3. **Verify** — `claim.sh` re-reads the ref after the push and reports `CLAIM HELD` only if you hold it
+   (`claim.sh verify <N>` re-checks holder identity later); on `CLAIM LOST`, back off and take the next
+   eligible item.
 
-Another machine that finds an existing claim branch can `git fetch` it to **resume** that work instead of
-colliding. The claiming session also maintains a liveness **heartbeat** (`scripts/flow/claim-heartbeat.sh
-beat <N>` — a cheap origin git ref under `refs/heartbeats/<machine>`, never a GitHub API call — refreshed at
-claim time and on every stage transition: activate/implement/gate/PR). `flow-board` reaps **abandoned
-claims deterministically** (issue #2089): an `In Progress` item is reaped only when its heartbeat age
-exceeds the documented threshold (4h — the `claim-heartbeat.sh` header is the single source of truth) **AND**
-it has no open PR — reap = a traceable comment + assignee clear + `Status → Ready` + a claim-branch note
-(never deleting a branch that carries commits). This replaces the old "no recent commits" guess.
-`flow-finalize` releases the claim by deleting the origin branch and clearing the heartbeat on cleanup.
+Another machine that finds an existing claim can `git fetch` the branch to **resume** that work instead of
+colliding; a **reaped** claim is adopted via compare-and-swap — `claim.sh adopt <N> --expect <old-sha>`,
+which replaces the ref with force-with-lease so a resurrected original holder loses the lease and detects
+the loss immediately (fixes the #2467/#2499 two-writer race). The claiming session also maintains a
+liveness **heartbeat** (`scripts/flow/claim-heartbeat.sh beat <N>` — a cheap origin git ref under
+`refs/heartbeats/<machine>`, never a GitHub API call — refreshed at claim time and on every stage
+transition: activate/implement/gate/PR). `flow-board` reaps **abandoned claims deterministically** (issue
+#2089): an `In Progress` item is reaped only when its heartbeat age exceeds the documented threshold (4h —
+the `claim-heartbeat.sh` header is the single source of truth) **AND** it has no open PR — reap = a
+traceable comment + assignee clear + `Status → Ready` + an adopt-eligibility note on the claim ref (never
+deleting a branch that carries commits). This replaces the old "no recent commits" guess. `flow-finalize`
+releases the claim (`claim.sh release <N>`, which refuses under an open PR without `--force`) and clears
+the heartbeat on cleanup.
 
 For unattended/overnight runs a **worker supervisor** (`scripts/local/worker-supervisor.sh`, issue #2090)
 recycles one worker process per issue — the hard context bound is process exit: the worker rehydrates from
