@@ -84,7 +84,7 @@ fn is_complex_column_is_not_called_per_row_issue_1674() {
             .filter(|i| i % 3 != 0)
             .map(|i| CellOperation::Write {
                 column: format!("c_{i:02}"),
-                value: Value::Text("x".to_string()),
+                value: Value::text("x".to_string()),
             })
             .collect();
         let mutation = Mutation::new(table_id, pk, Some(ck), ops, 1_001_000, None);
