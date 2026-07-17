@@ -132,7 +132,7 @@ fn mutation(pk: i32, v: &str) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text(v.to_string()),
+            value: Value::text(v.to_string()),
         }],
         1_000_000 + pk as i64,
         None,

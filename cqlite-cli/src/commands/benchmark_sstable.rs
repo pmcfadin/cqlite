@@ -213,7 +213,7 @@ async fn benchmark_query_operation(
                             // `Marker` is reserved for a genuine null/row-tombstone.
                             let value = cqlite_core::types::ScanRow::Row(vec![(
                                 std::sync::Arc::from("data"),
-                                cqlite_core::Value::Text(format!("{:?}", entry.key)),
+                                cqlite_core::Value::text(format!("{:?}", entry.key)),
                             )]);
 
                             if parser.parse_entry(&key, &value).is_ok() {

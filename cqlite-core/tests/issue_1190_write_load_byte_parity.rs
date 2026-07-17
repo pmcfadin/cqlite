@@ -273,7 +273,7 @@ fn finished_mutations() -> Vec<Mutation> {
                 None,
                 vec![CellOperation::Write {
                     column: "name".into(),
-                    value: Value::Text(format!("name{i}")),
+                    value: Value::text(format!("name{i}")),
                 }],
                 T_WRITE,
                 None,
@@ -291,7 +291,7 @@ fn partition_boundary_mutations() -> Vec<Mutation> {
             Some(ClusteringKey::single("ck", Value::Integer(ck))),
             vec![CellOperation::Write {
                 column: "v".into(),
-                value: Value::Text(format!("v_1_{ck}")),
+                value: Value::text(format!("v_1_{ck}")),
             }],
             T_WRITE,
             None,
@@ -304,7 +304,7 @@ fn partition_boundary_mutations() -> Vec<Mutation> {
             Some(ClusteringKey::single("ck", Value::Integer(ck))),
             vec![CellOperation::Write {
                 column: "v".into(),
-                value: Value::Text(format!("v_2_{ck}")),
+                value: Value::text(format!("v_2_{ck}")),
             }],
             T_WRITE,
             None,

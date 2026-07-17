@@ -1343,7 +1343,7 @@ mod tests {
             RowData::Live {
                 cells: vec![CellData::new(
                     "region".to_string(),
-                    Value::Text("us-east".to_string()),
+                    Value::text("us-east".to_string()),
                     100,
                 )],
             },

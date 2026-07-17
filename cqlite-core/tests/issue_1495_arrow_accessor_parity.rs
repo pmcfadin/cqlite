@@ -112,7 +112,7 @@ fn wide_rows() -> Vec<QueryRow> {
             ("c_double", Value::Float(2.25)),
             ("c_text", Value::Text("hello".into())),
             ("c_text_opaque", Value::Text("opaque".into())),
-            ("c_blob", Value::Blob(vec![0xde, 0xad, 0xbe, 0xef])),
+            ("c_blob", Value::blob(vec![0xde, 0xad, 0xbe, 0xef])),
             ("c_ts", Value::Timestamp(1_700_000_000_000)),
             ("c_uuid_flat", Value::Uuid([1u8; 16])),
             ("c_date", Value::Date(19_000)),
@@ -124,7 +124,7 @@ fn wide_rows() -> Vec<QueryRow> {
                     unscaled: vec![0x30, 0x39], // 12345
                 },
             ),
-            ("c_varint", Value::Varint(vec![0x01, 0x00])), // 256
+            ("c_varint", Value::varint(vec![0x01, 0x00])), // 256
             (
                 "c_duration",
                 Value::Duration {
@@ -134,7 +134,7 @@ fn wide_rows() -> Vec<QueryRow> {
                 },
             ),
             ("c_uuid_fixed", Value::Uuid([2u8; 16])),
-            ("c_inet", Value::Inet(vec![127, 0, 0, 1])),
+            ("c_inet", Value::inet(vec![127, 0, 0, 1])),
             ("c_counter", Value::Counter(99)),
             (
                 "c_list_typed",
@@ -193,7 +193,7 @@ fn wide_rows() -> Vec<QueryRow> {
             ("c_int", Value::Integer(7)),
             ("c_bigint", Value::BigInt(-5)),
             ("c_text", Value::Text("world".into())),
-            ("c_blob", Value::Blob(vec![0x00])),
+            ("c_blob", Value::blob(vec![0x00])),
             ("c_list_typed", Value::List(vec![Value::Integer(9)])),
         ]),
     ]

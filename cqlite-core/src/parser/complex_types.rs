@@ -752,8 +752,8 @@ mod tests {
         assert_eq!(inferred.cql_type, CqlType::Int);
 
         let list_value = Value::List(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ]);
         let inferred = parser.infer_type_from_value(&list_value).unwrap();
         if let CqlType::List(inner) = inferred.cql_type {

@@ -385,11 +385,11 @@ fn person(first: Option<&str>, last: Option<&str>, age: Option<i32>) -> Value {
         fields: vec![
             UdtField {
                 name: "first_name".into(),
-                value: first.map(|s| Value::Text(s.into())),
+                value: first.map(Value::from),
             },
             UdtField {
                 name: "last_name".into(),
-                value: last.map(|s| Value::Text(s.into())),
+                value: last.map(Value::from),
             },
             UdtField {
                 name: "age".into(),
@@ -407,11 +407,11 @@ fn person_inner(first: &str, last: &str, age: i32) -> Value {
         fields: vec![
             UdtField {
                 name: "first_name".into(),
-                value: Some(Value::Text(first.into())),
+                value: Some(Value::text(first)),
             },
             UdtField {
                 name: "last_name".into(),
-                value: Some(Value::Text(last.into())),
+                value: Some(Value::text(last)),
             },
             UdtField {
                 name: "age".into(),
@@ -428,15 +428,15 @@ fn address_inner(street: &str, city: Option<&str>, zip: &str) -> Value {
         fields: vec![
             UdtField {
                 name: "street".into(),
-                value: Some(Value::Text(street.into())),
+                value: Some(Value::text(street)),
             },
             UdtField {
                 name: "city".into(),
-                value: city.map(|s| Value::Text(s.into())),
+                value: city.map(Value::from),
             },
             UdtField {
                 name: "zip".into(),
-                value: Some(Value::Text(zip.into())),
+                value: Some(Value::text(zip)),
             },
         ],
     }))
@@ -449,7 +449,7 @@ fn employee(name: &str, home: Value, level: i32) -> Value {
         fields: vec![
             UdtField {
                 name: "name".into(),
-                value: Some(Value::Text(name.into())),
+                value: Some(Value::text(name)),
             },
             UdtField {
                 name: "home".into(),
@@ -472,7 +472,7 @@ fn flist(ns: &[i32]) -> Value {
 fn fmap(kvs: &[(&str, i32)]) -> Value {
     Value::Frozen(Box::new(Value::Map(
         kvs.iter()
-            .map(|(k, v)| (Value::Text((*k).into()), Value::Integer(*v)))
+            .map(|(k, v)| (Value::text(*k), Value::Integer(*v)))
             .collect(),
     )))
 }
@@ -1234,7 +1234,7 @@ async fn collections_with_udts_compaction_parity() {
                 op(
                     "ma",
                     Value::Frozen(Box::new(Value::Map(vec![(
-                        Value::Text("home".into()),
+                        Value::text("home"),
                         address_inner("1 Navy Way", Some("Arlington"), "22201"),
                     )]))),
                 ),
@@ -1254,7 +1254,7 @@ async fn collections_with_udts_compaction_parity() {
                 op(
                     "ma",
                     Value::Frozen(Box::new(Value::Map(vec![(
-                        Value::Text("k".into()),
+                        Value::text("k"),
                         address_inner("old", Some("old"), "0"),
                     )]))),
                 ),
@@ -1279,7 +1279,7 @@ async fn collections_with_udts_compaction_parity() {
                 op(
                     "ma",
                     Value::Frozen(Box::new(Value::Map(vec![(
-                        Value::Text("office".into()),
+                        Value::text("office"),
                         address_inner("9 Apollo", Some("Hampton"), "23666"),
                     )]))),
                 ),
@@ -1303,7 +1303,7 @@ async fn collections_with_udts_compaction_parity() {
                 op(
                     "ma",
                     Value::Frozen(Box::new(Value::Map(vec![(
-                        Value::Text("h".into()),
+                        Value::text("h"),
                         address_inner("9 Apollo", Some("Hampton"), "23666"),
                     )]))),
                 ),

@@ -236,7 +236,7 @@ async fn test_data_single_partition_column_types() {
     let ops = vec![
         CellOperation::Write {
             column: "text_col".to_string(),
-            value: Value::Text("Hello, CQLite!".to_string()),
+            value: Value::text("Hello, CQLite!".to_string()),
         },
         CellOperation::Write {
             column: "int_col".to_string(),
@@ -302,7 +302,7 @@ async fn test_data_single_partition_null_values() {
     // Only write 'name', leave 'value' as null
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text("Only name".to_string()),
+        value: Value::text("Only name".to_string()),
     }];
     let mutation = Mutation::new(table_id, pk, None, ops, 1000000, None);
 

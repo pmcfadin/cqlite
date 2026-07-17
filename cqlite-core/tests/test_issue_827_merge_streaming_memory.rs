@@ -121,7 +121,7 @@ fn write_row(id: i32, timestamp: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "payload".to_string(),
-        value: Value::Text(payload_for(id)),
+        value: Value::text(payload_for(id)),
     }];
     Mutation::new(table_id, pk, None, ops, timestamp, None)
 }

@@ -147,7 +147,7 @@ async fn build_generations(root: &Path, n_gens: i32) {
             None,
             vec![CellOperation::Write {
                 column: "value".to_string(),
-                value: Value::Text(format!("v{gen}")),
+                value: Value::text(format!("v{gen}")),
             }],
             1_000 + gen as i64,
             None,
@@ -162,7 +162,7 @@ async fn build_generations(root: &Path, n_gens: i32) {
             None,
             vec![CellOperation::Write {
                 column: "value".to_string(),
-                value: Value::Text(format!("hot{gen}")),
+                value: Value::text(format!("hot{gen}")),
             }],
             2_000 + gen as i64,
             None,
@@ -212,7 +212,7 @@ fn ordered_rows(rows: &[cqlite_core::query::result::QueryRow]) -> Vec<(i32, Stri
             assert_eq!(b.len(), 4, "int partition key must be 4 bytes, got {b:?}");
             let id = i32::from_be_bytes([b[0], b[1], b[2], b[3]]);
             let value = match r.values.get("value") {
-                Some(Value::Text(s)) => s.clone(),
+                Some(Value::Text(s)) => String::from_utf8_lossy(s).into_owned(),
                 other => panic!("row id={id} missing text `value` column: {other:?}"),
             };
             (id, value)
@@ -362,7 +362,7 @@ async fn build_single_generation(root: &Path, n: i32) {
             None,
             vec![CellOperation::Write {
                 column: "value".to_string(),
-                value: Value::Text(format!("v{id}")),
+                value: Value::text(format!("v{id}")),
             }],
             1_000 + id as i64,
             None,

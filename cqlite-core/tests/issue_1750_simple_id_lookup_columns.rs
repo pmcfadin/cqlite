@@ -433,7 +433,7 @@ async fn schemaless_where_non_pk_col_eq_returns_the_matching_row() {
         return;
     };
     let name = match row.values.get("name") {
-        Some(Value::Text(s)) if !s.is_empty() => s.clone(),
+        Some(Value::Text(s)) if !s.is_empty() => String::from_utf8_lossy(s).into_owned(),
         _ => {
             eprintln!("Skipping: first row has no non-empty text `name`");
             return;

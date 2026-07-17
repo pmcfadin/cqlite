@@ -651,7 +651,9 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Text(s) => Ok(Some(s.as_str())),
+                        Value::Text(s) => std::str::from_utf8(s).map(Some).map_err(|e| {
+                            ArrowConvertError::InvalidValue(format!("invalid UTF-8 in text: {e}"))
+                        }),
                         Value::Null => Ok(None),
                         other => Err(ArrowConvertError::InvalidValue(format!(
                             "expected Text value in element, got {:?}",
@@ -671,7 +673,7 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Blob(b) => Ok(Some(b.as_slice())),
+                        Value::Blob(b) => Ok(Some(b.as_ref())),
                         Value::Null => Ok(None),
                         other => Err(ArrowConvertError::InvalidValue(format!(
                             "expected Blob value in element, got {:?}",
@@ -1542,7 +1544,9 @@ fn build_string_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, ArrowC
             .iter()
             .map(|cell| match unwrap_frozen_value(*cell) {
                 None | Some(Value::Null) => Ok(None),
-                Some(Value::Text(s)) => Ok(Some(s.as_str())),
+                Some(Value::Text(s)) => std::str::from_utf8(s).map(Some).map_err(|e| {
+                    ArrowConvertError::InvalidValue(format!("invalid UTF-8 in text: {e}"))
+                }),
                 Some(other) => Err(ArrowConvertError::InvalidValue(format!(
                     "column '{}': expected Text value, got {:?}",
                     col.name, other
@@ -1562,7 +1566,11 @@ fn build_string_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, ArrowC
         .map(|cell| match unwrap_frozen_value(*cell) {
             None => Ok(None),
             Some(Value::Null) => Ok(None),
-            Some(Value::Text(s)) => Ok(Some(Cow::Borrowed(s.as_str()))),
+            Some(Value::Text(s)) => std::str::from_utf8(s)
+                .map(|st| Some(Cow::Borrowed(st)))
+                .map_err(|e| {
+                    ArrowConvertError::InvalidValue(format!("invalid UTF-8 in text: {e}"))
+                }),
             Some(Value::Json(j)) => Ok(Some(Cow::Owned(j.to_string()))),
             Some(other) => Ok(Some(Cow::Owned(ValueFormatter::format_value(other)))),
         })
@@ -1578,7 +1586,7 @@ fn build_binary_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, ArrowC
         .iter()
         .map(|cell| match unwrap_frozen_value(*cell) {
             None => Ok(None),
-            Some(Value::Blob(b)) => Ok(Some(b.as_slice())),
+            Some(Value::Blob(b)) => Ok(Some(b.as_ref())),
             Some(Value::Null) => Ok(None),
             Some(other) => Err(ArrowConvertError::InvalidValue(format!(
                 "column '{}': expected Blob value, got {:?}",
@@ -1693,7 +1701,7 @@ fn build_decimal128_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, Ar
     Ok(Arc::new(builder.finish()))
 }
 
-/// Build an Arrow `Decimal128(38, 0)` array from `Value::Varint(Vec<u8>)`.
+/// Build an Arrow `Decimal128(38, 0)` array from `Value::varint(Vec<u8>)`.
 fn build_varint_as_decimal128_array(
     col: &ColumnInfo,
     cells: Cells,
@@ -1787,7 +1795,7 @@ fn build_uuid_fixed_binary_array(
     Ok(Arc::new(builder.finish()))
 }
 
-/// Build an Arrow `Utf8` array from `Value::Inet(Vec<u8>)`.
+/// Build an Arrow `Utf8` array from `Value::inet(Vec<u8>)`.
 fn build_inet_utf8_array(col: &ColumnInfo, cells: Cells) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<String>> = cells
         .iter()
@@ -2239,7 +2247,7 @@ mod tests {
     }
 
     /// (9d) Frozen-wrapped valid values must NOT be rejected: `frozen<text>`
-    /// with `Value::Frozen(Value::Text(..))` builds, and a high-fidelity
+    /// with `Value::Frozen(Value::text(..))` builds, and a high-fidelity
     /// `frozen<date>` with `Value::Frozen(Value::Date(..))` builds.
     #[test]
     fn frozen_wrapped_scalar_values_build_ok() {
@@ -2413,7 +2421,7 @@ mod tests {
     fn typed_blob_builder_over_i32_max_fails_closed_without_2gib_clone() {
         const CHUNK: usize = 16 * 1024 * 1024; // 16 MiB
         const N: usize = 128; // 128 * 16 MiB = i32::MAX + 1
-        let big = Value::Blob(vec![0u8; CHUNK]);
+        let big = Value::blob(vec![0u8; CHUNK]);
         let refs: Vec<Option<&Value>> = (0..N).map(|_| Some(&big)).collect();
         let err = super::build_typed_value_array(&CqlType::Blob, &refs);
         assert!(
@@ -2430,7 +2438,7 @@ mod tests {
     fn typed_text_builder_over_i32_max_fails_closed_without_2gib_clone() {
         const CHUNK: usize = 16 * 1024 * 1024; // 16 MiB
         const N: usize = 128; // 128 * 16 MiB = i32::MAX + 1
-        let big = Value::Text("a".repeat(CHUNK));
+        let big = Value::text("a".repeat(CHUNK));
         let refs: Vec<Option<&Value>> = (0..N).map(|_| Some(&big)).collect();
         let err = super::build_typed_value_array(&CqlType::Text, &refs);
         assert!(
@@ -2549,7 +2557,7 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
 
         let blob_cols = vec![col("b", DataType::Blob, Some(CqlType::Blob))];
-        let blob_rows = vec![row_one("b", Value::Blob(vec![1, 2, 3, 4]))];
+        let blob_rows = vec![row_one("b", Value::blob(vec![1, 2, 3, 4]))];
         let batch = rows_to_record_batch(&blob_cols, &blob_rows).expect("blob must build");
         assert_eq!(batch.num_rows(), 1);
     }

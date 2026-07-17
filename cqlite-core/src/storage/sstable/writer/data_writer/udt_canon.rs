@@ -822,7 +822,7 @@ mod tests {
              66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type)))",
             p = MARSHAL_PREFIX
         );
-        let blob = Value::Blob(vec![0, 0, 0, 1, 0, 0, 0, 3, 65, 100, 97]);
+        let blob = Value::blob(vec![0, 0, 0, 1, 0, 0, 0, 3, 65, 100, 97]);
         let canon = canonicalize_udt_value(&list_marshal, &blob).unwrap();
         assert_eq!(canon.as_ref(), &blob, "opaque blob must be byte-identical");
     }
@@ -1068,7 +1068,7 @@ mod tests {
             keyspace: KS.into(),
             fields: vec![UdtField {
                 name: "first_name".into(),
-                value: Some(Value::Text(first.into())),
+                value: Some(Value::text(first)),
             }],
         }))
     }
@@ -1093,7 +1093,7 @@ mod tests {
         let keys: Vec<&str> = entries
             .iter()
             .map(|(k, _)| match k {
-                Value::Text(s) => s.as_str(),
+                Value::Text(s) => std::str::from_utf8(s).unwrap_or_default(),
                 other => panic!("expected text key, got {other:?}"),
             })
             .collect();
@@ -1144,7 +1144,7 @@ mod tests {
         let firsts: Vec<String> = items
             .iter()
             .map(|p| match declared_order(p).into_iter().next() {
-                Some((_, Some(Value::Text(s)))) => s,
+                Some((_, Some(Value::Text(s)))) => String::from_utf8_lossy(&s).into_owned(),
                 other => panic!("unexpected first field: {other:?}"),
             })
             .collect();

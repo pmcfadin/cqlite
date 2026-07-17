@@ -76,11 +76,11 @@ impl CollectionCompatibilityTester {
 
         // Test 2: String List (common in user data)
         let string_list = Value::List(vec![
-            Value::Text("apple".to_string()),
-            Value::Text("banana".to_string()),
-            Value::Text("cherry".to_string()),
-            Value::Text("date".to_string()),
-            Value::Text("elderberry".to_string()),
+            Value::text("apple".to_string()),
+            Value::text("banana".to_string()),
+            Value::text("cherry".to_string()),
+            Value::text("date".to_string()),
+            Value::text("elderberry".to_string()),
         ]);
         self.test_collection_roundtrip("String List", string_list, CqlTypeId::List)?;
 
@@ -125,10 +125,10 @@ impl CollectionCompatibilityTester {
 
         // Test 2: String Set (tags, categories)
         let string_set = Value::Set(vec![
-            Value::Text("technology".to_string()),
-            Value::Text("programming".to_string()),
-            Value::Text("database".to_string()),
-            Value::Text("cassandra".to_string()),
+            Value::text("technology".to_string()),
+            Value::text("programming".to_string()),
+            Value::text("database".to_string()),
+            Value::text("cassandra".to_string()),
         ]);
         self.test_collection_roundtrip("String Set", string_set, CqlTypeId::Set)?;
 
@@ -144,10 +144,10 @@ impl CollectionCompatibilityTester {
 
         // Test 4: Set with duplicate handling (should be processed correctly)
         let duplicate_test_data = vec![
-            Value::Text("apple".to_string()),
-            Value::Text("banana".to_string()),
-            Value::Text("apple".to_string()), // Duplicate
-            Value::Text("cherry".to_string()),
+            Value::text("apple".to_string()),
+            Value::text("banana".to_string()),
+            Value::text("apple".to_string()), // Duplicate
+            Value::text("cherry".to_string()),
         ];
 
         // Manually create binary data with duplicates to test parser behavior
@@ -158,7 +158,7 @@ impl CollectionCompatibilityTester {
         for item in &duplicate_test_data {
             if let Value::Text(s) = item {
                 test_data.extend_from_slice(&encode_vint(s.len() as i64));
-                test_data.extend_from_slice(s.as_bytes());
+                test_data.extend_from_slice(s.as_ref());
             }
         }
 
@@ -201,34 +201,34 @@ impl CollectionCompatibilityTester {
 
         // Test 2: String to Integer Map (most common pattern)
         let string_int_map = Value::Map(vec![
-            (Value::Text("count".to_string()), Value::Integer(42)),
-            (Value::Text("total".to_string()), Value::Integer(1000)),
-            (Value::Text("average".to_string()), Value::Integer(24)),
+            (Value::text("count".to_string()), Value::Integer(42)),
+            (Value::text("total".to_string()), Value::Integer(1000)),
+            (Value::text("average".to_string()), Value::Integer(24)),
         ]);
         self.test_collection_roundtrip("String-to-Int Map", string_int_map, CqlTypeId::Map)?;
 
         // Test 3: String to String Map (metadata, configs)
         let string_string_map = Value::Map(vec![
             (
-                Value::Text("version".to_string()),
-                Value::Text("1.0.0".to_string()),
+                Value::text("version".to_string()),
+                Value::text("1.0.0".to_string()),
             ),
             (
-                Value::Text("environment".to_string()),
-                Value::Text("production".to_string()),
+                Value::text("environment".to_string()),
+                Value::text("production".to_string()),
             ),
             (
-                Value::Text("region".to_string()),
-                Value::Text("us-east-1".to_string()),
+                Value::text("region".to_string()),
+                Value::text("us-east-1".to_string()),
             ),
         ]);
         self.test_collection_roundtrip("String-to-String Map", string_string_map, CqlTypeId::Map)?;
 
         // Test 4: Integer to String Map (ID mappings)
         let int_string_map = Value::Map(vec![
-            (Value::Integer(1), Value::Text("admin".to_string())),
-            (Value::Integer(2), Value::Text("user".to_string())),
-            (Value::Integer(3), Value::Text("guest".to_string())),
+            (Value::Integer(1), Value::text("admin".to_string())),
+            (Value::Integer(2), Value::text("user".to_string())),
+            (Value::Integer(3), Value::text("guest".to_string())),
         ]);
         self.test_collection_roundtrip("Int-to-String Map", int_string_map, CqlTypeId::Map)?;
 
@@ -236,11 +236,11 @@ impl CollectionCompatibilityTester {
         let uuid_text_map = Value::Map(vec![
             (
                 Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
-                Value::Text("John Doe".to_string()),
+                Value::text("John Doe".to_string()),
             ),
             (
                 Value::Uuid([16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]),
-                Value::Text("Jane Smith".to_string()),
+                Value::text("Jane Smith".to_string()),
             ),
         ]);
         self.test_collection_roundtrip("UUID-to-Text Map", uuid_text_map, CqlTypeId::Map)?;
@@ -248,7 +248,7 @@ impl CollectionCompatibilityTester {
         // Test 6: Large Map (performance test)
         let large_map = Value::Map(
             (0..100)
-                .map(|i| (Value::Text(format!("key_{}", i)), Value::Integer(i * 10)))
+                .map(|i| (Value::text(format!("key_{}", i)), Value::Integer(i * 10)))
                 .collect(),
         );
         self.test_collection_roundtrip("Large Map (100 entries)", large_map, CqlTypeId::Map)?;
@@ -266,7 +266,7 @@ impl CollectionCompatibilityTester {
         // Test 2: Mixed basic types (common in analytics)
         let mixed_tuple = Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
             Value::Float(3.14159),
             Value::BigInt(1640995200000000),
@@ -288,15 +288,15 @@ impl CollectionCompatibilityTester {
         let event_tuple = Value::Tuple(vec![
             Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             Value::Timestamp(1640995200000000), // 2022-01-01
-            Value::Text("user_login".to_string()),
+            Value::text("user_login".to_string()),
             Value::Integer(200), // HTTP status
         ]);
         self.test_collection_roundtrip("Event Tuple", event_tuple, CqlTypeId::Tuple)?;
 
         // Test 5: Tuple with Binary Data
         let binary_tuple = Value::Tuple(vec![
-            Value::Text("image_metadata".to_string()),
-            Value::Blob(vec![0xFF, 0xD8, 0xFF, 0xE0]), // JPEG header
+            Value::text("image_metadata".to_string()),
+            Value::blob(vec![0xFF, 0xD8, 0xFF, 0xE0]), // JPEG header
             Value::Integer(1920),                      // width
             Value::Integer(1080),                      // height
         ]);
@@ -313,17 +313,17 @@ impl CollectionCompatibilityTester {
         let list_of_maps = Value::List(vec![
             Value::Map(vec![
                 (
-                    Value::Text("name".to_string()),
-                    Value::Text("John".to_string()),
+                    Value::text("name".to_string()),
+                    Value::text("John".to_string()),
                 ),
-                (Value::Text("age".to_string()), Value::Integer(30)),
+                (Value::text("age".to_string()), Value::Integer(30)),
             ]),
             Value::Map(vec![
                 (
-                    Value::Text("name".to_string()),
-                    Value::Text("Jane".to_string()),
+                    Value::text("name".to_string()),
+                    Value::text("Jane".to_string()),
                 ),
-                (Value::Text("age".to_string()), Value::Integer(25)),
+                (Value::text("age".to_string()), Value::Integer(25)),
             ]),
         ]);
         self.test_collection_roundtrip("List of Maps", list_of_maps, CqlTypeId::List)?;
@@ -331,18 +331,18 @@ impl CollectionCompatibilityTester {
         // Test 2: Map with List values (tags per category)
         let map_of_lists = Value::Map(vec![
             (
-                Value::Text("programming".to_string()),
+                Value::text("programming".to_string()),
                 Value::List(vec![
-                    Value::Text("rust".to_string()),
-                    Value::Text("python".to_string()),
-                    Value::Text("javascript".to_string()),
+                    Value::text("rust".to_string()),
+                    Value::text("python".to_string()),
+                    Value::text("javascript".to_string()),
                 ]),
             ),
             (
-                Value::Text("databases".to_string()),
+                Value::text("databases".to_string()),
                 Value::List(vec![
-                    Value::Text("cassandra".to_string()),
-                    Value::Text("postgresql".to_string()),
+                    Value::text("cassandra".to_string()),
+                    Value::text("postgresql".to_string()),
                 ]),
             ),
         ]);
@@ -350,20 +350,20 @@ impl CollectionCompatibilityTester {
 
         // Test 3: Tuple with nested collections
         let nested_tuple = Value::Tuple(vec![
-            Value::Text("user_data".to_string()),
+            Value::text("user_data".to_string()),
             Value::Map(vec![
                 (
-                    Value::Text("preferences".to_string()),
-                    Value::Text("dark_mode".to_string()),
+                    Value::text("preferences".to_string()),
+                    Value::text("dark_mode".to_string()),
                 ),
                 (
-                    Value::Text("language".to_string()),
-                    Value::Text("en".to_string()),
+                    Value::text("language".to_string()),
+                    Value::text("en".to_string()),
                 ),
             ]),
             Value::List(vec![
-                Value::Text("admin".to_string()),
-                Value::Text("user".to_string()),
+                Value::text("admin".to_string()),
+                Value::text("user".to_string()),
             ]),
         ]);
         self.test_collection_roundtrip("Nested Collections Tuple", nested_tuple, CqlTypeId::Tuple)?;
@@ -381,9 +381,9 @@ impl CollectionCompatibilityTester {
 
         // Test collections with null-equivalent empty strings
         let empty_string_list = Value::List(vec![
-            Value::Text("".to_string()),
-            Value::Text("non-empty".to_string()),
-            Value::Text("".to_string()),
+            Value::text("".to_string()),
+            Value::text("non-empty".to_string()),
+            Value::text("".to_string()),
         ]);
         self.test_collection_roundtrip("Empty String List", empty_string_list, CqlTypeId::List)?;
 
@@ -410,7 +410,7 @@ impl CollectionCompatibilityTester {
             // Test List performance
             let large_list = Value::List(
                 (0..size)
-                    .map(|i| Value::Text(format!("item_{}", i)))
+                    .map(|i| Value::text(format!("item_{}", i)))
                     .collect(),
             );
 
@@ -440,7 +440,7 @@ impl CollectionCompatibilityTester {
             // Test Map performance
             let large_map = Value::Map(
                 (0..size)
-                    .map(|i| (Value::Text(format!("key_{}", i)), Value::Integer(i)))
+                    .map(|i| (Value::text(format!("key_{}", i)), Value::Integer(i)))
                     .collect(),
             );
 
@@ -478,21 +478,21 @@ impl CollectionCompatibilityTester {
         // Pattern 1: IoT sensor metadata
         let iot_metadata = Value::Map(vec![
             (
-                Value::Text("device_id".to_string()),
-                Value::Text("sensor_001".to_string()),
+                Value::text("device_id".to_string()),
+                Value::text("sensor_001".to_string()),
             ),
             (
-                Value::Text("firmware_version".to_string()),
-                Value::Text("v2.1.3".to_string()),
+                Value::text("firmware_version".to_string()),
+                Value::text("v2.1.3".to_string()),
             ),
             (
-                Value::Text("last_update".to_string()),
+                Value::text("last_update".to_string()),
                 Value::BigInt(1640995200000000),
             ),
-            (Value::Text("battery_level".to_string()), Value::Integer(85)),
+            (Value::text("battery_level".to_string()), Value::Integer(85)),
             (
-                Value::Text("location".to_string()),
-                Value::Text("warehouse_a".to_string()),
+                Value::text("location".to_string()),
+                Value::text("warehouse_a".to_string()),
             ),
         ]);
         self.test_collection_roundtrip("IoT Sensor Metadata", iot_metadata, CqlTypeId::Map)?;
@@ -501,27 +501,27 @@ impl CollectionCompatibilityTester {
         let social_profiles = Value::List(vec![
             Value::Map(vec![
                 (
-                    Value::Text("platform".to_string()),
-                    Value::Text("twitter".to_string()),
+                    Value::text("platform".to_string()),
+                    Value::text("twitter".to_string()),
                 ),
                 (
-                    Value::Text("username".to_string()),
-                    Value::Text("john_doe".to_string()),
+                    Value::text("username".to_string()),
+                    Value::text("john_doe".to_string()),
                 ),
-                (Value::Text("verified".to_string()), Value::Boolean(true)),
-                (Value::Text("followers".to_string()), Value::Integer(1250)),
+                (Value::text("verified".to_string()), Value::Boolean(true)),
+                (Value::text("followers".to_string()), Value::Integer(1250)),
             ]),
             Value::Map(vec![
                 (
-                    Value::Text("platform".to_string()),
-                    Value::Text("linkedin".to_string()),
+                    Value::text("platform".to_string()),
+                    Value::text("linkedin".to_string()),
                 ),
                 (
-                    Value::Text("username".to_string()),
-                    Value::Text("john.doe".to_string()),
+                    Value::text("username".to_string()),
+                    Value::text("john.doe".to_string()),
                 ),
-                (Value::Text("verified".to_string()), Value::Boolean(false)),
-                (Value::Text("connections".to_string()), Value::Integer(500)),
+                (Value::text("verified".to_string()), Value::Boolean(false)),
+                (Value::text("connections".to_string()), Value::Integer(500)),
             ]),
         ]);
         self.test_collection_roundtrip("Social Profiles", social_profiles, CqlTypeId::List)?;
@@ -529,44 +529,44 @@ impl CollectionCompatibilityTester {
         // Pattern 3: Analytics event properties
         let event_properties = Value::Map(vec![
             (
-                Value::Text("event_type".to_string()),
-                Value::Text("page_view".to_string()),
+                Value::text("event_type".to_string()),
+                Value::text("page_view".to_string()),
             ),
             (
-                Value::Text("user_id".to_string()),
+                Value::text("user_id".to_string()),
                 Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             ),
             (
-                Value::Text("session_id".to_string()),
-                Value::Text("sess_abc123".to_string()),
+                Value::text("session_id".to_string()),
+                Value::text("sess_abc123".to_string()),
             ),
             (
-                Value::Text("page_url".to_string()),
-                Value::Text("/products/laptop".to_string()),
+                Value::text("page_url".to_string()),
+                Value::text("/products/laptop".to_string()),
             ),
             (
-                Value::Text("referrer".to_string()),
-                Value::Text("https://google.com".to_string()),
+                Value::text("referrer".to_string()),
+                Value::text("https://google.com".to_string()),
             ),
             (
-                Value::Text("user_agent".to_string()),
-                Value::Text("Mozilla/5.0 (compatible)".to_string()),
+                Value::text("user_agent".to_string()),
+                Value::text("Mozilla/5.0 (compatible)".to_string()),
             ),
             (
-                Value::Text("ip_address".to_string()),
-                Value::Text("192.168.1.100".to_string()),
+                Value::text("ip_address".to_string()),
+                Value::text("192.168.1.100".to_string()),
             ),
         ]);
         self.test_collection_roundtrip("Analytics Event", event_properties, CqlTypeId::Map)?;
 
         // Pattern 4: Content tags and keywords
         let content_tags = Value::Set(vec![
-            Value::Text("programming".to_string()),
-            Value::Text("rust".to_string()),
-            Value::Text("database".to_string()),
-            Value::Text("performance".to_string()),
-            Value::Text("tutorial".to_string()),
-            Value::Text("open-source".to_string()),
+            Value::text("programming".to_string()),
+            Value::text("rust".to_string()),
+            Value::text("database".to_string()),
+            Value::text("performance".to_string()),
+            Value::text("tutorial".to_string()),
+            Value::text("open-source".to_string()),
         ]);
         self.test_collection_roundtrip("Content Tags", content_tags, CqlTypeId::Set)?;
 

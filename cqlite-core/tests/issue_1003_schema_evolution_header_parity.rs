@@ -465,7 +465,8 @@ fn value_to_json(v: &Value) -> String {
         Value::SmallInt(i) => i.to_string(),
         Value::TinyInt(i) => i.to_string(),
         Value::Boolean(b) => b.to_string(),
-        Value::Text(s) => serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}")),
+        Value::Text(s) => serde_json::to_string(std::str::from_utf8(s).unwrap_or_default())
+            .unwrap_or_else(|_| format!("{s:?}")),
         Value::Null => "null".to_string(),
         Value::Frozen(inner) => value_to_json(inner),
         Value::List(items) | Value::Set(items) => {
@@ -1257,7 +1258,7 @@ fn frozen_multicell_collection_mismatch() {
             let texts: Vec<String> = list
                 .iter()
                 .map(|v| match v {
-                    Value::Text(s) => s.clone(),
+                    Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
                     other => panic!("[{MID}] fl element must be text, got {other:?}"),
                 })
                 .collect();

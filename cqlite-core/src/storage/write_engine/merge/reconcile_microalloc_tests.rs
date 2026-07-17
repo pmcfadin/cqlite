@@ -28,7 +28,7 @@ use std::collections::HashMap;
 /// A single live cell (`CellData::new` — no TTL/path/ldt), created fresh (NOT
 /// cloned), so building the input costs zero recorded clones.
 fn live_cell(column: &str, ts: i64) -> CellData {
-    CellData::new(column.to_string(), Value::Text("v".to_string()), ts)
+    CellData::new(column.to_string(), Value::text("v"), ts)
 }
 
 /// One live `MergeEntry` in partition `token=1` with `clustering_key = None`

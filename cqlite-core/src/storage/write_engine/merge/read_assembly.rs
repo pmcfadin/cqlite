@@ -641,13 +641,16 @@ mod tests {
         let ip_9 = vec![9u8, 0, 0, 1];
         let ip_10 = vec![10u8, 0, 0, 1];
         let cells = vec![
-            elem("iset", Value::Inet(ip_10.clone()), ip_10.clone()),
-            elem("iset", Value::Inet(ip_9.clone()), ip_9.clone()),
+            elem("iset", Value::inet(ip_10.clone()), ip_10.clone()),
+            elem("iset", Value::inet(ip_9.clone()), ip_9.clone()),
         ];
         let out = assemble_read_cells(cells, &schema(), None).unwrap();
         assert_eq!(
             get(&out, "iset"),
-            Some(&Value::Set(vec![Value::Inet(ip_9), Value::Inet(ip_10),])),
+            Some(&Value::Set(vec![
+                Value::Inet(ip_9.into()),
+                Value::Inet(ip_10.into()),
+            ])),
             "set<inet> must order by unsigned address bytes (9.0.0.1 before 10.0.0.1), \
              not the reversed formatted-string order"
         );
@@ -828,8 +831,8 @@ mod tests {
         // naming the column + declared element type (roborev 1632; full composite
         // element decode is follow-up #2339).
         let cells = vec![
-            elem("fset", Value::Blob(vec![0xBB]), vec![0x02]),
-            elem("fset", Value::Blob(vec![0xAA]), vec![0x01]),
+            elem("fset", Value::blob(vec![0xBB]), vec![0x02]),
+            elem("fset", Value::blob(vec![0xAA]), vec![0x01]),
         ];
         let err = assemble_read_cells(cells, &schema(), None).unwrap_err();
         let msg = err.to_string();

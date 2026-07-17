@@ -29,7 +29,7 @@ async fn test_end_to_end_performance() {
     
     for i in 0..write_count {
         let key = RowKey::from(format!("perf_key_{:08}", i));
-        let value = Value::Text(format!("perf_value_{}", i));
+        let value = Value::text(format!("perf_value_{}", i));
         engine.put(&table_id, key, value).await.unwrap();
     }
     
@@ -90,7 +90,7 @@ async fn test_concurrent_performance() {
         let handle = tokio::spawn(async move {
             for i in 0..1000 {
                 let key = RowKey::from(format!("concurrent_key_{}_{:04}", thread_id, i));
-                let value = Value::Text(format!("concurrent_value_{}_{}", thread_id, i));
+                let value = Value::text(format!("concurrent_value_{}_{}", thread_id, i));
                 engine.put(&table_id, key, value).await.unwrap();
             }
         });
@@ -137,7 +137,7 @@ async fn test_memory_optimization() {
     // Insert 50K records
     for i in 0..50_000 {
         let key = RowKey::from(format!("memory_key_{:08}", i));
-        let value = Value::Text(format!("memory_value_{}", i));
+        let value = Value::text(format!("memory_value_{}", i));
         engine.put(&table_id, key, value).await.unwrap();
         
         // Force flush every 10K records to test memory management
@@ -175,7 +175,7 @@ async fn test_compression_performance() {
     // Insert compressible data
     for i in 0..1000 {
         let key = RowKey::from(format!("compress_key_{:04}", i));
-        let value = Value::Text(format!("{}{}", compressible_data, i));
+        let value = Value::text(format!("{}{}", compressible_data, i));
         engine.put(&table_id, key, value).await.unwrap();
     }
     
@@ -229,7 +229,7 @@ async fn test_sstable_performance() {
     // Insert enough data to trigger multiple SSTable flushes
     for i in 0..entries_needed * 3 {
         let key = RowKey::from(format!("sstable_key_{:08}", i));
-        let value = Value::Text(format!("sstable_value_{}_with_extra_data", i));
+        let value = Value::text(format!("sstable_value_{}_with_extra_data", i));
         engine.put(&table_id, key, value).await.unwrap();
     }
     
@@ -273,7 +273,7 @@ async fn test_query_performance() {
     // Insert ordered data for range queries
     for i in 0..10_000 {
         let key = RowKey::from(format!("query_key_{:08}", i));
-        let value = Value::Text(format!("query_value_{}", i));
+        let value = Value::text(format!("query_value_{}", i));
         engine.put(&table_id, key, value).await.unwrap();
     }
     
@@ -318,7 +318,7 @@ async fn test_mixed_workload_performance() {
     // Pre-populate with some data
     for i in 0..1000 {
         let key = RowKey::from(format!("mixed_key_{:08}", i));
-        let value = Value::Text(format!("mixed_value_{}", i));
+        let value = Value::text(format!("mixed_value_{}", i));
         engine.put(&table_id, key, value).await.unwrap();
     }
     
@@ -339,7 +339,7 @@ async fn test_mixed_workload_performance() {
         } else {
             // Write operation
             let key = RowKey::from(format!("mixed_key_{:08}", i));
-            let value = Value::Text(format!("mixed_value_{}", i));
+            let value = Value::text(format!("mixed_value_{}", i));
             engine.put(&table_id, key, value).await.unwrap();
             write_count += 1;
         }
@@ -371,7 +371,7 @@ async fn test_sustained_performance() {
     // Run sustained operations for 30 seconds
     while start_time.elapsed() < test_duration {
         let key = RowKey::from(format!("sustained_key_{:08}", operation_count));
-        let value = Value::Text(format!("sustained_value_{}", operation_count));
+        let value = Value::text(format!("sustained_value_{}", operation_count));
         engine.put(&table_id, key, value).await.unwrap();
         
         operation_count += 1;
@@ -418,7 +418,7 @@ async fn test_recovery_performance() {
         // Insert data
         for i in 0..10_000 {
             let key = RowKey::from(format!("recovery_key_{:08}", i));
-            let value = Value::Text(format!("recovery_value_{}", i));
+            let value = Value::text(format!("recovery_value_{}", i));
             engine.put(&table_id, key, value).await.unwrap();
         }
         
@@ -467,7 +467,7 @@ async fn test_bloom_filter_performance() {
     // Insert data to create bloom filter
     for i in 0..10_000 {
         let key = RowKey::from(format!("bloom_key_{:08}", i));
-        let value = Value::Text(format!("bloom_value_{}", i));
+        let value = Value::text(format!("bloom_value_{}", i));
         engine.put(&table_id, key, value).await.unwrap();
     }
     
@@ -527,8 +527,8 @@ async fn test_data_type_performance() {
         ("bigint", Value::BigInt(9223372036854775807)),
         ("float", Value::Float(3.14159)),
         ("boolean", Value::Boolean(true)),
-        ("text", Value::Text("Hello, World!".to_string())),
-        ("blob", Value::Blob(vec![1, 2, 3, 4, 5])),
+        ("text", Value::text("Hello, World!".to_string())),
+        ("blob", Value::blob(vec![1, 2, 3, 4, 5])),
         ("timestamp", Value::Timestamp(1640995200000000)),
     ];
     

@@ -500,7 +500,7 @@ impl PerformanceValidationSuite {
                 let table_id = TableId::new(format!("concurrent_table_{}", thread_id));
                 for i in 0..operations_per_thread {
                     let key = RowKey::from(format!("concurrent_key_{}_{}", thread_id, i));
-                    let value = Value::Text(format!("concurrent_value_{}_{}", thread_id, i));
+                    let value = Value::text(format!("concurrent_value_{}_{}", thread_id, i));
                     let _ = storage.put(&table_id, key, value).await;
                 }
             });
@@ -541,7 +541,7 @@ impl PerformanceValidationSuite {
 
                 for i in 0..operations_per_thread {
                     let key = RowKey::from(format!("pressure_key_{}_{}", thread_id, i));
-                    let value = Value::Text("x".repeat(1024)); // 1KB values for pressure
+                    let value = Value::text("x".repeat(1024)); // 1KB values for pressure
 
                     if storage.put(&table_id, key, value).await.is_ok() {
                         completed += 1;
@@ -704,7 +704,7 @@ impl PerformanceValidationSuite {
         (0..size)
             .map(|i| {
                 let key = RowKey::from(format!("perf_key_{:08}", i));
-                let value = Value::Text(format!(
+                let value = Value::text(format!(
                     "Performance test data {} with substantial content for realistic testing scenarios. This data simulates real Cassandra workloads with varied content length and complexity.",
                     i
                 ));
@@ -717,7 +717,7 @@ impl PerformanceValidationSuite {
         (0..size)
             .map(|i| {
                 let key = RowKey::from(format!("query_key_{:06}", i));
-                let value = Value::Text(format!("Query test data {}", i));
+                let value = Value::text(format!("Query test data {}", i));
                 (key, value)
             })
             .collect()

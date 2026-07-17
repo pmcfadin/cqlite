@@ -144,7 +144,7 @@ fn live_row(pk: i32, payload: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "payload".to_string(),
-            value: Value::Text(payload.to_string()),
+            value: Value::text(payload.to_string()),
         }],
         ts,
         None,

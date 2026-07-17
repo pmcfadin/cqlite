@@ -58,7 +58,7 @@ fn create_mutation(id: i32, name: &str, age: i32, timestamp: i64) -> Mutation {
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "age".to_string(),
@@ -268,7 +268,7 @@ async fn test_write_engine_with_ttl() -> Result<()> {
     let pk = PartitionKey::single("id", Value::Integer(1));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text("Alice".to_string()),
+        value: Value::text("Alice".to_string()),
     }];
 
     let mutation = Mutation::new(table_id, pk, None, ops, 1000000, Some(3600));
@@ -512,12 +512,12 @@ fn create_comprehensive_schema() -> TableSchema {
 fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutation {
     let table_id = TableId::new("test_roundtrip", "comprehensive_types");
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
-    let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+    let clustering_key = Some(ClusteringKey::single("ck", Value::text(ck.to_string())));
 
     let ops = vec![
         CellOperation::Write {
             column: "text_col".to_string(),
-            value: Value::Text(format!("Text for {}-{}", pk, ck)),
+            value: Value::text(format!("Text for {}-{}", pk, ck)),
         },
         CellOperation::Write {
             column: "int_col".to_string(),
@@ -1046,7 +1046,7 @@ async fn test_stage0_various_data_types() -> Result<()> {
     let pk1 = PartitionKey::single("id", Value::Integer(1));
     let ops1 = vec![CellOperation::Write {
         column: "text_val".to_string(),
-        value: Value::Text("Hello, CQLite!".to_string()),
+        value: Value::text("Hello, CQLite!".to_string()),
     }];
     engine
         .write_async(Mutation::new(
@@ -1222,7 +1222,7 @@ async fn test_stage0_null_values() -> Result<()> {
     // Only write 'name', leave 'age' as null
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text("Alice".to_string()),
+        value: Value::text("Alice".to_string()),
     }];
 
     engine

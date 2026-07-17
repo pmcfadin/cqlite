@@ -410,7 +410,7 @@ mod tests {
 
         let operations = vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }];
 
         let mutation = Mutation::new(
@@ -608,8 +608,8 @@ mod tests {
     #[test]
     fn test_memtable_size_estimates() {
         // Test size estimation for different value types
-        let small_text = Value::Text("hi".to_string());
-        let large_text = Value::Text("a".repeat(1000));
+        let small_text = Value::text("hi".to_string());
+        let large_text = Value::text("a".repeat(1000));
         let integer = Value::Integer(42);
         let uuid = Value::Uuid([0u8; 16]);
 
@@ -632,16 +632,16 @@ mod tests {
 
         // Set
         let set = Value::Set(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ]);
         let size = Memtable::estimate_value_size(&set);
         assert!(size >= 2); // 2 * 1 byte + overhead
 
         // Map
         let map = Value::Map(vec![
-            (Value::Integer(1), Value::Text("one".to_string())),
-            (Value::Integer(2), Value::Text("two".to_string())),
+            (Value::Integer(1), Value::text("one".to_string())),
+            (Value::Integer(2), Value::text("two".to_string())),
         ]);
         let size = Memtable::estimate_value_size(&map);
         assert!(size >= 11); // 2 * (4 + 3) bytes + overhead
@@ -698,7 +698,7 @@ mod tests {
         let partition_key = PartitionKey::single("id", Value::Integer(1));
         let operations = vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Alice".to_string()),
+            value: Value::text("Alice".to_string()),
         }];
 
         let mutation = Mutation::new(table_id, partition_key, None, operations, 1234567890, None);
@@ -730,7 +730,7 @@ mod tests {
     fn test_memtable_nested_map_depth_limit() {
         // Issue #1625: deep map nesting counted accurately. 35 maps, each +16
         // overhead + Integer key (4), innermost Text("bottom") (6). No floor.
-        let mut nested_value = Value::Text("bottom".to_string());
+        let mut nested_value = Value::text("bottom".to_string());
         for _ in 0..35 {
             nested_value = Value::Map(vec![(Value::Integer(1), nested_value)]);
         }
@@ -792,7 +792,7 @@ mod tests {
         use crate::types::{UdtField, UdtValue};
 
         // Create a complex nested structure mixing different types
-        let mut nested_value = Value::Text("base".to_string());
+        let mut nested_value = Value::text("base".to_string());
 
         // Alternate between different collection types
         for i in 0..50 {
@@ -863,7 +863,7 @@ mod tests {
         // counted at its REAL byte size regardless of depth. The iterative
         // estimator has no depth cap, so the 500 × 200-byte strings (~100KB) at
         // the bottom are summed exactly — not collapsed to any floor.
-        let wide = Value::List((0..500).map(|_| Value::Text("y".repeat(200))).collect());
+        let wide = Value::List((0..500).map(|_| Value::text("y".repeat(200))).collect());
         let mut nested = wide;
         for _ in 0..32 {
             nested = Value::List(vec![nested]);
@@ -893,7 +893,7 @@ mod tests {
         // enough to slip a 64KB gate. Post-fix: the iterative estimator counts
         // the 128KB scalar at its real heap size regardless of depth.
         let big = 128 * 1024;
-        let mut nested = Value::List(vec![Value::Text("x".repeat(big))]);
+        let mut nested = Value::List(vec![Value::text("x".repeat(big))]);
         for _ in 0..32 {
             nested = Value::List(vec![nested]);
         }
@@ -913,7 +913,7 @@ mod tests {
         // 128KB text in 40 single-element lists — well past the old cap — and
         // confirm the iterative estimator still sees the full 128KB.
         let big = 128 * 1024;
-        let mut nested = Value::Text("z".repeat(big));
+        let mut nested = Value::text("z".repeat(big));
         for _ in 0..40 {
             nested = Value::List(vec![nested]);
         }

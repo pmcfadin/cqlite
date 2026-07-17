@@ -73,7 +73,7 @@ async fn build_two_generations(root: &Path) -> PathBuf {
         let pk = PartitionKey::single("id", Value::Integer(id));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(format!("v{}", id)),
+            value: Value::text(format!("v{}", id)),
         }];
         engine
             .write_async(Mutation::new(

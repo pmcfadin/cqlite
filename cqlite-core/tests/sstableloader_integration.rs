@@ -1255,11 +1255,11 @@ async fn test_issue_507_gen_static_shape_cassandra_readback() -> CqliteResult<()
                 vec![
                     CellOperation::Write {
                         column: "static_data".to_string(),
-                        value: Value::Text("shared-static-text".to_string()),
+                        value: Value::text("shared-static-text".to_string()),
                     },
                     CellOperation::Write {
                         column: "row_data".to_string(),
-                        value: Value::Text("alpha".to_string()),
+                        value: Value::text("alpha".to_string()),
                     },
                     CellOperation::Write {
                         column: "row_value".to_string(),
@@ -1280,11 +1280,11 @@ async fn test_issue_507_gen_static_shape_cassandra_readback() -> CqliteResult<()
                 vec![
                     CellOperation::Write {
                         column: "static_data".to_string(),
-                        value: Value::Text("shared-static-text".to_string()),
+                        value: Value::text("shared-static-text".to_string()),
                     },
                     CellOperation::Write {
                         column: "row_data".to_string(),
-                        value: Value::Text("beta".to_string()),
+                        value: Value::text("beta".to_string()),
                     },
                     CellOperation::Write {
                         column: "row_value".to_string(),
@@ -2293,7 +2293,7 @@ fn simple_mutation(table_name: &str, id: i32, name: &str, value: i32, timestamp:
     let operations = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "value".to_string(),
@@ -2307,10 +2307,10 @@ fn simple_mutation(table_name: &str, id: i32, name: &str, value: i32, timestamp:
 fn clustered_mutation(table_name: &str, pk: i32, ck: &str, data: &str, timestamp: i64) -> Mutation {
     let table_id = TableId::new(KEYSPACE, table_name);
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
-    let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+    let clustering_key = Some(ClusteringKey::single("ck", Value::text(ck.to_string())));
     let operations = vec![CellOperation::Write {
         column: "data".to_string(),
-        value: Value::Text(data.to_string()),
+        value: Value::text(data.to_string()),
     }];
 
     Mutation::new(
@@ -2326,11 +2326,11 @@ fn clustered_mutation(table_name: &str, pk: i32, ck: &str, data: &str, timestamp
 fn types_mutation(table_name: &str, pk: i32, ck: &str, mutation_timestamp: i64) -> Mutation {
     let table_id = TableId::new(KEYSPACE, table_name);
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
-    let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+    let clustering_key = Some(ClusteringKey::single("ck", Value::text(ck.to_string())));
     let operations = vec![
         CellOperation::Write {
             column: "text_col".to_string(),
-            value: Value::Text("stage0".to_string()),
+            value: Value::text("stage0".to_string()),
         },
         CellOperation::Write {
             column: "int_col".to_string(),
@@ -2664,7 +2664,7 @@ fn simple_table_mutation(
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(name.to_string()),
+                value: Value::text(name.to_string()),
             },
             CellOperation::Write {
                 column: "age".to_string(),
@@ -2700,7 +2700,7 @@ fn simple_table_mutation(
             },
             CellOperation::Write {
                 column: "description".to_string(),
-                value: Value::Blob(description.to_vec()),
+                value: Value::blob(description.to_vec()),
             },
             CellOperation::Write {
                 column: "account_balance".to_string(),
@@ -2712,7 +2712,7 @@ fn simple_table_mutation(
             },
             CellOperation::Write {
                 column: "ip_address".to_string(),
-                value: Value::Inet(ip_address.to_vec()),
+                value: Value::inet(ip_address.to_vec()),
             },
             CellOperation::Write {
                 column: "small_number".to_string(),
@@ -2728,11 +2728,11 @@ fn simple_table_mutation(
             },
             CellOperation::Write {
                 column: "varchar_field".to_string(),
-                value: Value::Text(varchar_field.to_string()),
+                value: Value::text(varchar_field.to_string()),
             },
             CellOperation::Write {
                 column: "ascii_field".to_string(),
-                value: Value::Text(ascii_field.to_string()),
+                value: Value::text(ascii_field.to_string()),
             },
         ],
         timestamp_micros,
@@ -2790,13 +2790,13 @@ fn composite_key_table_mutation(
             ),
             (
                 "clustering_key2".to_string(),
-                Value::Text(clustering_key2.to_string()),
+                Value::text(clustering_key2.to_string()),
             ),
         ])),
         vec![
             CellOperation::Write {
                 column: "data".to_string(),
-                value: Value::Text(data.to_string()),
+                value: Value::text(data.to_string()),
             },
             CellOperation::Write {
                 column: "value".to_string(),
@@ -2864,13 +2864,13 @@ fn multi_partition_table_mutation(
             ("user_id".to_string(), uuid_value(user_id)),
         ]),
         Some(ClusteringKey::new(vec![
-            ("category".to_string(), Value::Text(category.to_string())),
+            ("category".to_string(), Value::text(category.to_string())),
             ("item_id".to_string(), uuid_value(item_id)),
         ])),
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(name.to_string()),
+                value: Value::text(name.to_string()),
             },
             CellOperation::Write {
                 column: "value".to_string(),
@@ -2878,7 +2878,7 @@ fn multi_partition_table_mutation(
             },
             CellOperation::Write {
                 column: "metadata".to_string(),
-                value: Value::Text(metadata.to_string()),
+                value: Value::text(metadata.to_string()),
             },
         ],
         timestamp_micros,
@@ -2933,7 +2933,7 @@ fn static_only_mutation(
         None,
         vec![CellOperation::Write {
             column: "static_data".to_string(),
-            value: Value::Text(static_data.to_string()),
+            value: Value::text(static_data.to_string()),
         }],
         timestamp_micros,
         None,
@@ -2958,7 +2958,7 @@ fn static_row_mutation(
         vec![
             CellOperation::Write {
                 column: "row_data".to_string(),
-                value: Value::Text(row_data.to_string()),
+                value: Value::text(row_data.to_string()),
             },
             CellOperation::Write {
                 column: "row_value".to_string(),
@@ -3011,7 +3011,7 @@ fn ttl_test_table_mutation(
         vec![
             CellOperation::Write {
                 column: "temporary_data".to_string(),
-                value: Value::Text(temporary_data.to_string()),
+                value: Value::text(temporary_data.to_string()),
             },
             CellOperation::Write {
                 column: "expiring_value".to_string(),
@@ -3019,7 +3019,7 @@ fn ttl_test_table_mutation(
             },
             CellOperation::Write {
                 column: "session_info".to_string(),
-                value: Value::Text(session_info.to_string()),
+                value: Value::text(session_info.to_string()),
             },
         ],
         timestamp_micros,
@@ -3104,11 +3104,11 @@ fn sensor_data_mutation(
             },
             CellOperation::Write {
                 column: "location".to_string(),
-                value: Value::Text(location.to_string()),
+                value: Value::text(location.to_string()),
             },
             CellOperation::Write {
                 column: "status".to_string(),
-                value: Value::Text(status.to_string()),
+                value: Value::text(status.to_string()),
             },
         ],
         timestamp_micros,
@@ -3176,7 +3176,7 @@ fn stock_prices_mutation(
         "test_timeseries",
         "stock_prices",
         PartitionKey::new(vec![
-            ("symbol".to_string(), Value::Text(symbol.to_string())),
+            ("symbol".to_string(), Value::text(symbol.to_string())),
             (
                 "trading_day".to_string(),
                 Value::Date(date_days(trading_day)),
@@ -3285,7 +3285,7 @@ fn wide_partition_table_mutation(
             ),
             (
                 "clustering_col2".to_string(),
-                Value::Text(clustering_col2.to_string()),
+                Value::text(clustering_col2.to_string()),
             ),
             (
                 "clustering_col3".to_string(),
@@ -3300,7 +3300,7 @@ fn wide_partition_table_mutation(
         vec![
             CellOperation::Write {
                 column: "data_column".to_string(),
-                value: Value::Text(data_column.to_string()),
+                value: Value::text(data_column.to_string()),
             },
             CellOperation::Write {
                 column: "value_column".to_string(),
@@ -3308,11 +3308,11 @@ fn wide_partition_table_mutation(
             },
             CellOperation::Write {
                 column: "blob_column".to_string(),
-                value: Value::Blob(blob_column.to_vec()),
+                value: Value::blob(blob_column.to_vec()),
             },
             CellOperation::Write {
                 column: "json_column".to_string(),
-                value: Value::Text(json_column.to_string()),
+                value: Value::text(json_column.to_string()),
             },
         ],
         timestamp_micros,
@@ -3357,14 +3357,14 @@ fn issue_439_mixed_columns_mutation(
         vec![
             CellOperation::Write {
                 column: "z_simple".to_string(),
-                value: Value::Text(z_simple.to_string()),
+                value: Value::text(z_simple.to_string()),
             },
             CellOperation::Write {
                 column: "a_complex".to_string(),
                 value: Value::Set(
                     a_complex
                         .iter()
-                        .map(|value| Value::Text((*value).to_string()))
+                        .map(|value| Value::text((*value).to_string()))
                         .collect(),
                 ),
             },
@@ -3449,41 +3449,41 @@ fn issue_439_product_catalog_mutation(
         vec![
             CellOperation::Write {
                 column: "product_name".to_string(),
-                value: Value::Text(product_name.to_string()),
+                value: Value::text(product_name.to_string()),
             },
             CellOperation::Write {
                 column: "description".to_string(),
-                value: Value::Text(description.to_string()),
+                value: Value::text(description.to_string()),
             },
             CellOperation::Write {
                 column: "long_description".to_string(),
-                value: Value::Text(format!("{description} with extended specs")),
+                value: Value::text(format!("{description} with extended specs")),
             },
             CellOperation::Write {
                 column: "specifications".to_string(),
                 value: Value::Map(vec![
                     (
-                        Value::Text("material".to_string()),
-                        Value::Text("nylon".to_string()),
+                        Value::text("material".to_string()),
+                        Value::text("nylon".to_string()),
                     ),
                     (
-                        Value::Text("origin".to_string()),
-                        Value::Text("USA".to_string()),
+                        Value::text("origin".to_string()),
+                        Value::text("USA".to_string()),
                     ),
                 ]),
             },
             CellOperation::Write {
                 column: "images".to_string(),
                 value: Value::List(vec![
-                    Value::Text("front.jpg".to_string()),
-                    Value::Text("detail.jpg".to_string()),
+                    Value::text("front.jpg".to_string()),
+                    Value::text("detail.jpg".to_string()),
                 ]),
             },
             CellOperation::Write {
                 column: "tags".to_string(),
                 value: Value::Set(vec![
-                    Value::Text("featured".to_string()),
-                    Value::Text("seasonal".to_string()),
+                    Value::text("featured".to_string()),
+                    Value::text("seasonal".to_string()),
                 ]),
             },
             CellOperation::Write {
@@ -3492,7 +3492,7 @@ fn issue_439_product_catalog_mutation(
             },
             CellOperation::Write {
                 column: "currency".to_string(),
-                value: Value::Text("USD".to_string()),
+                value: Value::text("USD".to_string()),
             },
             CellOperation::Write {
                 column: "availability_count".to_string(),
@@ -3505,32 +3505,32 @@ fn issue_439_product_catalog_mutation(
             CellOperation::Write {
                 column: "dimensions".to_string(),
                 value: Value::Map(vec![
-                    (Value::Text("height".to_string()), Value::Float32(10.0)),
-                    (Value::Text("width".to_string()), Value::Float32(20.0)),
+                    (Value::text("height".to_string()), Value::Float32(10.0)),
+                    (Value::text("width".to_string()), Value::Float32(20.0)),
                 ]),
             },
             CellOperation::Write {
                 column: "reviews_summary".to_string(),
                 value: Value::Map(vec![
-                    (Value::Text("average".to_string()), Value::Float(4.8)),
-                    (Value::Text("count".to_string()), Value::Float(128.0)),
+                    (Value::text("average".to_string()), Value::Float(4.8)),
+                    (Value::text("count".to_string()), Value::Float(128.0)),
                 ]),
             },
             CellOperation::Write {
                 column: "attributes".to_string(),
                 value: Value::Map(vec![
                     (
-                        Value::Text("terrain".to_string()),
+                        Value::text("terrain".to_string()),
                         Value::Frozen(Box::new(Value::Set(vec![
-                            Value::Text("trail".to_string()),
-                            Value::Text("rock".to_string()),
+                            Value::text("trail".to_string()),
+                            Value::text("rock".to_string()),
                         ]))),
                     ),
                     (
-                        Value::Text("season".to_string()),
+                        Value::text("season".to_string()),
                         Value::Frozen(Box::new(Value::Set(vec![
-                            Value::Text("spring".to_string()),
-                            Value::Text("fall".to_string()),
+                            Value::text("spring".to_string()),
+                            Value::text("fall".to_string()),
                         ]))),
                     ),
                 ]),
@@ -3616,23 +3616,23 @@ CREATE TABLE test_phase3.issue_434_complex_types (
 fn issue_434_address_value(street: &str, city: &str) -> Value {
     Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("address".to_string(), "test_phase3".to_string())
-            .with_field("street".to_string(), Some(Value::Text(street.to_string())))
-            .with_field("city".to_string(), Some(Value::Text(city.to_string()))),
+            .with_field("street".to_string(), Some(Value::text(street.to_string())))
+            .with_field("city".to_string(), Some(Value::text(city.to_string()))),
     ))
 }
 
 fn issue_434_phone_value(label: &str, number: &str) -> Value {
     Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("phone_number".to_string(), "test_phase3".to_string())
-            .with_field("label".to_string(), Some(Value::Text(label.to_string())))
-            .with_field("number".to_string(), Some(Value::Text(number.to_string()))),
+            .with_field("label".to_string(), Some(Value::text(label.to_string())))
+            .with_field("number".to_string(), Some(Value::text(number.to_string()))),
     ))
 }
 
 fn issue_434_person_value(name: &str) -> Value {
     Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("person".to_string(), "test_phase3".to_string())
-            .with_field("name".to_string(), Some(Value::Text(name.to_string())))
+            .with_field("name".to_string(), Some(Value::text(name.to_string())))
             .with_field(
                 "phone_numbers".to_string(),
                 Some(Value::List(vec![Value::Frozen(Box::new(
@@ -3652,7 +3652,7 @@ fn issue_434_company_value() -> Value {
     let person = issue_434_person_value("Alice");
     Value::Udt(Box::new(
         cqlite_core::types::UdtValue::new("company".to_string(), "test_phase3".to_string())
-            .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
+            .with_field("name".to_string(), Some(Value::text("Acme".to_string())))
             .with_field(
                 "employees".to_string(),
                 Some(Value::List(vec![Value::Frozen(Box::new(person.clone()))])),
@@ -3660,7 +3660,7 @@ fn issue_434_company_value() -> Value {
             .with_field(
                 "departments".to_string(),
                 Some(Value::Map(vec![(
-                    Value::Text("platform".to_string()),
+                    Value::text("platform".to_string()),
                     Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(person))]))),
                 )])),
             ),
@@ -3677,23 +3677,23 @@ fn issue_434_phase3_complex_mutation(id: &str, timestamp_micros: i64) -> Mutatio
             CellOperation::Write {
                 column: "nested_map_list".to_string(),
                 value: Value::Map(vec![(
-                    Value::Text("outer".to_string()),
+                    Value::text("outer".to_string()),
                     Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
-                        Value::Map(vec![(Value::Text("inner".to_string()), Value::Integer(7))]),
+                        Value::Map(vec![(Value::text("inner".to_string()), Value::Integer(7))]),
                     ))]))),
                 )]),
             },
             CellOperation::Write {
                 column: "company_map".to_string(),
                 value: Value::Map(vec![(
-                    Value::Text("primary".to_string()),
+                    Value::text("primary".to_string()),
                     Value::Frozen(Box::new(issue_434_company_value())),
                 )]),
             },
             CellOperation::Write {
                 column: "tuple_with_list".to_string(),
                 value: Value::Tuple(vec![
-                    Value::Text("phase3".to_string()),
+                    Value::text("phase3".to_string()),
                     Value::List(vec![
                         Value::Integer(1),
                         Value::Integer(2),
@@ -3704,14 +3704,14 @@ fn issue_434_phase3_complex_mutation(id: &str, timestamp_micros: i64) -> Mutatio
             CellOperation::Write {
                 column: "complex_tuple".to_string(),
                 value: Value::Tuple(vec![
-                    Value::Text("tuple".to_string()),
+                    Value::text("tuple".to_string()),
                     Value::Frozen(Box::new(Value::List(vec![
                         Value::Integer(3),
                         Value::Integer(5),
                         Value::Integer(8),
                     ]))),
                     Value::Frozen(Box::new(Value::Map(vec![(
-                        Value::Text("home".to_string()),
+                        Value::text("home".to_string()),
                         Value::Frozen(Box::new(issue_434_address_value("Main St", "Seattle"))),
                     )]))),
                     Value::Frozen(Box::new(issue_434_person_value("Tuple User"))),
@@ -3720,8 +3720,8 @@ fn issue_434_phase3_complex_mutation(id: &str, timestamp_micros: i64) -> Mutatio
             CellOperation::Write {
                 column: "unicode_map".to_string(),
                 value: Value::Map(vec![(
-                    Value::Text("挨拶".to_string()),
-                    Value::Text("こんにちは".to_string()),
+                    Value::text("挨拶".to_string()),
+                    Value::text("こんにちは".to_string()),
                 )]),
             },
             CellOperation::Write {
@@ -3792,15 +3792,15 @@ fn large_blob_table_mutation(
         vec![
             CellOperation::Write {
                 column: "file_name".to_string(),
-                value: Value::Text(file_name.to_string()),
+                value: Value::text(file_name.to_string()),
             },
             CellOperation::Write {
                 column: "mime_type".to_string(),
-                value: Value::Text(mime_type.to_string()),
+                value: Value::text(mime_type.to_string()),
             },
             CellOperation::Write {
                 column: "chunk_data".to_string(),
-                value: Value::Blob(chunk_data.to_vec()),
+                value: Value::blob(chunk_data.to_vec()),
             },
             CellOperation::Write {
                 column: "chunk_size".to_string(),
@@ -3812,7 +3812,7 @@ fn large_blob_table_mutation(
             },
             CellOperation::Write {
                 column: "checksum".to_string(),
-                value: Value::Text(checksum.to_string()),
+                value: Value::text(checksum.to_string()),
             },
         ],
         timestamp_micros,

@@ -98,8 +98,8 @@ fn test_write_set_complex_column() {
     };
 
     let value = Value::Set(vec![
-        Value::Text("alpha".to_string()),
-        Value::Text("beta".to_string()),
+        Value::text("alpha".to_string()),
+        Value::text("beta".to_string()),
     ]);
 
     let mut buf = Vec::new();
@@ -207,8 +207,8 @@ fn test_write_map_complex_column() {
     };
 
     let value = Value::Map(vec![
-        (Value::Text("key1".to_string()), Value::Integer(100)),
-        (Value::Text("key2".to_string()), Value::Integer(200)),
+        (Value::text("key1".to_string()), Value::Integer(100)),
+        (Value::text("key2".to_string()), Value::Integer(200)),
     ]);
 
     let mut buf = Vec::new();
@@ -300,8 +300,8 @@ fn test_frozen_collection_not_complex() {
         vec![CellOperation::Write {
             column: "frozen_tags".to_string(),
             value: Value::Frozen(Box::new(Value::Set(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
+                Value::text("a".to_string()),
+                Value::text("b".to_string()),
             ]))),
         }],
         1001000,
@@ -356,9 +356,9 @@ fn test_frozen_map_sorted_by_serialized_key_bytes() {
     // written with REVERSED keys must serialize entries in unsigned serialized
     // key-byte order. Assert the FULL serialized blob.
     let value = Value::Frozen(Box::new(Value::Map(vec![
-        (Value::Text("c".to_string()), Value::Integer(30)),
-        (Value::Text("b".to_string()), Value::Integer(20)),
-        (Value::Text("a".to_string()), Value::Integer(10)),
+        (Value::text("c".to_string()), Value::Integer(30)),
+        (Value::text("b".to_string()), Value::Integer(20)),
+        (Value::text("a".to_string()), Value::Integer(10)),
     ])));
 
     let bytes = serialize_value(&value).unwrap();
@@ -418,9 +418,9 @@ fn test_frozen_map_row_emits_sorted_bytes_end_to_end() {
         vec![CellOperation::Write {
             column: "fm".to_string(),
             value: Value::Frozen(Box::new(Value::Map(vec![
-                (Value::Text("c".to_string()), Value::Integer(30)),
-                (Value::Text("b".to_string()), Value::Integer(20)),
-                (Value::Text("a".to_string()), Value::Integer(10)),
+                (Value::text("c".to_string()), Value::Integer(30)),
+                (Value::text("b".to_string()), Value::Integer(20)),
+                (Value::text("a".to_string()), Value::Integer(10)),
             ]))),
         }],
         1001000,
@@ -507,13 +507,13 @@ fn test_mixed_simple_and_complex_columns() {
         vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("Alice".to_string()),
+                value: Value::text("Alice".to_string()),
             },
             CellOperation::Write {
                 column: "tags".to_string(),
                 value: Value::Set(vec![
-                    Value::Text("admin".to_string()),
-                    Value::Text("user".to_string()),
+                    Value::text("admin".to_string()),
+                    Value::text("user".to_string()),
                 ]),
             },
         ],
@@ -561,9 +561,9 @@ fn test_set_canonical_ordering() {
 
     // Input: zebra, alpha, mango (unsorted)
     let value = Value::Set(vec![
-        Value::Text("zebra".to_string()),
-        Value::Text("alpha".to_string()),
-        Value::Text("mango".to_string()),
+        Value::text("zebra".to_string()),
+        Value::text("alpha".to_string()),
+        Value::text("mango".to_string()),
     ]);
 
     let mut buf = Vec::new();
@@ -604,8 +604,8 @@ fn test_map_canonical_ordering() {
 
     // Input: keys out of order (z_key, a_key)
     let value = Value::Map(vec![
-        (Value::Text("z_key".to_string()), Value::Integer(1)),
-        (Value::Text("a_key".to_string()), Value::Integer(2)),
+        (Value::text("z_key".to_string()), Value::Integer(1)),
+        (Value::text("a_key".to_string()), Value::Integer(2)),
     ]);
 
     let mut buf = Vec::new();
@@ -639,7 +639,7 @@ fn test_set_rejects_list_value() {
     };
 
     // Pass a List value to a SET column — should be rejected
-    let value = Value::List(vec![Value::Text("x".to_string())]);
+    let value = Value::List(vec![Value::text("x".to_string())]);
     let mut buf = Vec::new();
     let result =
         writer.write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS);
@@ -660,7 +660,7 @@ fn test_list_rejects_set_value() {
     };
 
     // Pass a Set value to a LIST column — should be rejected
-    let value = Value::Set(vec![Value::Text("x".to_string())]);
+    let value = Value::Set(vec![Value::text("x".to_string())]);
     let mut buf = Vec::new();
     let result =
         writer.write_complex_column(&mut buf, &column, &value, 1001000, None, TEST_NOW_SECONDS);
@@ -1047,8 +1047,8 @@ fn test_write_with_ttl_complex_column() {
         vec![CellOperation::WriteWithTtl {
             column: "tags".to_string(),
             value: Value::Set(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
+                Value::text("a".to_string()),
+                Value::text("b".to_string()),
             ]),
             ttl_seconds: 3600,
             local_deletion_time: None,
@@ -1163,7 +1163,7 @@ fn test_internal_type_string_complex_column() {
         None,
         vec![CellOperation::Write {
             column: "tags".to_string(),
-            value: Value::Set(vec![Value::Text("test".to_string())]),
+            value: Value::Set(vec![Value::text("test".to_string())]),
         }],
         1001000,
         None,
@@ -1197,8 +1197,8 @@ fn test_set_complex_column_with_ttl() {
     };
 
     let value = Value::Set(vec![
-        Value::Text("alpha".to_string()),
-        Value::Text("beta".to_string()),
+        Value::text("alpha".to_string()),
+        Value::text("beta".to_string()),
     ]);
 
     let mut buf = Vec::new();
@@ -1359,10 +1359,10 @@ fn test_frozen_set_int_negative_sorts_signed() {
 #[test]
 fn test_frozen_map_int_key_negative_sorts_signed() {
     let value = Value::Frozen(Box::new(Value::Map(vec![
-        (Value::Integer(2), Value::Text("two".to_string())),
-        (Value::Integer(-1), Value::Text("neg-one".to_string())),
-        (Value::Integer(0), Value::Text("zero".to_string())),
-        (Value::Integer(-5), Value::Text("neg-five".to_string())),
+        (Value::Integer(2), Value::text("two".to_string())),
+        (Value::Integer(-1), Value::text("neg-one".to_string())),
+        (Value::Integer(0), Value::text("zero".to_string())),
+        (Value::Integer(-5), Value::text("neg-five".to_string())),
     ])));
 
     let bytes = serialize_value(&value).unwrap();
@@ -1442,10 +1442,10 @@ fn test_nonfrozen_map_int_key_negative_sorts_signed() {
         is_static: false,
     };
     let value = Value::Map(vec![
-        (Value::Integer(2), Value::Text("two".to_string())),
-        (Value::Integer(-1), Value::Text("neg-one".to_string())),
-        (Value::Integer(0), Value::Text("zero".to_string())),
-        (Value::Integer(-5), Value::Text("neg-five".to_string())),
+        (Value::Integer(2), Value::text("two".to_string())),
+        (Value::Integer(-1), Value::text("neg-one".to_string())),
+        (Value::Integer(0), Value::text("zero".to_string())),
+        (Value::Integer(-5), Value::text("neg-five".to_string())),
     ]);
 
     let mut buf = Vec::new();

@@ -1092,7 +1092,7 @@ mod tests {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("Alice".to_string())),
+                    value: Some(Value::text("Alice".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -1331,7 +1331,7 @@ mod tests {
             None,
             vec![CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(name.to_string()),
+                value: Value::text(name.to_string()),
             }],
             timestamp,
             None,
@@ -1981,7 +1981,7 @@ mod tests {
             None,
             vec![CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("survivor".to_string()),
+                value: Value::text("survivor".to_string()),
             }],
             ROW_TS,
             None,
@@ -2022,7 +2022,7 @@ mod tests {
             None,
             vec![CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("survivor".to_string()),
+                value: Value::text("survivor".to_string()),
             }],
             ROW_TS,
             None,
@@ -2460,11 +2460,11 @@ mod tests {
             vec![
                 CellOperation::Write {
                     column: "s".to_string(),
-                    value: Value::Text("static-val".to_string()),
+                    value: Value::text("static-val".to_string()),
                 },
                 CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("regular-val".to_string()),
+                    value: Value::text("regular-val".to_string()),
                 },
             ],
             1_000_000,
@@ -2504,7 +2504,7 @@ mod tests {
                 Some(ClusteringKey::single("ck", Value::Integer(7))),
                 vec![CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text(val.to_string()),
+                    value: Value::text(val.to_string()),
                 }],
                 ts,
                 None,
@@ -2548,7 +2548,7 @@ mod tests {
             vec![
                 CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("Alice".to_string()),
+                    value: Value::text("Alice".to_string()),
                 },
                 CellOperation::Write {
                     column: "age".to_string(),

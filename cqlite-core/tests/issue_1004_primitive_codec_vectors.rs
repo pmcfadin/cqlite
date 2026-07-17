@@ -284,7 +284,7 @@ fn text_blob_ascii_vectors() {
                     expected.as_slice(),
                     "[{label}] fixture hex must equal UTF-8 of value"
                 );
-                assert_encode(&Value::Text(text.clone()), ty, &expected, &label);
+                assert_encode(&Value::text(text.clone()), ty, &expected, &label);
                 // text/ascii decode: entire cell bytes are the value (deterministic path).
                 let type_id = if ty == "ascii" {
                     CqlTypeId::Ascii
@@ -296,19 +296,23 @@ fn text_blob_ascii_vectors() {
                 if expected.is_empty() {
                     assert!(text.is_empty(), "[{label}] empty cell must be empty text");
                 } else {
-                    assert_decode_raw(&expected, type_id, &Value::Text(text), &label);
+                    assert_decode_raw(&expected, type_id, &Value::Text(text.into()), &label);
                 }
             }
             "blob" => {
                 let raw = hex(s(e, "value_hex"));
                 assert_eq!(raw, expected, "[{label}] blob value_hex must equal hex");
-                assert_encode(&Value::Blob(raw.clone()), "blob", &expected, &label);
+                assert_encode(&Value::blob(raw.clone()), "blob", &expected, &label);
                 // Raw cell bytes ARE the blob value (no length prefix at cell level);
                 // parse_cql_value_raw is the faithful raw decode entry for blob.
                 let (rem, got) = parse_cql_value_raw(&expected, CqlTypeId::Blob)
                     .unwrap_or_else(|e| panic!("[{label}] blob decode failed: {e:?}"));
                 assert!(rem.is_empty(), "[{label}] blob trailing bytes");
-                assert_eq!(got, Value::Blob(raw), "[{label}] blob decode mismatch");
+                assert_eq!(
+                    got,
+                    Value::Blob(raw.into()),
+                    "[{label}] blob decode mismatch"
+                );
             }
             other => panic!("[{label}] unexpected type {other}"),
         }
@@ -348,7 +352,7 @@ fn uuid_inet_vectors() {
                     raw.len() == 4 || raw.len() == 16,
                     "[{label}] inet must be 4 or 16 bytes"
                 );
-                assert_encode(&Value::Inet(raw.clone()), "inet", &expected, &label);
+                assert_encode(&Value::inet(raw.clone()), "inet", &expected, &label);
                 // parse_inet consumes a VInt-length-prefixed value; frame the raw
                 // cell bytes the way the decoder expects, then assert reproduction.
                 let mut framed = encode_vint(raw.len() as i64);
@@ -356,7 +360,11 @@ fn uuid_inet_vectors() {
                 let (rem, got) = parse_inet(&framed)
                     .unwrap_or_else(|e| panic!("[{label}] parse_inet failed: {e:?}"));
                 assert!(rem.is_empty(), "[{label}] inet trailing bytes");
-                assert_eq!(got, Value::Inet(raw), "[{label}] inet decode mismatch");
+                assert_eq!(
+                    got,
+                    Value::Inet(raw.into()),
+                    "[{label}] inet decode mismatch"
+                );
             }
             other => panic!("[{label}] unexpected type {other}"),
         }
@@ -430,14 +438,18 @@ fn varint_decimal_duration_vectors() {
                 // Canonical cross-check (no CQLite involved).
                 assert_eq!(ref_varint(&n), expected, "[{label}] canonical varint bytes");
                 let raw = expected.clone();
-                assert_encode(&Value::Varint(raw.clone()), "varint", &expected, &label);
+                assert_encode(&Value::varint(raw.clone()), "varint", &expected, &label);
                 // parse_varint expects a VInt length prefix; frame and reproduce.
                 let mut framed = encode_vint(raw.len() as i64);
                 framed.extend_from_slice(&raw);
                 let (rem, got) = parse_varint(&framed)
                     .unwrap_or_else(|err| panic!("[{label}] parse_varint failed: {err:?}"));
                 assert!(rem.is_empty(), "[{label}] varint trailing bytes");
-                assert_eq!(got, Value::Varint(raw), "[{label}] varint decode mismatch");
+                assert_eq!(
+                    got,
+                    Value::Varint(raw.into()),
+                    "[{label}] varint decode mismatch"
+                );
             }
             "decimal" => {
                 let scale = i64f(e, "scale") as i32;

@@ -288,7 +288,7 @@ async fn test_data_mixed_partition_sizes() {
         let ops = vec![
             CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text(name),
+                value: Value::Text(name.into()),
             },
             CellOperation::Write {
                 column: "value".to_string(),

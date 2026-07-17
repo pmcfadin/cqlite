@@ -164,7 +164,7 @@ fn map_element_expired_within_grace_becomes_element_tombstone() {
         expiring_complex_element(
             "props",
             b"k1",
-            Value::Text("secret".to_string()),
+            Value::text("secret".to_string()),
             false,
             100,
             60,
@@ -207,7 +207,7 @@ fn map_element_expired_within_grace_becomes_element_tombstone() {
     // The live value must NOT survive: it is wrapped as a CellTombstone.
     assert_ne!(
         elem.value,
-        Value::Text("secret".to_string()),
+        Value::text("secret".to_string()),
         "the expired element's live value must not survive"
     );
     assert!(
@@ -234,7 +234,7 @@ fn map_element_expired_past_grace_is_purged() {
         expiring_complex_element(
             "props",
             b"k1",
-            Value::Text("secret".to_string()),
+            Value::text("secret".to_string()),
             false,
             100,
             60,
@@ -280,7 +280,7 @@ fn live_map_element_survives_unchanged() {
         expiring_complex_element(
             "props",
             b"k1",
-            Value::Text("alive".to_string()),
+            Value::text("alive".to_string()),
             false,
             100,
             10_000_000,
@@ -301,7 +301,7 @@ fn live_map_element_survives_unchanged() {
     assert!(!elem.is_deleted, "an un-expired element is not a tombstone");
     assert_eq!(
         elem.value,
-        Value::Text("alive".to_string()),
+        Value::text("alive".to_string()),
         "live element keeps its value"
     );
     assert!(elem.ttl.is_some(), "live expiring element keeps its TTL");
@@ -357,7 +357,7 @@ fn expiry_disabled_leaves_complex_element_live() {
     let cells = vec![expiring_complex_element(
         "props",
         b"k1",
-        Value::Text("secret".to_string()),
+        Value::text("secret".to_string()),
         false,
         100,
         60,
@@ -374,7 +374,7 @@ fn expiry_disabled_leaves_complex_element_live() {
     );
     assert_eq!(
         elem.value,
-        Value::Text("secret".to_string()),
+        Value::text("secret".to_string()),
         "value untouched"
     );
     assert_eq!(elem.ttl, Some(60), "ttl untouched");
@@ -395,7 +395,7 @@ fn element_at_now_equals_ldt_expires() {
         expiring_complex_element(
             "props",
             b"k1",
-            Value::Text("secret".to_string()),
+            Value::text("secret".to_string()),
             false,
             100,
             ttl,

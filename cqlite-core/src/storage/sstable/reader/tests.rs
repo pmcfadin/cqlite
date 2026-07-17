@@ -477,7 +477,10 @@ mod tests {
                 // CRITICAL: Verify typed values (not blobs!)
                 match &ascii_field.1 {
                     Value::Text(text) => {
-                        eprintln!("✅ ascii_field is Text: '{}'", text);
+                        eprintln!(
+                            "✅ ascii_field is Text: '{}'",
+                            String::from_utf8_lossy(text)
+                        );
                         assert_eq!(
                             text, "ascii",
                             "ascii_field value should be 'ascii' from sstabledump"

@@ -335,7 +335,7 @@ fn ck_row(table: &str, id: i32, ck: i32, v: &str, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "v".into(),
-            value: Value::Text(v.into()),
+            value: Value::text(v),
         }],
         ts,
         None,
@@ -661,7 +661,7 @@ async fn ttl_expired_live_compaction_byte_for_byte() {
     });
     // #1538 (target shape once the authoritative-LDT WriteWithTtl API exists):
     //   let expired = Mutation::new(.., vec![CellOperation::WriteWithTtl {
-    //       column: "v".into(), value: Value::Text("...".into()), ttl_seconds: 1,
+    //       column: "v".into(), value: Value::text("..."), ttl_seconds: 1,
     //   }], T_A, None).with_ttl_local_expiration_time(_expires_at); // #1538 API
     //   let group_a = vec![expired];
     //   let group_b = vec![ck_row(t, 1, 2, "b-1-2", T_B)];

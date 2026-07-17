@@ -184,7 +184,7 @@ mod tests {
             CellOperation::Write {
                 column: c,
                 value: Value::Text(s),
-            } if c == column => Some(s.clone()),
+            } if c == column => Some(String::from_utf8_lossy(s).into_owned()),
             _ => None,
         })
     }
@@ -198,9 +198,9 @@ mod tests {
     fn tracker_matches_whole_slice_for_lww_conflict() {
         let schema = schema_with_static();
         let mutations = vec![
-            static_write("region", Value::Text("us-east".to_string()), 100),
-            static_write("region", Value::Text("us-west".to_string()), 300), // wins: highest ts
-            static_write("region", Value::Text("eu-west".to_string()), 200),
+            static_write("region", Value::text("us-east".to_string()), 100),
+            static_write("region", Value::text("us-west".to_string()), 300), // wins: highest ts
+            static_write("region", Value::text("eu-west".to_string()), 200),
             static_write("quota", Value::Integer(10), 150),
         ];
 
@@ -242,8 +242,8 @@ mod tests {
     fn tracker_matches_whole_slice_for_exact_timestamp_tie() {
         let schema = schema_with_static();
         let mutations = vec![
-            static_write("region", Value::Text("first".to_string()), 500),
-            static_write("region", Value::Text("second".to_string()), 500), // later-fed at the SAME ts: wins
+            static_write("region", Value::text("first".to_string()), 500),
+            static_write("region", Value::text("second".to_string()), 500), // later-fed at the SAME ts: wins
         ];
 
         let whole_slice = collect_static_operations(&mutations, &schema, None);
@@ -271,8 +271,8 @@ mod tests {
     fn tracker_matches_whole_slice_with_shadow_floor() {
         let schema = schema_with_static();
         let mutations = vec![
-            static_write("region", Value::Text("shadowed".to_string()), 100), // <= floor
-            static_write("region", Value::Text("survivor".to_string()), 300), // > floor
+            static_write("region", Value::text("shadowed".to_string()), 100), // <= floor
+            static_write("region", Value::text("survivor".to_string()), 300), // > floor
         ];
         let shadow_floor = Some(200i64);
 

@@ -98,7 +98,7 @@ fn row(pk: i32, ck: i32, payload_len: usize, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "payload".to_string(),
-            value: Value::Text("x".repeat(payload_len)),
+            value: Value::text("x".repeat(payload_len)),
         }],
         ts,
         None,
@@ -221,7 +221,7 @@ fn payload_of(value: &ScanRow) -> Option<String> {
         for (k, v) in entries {
             if k.as_ref() == "payload" {
                 if let Value::Text(text) = v {
-                    return Some(text.clone());
+                    return Some(String::from_utf8_lossy(text).into_owned());
                 }
             }
         }

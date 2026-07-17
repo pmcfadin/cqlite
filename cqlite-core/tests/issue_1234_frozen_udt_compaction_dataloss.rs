@@ -94,7 +94,7 @@ fn person_value(name: &str, age: i32) -> Value {
         fields: vec![
             UdtField {
                 name: "name".to_string(),
-                value: Some(Value::Text(name.to_string())),
+                value: Some(Value::text(name.to_string())),
             },
             UdtField {
                 name: "age".to_string(),
@@ -111,7 +111,7 @@ fn address_value(street: &str, zip: i32) -> Value {
         fields: vec![
             UdtField {
                 name: "street".to_string(),
-                value: Some(Value::Text(street.to_string())),
+                value: Some(Value::text(street.to_string())),
             },
             UdtField {
                 name: "zip".to_string(),
@@ -128,7 +128,7 @@ fn employee_value(name: &str, street: &str, zip: i32) -> Value {
         fields: vec![
             UdtField {
                 name: "emp_name".to_string(),
-                value: Some(Value::Text(name.to_string())),
+                value: Some(Value::text(name.to_string())),
             },
             UdtField {
                 name: "home".to_string(),

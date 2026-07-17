@@ -57,7 +57,7 @@ fn create_mutation(id: i32, value: &str, timestamp: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "value".to_string(),
-        value: Value::Text(value.to_string()),
+        value: Value::text(value.to_string()),
     }];
     Mutation::new(table_id, pk, None, ops, timestamp, None)
 }

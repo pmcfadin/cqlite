@@ -275,7 +275,7 @@ fn exec_context() -> ExecutionContext {
 fn live(key: &[u8], name: &str) -> (RowKey, ScanRow) {
     (
         RowKey::new(key.to_vec()),
-        ScanRow::Row(vec![(Arc::from("name"), Value::Text(name.to_string()))]),
+        ScanRow::Row(vec![(Arc::from("name"), Value::text(name.to_string()))]),
     )
 }
 
@@ -598,7 +598,7 @@ async fn multi_generation_capped_scan_decode_stops() {
                     None,
                     vec![CellOperation::Write {
                         column: "value".to_string(),
-                        value: Value::Text(format!("v{id}")),
+                        value: Value::text(format!("v{id}")),
                     }],
                     1_000 + id as i64,
                     None,

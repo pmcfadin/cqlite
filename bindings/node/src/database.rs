@@ -1566,7 +1566,7 @@ fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
         Value::Float32(f) => serde_json::Number::from_f64(*f as f64)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
-        Value::Text(s) => serde_json::Value::String(s.clone()),
+        Value::Text(s) => serde_json::Value::String(String::from_utf8_lossy(s).into_owned()),
         Value::Blob(b) => {
             // Convert blob to base64 string
             use base64::Engine;
@@ -1643,7 +1643,7 @@ fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
                     .iter()
                     .filter_map(|(k, v)| {
                         if let Value::Text(s) = k {
-                            Some((s.clone(), value_to_json(v)))
+                            Some((String::from_utf8_lossy(s).into_owned(), value_to_json(v)))
                         } else {
                             None
                         }
@@ -1722,7 +1722,7 @@ mod tests {
         );
         assert_eq!(value_to_json(&Value::Integer(42)), serde_json::json!(42));
         assert_eq!(
-            value_to_json(&Value::Text("hello".to_string())),
+            value_to_json(&Value::text("hello".to_string())),
             serde_json::json!("hello")
         );
     }
@@ -1756,8 +1756,8 @@ mod tests {
 
         // Map with string keys
         let map = Value::Map(vec![
-            (Value::Text("a".to_string()), Value::Integer(1)),
-            (Value::Text("b".to_string()), Value::Integer(2)),
+            (Value::text("a".to_string()), Value::Integer(1)),
+            (Value::text("b".to_string()), Value::Integer(2)),
         ]);
         let result = value_to_json(&map);
         assert!(result.is_object());

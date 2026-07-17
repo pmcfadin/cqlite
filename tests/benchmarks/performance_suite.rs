@@ -26,7 +26,7 @@ fn generate_test_data(count: usize) -> Vec<(RowKey, Value)> {
     (0..count)
         .map(|i| {
             let key = RowKey::from(format!("benchmark_key_{:08}", i));
-            let value = Value::Text(format!(
+            let value = Value::text(format!(
                 "benchmark_value_{}_with_additional_data_to_make_it_realistic",
                 i
             ));
@@ -39,7 +39,7 @@ fn generate_large_test_data(count: usize, value_size: usize) -> Vec<(RowKey, Val
     (0..count)
         .map(|i| {
             let key = RowKey::from(format!("large_key_{:08}", i));
-            let value = Value::Text("x".repeat(value_size));
+            let value = Value::text("x".repeat(value_size));
             (key, value)
         })
         .collect()
@@ -51,12 +51,12 @@ fn generate_mixed_data_types(count: usize) -> Vec<(RowKey, Value)> {
             let key = RowKey::from(format!("mixed_key_{:08}", i));
             let value = match i % 6 {
                 0 => Value::Integer(i as i32),
-                1 => Value::Text(format!("text_value_{}", i)),
+                1 => Value::text(format!("text_value_{}", i)),
                 2 => Value::Float(i as f64 * 3.14159),
                 3 => Value::Boolean(i % 2 == 0),
-                4 => Value::Blob(format!("blob_data_{}", i).into_bytes()),
+                4 => Value::blob(format!("blob_data_{}", i).into_bytes()),
                 5 => Value::BigInt(i as i64),
-                _ => Value::Text(format!("default_{}", i)),
+                _ => Value::text(format!("default_{}", i)),
             };
             (key, value)
         })
@@ -236,7 +236,7 @@ fn benchmark_concurrent_operations(c: &mut Criterion) {
                             for i in 0..ops_per_thread {
                                 let key = RowKey::from(format!("thread_{}_key_{}", thread_id, i));
                                 let value =
-                                    Value::Text(format!("thread_{}_value_{}", thread_id, i));
+                                    Value::text(format!("thread_{}_value_{}", thread_id, i));
                                 engine.put(&table_id, key, value).await.unwrap();
                             }
                         });
@@ -497,7 +497,7 @@ fn benchmark_mixed_workload(c: &mut Criterion) {
                 } else {
                     // Write operation
                     let key = RowKey::from(format!("new_key_{:08}", i));
-                    let value = Value::Text(format!("new_value_{}", i));
+                    let value = Value::text(format!("new_value_{}", i));
                     engine.put(&table_id, key, value).await.unwrap();
                 }
             }

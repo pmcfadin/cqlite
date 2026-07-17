@@ -334,7 +334,7 @@ impl PerformanceRegressionFramework {
         // Warmup
         for i in 0..self.config.warmup_iterations {
             let key = RowKey::from(format!("warmup_key_{}", i));
-            let value = Value::Text(format!("warmup_value_{}", i));
+            let value = Value::text(format!("warmup_value_{}", i));
             self.storage_engine.put(&table_id, key, value).await?;
         }
 
@@ -345,7 +345,7 @@ impl PerformanceRegressionFramework {
 
         for i in 0..iterations {
             let key = RowKey::from(format!("bench_key_{:08}", i));
-            let value = Value::Text(format!(
+            let value = Value::text(format!(
                 "benchmark_value_{}_with_substantial_content_for_realistic_testing_scenarios_{}",
                 i,
                 "x".repeat(100)
@@ -381,7 +381,7 @@ impl PerformanceRegressionFramework {
         // Pre-populate data
         for i in 0..iterations {
             let key = RowKey::from(format!("read_key_{:08}", i));
-            let value = Value::Text(format!("read_value_{}", i));
+            let value = Value::text(format!("read_value_{}", i));
             self.storage_engine.put(&table_id, key, value).await?;
         }
         self.storage_engine.flush().await?;
@@ -431,7 +431,7 @@ impl PerformanceRegressionFramework {
         // Pre-populate data
         for i in 0..data_size {
             let key = RowKey::from(format!("scan_key_{:08}", i));
-            let value = Value::Text(format!("scan_value_{}", i));
+            let value = Value::text(format!("scan_value_{}", i));
             self.storage_engine.put(&table_id, key, value).await?;
         }
         self.storage_engine.flush().await?;
@@ -502,7 +502,7 @@ impl PerformanceRegressionFramework {
 
                 for i in 0..ops_per_thread {
                     let key = RowKey::from(format!("concurrent_{}_{:06}", thread_id, i));
-                    let value = Value::Text(format!("concurrent_value_{}_{}", thread_id, i));
+                    let value = Value::text(format!("concurrent_value_{}_{}", thread_id, i));
 
                     let op_start = Instant::now();
                     if storage.put(&table_id, key, value).await.is_ok() {

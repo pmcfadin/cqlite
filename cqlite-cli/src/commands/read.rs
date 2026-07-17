@@ -103,7 +103,7 @@ pub async fn read_sstable(
                 let key = entry.key.clone();
                 let value = cqlite_core::types::ScanRow::Row(vec![(
                     std::sync::Arc::from("data"),
-                    cqlite_core::Value::Text(format!("{:?}|{}", entry.key, entry.format_info)),
+                    cqlite_core::Value::text(format!("{:?}|{}", entry.key, entry.format_info)),
                 )]);
 
                 match parser.parse_entry(&key, &value) {

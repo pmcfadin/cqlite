@@ -252,6 +252,16 @@ harness = false
 name = "read"
 harness = false
 
+# Predicate-eval / sort throughput micro-benches (issue #1644, K5, task 6.4).
+# `predicate_sort/reject_most_rows` proves a predicate-rejected Bytes-backed
+# Text value is never copied; `predicate_sort/order_by_text` proves the
+# comparator borrow (stage 3) does not regress ORDER BY throughput. Needs
+# `cli-helpers`; without it compiles to an empty criterion main.
+[[bench]]
+name = "predicate_sort"
+path = "benches/predicate_sort_bench.rs"
+harness = false
+
 # Stage-0 measure-first bench for the runtime DecodePolicy work (issue #2211,
 # F6.4). Quantifies (a) SAFE lz4 decompress-only throughput via `lz4_flex`, (b)
 # the full chunk-decompress path (seek+read+CRC32+decode+validate), and (c)

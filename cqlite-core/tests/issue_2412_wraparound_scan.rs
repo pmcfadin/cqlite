@@ -99,7 +99,7 @@ fn mutation(id: i32) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(format!("v{id}")),
+            value: Value::text(format!("v{id}")),
         }],
         1_000_000 + id as i64,
         None,

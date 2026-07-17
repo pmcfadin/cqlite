@@ -89,11 +89,11 @@ fn write_static_and_row(pk: i32, s_val: &str, v_val: &str, ts: i64) -> Mutation 
         vec![
             CellOperation::Write {
                 column: "s".to_string(),
-                value: Value::Text(s_val.to_string()),
+                value: Value::text(s_val.to_string()),
             },
             CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text(v_val.to_string()),
+                value: Value::text(v_val.to_string()),
             },
         ],
         ts,

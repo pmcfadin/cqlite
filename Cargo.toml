@@ -118,7 +118,7 @@ dashmap = "5.5"
 arc-swap = "1"
 
 # Memory management
-bytes = "1.4"
+bytes = "1.6"
 memmap2 = "0.9"
 
 # Development and testing

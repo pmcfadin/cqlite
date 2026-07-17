@@ -375,7 +375,7 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(id));
         let ops = vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }];
         Mutation::new(table_id, pk, None, ops, 1234567890, None)
     }

@@ -319,12 +319,17 @@ impl V5CompressedLegacyParser {
         // value fell through to the blob default and was mis-typed as Value::Blob.
         else if type_str == "varint" {
             let bytes = Self::read_vint_length_prefixed_bytes(data, &mut off, column, "varint")?;
-            Value::Varint(bytes.to_vec())
+            // Issue #1644: adapt the #1885 varint arm to the Bytes-backed enum
+            // via the `Value::varint` constructor (preserves #1885's owned-copy
+            // semantics; this arm was not part of #1644's zero-copy borrow scope).
+            Value::varint(bytes.to_vec())
         }
         // Default: treat as VInt-length-prefixed blob (unknown scalar type).
         else {
             let bytes = Self::read_vint_length_prefixed_bytes(data, &mut off, column, "blob")?;
-            Value::Blob(bytes.to_vec())
+            // Issue #1644 (K5 stage 2): the complex blob default shares the scalar
+            // blob arm's zero-copy borrow (mirrors the pre-split shared closure).
+            Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(bytes))
         };
 
         *offset = off;

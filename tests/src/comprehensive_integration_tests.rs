@@ -521,7 +521,7 @@ impl ComprehensiveIntegrationTestSuite {
             let test_data = vec![
                 (
                     RowKey::new(b"key1".to_vec()),
-                    Value::Text("Hello World".to_string()),
+                    Value::text("Hello World".to_string()),
                 ),
                 (RowKey::new(b"key2".to_vec()), Value::Integer(42)),
                 (RowKey::new(b"key3".to_vec()), Value::Boolean(true)),
@@ -626,13 +626,13 @@ impl ComprehensiveIntegrationTestSuite {
             Value::Integer(42),
             Value::BigInt(9223372036854775807),
             Value::Float(3.14159),
-            Value::Text("Unicode: 测试数据 🚀".to_string()),
-            Value::Blob(vec![0x01, 0x02, 0x03, 0xFF]),
+            Value::text("Unicode: 测试数据 🚀".to_string()),
+            Value::blob(vec![0x01, 0x02, 0x03, 0xFF]),
             Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             Value::Timestamp(1640995200000000),
             Value::List(vec![
-                Value::Text("item1".to_string()),
-                Value::Text("item2".to_string()),
+                Value::text("item1".to_string()),
+                Value::text("item2".to_string()),
             ]),
             Value::Null,
         ];

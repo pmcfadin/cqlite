@@ -210,7 +210,7 @@ fn coerce_value_for_comparator(value: &Value, comparator: &ComparatorType) -> Va
         // UUID / TIMEUUID literal -> already in the serializer's expected shape.
         (Value::Uuid(bytes), ComparatorType::Uuid) => Value::Uuid(*bytes),
         // Blob literal (0x...) -> matches the `blob` serializer directly.
-        (Value::Blob(bytes), ComparatorType::Blob) => Value::Blob(bytes.clone()),
+        (Value::Blob(bytes), ComparatorType::Blob) => Value::blob(bytes.clone()),
         _ => value.clone(),
     }
 }
@@ -231,8 +231,8 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
         (Value::Counter(n), ComparatorType::Counter) => Ok(n.to_be_bytes().to_vec()),
         (Value::Float32(f), ComparatorType::Float32) => Ok(f.to_bits().to_be_bytes().to_vec()),
         (Value::Float(f), ComparatorType::Float) => Ok(f.to_bits().to_be_bytes().to_vec()),
-        (Value::Text(s), ComparatorType::Text) => Ok(s.as_bytes().to_vec()),
-        (Value::Blob(bytes), ComparatorType::Blob) => Ok(bytes.clone()),
+        (Value::Text(s), ComparatorType::Text) => Ok(s.to_vec()),
+        (Value::Blob(bytes), ComparatorType::Blob) => Ok(bytes.to_vec()),
         (Value::Timestamp(millis), ComparatorType::Timestamp) => Ok(millis.to_be_bytes().to_vec()),
         (Value::Date(days), ComparatorType::Date) => {
             let stored = days.wrapping_sub(i32::MIN) as u32;
@@ -242,8 +242,8 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
         (Value::Time(nanos), ComparatorType::Custom(name)) if name == "time" => {
             Ok(nanos.to_be_bytes().to_vec())
         }
-        (Value::Inet(bytes), ComparatorType::Custom(name)) if name == "inet" => Ok(bytes.clone()),
-        (Value::Varint(bytes), ComparatorType::Varint) => Ok(bytes.clone()),
+        (Value::Inet(bytes), ComparatorType::Custom(name)) if name == "inet" => Ok(bytes.to_vec()),
+        (Value::Varint(bytes), ComparatorType::Varint) => Ok(bytes.to_vec()),
         (Value::Decimal { scale, unscaled }, ComparatorType::Decimal) => {
             let mut result = Vec::with_capacity(4 + unscaled.len());
             result.extend_from_slice(&scale.to_be_bytes());
@@ -328,9 +328,9 @@ pub fn deserialize_value_bytes(data: &[u8], comparator: &ComparatorType) -> Resu
         ComparatorType::Text => {
             let s = String::from_utf8(data.to_vec())
                 .map_err(|e| Error::InvalidInput(format!("Invalid UTF-8 in text value: {}", e)))?;
-            Ok(Value::Text(s))
+            Ok(Value::Text(s.into()))
         }
-        ComparatorType::Blob => Ok(Value::Blob(data.to_vec())),
+        ComparatorType::Blob => Ok(Value::blob(data.to_vec())),
         ComparatorType::Timestamp => {
             let bytes: [u8; 8] = data.try_into().map_err(|_| {
                 Error::InvalidInput(format!("Timestamp requires 8 bytes, got {}", data.len()))
@@ -356,8 +356,8 @@ pub fn deserialize_value_bytes(data: &[u8], comparator: &ComparatorType) -> Resu
             })?;
             Ok(Value::Time(i64::from_be_bytes(bytes)))
         }
-        ComparatorType::Custom(name) if name == "inet" => Ok(Value::Inet(data.to_vec())),
-        ComparatorType::Varint => Ok(Value::Varint(data.to_vec())),
+        ComparatorType::Custom(name) if name == "inet" => Ok(Value::inet(data.to_vec())),
+        ComparatorType::Varint => Ok(Value::varint(data.to_vec())),
         ComparatorType::Decimal => {
             if data.len() < 4 {
                 return Err(Error::InvalidInput(format!(
@@ -440,7 +440,7 @@ mod tests {
             cols,
             vec![(
                 "id".to_string(),
-                Value::Text("k0000000000000000".to_string())
+                Value::text("k0000000000000000".to_string())
             )]
         );
     }
@@ -465,8 +465,8 @@ mod tests {
         assert_eq!(
             cols,
             vec![
-                ("application_id".to_string(), Value::Text("a".to_string())),
-                ("metric_name".to_string(), Value::Text("view".to_string())),
+                ("application_id".to_string(), Value::text("a".to_string())),
+                ("metric_name".to_string(), Value::text("view".to_string())),
             ]
         );
     }
@@ -480,7 +480,7 @@ mod tests {
         let cols = decode_partition_key_columns(&data, &schema).unwrap();
         assert_eq!(
             cols[0],
-            ("symbol".to_string(), Value::Text("AAPL".to_string()))
+            ("symbol".to_string(), Value::text("AAPL".to_string()))
         );
         assert_eq!(cols[1].0, "trading_day");
         assert!(
@@ -500,7 +500,7 @@ mod tests {
     fn encode_single_text_pk_is_raw_bytes() {
         let schema = schema_with_pks(&[("id", "text")]);
         let bytes =
-            encode_partition_key_columns(&[Value::Text("k0000000000000000".to_string())], &schema)
+            encode_partition_key_columns(&[Value::text("k0000000000000000".to_string())], &schema)
                 .unwrap();
         assert_eq!(bytes, b"k0000000000000000");
     }
@@ -521,8 +521,8 @@ mod tests {
     fn encode_decode_roundtrip_composite() {
         let schema = schema_with_pks(&[("application_id", "text"), ("metric_name", "text")]);
         let values = vec![
-            Value::Text("a".to_string()),
-            Value::Text("view".to_string()),
+            Value::text("a".to_string()),
+            Value::text("view".to_string()),
         ];
         let bytes = encode_partition_key_columns(&values, &schema).unwrap();
         // [len=1]['a'][0x00][len=4]["view"][0x00]
@@ -534,8 +534,8 @@ mod tests {
         assert_eq!(
             decoded,
             vec![
-                ("application_id".to_string(), Value::Text("a".to_string())),
-                ("metric_name".to_string(), Value::Text("view".to_string())),
+                ("application_id".to_string(), Value::text("a".to_string())),
+                ("metric_name".to_string(), Value::text("view".to_string())),
             ]
         );
     }
@@ -577,7 +577,7 @@ mod tests {
         // its raw bytes for a `blob` partition key.
         let schema = schema_with_pks(&[("data", "blob")]);
         let bytes =
-            encode_partition_key_columns(&[Value::Blob(vec![0xde, 0xad, 0xbe, 0xef])], &schema)
+            encode_partition_key_columns(&[Value::blob(vec![0xde, 0xad, 0xbe, 0xef])], &schema)
                 .unwrap();
         assert_eq!(bytes, vec![0xde, 0xad, 0xbe, 0xef]);
     }
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn encode_column_count_mismatch_errors() {
         let schema = schema_with_pks(&[("a", "text"), ("b", "text")]);
-        assert!(encode_partition_key_columns(&[Value::Text("a".to_string())], &schema).is_err());
+        assert!(encode_partition_key_columns(&[Value::text("a".to_string())], &schema).is_err());
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
         let cases: Vec<Case> = vec![
             (
                 vec![("id", "text")],
-                vec![("id", Value::Text("k123".to_string()))],
+                vec![("id", Value::text("k123".to_string()))],
             ),
             (vec![("id", "int")], vec![("id", Value::Integer(42))]),
             (vec![("id", "bigint")], vec![("id", Value::BigInt(-7))]),
@@ -622,14 +622,14 @@ mod tests {
             (
                 vec![("app", "text"), ("metric", "text")],
                 vec![
-                    ("app", Value::Text("a".to_string())),
-                    ("metric", Value::Text("view".to_string())),
+                    ("app", Value::text("a".to_string())),
+                    ("metric", Value::text("view".to_string())),
                 ],
             ),
             (
                 vec![("app", "text"), ("part", "int")],
                 vec![
-                    ("app", Value::Text("svc".to_string())),
+                    ("app", Value::text("svc".to_string())),
                     ("part", Value::Integer(3)),
                 ],
             ),

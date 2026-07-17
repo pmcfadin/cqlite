@@ -84,7 +84,7 @@ fn write_row(id: i32, ck: i32, name: &str, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }],
         ts,
         None,

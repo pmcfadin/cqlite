@@ -1042,7 +1042,7 @@ mod tests {
 
         // Unknown columns should be preserved as blobs (graceful fallback)
         match &row.clustering_rows[0].columns["unknown"] {
-            Value::Blob(data) => assert_eq!(data, b"value"),
+            Value::Blob(data) => assert_eq!(data.as_ref(), b"value"),
             _ => panic!("Expected blob value for unknown column"),
         }
     }

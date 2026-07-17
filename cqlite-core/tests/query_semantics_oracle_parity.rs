@@ -188,7 +188,7 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, String> {
         Value::SmallInt(i) => json!(i),
         Value::TinyInt(i) => json!(i),
         Value::Float(f) => json!(f),
-        Value::Text(s) => json!(s),
+        Value::Text(s) => json!(std::str::from_utf8(s).unwrap_or_default()),
         other => return Err(format!("unsupported oracle scalar {other:?}")),
     })
 }

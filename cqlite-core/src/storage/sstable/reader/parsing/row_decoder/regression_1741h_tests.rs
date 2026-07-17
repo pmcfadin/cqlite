@@ -260,7 +260,7 @@ mod row_size_bound_negative_pin {
             None,
             vec![CellOperation::Write {
                 column: "name".to_string(),
-                value: Value::Text("hi".to_string()),
+                value: Value::text("hi"),
             }],
             1_000_000,
             None,

@@ -16,7 +16,7 @@ mod tests {
         // Test tuple with mixed types: tuple<int, text, boolean>
         let tuple = Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
             Value::Null,
         ]);
@@ -30,8 +30,8 @@ mod tests {
     fn test_udt_value_creation_and_display() {
         // Test UDT: CREATE TYPE address (street text, city text, zip int)
         let mut fields = HashMap::new();
-        fields.insert("street".to_string(), Value::Text("123 Main St".to_string()));
-        fields.insert("city".to_string(), Value::Text("San Francisco".to_string()));
+        fields.insert("street".to_string(), Value::text("123 Main St".to_string()));
+        fields.insert("city".to_string(), Value::text("San Francisco".to_string()));
         fields.insert("zip".to_string(), Value::Integer(94102));
         fields.insert("country".to_string(), Value::Null); // Nullable field
 
@@ -58,8 +58,8 @@ mod tests {
 
         // Test frozen<map<text, int>>
         let frozen_map = Value::Frozen(Box::new(Value::Map(vec![
-            (Value::Text("a".to_string()), Value::Integer(1)),
-            (Value::Text("b".to_string()), Value::Integer(2)),
+            (Value::text("a".to_string()), Value::Integer(1)),
+            (Value::text("b".to_string()), Value::Integer(2)),
         ])));
         
         assert_eq!(frozen_map.to_string(), "FROZEN({'a': 1, 'b': 2})");
@@ -69,12 +69,12 @@ mod tests {
     fn test_nested_udt_in_tuple() {
         // Test complex nesting: tuple<text, address>
         let mut address_fields = HashMap::new();
-        address_fields.insert("street".to_string(), Value::Text("456 Oak Ave".to_string()));
-        address_fields.insert("city".to_string(), Value::Text("Portland".to_string()));
+        address_fields.insert("street".to_string(), Value::text("456 Oak Ave".to_string()));
+        address_fields.insert("city".to_string(), Value::text("Portland".to_string()));
         
         let address = Value::Udt("address".to_string(), address_fields);
         let nested_tuple = Value::Tuple(vec![
-            Value::Text("John Doe".to_string()),
+            Value::text("John Doe".to_string()),
             address,
         ]);
         
@@ -147,10 +147,10 @@ mod tests {
     fn test_schema_evolution_scenarios() {
         // Test adding fields to UDT (schema evolution)
         let mut v1_fields = HashMap::new();
-        v1_fields.insert("name".to_string(), Value::Text("Alice".to_string()));
+        v1_fields.insert("name".to_string(), Value::text("Alice".to_string()));
         
         let mut v2_fields = HashMap::new();
-        v2_fields.insert("name".to_string(), Value::Text("Alice".to_string()));
+        v2_fields.insert("name".to_string(), Value::text("Alice".to_string()));
         v2_fields.insert("age".to_string(), Value::Integer(30)); // New field
         v2_fields.insert("email".to_string(), Value::Null); // New nullable field
         

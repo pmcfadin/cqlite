@@ -55,10 +55,12 @@ impl V5CompressedLegacyParser {
                 }
 
                 let text_bytes = &data[offset..offset + text_len];
-                let text = String::from_utf8(text_bytes.to_vec())
+                std::str::from_utf8(text_bytes)
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in text: {}", e)))?;
                 offset += text_len;
-                Value::Text(text)
+                Value::Text(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(text_bytes),
+                )
             }
 
             "boolean" => {
@@ -115,7 +117,7 @@ impl V5CompressedLegacyParser {
                 }
 
                 let text_bytes = &data[offset..offset + text_len];
-                let text = String::from_utf8(text_bytes.to_vec()).map_err(|e| {
+                std::str::from_utf8(text_bytes).map_err(|e| {
                     Error::corruption(format!(
                         "Frozen element '{}': invalid UTF-8 in text value: {}",
                         column_name, e
@@ -123,7 +125,9 @@ impl V5CompressedLegacyParser {
                 })?;
 
                 offset += text_len;
-                Value::Text(text)
+                Value::Text(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(text_bytes),
+                )
             }
 
             "uuid" | "timeuuid" => {
@@ -416,7 +420,9 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let bytes = data[offset..offset + len].to_vec();
+                let bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                    &data[offset..offset + len],
+                );
                 offset += len;
                 Value::Inet(bytes)
             }
@@ -442,7 +448,9 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let blob_bytes = data[offset..offset + blob_len].to_vec();
+                let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                    &data[offset..offset + blob_len],
+                );
                 offset += blob_len;
                 Value::Blob(blob_bytes)
             }
@@ -496,7 +504,9 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let varint_bytes = data[offset..offset + varint_len].to_vec();
+                let varint_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                    &data[offset..offset + varint_len],
+                );
                 offset += varint_len;
                 Value::Varint(varint_bytes)
             }
@@ -996,7 +1006,7 @@ impl V5CompressedLegacyParser {
                                             )?
                                         } else {
                                             // Unknown custom type - parse as blob
-                                            Value::Blob(field_data.to_vec())
+                                            Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
                                         }
                                     }
                                     CqlType::Udt(udt_name, inline_fields) => {
@@ -1015,7 +1025,7 @@ impl V5CompressedLegacyParser {
                                                 1,
                                             )?
                                         } else {
-                                            Value::Blob(field_data.to_vec())
+                                            Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))
                                         }
                                     }
                                     CqlType::Frozen(inner) => {
@@ -1035,9 +1045,7 @@ impl V5CompressedLegacyParser {
                                                         )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else {
-                                                    Value::Frozen(Box::new(Value::Blob(
-                                                        field_data.to_vec(),
-                                                    )))
+                                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
                                                 }
                                             }
                                             CqlType::Udt(udt_name, inline_fields) => {
@@ -1059,9 +1067,7 @@ impl V5CompressedLegacyParser {
                                                     )?;
                                                     Value::Frozen(Box::new(inner_value))
                                                 } else {
-                                                    Value::Frozen(Box::new(Value::Blob(
-                                                        field_data.to_vec(),
-                                                    )))
+                                                    Value::Frozen(Box::new(Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(field_data))))
                                                 }
                                             }
                                             _ => {
@@ -1123,7 +1129,10 @@ impl V5CompressedLegacyParser {
                             )));
                         }
 
-                        let blob_bytes = data[offset..offset + blob_len].to_vec();
+                        let blob_bytes =
+                            crate::storage::sstable::reader::value_borrow::borrow_active(
+                                &data[offset..offset + blob_len],
+                            );
                         offset += blob_len;
                         Value::Blob(blob_bytes)
                     }
@@ -1154,7 +1163,9 @@ impl V5CompressedLegacyParser {
                         )));
                     }
 
-                    let blob_bytes = data[offset..offset + blob_len].to_vec();
+                    let blob_bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                        &data[offset..offset + blob_len],
+                    );
                     offset += blob_len;
                     Value::Blob(blob_bytes)
                 }

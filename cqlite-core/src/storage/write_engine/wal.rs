@@ -1932,7 +1932,7 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(id));
         let ops = vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }];
 
         Mutation::new(table_id, pk, None, ops, 1234567890, None)
@@ -2295,7 +2295,7 @@ mod tests {
         let ck = Some(ClusteringKey::single("ts", Value::Timestamp(1000)));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text("test".to_string()),
+            value: Value::text("test".to_string()),
         }];
 
         let mutation = Mutation::new(table_id, pk, ck, ops, 1234567890, None);
@@ -2316,7 +2316,7 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text("test".to_string()),
+            value: Value::text("test".to_string()),
         }];
 
         let mutation = Mutation::new(table_id, pk, None, ops, 1234567890, Some(3600));
@@ -2473,7 +2473,7 @@ mod tests {
                 },
                 LegacyCellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("Bob".to_string()),
+                    value: Value::text("Bob".to_string()),
                 },
             ],
             timestamp_micros: 999_000,
@@ -2499,7 +2499,7 @@ mod tests {
                 },
                 CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("Bob".to_string()),
+                    value: Value::text("Bob".to_string()),
                 },
             ],
             999_000,
@@ -2532,7 +2532,7 @@ mod tests {
         match &decoded.operations[1] {
             CellOperation::Write { column, value } => {
                 assert_eq!(column, "name");
-                assert_eq!(value, &Value::Text("Bob".to_string()));
+                assert_eq!(value, &Value::text("Bob".to_string()));
             }
             other => panic!("expected Write, got {other:?}"),
         }
@@ -2594,7 +2594,7 @@ mod tests {
                 },
                 LegacyCellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("Carol".to_string()),
+                    value: Value::text("Carol".to_string()),
                 },
             ],
             timestamp_micros: 1_650_000_000_000_000,
@@ -2619,7 +2619,7 @@ mod tests {
             Ok(m) if m.operations.len() == 2
                 && matches!(&m.operations[0], CellOperation::Delete { column, .. } if column == "dropped_col")
                 && matches!(&m.operations[1], CellOperation::Write { column, value }
-                    if column == "name" && value == &Value::Text("Carol".to_string()))
+                    if column == "name" && value == &Value::text("Carol".to_string()))
         );
         assert!(
             !current_recovers_faithfully,
@@ -2646,7 +2646,7 @@ mod tests {
         match &decoded.operations[1] {
             CellOperation::Write { column, value } => {
                 assert_eq!(column, "name");
-                assert_eq!(value, &Value::Text("Carol".to_string()));
+                assert_eq!(value, &Value::text("Carol".to_string()));
             }
             other => panic!("expected Write, got {other:?}"),
         }
@@ -2677,7 +2677,7 @@ mod tests {
             operations: vec![
                 PreCellLdtWriteTtlCellOperation::WriteWithTtl {
                     column: "session".to_string(),
-                    value: Value::Text("abc".to_string()),
+                    value: Value::text("abc".to_string()),
                     ttl_seconds: 3600,
                 },
                 PreCellLdtWriteTtlCellOperation::Delete {
@@ -2753,7 +2753,7 @@ mod tests {
                 local_deletion_time,
             } => {
                 assert_eq!(column, "session");
-                assert_eq!(value, &Value::Text("abc".to_string()));
+                assert_eq!(value, &Value::text("abc".to_string()));
                 assert_eq!(*ttl_seconds, 3600);
                 // pre-#1538 WriteWithTtl had no surfaced source LDT → None.
                 assert_eq!(*local_deletion_time, None);
@@ -2792,7 +2792,7 @@ mod tests {
             operations: vec![
                 PreCellLdtWriteTtlCellOperation::WriteWithTtl {
                     column: "session".to_string(),
-                    value: Value::Text("cee".to_string()),
+                    value: Value::text("cee".to_string()),
                     ttl_seconds: 900,
                 },
                 PreCellLdtWriteTtlCellOperation::Delete {
@@ -2853,7 +2853,7 @@ mod tests {
                 local_deletion_time,
             } => {
                 assert_eq!(column, "session");
-                assert_eq!(value, &Value::Text("cee".to_string()));
+                assert_eq!(value, &Value::text("cee".to_string()));
                 assert_eq!(*ttl_seconds, 900);
                 assert_eq!(*local_deletion_time, None);
             }
@@ -2888,7 +2888,7 @@ mod tests {
             operations: vec![
                 PreCellLdtWriteTtlCellOperation::WriteWithTtl {
                     column: "session".to_string(),
-                    value: Value::Text("dee".to_string()),
+                    value: Value::text("dee".to_string()),
                     ttl_seconds: 1800,
                 },
                 PreCellLdtWriteTtlCellOperation::Delete {
@@ -2950,7 +2950,7 @@ mod tests {
                 local_deletion_time,
             } => {
                 assert_eq!(column, "session");
-                assert_eq!(value, &Value::Text("dee".to_string()));
+                assert_eq!(value, &Value::text("dee".to_string()));
                 assert_eq!(*ttl_seconds, 1800);
                 assert_eq!(*local_deletion_time, None);
             }
@@ -2983,7 +2983,7 @@ mod tests {
             None,
             vec![CellOperation::WriteWithTtl {
                 column: "session".to_string(),
-                value: Value::Text("xyz".to_string()),
+                value: Value::text("xyz".to_string()),
                 ttl_seconds: 7200,
                 local_deletion_time: Some(1_720_007_200),
             }],
@@ -3275,7 +3275,7 @@ mod tests {
                 CellOperation::Write {
                     value: Value::Text(name),
                     ..
-                } => name.as_str(),
+                } => std::str::from_utf8(name).unwrap_or_default(),
                 other => panic!("expected Write op, got {other:?}"),
             })
             .collect();
@@ -3436,7 +3436,7 @@ mod tests {
                 CellOperation::Write {
                     value: Value::Text(name),
                     ..
-                } => name.as_str(),
+                } => std::str::from_utf8(name).unwrap_or_default(),
                 other => panic!("expected Write op, got {other:?}"),
             })
             .collect();
@@ -3498,7 +3498,7 @@ mod tests {
                     CellOperation::Write {
                         value: Value::Text(name),
                         ..
-                    } => name.as_str(),
+                    } => std::str::from_utf8(name).unwrap_or_default(),
                     other => panic!("expected Write op, got {other:?}"),
                 })
                 .collect();
@@ -3593,7 +3593,7 @@ mod tests {
                 CellOperation::Write {
                     value: Value::Text(name),
                     ..
-                } => name.as_str(),
+                } => std::str::from_utf8(name).unwrap_or_default(),
                 other => panic!("expected Write op, got {other:?}"),
             })
             .collect();
@@ -3668,7 +3668,7 @@ mod tests {
                 CellOperation::Write {
                     value: Value::Text(name),
                     ..
-                } => name.as_str(),
+                } => std::str::from_utf8(name).unwrap_or_default(),
                 other => panic!("expected Write op, got {other:?}"),
             })
             .collect();

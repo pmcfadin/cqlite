@@ -1213,7 +1213,7 @@ fn value_to_string(v: &Value) -> String {
         Value::TinyInt(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Float32(f) => f.to_string(),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => String::from_utf8_lossy(s).into_owned(),
         Value::Boolean(b) => b.to_string(),
         // Uuid is stored as [u8; 16]; format as hex.
         Value::Uuid(u) => format!("{}", uuid::Uuid::from_bytes(*u)),

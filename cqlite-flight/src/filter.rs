@@ -477,7 +477,7 @@ fn json_to_value(
             .ok_or_else(|| bad(format!("expected boolean, got {json}"))),
         CqlType::Text | CqlType::Ascii | CqlType::Varchar => json
             .as_str()
-            .map(|s| Value::Text(s.to_string()))
+            .map(|s| Value::text(s.to_string()))
             .ok_or_else(|| bad(format!("expected string, got {json}"))),
         CqlType::Uuid | CqlType::TimeUuid => {
             let s = json

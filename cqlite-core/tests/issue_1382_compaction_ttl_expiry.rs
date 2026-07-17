@@ -109,7 +109,7 @@ fn write_ttl_row(id: i32, ck: i32, name: &str, ttl_seconds: u32, ts: i64) -> Mut
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::WriteWithTtl {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
             ttl_seconds,
             local_deletion_time: None,
         }],
@@ -126,7 +126,7 @@ fn write_live_row(id: i32, ck: i32, name: &str, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }],
         ts,
         None,
@@ -323,7 +323,7 @@ fn expired_within_grace_emitted_as_tombstone() {
     }
     assert_ne!(
         cell.value,
-        Value::Text("secret".to_string()),
+        Value::text("secret".to_string()),
         "live value must NOT survive"
     );
     // markedForDeleteAt (the cell's own write timestamp) is unchanged.
@@ -403,7 +403,7 @@ fn live_ttl_cell_survives() {
     let cell = &cells[0];
     assert_eq!(
         cell.value,
-        Value::Text("alive".to_string()),
+        Value::text("alive".to_string()),
         "value survives live"
     );
     assert!(cell.ttl.is_some(), "TTL preserved");
@@ -645,7 +645,10 @@ fn differential_compact_matches_reference_on_ttl_corpus() {
     let mut ldt_by_name: HashMap<String, i64> = HashMap::new();
     for c in &raw_cells {
         if let (Value::Text(v), Some(ldt)) = (&c.value, c.local_deletion_time) {
-            ldt_by_name.insert(v.clone(), i64::from(ldt as u32));
+            ldt_by_name.insert(
+                String::from_utf8_lossy(v).into_owned(),
+                i64::from(ldt as u32),
+            );
         }
     }
     assert_eq!(
@@ -696,7 +699,10 @@ fn differential_compact_matches_reference_on_ttl_corpus() {
         for c in &out_cells {
             match &c.value {
                 Value::Text(v) => {
-                    actual.insert(v.clone(), RefOutcome::Live(v.clone()));
+                    actual.insert(
+                        String::from_utf8_lossy(v).into_owned(),
+                        RefOutcome::Live(String::from_utf8_lossy(v).into_owned()),
+                    );
                 }
                 Value::Tombstone(info) if info.tombstone_type == TombstoneType::CellTombstone => {
                     // Map by `markedForDeleteAt` (the cell's own write timestamp,

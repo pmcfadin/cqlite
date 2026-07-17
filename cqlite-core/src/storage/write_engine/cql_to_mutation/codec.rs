@@ -95,7 +95,7 @@ pub(crate) fn literal_to_value(
         },
 
         CqlLiteral::String(s) => match target_type {
-            CqlType::Text | CqlType::Varchar | CqlType::Ascii => Ok(Value::Text(s.clone())),
+            CqlType::Text | CqlType::Varchar | CqlType::Ascii => Ok(Value::text(s.clone())),
             CqlType::Inet => parse_inet(s),
             _ => Err(type_mismatch("string", target_type)),
         },
@@ -154,7 +154,7 @@ fn integer_to_value(i: i64, target: &CqlType) -> Result<Value, Error> {
         CqlType::Varint => {
             // Store as big-endian two's complement bytes (minimal encoding)
             let bytes = varint_to_bytes(i);
-            Ok(Value::Varint(bytes))
+            Ok(Value::Varint(bytes.into()))
         }
         _ => Err(type_mismatch("integer", target)),
     }
@@ -232,7 +232,7 @@ fn parse_blob(s: &str) -> Result<Value, Error> {
         let lo = hex_nibble(chunk[1])?;
         bytes.push((hi << 4) | lo);
     }
-    Ok(Value::Blob(bytes))
+    Ok(Value::Blob(bytes.into()))
 }
 
 /// Parse an IP address string into 4 (IPv4) or 16 (IPv6) bytes.
@@ -246,7 +246,7 @@ fn parse_inet(s: &str) -> Result<Value, Error> {
         IpAddr::V4(a) => a.octets().to_vec(),
         IpAddr::V6(a) => a.octets().to_vec(),
     };
-    Ok(Value::Inet(bytes))
+    Ok(Value::Inet(bytes.into()))
 }
 
 /// Convert a single hex ASCII byte to its nibble value.
@@ -443,12 +443,12 @@ pub(super) fn json_value_to_cql_value(
             let v = n
                 .as_i64()
                 .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to varint", n)))?;
-            Ok(Value::Varint(varint_to_bytes(v)))
+            Ok(Value::varint(varint_to_bytes(v)))
         }
 
         // String types
         (JV::String(s), CqlType::Text | CqlType::Varchar | CqlType::Ascii) => {
-            Ok(Value::Text(s.clone()))
+            Ok(Value::text(s.clone()))
         }
         (JV::String(s), CqlType::Uuid | CqlType::TimeUuid) => parse_uuid(s),
         (JV::String(s), CqlType::Blob) => parse_blob(s),
@@ -675,21 +675,21 @@ mod tests {
     #[test]
     fn test_string_to_text() {
         let v = literal_to_value(&CqlLiteral::String("hello".to_string()), &CqlType::Text).unwrap();
-        assert_eq!(v, Value::Text("hello".to_string()));
+        assert_eq!(v, Value::text("hello".to_string()));
     }
 
     #[test]
     fn test_string_to_varchar() {
         let v =
             literal_to_value(&CqlLiteral::String("world".to_string()), &CqlType::Varchar).unwrap();
-        assert_eq!(v, Value::Text("world".to_string()));
+        assert_eq!(v, Value::text("world".to_string()));
     }
 
     #[test]
     fn test_string_to_ascii() {
         let v =
             literal_to_value(&CqlLiteral::String("ascii".to_string()), &CqlType::Ascii).unwrap();
-        assert_eq!(v, Value::Text("ascii".to_string()));
+        assert_eq!(v, Value::text("ascii".to_string()));
     }
 
     // ── UUID ─────────────────────────────────────────────────────────────────
@@ -714,7 +714,7 @@ mod tests {
     fn test_blob_literal() {
         let v =
             literal_to_value(&CqlLiteral::Blob("0xDEADBEEF".to_string()), &CqlType::Blob).unwrap();
-        assert_eq!(v, Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(v, Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
     }
 
     // ── Type mismatch ────────────────────────────────────────────────────────
@@ -735,7 +735,7 @@ mod tests {
         let frozen_text = CqlType::Frozen(Box::new(CqlType::Text));
         let v = literal_to_value(&CqlLiteral::String("frozen".to_string()), &frozen_text).unwrap();
         match v {
-            Value::Frozen(inner) => assert_eq!(*inner, Value::Text("frozen".to_string())),
+            Value::Frozen(inner) => assert_eq!(*inner, Value::text("frozen".to_string())),
             other => panic!("expected Value::Frozen, got {:?}", other),
         }
     }
@@ -746,7 +746,7 @@ mod tests {
     fn test_inet_ipv4() {
         let v =
             literal_to_value(&CqlLiteral::String("127.0.0.1".to_string()), &CqlType::Inet).unwrap();
-        assert_eq!(v, Value::Inet(vec![127, 0, 0, 1]));
+        assert_eq!(v, Value::inet(vec![127, 0, 0, 1]));
     }
 
     #[test]

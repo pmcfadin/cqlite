@@ -289,11 +289,11 @@ mod tests {
             vec![
                 vec![
                     ("id", Value::Integer(1)),
-                    ("name", Value::Text("Alice".to_string())),
+                    ("name", Value::text("Alice".to_string())),
                 ],
                 vec![
                     ("id", Value::Integer(2)),
-                    ("name", Value::Text("Bob".to_string())),
+                    ("name", Value::text("Bob".to_string())),
                 ],
             ],
         );
@@ -315,7 +315,7 @@ mod tests {
                 vec![("id", Value::Integer(1)), ("name", Value::Null)],
                 vec![
                     ("id", Value::Null),
-                    ("name", Value::Text("Bob".to_string())),
+                    ("name", Value::text("Bob".to_string())),
                 ],
             ],
         );
@@ -343,7 +343,7 @@ mod tests {
                 // Row 2: literal text "null" → must stay "null", not empty.
                 vec![
                     ("id", Value::Integer(2)),
-                    ("name", Value::Text("null".to_string())),
+                    ("name", Value::text("null".to_string())),
                 ],
             ],
         );
@@ -398,7 +398,7 @@ mod tests {
         };
         let rows = vec![
             mk_row(1, Value::Null),
-            mk_row(2, Value::Text("null".to_string())),
+            mk_row(2, Value::text("null".to_string())),
         ];
 
         let mut writer = StreamingCSVWriter::new(Vec::new());
@@ -437,7 +437,7 @@ mod tests {
                     ("id", Value::Integer(2)),
                     (
                         "name",
-                        Value::Frozen(Box::new(Value::Text("Bob".to_string()))),
+                        Value::Frozen(Box::new(Value::text("Bob".to_string()))),
                     ),
                 ],
             ],
@@ -493,7 +493,7 @@ mod tests {
         };
         let rows = vec![
             mk_row(1, Value::Frozen(Box::new(Value::Null))),
-            mk_row(2, Value::Frozen(Box::new(Value::Text("Bob".to_string())))),
+            mk_row(2, Value::Frozen(Box::new(Value::text("Bob".to_string())))),
         ];
 
         let mut writer = StreamingCSVWriter::new(Vec::new());
@@ -524,12 +524,12 @@ mod tests {
                 // First row: missing email
                 vec![
                     ("id", Value::Integer(1)),
-                    ("name", Value::Text("Alice".to_string())),
+                    ("name", Value::text("Alice".to_string())),
                 ],
                 // Second row: missing name
                 vec![
                     ("id", Value::Integer(2)),
-                    ("email", Value::Text("bob@test.com".to_string())),
+                    ("email", Value::text("bob@test.com".to_string())),
                 ],
             ],
         );
@@ -550,15 +550,15 @@ mod tests {
             vec![
                 vec![
                     ("id", Value::Integer(1)),
-                    ("description", Value::Text("Contains, comma".to_string())),
+                    ("description", Value::text("Contains, comma".to_string())),
                 ],
                 vec![
                     ("id", Value::Integer(2)),
-                    ("description", Value::Text("Has \"quotes\"".to_string())),
+                    ("description", Value::text("Has \"quotes\"".to_string())),
                 ],
                 vec![
                     ("id", Value::Integer(3)),
-                    ("description", Value::Text("Line\nbreak".to_string())),
+                    ("description", Value::text("Line\nbreak".to_string())),
                 ],
             ],
         );
@@ -581,9 +581,9 @@ mod tests {
                 ("m_field", DataType::Text),
             ],
             vec![vec![
-                ("a_field", Value::Text("aaa".to_string())),
-                ("m_field", Value::Text("mmm".to_string())),
-                ("z_field", Value::Text("zzz".to_string())),
+                ("a_field", Value::text("aaa".to_string())),
+                ("m_field", Value::text("mmm".to_string())),
+                ("z_field", Value::text("zzz".to_string())),
             ]],
         );
 
@@ -657,8 +657,8 @@ mod tests {
             vec![vec![
                 ("bool_col", Value::Boolean(true)),
                 ("int_col", Value::Integer(42)),
-                ("text_col", Value::Text("test".to_string())),
-                ("blob_col", Value::Blob(vec![0xDE, 0xAD])),
+                ("text_col", Value::text("test".to_string())),
+                ("blob_col", Value::blob(vec![0xDE, 0xAD])),
             ]],
         );
 
@@ -687,8 +687,8 @@ mod tests {
                 (
                     "set_col",
                     Value::Set(vec![
-                        Value::Text("a".to_string()),
-                        Value::Text("b".to_string()),
+                        Value::text("a".to_string()),
+                        Value::text("b".to_string()),
                     ]),
                 ),
             ]],

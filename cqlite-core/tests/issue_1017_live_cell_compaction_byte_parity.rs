@@ -370,7 +370,7 @@ fn nc_row(id: i32, v: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "v".into(),
-            value: Value::Text(v.into()),
+            value: Value::text(v),
         }],
         ts,
         None,
@@ -384,7 +384,7 @@ fn ck_row(id: i32, ck: i32, v: &str, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "v".into(),
-            value: Value::Text(v.into()),
+            value: Value::text(v),
         }],
         ts,
         None,

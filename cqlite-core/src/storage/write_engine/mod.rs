@@ -2130,11 +2130,11 @@ mod tests {
             let mut wal = WriteAheadLog::create(&config.wal_dir).unwrap();
             let bad = Mutation::new(
                 TableId::new("test_ks", "test_table"),
-                PartitionKey::single("id", Value::Text("not-an-int".to_string())),
+                PartitionKey::single("id", Value::text("not-an-int".to_string())),
                 None,
                 vec![CellOperation::Write {
                     column: "name".to_string(),
-                    value: Value::Text("A".to_string()),
+                    value: Value::text("A".to_string()),
                 }],
                 1_000_000,
                 None,
@@ -2292,7 +2292,7 @@ mod tests {
                 CellOperation::Write {
                     value: Value::Text(name),
                     ..
-                } => name.as_str(),
+                } => std::str::from_utf8(name).unwrap_or_default(),
                 other => panic!("expected Write op, got {other:?}"),
             })
             .collect();

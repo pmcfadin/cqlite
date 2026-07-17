@@ -868,7 +868,7 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(op_map.get("name"), Some(&Value::Text("Alice".to_string())));
+        assert_eq!(op_map.get("name"), Some(&Value::text("Alice".to_string())));
         assert_eq!(op_map.get("age"), Some(&Value::Integer(30)));
     }
 
@@ -942,7 +942,7 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(op_map.get("name"), Some(&Value::Text("Alice".to_string())));
+        assert_eq!(op_map.get("name"), Some(&Value::text("Alice".to_string())));
         assert_eq!(op_map.get("value"), Some(&Value::Integer(42)));
     }
 
@@ -1104,8 +1104,8 @@ mod tests {
         assert_eq!(
             list_op,
             Some(Value::List(vec![
-                Value::Text("alpha".to_string()),
-                Value::Text("beta".to_string()),
+                Value::text("alpha".to_string()),
+                Value::text("beta".to_string()),
             ]))
         );
     }

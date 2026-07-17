@@ -123,39 +123,43 @@ impl TypeSystemTests {
         self.test_type_roundtrip(
             "ASCII",
             CqlTypeId::Ascii,
-            Value::Text("Hello, World!".to_string()),
+            Value::text("Hello, World!".to_string()),
         )?;
         self.test_type_roundtrip(
             "VARCHAR",
             CqlTypeId::Varchar,
-            Value::Text("Hello, World!".to_string()),
+            Value::text("Hello, World!".to_string()),
         )?;
 
         // Empty string
         self.test_type_roundtrip(
             "EMPTY_STRING",
             CqlTypeId::Varchar,
-            Value::Text("".to_string()),
+            Value::text("".to_string()),
         )?;
 
         // Unicode strings
         self.test_type_roundtrip(
             "UNICODE",
             CqlTypeId::Varchar,
-            Value::Text("🚀 Unicode: δῶς, ñoël, 中文, العربية, עברית".to_string()),
+            Value::text("🚀 Unicode: δῶς, ñoël, 中文, العربية, עברית".to_string()),
         )?;
 
         // Long strings
         let long_string = "A".repeat(10000);
-        self.test_type_roundtrip("LONG_STRING", CqlTypeId::Varchar, Value::Text(long_string))?;
+        self.test_type_roundtrip(
+            "LONG_STRING",
+            CqlTypeId::Varchar,
+            Value::Text(long_string.into()),
+        )?;
 
         // BLOB tests
         self.test_type_roundtrip(
             "BLOB_SMALL",
             CqlTypeId::Blob,
-            Value::Blob(vec![0x01, 0x02, 0x03, 0xFF]),
+            Value::blob(vec![0x01, 0x02, 0x03, 0xFF]),
         )?;
-        self.test_type_roundtrip("BLOB_EMPTY", CqlTypeId::Blob, Value::Blob(vec![]))?;
+        self.test_type_roundtrip("BLOB_EMPTY", CqlTypeId::Blob, Value::blob(vec![]))?;
 
         // Large blob
         let large_blob = (0..1000).map(|i| (i % 256) as u8).collect();
@@ -204,9 +208,9 @@ impl TypeSystemTests {
         self.test_type_roundtrip("LIST_EMPTY", CqlTypeId::List, empty_list)?;
 
         let string_list = Value::List(vec![
-            Value::Text("item1".to_string()),
-            Value::Text("item2".to_string()),
-            Value::Text("item3".to_string()),
+            Value::text("item1".to_string()),
+            Value::text("item2".to_string()),
+            Value::text("item3".to_string()),
         ]);
         self.test_type_roundtrip("LIST_STRINGS", CqlTypeId::List, string_list)?;
 
@@ -219,9 +223,9 @@ impl TypeSystemTests {
 
         // SET tests (same format as list)
         let string_set = Value::List(vec![
-            Value::Text("unique1".to_string()),
-            Value::Text("unique2".to_string()),
-            Value::Text("unique3".to_string()),
+            Value::text("unique1".to_string()),
+            Value::text("unique2".to_string()),
+            Value::text("unique3".to_string()),
         ]);
         self.test_type_roundtrip("SET_STRINGS", CqlTypeId::Set, string_set)?;
 
@@ -230,13 +234,13 @@ impl TypeSystemTests {
         self.test_type_roundtrip("MAP_EMPTY", CqlTypeId::Map, empty_map)?;
 
         let mut test_map = HashMap::new();
-        test_map.insert("key1".to_string(), Value::Text("value1".to_string()));
+        test_map.insert("key1".to_string(), Value::text("value1".to_string()));
         test_map.insert("key2".to_string(), Value::Integer(42));
         test_map.insert("key3".to_string(), Value::Boolean(true));
         // Convert HashMap to Vec<(Value, Value)>
         let map_vec: Vec<(Value, Value)> = test_map
             .into_iter()
-            .map(|(k, v)| (Value::Text(k), v))
+            .map(|(k, v)| (Value::Text(k.into()), v))
             .collect();
         let map_value = Value::Map(map_vec);
         self.test_type_roundtrip("MAP_MIXED", CqlTypeId::Map, map_value)?;
@@ -260,13 +264,13 @@ impl TypeSystemTests {
 
         // INET address (stored as blob)
         let ipv4_bytes = vec![192, 168, 1, 1]; // 192.168.1.1
-        self.test_type_roundtrip("INET_IPV4", CqlTypeId::Inet, Value::Blob(ipv4_bytes))?;
+        self.test_type_roundtrip("INET_IPV4", CqlTypeId::Inet, Value::Blob(ipv4_bytes.into()))?;
 
         let ipv6_bytes = vec![
             0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70,
             0x73, 0x34,
         ]; // 2001:db8:85a3::8a2e:370:7334
-        self.test_type_roundtrip("INET_IPV6", CqlTypeId::Inet, Value::Blob(ipv6_bytes))?;
+        self.test_type_roundtrip("INET_IPV6", CqlTypeId::Inet, Value::Blob(ipv6_bytes.into()))?;
 
         // Duration (stored as bigint representing microseconds)
         self.test_type_roundtrip("DURATION", CqlTypeId::Duration, Value::BigInt(3600000000))?; // 1 hour
@@ -283,16 +287,20 @@ impl TypeSystemTests {
         self.test_type_roundtrip(
             "VERY_LONG_TEXT",
             CqlTypeId::Varchar,
-            Value::Text(very_long_text),
+            Value::Text(very_long_text.into()),
         )?;
 
         // Text with all ASCII characters
         let all_ascii: String = (0..128).map(|i| i as u8 as char).collect();
-        self.test_type_roundtrip("ALL_ASCII", CqlTypeId::Varchar, Value::Text(all_ascii))?;
+        self.test_type_roundtrip(
+            "ALL_ASCII",
+            CqlTypeId::Varchar,
+            Value::Text(all_ascii.into()),
+        )?;
 
         // Binary data with all byte values
         let all_bytes: Vec<u8> = (0..256).map(|i| i as u8).collect();
-        self.test_type_roundtrip("ALL_BYTES", CqlTypeId::Blob, Value::Blob(all_bytes))?;
+        self.test_type_roundtrip("ALL_BYTES", CqlTypeId::Blob, Value::Blob(all_bytes.into()))?;
 
         // List with many elements
         let large_list: Vec<Value> = (0..1000).map(|i| Value::Integer(i)).collect();
@@ -306,7 +314,7 @@ impl TypeSystemTests {
         // Convert HashMap to Vec<(Value, Value)>
         let large_map_vec: Vec<(Value, Value)> = large_map
             .into_iter()
-            .map(|(k, v)| (Value::Text(k), v))
+            .map(|(k, v)| (Value::Text(k.into()), v))
             .collect();
         self.test_type_roundtrip("LARGE_MAP", CqlTypeId::Map, Value::Map(large_map_vec))?;
 

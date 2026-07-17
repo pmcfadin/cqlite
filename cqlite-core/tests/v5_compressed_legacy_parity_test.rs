@@ -437,7 +437,7 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
             for (key, val) in parser_map {
                 // Try to extract string key
                 if let cqlite_core::Value::Text(key_str) = key {
-                    parser_string_map.insert(key_str.clone(), val);
+                    parser_string_map.insert(String::from_utf8_lossy(key_str).into_owned(), val);
                 } else {
                     eprintln!("Map key is not a string: {:?}", key);
                     return false;
@@ -1006,7 +1006,7 @@ fn test_large_varint_comparison() {
     // Test 1: Small varint that fits in i64 (should use numeric comparison)
     let small_varint = BigInt::from(12345_i64);
     let small_bytes = small_varint.to_signed_bytes_be();
-    let parser_value = Value::Varint(small_bytes);
+    let parser_value = Value::Varint(small_bytes.into());
     let jsonl_value = JsonlValue::Number(12345.0);
     assert!(
         values_match(&parser_value, &jsonl_value),
@@ -1019,7 +1019,7 @@ fn test_large_varint_comparison() {
     // Note: In real Cassandra JSONL, values beyond f64 precision would be strings, not numbers
     let large_positive = BigInt::from(9223372036854775807_i64) + BigInt::from(1);
     let large_bytes = large_positive.to_signed_bytes_be();
-    let parser_value = Value::Varint(large_bytes);
+    let parser_value = Value::Varint(large_bytes.into());
     // f64 can represent 2^63 exactly (it's a power of 2)
     let jsonl_value = JsonlValue::Number(9223372036854775808.0);
     assert!(
@@ -1030,7 +1030,7 @@ fn test_large_varint_comparison() {
     // Test 3: Values within i64 range at boundaries
     let i64_max = BigInt::from(i64::MAX);
     let max_bytes = i64_max.to_signed_bytes_be();
-    let parser_value = Value::Varint(max_bytes);
+    let parser_value = Value::Varint(max_bytes.into());
     let jsonl_value = JsonlValue::Number(i64::MAX as f64);
     assert!(
         values_match(&parser_value, &jsonl_value),
@@ -1040,7 +1040,7 @@ fn test_large_varint_comparison() {
     // Test 4: Mismatch case - parser and JSONL have different values
     let varint_123 = BigInt::from(123);
     let bytes_123 = varint_123.to_signed_bytes_be();
-    let parser_value = Value::Varint(bytes_123);
+    let parser_value = Value::Varint(bytes_123.into());
     let jsonl_value = JsonlValue::Number(456.0);
     assert!(
         !values_match(&parser_value, &jsonl_value),
@@ -1050,7 +1050,7 @@ fn test_large_varint_comparison() {
     // Test 5: Zero varint
     let zero_varint = BigInt::from(0);
     let zero_bytes = zero_varint.to_signed_bytes_be();
-    let parser_value = Value::Varint(zero_bytes);
+    let parser_value = Value::Varint(zero_bytes.into());
     let jsonl_value = JsonlValue::Number(0.0);
     assert!(
         values_match(&parser_value, &jsonl_value),

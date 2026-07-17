@@ -135,6 +135,7 @@
 //! `READ_SCAN_WINDOW_REFILL` counter. The only change is WHERE the CPU runs.
 
 use super::source::ScanCursor;
+use super::value_borrow::ActiveWindowGuard;
 use super::window_cursor::WindowCursor;
 use super::SSTableReader;
 use crate::types::{ScanRow, TableId};
@@ -780,7 +781,13 @@ impl SSTableReader {
             // decompressed refcounted `Bytes` substrate; the parse half just refills
             // the window from it — no decode here.
             while let Some(chunk) = raw_rx.blocking_recv() {
-                window.refill(&chunk);
+                // Issue #1644 (D1): refill by MOVING the decoded `Bytes` in
+                // (refcount bump, no copy) when the window is fully consumed —
+                // the steady state — so the window's backing becomes exactly
+                // this chunk's `Bytes` and subsequent value decode can borrow
+                // zero-copy subslices of it. A straddling residual still
+                // stitches into an owned buffer (correctness over borrow, D1).
+                window.refill_owned(chunk);
                 chunk_count += 1;
 
                 // Not the final chunk yet: drain confirmed partitions; NeedMore
@@ -925,6 +932,16 @@ impl SSTableReader {
             // buffer is reused, not reallocated per partition (issue #1333 guard).
             #[cfg(feature = "scan-offload-probe")]
             let scratch_cap_before = scratch.capacity();
+            // Issue #1644 (D1/K5 stage 2): install this window's active `Bytes`
+            // backing (`None` when stitched) as the decode-borrow source for
+            // exactly this partition parse, so any leaf decode site below
+            // (raw_value.rs/cell_value.rs/raw_type_value.rs/complex_column.rs/
+            // udt.rs, and the comparator family in stage 3) can materialize a
+            // zero-copy `Bytes` view via `value_borrow::borrow_active` WITHOUT
+            // any new parameter threaded through the whole call graph. Dropped
+            // at the end of this scope (loop iteration), restoring the prior
+            // (`None`) state before the next chunk's refill.
+            let _borrow_guard = ActiveWindowGuard::install(window);
             let step = parser.parse_one_partition_with_timestamps(
                 window.as_slice(),
                 ctx.schema.as_ref(),

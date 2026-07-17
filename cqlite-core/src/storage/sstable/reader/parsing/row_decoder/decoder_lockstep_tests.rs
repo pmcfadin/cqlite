@@ -214,7 +214,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "text",
-            value: Value::Text("hi".to_string()),
+            value: Value::text("hi".to_string()),
             value_bytes: b"hi".to_vec(),
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -222,7 +222,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "ascii",
-            value: Value::Text("abc".to_string()),
+            value: Value::text("abc".to_string()),
             value_bytes: b"abc".to_vec(),
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -230,7 +230,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "varchar",
-            value: Value::Text("vc".to_string()),
+            value: Value::text("vc".to_string()),
             value_bytes: b"vc".to_vec(),
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -238,7 +238,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "blob",
-            value: Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]),
+            value: Value::blob(vec![0xde, 0xad, 0xbe, 0xef]),
             value_bytes: vec![0xde, 0xad, 0xbe, 0xef],
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -301,7 +301,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         // CQL varint to Value::Varint.
         ScalarCase {
             cql_type: "varint",
-            value: Value::Varint(vec![0x01, 0x00]),
+            value: Value::varint(vec![0x01, 0x00]),
             value_bytes: vec![0x01, 0x00],
             framing: V5Framing::VintLen,
             arbitrary_len: true,
@@ -324,7 +324,7 @@ pub(crate) fn scalar_cases() -> Vec<ScalarCase> {
         },
         ScalarCase {
             cql_type: "inet",
-            value: Value::Inet(vec![10, 0, 0, 1]),
+            value: Value::inet(vec![10, 0, 0, 1]),
             value_bytes: vec![10, 0, 0, 1],
             framing: V5Framing::VintLen,
             arbitrary_len: false,
@@ -516,7 +516,7 @@ async fn synthetic_reader() -> SSTableReader {
         None,
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text("x".to_string()),
+            value: Value::text("x".to_string()),
         }],
         1_000_000,
         None,
@@ -943,7 +943,7 @@ async fn v5_varint_arm_decodes_edge_cases() {
         // Both paths must produce Value::Varint with the SAME raw bytes.
         assert_eq!(
             v5,
-            Value::Varint(value_bytes.clone()),
+            Value::varint(value_bytes.clone()),
             "v5 varint {label} must decode to Value::Varint (not Blob)"
         );
         assert_eq!(
@@ -991,7 +991,7 @@ async fn v5_varint_empty_matches_block() {
         .unwrap_or_else(|e| panic!("v5 zero-length varint failed: {e:?}"));
     assert_eq!(
         v5_len0,
-        Value::Varint(Vec::new()),
+        Value::varint(Vec::new()),
         "zero-length-prefix v5 varint → Varint([])"
     );
     assert_eq!(
@@ -1009,7 +1009,7 @@ async fn v5_varint_empty_matches_block() {
         .unwrap_or_else(|e| panic!("v5 empty-value-flag varint failed: {e:?}"));
     assert_eq!(
         v5_empty_flag,
-        Value::Varint(Vec::new()),
+        Value::varint(Vec::new()),
         "empty-value-flag (0x0C) v5 varint → Varint([]) via the empty arm"
     );
     assert_eq!(

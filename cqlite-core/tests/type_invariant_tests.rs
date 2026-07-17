@@ -125,8 +125,8 @@ fn test_nonempty_set_preserves_element_type() {
 #[test]
 fn test_nonempty_map_preserves_key_value_types() {
     let text_bigint_map = Value::Map(vec![
-        (Value::Text("key1".to_string()), Value::BigInt(100)),
-        (Value::Text("key2".to_string()), Value::BigInt(200)),
+        (Value::text("key1".to_string()), Value::BigInt(100)),
+        (Value::text("key2".to_string()), Value::BigInt(200)),
     ]);
     let data_type = text_bigint_map.data_type();
 
@@ -152,7 +152,7 @@ fn test_null_udt_field_returns_text() {
         fields: vec![
             UdtField {
                 name: "street".to_string(),
-                value: Some(Value::Text("123 Main St".to_string())),
+                value: Some(Value::text("123 Main St".to_string())),
             },
             UdtField {
                 name: "city".to_string(),
@@ -160,7 +160,7 @@ fn test_null_udt_field_returns_text() {
             },
             UdtField {
                 name: "zip_code".to_string(),
-                value: Some(Value::Text("12345".to_string())),
+                value: Some(Value::text("12345".to_string())),
             },
         ],
     };
@@ -199,7 +199,7 @@ fn test_udt_with_values_preserves_types() {
             },
             UdtField {
                 name: "text_field".to_string(),
-                value: Some(Value::Text("hello".to_string())),
+                value: Some(Value::text("hello".to_string())),
             },
             UdtField {
                 name: "bigint_field".to_string(),
@@ -402,8 +402,8 @@ fn test_frozen_wrapper_preserves_inner_type() {
 #[test]
 fn test_frozen_set_preserves_type() {
     let inner_set = Value::Set(vec![
-        Value::Text("a".to_string()),
-        Value::Text("b".to_string()),
+        Value::text("a".to_string()),
+        Value::text("b".to_string()),
     ]);
     let frozen = Value::Frozen(Box::new(inner_set));
 
@@ -578,7 +578,7 @@ fn test_nested_collection_types() {
 #[test]
 fn test_map_with_collection_values() {
     let list_value = Value::List(vec![Value::Timestamp(1609459200000)]);
-    let map = Value::Map(vec![(Value::Text("timestamps".to_string()), list_value)]);
+    let map = Value::Map(vec![(Value::text("timestamps".to_string()), list_value)]);
 
     let data_type = map.data_type();
 

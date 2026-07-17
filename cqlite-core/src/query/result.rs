@@ -1048,7 +1048,7 @@ impl ToJson for Value {
             Value::Timestamp(ts) => json!(*ts),
             Value::Float(f) => float_to_json(*f),
             Value::Float32(f) => float_to_json(*f as f64),
-            Value::Text(s) => json!(s),
+            Value::Text(s) => json!(std::str::from_utf8(s).unwrap_or_default()),
             Value::Json(value) => (**value).clone(),
             Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => json!(b64(bytes)),
             Value::Uuid(uuid) => json!(b64(uuid)),
@@ -1123,11 +1123,11 @@ mod tests {
     fn test_query_result_with_rows() {
         let mut row1 = QueryRow::new(RowKey::new(vec![1]));
         row1.set("id".to_string(), Value::Integer(1));
-        row1.set("name".to_string(), Value::Text("Alice".to_string()));
+        row1.set("name".to_string(), Value::text("Alice".to_string()));
 
         let mut row2 = QueryRow::new(RowKey::new(vec![2]));
         row2.set("id".to_string(), Value::Integer(2));
-        row2.set("name".to_string(), Value::Text("Bob".to_string()));
+        row2.set("name".to_string(), Value::text("Bob".to_string()));
 
         let result = QueryResult::with_rows(vec![row1, row2]);
         assert_eq!(result.row_count(), 2);
@@ -1137,7 +1137,7 @@ mod tests {
         assert_eq!(first_row.get("id"), Some(&Value::Integer(1)));
         assert_eq!(
             first_row.get("name"),
-            Some(&Value::Text("Alice".to_string()))
+            Some(&Value::text("Alice".to_string()))
         );
     }
 
@@ -1331,7 +1331,7 @@ mod tests {
     fn test_json_serialization() {
         let mut row = QueryRow::new(RowKey::new(vec![1]));
         row.set("id".to_string(), Value::Integer(1));
-        row.set("name".to_string(), Value::Text("test".to_string()));
+        row.set("name".to_string(), Value::text("test".to_string()));
 
         let json = row.to_json();
         assert!(json.is_object());
@@ -1398,7 +1398,7 @@ mod tests {
     #[test]
     fn test_cell_metadata_single_sstable_single_cell() {
         let mut row = QueryRow::new(RowKey::new(vec![1]));
-        row.set("name".to_string(), Value::Text("Alice".to_string()));
+        row.set("name".to_string(), Value::text("Alice".to_string()));
 
         let meta = CellWriteMetadata {
             write_timestamp_micros: 1_700_000_000_000_000, // ~2023 epoch in µs
@@ -1409,7 +1409,7 @@ mod tests {
         // cell_metadata map must now be Some
         assert!(row.cell_metadata.is_some());
         // Values are unchanged
-        assert_eq!(row.get("name"), Some(&Value::Text("Alice".to_string())));
+        assert_eq!(row.get("name"), Some(&Value::text("Alice".to_string())));
         // Metadata round-trips correctly
         let got = row
             .get_cell_metadata("name")
@@ -1610,11 +1610,11 @@ mod tests {
     fn test_row_values_addressable_by_str_key() {
         let mut row = QueryRow::new(RowKey::new(vec![1]));
         row.set("id", Value::Integer(7)); // &str key
-        row.set("name".to_string(), Value::Text("Zoe".to_string())); // String key
+        row.set("name".to_string(), Value::text("Zoe".to_string())); // String key
 
         // `get(&str)` works unchanged.
         assert_eq!(row.get("id"), Some(&Value::Integer(7)));
-        assert_eq!(row.get("name"), Some(&Value::Text("Zoe".to_string())));
+        assert_eq!(row.get("name"), Some(&Value::text("Zoe".to_string())));
         assert_eq!(row.get("absent"), None);
 
         // The key type is a shared Arc<str> handle.
@@ -1629,7 +1629,7 @@ mod tests {
     fn test_query_result_serde_round_trip_preserves_names_and_values() {
         let mut row = QueryRow::new(RowKey::new(vec![1]));
         row.set("id", Value::Integer(42));
-        row.set("name", Value::Text("Alice".to_string()));
+        row.set("name", Value::text("Alice".to_string()));
         let result = QueryResult::with_rows(vec![row]);
 
         // Serialize → the values object is keyed by the plain column-name string
@@ -1651,6 +1651,6 @@ mod tests {
         let back: QueryResult = serde_json::from_value(json).expect("deserialise QueryResult");
         let r = &back.rows[0];
         assert_eq!(r.get("id"), Some(&Value::Integer(42)));
-        assert_eq!(r.get("name"), Some(&Value::Text("Alice".to_string())));
+        assert_eq!(r.get("name"), Some(&Value::text("Alice".to_string())));
     }
 }

@@ -107,14 +107,14 @@ struct Edit {
 fn write(col: &str, v: &str) -> CellOperation {
     CellOperation::Write {
         column: col.to_string(),
-        value: Value::Text(v.to_string()),
+        value: Value::text(v.to_string()),
     }
 }
 
 fn write_ttl(col: &str, v: &str, ttl: u32) -> CellOperation {
     CellOperation::WriteWithTtl {
         column: col.to_string(),
-        value: Value::Text(v.to_string()),
+        value: Value::text(v.to_string()),
         ttl_seconds: ttl,
         local_deletion_time: None,
     }

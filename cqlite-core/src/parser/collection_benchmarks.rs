@@ -77,7 +77,7 @@ impl CollectionBenchmarks {
             // String List benchmark
             let string_list = Value::List(
                 (0..size)
-                    .map(|i| Value::Text(format!("item_{:06}", i)))
+                    .map(|i| Value::text(format!("item_{:06}", i)))
                     .collect(),
             );
 
@@ -130,7 +130,7 @@ impl CollectionBenchmarks {
             // String Set benchmark (tags, categories)
             let string_set = Value::Set(
                 (0..size)
-                    .map(|i| Value::Text(format!("tag_{:04}", i)))
+                    .map(|i| Value::text(format!("tag_{:04}", i)))
                     .collect(),
             );
 
@@ -165,7 +165,7 @@ impl CollectionBenchmarks {
             // String-to-Integer Map (common pattern)
             let string_int_map = Value::Map(
                 (0i32..size)
-                    .map(|i| (Value::Text(format!("key_{:06}", i)), Value::Integer(i)))
+                    .map(|i| (Value::text(format!("key_{:06}", i)), Value::Integer(i)))
                     .collect(),
             );
 
@@ -181,8 +181,8 @@ impl CollectionBenchmarks {
                 (0..size)
                     .map(|i| {
                         (
-                            Value::Text(format!("key_{:06}", i)),
-                            Value::Text(format!("value_{:06}", i)),
+                            Value::text(format!("key_{:06}", i)),
+                            Value::text(format!("value_{:06}", i)),
                         )
                     })
                     .collect(),
@@ -201,7 +201,7 @@ impl CollectionBenchmarks {
                     .map(|i| {
                         let mut uuid = [0u8; 16];
                         uuid[0..4].copy_from_slice(&(i as u32).to_be_bytes());
-                        (Value::Uuid(uuid), Value::Text(format!("user_{:06}", i)))
+                        (Value::Uuid(uuid), Value::text(format!("user_{:06}", i)))
                     })
                     .collect(),
             );
@@ -229,7 +229,7 @@ impl CollectionBenchmarks {
                 (0..size)
                     .map(|i| match i % 6 {
                         0 => Value::Integer(i),
-                        1 => Value::Text(format!("field_{}", i)),
+                        1 => Value::text(format!("field_{}", i)),
                         2 => Value::Boolean(i % 2 == 0),
                         3 => Value::Float(i as f64 * std::f64::consts::PI),
                         4 => Value::BigInt(i as i64 * 1_000_000),
@@ -262,7 +262,7 @@ impl CollectionBenchmarks {
             // String tuple (field names, etc.)
             let string_tuple = Value::Tuple(
                 (0..size)
-                    .map(|i| Value::Text(format!("field_{}", i)))
+                    .map(|i| Value::text(format!("field_{}", i)))
                     .collect(),
             );
 
@@ -290,17 +290,17 @@ impl CollectionBenchmarks {
                 (0i32..size)
                     .map(|i| {
                         Value::Map(vec![
-                            (Value::Text("id".to_string()), Value::Integer(i)),
+                            (Value::text("id".to_string()), Value::Integer(i)),
                             (
-                                Value::Text("name".to_string()),
-                                Value::Text(format!("item_{}", i)),
+                                Value::text("name".to_string()),
+                                Value::text(format!("item_{}", i)),
                             ),
                             (
-                                Value::Text("active".to_string()),
+                                Value::text("active".to_string()),
                                 Value::Boolean(i % 2 == 0),
                             ),
                             (
-                                Value::Text("score".to_string()),
+                                Value::text("score".to_string()),
                                 Value::Float(i as f64 * 1.5),
                             ),
                         ])
@@ -320,11 +320,11 @@ impl CollectionBenchmarks {
                 (0..size)
                     .map(|i| {
                         (
-                            Value::Text(format!("category_{}", i)),
+                            Value::text(format!("category_{}", i)),
                             Value::List(vec![
-                                Value::Text(format!("item_{}_{}", i, 1)),
-                                Value::Text(format!("item_{}_{}", i, 2)),
-                                Value::Text(format!("item_{}_{}", i, 3)),
+                                Value::text(format!("item_{}_{}", i, 1)),
+                                Value::text(format!("item_{}_{}", i, 2)),
+                                Value::text(format!("item_{}_{}", i, 3)),
                             ]),
                         )
                     })
@@ -341,14 +341,14 @@ impl CollectionBenchmarks {
             // Tuple with nested collections (complex records)
             let nested_tuple = Value::Tuple(vec![
                 Value::Integer(42),
-                Value::Text("complex_record".to_string()),
+                Value::text("complex_record".to_string()),
                 Value::List((0i32..size).map(Value::Integer).collect()),
                 Value::Map(
                     (0..size / 2)
                         .map(|i| {
                             (
-                                Value::Text(format!("attr_{}", i)),
-                                Value::Text(format!("value_{}", i)),
+                                Value::text(format!("attr_{}", i)),
+                                Value::text(format!("value_{}", i)),
                             )
                         })
                         .collect(),
@@ -377,7 +377,7 @@ impl CollectionBenchmarks {
             // Large string list
             let large_list = Value::List(
                 (0..size)
-                    .map(|i| Value::Text(format!("large_item_{:08}", i)))
+                    .map(|i| Value::text(format!("large_item_{:08}", i)))
                     .collect(),
             );
 
@@ -403,7 +403,7 @@ impl CollectionBenchmarks {
                 // Large map
                 let large_map = Value::Map(
                     (0i32..size)
-                        .map(|i| (Value::Text(format!("key_{:08}", i)), Value::Integer(i)))
+                        .map(|i| (Value::text(format!("key_{:08}", i)), Value::Integer(i)))
                         .collect(),
                 );
 

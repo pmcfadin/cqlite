@@ -172,7 +172,7 @@ async fn shadowed_static_row_is_not_merged_into_surviving_rows() {
         None,
         vec![CellOperation::Write {
             column: "s".to_string(),
-            value: Value::Text("OLD".to_string()),
+            value: Value::text("OLD".to_string()),
         }],
         1_000_000,
         None,
@@ -184,7 +184,7 @@ async fn shadowed_static_row_is_not_merged_into_surviving_rows() {
         Some(ClusteringKey::single("ck", Value::Integer(1))),
         vec![CellOperation::Write {
             column: "v".to_string(),
-            value: Value::Text("new".to_string()),
+            value: Value::text("new".to_string()),
         }],
         3_000_000,
         None,
@@ -286,7 +286,7 @@ async fn skip_row_framing_matches_full_decode_offset() {
         None,
         vec![CellOperation::Write {
             column: "s".to_string(),
-            value: Value::Text("stat".to_string()),
+            value: Value::text("stat".to_string()),
         }],
         1_000_000,
         None,
@@ -299,7 +299,7 @@ async fn skip_row_framing_matches_full_decode_offset() {
             Some(ClusteringKey::single("ck", Value::Integer(ck))),
             vec![CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text(format!("v{ck}")),
+                value: Value::text(format!("v{ck}")),
             }],
             2_000_000 + ck as i64,
             None,
@@ -455,11 +455,11 @@ async fn partial_row_survival_drops_shadowed_cell() {
         vec![
             CellOperation::Write {
                 column: "a".to_string(),
-                value: Value::Text("AAA".to_string()),
+                value: Value::text("AAA".to_string()),
             },
             CellOperation::Write {
                 column: "b".to_string(),
-                value: Value::Text("BBB".to_string()),
+                value: Value::text("BBB".to_string()),
             },
         ],
         3_000_000,
@@ -805,7 +805,7 @@ async fn all_shadowed_collection_reads_as_absent() {
         vec![
             CellOperation::Write {
                 column: "note".to_string(),
-                value: Value::Text("keep".to_string()),
+                value: Value::text("keep".to_string()),
             },
             elem(1, 1_000_000),
             elem(2, 1_000_000),

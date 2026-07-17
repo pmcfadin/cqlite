@@ -29,7 +29,11 @@ impl V5CompressedLegacyParser {
         let value = match kind {
             CellKind::Blob => {
                 let bytes = Self::read_vint_length_prefixed_bytes(data, &mut off, column, "blob")?;
-                Value::Blob(bytes.to_vec())
+                // Issue #1644 (K5 stage 2): borrow a zero-copy view of the active
+                // scan window's Bytes when this slice lies within it (the common
+                // streaming case); falls back to an owned copy outside a windowed
+                // scan (get()/compaction) or across a chunk straddle.
+                Value::Blob(crate::storage::sstable::reader::value_borrow::borrow_active(bytes))
             }
             CellKind::Boolean => {
                 // Boolean: [0x08][u8 value]
@@ -62,13 +66,16 @@ impl V5CompressedLegacyParser {
             CellKind::Text => {
                 // Text: [VInt len][text bytes]
                 let bytes = Self::read_vint_length_prefixed_bytes(data, &mut off, column, "text")?;
-                let text = String::from_utf8(bytes.to_vec()).map_err(|e| {
+                // Issue #1644 (K5 stage 2): validate UTF-8 IN PLACE on the borrowed
+                // slice, then store the (possibly zero-copy) Bytes — no separate
+                // owned-String detour.
+                std::str::from_utf8(bytes).map_err(|e| {
                     Error::corruption(format!(
                         "Cell '{}': invalid UTF-8 in text value: {}",
                         column.name, e
                     ))
                 })?;
-                Value::Text(text)
+                Value::Text(crate::storage::sstable::reader::value_borrow::borrow_active(bytes))
             }
 
             CellKind::Uuid => {
@@ -565,7 +572,10 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                let bytes = data[off..off + len].to_vec();
+                // Issue #1644 (K5 stage 2): borrow, see the blob arm above.
+                let bytes = crate::storage::sstable::reader::value_borrow::borrow_active(
+                    &data[off..off + len],
+                );
                 off += len;
                 Value::Inet(bytes)
             }

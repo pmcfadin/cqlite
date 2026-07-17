@@ -77,7 +77,7 @@ fn write_row(id: i32, name: &str, score: i32, ts: i64) -> Mutation {
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "score".to_string(),
@@ -93,7 +93,7 @@ fn write_name_only(id: i32, name: &str, ts: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text(name.to_string()),
+        value: Value::text(name.to_string()),
     }];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)
 }
@@ -239,7 +239,7 @@ fn select_star_merges_generations_with_lww_and_tombstone_suppression() {
     let row1 = by_pk.get(&pk(1)).expect("PK1 present");
     assert_eq!(
         col(row1, "name"),
-        Some(&Value::Text("n1-v2".to_string())),
+        Some(&Value::text("n1-v2".to_string())),
         "PK1 name must be the gen2 (newer) value"
     );
     assert_eq!(
@@ -250,12 +250,12 @@ fn select_star_merges_generations_with_lww_and_tombstone_suppression() {
 
     // PK3: full overwrite — gen2 wins both columns.
     let row3 = by_pk.get(&pk(3)).expect("PK3 present");
-    assert_eq!(col(row3, "name"), Some(&Value::Text("n3-v2".to_string())));
+    assert_eq!(col(row3, "name"), Some(&Value::text("n3-v2".to_string())));
     assert_eq!(col(row3, "score"), Some(&Value::Integer(333)));
 
     // PK4: cell-delete of score in gen3 shadows gen1's score; name survives.
     let row4 = by_pk.get(&pk(4)).expect("PK4 present");
-    assert_eq!(col(row4, "name"), Some(&Value::Text("n4-v1".to_string())));
+    assert_eq!(col(row4, "name"), Some(&Value::text("n4-v1".to_string())));
     assert!(
         col(row4, "score").is_none(),
         "PK4 score was cell-deleted in a later generation; it must be absent, got {:?}",

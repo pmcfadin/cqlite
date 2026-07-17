@@ -102,21 +102,21 @@ fn test_parse_counter_wrong_length() {
 fn test_parse_text() {
     let data = b"hello";
     let result = parse_text_value(data).unwrap();
-    assert_eq!(result, Value::Text("hello".to_string()));
+    assert_eq!(result, Value::text("hello".to_string()));
 }
 
 #[test]
 fn test_parse_text_unicode() {
     let data = "Hello 世界".as_bytes();
     let result = parse_text_value(data).unwrap();
-    assert_eq!(result, Value::Text("Hello 世界".to_string()));
+    assert_eq!(result, Value::text("Hello 世界".to_string()));
 }
 
 #[test]
 fn test_parse_blob() {
     let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
     let result = parse_blob_value(&data).unwrap();
-    assert_eq!(result, Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    assert_eq!(result, Value::blob(vec![0xDE, 0xAD, 0xBE, 0xEF]));
 }
 
 #[test]
@@ -236,8 +236,8 @@ fn test_parse_list_text_elements() {
 
     if let Value::List(elements) = result {
         assert_eq!(elements.len(), 2);
-        assert_eq!(elements[0], Value::Text("hello".to_string()));
-        assert_eq!(elements[1], Value::Text("world".to_string()));
+        assert_eq!(elements[0], Value::text("hello".to_string()));
+        assert_eq!(elements[1], Value::text("world".to_string()));
     } else {
         panic!("Expected List value");
     }
@@ -297,9 +297,9 @@ fn test_parse_map_text_int() {
 
     if let Value::Map(entries) = result {
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].0, Value::Text("key1".to_string()));
+        assert_eq!(entries[0].0, Value::text("key1".to_string()));
         assert_eq!(entries[0].1, Value::Integer(100));
-        assert_eq!(entries[1].0, Value::Text("key2".to_string()));
+        assert_eq!(entries[1].0, Value::text("key2".to_string()));
         assert_eq!(entries[1].1, Value::Integer(200));
     } else {
         panic!("Expected Map value");
@@ -370,7 +370,7 @@ fn test_parse_map_nested() {
 
     if let Value::Map(entries) = result {
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, Value::Text("numbers".to_string()));
+        assert_eq!(entries[0].0, Value::text("numbers".to_string()));
         if let Value::List(list_elements) = &entries[0].1 {
             assert_eq!(list_elements.len(), 3);
             assert_eq!(list_elements[0], Value::Integer(1));
@@ -414,7 +414,7 @@ fn test_parse_tuple_int_text() {
     if let Value::Tuple(fields) = result {
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0], Value::Integer(42));
-        assert_eq!(fields[1], Value::Text("hello".to_string()));
+        assert_eq!(fields[1], Value::text("hello".to_string()));
     } else {
         panic!("Expected Tuple value");
     }
@@ -487,7 +487,7 @@ fn test_parse_udt_simple() {
     assert_eq!(result.fields[1].name, "name");
     assert_eq!(
         result.fields[1].value,
-        Some(Value::Text("Alice".to_string()))
+        Some(Value::text("Alice".to_string()))
     );
 }
 
@@ -538,8 +538,8 @@ fn test_parse_udt_with_collection() {
     assert_eq!(result.fields[1].name, "tags");
     if let Some(Value::List(tags)) = &result.fields[1].value {
         assert_eq!(tags.len(), 2);
-        assert_eq!(tags[0], Value::Text("tag1".to_string()));
-        assert_eq!(tags[1], Value::Text("tag2".to_string()));
+        assert_eq!(tags[0], Value::text("tag1".to_string()));
+        assert_eq!(tags[1], Value::text("tag2".to_string()));
     } else {
         panic!("Expected List value in UDT");
     }
@@ -636,7 +636,7 @@ fn s2_a07_tuple_field_128_bytes_cassandra_format() {
         assert_eq!(fields.len(), 2);
         assert_eq!(
             fields[0],
-            Value::Blob(blob_data),
+            Value::Blob(blob_data.into()),
             "128-byte blob should be intact"
         );
         assert_eq!(
@@ -684,7 +684,7 @@ fn s2_a08_udt_field_128_bytes_cassandra_format() {
     assert_eq!(result.fields.len(), 1);
     assert_eq!(
         result.fields[0].value,
-        Some(Value::Text("A".repeat(128))),
+        Some(Value::text("A".repeat(128))),
         "128-char text field should be intact"
     );
 }

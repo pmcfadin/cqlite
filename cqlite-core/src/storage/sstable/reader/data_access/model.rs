@@ -872,7 +872,7 @@ mod tests {
     #[test]
     fn test_value_blob_creation() {
         let data = vec![1, 2, 3, 4, 5];
-        let value = Value::Blob(data.clone());
+        let value = Value::blob(data.clone());
 
         if let Value::Blob(v) = value {
             assert_eq!(v, data);

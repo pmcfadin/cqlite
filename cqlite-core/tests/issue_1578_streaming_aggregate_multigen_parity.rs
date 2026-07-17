@@ -69,7 +69,7 @@ fn write_row(id: i32, v: i32, name: &str, ts: i64) -> Mutation {
         },
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
     ];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)
@@ -258,13 +258,13 @@ async fn streaming_aggregate_multigen_parity() {
     assert_agg(
         &db,
         &format!("SELECT MIN(name) {from}"),
-        Value::Text("alpha2".to_string()),
+        Value::text("alpha2".to_string()),
     )
     .await;
     assert_agg(
         &db,
         &format!("SELECT MAX(name) {from}"),
-        Value::Text("delta".to_string()),
+        Value::text("delta".to_string()),
     )
     .await;
 }

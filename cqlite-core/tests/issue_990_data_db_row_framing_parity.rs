@@ -285,7 +285,7 @@ fn write_one_partition(
 fn write_op(column: &str, text: &str) -> CellOperation {
     CellOperation::Write {
         column: column.to_string(),
-        value: Value::Text(text.to_string()),
+        value: Value::text(text.to_string()),
     }
 }
 
@@ -652,7 +652,7 @@ fn cell_flag_expiring_explicit_ttl() {
     // row-timestamp/row-ttl reuse.
     let ops = vec![CellOperation::WriteWithTtl {
         column: "a".to_string(),
-        value: Value::Text("temp".to_string()),
+        value: Value::text("temp".to_string()),
         ttl_seconds: 3600,
         local_deletion_time: None,
     }];

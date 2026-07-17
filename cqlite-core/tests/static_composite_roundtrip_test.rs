@@ -85,7 +85,7 @@ fn test_static_row_flags() {
         None,
         vec![CellOperation::Write {
             column: "static_val".to_string(),
-            value: Value::Text("static_data".to_string()),
+            value: Value::text("static_data".to_string()),
         }],
         1001000,
         None,
@@ -134,7 +134,7 @@ fn test_static_row_no_clustering_prefix() {
         Some(ClusteringKey::single("ck", Value::Integer(999))),
         vec![CellOperation::Write {
             column: "static_val".to_string(),
-            value: Value::Text("value".to_string()),
+            value: Value::text("value".to_string()),
         }],
         1001000,
         None,
@@ -166,7 +166,7 @@ fn test_static_row_with_ttl() {
         None,
         vec![CellOperation::Write {
             column: "static_val".to_string(),
-            value: Value::Text("expiring".to_string()),
+            value: Value::text("expiring".to_string()),
         }],
         1001000,
         Some(3600), // 1 hour TTL
@@ -208,7 +208,7 @@ fn test_static_row_before_regular_rows() {
         None,
         vec![CellOperation::Write {
             column: "static_val".to_string(),
-            value: Value::Text("static".to_string()),
+            value: Value::text("static".to_string()),
         }],
         1001000,
         None,
@@ -221,7 +221,7 @@ fn test_static_row_before_regular_rows() {
         Some(ClusteringKey::single("ck", Value::Integer(1))),
         vec![CellOperation::Write {
             column: "regular_val".to_string(),
-            value: Value::Text("regular".to_string()),
+            value: Value::text("regular".to_string()),
         }],
         1002000,
         None,
@@ -418,7 +418,7 @@ fn test_composite_key_with_text() {
     };
 
     let pk = PartitionKey::new(vec![
-        ("region".to_string(), Value::Text("us-east".to_string())),
+        ("region".to_string(), Value::text("us-east".to_string())),
         ("id".to_string(), Value::Integer(100)),
     ]);
 
@@ -516,7 +516,7 @@ fn test_composite_partition_single_row_matches_cassandra_probe() {
         TableId::new("issue438_probe", "single_probe"),
         partition_key,
         Some(ClusteringKey::new(vec![
-            ("category".to_string(), Value::Text("analytics".to_string())),
+            ("category".to_string(), Value::text("analytics".to_string())),
             (
                 "item_id".to_string(),
                 Value::Uuid([
@@ -527,7 +527,7 @@ fn test_composite_partition_single_row_matches_cassandra_probe() {
         ])),
         vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text("v1".to_string()),
+            value: Value::text("v1".to_string()),
         }],
         timestamp_micros,
         None,
@@ -630,11 +630,11 @@ fn test_issue_507_gen_static_shape_emits_static_prelude() {
             vec![
                 CellOperation::Write {
                     column: "static_data".to_string(),
-                    value: Value::Text("shared-static-text".to_string()),
+                    value: Value::text("shared-static-text".to_string()),
                 },
                 CellOperation::Write {
                     column: "row_data".to_string(),
-                    value: Value::Text("alpha".to_string()),
+                    value: Value::text("alpha".to_string()),
                 },
                 CellOperation::Write {
                     column: "row_value".to_string(),
@@ -654,11 +654,11 @@ fn test_issue_507_gen_static_shape_emits_static_prelude() {
             vec![
                 CellOperation::Write {
                     column: "static_data".to_string(),
-                    value: Value::Text("shared-static-text".to_string()),
+                    value: Value::text("shared-static-text".to_string()),
                 },
                 CellOperation::Write {
                     column: "row_data".to_string(),
-                    value: Value::Text("beta".to_string()),
+                    value: Value::text("beta".to_string()),
                 },
                 CellOperation::Write {
                     column: "row_value".to_string(),
@@ -764,7 +764,7 @@ fn test_issue_507_empty_static_prelude_when_no_static_ops() {
         vec![
             CellOperation::Write {
                 column: "row_data".to_string(),
-                value: Value::Text("only-regular".to_string()),
+                value: Value::text("only-regular".to_string()),
             },
             CellOperation::Write {
                 column: "row_value".to_string(),

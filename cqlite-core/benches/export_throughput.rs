@@ -169,12 +169,12 @@ fn bench_delta_export(c: &mut Criterion) {
         .map(|i| DeltaRecord::Upsert {
             keys: RowKeys::new(
                 vec![Value::Integer(i as i32)],
-                vec![Value::Text(format!("ck{i}"))],
+                vec![Value::text(format!("ck{i}"))],
             ),
             liveness: None,
             cells: vec![(
                 ColumnId::new("val"),
-                CellDelta::value(Value::Text(format!("value-{i}")), 1_000_000 + i as i64),
+                CellDelta::value(Value::text(format!("value-{i}")), 1_000_000 + i as i64),
             )],
         })
         .collect();

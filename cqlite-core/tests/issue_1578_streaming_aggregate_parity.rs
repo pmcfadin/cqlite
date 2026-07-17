@@ -78,7 +78,7 @@ fn write_mutation(row: &Fx, ts: i64) -> Mutation {
     if let Some(t) = row.t {
         ops.push(CellOperation::Write {
             column: "t".to_string(),
-            value: Value::Text(t.to_string()),
+            value: Value::text(t.to_string()),
         });
     }
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)
@@ -247,13 +247,13 @@ async fn streaming_aggregate_parity_matrix() {
     assert_agg(
         &db,
         &format!("SELECT MIN(t) {from}"),
-        Value::Text("alpha".to_string()),
+        Value::text("alpha".to_string()),
     )
     .await;
     assert_agg(
         &db,
         &format!("SELECT MAX(t) {from}"),
-        Value::Text("delta".to_string()),
+        Value::text("delta".to_string()),
     )
     .await;
 

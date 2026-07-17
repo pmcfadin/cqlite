@@ -631,7 +631,7 @@ impl ComplexTypePerformanceBenchmark {
         let base_size = 10 * size_factor;
         vec![Value::Set(
             (0..base_size)
-                .map(|i| Value::Text(format!("item_{}", i)))
+                .map(|i| Value::text(format!("item_{}", i)))
                 .collect(),
         )]
     }
@@ -640,7 +640,7 @@ impl ComplexTypePerformanceBenchmark {
         let base_size = 10 * size_factor;
         vec![Value::Map(
             (0..base_size)
-                .map(|i| (Value::Text(format!("key_{}", i)), Value::Integer(i as i32)))
+                .map(|i| (Value::text(format!("key_{}", i)), Value::Integer(i as i32)))
                 .collect(),
         )]
     }
@@ -649,7 +649,7 @@ impl ComplexTypePerformanceBenchmark {
         (0..size_factor)
             .map(|i| {
                 Value::Tuple(vec![
-                    Value::Text(format!("tuple_{}", i)),
+                    Value::text(format!("tuple_{}", i)),
                     Value::Integer(i as i32),
                     Value::Boolean(i % 2 == 0),
                 ])
@@ -662,7 +662,7 @@ impl ComplexTypePerformanceBenchmark {
             .map(|i| {
                 let udt_value = UdtValue::new("User".to_string(), "test".to_string())
                     .with_field("id".to_string(), Some(Value::Integer(i as i32)))
-                    .with_field("name".to_string(), Some(Value::Text(format!("user_{}", i))))
+                    .with_field("name".to_string(), Some(Value::text(format!("user_{}", i))))
                     .with_field("active".to_string(), Some(Value::Boolean(true)));
                 Value::Udt(Box::new(udt_value))
             })
@@ -673,9 +673,9 @@ impl ComplexTypePerformanceBenchmark {
         (0..size_factor)
             .map(|i| {
                 let inner_map = Value::Map(vec![
-                    (Value::Text("count".to_string()), Value::Integer(i as i32)),
+                    (Value::text("count".to_string()), Value::Integer(i as i32)),
                     (
-                        Value::Text("id".to_string()),
+                        Value::text("id".to_string()),
                         Value::Integer((i * 2) as i32),
                     ),
                 ]);

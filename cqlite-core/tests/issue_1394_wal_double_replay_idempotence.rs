@@ -91,7 +91,7 @@ fn write_row(id: i32, name: &str, score: i32, ts: i64) -> Mutation {
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "score".to_string(),
@@ -260,7 +260,7 @@ fn scan_reconciled(
             row.into_cells().map(|cells| {
                 let map = cells
                     .into_iter()
-                    .map(|(name, v)| (Value::Text(name.to_string()), v))
+                    .map(|(name, v)| (Value::text(name.to_string()), v))
                     .collect();
                 (k.as_bytes().to_vec(), Value::Map(map))
             })
@@ -360,7 +360,7 @@ fn ac1_double_replay_reads_each_row_exactly_once() {
         let row = by_pk.get(&pk_bytes(id)).expect("row present exactly once");
         assert_eq!(
             col(row, "name"),
-            Some(&Value::Text(name.to_string())),
+            Some(&Value::text(name.to_string())),
             "PK{id} name value/timestamp must be intact after double-replay"
         );
         assert_eq!(
@@ -564,7 +564,7 @@ fn ac3_replayed_tombstone_shadows_exactly_what_it_shadowed() {
         .expect("PK3 must remain live — the replayed tombstone must not over-shadow it");
     assert_eq!(
         col(row3, "name"),
-        Some(&Value::Text("bystander".to_string()))
+        Some(&Value::text("bystander".to_string()))
     );
     assert_eq!(col(row3, "score"), Some(&Value::Integer(33)));
     assert_eq!(

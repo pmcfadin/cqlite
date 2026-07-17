@@ -30,8 +30,8 @@ mod tests {
     fn test_text_comparison() {
         let comparator = ComparatorType::Text;
 
-        let apple = Value::Text("apple".to_string());
-        let banana = Value::Text("banana".to_string());
+        let apple = Value::text("apple".to_string());
+        let banana = Value::text("banana".to_string());
 
         assert_eq!(comparator.compare(&apple, &banana).unwrap(), Ordering::Less);
         assert_eq!(
@@ -172,7 +172,7 @@ mod tests {
         let comparator = ComparatorType::Int;
 
         let int_val = Value::Integer(42);
-        let text_val = Value::Text("hello".to_string());
+        let text_val = Value::text("hello".to_string());
 
         // Should return error for type mismatch
         assert!(comparator.compare(&int_val, &text_val).is_err());

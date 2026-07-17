@@ -66,7 +66,7 @@ fn int_mutation(id: i32, name: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }],
         ts,
         None,
@@ -336,7 +336,7 @@ fn wide_row(pk: i32, ck: i32, ts: i64) -> Mutation {
         ),
         vec![CellOperation::Write {
             column: "payload".to_string(),
-            value: Value::Text(payload),
+            value: Value::Text(payload.into()),
         }],
         ts,
         None,
@@ -550,7 +550,7 @@ fn wide_row_for(table: &str, pk: i32, ck: i32, ts: i64) -> Mutation {
         ),
         vec![CellOperation::Write {
             column: "payload".to_string(),
-            value: Value::Text(payload),
+            value: Value::Text(payload.into()),
         }],
         ts,
         None,
@@ -668,7 +668,7 @@ async fn bti_wide_mixed_order_partition_resolves_through_rows_db() {
                 ),
                 vec![CellOperation::Write {
                     column: "payload".to_string(),
-                    value: Value::Text(payload.clone()),
+                    value: Value::text(payload.clone()),
                 }],
                 1_000_000,
                 None,

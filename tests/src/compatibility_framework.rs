@@ -210,9 +210,9 @@ impl CompatibilityTestFramework {
 
         // Test LIST
         let list_value = Value::List(vec![
-            Value::Text("item1".to_string()),
-            Value::Text("item2".to_string()),
-            Value::Text("item3".to_string()),
+            Value::text("item1".to_string()),
+            Value::text("item2".to_string()),
+            Value::text("item3".to_string()),
         ]);
 
         if let Ok(serialized) = serialize_cql_value(&list_value) {
@@ -234,11 +234,15 @@ impl CompatibilityTestFramework {
 
         // Test MAP
         let mut map = HashMap::new();
-        map.insert("key1".to_string(), Value::Text("value1".to_string()));
+        map.insert("key1".to_string(), Value::text("value1".to_string()));
         map.insert("key2".to_string(), Value::Integer(42));
         map.insert("key3".to_string(), Value::Boolean(true));
 
-        let map_value = Value::Map(map.into_iter().map(|(k, v)| (Value::Text(k), v)).collect());
+        let map_value = Value::Map(
+            map.into_iter()
+                .map(|(k, v)| (Value::Text(k.into()), v))
+                .collect(),
+        );
 
         if let Ok(serialized) = serialize_cql_value(&map_value) {
             total_bytes += serialized.len();
@@ -290,7 +294,7 @@ impl CompatibilityTestFramework {
             0x05, 0x06, 0x07, 0x08,
         ];
 
-        let udt_value = Value::Blob(udt_mock_data.clone());
+        let udt_value = Value::blob(udt_mock_data.clone());
         let serialized = serialize_cql_value(&udt_value)?;
 
         let passed = serialized.len() > 1 && serialized[0] == CqlTypeId::Blob as u8;
@@ -323,8 +327,8 @@ impl CompatibilityTestFramework {
 
         // Test multi-part key serialization
         let key_parts = vec![
-            Value::Text("user_123".to_string()),
-            Value::Text("session_456".to_string()),
+            Value::text("user_123".to_string()),
+            Value::text("session_456".to_string()),
             Value::BigInt(1640995200000),
         ];
 
@@ -399,7 +403,7 @@ impl CompatibilityTestFramework {
 
         for i in 0..(large_data_size / batch_size) {
             let _key = RowKey::from(format!("large_key_{:08}", i));
-            let value = Value::Text(format!(
+            let value = Value::text(format!(
                 "Large value {} with extra data to test scalability",
                 i
             ));
@@ -439,7 +443,7 @@ impl CompatibilityTestFramework {
 
         // Simulate parsing benchmark
         for i in 0..1000 {
-            let value = Value::Text(format!("benchmark_value_{}", i));
+            let value = Value::text(format!("benchmark_value_{}", i));
             if serialize_cql_value(&value).is_ok() {
                 parsed_count += 1;
             }
@@ -481,7 +485,7 @@ impl CompatibilityTestFramework {
         total_tests += 1;
 
         // Test empty strings
-        let empty_string = Value::Text("".to_string());
+        let empty_string = Value::text("".to_string());
         if serialize_cql_value(&empty_string).is_ok() {
             passed_tests += 1;
             println!("  ✓ Empty string: PASS");
@@ -497,7 +501,7 @@ impl CompatibilityTestFramework {
         total_tests += 1;
 
         // Test Unicode strings
-        let unicode_string = Value::Text("🚀 Unicode test: δῶς, ñoël, 中文".to_string());
+        let unicode_string = Value::text("🚀 Unicode test: δῶς, ñoël, 中文".to_string());
         if serialize_cql_value(&unicode_string).is_ok() {
             passed_tests += 1;
             println!("  ✓ Unicode string: PASS");
@@ -684,12 +688,12 @@ impl CompatibilityTestFramework {
             (
                 "TEXT".to_string(),
                 CqlTypeId::Varchar,
-                Value::Text("Hello, Cassandra!".to_string()),
+                Value::text("Hello, Cassandra!".to_string()),
             ),
             (
                 "BLOB".to_string(),
                 CqlTypeId::Blob,
-                Value::Blob(vec![0x01, 0x02, 0x03, 0xFF]),
+                Value::blob(vec![0x01, 0x02, 0x03, 0xFF]),
             ),
             (
                 "UUID".to_string(),

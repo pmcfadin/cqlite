@@ -754,9 +754,9 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
 
         (Value::Float(f), ComparatorType::Float) => Ok(f.to_bits().to_be_bytes().to_vec()),
 
-        (Value::Text(s), ComparatorType::Text) => Ok(s.as_bytes().to_vec()),
+        (Value::Text(s), ComparatorType::Text) => Ok(s.to_vec()),
 
-        (Value::Blob(bytes), ComparatorType::Blob) => Ok(bytes.clone()),
+        (Value::Blob(bytes), ComparatorType::Blob) => Ok(bytes.to_vec()),
 
         (Value::Timestamp(millis), ComparatorType::Timestamp) => Ok(millis.to_be_bytes().to_vec()),
 
@@ -773,9 +773,9 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
             Ok(nanos.to_be_bytes().to_vec())
         }
 
-        (Value::Inet(bytes), ComparatorType::Custom(name)) if name == "inet" => Ok(bytes.clone()),
+        (Value::Inet(bytes), ComparatorType::Custom(name)) if name == "inet" => Ok(bytes.to_vec()),
 
-        (Value::Varint(bytes), ComparatorType::Varint) => Ok(bytes.clone()),
+        (Value::Varint(bytes), ComparatorType::Varint) => Ok(bytes.to_vec()),
 
         (Value::Decimal { scale, unscaled }, ComparatorType::Decimal) => {
             // Decimal: [scale (4B BE i32)][unscaled bytes]
@@ -944,7 +944,7 @@ mod tests {
         let schema = create_test_schema(vec![("id", "int"), ("name", "text")], vec![]);
         let pk = PartitionKey::new(vec![
             ("id".to_string(), Value::Integer(42)),
-            ("name".to_string(), Value::Text("hello".to_string())),
+            ("name".to_string(), Value::text("hello".to_string())),
         ]);
 
         let bytes = pk.to_bytes(&schema).unwrap();
@@ -969,8 +969,8 @@ mod tests {
             vec![],
         );
         let pk = PartitionKey::new(vec![
-            ("symbol".to_string(), Value::Text("AAPL".to_string())),
-            ("exchange".to_string(), Value::Text("NYSE".to_string())),
+            ("symbol".to_string(), Value::text("AAPL".to_string())),
+            ("exchange".to_string(), Value::text("NYSE".to_string())),
             ("bucket".to_string(), Value::Integer(100)),
         ]);
 
@@ -1186,8 +1186,8 @@ mod tests {
             vec![("c", "text", ClusteringOrder::Asc)],
         );
 
-        let empty_ck = ClusteringKey::single("c", Value::Text(String::new()));
-        let valued_ck = ClusteringKey::single("c", Value::Text("a".to_string()));
+        let empty_ck = ClusteringKey::single("c", Value::text(String::new()));
+        let valued_ck = ClusteringKey::single("c", Value::text("a".to_string()));
 
         assert_eq!(
             empty_ck.compare(&valued_ck, &schema).unwrap(),
@@ -1205,8 +1205,8 @@ mod tests {
             vec![("c", "text", ClusteringOrder::Desc)],
         );
 
-        let empty_ck = ClusteringKey::single("c", Value::Text(String::new()));
-        let valued_ck = ClusteringKey::single("c", Value::Text("a".to_string()));
+        let empty_ck = ClusteringKey::single("c", Value::text(String::new()));
+        let valued_ck = ClusteringKey::single("c", Value::text("a".to_string()));
 
         assert_eq!(
             empty_ck.compare(&valued_ck, &schema).unwrap(),
@@ -1348,7 +1348,7 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text("Alice".to_string()),
+            value: Value::text("Alice".to_string()),
         }];
 
         let mutation = Mutation::new(table_id.clone(), pk, None, ops, 1234567890, None);
@@ -1408,7 +1408,7 @@ mod tests {
         assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x2A]);
 
         // Text
-        let bytes = serialize_value_bytes(&Value::Text("hello".to_string()), &ComparatorType::Text)
+        let bytes = serialize_value_bytes(&Value::text("hello".to_string()), &ComparatorType::Text)
             .unwrap();
         assert_eq!(bytes, b"hello");
 
@@ -1643,17 +1643,17 @@ mod tests {
     fn test_compare_frozen_list_values() {
         // Issue #437: Frozen collection clustering keys must be comparable
         let list_a = Value::Frozen(Box::new(Value::List(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ])));
         let list_b = Value::Frozen(Box::new(Value::List(vec![
-            Value::Text("a".to_string()),
-            Value::Text("c".to_string()),
+            Value::text("a".to_string()),
+            Value::text("c".to_string()),
         ])));
         let list_c = Value::Frozen(Box::new(Value::List(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
-            Value::Text("c".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
+            Value::text("c".to_string()),
         ])));
 
         // Same elements: equal
@@ -1677,25 +1677,25 @@ mod tests {
         let ck_2elem = ClusteringKey::single(
             "tags",
             Value::Frozen(Box::new(Value::List(vec![
-                Value::Text("ck_0_0".to_string()),
-                Value::Text("ck_0_1".to_string()),
+                Value::text("ck_0_0".to_string()),
+                Value::text("ck_0_1".to_string()),
             ]))),
         );
         let ck_3elem = ClusteringKey::single(
             "tags",
             Value::Frozen(Box::new(Value::List(vec![
-                Value::Text("ck_1_0".to_string()),
-                Value::Text("ck_1_1".to_string()),
-                Value::Text("ck_1_2".to_string()),
+                Value::text("ck_1_0".to_string()),
+                Value::text("ck_1_1".to_string()),
+                Value::text("ck_1_2".to_string()),
             ]))),
         );
         let ck_4elem = ClusteringKey::single(
             "tags",
             Value::Frozen(Box::new(Value::List(vec![
-                Value::Text("ck_2_0".to_string()),
-                Value::Text("ck_2_1".to_string()),
-                Value::Text("ck_2_2".to_string()),
-                Value::Text("ck_2_3".to_string()),
+                Value::text("ck_2_0".to_string()),
+                Value::text("ck_2_1".to_string()),
+                Value::text("ck_2_2".to_string()),
+                Value::text("ck_2_3".to_string()),
             ]))),
         );
 
@@ -1773,7 +1773,7 @@ mod tests {
             dropped_columns: HashMap::new(),
         };
 
-        let original = PartitionKey::single("name", Value::Text("hello".to_string()));
+        let original = PartitionKey::single("name", Value::text("hello".to_string()));
         let bytes = original.to_bytes(&schema).unwrap();
         let decoded = PartitionKey::from_bytes(&bytes, &schema).unwrap();
         assert_eq!(original, decoded);
@@ -1803,7 +1803,7 @@ mod tests {
         };
 
         let original = PartitionKey::new(vec![
-            ("tenant".to_string(), Value::Text("acme".to_string())),
+            ("tenant".to_string(), Value::text("acme".to_string())),
             ("id".to_string(), Value::Integer(99)),
         ]);
         let bytes = original.to_bytes(&schema).unwrap();
@@ -1839,7 +1839,7 @@ mod tests {
             columns: vec![("col".to_string(), Value::Integer(1))],
         };
         let key_b = ClusteringKey {
-            columns: vec![("col".to_string(), Value::Text("1".to_string()))],
+            columns: vec![("col".to_string(), Value::text("1".to_string()))],
         };
 
         // Must not panic.

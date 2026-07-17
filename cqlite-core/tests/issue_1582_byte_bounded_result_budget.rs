@@ -101,10 +101,10 @@ fn wide_keyed_schema_cql() -> String {
 }
 
 fn wide_keyed_row(id: &str, ts: i64) -> Mutation {
-    let pk = PartitionKey::single("id", Value::Text(id.to_string()));
+    let pk = PartitionKey::single("id", Value::text(id.to_string()));
     let ops = vec![CellOperation::Write {
         column: "payload".to_string(),
-        value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
+        value: Value::blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
     }];
     Mutation::new(TableId::new(KS, WIDE_KEYED_TBL), pk, None, ops, ts, None)
 }
@@ -113,7 +113,7 @@ fn wide_row(id: i32, ts: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "payload".to_string(),
-        value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
+        value: Value::blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
     }];
     Mutation::new(TableId::new(KS, WIDE_TBL), pk, None, ops, ts, None)
 }

@@ -220,7 +220,9 @@ fn merge_facts(inputs: Vec<PathBuf>, sch: &TableSchema) -> Vec<MergeFact> {
                         RowData::Live { cells } => {
                             let val_cell = cells.iter().find(|c| c.column == "val");
                             let (val, val_dead) = match val_cell.map(|c| &c.value) {
-                                Some(Value::Text(t)) => (Some(t.clone()), false),
+                                Some(Value::Text(t)) => {
+                                    (Some(String::from_utf8_lossy(t).into_owned()), false)
+                                }
                                 Some(Value::Tombstone(_)) => (None, true),
                                 _ => (None, false),
                             };

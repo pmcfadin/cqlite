@@ -257,7 +257,7 @@ mod tests {
             Some(ck(2)),
             vec![CellOperation::WriteWithTtl {
                 column: "v".to_string(),
-                value: Value::Text("x".to_string()),
+                value: Value::text("x".to_string()),
                 ttl_seconds: 60,
                 local_deletion_time: Some(4_000),
             }],
@@ -295,7 +295,7 @@ mod tests {
                 CellOperation::WriteComplexElement {
                     column: "tags".to_string(),
                     cell_path: b"b".to_vec(),
-                    value: Some(Value::Text("b".to_string())),
+                    value: Some(Value::text("b".to_string())),
                     timestamp_micros: 750,
                     ttl_seconds: None,
                     local_deletion_time: None,
@@ -312,7 +312,7 @@ mod tests {
             Some(ck(5)),
             vec![CellOperation::Write {
                 column: "v".to_string(),
-                value: Value::Text("live".to_string()),
+                value: Value::text("live".to_string()),
             }],
             800,
             None,
@@ -448,7 +448,7 @@ mod tests {
                 Some(ck(1)),
                 vec![CellOperation::WriteWithTtl {
                     column: "v".to_string(),
-                    value: Value::Text("x".to_string()),
+                    value: Value::text("x".to_string()),
                     ttl_seconds: 60,
                     local_deletion_time: Some(1_000),
                 }],

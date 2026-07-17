@@ -290,9 +290,9 @@ impl CQLQueryProcessor {
         // Add column information
         for column in schema_info.columns {
             let mut row_data = HashMap::new();
-            row_data.insert("column_name".to_string(), Value::Text(column.name));
-            row_data.insert("type".to_string(), Value::Text(column.data_type));
-            row_data.insert("kind".to_string(), Value::Text(column.kind));
+            row_data.insert("column_name".to_string(), Value::text(column.name));
+            row_data.insert("type".to_string(), Value::text(column.data_type));
+            row_data.insert("kind".to_string(), Value::text(column.kind));
             
             rows.push(cqlite_core::query::result::QueryRow::from_map(row_data));
         }

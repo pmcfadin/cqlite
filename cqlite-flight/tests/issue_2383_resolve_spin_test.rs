@@ -93,7 +93,7 @@ fn write_row(id: i32, name: &str, score: i32) -> Mutation {
         vec![
             CellOperation::Write {
                 column: "name".into(),
-                value: Value::Text(name.into()),
+                value: Value::text(name),
             },
             CellOperation::Write {
                 column: "score".into(),

@@ -37,9 +37,9 @@ fn test_list_text_parsing() {
     match parsed_value {
         Value::List(elements) => {
             assert_eq!(elements.len(), 3);
-            assert_eq!(elements[0], Value::Text("hello".to_string()));
-            assert_eq!(elements[1], Value::Text("world".to_string()));
-            assert_eq!(elements[2], Value::Text("test".to_string()));
+            assert_eq!(elements[0], Value::text("hello".to_string()));
+            assert_eq!(elements[1], Value::text("world".to_string()));
+            assert_eq!(elements[2], Value::text("test".to_string()));
         }
         _ => panic!("Expected List value, got {:?}", parsed_value),
     }
@@ -103,11 +103,11 @@ fn test_map_text_int_parsing() {
             assert_eq!(pairs.len(), 2);
             assert_eq!(
                 pairs[0],
-                (Value::Text("key1".to_string()), Value::Integer(10))
+                (Value::text("key1".to_string()), Value::Integer(10))
             );
             assert_eq!(
                 pairs[1],
-                (Value::Text("key2".to_string()), Value::Integer(20))
+                (Value::text("key2".to_string()), Value::Integer(20))
             );
         }
         _ => panic!("Expected Map value, got {:?}", parsed_value),
@@ -163,25 +163,25 @@ fn test_address_udt_parsing() {
             assert_eq!(udt_value.fields[0].name, "street");
             assert_eq!(
                 udt_value.fields[0].value,
-                Some(Value::Text("123 Main St".to_string()))
+                Some(Value::text("123 Main St".to_string()))
             );
 
             assert_eq!(udt_value.fields[1].name, "city");
             assert_eq!(
                 udt_value.fields[1].value,
-                Some(Value::Text("Test City".to_string()))
+                Some(Value::text("Test City".to_string()))
             );
 
             assert_eq!(udt_value.fields[2].name, "state");
             assert_eq!(
                 udt_value.fields[2].value,
-                Some(Value::Text("TC".to_string()))
+                Some(Value::text("TC".to_string()))
             );
 
             assert_eq!(udt_value.fields[3].name, "zip_code");
             assert_eq!(
                 udt_value.fields[3].value,
-                Some(Value::Text("12345".to_string()))
+                Some(Value::text("12345".to_string()))
             );
         }
         _ => panic!("Expected UDT value, got {:?}", parsed_value),
@@ -250,9 +250,9 @@ fn test_collection_serialization_roundtrip() {
 
     // Test list roundtrip
     let original_list = vec![
-        Value::Text("item1".to_string()),
-        Value::Text("item2".to_string()),
-        Value::Text("item3".to_string()),
+        Value::text("item1".to_string()),
+        Value::text("item2".to_string()),
+        Value::text("item3".to_string()),
     ];
 
     let serialized = serialize_list_v5(&original_list).unwrap();
@@ -268,8 +268,8 @@ fn test_collection_serialization_roundtrip() {
 
     // Test map roundtrip
     let original_map = vec![
-        (Value::Text("key1".to_string()), Value::Integer(100)),
-        (Value::Text("key2".to_string()), Value::Integer(200)),
+        (Value::text("key1".to_string()), Value::Integer(100)),
+        (Value::text("key2".to_string()), Value::Integer(200)),
     ];
 
     let serialized = serialize_map_v5(&original_map).unwrap();
@@ -360,12 +360,12 @@ fn test_udt_null_fields() {
 
             assert_eq!(
                 udt_value.fields[0].value,
-                Some(Value::Text("123 Main St".to_string()))
+                Some(Value::text("123 Main St".to_string()))
             );
             assert_eq!(udt_value.fields[1].value, None); // null city
             assert_eq!(
                 udt_value.fields[2].value,
-                Some(Value::Text("TC".to_string()))
+                Some(Value::text("TC".to_string()))
             );
             assert_eq!(udt_value.fields[3].value, None); // null zip_code
         }

@@ -98,8 +98,8 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
         // Create a composite value representing the row
         let mut row_data = std::collections::HashMap::new();
         row_data.insert("id".to_string(), Value::Integer(id as i32));
-        row_data.insert("name".to_string(), Value::Text(name.to_string()));
-        row_data.insert("email".to_string(), Value::Text(email.to_string()));
+        row_data.insert("name".to_string(), Value::text(name.to_string()));
+        row_data.insert("email".to_string(), Value::text(email.to_string()));
         row_data.insert("age".to_string(), Value::Integer(age as i32));
 
         // Store as JSON for simplicity in this test
@@ -154,12 +154,12 @@ async fn test_complete_workflow() -> Result<(), Box<dyn std::error::Error>> {
         cqlite_core::storage::BatchOperation::Put {
             table_id: table_id.clone(),
             key: RowKey::new(5i64.to_be_bytes().to_vec()),
-            value: Value::Text("batch_test".to_string()),
+            value: Value::text("batch_test".to_string()),
         },
         cqlite_core::storage::BatchOperation::Put {
             table_id: table_id.clone(),
             key: RowKey::new(6i64.to_be_bytes().to_vec()),
-            value: Value::Text("batch_test_2".to_string()),
+            value: Value::text("batch_test_2".to_string()),
         },
     ];
 
@@ -252,7 +252,7 @@ async fn test_performance_scalability() -> Result<(), Box<dyn std::error::Error>
 
     for i in 0..record_count {
         let key = RowKey::new((i as u32).to_be_bytes().to_vec());
-        let value = Value::Text(format!("test_value_{i}"));
+        let value = Value::text(format!("test_value_{i}"));
         storage.put(&table_id, key, value).await?;
     }
 
@@ -327,7 +327,7 @@ async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> 
             for i in 0..records_per_task {
                 let key_value = (task_id * records_per_task + i) as u64;
                 let key = RowKey::new(key_value.to_be_bytes().to_vec());
-                let value = Value::Text(format!("task_{task_id}_record_{i}"));
+                let value = Value::text(format!("task_{task_id}_record_{i}"));
 
                 storage_clone
                     .put(&table_id_clone, key, value)
@@ -397,9 +397,9 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
         (CqlTypeId::Double, Value::Float(2.718281828)),
         (
             CqlTypeId::Varchar,
-            Value::Text("Unicode test: 测试数据 🚀".to_string()),
+            Value::text("Unicode test: 测试数据 🚀".to_string()),
         ),
-        (CqlTypeId::Blob, Value::Blob(vec![0x01, 0x02, 0x03, 0xFF])),
+        (CqlTypeId::Blob, Value::blob(vec![0x01, 0x02, 0x03, 0xFF])),
         (
             CqlTypeId::Uuid,
             Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
@@ -421,9 +421,9 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
 
     // Test 3: Collection types
     let list_value = Value::List(vec![
-        Value::Text("item1".to_string()),
-        Value::Text("item2".to_string()),
-        Value::Text("unicode: 列表项".to_string()),
+        Value::text("item1".to_string()),
+        Value::text("item2".to_string()),
+        Value::text("unicode: 列表项".to_string()),
     ]);
 
     let serialized_list = serialize_cql_value(&list_value)?;
@@ -434,10 +434,13 @@ async fn test_cassandra5_sstable_compatibility() -> Result<(), Box<dyn std::erro
     }
 
     let mut map = HashMap::new();
-    map.insert("key1".to_string(), Value::Text("value1".to_string()));
+    map.insert("key1".to_string(), Value::text("value1".to_string()));
     map.insert("unicode_key_键".to_string(), Value::Integer(42));
     // Convert HashMap to Vec<(Value, Value)>
-    let map_vec: Vec<(Value, Value)> = map.into_iter().map(|(k, v)| (Value::Text(k), v)).collect();
+    let map_vec: Vec<(Value, Value)> = map
+        .into_iter()
+        .map(|(k, v)| (Value::Text(k.into()), v))
+        .collect();
     let map_value = Value::Map(map_vec);
 
     let serialized_map = serialize_cql_value(&map_value)?;
@@ -496,7 +499,7 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
             );
             row_data.insert(
                 "device_id".to_string(),
-                Value::Text(format!("device_{:06}", i % 1000)),
+                Value::text(format!("device_{:06}", i % 1000)),
             );
             row_data.insert(
                 "sensor_data".to_string(),
@@ -512,20 +515,20 @@ async fn test_large_dataset_processing() -> Result<(), Box<dyn std::error::Error
                     let mut metadata = HashMap::new();
                     metadata.insert(
                         "location".to_string(),
-                        Value::Text(format!("zone_{}", i % 10)),
+                        Value::text(format!("zone_{}", i % 10)),
                     );
                     metadata.insert(
                         "type".to_string(),
-                        Value::Text("sensor_reading".to_string()),
+                        Value::text("sensor_reading".to_string()),
                     );
                     metadata.insert(
                         "unicode_field".to_string(),
-                        Value::Text("测试数据".to_string()),
+                        Value::text("测试数据".to_string()),
                     );
                     // Convert HashMap to Vec<(Value, Value)>
                     let metadata_vec: Vec<(Value, Value)> = metadata
                         .into_iter()
-                        .map(|(k, v)| (Value::Text(k), v))
+                        .map(|(k, v)| (Value::Text(k.into()), v))
                         .collect();
                     metadata_vec
                 }),
@@ -658,22 +661,22 @@ async fn test_concurrent_round_trip_operations() -> Result<(), Box<dyn std::erro
                 row_data.insert(
                     "data_list".to_string(),
                     Value::List(vec![
-                        Value::Text(format!("item_{i}_1")),
-                        Value::Text(format!("item_{i}_2")),
-                        Value::Text(format!("unicode_项目_{i}")),
+                        Value::text(format!("item_{i}_1")),
+                        Value::text(format!("item_{i}_2")),
+                        Value::text(format!("unicode_项目_{i}")),
                     ]),
                 );
                 row_data.insert(
                     "metadata_map".to_string(),
                     Value::Map(vec![
                         (
-                            Value::Text("source".to_string()),
-                            Value::Text(format!("task_{task_id}")),
+                            Value::text("source".to_string()),
+                            Value::text(format!("task_{task_id}")),
                         ),
-                        (Value::Text("iteration".to_string()), Value::Integer(i)),
+                        (Value::text("iteration".to_string()), Value::Integer(i)),
                         (
-                            Value::Text("unicode_元数据".to_string()),
-                            Value::Text("并发测试".to_string()),
+                            Value::text("unicode_元数据".to_string()),
+                            Value::text("并发测试".to_string()),
                         ),
                     ]),
                 );
@@ -792,7 +795,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
     storage.put(&table_id, null_key.clone(), null_value).await?;
 
     let empty_key = RowKey::new(b"empty_test".to_vec());
-    let empty_value = Value::Text("".to_string());
+    let empty_value = Value::text("".to_string());
     storage
         .put(&table_id, empty_key.clone(), empty_value)
         .await?;
@@ -807,7 +810,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
     // Test 2: Unicode stress test
     println!("   Testing Unicode handling...");
     let unicode_key = RowKey::new("unicode_test_键".as_bytes().to_vec());
-    let unicode_value = Value::Text(
+    let unicode_value = Value::text(
         "🚀 Unicode test: δῶς, ñoël, 中文, العربية, עברית, 日本語, 한국어, русский 🌟".to_string(),
     );
     storage
@@ -821,7 +824,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
     println!("   Testing large binary data...");
     let large_blob_key = RowKey::new(b"large_blob_test".to_vec());
     let large_blob_data = vec![0xAA; 1024 * 1024]; // 1MB of data
-    let large_blob_value = Value::Blob(large_blob_data.clone());
+    let large_blob_value = Value::blob(large_blob_data.clone());
     storage
         .put(&table_id, large_blob_key.clone(), large_blob_value)
         .await?;
@@ -875,18 +878,18 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
                 inner_map.insert(
                     "level2".to_string(),
                     Value::List(vec![
-                        Value::Text("nested_item_1".to_string()),
-                        Value::Text("nested_item_2".to_string()),
+                        Value::text("nested_item_1".to_string()),
+                        Value::text("nested_item_2".to_string()),
                         Value::Map({
                             let mut deep_map = HashMap::new();
                             deep_map.insert(
                                 "level3".to_string(),
-                                Value::Text("deep_value".to_string()),
+                                Value::text("deep_value".to_string()),
                             );
                             // Convert deep HashMap to Vec<(Value, Value)>
                             let deep_map_vec: Vec<(Value, Value)> = deep_map
                                 .into_iter()
-                                .map(|(k, v)| (Value::Text(k), v))
+                                .map(|(k, v)| (Value::Text(k.into()), v))
                                 .collect();
                             deep_map_vec
                         }),
@@ -895,7 +898,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
                 // Convert inner HashMap to Vec<(Value, Value)>
                 let inner_map_vec: Vec<(Value, Value)> = inner_map
                     .into_iter()
-                    .map(|(k, v)| (Value::Text(k), v))
+                    .map(|(k, v)| (Value::Text(k.into()), v))
                     .collect();
                 inner_map_vec
             }),
@@ -903,7 +906,7 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
         // Convert outer HashMap to Vec<(Value, Value)>
         let outer_map_vec: Vec<(Value, Value)> = outer_map
             .into_iter()
-            .map(|(k, v)| (Value::Text(k), v))
+            .map(|(k, v)| (Value::Text(k.into()), v))
             .collect();
         outer_map_vec
     });
@@ -1181,10 +1184,10 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     println!("   Testing List types...");
     let list_key = RowKey::new(b"list_test".to_vec());
     let list_value = Value::List(vec![
-        Value::Text("first_item".to_string()),
-        Value::Text("second_item".to_string()),
-        Value::Text("unicode_项目".to_string()),
-        Value::Text("special_chars_!@#$%^&*()".to_string()),
+        Value::text("first_item".to_string()),
+        Value::text("second_item".to_string()),
+        Value::text("unicode_项目".to_string()),
+        Value::text("special_chars_!@#$%^&*()".to_string()),
     ]);
 
     storage
@@ -1214,17 +1217,17 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     let map_key = RowKey::new(b"map_test".to_vec());
     let map_value = Value::Map(vec![
         (
-            Value::Text("name".to_string()),
-            Value::Text("Alice".to_string()),
+            Value::text("name".to_string()),
+            Value::text("Alice".to_string()),
         ),
-        (Value::Text("age".to_string()), Value::Integer(30)),
+        (Value::text("age".to_string()), Value::Integer(30)),
         (
-            Value::Text("city".to_string()),
-            Value::Text("San Francisco".to_string()),
+            Value::text("city".to_string()),
+            Value::text("San Francisco".to_string()),
         ),
         (
-            Value::Text("unicode_键".to_string()),
-            Value::Text("unicode_值".to_string()),
+            Value::text("unicode_键".to_string()),
+            Value::text("unicode_值".to_string()),
         ),
     ]);
 
@@ -1239,7 +1242,7 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     let tuple_key = RowKey::new(b"tuple_test".to_vec());
     let tuple_value = Value::Tuple(vec![
         Value::Integer(42),
-        Value::Text("tuple_text".to_string()),
+        Value::text("tuple_text".to_string()),
         Value::Boolean(true),
         Value::Float(3.14159),
         Value::Timestamp(1640995200000000), // 2022-01-01 UTC
@@ -1256,33 +1259,33 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     let nested_key = RowKey::new(b"nested_test".to_vec());
     let nested_value = Value::Map(vec![
         (
-            Value::Text("user_data".to_string()),
+            Value::text("user_data".to_string()),
             Value::Map(vec![
                 (
-                    Value::Text("personal".to_string()),
+                    Value::text("personal".to_string()),
                     Value::Map(vec![
                         (
-                            Value::Text("name".to_string()),
-                            Value::Text("Bob".to_string()),
+                            Value::text("name".to_string()),
+                            Value::text("Bob".to_string()),
                         ),
-                        (Value::Text("age".to_string()), Value::Integer(25)),
+                        (Value::text("age".to_string()), Value::Integer(25)),
                     ]),
                 ),
                 (
-                    Value::Text("preferences".to_string()),
+                    Value::text("preferences".to_string()),
                     Value::List(vec![
-                        Value::Text("music".to_string()),
-                        Value::Text("sports".to_string()),
-                        Value::Text("reading".to_string()),
+                        Value::text("music".to_string()),
+                        Value::text("sports".to_string()),
+                        Value::text("reading".to_string()),
                     ]),
                 ),
             ]),
         ),
         (
-            Value::Text("metadata".to_string()),
+            Value::text("metadata".to_string()),
             Value::Tuple(vec![
                 Value::Timestamp(chrono::Utc::now().timestamp_micros()),
-                Value::Text("v1.0".to_string()),
+                Value::text("v1.0".to_string()),
                 Value::Boolean(true),
             ]),
         ),
@@ -1298,10 +1301,10 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     println!("   Testing empty collections...");
     let empty_key = RowKey::new(b"empty_test".to_vec());
     let empty_collections = Value::Map(vec![
-        (Value::Text("empty_list".to_string()), Value::List(vec![])),
-        (Value::Text("empty_set".to_string()), Value::Set(vec![])),
-        (Value::Text("empty_map".to_string()), Value::Map(vec![])),
-        (Value::Text("empty_tuple".to_string()), Value::Tuple(vec![])),
+        (Value::text("empty_list".to_string()), Value::List(vec![])),
+        (Value::text("empty_set".to_string()), Value::Set(vec![])),
+        (Value::text("empty_map".to_string()), Value::Map(vec![])),
+        (Value::text("empty_tuple".to_string()), Value::Tuple(vec![])),
     ]);
 
     storage
@@ -1317,21 +1320,21 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     // Create large list
     let mut large_list = Vec::new();
     for i in 0..1000 {
-        large_list.push(Value::Text(format!("item_{i:04}")));
+        large_list.push(Value::text(format!("item_{i:04}")));
     }
 
     // Create large map
     let mut large_map = Vec::new();
     for i in 0..500 {
-        large_map.push((Value::Text(format!("key_{i:04}")), Value::Integer(i)));
+        large_map.push((Value::text(format!("key_{i:04}")), Value::Integer(i)));
     }
 
     let large_collections = Value::Map(vec![
         (
-            Value::Text("large_list".to_string()),
+            Value::text("large_list".to_string()),
             Value::List(large_list),
         ),
-        (Value::Text("large_map".to_string()), Value::Map(large_map)),
+        (Value::text("large_map".to_string()), Value::Map(large_map)),
     ]);
 
     storage
@@ -1347,9 +1350,9 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
     for i in 0..100 {
         let perf_key = RowKey::new(format!("perf_test_{i}").as_bytes().to_vec());
         let perf_value = Value::Map(vec![
-            (Value::Text("id".to_string()), Value::Integer(i)),
+            (Value::text("id".to_string()), Value::Integer(i)),
             (
-                Value::Text("data".to_string()),
+                Value::text("data".to_string()),
                 Value::List(vec![
                     Value::Integer(i * 10),
                     Value::Integer(i * 20),
@@ -1357,15 +1360,15 @@ async fn test_complex_types_integration() -> Result<(), Box<dyn std::error::Erro
                 ]),
             ),
             (
-                Value::Text("metadata".to_string()),
+                Value::text("metadata".to_string()),
                 Value::Map(vec![
                     (
-                        Value::Text("created".to_string()),
+                        Value::text("created".to_string()),
                         Value::Timestamp(chrono::Utc::now().timestamp_micros()),
                     ),
                     (
-                        Value::Text("type".to_string()),
-                        Value::Text("test_data".to_string()),
+                        Value::text("type".to_string()),
+                        Value::text("test_data".to_string()),
                     ),
                 ]),
             ),
@@ -1412,15 +1415,15 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
         (
             RowKey::new(b"row_001".to_vec()),
             Value::Map(vec![
-                (Value::Text("id".to_string()), Value::Integer(1)),
+                (Value::text("id".to_string()), Value::Integer(1)),
                 (
-                    Value::Text("name".to_string()),
-                    Value::Text("Alice".to_string()),
+                    Value::text("name".to_string()),
+                    Value::text("Alice".to_string()),
                 ),
-                (Value::Text("active".to_string()), Value::Boolean(true)),
-                (Value::Text("score".to_string()), Value::Float(95.5)),
+                (Value::text("active".to_string()), Value::Boolean(true)),
+                (Value::text("score".to_string()), Value::Float(95.5)),
                 (
-                    Value::Text("created".to_string()),
+                    Value::text("created".to_string()),
                     Value::Timestamp(1640995200000000),
                 ),
             ]),
@@ -1429,39 +1432,39 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
         (
             RowKey::new(b"row_002".to_vec()),
             Value::Map(vec![
-                (Value::Text("id".to_string()), Value::Integer(2)),
+                (Value::text("id".to_string()), Value::Integer(2)),
                 (
-                    Value::Text("tags".to_string()),
+                    Value::text("tags".to_string()),
                     Value::List(vec![
-                        Value::Text("tag1".to_string()),
-                        Value::Text("tag2".to_string()),
-                        Value::Text("unicode_标签".to_string()),
+                        Value::text("tag1".to_string()),
+                        Value::text("tag2".to_string()),
+                        Value::text("unicode_标签".to_string()),
                     ]),
                 ),
                 (
-                    Value::Text("properties".to_string()),
+                    Value::text("properties".to_string()),
                     Value::Map(vec![
                         (
-                            Value::Text("category".to_string()),
-                            Value::Text("premium".to_string()),
+                            Value::text("category".to_string()),
+                            Value::text("premium".to_string()),
                         ),
-                        (Value::Text("priority".to_string()), Value::Integer(5)),
+                        (Value::text("priority".to_string()), Value::Integer(5)),
                         (
-                            Value::Text("features".to_string()),
+                            Value::text("features".to_string()),
                             Value::Set(vec![
-                                Value::Text("feature_a".to_string()),
-                                Value::Text("feature_b".to_string()),
-                                Value::Text("feature_c".to_string()),
+                                Value::text("feature_a".to_string()),
+                                Value::text("feature_b".to_string()),
+                                Value::text("feature_c".to_string()),
                             ]),
                         ),
                     ]),
                 ),
                 (
-                    Value::Text("coordinates".to_string()),
+                    Value::text("coordinates".to_string()),
                     Value::Tuple(vec![
                         Value::Float(37.7749),   // latitude
                         Value::Float(-122.4194), // longitude
-                        Value::Text("San Francisco".to_string()),
+                        Value::text("San Francisco".to_string()),
                     ]),
                 ),
             ]),
@@ -1470,21 +1473,21 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
         (
             RowKey::new(b"row_003".to_vec()),
             Value::Map(vec![
-                (Value::Text("id".to_string()), Value::Integer(3)),
+                (Value::text("id".to_string()), Value::Integer(3)),
                 (
-                    Value::Text("binary_data".to_string()),
-                    Value::Blob(vec![0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD]),
+                    Value::text("binary_data".to_string()),
+                    Value::blob(vec![0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD]),
                 ),
                 (
-                    Value::Text("uuid_field".to_string()),
+                    Value::text("uuid_field".to_string()),
                     Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
                 ),
-                (Value::Text("null_field".to_string()), Value::Null),
+                (Value::text("null_field".to_string()), Value::Null),
                 (
-                    Value::Text("empty_collections".to_string()),
+                    Value::text("empty_collections".to_string()),
                     Value::Map(vec![
-                        (Value::Text("empty_list".to_string()), Value::List(vec![])),
-                        (Value::Text("empty_map".to_string()), Value::Map(vec![])),
+                        (Value::text("empty_list".to_string()), Value::List(vec![])),
+                        (Value::text("empty_map".to_string()), Value::Map(vec![])),
                     ]),
                 ),
             ]),
@@ -1618,16 +1621,16 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
         (CqlTypeId::Float, Value::Float32(0.0f32)),
         (CqlTypeId::Double, Value::Float(f64::MAX)),
         (CqlTypeId::Double, Value::Float(f64::MIN)),
-        (CqlTypeId::Varchar, Value::Text("".to_string())),
-        (CqlTypeId::Varchar, Value::Text("Hello, World!".to_string())),
+        (CqlTypeId::Varchar, Value::text("".to_string())),
+        (CqlTypeId::Varchar, Value::text("Hello, World!".to_string())),
         (
             CqlTypeId::Varchar,
-            Value::Text("Unicode: 测试数据 🚀 💫 🌟".to_string()),
+            Value::text("Unicode: 测试数据 🚀 💫 🌟".to_string()),
         ),
-        (CqlTypeId::Blob, Value::Blob(vec![])),
+        (CqlTypeId::Blob, Value::blob(vec![])),
         (
             CqlTypeId::Blob,
-            Value::Blob(vec![0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0xFC]),
+            Value::blob(vec![0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0xFC]),
         ),
         (CqlTypeId::Uuid, Value::Uuid([0; 16])),
         (
@@ -1691,21 +1694,21 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
             Value::Integer(3),
         ]),
         Value::Set(vec![
-            Value::Text("apple".to_string()),
-            Value::Text("banana".to_string()),
-            Value::Text("cherry".to_string()),
+            Value::text("apple".to_string()),
+            Value::text("banana".to_string()),
+            Value::text("cherry".to_string()),
         ]),
         Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(100)),
-            (Value::Text("key2".to_string()), Value::Integer(200)),
+            (Value::text("key1".to_string()), Value::Integer(100)),
+            (Value::text("key2".to_string()), Value::Integer(200)),
             (
-                Value::Text("unicode_键".to_string()),
-                Value::Text("unicode_值".to_string()),
+                Value::text("unicode_键".to_string()),
+                Value::text("unicode_值".to_string()),
             ),
         ]),
         Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
         ]),
     ];
@@ -1744,8 +1747,8 @@ async fn test_comprehensive_data_type_validation() -> Result<(), Box<dyn std::er
     println!("   Testing edge cases...");
     let edge_case_tests = vec![
         Value::Null,
-        Value::Text("".to_string()),
-        Value::Blob(vec![]),
+        Value::text("".to_string()),
+        Value::blob(vec![]),
         Value::List(vec![]),
         Value::Set(vec![]),
         Value::Map(vec![]),

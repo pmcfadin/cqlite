@@ -111,7 +111,7 @@ fn write_row(id: i32, name: &str, score: i32, ts: i64) -> Mutation {
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "score".to_string(),

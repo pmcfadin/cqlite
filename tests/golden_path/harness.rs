@@ -319,9 +319,9 @@ impl GoldenPathTestHarness {
                     end_key: None,
                     expected_count: 3,
                     expected_results: vec![
-                        (RowKey::from("key1"), Value::Text("value1".to_string())),
-                        (RowKey::from("key2"), Value::Text("value2".to_string())),
-                        (RowKey::from("key3"), Value::Text("value3".to_string())),
+                        (RowKey::from("key1"), Value::text("value1".to_string())),
+                        (RowKey::from("key2"), Value::text("value2".to_string())),
+                        (RowKey::from("key3"), Value::text("value3".to_string())),
                     ],
                 },
             ],

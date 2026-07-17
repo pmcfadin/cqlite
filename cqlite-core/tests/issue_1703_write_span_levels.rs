@@ -166,7 +166,7 @@ fn mutation(i: usize) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(format!("row-{i}")),
+            value: Value::text(format!("row-{i}")),
         }],
         1_000 + i as i64,
         None,

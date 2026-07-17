@@ -360,7 +360,7 @@ fn iso8601_to_micros(s: &str) -> Option<i64> {
 
 fn value_to_string(v: &Value) -> String {
     match v {
-        Value::Text(t) => t.clone(),
+        Value::Text(t) => String::from_utf8_lossy(t).into_owned(),
         Value::Integer(i) => i.to_string(),
         other => format!("{other:?}"),
     }

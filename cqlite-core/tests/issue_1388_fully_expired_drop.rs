@@ -109,7 +109,7 @@ fn write_live_row(id: i32, ck: i32, name: &str, ts_micros: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         }],
         ts_micros,
         None,
@@ -203,7 +203,7 @@ fn read_name_values(inputs: &[PathBuf], schema: &TableSchema, purge_safe: bool) 
                         for c in cells {
                             if c.column == "name" {
                                 if let Value::Text(v) = &c.value {
-                                    out.push(v.clone());
+                                    out.push(String::from_utf8_lossy(v).into_owned());
                                 }
                             }
                         }

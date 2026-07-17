@@ -251,7 +251,12 @@ pub fn build_row_from_scan_cached(
     // NO `String` re-allocation of the name).
     for (name, col_value) in cells {
         if project(&name) {
-            row_values.insert(name, col_value);
+            // Issue #1644 (D2): this row is about to be handed to the
+            // streaming-scan caller through a channel — once sent, the
+            // window may refill/move on, so this is a retention boundary.
+            // Compact any borrowed value whose backing is a shared/oversized
+            // decoded chunk (a no-op for an already-tight/owned value).
+            row_values.insert(name, col_value.into_owned());
         }
     }
     // Cassandra never serialises partition-key columns in the cell payload;
@@ -290,7 +295,7 @@ mod tests {
     #[test]
     fn build_row_from_scan_materialises_single_text_pk() {
         let key = RowKey::new(b"k0000000000000000".to_vec());
-        let value = ScanRow::Row(vec![(Arc::from("name"), Value::Text("name-0".to_string()))]);
+        let value = ScanRow::Row(vec![(Arc::from("name"), Value::text("name-0".to_string()))]);
         let schema = single_pk_schema("id", "text");
 
         let row = build_row_from_scan(key, value, &[], Some(&schema))
@@ -298,13 +303,13 @@ mod tests {
 
         assert_eq!(
             row.values.get("id"),
-            Some(&Value::Text("k0000000000000000".to_string())),
+            Some(&Value::text("k0000000000000000".to_string())),
             "Issue #586: single TEXT PK column must be reconstructed from the raw row key"
         );
         // Regular columns must still be present.
         assert_eq!(
             row.values.get("name"),
-            Some(&Value::Text("name-0".to_string()))
+            Some(&Value::text("name-0".to_string()))
         );
     }
 
@@ -322,7 +327,7 @@ mod tests {
         let predicate = SSTablePredicate::column(
             "id",
             SSTableFilterOp::Equal,
-            vec![Value::Text("k0000000000000000".to_string())],
+            vec![Value::text("k0000000000000000".to_string())],
         );
 
         assert!(
@@ -340,7 +345,7 @@ mod tests {
     fn build_row_from_scan_multi_column_row_has_no_data_fallback() {
         let key = RowKey::new(b"k0000000000000000".to_vec());
         let value = ScanRow::Row(vec![
-            (Arc::from("name"), Value::Text("alice".to_string())),
+            (Arc::from("name"), Value::text("alice".to_string())),
             (Arc::from("score"), Value::Integer(42)),
         ]);
 
@@ -350,7 +355,7 @@ mod tests {
 
         assert_eq!(
             row.values.get("name"),
-            Some(&Value::Text("alice".to_string())),
+            Some(&Value::text("alice".to_string())),
             "real text column value must survive the row-carrier disassembly"
         );
         assert_eq!(
@@ -438,7 +443,7 @@ mod tests {
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(
                 row.values.get("id"),
-                Some(&Value::Text("partition-A".to_string())),
+                Some(&Value::text("partition-A".to_string())),
                 "each row must carry the reconstructed PK column value"
             );
             assert_eq!(row.values.get("v"), Some(&Value::Integer(i as i32)));
@@ -474,7 +479,7 @@ mod tests {
                 .expect("a live row must build");
                 assert_eq!(
                     row.values.get("id"),
-                    Some(&Value::Text(format!("partition-{p}"))),
+                    Some(&Value::text(format!("partition-{p}"))),
                     "PK column reconstructed per partition"
                 );
                 total_rows += 1;
@@ -512,7 +517,7 @@ mod tests {
                     .expect("a live row must build");
             assert_eq!(
                 row.values.get("id"),
-                Some(&Value::Text("partition-A".to_string()))
+                Some(&Value::text("partition-A".to_string()))
             );
         }
         let decodes = PARTITION_KEY_DECODES.with(|c| c.get());
@@ -544,7 +549,7 @@ mod tests {
         let cols_a: Vec<(Arc<str>, Value)> = cache.columns_for(&key_bytes, &schema_a).to_vec();
         assert_eq!(cols_a.len(), 1);
         assert_eq!(cols_a[0].0.as_ref(), "id_a");
-        assert_eq!(cols_a[0].1, Value::Text("shared-key".to_string()));
+        assert_eq!(cols_a[0].1, Value::text("shared-key".to_string()));
 
         // Second call: schema B with the SAME key bytes. Columns MUST reflect B
         // (`id_b`), NOT the cached A columns (`id_a`).
@@ -556,7 +561,7 @@ mod tests {
             "roborev: a cache reused across schemas must NOT leak the first \
              schema's partition-key column names — differing schema is a MISS"
         );
-        assert_eq!(cols_b[0].1, Value::Text("shared-key".to_string()));
+        assert_eq!(cols_b[0].1, Value::text("shared-key".to_string()));
     }
 
     /// A suppressed marker (row tombstone / null row) yields no user-visible row.
@@ -577,7 +582,7 @@ mod tests {
     #[test]
     fn live_value_dropped_as_marker_surfaces_as_row() {
         let key = RowKey::new(b"k".to_vec());
-        let live = Value::Text("synthetic-fallback".to_string());
+        let live = Value::text("synthetic-fallback".to_string());
 
         // Wrapped as a Marker (the pre-fix producer): dropped entirely.
         assert!(

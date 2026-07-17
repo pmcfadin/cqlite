@@ -97,7 +97,7 @@ fn deterministic_mutation(i: i32) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "value".to_string(),
-            value: Value::Text(payload),
+            value: Value::Text(payload.into()),
         }],
         // Monotonic, deterministic write timestamp (not wall-clock).
         1_000 + i as i64,

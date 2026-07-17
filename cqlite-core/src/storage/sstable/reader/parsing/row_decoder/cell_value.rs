@@ -250,8 +250,8 @@ impl V5CompressedLegacyParser {
             // every other declared type → NULL), byte-identical to the pre-J1
             // `match normalized_type.as_str()` empty arm.
             let empty_value = match kind {
-                CellKind::Text => Value::Text(String::new()),
-                CellKind::Blob => Value::Blob(Vec::new()),
+                CellKind::Text => Value::text(String::new()),
+                CellKind::Blob => Value::blob(Vec::new()),
                 // Issue #1885: an empty `varint` cell is `Varint([])`, matching the
                 // block / `ComparatorType::Varint` path (empty slice → `Varint([])`).
                 // In this split layout `varint` routes through `CellKind::Complex`
@@ -259,7 +259,7 @@ impl V5CompressedLegacyParser {
                 // match on the lowered declared-type string rather than a dedicated
                 // scalar tag.
                 CellKind::Complex(lowered) if lowered.as_ref() == "varint" => {
-                    Value::Varint(Vec::new())
+                    Value::varint(Vec::new())
                 }
                 _ => {
                     tracing::warn!(

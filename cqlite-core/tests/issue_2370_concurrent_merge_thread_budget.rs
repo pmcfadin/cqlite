@@ -167,7 +167,7 @@ fn write_row(id: i32, val: &str, ts: i64) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "val".to_string(),
-            value: Value::Text(val.to_string()),
+            value: Value::text(val.to_string()),
         }],
         ts,
         None,

@@ -72,9 +72,9 @@ mod primitive_type_tests {
     fn test_text_comparison() {
         let comparator = ComparatorType::Text;
 
-        let apple = Value::Text("apple".to_string());
-        let banana = Value::Text("banana".to_string());
-        let apple_dup = Value::Text("apple".to_string());
+        let apple = Value::text("apple".to_string());
+        let banana = Value::text("banana".to_string());
+        let apple_dup = Value::text("apple".to_string());
 
         assert_eq!(comparator.compare(&apple, &banana).unwrap(), Ordering::Less);
         assert_eq!(
@@ -130,9 +130,9 @@ mod primitive_type_tests {
     fn test_varint_comparison() {
         let comparator = ComparatorType::Varint;
 
-        let var1 = Value::Varint(vec![1, 2, 3]);
-        let var2 = Value::Varint(vec![1, 2, 4]);
-        let var1_dup = Value::Varint(vec![1, 2, 3]);
+        let var1 = Value::varint(vec![1, 2, 3]);
+        let var2 = Value::varint(vec![1, 2, 4]);
+        let var1_dup = Value::varint(vec![1, 2, 3]);
 
         assert_eq!(comparator.compare(&var1, &var2).unwrap(), Ordering::Less);
         assert_eq!(comparator.compare(&var2, &var1).unwrap(), Ordering::Greater);
@@ -222,7 +222,7 @@ mod primitive_type_tests {
         let comparator = ComparatorType::Int;
 
         let int_val = Value::Integer(42);
-        let text_val = Value::Text("hello".to_string());
+        let text_val = Value::text("hello".to_string());
 
         // Should return error for type mismatch
         assert!(comparator.compare(&int_val, &text_val).is_err());
@@ -305,16 +305,16 @@ mod collection_type_tests {
             ComparatorType::Map(Box::new(key_comparator), Box::new(value_comparator));
 
         let map1 = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key2".to_string()), Value::Integer(2)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key2".to_string()), Value::Integer(2)),
         ]);
 
         let map2 = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key2".to_string()), Value::Integer(2)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key2".to_string()), Value::Integer(2)),
         ]);
 
-        let map3 = Value::Map(vec![(Value::Text("key1".to_string()), Value::Integer(1))]);
+        let map3 = Value::Map(vec![(Value::text("key1".to_string()), Value::Integer(1))]);
 
         // Maps only support equality
         assert_eq!(
@@ -339,9 +339,9 @@ mod complex_type_tests {
         let field_comparators = vec![ComparatorType::Int, ComparatorType::Text];
         let tuple_comparator = ComparatorType::Tuple(field_comparators);
 
-        let tuple1 = Value::Tuple(vec![Value::Integer(1), Value::Text("hello".to_string())]);
-        let tuple2 = Value::Tuple(vec![Value::Integer(1), Value::Text("world".to_string())]);
-        let tuple3 = Value::Tuple(vec![Value::Integer(2), Value::Text("hello".to_string())]);
+        let tuple1 = Value::Tuple(vec![Value::Integer(1), Value::text("hello".to_string())]);
+        let tuple2 = Value::Tuple(vec![Value::Integer(1), Value::text("world".to_string())]);
+        let tuple3 = Value::Tuple(vec![Value::Integer(2), Value::text("hello".to_string())]);
 
         // Compare field by field
         assert_eq!(
@@ -378,7 +378,7 @@ mod complex_type_tests {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("Alice".to_string())),
+                    value: Some(Value::text("Alice".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -393,7 +393,7 @@ mod complex_type_tests {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("Bob".to_string())),
+                    value: Some(Value::text("Bob".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -711,7 +711,7 @@ mod integration_tests {
         // Test type mismatch in comparison
         let int_comparator = ComparatorType::Int;
         let int_val = Value::Integer(42);
-        let text_val = Value::Text("hello".to_string());
+        let text_val = Value::text("hello".to_string());
 
         assert!(int_comparator.compare(&int_val, &text_val).is_err());
     }

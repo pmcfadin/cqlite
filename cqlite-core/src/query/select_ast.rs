@@ -736,7 +736,7 @@ mod tests {
             WhereExpression::Comparison(ComparisonExpression {
                 left: SelectExpression::Column(ColumnRef::new("city")),
                 operator: ComparisonOperator::Equal,
-                right: ComparisonRightSide::Value(SelectExpression::Literal(Value::Text(
+                right: ComparisonRightSide::Value(SelectExpression::Literal(Value::text(
                     "NYC".to_string(),
                 ))),
             }),

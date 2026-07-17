@@ -205,7 +205,9 @@ pub(crate) fn serialize_value_into(value: &Value, out: &mut Vec<u8>) -> Result<(
         Value::Counter(n) => out.extend_from_slice(&n.to_be_bytes()),
         Value::Float32(f) => out.extend_from_slice(&f.to_bits().to_be_bytes()),
         Value::Float(f) => out.extend_from_slice(&f.to_bits().to_be_bytes()),
-        Value::Text(s) => out.extend_from_slice(s.as_bytes()),
+        // Issue #1644: Text/Blob hold `bytes::Bytes`; `&Bytes` deref-coerces to
+        // `&[u8]` for `extend_from_slice` (same as the pre-split `&Vec<u8>`).
+        Value::Text(s) => out.extend_from_slice(s),
         Value::Blob(bytes) => out.extend_from_slice(bytes),
         Value::Timestamp(millis) => out.extend_from_slice(&millis.to_be_bytes()),
         Value::Date(days) => {
@@ -645,7 +647,7 @@ pub(crate) fn serialize_value_for_clustering(
 
         // Variable-width types (VInt length + bytes)
         (Value::Text(s), ComparatorType::Text) => {
-            let bytes = s.as_bytes();
+            let bytes = s.as_ref();
             let mut result = Vec::new();
             encode_unsigned(bytes.len() as u64, &mut result);
             result.extend_from_slice(bytes);

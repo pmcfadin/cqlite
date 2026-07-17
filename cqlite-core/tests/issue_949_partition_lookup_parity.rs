@@ -82,7 +82,7 @@ async fn setup() -> Result<Database, String> {
 
 fn text(row: &QueryRow, col: &str) -> Option<String> {
     match row.values.get(col) {
-        Some(Value::Text(s)) => Some(s.clone()),
+        Some(Value::Text(s)) => Some(String::from_utf8_lossy(s).into_owned()),
         _ => None,
     }
 }

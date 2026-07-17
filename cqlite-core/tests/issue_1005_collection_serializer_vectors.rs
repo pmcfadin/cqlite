@@ -574,7 +574,7 @@ fn single_cell_multicell_equivalence_same_ordered_members() {
     // path uses) — NOT from CQLite's own VInt reader.
     let frozen_members: Vec<Value> = walk_elements(SET_TEXT_BYTES, false)
         .iter()
-        .map(|e| Value::Text(String::from_utf8(e.value.clone()).expect("utf8 frozen member")))
+        .map(|e| Value::text(String::from_utf8(e.value.clone()).expect("utf8 frozen member")))
         .collect();
 
     // Multi-cell form: element count via signed VInt, then each element's length-prefixed

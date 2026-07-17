@@ -480,7 +480,7 @@ async fn writetime_parity_test_basic_ttl_test_table() {
                 Some(s) => s,
                 None => continue,
             },
-            Some(Value::Text(s)) => s.clone(),
+            Some(Value::Text(s)) => String::from_utf8_lossy(s).into_owned(),
             _ => continue,
         };
 
@@ -745,7 +745,7 @@ async fn writetime_parity_test_collections_collection_table() {
                         Some(s) => s,
                         None => continue,
                     },
-                    Some(Value::Text(s)) => s.clone(),
+                    Some(Value::Text(s)) => String::from_utf8_lossy(s).into_owned(),
                     _ => continue,
                 };
 
@@ -882,7 +882,7 @@ async fn writetime_parity_test_timeseries_sensor_data() {
                 Some(s) => s,
                 None => continue,
             },
-            Some(Value::Text(s)) => s.clone(),
+            Some(Value::Text(s)) => String::from_utf8_lossy(s).into_owned(),
             _ => continue,
         };
 
@@ -1034,7 +1034,7 @@ async fn writetime_parity_test_wide_rows_product_catalog() {
                 Some(s) => s,
                 None => continue,
             },
-            Some(Value::Text(s)) => s.clone(),
+            Some(Value::Text(s)) => String::from_utf8_lossy(s).into_owned(),
             _ => continue,
         };
 
@@ -1043,7 +1043,7 @@ async fn writetime_parity_test_wide_rows_product_catalog() {
                 Some(s) => s,
                 None => continue,
             },
-            Some(Value::Text(s)) => s.clone(),
+            Some(Value::Text(s)) => String::from_utf8_lossy(s).into_owned(),
             _ => continue,
         };
 

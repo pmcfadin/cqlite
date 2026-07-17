@@ -138,7 +138,7 @@ mod parser_tests {
 
         assert!(result.is_ok());
         let (value, consumed) = result.unwrap();
-        assert_eq!(value, Value::Text("hello".to_string()));
+        assert_eq!(value, Value::text("hello".to_string()));
         assert_eq!(consumed, 9); // 4 bytes length + 5 bytes content
     }
 
@@ -153,7 +153,7 @@ mod parser_tests {
 
         assert!(result.is_ok());
         let (value, consumed) = result.unwrap();
-        assert_eq!(value, Value::Blob(vec![1, 2, 3]));
+        assert_eq!(value, Value::blob(vec![1, 2, 3]));
         assert_eq!(consumed, 7); // 4 bytes length + 3 bytes content
     }
 
@@ -177,8 +177,8 @@ mod parser_tests {
         match value {
             Value::List(elements) => {
                 assert_eq!(elements.len(), 2);
-                assert_eq!(elements[0], Value::Text("hello".to_string()));
-                assert_eq!(elements[1], Value::Text("world".to_string()));
+                assert_eq!(elements[0], Value::text("hello".to_string()));
+                assert_eq!(elements[1], Value::text("world".to_string()));
             }
             _ => panic!("Expected List value"),
         }
@@ -218,7 +218,7 @@ mod parser_tests {
         let values = result.unwrap();
         assert_eq!(values.len(), 2);
         assert_eq!(values[0], Value::Integer(42));
-        assert_eq!(values[1], Value::Text("US".to_string()));
+        assert_eq!(values[1], Value::text("US".to_string()));
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod parser_tests {
         assert!(result.is_ok());
         let values = result.unwrap();
         assert_eq!(values.len(), 2);
-        assert_eq!(values[0], Value::Text("US-WEST".to_string()));
+        assert_eq!(values[0], Value::text("US-WEST".to_string()));
         assert_eq!(values[1], Value::Integer(42));
 
         // Test clustering key parsing: timestamp(1640995200000) + bigint(123456789)

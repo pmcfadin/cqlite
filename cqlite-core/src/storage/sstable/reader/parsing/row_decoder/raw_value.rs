@@ -136,15 +136,20 @@ impl V5CompressedLegacyParser {
             | "org.apache.cassandra.db.marshal.utf8type"
             | "org.apache.cassandra.db.marshal.asciitype"
             | "org.apache.cassandra.db.marshal.varchartype" => {
-                let text = String::from_utf8(data.to_vec()).map_err(|e| {
+                // Issue #1644 (K5 stage 2): validate in place, borrow if possible.
+                std::str::from_utf8(data).map_err(|e| {
                     Error::corruption(format!(
                         "Frozen element '{}': invalid UTF-8 in text value: {}",
                         column_name, e
                     ))
                 })?;
-                Ok(Value::Text(text))
+                Ok(Value::Text(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
-            "blob" | "bytes" => Ok(Value::Blob(data.to_vec())),
+            "blob" | "bytes" => Ok(Value::Blob(
+                crate::storage::sstable::reader::value_borrow::borrow_active(data),
+            )),
             "int" => {
                 if data.len() < 4 {
                     return Err(Error::corruption(format!(
@@ -321,7 +326,9 @@ impl V5CompressedLegacyParser {
                     nanos,
                 })
             }
-            "varint" => Ok(Value::Varint(data.to_vec())),
+            "varint" => Ok(Value::Varint(
+                crate::storage::sstable::reader::value_borrow::borrow_active(data),
+            )),
             "decimal" => {
                 if data.len() < 4 {
                     return Err(Error::corruption(format!(
@@ -334,7 +341,9 @@ impl V5CompressedLegacyParser {
                 let unscaled = data[4..].to_vec();
                 Ok(Value::Decimal { scale, unscaled })
             }
-            "inet" => Ok(Value::Inet(data.to_vec())),
+            "inet" => Ok(Value::Inet(
+                crate::storage::sstable::reader::value_borrow::borrow_active(data),
+            )),
             // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>).
             //
             // Issue #1081: the guards accept BOTH the CQL short form (`list<...>`)
@@ -477,7 +486,9 @@ impl V5CompressedLegacyParser {
                     column_name,
                     data.len()
                 );
-                Ok(Value::Blob(data.to_vec()))
+                Ok(Value::Blob(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
         }
     }
@@ -578,7 +589,7 @@ mod tests {
         let val = parser
             .parse_value_from_raw_bytes(data, "text", "col", 0)
             .unwrap();
-        assert_eq!(val, Value::Text("hello".to_string()));
+        assert_eq!(val, Value::text("hello".to_string()));
 
         // boolean true
         let val = parser
@@ -634,21 +645,21 @@ mod tests {
         let val = parser
             .parse_value_from_raw_bytes(&data, "blob", "col", 0)
             .unwrap();
-        assert_eq!(val, Value::Blob(data));
+        assert_eq!(val, Value::Blob(data.into()));
 
         // varint
         let data = vec![0x01, 0x00];
         let val = parser
             .parse_value_from_raw_bytes(&data, "varint", "col", 0)
             .unwrap();
-        assert_eq!(val, Value::Varint(vec![0x01, 0x00]));
+        assert_eq!(val, Value::varint(vec![0x01, 0x00]));
 
         // inet (IPv4)
         let data = vec![127, 0, 0, 1];
         let val = parser
             .parse_value_from_raw_bytes(&data, "inet", "col", 0)
             .unwrap();
-        assert_eq!(val, Value::Inet(vec![127, 0, 0, 1]));
+        assert_eq!(val, Value::inet(vec![127, 0, 0, 1]));
 
         // timestamp
         let data = 1704067200000i64.to_be_bytes();
@@ -811,8 +822,8 @@ mod tests {
         assert_eq!(
             val,
             Value::Map(vec![
-                (Value::Text("alice".to_string()), Value::Integer(1)),
-                (Value::Text("bob".to_string()), Value::Integer(2)),
+                (Value::text("alice".to_string()), Value::Integer(1)),
+                (Value::text("bob".to_string()), Value::Integer(2)),
             ])
         );
     }
@@ -859,8 +870,8 @@ mod tests {
         assert_eq!(
             val,
             Value::List(vec![
-                Value::Text("alpha".to_string()),
-                Value::Text("beta".to_string()),
+                Value::text("alpha".to_string()),
+                Value::text("beta".to_string()),
             ]),
             "marshal-form list field must produce a List of Text (not a Blob)"
         );
@@ -890,8 +901,8 @@ mod tests {
         assert_eq!(
             val,
             Value::Map(vec![
-                (Value::Text("alice".to_string()), Value::Integer(1)),
-                (Value::Text("bob".to_string()), Value::Integer(2)),
+                (Value::text("alice".to_string()), Value::Integer(1)),
+                (Value::text("bob".to_string()), Value::Integer(2)),
             ]),
             "marshal-form map field must produce a Map of (Text, Integer) (not a Blob)"
         );
@@ -944,8 +955,8 @@ mod tests {
         assert_eq!(
             val,
             Value::Frozen(Box::new(Value::List(vec![
-                Value::Text("gamma".to_string()),
-                Value::Text("delta".to_string()),
+                Value::text("gamma".to_string()),
+                Value::text("delta".to_string()),
             ]))),
             "marshal-form frozen-list field must produce Frozen(List(Text)) (not a Blob)"
         );

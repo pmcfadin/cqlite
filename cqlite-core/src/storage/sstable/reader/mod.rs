@@ -67,6 +67,10 @@ mod types;
 pub(crate) mod window_cursor;
 #[cfg(feature = "scan-offload-probe")]
 pub mod window_cursor;
+// Active-window decode borrow source (issue #1644, K5 stage 2) — localizes the
+// borrow-vs-copy decision to one place without threading a window handle
+// through the whole decode call graph. See module docs.
+pub(crate) mod value_borrow;
 
 // Re-export public types
 pub use types::{

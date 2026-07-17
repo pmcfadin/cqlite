@@ -1519,9 +1519,11 @@ impl V5CompressedLegacyParser {
             | "text"
             | "varchar"
             | "ascii" => {
-                let text = String::from_utf8(data.to_vec())
+                std::str::from_utf8(data)
                     .map_err(|e| Error::corruption(format!("Invalid UTF-8 in map key: {}", e)))?;
-                Ok(Value::Text(text))
+                Ok(Value::Text(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
 
             // UUID types: 16 bytes
@@ -1603,7 +1605,9 @@ impl V5CompressedLegacyParser {
                     column_name,
                     data.len()
                 );
-                Ok(Value::Blob(data.to_vec()))
+                Ok(Value::Blob(
+                    crate::storage::sstable::reader::value_borrow::borrow_active(data),
+                ))
             }
         }
     }
@@ -1741,7 +1745,7 @@ mod tests {
         assert_eq!(cell.next_offset, cell_bytes.len());
         assert_eq!(
             cell.value,
-            Some(Value::Blob(vec![0x2A, 0xBB, 0xCC])),
+            Some(Value::blob(vec![0x2A, 0xBB, 0xCC])),
             "blob value must be the three raw bytes, not a misread length-prefixed parse"
         );
     }
@@ -1923,7 +1927,7 @@ mod tests {
             .expect("parse list<blob>");
         assert_eq!(
             value,
-            Value::List(vec![Value::Blob(vec![0xBB])]),
+            Value::List(vec![Value::blob(vec![0xBB])]),
             "only the live-forever element survives; the expired element is dropped"
         );
         assert_eq!(meta.shadow_filtered_element_count, 1);
@@ -1939,7 +1943,7 @@ mod tests {
             .expect("parse list<blob>");
         assert_eq!(
             value_unfiltered,
-            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])]),
+            Value::List(vec![Value::blob(vec![0xAA]), Value::blob(vec![0xBB])]),
             "the physical (no-filter) parse must keep BOTH elements (byte-unchanged)"
         );
         assert_eq!(meta_unfiltered.shadow_filtered_element_count, 0);
@@ -2020,7 +2024,7 @@ mod tests {
             .expect("parse list<blob>");
         assert_eq!(
             value_unfiltered,
-            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])])
+            Value::List(vec![Value::blob(vec![0xAA]), Value::blob(vec![0xBB])])
         );
         assert_eq!(meta_unfiltered.shadow_filtered_element_count, 0);
     }
@@ -2108,7 +2112,7 @@ mod tests {
             .expect("parse list<blob>");
         assert_eq!(
             value,
-            Value::List(vec![Value::Blob(vec![0xBB])]),
+            Value::List(vec![Value::blob(vec![0xBB])]),
             "the inherited-row-TTL element is expired and must be dropped; only the \
              live-forever element survives (pre-fix: BOTH leaked)"
         );
@@ -2127,7 +2131,7 @@ mod tests {
             .expect("parse list<blob>");
         assert_eq!(
             value_unfiltered,
-            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])]),
+            Value::List(vec![Value::blob(vec![0xAA]), Value::blob(vec![0xBB])]),
             "the physical (no-filter) parse keeps BOTH elements (byte-unchanged)"
         );
         assert_eq!(meta_unfiltered.shadow_filtered_element_count, 0);
@@ -2201,7 +2205,7 @@ mod tests {
             .expect("parse list<blob>");
         assert_eq!(
             value,
-            Value::List(vec![Value::Blob(vec![0xAA])]),
+            Value::List(vec![Value::blob(vec![0xAA])]),
             "the live USE_ROW_TTL element survives (not expired)"
         );
         assert_eq!(
@@ -2234,7 +2238,7 @@ mod tests {
             "sanity: a bare `as i32` cast of this TTL would be negative"
         );
         let cell = ComplexCellParse {
-            value: Some(Value::Blob(vec![0xAA])),
+            value: Some(Value::blob(vec![0xAA])),
             path_bytes: Vec::new(),
             is_deleted: false,
             has_empty_value: false,
@@ -2331,7 +2335,7 @@ mod tests {
             .expect("parse list<blob>");
         assert_eq!(
             value,
-            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])]),
+            Value::List(vec![Value::blob(vec![0xAA]), Value::blob(vec![0xBB])]),
             "both elements are live and survive"
         );
         assert_eq!(
@@ -2472,13 +2476,13 @@ mod tests {
         let street_field = udt_val.fields.iter().find(|f| f.name == "street").unwrap();
         assert_eq!(
             street_field.value,
-            Some(Value::Text("Main St".to_string())),
+            Some(Value::text("Main St".to_string())),
             "street field must decode to Text(\"Main St\")"
         );
         let city_field = udt_val.fields.iter().find(|f| f.name == "city").unwrap();
         assert_eq!(
             city_field.value,
-            Some(Value::Text("Springfield".to_string())),
+            Some(Value::text("Springfield".to_string())),
             "city field must decode to Text(\"Springfield\")"
         );
     }
@@ -2691,8 +2695,8 @@ mod tests {
         assert_eq!(
             value,
             Value::Set(vec![
-                Value::Text("hello".to_string()),
-                Value::Text("world".to_string()),
+                Value::text("hello".to_string()),
+                Value::text("world".to_string()),
             ]),
             "set elements stored in cell path must be decoded and returned"
         );
@@ -2743,7 +2747,7 @@ mod tests {
         assert_eq!(consumed, blob.len(), "parser must consume the entire blob");
         assert_eq!(
             value,
-            Value::Set(vec![Value::Text("live".to_string())]),
+            Value::Set(vec![Value::text("live".to_string())]),
             "tombstoned set element must be skipped; only the live element survives"
         );
         // DS4 (Issue #700): element tombstone must be counted in the scan summary.

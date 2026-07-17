@@ -1295,8 +1295,8 @@ impl V5CompressedLegacyParser {
                     // bigint, UUID), EMPTY should not normally occur.
                     let col_type = col.data_type.to_lowercase();
                     let empty_value = match col_type.as_str() {
-                        "text" | "varchar" | "ascii" => Value::Text(String::new()),
-                        "blob" => Value::Blob(vec![]),
+                        "text" | "varchar" | "ascii" => Value::text(String::new()),
+                        "blob" => Value::blob(vec![]),
                         _ => {
                             // Fixed-width types shouldn't have EMPTY state in normal data
                             tracing::warn!(
@@ -1402,7 +1402,7 @@ impl V5CompressedLegacyParser {
                             col.name, e
                         ))
                     })?;
-                Ok((Value::Text(text), len_offset + len as usize))
+                Ok((Value::Text(text.into()), len_offset + len as usize))
             }
 
             "int" => {
@@ -1493,7 +1493,7 @@ impl V5CompressedLegacyParser {
                 }
 
                 Ok((
-                    Value::Blob(data[len_offset..len_offset + len as usize].to_vec()),
+                    Value::blob(data[len_offset..len_offset + len as usize].to_vec()),
                     len_offset + len as usize,
                 ))
             }

@@ -394,13 +394,13 @@ impl ComplexTypeValidationSuite {
         let tuple_test_cases = vec![
             (
                 "tuple<text,int>",
-                vec![Value::Text("hello".to_string()), Value::Integer(42)],
+                vec![Value::text("hello".to_string()), Value::Integer(42)],
             ),
             (
                 "tuple<uuid,text,boolean>",
                 vec![
                     Value::Uuid([1u8; 16]),
-                    Value::Text("test".to_string()),
+                    Value::text("test".to_string()),
                     Value::Boolean(true),
                 ],
             ),
@@ -409,7 +409,7 @@ impl ComplexTypeValidationSuite {
                 vec![
                     Value::BigInt(9223372036854775807),
                     Value::Float(3.14159),
-                    Value::Text("pi".to_string()),
+                    Value::text("pi".to_string()),
                 ],
             ),
         ];
@@ -953,7 +953,7 @@ impl ComplexTypeValidationSuite {
     /// Parse string value to CQL Value based on the type
     fn parse_string_to_value(&self, s: &str, cql_type: &CqlType) -> Result<Value> {
         match cql_type {
-            CqlType::Text => Ok(Value::Text(s.to_string())),
+            CqlType::Text => Ok(Value::text(s.to_string())),
             CqlType::Int => {
                 Ok(Value::Integer(s.parse().map_err(|_| {
                     Error::storage("Invalid integer".to_string())
@@ -978,7 +978,7 @@ impl ComplexTypeValidationSuite {
                     .map_err(|_| Error::storage("Invalid UUID format".to_string()))?;
                 Ok(Value::Uuid(uuid_bytes))
             }
-            _ => Ok(Value::Text(s.to_string())), // Default fallback
+            _ => Ok(Value::text(s.to_string())), // Default fallback
         }
     }
 

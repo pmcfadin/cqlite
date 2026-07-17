@@ -798,7 +798,7 @@ impl CkVal {
             Value::SmallInt(i) => Some(CkVal::Int(*i as i64)),
             Value::TinyInt(i) => Some(CkVal::Int(*i as i64)),
             Value::Date(d) => Some(CkVal::Int(*d as i64)),
-            Value::Text(s) => Some(CkVal::Text(s.clone())),
+            Value::Text(s) => Some(CkVal::Text(String::from_utf8_lossy(s).into_owned())),
             _ => None,
         }
     }
@@ -819,7 +819,7 @@ fn pk_literal(v: &Value) -> Option<String> {
         Value::BigInt(i) => i.to_string(),
         Value::SmallInt(i) => i.to_string(),
         Value::TinyInt(i) => i.to_string(),
-        Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::Text(s) => format!("'{}'", String::from_utf8_lossy(s).replace('\'', "''")),
         Value::Uuid(b) => {
             let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
             format!(

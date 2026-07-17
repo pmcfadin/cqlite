@@ -761,10 +761,10 @@ mod tests {
         let mut column_data = ColumnData::new();
 
         // Add some sample values
-        column_data.add_sample_value(Value::Text("test1".to_string()));
-        column_data.add_sample_value(Value::Text("test2".to_string()));
+        column_data.add_sample_value(Value::text("test1".to_string()));
+        column_data.add_sample_value(Value::text("test2".to_string()));
         column_data.add_sample_value(Value::Null);
-        column_data.add_sample_value(Value::Text("test3".to_string()));
+        column_data.add_sample_value(Value::text("test3".to_string()));
 
         // Test calculations
         assert_eq!(column_data.calculate_null_percentage(), 0.25); // 1 null out of 4 values

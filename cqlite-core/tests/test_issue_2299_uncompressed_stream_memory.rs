@@ -105,7 +105,7 @@ fn write_row(ck: i32, timestamp: i64) -> Mutation {
     let ck_key = ClusteringKey::single("ck", Value::Integer(ck));
     let ops = vec![CellOperation::Write {
         column: "payload".to_string(),
-        value: Value::Text(payload_for(ck)),
+        value: Value::text(payload_for(ck)),
     }];
     Mutation::new(table_id, pk, Some(ck_key), ops, timestamp, None)
 }

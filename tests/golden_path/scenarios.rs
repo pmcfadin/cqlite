@@ -125,7 +125,7 @@ pub fn get_single_key_scenario() -> TestScenario {
             expected_results: vec![
                 ExpectedResult {
                     key: RowKey::from("user123"),
-                    value: Some(Value::Text("test_user_data".to_string())),
+                    value: Some(Value::text("test_user_data".to_string())),
                     validation_criteria: vec![ValidationCriteria::ExactMatch],
                 }
             ],
@@ -159,7 +159,7 @@ pub fn get_multiple_keys_scenario() -> TestScenario {
             expected_results: vec![
                 ExpectedResult {
                     key: RowKey::from("user123"),
-                    value: Some(Value::Text("test_user_data".to_string())),
+                    value: Some(Value::text("test_user_data".to_string())),
                     validation_criteria: vec![ValidationCriteria::ExactMatch],
                 },
                 ExpectedResult {

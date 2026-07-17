@@ -165,11 +165,15 @@ fn parse_value_with_comparator_at_depth(
             }
         }
         ComparatorType::Text => {
-            let text = String::from_utf8(value_data.to_vec())
+            std::str::from_utf8(value_data)
                 .map_err(|_| Error::corruption("Invalid UTF-8 in text value"))?;
-            Ok(Value::Text(text))
+            Ok(Value::Text(
+                crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+            ))
         }
-        ComparatorType::Blob => Ok(Value::Blob(value_data.to_vec())),
+        ComparatorType::Blob => Ok(Value::Blob(
+            crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+        )),
         ComparatorType::Timestamp => {
             if value_data.len() == 8 {
                 let val = i64::from_be_bytes([
@@ -213,7 +217,9 @@ fn parse_value_with_comparator_at_depth(
                 Err(Error::corruption("Invalid DATE value length"))
             }
         }
-        ComparatorType::Varint => Ok(Value::Varint(value_data.to_vec())),
+        ComparatorType::Varint => Ok(Value::Varint(
+            crate::storage::sstable::reader::value_borrow::borrow_active(value_data),
+        )),
         ComparatorType::Decimal => {
             // Decimal format: 4-byte scale + variable-length unscaled value
             if value_data.len() < 4 {
@@ -419,7 +425,7 @@ mod tests {
         let data = b"hello".to_vec();
         let comparator = ComparatorType::Text;
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
-        assert_eq!(result, Value::Text("hello".to_string()));
+        assert_eq!(result, Value::text("hello".to_string()));
     }
 
     /// Build a Duration value-body (three signed/zigzag VInts: months, days, nanos)
@@ -620,7 +626,10 @@ mod tests {
         let comparator = ComparatorType::List(Box::new(ComparatorType::Custom("inet".to_string())));
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
 
-        assert_eq!(result, Value::List(vec![Value::Inet(v4), Value::Inet(v6)]));
+        assert_eq!(
+            result,
+            Value::List(vec![Value::Inet(v4.into()), Value::Inet(v6.into())])
+        );
     }
 
     #[test]
@@ -642,7 +651,7 @@ mod tests {
         assert_eq!(
             result,
             Value::Map(vec![(
-                Value::Text("k".to_string()),
+                Value::text("k".to_string()),
                 Value::Json(Box::new(serde_json::json!([1, 2, 3]))),
             )])
         );
@@ -660,7 +669,10 @@ mod tests {
         let comparator = ComparatorType::Set(Box::new(ComparatorType::Custom("inet".to_string())));
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
 
-        assert_eq!(result, Value::Set(vec![Value::Inet(v4a), Value::Inet(v4b)]));
+        assert_eq!(
+            result,
+            Value::Set(vec![Value::Inet(v4a.into()), Value::Inet(v4b.into())])
+        );
     }
 
     #[test]
@@ -677,7 +689,7 @@ mod tests {
         )));
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
 
-        assert_eq!(result, Value::List(vec![Value::Blob(body)]));
+        assert_eq!(result, Value::List(vec![Value::Blob(body.into())]));
     }
 
     // Issue #1632 (hardening a): a corrupt or adversarial deeply-nested type must

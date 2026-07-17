@@ -834,7 +834,7 @@ impl SelectExecutor {
             }
             (Like, ComparisonRightSide::Value(pattern_expr)) => {
                 let pattern = self.evaluate_select_expression(pattern_expr, row)?;
-                if let (Value::Text(text), Value::Text(pattern_str)) = (&left_value, &pattern) {
+                if let (Some(text), Some(pattern_str)) = (left_value.as_str(), pattern.as_str()) {
                     Ok(self.match_like_pattern(text, pattern_str))
                 } else {
                     Ok(false)
@@ -2158,7 +2158,7 @@ mod tests {
         let write_ts = 1_700_000_000_000_000_i64;
         let row = row_with_cell_meta(
             "name",
-            Value::Text("Carol".to_string()),
+            Value::text("Carol".to_string()),
             Some(CellWriteMetadata {
                 write_timestamp_micros: write_ts,
                 expiration: None,
@@ -2183,7 +2183,7 @@ mod tests {
         let executor = create_test_executor_with_clock(0).await;
 
         // Row has the column value but no attached cell metadata.
-        let row = row_with_cell_meta("name", Value::Text("Dave".to_string()), None);
+        let row = row_with_cell_meta("name", Value::text("Dave".to_string()), None);
 
         let expr = SelectExpression::WriteTimeTtl(WriteTimeTtlCall {
             function: WriteTimeTtlFunction::WriteTime,
@@ -2204,7 +2204,7 @@ mod tests {
 
         let row = row_with_cell_meta(
             "session",
-            Value::Text("tok".to_string()),
+            Value::text("tok".to_string()),
             Some(CellWriteMetadata {
                 write_timestamp_micros: 0,
                 expiration: Some(CellExpiration {
@@ -2236,7 +2236,7 @@ mod tests {
 
         let row = row_with_cell_meta(
             "cache",
-            Value::Text("val".to_string()),
+            Value::text("val".to_string()),
             Some(CellWriteMetadata {
                 write_timestamp_micros: 0,
                 expiration: Some(CellExpiration {

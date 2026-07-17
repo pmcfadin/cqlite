@@ -34,7 +34,7 @@ mod parsing_improvements_tests {
 
         // This should be detected as text, not UUID, due to improved validation
         if let Ok(text) = std::str::from_utf8(text_16_bytes) {
-            let _text_value = Value::Text(text.to_string());
+            let _text_value = Value::text(text.to_string());
             assert_eq!(text, "Hello, World!16b");
         }
 
@@ -77,6 +77,7 @@ mod parsing_improvements_tests {
             parse_cql_value(valid_utf8.as_bytes(), CqlTypeId::Varchar).unwrap();
         match value {
             Value::Text(parsed_text) => {
+                let parsed_text = std::str::from_utf8(&parsed_text).expect("valid utf8");
                 assert!(parsed_text.contains("🚀"));
                 assert_eq!(parsed_text, valid_utf8);
             }
@@ -197,7 +198,7 @@ mod parsing_improvements_tests {
 
         let (_, value) = parse_cql_value(binary_data, CqlTypeId::Blob).unwrap();
         match value {
-            Value::Blob(blob) => assert_eq!(blob, binary_data),
+            Value::Blob(blob) => assert_eq!(blob.as_ref(), binary_data),
             _ => panic!("Expected blob value"),
         }
 

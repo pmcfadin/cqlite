@@ -177,7 +177,7 @@ mod test_data {
             (
                 Uuid::new_v4().as_bytes().to_vec(),
                 vec![
-                    Value::Text("Alice".to_string()),
+                    Value::text("Alice".to_string()),
                     Value::Integer(25),
                     Value::Boolean(true),
                 ],
@@ -185,7 +185,7 @@ mod test_data {
             (
                 Uuid::new_v4().as_bytes().to_vec(),
                 vec![
-                    Value::Text("Bob".to_string()),
+                    Value::text("Bob".to_string()),
                     Value::Integer(30),
                     Value::Boolean(false),
                 ],
@@ -200,20 +200,20 @@ mod test_data {
                 Uuid::new_v4().as_bytes().to_vec(),
                 vec![
                     Value::List(vec![
-                        Value::Text("tag1".to_string()),
-                        Value::Text("tag2".to_string()),
+                        Value::text("tag1".to_string()),
+                        Value::text("tag2".to_string()),
                     ]),
                     Value::Set(vec![
-                        Value::Text("category1".to_string()),
-                        Value::Text("category2".to_string()),
+                        Value::text("category1".to_string()),
+                        Value::text("category2".to_string()),
                     ]),
                     Value::Map(vec![
-                        (Value::Text("key1".to_string()), Value::Text("value1".to_string())),
-                        (Value::Text("key2".to_string()), Value::Text("value2".to_string())),
+                        (Value::text("key1".to_string()), Value::text("value1".to_string())),
+                        (Value::text("key2".to_string()), Value::text("value2".to_string())),
                     ]),
                     Value::Map(vec![
-                        (Value::Text("score1".to_string()), Value::Integer(100)),
-                        (Value::Text("score2".to_string()), Value::Integer(85)),
+                        (Value::text("score1".to_string()), Value::Integer(100)),
+                        (Value::text("score2".to_string()), Value::Integer(85)),
                     ]),
                 ],
             ),
@@ -232,7 +232,7 @@ mod test_data {
                     ]),
                     Value::Map(vec![
                         (
-                            Value::Text("numbers".to_string()),
+                            Value::text("numbers".to_string()),
                             Value::Frozen(Box::new(Value::List(vec![
                                 Value::Integer(1),
                                 Value::Integer(2),
@@ -245,19 +245,19 @@ mod test_data {
                         fields: vec![
                             cqlite_core::types::UdtField {
                                 name: "username".to_string(),
-                                value: Some(Value::Text("alice123".to_string())),
+                                value: Some(Value::text("alice123".to_string())),
                             },
                             cqlite_core::types::UdtField {
                                 name: "email".to_string(),
-                                value: Some(Value::Text("alice@example.com".to_string())),
+                                value: Some(Value::text("alice@example.com".to_string())),
                             },
                         ],
                     }))),
                     Value::Frozen(Box::new(Value::Map(vec![
                         (
-                            Value::Text("theme".to_string()),
+                            Value::text("theme".to_string()),
                             Value::Tuple(vec![
-                                Value::Text("dark".to_string()),
+                                Value::text("dark".to_string()),
                                 Value::Boolean(true),
                             ]),
                         ),
@@ -357,9 +357,9 @@ mod integration_tests {
         // This is critical for clustering key correctness
 
         let key_values = vec![
-            Value::Text("apple".to_string()),
-            Value::Text("banana".to_string()),
-            Value::Text("cherry".to_string()),
+            Value::text("apple".to_string()),
+            Value::text("banana".to_string()),
+            Value::text("cherry".to_string()),
         ];
 
         // Ensure that:

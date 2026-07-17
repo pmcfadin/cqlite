@@ -325,7 +325,7 @@ impl StressTestFramework {
                 }
 
                 let large_string = "A".repeat(size);
-                let text_value = Value::Text(large_string);
+                let text_value = Value::Text(large_string.into());
 
                 match serialize_cql_value(&text_value) {
                     Ok(serialized) => {
@@ -425,7 +425,7 @@ impl StressTestFramework {
                     let map_vec: Vec<(Value, Value)> = huge_map
                         .clone()
                         .into_iter()
-                        .map(|(k, v)| (Value::Text(k), v))
+                        .map(|(k, v)| (Value::Text(k.into()), v))
                         .collect();
                     let map_value = Value::Map(map_vec);
                     match serialize_cql_value(&map_value) {
@@ -597,7 +597,7 @@ impl StressTestFramework {
                 // Create binary data with pattern
                 let binary_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
 
-                let blob_value = Value::Blob(binary_data);
+                let blob_value = Value::Blob(binary_data.into());
 
                 match serialize_cql_value(&blob_value) {
                     Ok(serialized) => {
@@ -684,7 +684,7 @@ impl StressTestFramework {
 
             for i in 0..max_allocations {
                 let data = vec![i as u8; allocation_size];
-                let blob_value = Value::Blob(data);
+                let blob_value = Value::Blob(data.into());
 
                 match serialize_cql_value(&blob_value) {
                     Ok(serialized) => {
@@ -747,7 +747,7 @@ impl StressTestFramework {
             // Try to allocate a very large chunk at once
             let spike_size = (self.config.max_memory_mb / 2) * 1024 * 1024; // Half of max memory
             let large_data = vec![0x42u8; spike_size as usize];
-            let blob_value = Value::Blob(large_data);
+            let blob_value = Value::Blob(large_data.into());
 
             match serialize_cql_value(&blob_value) {
                 Ok(serialized) => Ok(serialized.len()),
@@ -869,7 +869,7 @@ impl StressTestFramework {
             large_allocations.clear();
 
             // Test that normal operations work after recovery
-            let test_value = Value::Text("Recovery test".to_string());
+            let test_value = Value::text("Recovery test".to_string());
             match serialize_cql_value(&test_value) {
                 Ok(_) => Ok(()),
                 Err(e) => Err(format!("Recovery failed: {:?}", e)),

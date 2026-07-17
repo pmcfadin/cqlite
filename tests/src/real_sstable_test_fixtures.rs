@@ -650,15 +650,15 @@ impl SSTableTestFixtureGenerator {
         );
         row.insert(
             "text_col".to_string(),
-            Value::Text(format!("Test text value {}", index)),
+            Value::text(format!("Test text value {}", index)),
         );
         row.insert(
             "varchar_col".to_string(),
-            Value::Text(format!("VARCHAR_{}_{}", index, index * 2)),
+            Value::text(format!("VARCHAR_{}_{}", index, index * 2)),
         );
         row.insert(
             "blob_col".to_string(),
-            Value::Blob(vec![
+            Value::blob(vec![
                 (index & 0xFF) as u8,
                 ((index >> 8) & 0xFF) as u8,
                 ((index >> 16) & 0xFF) as u8,
@@ -723,9 +723,9 @@ impl SSTableTestFixtureGenerator {
 
         // Text list
         let text_list = Value::List(vec![
-            Value::Text(format!("item_{}_1", index)),
-            Value::Text(format!("item_{}_2", index)),
-            Value::Text(format!("unicode_项目_{}", index)),
+            Value::text(format!("item_{}_1", index)),
+            Value::text(format!("item_{}_2", index)),
+            Value::text(format!("unicode_项目_{}", index)),
         ]);
         row.insert("text_list".to_string(), text_list);
 
@@ -748,19 +748,19 @@ impl SSTableTestFixtureGenerator {
         // Convert HashMap to Vec<(Value, Value)>
         let map_vec: Vec<(Value, Value)> = map_data
             .into_iter()
-            .map(|(k, v)| (Value::Text(k), v))
+            .map(|(k, v)| (Value::Text(k.into()), v))
             .collect();
         row.insert("text_to_int_map".to_string(), Value::Map(map_vec));
 
         // Nested list
         let nested_list = Value::List(vec![
             Value::List(vec![
-                Value::Text(format!("nested_1_{}", index)),
-                Value::Text(format!("nested_2_{}", index)),
+                Value::text(format!("nested_1_{}", index)),
+                Value::text(format!("nested_2_{}", index)),
             ]),
             Value::List(vec![
-                Value::Text("static_nested_1".to_string()),
-                Value::Text("static_nested_2".to_string()),
+                Value::text("static_nested_1".to_string()),
+                Value::text("static_nested_2".to_string()),
             ]),
         ]);
         row.insert("nested_list".to_string(), nested_list);
@@ -796,7 +796,7 @@ impl SSTableTestFixtureGenerator {
         // Large text (1KB to 10KB)
         let text_size = 1024 + (index % 9) * 1024; // 1KB to 10KB
         let large_text = format!("Large text data for record {}.\n", index).repeat(text_size / 50);
-        row.insert("large_text".to_string(), Value::Text(large_text));
+        row.insert("large_text".to_string(), Value::Text(large_text.into()));
 
         // Large blob (10KB to 100KB)
         let blob_size = 10240 + (index % 10) * 10240; // 10KB to 100KB
@@ -805,7 +805,7 @@ impl SSTableTestFixtureGenerator {
         for i in 0..blob_size {
             large_blob[i] = ((i + index) % 256) as u8;
         }
-        row.insert("large_blob".to_string(), Value::Blob(large_blob));
+        row.insert("large_blob".to_string(), Value::Blob(large_blob.into()));
 
         // JSON data
         let json_data = format!(
@@ -836,7 +836,7 @@ impl SSTableTestFixtureGenerator {
             index as f64 * 3.14159, // float value
             index as f64 * 1e6      // scientific value
         );
-        row.insert("json_data".to_string(), Value::Text(json_data));
+        row.insert("json_data".to_string(), Value::Text(json_data.into()));
 
         Ok(row)
     }

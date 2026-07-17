@@ -33,7 +33,7 @@ fn tagged_mutation(id: i32, tag: &str) -> Mutation {
         None,
         vec![CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(tag.to_string()),
+            value: Value::text(tag.to_string()),
         }],
         1_700_000_000_000_000,
         None,
@@ -45,7 +45,7 @@ fn tag_of(m: &Mutation) -> String {
         CellOperation::Write {
             value: Value::Text(t),
             ..
-        } => t.clone(),
+        } => String::from_utf8_lossy(t).into_owned(),
         other => panic!("expected Write op, got {other:?}"),
     }
 }

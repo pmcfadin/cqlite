@@ -317,9 +317,9 @@ mod tests {
         // Test that round-trip encoding/decoding preserves ordering
         
         let text_values = vec![
-            Value::Text("apple".to_string()),
-            Value::Text("banana".to_string()),
-            Value::Text("cherry".to_string()),
+            Value::text("apple".to_string()),
+            Value::text("banana".to_string()),
+            Value::text("cherry".to_string()),
         ];
         
         let text_comparator = ComparatorType::Text;

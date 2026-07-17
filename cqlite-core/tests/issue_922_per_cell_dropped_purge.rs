@@ -112,7 +112,7 @@ fn build_mixed_timestamp_input(temp: &TempDir) -> Vec<PathBuf> {
     engine
         .write(write_one_cell(
             "name",
-            Value::Text("alice".to_string()),
+            Value::text("alice".to_string()),
             300,
         ))
         .expect("write name @300");

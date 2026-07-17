@@ -148,7 +148,7 @@ fn mutations() -> Vec<Mutation> {
             },
             CellOperation::Write {
                 column: "c_blob".into(),
-                value: Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]),
+                value: Value::blob(vec![0xde, 0xad, 0xbe, 0xef]),
             },
             CellOperation::Write {
                 column: "c_timestamp".into(),

@@ -8,9 +8,55 @@ mod comparator_test;
 pub use comparator::ComparatorType;
 
 use crate::schema::CqlType;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
+
+/// Zero-copy Bytes-backed value serde helpers (issue #1644, K5).
+///
+/// The byte-carrying `Value` variants (`Text`/`Blob`/`Varint`/`Inet`) are backed
+/// by [`bytes::Bytes`] so a decoded value can be a refcounted view of the
+/// decompressed chunk (no per-cell copy). `Bytes`'s derived serde form is NOT the
+/// same wire shape as the former `String`/`Vec<u8>`, so these modules pin the wire
+/// format byte-identical: `Text` serializes as a UTF-8 string exactly as
+/// `String` did, and `Blob`/`Varint`/`Inet` serialize as a byte sequence exactly
+/// as `Vec<u8>` did. This keeps every JSONL golden and serde round-trip unchanged
+/// (a parity-pinned requirement, not a nicety).
+mod text_serde {
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+        // `Text` bytes are UTF-8-validated at construction, so this cannot fail in
+        // practice; surface any (impossible) invalid byte as a serde error rather
+        // than lossily, so a corrupt value can never silently change the wire form.
+        let as_str = std::str::from_utf8(b).map_err(serde::ser::Error::custom)?;
+        as_str.serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Bytes::from(s.into_bytes()))
+    }
+}
+
+mod bytes_serde {
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(b: &Bytes, s: S) -> Result<S::Ok, S::Error> {
+        // Serialize the raw slice, which produces the identical seq-of-`u8` wire
+        // form that `Vec<u8>`/`&[u8]` produce (JSON array, bincode len+bytes).
+        let slice: &[u8] = b;
+        slice.serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Bytes, D::Error> {
+        let v = Vec::<u8>::deserialize(d)?;
+        Ok(Bytes::from(v))
+    }
+}
 
 // Size constants for fixed-size types
 const BOOL_SIZE: usize = 1;
@@ -40,10 +86,11 @@ pub enum Value {
     Counter(i64),
     /// 64-bit floating point number
     Float(f64),
-    /// UTF-8 string
-    Text(String),
-    /// Binary data
-    Blob(Vec<u8>),
+    /// UTF-8 string (Bytes-backed zero-copy view — issue #1644; UTF-8-validated
+    /// at construction so `as_str` is a cheap borrow).
+    Text(#[serde(with = "text_serde")] Bytes),
+    /// Binary data (Bytes-backed zero-copy view — issue #1644).
+    Blob(#[serde(with = "bytes_serde")] Bytes),
     /// Timestamp (milliseconds since Unix epoch)
     Timestamp(i64),
     /// Date (days since Unix epoch: 1970-01-01)
@@ -52,8 +99,8 @@ pub enum Value {
     Time(i64),
     /// UUID as 16 bytes
     Uuid([u8; 16]),
-    /// Variable-length integer
-    Varint(Vec<u8>),
+    /// Variable-length integer (Bytes-backed zero-copy view — issue #1644).
+    Varint(#[serde(with = "bytes_serde")] Bytes),
     /// Decimal value with scale and unscaled value
     Decimal { scale: i32, unscaled: Vec<u8> },
     /// Duration value with months, days, and nanoseconds
@@ -80,16 +127,21 @@ pub enum Value {
     Frozen(Box<Value>),
     /// Tombstone marker indicating deleted data (boxed: rare/large cold variant — #1583)
     Tombstone(Box<TombstoneInfo>),
-    /// IP address (4 bytes for IPv4, 16 bytes for IPv6)
-    Inet(Vec<u8>),
+    /// IP address (4 bytes for IPv4, 16 bytes for IPv6) — Bytes-backed
+    /// zero-copy view (issue #1644).
+    Inet(#[serde(with = "bytes_serde")] Bytes),
 }
 
 // size_of::<Value>() layout pin (issue #1565, Epic A A4 ratchet; tightened by
-// Epic E #1583 / value-representation-v2 D1). The three fat cold variants
-// (`Tombstone`, `Udt`, `Json`) are boxed so every hot `Value` slot/clone stays
-// small. Measured 32 bytes after boxing (`Text(String)`/`Blob(Vec<u8>)` are the
-// 24-byte inline floor + tag). If Value grows past this ceiling the build fails
-// — measure and box the next-widest variant, do not just bump the pin.
+// Epic E #1583 / value-representation-v2 D1; re-measured for K5 #1644). The three
+// fat cold variants (`Tombstone`, `Udt`, `Json`) are boxed so every hot `Value`
+// slot/clone stays small. After K5 the byte-carrying variants (`Text`, `Blob`,
+// `Varint`, `Inet`) are `bytes::Bytes`-backed: `Bytes` is 32 bytes (4 words) vs
+// the former 24-byte `String`/`Vec<u8>`, so a Bytes variant is 32 + 8-byte tag =
+// 40 — exactly the ceiling. `Decimal.unscaled` is deliberately kept an owned
+// `Vec<u8>` (D3): a `Bytes` field there would pad the `Decimal` variant to 48 and
+// blow this pin. If Value grows past this ceiling the build fails — measure and
+// box the next-widest variant, do not just bump the pin.
 //
 // Epic H/H3 (issue #1616) deliberately does NOT duplicate this `Value` pin —
 // the parser-side struct-size guards live next to their own types
@@ -162,9 +214,10 @@ impl ScanRow {
     pub fn into_cells(self) -> Option<RowCells> {
         match self {
             ScanRow::Row(cells) => Some(cells),
-            ScanRow::RawRow(bytes) => {
-                Some(vec![(std::sync::Arc::from("data"), Value::Blob(bytes))])
-            }
+            ScanRow::RawRow(bytes) => Some(vec![(
+                std::sync::Arc::from("data"),
+                Value::Blob(bytes.into()),
+            )]),
             ScanRow::Marker(_) => None,
         }
     }
@@ -183,7 +236,10 @@ impl ScanRow {
             ScanRow::Row(cells) => Some(cells),
             ScanRow::RawRow(bytes) => {
                 let name = fallback_column?;
-                Some(vec![(std::sync::Arc::from(name), Value::Blob(bytes))])
+                Some(vec![(
+                    std::sync::Arc::from(name),
+                    Value::Blob(bytes.into()),
+                )])
             }
             ScanRow::Marker(_) => None,
         }
@@ -821,10 +877,14 @@ impl Value {
         }
     }
 
-    /// Try to convert this value to a string
+    /// Try to convert this value to a string.
+    ///
+    /// `Text`'s backing `Bytes` is UTF-8-validated at construction (issue #1644),
+    /// so this is a cheap borrowed view: `from_utf8` re-checks the invariant but
+    /// never copies, and returns `None` only if the invariant were ever violated.
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::Text(s) => Some(s),
+            Value::Text(s) => std::str::from_utf8(s).ok(),
             _ => None,
         }
     }
@@ -832,8 +892,8 @@ impl Value {
     /// Try to convert this value to bytes
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            Value::Blob(b) => Some(b),
-            Value::Text(s) => Some(s.as_bytes()),
+            Value::Blob(b) => Some(b.as_ref()),
+            Value::Text(s) => Some(s.as_ref()),
             _ => None,
         }
     }
@@ -841,7 +901,7 @@ impl Value {
     /// Try to convert this value to IP address bytes
     pub fn as_inet_bytes(&self) -> Option<&[u8]> {
         match self {
-            Value::Inet(bytes) => Some(bytes),
+            Value::Inet(bytes) => Some(bytes.as_ref()),
             _ => None,
         }
     }
@@ -1045,6 +1105,244 @@ impl Value {
     }
 }
 
+/// Retention force-copy slack (issue #1644, D2) — DOCUMENTED INTENT, see
+/// [`Value::into_owned`] for the actual implementation.
+///
+/// A borrowed [`Value`] payload is a refcounted `slice`/`slice_ref` view of a
+/// whole decompression chunk, so a tiny value can pin a large (e.g. 64 KB)
+/// chunk alive. The rule is "compact any payload whose backing is materially
+/// larger than the payload — `backing_capacity > payload.len() +
+/// RETENTION_SLACK`".
+///
+/// [`bytes::Bytes::try_into_mut`] alone CANNOT detect an oversized backing: it
+/// succeeds whenever the `Bytes` is uniquely REFERENCED (refcount == 1),
+/// regardless of whether the payload is a small sub-slice of a much larger
+/// original allocation. A sole-owner sliver of a big chunk — the
+/// production-common case once the scan window advances past a chunk and drops
+/// its own reference, leaving a retained cell as the last borrower — succeeds
+/// there, and `BytesMut::from(bytes)` would REUSE the original oversized
+/// allocation rather than shrink it, so `Bytes::from(mutable)` would still pin
+/// the whole parent chunk.
+///
+/// The only signals `bytes` exposes are the recovered
+/// [`bytes::BytesMut::capacity`] and the payload [`len`](bytes::Bytes::len);
+/// neither the slice's offset within its parent NOR the parent's total size is
+/// observable. Critically, `capacity()` reflects only the remaining capacity of
+/// the ORIGINAL backing allocation AHEAD of this payload's start (verified
+/// against `bytes` 1.12.1 — a 10-byte slice at offset 100 of a 64 KiB buffer
+/// recovers `capacity() == 65436`; a genuinely tight 10-byte `Bytes` recovers
+/// `capacity() == 10`). Bytes BEFORE the payload's offset are invisible to it,
+/// so an ahead-capacity-only rule misses a small payload sliced near the END of
+/// a big chunk (a 4-byte value at offset 65_000 of a 64 KiB chunk recovers
+/// `capacity() ~= 536`, well under `RETENTION_SLACK`, yet still pins the whole
+/// 64 KiB).
+///
+/// [`Value::into_owned`] therefore keys the decision on absolute payload SIZE,
+/// since the danger is specifically "a SMALL payload pinning a LARGE backing":
+///
+/// - **Small payloads (`len() <= RETENTION_SLACK`) — unconditional, exact**:
+///   always copied into a tight standalone `Bytes`, regardless of `capacity()`.
+///   This guarantees no small value pins a large parent no matter WHERE it sits
+///   in the original chunk (closes both the low-offset and high-offset cases).
+/// - **Large payloads (`len() > RETENTION_SLACK`) — best-effort, BOUNDED not
+///   proportional**: kept unless the ahead-capacity heuristic `capacity() >
+///   len() + RETENTION_SLACK` fires. This heuristic is blind to leading-offset
+///   waste: a large payload sole-owned near the END of its backing chunk can
+///   still pin the WHOLE chunk (the leftover waste can be many multiples of the
+///   payload's own size, not merely "proportionally small" — e.g. a 5 KiB
+///   payload at offset 59 KiB of a 64 KiB chunk still pins the full 64 KiB).
+///   The residual leak is nonetheless BOUNDED — at most one chunk's worth of
+///   retention per affected large value, never unbounded growth — and a full
+///   copy of a large value is comparatively expensive, so this is accepted as
+///   a known, tracked limitation (issue #2597) rather than fixed here; closing
+///   it fully needs provenance tracking (whether a `Bytes` originated from a
+///   window borrow) that the current `bytes` API alone cannot express.
+pub const RETENTION_SLACK: usize = 4 * 1024;
+
+impl Value {
+    /// Construct a `Value::Text` from any UTF-8 string source (issue #1644, K5).
+    ///
+    /// Ergonomic replacement for the former `Value::Text(String)` tuple
+    /// construction now that the variant is [`bytes::Bytes`]-backed. The input is
+    /// already valid UTF-8 (it comes from a `String`/`&str`), so the stored
+    /// `Bytes` upholds the `Text` UTF-8 invariant with no separate check.
+    pub fn text(s: impl Into<String>) -> Value {
+        Value::Text(Bytes::from(s.into().into_bytes()))
+    }
+
+    /// Construct a `Value::Blob` from any byte source.
+    pub fn blob(b: impl Into<Vec<u8>>) -> Value {
+        Value::Blob(Bytes::from(b.into()))
+    }
+
+    /// Construct a `Value::Varint` from any byte source.
+    pub fn varint(b: impl Into<Vec<u8>>) -> Value {
+        Value::Varint(Bytes::from(b.into()))
+    }
+
+    /// Construct a `Value::Inet` from any byte source.
+    pub fn inet(b: impl Into<Vec<u8>>) -> Value {
+        Value::Inet(Bytes::from(b.into()))
+    }
+
+    /// Construct a `Value::Text` from `Bytes` that MAY be a zero-copy view of a
+    /// decoded chunk, validating UTF-8 in place (issue #1644, K5).
+    ///
+    /// This is the streaming-decode entry point: `str::from_utf8` validates the
+    /// borrowed slice WITHOUT copying, then the (unchanged) `Bytes` is stored, so a
+    /// text value that survives to a copying sink is copied exactly once (at the
+    /// sink), and a predicate-rejected value is never copied at all. Returns an
+    /// error on invalid UTF-8 (the value is never inferred from byte patterns —
+    /// no-heuristics, issue #28).
+    pub fn text_from_bytes(b: Bytes) -> crate::Result<Value> {
+        std::str::from_utf8(&b)
+            .map_err(|e| crate::Error::corruption(format!("invalid UTF-8 in text value: {e}")))?;
+        Ok(Value::Text(b))
+    }
+
+    /// Compact every `Bytes`-backed payload that is a shared or oversized view
+    /// into a decoded chunk into a tight, standalone allocation, releasing the
+    /// parent (issue #1644, D2 — the retention force-copy boundary).
+    ///
+    /// On the streaming decode path values are left borrowed (zero-copy); this
+    /// is applied ONLY at retention boundaries — any point a `Value` outlives
+    /// the scan window that produced it: materialized/collected result sets,
+    /// LIMIT/sort/dedup buffers, core-internal caches, or any `Value` moved
+    /// into a longer-lived structure. Recurses into
+    /// `List`/`Set`/`Map`/`Tuple`/`Frozen`/`Udt` so a retained CONTAINER
+    /// releases every chunk its leaves borrowed, not just its own top-level
+    /// payload.
+    ///
+    /// Per-payload rule (see [`RETENTION_SLACK`] for the rationale and the
+    /// verified `bytes` semantics): a payload is compacted (copied into a tight
+    /// standalone `Bytes`) if it is shared (`try_into_mut` fails), OR — via a
+    /// two-tier decision keyed on absolute payload SIZE:
+    ///
+    /// - **Small payloads (`len() <= RETENTION_SLACK`)**: ALWAYS copied,
+    ///   unconditionally, regardless of `capacity()`. `capacity()` only reflects
+    ///   backing AHEAD of the payload's offset, so a small value near the END of
+    ///   a big chunk would evade an ahead-space-only check; an unconditional copy
+    ///   guarantees no small value pins a large parent wherever it sits (exact).
+    /// - **Large payloads (`len() > RETENTION_SLACK`)**: kept as-is UNLESS the
+    ///   best-effort ahead-space signal `capacity() > len() + RETENTION_SLACK`
+    ///   fires — a full copy of a large value is expensive and any undetected
+    ///   leading-offset waste is small relative to the payload.
+    ///
+    /// `Decimal`'s `unscaled: Vec<u8>` is already owned (D3) and needs no
+    /// compaction.
+    #[must_use]
+    pub fn into_owned(self) -> Value {
+        fn compact(b: Bytes) -> Bytes {
+            match b.try_into_mut() {
+                // `try_into_mut` succeeds whenever this `Bytes` is uniquely
+                // REFERENCED (refcount == 1) — it says NOTHING about whether the
+                // payload spans its whole backing allocation. A sole-owner sliver
+                // of a large chunk (the production-common case once the scan
+                // window advances past a chunk and drops its own reference)
+                // succeeds here too, and `BytesMut::from(bytes)` would REUSE the
+                // original oversized allocation without shrinking. So inspect the
+                // recovered `BytesMut`'s capacity: it reflects the remaining
+                // capacity of the ORIGINAL backing allocation ahead of this
+                // payload's start (verified against bytes 1.12.1: a 10-byte
+                // slice at offset 100 of a 64 KiB buffer recovers capacity
+                // 65436, a genuinely tight 10-byte `Bytes` recovers capacity 10).
+                Ok(mutable) => {
+                    if mutable.len() <= RETENTION_SLACK {
+                        // TIER 1 (small payload — unconditional, exact): a small
+                        // payload is EXACTLY the "single cell retained from a huge
+                        // chunk" case Stage 5 targets, and `capacity()` only sees
+                        // the backing AHEAD of the payload's start, so a small
+                        // value sliced near the END of a big chunk recovers a tiny
+                        // `capacity()` and would evade the ahead-space heuristic
+                        // below (a 4-byte value at offset 65_000 of a 64 KiB chunk
+                        // recovers capacity ~536 < RETENTION_SLACK). Always copy so
+                        // no small value pins a large parent, regardless of where
+                        // it sits in the original chunk.
+                        Bytes::copy_from_slice(&mutable)
+                    } else if mutable.capacity() > mutable.len() + RETENTION_SLACK {
+                        // TIER 2 (large payload — best-effort via ahead-capacity):
+                        // sole-owner sliver of an oversized parent chunk detected
+                        // via ahead-space. Copy into a tight, standalone allocation
+                        // so the parent is released.
+                        Bytes::copy_from_slice(&mutable)
+                    } else {
+                        // Large payload whose backing is within RETENTION_SLACK of
+                        // the payload (or whose leading-offset waste is invisible
+                        // to `capacity()`): keep it — a full copy of a large value
+                        // is expensive and any undetected leading waste is small
+                        // relative to the payload. The round-trip through BytesMut
+                        // is a pointer move, not a copy.
+                        Bytes::from(mutable)
+                    }
+                }
+                // Shared with another retained value / the live window: copy into
+                // a tight, standalone allocation, releasing the (possibly
+                // oversized) parent.
+                Err(shared) => Bytes::copy_from_slice(&shared),
+            }
+        }
+        match self {
+            Value::Text(b) => Value::Text(compact(b)),
+            Value::Blob(b) => Value::Blob(compact(b)),
+            Value::Varint(b) => Value::Varint(compact(b)),
+            Value::Inet(b) => Value::Inet(compact(b)),
+            Value::List(items) => Value::List(items.into_iter().map(Value::into_owned).collect()),
+            Value::Set(items) => Value::Set(items.into_iter().map(Value::into_owned).collect()),
+            Value::Map(pairs) => Value::Map(
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect(),
+            ),
+            Value::Tuple(items) => Value::Tuple(items.into_iter().map(Value::into_owned).collect()),
+            Value::Frozen(inner) => Value::Frozen(Box::new(inner.into_owned())),
+            Value::Udt(udt) => Value::Udt(Box::new(UdtValue {
+                type_name: udt.type_name,
+                keyspace: udt.keyspace,
+                fields: udt
+                    .fields
+                    .into_iter()
+                    .map(|f| UdtField {
+                        name: f.name,
+                        value: f.value.map(Value::into_owned),
+                    })
+                    .collect(),
+            })),
+            other => other,
+        }
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::text(s)
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::text(s)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(b: &[u8]) -> Self {
+        Value::Blob(Bytes::copy_from_slice(b))
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(b: Vec<u8>) -> Self {
+        Value::Blob(Bytes::from(b))
+    }
+}
+
+impl From<Bytes> for Value {
+    fn from(b: Bytes) -> Self {
+        Value::Blob(b)
+    }
+}
+
 /// Ordering for `Value`.
 ///
 /// NOTE (contract split, #1870/#2010/#2074): this `PartialOrd` INTENTIONALLY
@@ -1101,14 +1399,16 @@ impl fmt::Display for Value {
             Value::Float(fl) => write!(f, "{}", fl),
             Value::Float32(fl) => write!(f, "{}", fl),
             Value::Counter(i) => write!(f, "counter:{}", i),
-            Value::Text(s) => write!(f, "'{}'", s),
+            // `Text`'s bytes are UTF-8-validated at construction, so lossy decode
+            // is exact here; formats byte-identically to the former `String`.
+            Value::Text(s) => write!(f, "'{}'", String::from_utf8_lossy(s)),
             Value::Blob(b) => write!(f, "BLOB({} bytes)", b.len()),
             Value::Timestamp(ts) => Self::fmt_typed(f, "TIMESTAMP", ts),
             Value::Date(days) => Self::fmt_typed(f, "DATE", days),
             Value::Time(nanos) => Self::fmt_time(f, *nanos),
             Value::Uuid(uuid) => Self::fmt_typed(f, "UUID", hex::encode(uuid)),
             Value::Json(json) => Self::fmt_typed(f, "JSON", json),
-            Value::Inet(bytes) => Self::fmt_inet(f, bytes),
+            Value::Inet(bytes) => Self::fmt_inet(f, bytes.as_ref()),
             Value::Varint(data) => write!(f, "VARINT(0x{})", hex::encode(data)),
             Value::Decimal { scale, unscaled } => {
                 write!(f, "DECIMAL(scale={}, unscaled={:?})", scale, unscaled)
@@ -1318,8 +1618,8 @@ impl DataType {
             DataType::BigInt => Value::BigInt(0),
             DataType::Float32 => Value::Float32(0.0),
             DataType::Float => Value::Float(0.0),
-            DataType::Text => Value::Text(String::new()),
-            DataType::Blob => Value::Blob(Vec::new()),
+            DataType::Text => Value::text(String::new()),
+            DataType::Blob => Value::blob(Vec::new()),
             DataType::Timestamp => Value::Timestamp(0),
             DataType::Uuid => Value::Uuid([0; 16]),
             DataType::Json => Value::Json(Box::new(serde_json::Value::Null)),
@@ -1543,13 +1843,19 @@ impl std::hash::Hash for Value {
             Value::BigInt(i) => i.hash(state),
             Value::Counter(i) => i.hash(state),
             Value::Float(f) => f.to_bits().hash(state),
-            Value::Text(s) => s.hash(state),
-            Value::Blob(b) => b.hash(state),
+            // Hash byte-identically to the pre-#1644 `String`/`Vec<u8>`: `Text`
+            // hashes as a `str` (validated bytes + str terminator), the byte
+            // variants hash as a `[u8]` slice.
+            Value::Text(s) => match std::str::from_utf8(s) {
+                Ok(st) => st.hash(state),
+                Err(_) => s.as_ref().hash(state),
+            },
+            Value::Blob(b) => b.as_ref().hash(state),
             Value::Timestamp(t) => t.hash(state),
             Value::Time(t) => t.hash(state),
             Value::Date(d) => d.hash(state),
             Value::Uuid(u) => u.hash(state),
-            Value::Varint(v) => v.hash(state),
+            Value::Varint(v) => v.as_ref().hash(state),
             Value::Decimal { scale, unscaled } => {
                 scale.hash(state);
                 unscaled.hash(state);
@@ -1574,7 +1880,7 @@ impl std::hash::Hash for Value {
             Value::Udt(u) => u.hash(state),
             Value::Frozen(f) => f.hash(state),
             Value::Tombstone(t) => t.hash(state),
-            Value::Inet(i) => i.hash(state),
+            Value::Inet(i) => i.as_ref().hash(state),
         }
     }
 }
@@ -1637,7 +1943,7 @@ mod tests {
     fn boxed_variants_preserve_serde_and_display() {
         let udt = Value::Udt(Box::new(
             UdtValue::new("Person".to_string(), "ks".to_string())
-                .with_field("name".to_string(), Some(Value::Text("Jo".to_string()))),
+                .with_field("name".to_string(), Some(Value::text("Jo".to_string()))),
         ));
         let json = Value::Json(Box::new(serde_json::json!({"a": 1, "b": [true, null]})));
         let tomb = Value::row_tombstone(1234);
@@ -1676,10 +1982,329 @@ mod tests {
         assert_eq!(vals[0], Value::Integer(5));
     }
 
+    /// Issue #1644 (K5): the byte-carrying variants are now `bytes::Bytes`-backed,
+    /// but their serde wire format MUST stay byte-identical to the former
+    /// `String`/`Vec<u8>` so every JSONL golden and serde round-trip is unchanged.
+    /// `Text` serializes as a JSON string; `Blob`/`Varint`/`Inet` as a JSON array
+    /// of byte integers (exactly what `String`/`Vec<u8>` produced).
+    #[test]
+    fn bytes_backed_variants_serde_is_byte_identical() {
+        let text = Value::text("hÉllo");
+        let blob = Value::blob(vec![0u8, 1, 2, 255]);
+        let varint = Value::varint(vec![0x80u8, 0x00]);
+        let inet = Value::inet(vec![127u8, 0, 0, 1]);
+
+        // Exact JSON wire form (the pre-#1644 String/Vec<u8> form).
+        assert_eq!(
+            serde_json::to_string(&text).unwrap(),
+            "{\"Text\":\"hÉllo\"}"
+        );
+        assert_eq!(
+            serde_json::to_string(&blob).unwrap(),
+            "{\"Blob\":[0,1,2,255]}"
+        );
+        assert_eq!(
+            serde_json::to_string(&varint).unwrap(),
+            "{\"Varint\":[128,0]}"
+        );
+        assert_eq!(
+            serde_json::to_string(&inet).unwrap(),
+            "{\"Inet\":[127,0,0,1]}"
+        );
+
+        // serde round-trip identity (JSON + bincode, the RowKey path).
+        for v in [&text, &blob, &varint, &inet] {
+            let j = serde_json::to_string(v).unwrap();
+            assert_eq!(&serde_json::from_str::<Value>(&j).unwrap(), v);
+            let b = bincode::serialize(v).unwrap();
+            assert_eq!(&bincode::deserialize::<Value>(&b).unwrap(), v);
+        }
+    }
+
+    /// Issue #1644: ergonomic constructors and `From` conversions keep idiomatic
+    /// construction source-compatible, and the accessors return the same views the
+    /// pre-change `String`/`Vec<u8>` variants did.
+    #[test]
+    fn bytes_backed_constructors_and_accessors() {
+        // Constructors from common source types.
+        assert_eq!(Value::text("hi"), Value::text(String::from("hi")));
+        assert_eq!(Value::blob(vec![1u8, 2]), Value::blob(&[1u8, 2][..]));
+
+        // From conversions: &str/String → Text, Vec<u8>/&[u8]/Bytes → Blob.
+        assert_eq!(Value::from("x"), Value::text("x"));
+        assert_eq!(Value::from(String::from("x")), Value::text("x"));
+        assert_eq!(Value::from(vec![9u8, 8]), Value::blob(vec![9u8, 8]));
+        assert_eq!(Value::from(&[9u8, 8][..]), Value::blob(vec![9u8, 8]));
+        assert_eq!(
+            Value::from(Bytes::from_static(b"z")),
+            Value::blob(vec![b'z'])
+        );
+
+        // Accessors: same &str / &[u8] / length / emptiness as before.
+        let t = Value::text("abc");
+        assert_eq!(t.as_str(), Some("abc"));
+        assert_eq!(t.as_bytes(), Some(&b"abc"[..]));
+        assert_eq!(t.len(), 3);
+        assert!(!t.is_empty());
+        assert!(Value::text("").is_empty());
+
+        let b = Value::blob(vec![1u8, 2, 3]);
+        assert_eq!(b.as_bytes(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(b.len(), 3);
+        assert_eq!(
+            Value::inet(vec![10u8, 0, 0, 1]).as_inet_bytes(),
+            Some(&[10u8, 0, 0, 1][..])
+        );
+
+        // text_from_bytes validates UTF-8 in place (no-heuristics decode entry).
+        assert_eq!(
+            Value::text_from_bytes(Bytes::from_static(b"ok")).unwrap(),
+            Value::text("ok")
+        );
+        assert!(Value::text_from_bytes(Bytes::from_static(&[0xff, 0xfe])).is_err());
+    }
+
+    /// Issue #1644 (D2, retention boundary): a small value that is the GENUINE
+    /// SOLE OWNER of a much larger chunk (the production shape once the scan
+    /// window advances past a chunk and drops its own reference) must NOT keep
+    /// pinning that whole chunk after `into_owned()` — it must end up a tight,
+    /// standalone allocation.
+    ///
+    /// The observable is the recovered `BytesMut::capacity()`, NOT
+    /// `try_into_mut().is_ok()`: a sole-owner sliver of an oversized parent and
+    /// a genuinely tight allocation BOTH return `is_ok()`, so only capacity can
+    /// distinguish them. Before the capacity-based fix this test FAILS — the
+    /// buggy `Ok(mutable) => Bytes::from(mutable)` branch reuses the 64 KiB
+    /// backing, so the recovered capacity stays chunk-sized (~65 KiB). Verified
+    /// by temporarily reverting the fix: the payload's capacity remained 25_536
+    /// (64 KiB − offset 40_000) instead of the compacted 4.
+    #[test]
+    fn into_owned_compacts_a_tiny_value_retained_from_a_large_chunk() {
+        const CHUNK: usize = 64 * 1024;
+
+        // Precondition: a sole-owner sliver of a 64 KiB parent is uniquely
+        // referenced, so try_into_mut SUCCEEDS (refcount == 1) — yet the
+        // recovered capacity is still chunk-sized, proving `try_into_mut`
+        // success alone does NOT mean "already tight". (Consumed here so the
+        // probe holds the sole reference.)
+        let probe_chunk = Bytes::from(vec![0u8; CHUNK]);
+        let probe_sliver = probe_chunk.slice(40_000..40_004);
+        drop(probe_chunk);
+        let probe = probe_sliver
+            .try_into_mut()
+            .expect("a sole-owner sliver is uniquely referenced, so try_into_mut succeeds");
+        assert!(
+            probe.capacity() > 4 + RETENTION_SLACK,
+            "precondition: the borrowed sliver must still pin the oversized parent \
+             (capacity {} should be chunk-sized)",
+            probe.capacity()
+        );
+
+        // The actual retention case: build the value by CONSUMING the sole
+        // reference to the parent chunk — no live clone kept.
+        let chunk = Bytes::from(vec![0u8; CHUNK]); // a 64 KiB "decoded chunk"
+        let small = chunk.slice(40_000..40_004); // a 4-byte borrowed view
+        drop(chunk); // the window moved on; `small` is now the SOLE reference
+        let expected = small.to_vec();
+
+        let compacted = Value::Blob(small).into_owned();
+
+        let Value::Blob(tight) = compacted else {
+            panic!("expected Blob");
+        };
+        assert_eq!(
+            &tight[..],
+            &expected[..],
+            "compaction must not change the bytes"
+        );
+
+        // The compacted payload's backing must now be payload-sized, not
+        // chunk-sized. `tight` is the sole owner, so try_into_mut recovers the
+        // BytesMut whose capacity reveals the real backing size.
+        let recovered = tight
+            .try_into_mut()
+            .expect("compacted payload must be uniquely owned");
+        assert!(
+            recovered.capacity() <= 4 + RETENTION_SLACK,
+            "issue #1644 REGRESSION: into_owned() must release the 64 KiB parent chunk — the \
+             compacted payload's capacity ({}) must be payload-sized, not chunk-sized",
+            recovered.capacity()
+        );
+    }
+
+    /// Issue #1644 (residual high-offset retention gap found in review of
+    /// d355ab5f8): a SMALL value sliced near the END of a large chunk. Here
+    /// `capacity()` reflects only the backing AHEAD of the payload's offset, so
+    /// a 4-byte value at offset 65_000 of a 65_536-byte chunk recovers
+    /// `capacity() ~= 536` — well UNDER `RETENTION_SLACK` (4096). The previous
+    /// ahead-capacity-only fix's condition `capacity() > len() + RETENTION_SLACK`
+    /// was therefore `536 > 4100` == false → the keep branch fired → the value
+    /// still pinned the whole 65_536-byte chunk (NON-VACUOUS: this test would
+    /// have FAILED under d355ab5f8). The two-tier fix copies unconditionally for
+    /// small payloads (TIER 1), releasing the chunk regardless of offset.
+    #[test]
+    fn into_owned_compacts_a_small_value_sliced_near_the_end_of_a_large_chunk() {
+        const CHUNK: usize = 65_536;
+        const OFFSET: usize = 65_000; // near the END: ahead-capacity ~= 536
+
+        // Precondition proving the gap: a sole-owner high-offset sliver recovers
+        // a TINY ahead-capacity, so the OLD ahead-space-only heuristic would have
+        // (wrongly) treated it as "already tight" and kept the pinning.
+        let probe_chunk = Bytes::from(vec![0u8; CHUNK]);
+        let probe_sliver = probe_chunk.slice(OFFSET..OFFSET + 4);
+        drop(probe_chunk);
+        let probe = probe_sliver
+            .try_into_mut()
+            .expect("a sole-owner sliver is uniquely referenced");
+        assert!(
+            probe.capacity() <= 4 + RETENTION_SLACK,
+            "precondition: a high-offset sliver's ahead-capacity ({}) is SMALL, so the old \
+             capacity()-only rule would NOT have compacted it",
+            probe.capacity()
+        );
+
+        // The retention case: build the value by CONSUMING the sole reference.
+        let chunk = Bytes::from(vec![0u8; CHUNK]);
+        let small = chunk.slice(OFFSET..OFFSET + 4);
+        drop(chunk); // `small` is now the SOLE reference to the parent chunk
+        let expected = small.to_vec();
+
+        let compacted = Value::Blob(small).into_owned();
+        let Value::Blob(tight) = compacted else {
+            panic!("expected Blob");
+        };
+        assert_eq!(
+            &tight[..],
+            &expected[..],
+            "compaction must not change bytes"
+        );
+
+        let recovered = tight
+            .try_into_mut()
+            .expect("compacted payload must be uniquely owned");
+        assert!(
+            recovered.capacity() <= 4 + RETENTION_SLACK,
+            "issue #1644 high-offset REGRESSION: into_owned() must release the 65_536-byte \
+             parent chunk even for a slice near its end — recovered capacity ({}) must be \
+             payload-sized, not chunk-sized",
+            recovered.capacity()
+        );
+    }
+
+    /// A genuinely LARGE (`len() > RETENTION_SLACK`) value whose backing is not
+    /// materially larger than itself (a standalone allocation, no oversized
+    /// shared parent) is left as-is by `into_owned()` — no wasteful copy of an
+    /// already-tight large payload (the TIER 2 no-copy path).
+    ///
+    /// Under the two-tier logic (issue #1644 high-offset gap) the no-copy path
+    /// is only reachable for LARGE payloads: small payloads
+    /// (`len() <= RETENTION_SLACK`) are now ALWAYS copied defensively, so the
+    /// "skip copy when already tight" guarantee is exercised here with a large
+    /// tight value rather than a small one.
+    #[test]
+    fn into_owned_leaves_an_already_tight_large_value_alone() {
+        // > RETENTION_SLACK so TIER 2 (best-effort keep) applies; tight backing.
+        let tight = Bytes::copy_from_slice(&vec![b'a'; RETENTION_SLACK * 2]);
+        let ptr_before = tight.as_ptr();
+        let value = Value::Text(tight);
+        let owned = value.into_owned();
+        let Value::Text(after) = owned else {
+            panic!("expected Text");
+        };
+        assert_eq!(
+            after.as_ptr(),
+            ptr_before,
+            "an already-tight large payload must not be re-copied"
+        );
+    }
+
+    /// A SMALL already-tight value is now copied DEFENSIVELY (TIER 1) even
+    /// though it has no oversized parent: `capacity()` cannot prove a small
+    /// payload is free of a large leading-offset parent, so `into_owned()`
+    /// unconditionally copies small payloads. The observable is that the
+    /// result is a valid, uniquely-owned, byte-identical tight payload (a
+    /// pointer-equality assertion would be wrong here — a copy is expected).
+    #[test]
+    fn into_owned_defensively_copies_a_small_value() {
+        let original = b"small, tight, but copied defensively";
+        assert!(
+            original.len() <= RETENTION_SLACK,
+            "must be a TIER 1 payload"
+        );
+        let value = Value::Text(Bytes::copy_from_slice(original));
+        let owned = value.into_owned();
+        let Value::Text(after) = owned else {
+            panic!("expected Text");
+        };
+        assert_eq!(&after[..], &original[..], "bytes must be preserved");
+        let recovered = after
+            .try_into_mut()
+            .expect("copied payload must be uniquely owned");
+        assert!(
+            recovered.capacity() <= original.len() + RETENTION_SLACK,
+            "defensive copy must be tight (capacity {})",
+            recovered.capacity()
+        );
+    }
+
+    /// `into_owned()` recurses into containers so a retained collection
+    /// releases every chunk its leaves borrowed, not just its own top-level
+    /// payload.
+    #[test]
+    fn into_owned_recurses_into_collections_and_udts() {
+        let list_chunk = Bytes::from(vec![b'x'; 8192]);
+        let list_leaf = list_chunk.slice(10..14);
+        drop(list_chunk); // `list_leaf` is now the sole reference
+
+        let list = Value::List(vec![Value::Blob(list_leaf), Value::Integer(1)]);
+        let Value::List(mut items) = list.into_owned() else {
+            panic!("expected List");
+        };
+        // Move the Bytes OUT of the container (not `&items[0]`, which would
+        // keep the container's own copy alive as a second reference and make
+        // any `try_into_mut` check on a clone spuriously non-unique).
+        let Value::Blob(b) = items.remove(0) else {
+            panic!("expected Blob element");
+        };
+        let recovered = b
+            .try_into_mut()
+            .expect("list element must be uniquely owned");
+        assert!(
+            recovered.capacity() <= 4 + RETENTION_SLACK,
+            "list element must be compacted to payload size, not the 8 KiB chunk (capacity {})",
+            recovered.capacity()
+        );
+
+        let udt_chunk = Bytes::from(vec![b'y'; 8192]);
+        let udt_leaf = udt_chunk.slice(10..14);
+        drop(udt_chunk); // `udt_leaf` is now the sole reference
+
+        let udt = Value::Udt(Box::new(UdtValue {
+            type_name: "t".to_string(),
+            keyspace: "ks".to_string(),
+            fields: vec![UdtField {
+                name: "f".to_string(),
+                value: Some(Value::Blob(udt_leaf)),
+            }],
+        }));
+        let Value::Udt(mut u) = udt.into_owned() else {
+            panic!("expected Udt");
+        };
+        let Some(Value::Blob(b)) = u.fields.remove(0).value else {
+            panic!("expected Blob field");
+        };
+        let recovered = b.try_into_mut().expect("UDT field must be uniquely owned");
+        assert!(
+            recovered.capacity() <= 4 + RETENTION_SLACK,
+            "UDT field must be compacted to payload size, not the 8 KiB chunk (capacity {})",
+            recovered.capacity()
+        );
+    }
+
     #[test]
     fn test_value_types() {
         assert_eq!(Value::Integer(42).data_type(), CqlType::Int);
-        assert_eq!(Value::Text("hello".to_string()).data_type(), CqlType::Text);
+        assert_eq!(Value::text("hello".to_string()).data_type(), CqlType::Text);
         assert_eq!(Value::Boolean(true).data_type(), CqlType::Boolean);
     }
 
@@ -1706,7 +2331,7 @@ mod tests {
             "payload",
             "a RawRow sample must use the header column name, never a synthetic \"data\" column"
         );
-        assert_eq!(sampled[0].1, Value::Blob(vec![1, 2, 3]));
+        assert_eq!(sampled[0].1, Value::blob(vec![1, 2, 3]));
     }
 
     #[test]
@@ -1745,7 +2370,7 @@ mod tests {
     fn test_value_display() {
         assert_eq!(Value::Null.to_string(), "NULL");
         assert_eq!(Value::Integer(42).to_string(), "42");
-        assert_eq!(Value::Text("hello".to_string()).to_string(), "'hello'");
+        assert_eq!(Value::text("hello".to_string()).to_string(), "'hello'");
     }
 
     #[test]
@@ -1753,7 +2378,7 @@ mod tests {
         // Test Tuple
         let tuple = Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
         ]);
         assert!(matches!(tuple.data_type(), CqlType::Tuple(_)));
@@ -1766,7 +2391,7 @@ mod tests {
             fields: vec![
                 UdtField {
                     name: "name".to_string(),
-                    value: Some(Value::Text("John".to_string())),
+                    value: Some(Value::text("John".to_string())),
                 },
                 UdtField {
                     name: "age".to_string(),
@@ -1820,11 +2445,11 @@ mod tests {
             Value::BigInt(9223372036854775807i64),
             Value::Counter(1000000i64),
             Value::Float(std::f64::consts::PI),
-            Value::Text("test string".to_string()),
-            Value::Blob(vec![1, 2, 3, 4]),
+            Value::text("test string".to_string()),
+            Value::blob(vec![1, 2, 3, 4]),
             Value::Timestamp(1234567890),
             Value::Uuid([0u8; 16]),
-            Value::Varint(vec![1, 2, 3]),
+            Value::varint(vec![1, 2, 3]),
             Value::Decimal {
                 scale: 2,
                 unscaled: vec![1, 2, 3],
@@ -1840,11 +2465,11 @@ mod tests {
             Value::Float32(std::f32::consts::PI),
             Value::List(vec![Value::Integer(1), Value::Integer(2)]),
             Value::Set(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
+                Value::text("a".to_string()),
+                Value::text("b".to_string()),
             ]),
-            Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(42))]),
-            Value::Tuple(vec![Value::Integer(1), Value::Text("test".to_string())]),
+            Value::Map(vec![(Value::text("key".to_string()), Value::Integer(42))]),
+            Value::Tuple(vec![Value::Integer(1), Value::text("test".to_string())]),
             Value::Udt(Box::new(UdtValue::new(
                 "TestType".to_string(),
                 "test_ks".to_string(),
@@ -1936,32 +2561,32 @@ mod tests {
         assert_eq!(valid_list.collection_len(), Some(3));
         assert!(!valid_list.is_empty_collection());
 
-        let mixed_list = Value::List(vec![Value::Integer(1), Value::Text("two".to_string())]);
+        let mixed_list = Value::List(vec![Value::Integer(1), Value::text("two".to_string())]);
         assert!(mixed_list.validate_collection_types().is_err());
 
         // Test set validation
         let valid_set = Value::Set(vec![
-            Value::Text("a".to_string()),
-            Value::Text("b".to_string()),
+            Value::text("a".to_string()),
+            Value::text("b".to_string()),
         ]);
         assert!(valid_set.validate_collection_types().is_ok());
 
         let duplicate_set = Value::Set(vec![
-            Value::Text("a".to_string()),
-            Value::Text("a".to_string()),
+            Value::text("a".to_string()),
+            Value::text("a".to_string()),
         ]);
         assert!(duplicate_set.validate_collection_types().is_err());
 
         // Test map validation
         let valid_map = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key2".to_string()), Value::Integer(2)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key2".to_string()), Value::Integer(2)),
         ]);
         assert!(valid_map.validate_collection_types().is_ok());
 
         let duplicate_key_map = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key1".to_string()), Value::Integer(2)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key1".to_string()), Value::Integer(2)),
         ]);
         assert!(duplicate_key_map.validate_collection_types().is_err());
 
@@ -1980,13 +2605,13 @@ mod tests {
         let mut udt = UdtValue::new("Person".to_string(), "test_ks".to_string());
 
         // Test field operations
-        udt = udt.with_field("name".to_string(), Some(Value::Text("John".to_string())));
+        udt = udt.with_field("name".to_string(), Some(Value::text("John".to_string())));
         udt = udt.with_field("age".to_string(), Some(Value::Integer(30)));
 
         assert_eq!(udt.field_count(), 2);
         assert_eq!(
             udt.get_field("name"),
-            Some(&Value::Text("John".to_string()))
+            Some(&Value::text("John".to_string()))
         );
         assert_eq!(udt.get_field("age"), Some(&Value::Integer(30)));
         assert_eq!(udt.get_field("nonexistent"), None);
@@ -2002,7 +2627,7 @@ mod tests {
         // Test new field addition via set_field
         udt.set_field(
             "email".to_string(),
-            Some(Value::Text("john@example.com".to_string())),
+            Some(Value::text("john@example.com".to_string())),
         );
         assert_eq!(udt.field_count(), 3);
     }
@@ -2021,7 +2646,7 @@ mod tests {
 
         // Test validation of matching UDT value
         let valid_udt = UdtValue::new("Person".to_string(), "test_ks".to_string())
-            .with_field("name".to_string(), Some(Value::Text("John".to_string())))
+            .with_field("name".to_string(), Some(Value::text("John".to_string())))
             .with_field("age".to_string(), Some(Value::Integer(30)));
 
         assert!(type_def.validate_value(&valid_udt).is_ok());
@@ -2038,13 +2663,13 @@ mod tests {
     fn test_tuple_functionality() {
         let mut tuple = TupleValue::new(vec![
             Some(Value::Integer(1)),
-            Some(Value::Text("test".to_string())),
+            Some(Value::text("test".to_string())),
             None,
         ]);
 
         assert_eq!(tuple.field_count(), 3);
         assert_eq!(tuple.get_field(0), Some(&Value::Integer(1)));
-        assert_eq!(tuple.get_field(1), Some(&Value::Text("test".to_string())));
+        assert_eq!(tuple.get_field(1), Some(&Value::text("test".to_string())));
         assert_eq!(tuple.get_field(2), None);
         assert_eq!(tuple.get_field(3), None);
 
@@ -2073,7 +2698,7 @@ mod tests {
         assert_eq!(DataType::Null.default_value(), Value::Null);
         assert_eq!(DataType::Boolean.default_value(), Value::Boolean(false));
         assert_eq!(DataType::Integer.default_value(), Value::Integer(0));
-        assert_eq!(DataType::Text.default_value(), Value::Text(String::new()));
+        assert_eq!(DataType::Text.default_value(), Value::text(String::new()));
 
         // Test string representation
         assert_eq!(DataType::Boolean.to_string(), "BOOLEAN");
@@ -2094,7 +2719,7 @@ mod tests {
         assert_eq!(key1.as_bytes(), &[1, 2, 3, 4]);
 
         // Test creation from value
-        let value = Value::Text("test".to_string());
+        let value = Value::text("test".to_string());
         let key2 = RowKey::from_value(&value).unwrap();
         assert!(!key2.is_empty());
 
@@ -2121,12 +2746,12 @@ mod tests {
 
         // Test same-type comparisons
         assert!(Value::Integer(1) < Value::Integer(2));
-        assert!(Value::Text("a".to_string()) < Value::Text("b".to_string()));
+        assert!(Value::text("a".to_string()) < Value::text("b".to_string()));
         assert!(Value::Boolean(false) < Value::Boolean(true));
 
         // Test mixed-type comparisons (fall back to string comparison)
         let int_val = Value::Integer(42);
-        let text_val = Value::Text("hello".to_string());
+        let text_val = Value::text("hello".to_string());
         assert!(int_val.partial_cmp(&text_val).is_some());
     }
 

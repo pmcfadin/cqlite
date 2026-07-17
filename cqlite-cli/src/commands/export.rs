@@ -328,7 +328,10 @@ pub async fn export_data(
                                 .get(col.as_str())
                                 .map(|v| match v {
                                     cqlite_core::Value::Text(s) => {
-                                        format!("'{}'", s.replace("'", "''"))
+                                        format!(
+                                            "'{}'",
+                                            String::from_utf8_lossy(s).replace("'", "''")
+                                        )
                                     }
                                     cqlite_core::Value::Null => "NULL".to_string(),
                                     _ => v.to_string(),

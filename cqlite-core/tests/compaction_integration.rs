@@ -114,7 +114,7 @@ fn write_row(id: i32, name: &str, score: i32, timestamp: i64) -> Mutation {
     let ops = vec![
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(name.to_string()),
+            value: Value::text(name.to_string()),
         },
         CellOperation::Write {
             column: "score".to_string(),
@@ -130,7 +130,7 @@ fn write_name_only(id: i32, name: &str, timestamp: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Write {
         column: "name".to_string(),
-        value: Value::Text(name.to_string()),
+        value: Value::text(name.to_string()),
     }];
     Mutation::new(table_id, pk, None, ops, timestamp, None)
 }
@@ -893,7 +893,7 @@ fn row_tombstone_shadows_live_row_after_compaction() {
     match pk3 {
         ScanRow::Row(cells) => {
             let name = cells.iter().find_map(|(k, v)| match v {
-                Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
+                Value::Text(val) if k.as_ref() == "name" => Some(String::from_utf8_lossy(val).into_owned()),
                 _ => None,
             });
             assert_eq!(
@@ -1043,7 +1043,9 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
     match pk7 {
         ScanRow::Row(cells) => {
             let name = cells.iter().find_map(|(k, v)| match v {
-                Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
+                Value::Text(val) if k.as_ref() == "name" => {
+                    Some(String::from_utf8_lossy(val).into_owned())
+                }
                 _ => None,
             });
             assert_eq!(
@@ -1349,7 +1351,7 @@ fn disjoint_columns_survive_compaction() {
 
     assert_eq!(
         name_1,
-        Some(&Value::Text("alice".to_string())),
+        Some(&Value::text("alice".to_string())),
         "PK=1 `name` from SSTable A was DROPPED after compaction — per-cell reconcile \
          regression (Issue #533). The old whole-row-wins merger keeps only B's `score`."
     );
@@ -1366,7 +1368,7 @@ fn disjoint_columns_survive_compaction() {
         .expect("PK=3 must be present after compaction");
     assert_eq!(
         find_col(pk3, "name"),
-        Some(&Value::Text("y".to_string())),
+        Some(&Value::text("y".to_string())),
         "PK=3 `name` conflict must resolve to the higher-timestamp value (B ts=200)"
     );
 
@@ -1463,7 +1465,7 @@ fn clustering_key_rows_survive_compaction() {
         Mutation::new(
             TableId::new("ck_ks", "wide"),
             PartitionKey::single("pk", Value::Integer(pk)),
-            Some(ClusteringKey::single("ck", Value::Text(ck.to_string()))),
+            Some(ClusteringKey::single("ck", Value::text(ck.to_string()))),
             vec![CellOperation::Write {
                 column: "val".to_string(),
                 value: Value::Integer(val),

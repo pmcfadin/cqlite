@@ -93,11 +93,11 @@ fn expiring_write(id: i32, ttl: u32, ts: i64) -> Mutation {
         // tombstone-carrier).
         CellOperation::Write {
             column: "name".to_string(),
-            value: Value::Text(format!("row-{id}")),
+            value: Value::text(format!("row-{id}")),
         },
         CellOperation::WriteWithTtl {
             column: "v".to_string(),
-            value: Value::Text("expiring-if-buggy".to_string()),
+            value: Value::text("expiring-if-buggy".to_string()),
             ttl_seconds: ttl,
             local_deletion_time: None,
         },
@@ -192,7 +192,7 @@ fn run_case(tombstone_first: bool) {
 
     assert_eq!(
         col(&row, "name"),
-        Some(&Value::Text(format!("row-{id}"))),
+        Some(&Value::text(format!("row-{id}"))),
         "the live `name` cell keeps the row present"
     );
     assert!(

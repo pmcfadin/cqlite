@@ -67,14 +67,14 @@ pub fn parse_text(input: &[u8]) -> IResult<&[u8], Value> {
     let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
     })?;
-    Ok((input, Value::Text(text)))
+    Ok((input, Value::Text(text.into())))
 }
 
 /// Parse blob (length-prefixed binary data)
 pub fn parse_blob(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
-    Ok((input, Value::Blob(bytes.to_vec())))
+    Ok((input, Value::blob(bytes.to_vec())))
 }
 
 /// Parse UUID (16 bytes)
@@ -111,7 +111,7 @@ pub fn parse_time(input: &[u8]) -> IResult<&[u8], Value> {
 pub fn parse_varint(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
-    Ok((input, Value::Varint(bytes.to_vec())))
+    Ok((input, Value::varint(bytes.to_vec())))
 }
 
 /// Parse decimal (scale + unscaled BigInteger bytes)
@@ -174,7 +174,7 @@ pub fn parse_duration(input: &[u8]) -> IResult<&[u8], Value> {
 pub fn parse_inet(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
-    Ok((input, Value::Inet(bytes.to_vec())))
+    Ok((input, Value::inet(bytes.to_vec())))
 }
 
 #[cfg(test)]
@@ -209,7 +209,7 @@ mod tests {
         data.extend_from_slice(test_str.as_bytes());
 
         let (_, value) = parse_text(&data).unwrap();
-        assert_eq!(value, Value::Text("hello".to_string()));
+        assert_eq!(value, Value::text("hello".to_string()));
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
         data.push(0x2A); // value 42
         let (remaining, value) = parse_varint(&data).unwrap();
         assert!(remaining.is_empty());
-        assert_eq!(value, Value::Varint(vec![0x2A]));
+        assert_eq!(value, Value::varint(vec![0x2A]));
     }
 
     #[test]
@@ -260,7 +260,7 @@ mod tests {
         data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
         let (remaining, value) = parse_varint(&data).unwrap();
         assert!(remaining.is_empty());
-        assert_eq!(value, Value::Varint(vec![0x01, 0x02, 0x03, 0x04]));
+        assert_eq!(value, Value::varint(vec![0x01, 0x02, 0x03, 0x04]));
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
         data.extend_from_slice(&[192, 168, 1, 1]); // 192.168.1.1
         let (remaining, value) = parse_inet(&data).unwrap();
         assert!(remaining.is_empty());
-        assert_eq!(value, Value::Inet(vec![192, 168, 1, 1]));
+        assert_eq!(value, Value::inet(vec![192, 168, 1, 1]));
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tests {
         data.extend_from_slice(&ipv6_bytes); // 2001:db8::1
         let (remaining, value) = parse_inet(&data).unwrap();
         assert!(remaining.is_empty());
-        assert_eq!(value, Value::Inet(ipv6_bytes.to_vec()));
+        assert_eq!(value, Value::inet(ipv6_bytes.to_vec()));
     }
 
     #[test]

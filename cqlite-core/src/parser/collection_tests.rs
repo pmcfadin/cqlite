@@ -532,9 +532,9 @@ mod roundtrip_tests {
     #[test]
     fn test_list_roundtrip() {
         let original = Value::List(vec![
-            Value::Text("apple".to_string()),
-            Value::Text("banana".to_string()),
-            Value::Text("cherry".to_string()),
+            Value::text("apple".to_string()),
+            Value::text("banana".to_string()),
+            Value::text("cherry".to_string()),
         ]);
 
         let serialized = serialize_cql_value(&original).unwrap();
@@ -553,9 +553,9 @@ mod roundtrip_tests {
     #[test]
     fn test_map_roundtrip() {
         let original = Value::Map(vec![
-            (Value::Text("key1".to_string()), Value::Integer(1)),
-            (Value::Text("key2".to_string()), Value::Integer(2)),
-            (Value::Text("key3".to_string()), Value::Integer(3)),
+            (Value::text("key1".to_string()), Value::Integer(1)),
+            (Value::text("key2".to_string()), Value::Integer(2)),
+            (Value::text("key3".to_string()), Value::Integer(3)),
         ]);
 
         let serialized = serialize_cql_value(&original).unwrap();
@@ -583,7 +583,7 @@ mod roundtrip_tests {
     fn test_tuple_roundtrip() {
         let original = Value::Tuple(vec![
             Value::Integer(42),
-            Value::Text("hello".to_string()),
+            Value::text("hello".to_string()),
             Value::Boolean(true),
             Value::Float(std::f64::consts::PI),
         ]);
