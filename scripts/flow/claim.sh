@@ -82,9 +82,10 @@
 #   0  success (CLAIM HELD, VERIFY-OK, ADOPTED, RELEASED, SMOKE-OK, status render)
 #   2  lost / refused (CLAIM LOST, VERIFY-FAIL, ADOPT-LOST, RELEASE-REFUSED)
 #   1  infra / git / gh failure — retryable, NOT a race-loss (CLAIM ERROR reason=infra,
-#      SMOKE-FAIL). `claim` NEVER reports LOST when nobody holds the ref: a failed
-#      push whose re-read finds the ref absent, or an ls-remote that itself errors,
-#      is ERROR (exit 1) so the caller retries rather than skipping the item.
+#      SMOKE-FAIL). EVERY remote-reading subcommand (claim/verify/adopt/release/status)
+#      maps an ls-remote/push/delete failure to ERROR (exit 1), so a network blip never
+#      makes a worker conclude it LOST/does-not-hold/RELEASED. `claim` also never reports
+#      LOST when nobody holds the ref (a failed push whose re-read finds it absent).
 #   64 usage error
 #
 # ---END-HELP---
@@ -95,6 +96,12 @@ prog="$(basename "$0")"
 die_usage() { echo "$prog: $*" >&2; exit 64; }
 note()      { echo "[claim] $*" >&2; }
 emit()      { echo "CLAIM: $*"; }
+
+# emit_infra <line> — a transient infrastructure failure (ls-remote/push/delete
+# unreachable): a retryable ERROR, NEVER a lost/absent verdict. Callers pair it
+# with `return 1` per the header exit-code contract, so a network blip never makes
+# a worker conclude it lost ownership.
+emit_infra() { emit "ERROR reason=infra $* (transient — retry)"; }
 
 REMOTE="${CLAIM_REMOTE:-origin}"
 
@@ -279,14 +286,14 @@ cmd_claim() {
     # an infra failure (remote unreachable, or a push error with NO holder) — a
     # LOST verdict must NEVER be emitted when nobody actually holds the ref.
     if ! remote_claim_lookup "$issue"; then
-      emit "ERROR issue=$issue reason=infra detail=push-failed-and-ls-remote-unreachable-on-$REMOTE (transient — retry)"
+      emit_infra "issue=$issue detail=push-failed-and-ls-remote-unreachable-on-$REMOTE"
       return 1
     fi
     local now="$REPLY_SHA"
     if [ -z "$now" ]; then
       # Push was rejected yet the ref is absent: not a lost race — a push/infra
       # error. Fail as ERROR (exit 1, retryable), never a bogus LOST.
-      emit "ERROR issue=$issue reason=infra detail=push-rejected-but-ref-absent-on-$REMOTE (transient — retry)"
+      emit_infra "issue=$issue detail=push-rejected-but-ref-absent-on-$REMOTE"
       return 1
     fi
     fetch_claim "$issue"
@@ -322,8 +329,13 @@ cmd_verify() {
   done
   require_numeric_issue "$issue" verify
 
-  local sha
-  sha="$(remote_claim_sha "$issue")"
+  # ls-remote failure is INFRA (retryable), not "you don't hold it" — never let a
+  # network blip make a worker conclude it lost ownership.
+  if ! remote_claim_lookup "$issue"; then
+    emit_infra "issue=$issue detail=ls-remote-unreachable-on-$REMOTE"
+    return 1
+  fi
+  local sha="$REPLY_SHA"
   if [ -z "$sha" ]; then
     emit "VERIFY-FAIL issue=$issue reason=no-claim-ref"
     return 2
@@ -363,8 +375,14 @@ cmd_adopt() {
       return 0
     fi
   fi
-  local now
-  now="$(remote_claim_sha "$issue")"
+  # Fallback: the CAS did not land. Distinguish an infra failure (origin
+  # unreachable) from a genuine ADOPT-LOST (the ref moved off <old-sha>) — a
+  # network blip must NOT be reported as a lost adoption.
+  if ! remote_claim_lookup "$issue"; then
+    emit_infra "issue=$issue detail=adopt-cas-failed-and-ls-remote-unreachable-on-$REMOTE"
+    return 1
+  fi
+  local now="$REPLY_SHA"
   fetch_claim "$issue"
   emit "ADOPT-LOST issue=$issue ref=refs/claims/issue-$issue expected=$expect actual=${now:-<gone>} $(holder_token "$now")"
   return 2
@@ -385,7 +403,9 @@ open_pr_count() {
     printf '%s\n' -1
     return 0
   fi
-  if ! refs="$(gh pr list --state open --json headRefName --jq '.[].headRefName' 2>/dev/null)"; then
+  # --limit 1000: gh's default page is 30; under-counting here would let a claim
+  # be released out from under an open PR — the exact orphan-endgame hazard.
+  if ! refs="$(gh pr list --state open --limit 1000 --json headRefName --jq '.[].headRefName' 2>/dev/null)"; then
     note "gh pr list failed — cannot check for an open PR on issue #$issue"
     printf '%s\n' -1
     return 0
@@ -412,8 +432,13 @@ cmd_release() {
   done
   require_numeric_issue "$issue" release
 
-  local sha
-  sha="$(remote_claim_sha "$issue")"
+  # ls-remote failure is INFRA (retryable), not "already absent" — never delete-
+  # or claim-absent on a network blip.
+  if ! remote_claim_lookup "$issue"; then
+    emit_infra "issue=$issue detail=ls-remote-unreachable-on-$REMOTE"
+    return 1
+  fi
+  local sha="$REPLY_SHA"
   if [ -z "$sha" ]; then
     emit "RELEASED issue=$issue ref=refs/claims/issue-$issue (already absent)"
     return 0
@@ -436,7 +461,8 @@ cmd_release() {
     emit "RELEASED issue=$issue ref=refs/claims/issue-$issue sha=$sha"
     return 0
   fi
-  emit "RELEASE-REFUSED issue=$issue reason=delete-failed sha=$sha"
+  # A failed delete is an infra/git failure (exit 1), not a policy refusal (exit 2).
+  emit_infra "issue=$issue detail=delete-failed-on-$REMOTE sha=$sha"
   return 1
 }
 
@@ -447,7 +473,12 @@ cmd_status() {
 
   local pattern raw now_epoch
   if [ -n "$only" ]; then pattern="refs/claims/issue-$only"; else pattern="refs/claims/*"; fi
-  raw="$(git ls-remote "$REMOTE" "$pattern" 2>/dev/null || true)"
+  # ls-remote failure is INFRA (retryable), not "no claims" — an unreachable
+  # origin must NOT render as an empty board.
+  if ! raw="$(git ls-remote "$REMOTE" "$pattern" 2>/dev/null)"; then
+    emit_infra "detail=ls-remote-unreachable-on-$REMOTE pattern=$pattern"
+    return 1
+  fi
   now_epoch="$(date -u +%s)"
 
   if [ -z "$raw" ]; then
@@ -457,7 +488,7 @@ cmd_status() {
 
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    local sha ref issue msg machine actor ts age
+    local sha ref issue msg machine actor ts age epoch
     sha="$(printf '%s' "$line" | awk '{print $1}')"
     ref="$(printf '%s' "$line" | awk '{print $2}')"
     issue="${ref#refs/claims/issue-}"

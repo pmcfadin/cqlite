@@ -312,6 +312,49 @@ $outMatch"
 fi
 
 # ===========================================================================
+echo "TEST 12: verify under an unreachable origin reports ERROR infra (exit 1), not VERIFY-FAIL"
+# ===========================================================================
+# A holds issue 13; then origin goes away. verify must NOT conclude "you don't
+# hold it" (VERIFY-FAIL exit 2) on a network blip — it must ERROR infra (exit 1).
+runA claim 13 >/dev/null
+mv "$ORIGIN" "$ORIGIN.bak"
+rc=0; outVinfra=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" verify 13 ) || rc=$?
+rcVinfra=$rc
+mv "$ORIGIN.bak" "$ORIGIN"
+if [ "$rcVinfra" -eq 1 ] && printf '%s\n' "$outVinfra" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outVinfra" | grep -q 'infra' \
+   && ! printf '%s\n' "$outVinfra" | grep -q 'VERIFY-FAIL'; then
+  ok "verify on unreachable origin → ERROR infra exit 1 (not a bogus VERIFY-FAIL)"
+else
+  bad "expected verify ERROR infra exit 1, no VERIFY-FAIL; got rc=$rcVinfra
+$outVinfra"
+fi
+
+# ===========================================================================
+echo "TEST 13: open_pr_count passes --limit 1000 to gh (no 30-PR-page under-count)"
+# ===========================================================================
+# gh's default page is 30; an under-count would delete a claim under an open PR.
+# The shim records its args; the test asserts the release path invoked gh with
+# --limit 1000.
+runA claim 12 >/dev/null
+ARGDIR="$T/shim-argcap"
+mkdir -p "$ARGDIR"
+cat >"$ARGDIR/gh" <<SHIM
+#!/usr/bin/env bash
+echo "\$@" >> "$T/gh-argcap.txt"
+printf 'issue-12-paging-check\n'
+SHIM
+chmod +x "$ARGDIR/gh"
+: >"$T/gh-argcap.txt"
+( cd "$A" && PATH="$ARGDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 12 >/dev/null 2>&1 ) || true
+if grep -q -- '--limit 1000' "$T/gh-argcap.txt"; then
+  ok "release invoked gh pr list with --limit 1000"
+else
+  bad "expected gh invoked with --limit 1000; captured args:
+$(cat "$T/gh-argcap.txt")"
+fi
+
+# ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
