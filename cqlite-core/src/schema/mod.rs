@@ -17,6 +17,7 @@ pub mod registry;
 // `UdtRegistry` type; the `pub use` below preserves the `schema::UdtRegistry`
 // public path.
 mod cql_type_parser;
+mod key_ordering;
 mod schema_comparator;
 mod udt_registry;
 
@@ -725,19 +726,9 @@ impl TableSchema {
         self.clustering_keys.iter().any(|k| k.name == name)
     }
 
-    /// Get partition key columns in order
-    pub fn ordered_partition_keys(&self) -> Vec<&KeyColumn> {
-        let mut keys = self.partition_keys.iter().collect::<Vec<_>>();
-        keys.sort_by_key(|k| k.position);
-        keys
-    }
-
-    /// Get clustering key columns in order
-    pub fn ordered_clustering_keys(&self) -> Vec<&ClusteringColumn> {
-        let mut keys = self.clustering_keys.iter().collect::<Vec<_>>();
-        keys.sort_by_key(|k| k.position);
-        keys
-    }
+    // `ordered_partition_keys` / `ordered_clustering_keys` live in the
+    // `key_ordering` submodule (issue #1677): they memoize-avoid the per-call
+    // re-sort via a "sort only if not already ordered" fast path.
 
     /// Create a minimal test schema (for testing only)
     #[cfg(test)]

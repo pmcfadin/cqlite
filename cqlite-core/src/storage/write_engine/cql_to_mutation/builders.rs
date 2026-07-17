@@ -18,7 +18,7 @@ use crate::cql::ast::{
     CqlLiteral, CqlTable, CqlUpdate, CqlUsing,
 };
 #[cfg(feature = "write-support")]
-use crate::schema::{CqlType, TableSchema};
+use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
 use crate::storage::write_engine::mutation::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, PartitionTombstone, TableId,
@@ -96,7 +96,7 @@ pub(crate) fn insert_to_mutation(
                     pk_col.name
                 ))
             })?;
-        let cql_type = CqlType::parse(&pk_col.data_type)?;
+        let cql_type = super::type_cache::cached_parse(&pk_col.data_type)?;
         let value = expression_to_value(expr, &cql_type)?;
         pk_columns.push((pk_col.name.clone(), value));
     }
@@ -111,7 +111,7 @@ pub(crate) fn insert_to_mutation(
             let col_name_lc = ck_col.name.to_lowercase();
             // Clustering key columns are optional in INSERT (may be absent)
             if let Some((_, expr)) = col_val_pairs.iter().find(|(name, _)| *name == col_name_lc) {
-                let cql_type = CqlType::parse(&ck_col.data_type)?;
+                let cql_type = super::type_cache::cached_parse(&ck_col.data_type)?;
                 let value = expression_to_value(expr, &cql_type)?;
                 ck_columns.push((ck_col.name.clone(), value));
             }
@@ -133,7 +133,7 @@ pub(crate) fn insert_to_mutation(
         let column = schema
             .get_column(col_name)
             .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name)))?;
-        let cql_type = CqlType::parse(&column.data_type)?;
+        let cql_type = super::type_cache::cached_parse(&column.data_type)?;
         let value = expression_to_value(expr, &cql_type)?;
         operations.push(CellOperation::Write {
             column: column.name.clone(),
@@ -218,7 +218,7 @@ fn insert_json_to_mutation(
                     pk_col.name
                 ))
             })?;
-        let cql_type = CqlType::parse(&pk_col.data_type)?;
+        let cql_type = super::type_cache::cached_parse(&pk_col.data_type)?;
         let value = json_value_to_cql_value(json_val, &cql_type)?;
         pk_columns.push((pk_col.name.clone(), value));
     }
@@ -230,7 +230,7 @@ fn insert_json_to_mutation(
     for ck_col in &ordered_ck {
         let col_name_lc = ck_col.name.to_lowercase();
         if let Some((_, json_val)) = col_values.iter().find(|(n, _)| *n == col_name_lc) {
-            let cql_type = CqlType::parse(&ck_col.data_type)?;
+            let cql_type = super::type_cache::cached_parse(&ck_col.data_type)?;
             let value = json_value_to_cql_value(json_val, &cql_type)?;
             ck_columns.push((ck_col.name.clone(), value));
         }
@@ -253,7 +253,7 @@ fn insert_json_to_mutation(
         let column = schema
             .get_column(col_name_lc)
             .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name_lc)))?;
-        let cql_type = CqlType::parse(&column.data_type)?;
+        let cql_type = super::type_cache::cached_parse(&column.data_type)?;
         let value = json_value_to_cql_value(json_val, &cql_type)?;
         operations.push(CellOperation::Write {
             column: column.name.clone(),
@@ -318,7 +318,7 @@ pub(crate) fn update_to_mutation(
                 let column = schema
                     .get_column(&col_name)
                     .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name)))?;
-                let cql_type = CqlType::parse(&column.data_type)?;
+                let cql_type = super::type_cache::cached_parse(&column.data_type)?;
                 let value = expression_to_value(&assignment.value, &cql_type)?;
                 operations.push(CellOperation::Write {
                     column: column.name.clone(),
@@ -336,7 +336,7 @@ pub(crate) fn update_to_mutation(
                 let column = schema
                     .get_column(&col_name)
                     .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name)))?;
-                let cql_type = CqlType::parse(&column.data_type)?;
+                let cql_type = super::type_cache::cached_parse(&column.data_type)?;
                 let value = expression_to_value(&assignment.value, &cql_type)?;
                 operations.push(CellOperation::Write {
                     column: column.name.clone(),
