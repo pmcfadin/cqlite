@@ -72,9 +72,11 @@
 //!   (the common case). Partition-level deletions ARE wired through.
 
 use crate::error::{Error, Result};
-use crate::storage::sstable::bti::encode_partition_key_for_bti_trie;
+use crate::storage::sstable::bti::encode_bti_trie_key_from_token;
 use crate::storage::sstable::bti::parser::FLAG_HAS_HASH_BYTE;
-use crate::util::cassandra_murmur3::cassandra_partition_filter_hash_lower_bits;
+use crate::util::cassandra_murmur3::{
+    cassandra_murmur3_normalize_token, cassandra_murmur3_x64_128,
+};
 use std::collections::BTreeMap;
 
 /// Where a partition leaf payload points (issue #910).
@@ -176,8 +178,13 @@ impl PartitionsTrieWriter {
     /// [`PartitionPayload::DataOffset`] for a narrow partition (negative
     /// position, direct `Data.db` offset).
     pub fn add_partition_with_payload(&mut self, raw_key_bytes: &[u8], payload: PartitionPayload) {
-        let key = encode_partition_key_for_bti_trie(raw_key_bytes);
-        let hash_byte = filter_hash_byte(raw_key_bytes);
+        // One 128-bit Murmur3 pass per key (issue #1681, S4), replacing the two
+        // that `encode_partition_key_for_bti_trie` + `filter_hash_byte` each ran:
+        // h1 → normalized token → trie key; h2 as u8 = the leaf filter hash byte
+        // (`DecoratedKey.filterHashLowerBits() as u8`).
+        let (h1, h2) = cassandra_murmur3_x64_128(raw_key_bytes);
+        let key = encode_bti_trie_key_from_token(cassandra_murmur3_normalize_token(h1));
+        let hash_byte = h2 as u8;
 
         // Track only the boundary raw keys (min/max trie key). `finish` sorts by
         // trie key before writing the first/last-key region, so the boundaries
@@ -303,8 +310,13 @@ fn write_with_short_length(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
 /// `canonical_filter_hash_byte_matches_real_bti_fixture` vector test below. It replaces
 /// the earlier phase-1 placeholder that derived the byte from the trie-key token (`h1`),
 /// which produced values a Cassandra-canonical reader would reject.
+///
+/// Test-only since issue #1681: the write path now derives this byte inline from
+/// `h2` of the single 128-bit hash it computes for the token; this re-hashing
+/// helper is kept only as the vector-test oracle for that inline derivation.
+#[cfg(test)]
 fn filter_hash_byte(raw_key_bytes: &[u8]) -> u8 {
-    cassandra_partition_filter_hash_lower_bits(raw_key_bytes) as u8
+    crate::util::cassandra_murmur3::cassandra_partition_filter_hash_lower_bits(raw_key_bytes) as u8
 }
 
 // ---------------------------------------------------------------------------

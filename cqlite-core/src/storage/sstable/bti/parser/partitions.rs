@@ -561,6 +561,18 @@ pub(crate) fn encode_partition_key_for_bti_trie_uncounted(raw_key_bytes: &[u8]) 
     use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 
     let token: i64 = cassandra_murmur3_token(raw_key_bytes);
+    encode_bti_trie_key_from_token(token)
+}
+
+/// Encode the byte-comparable BTI trie key from a *precomputed* Murmur3
+/// partition token — the single authoritative definition of the trie-key byte
+/// layout (`[0x40] ++ be8(token ^ 0x8000_0000_0000_0000)`).
+///
+/// This lets a caller that already holds the 128-bit hash words derive the trie
+/// key without re-hashing the raw key (issue #1681): `token` must be
+/// `cassandra_murmur3_normalize_token(h1)`, so the output is byte-identical to
+/// [`encode_partition_key_for_bti_trie`] over the same raw bytes.
+pub fn encode_bti_trie_key_from_token(token: i64) -> [u8; 9] {
     let bc: u64 = (token as u64) ^ 0x8000_0000_0000_0000u64;
     let bc_bytes = bc.to_be_bytes();
 
