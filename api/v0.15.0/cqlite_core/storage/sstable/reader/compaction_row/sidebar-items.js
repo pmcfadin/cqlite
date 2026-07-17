@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompactionBound","CompactionRowData"],"struct":["CompactionRow","ComplexColumn","ComplexElement","SimpleCell"]};

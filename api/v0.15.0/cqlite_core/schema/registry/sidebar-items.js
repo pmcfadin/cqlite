@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ErrorSeverity","SchemaChangeType","SchemaSource","SchemaValidationStatus"],"struct":["ParsingContext","RegistryStatistics","SchemaChange","SchemaQuery","SchemaRegistry","SchemaRegistryConfig","SchemaValidator","SchemaVersion","ValidationError","ValidationReport","ValidationWarning"]};

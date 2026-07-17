@@ -1,0 +1,46 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Read one Summary-bounded `Index.db` interval from disk and resolve `key` within it (issue #2412, design §B)."><title>lookup_key_in_interval in cqlite_core::storage::sstable::summary_reader::interval - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">lookup_key_in_interval</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.15.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable::<wbr>summary_<wbr>reader::<wbr>interval</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../../index.html">cqlite_core</a>::<wbr><a href="../../../index.html">storage</a>::<wbr><a href="../../index.html">sstable</a>::<wbr><a href="../index.html">summary_reader</a>::<wbr><a href="index.html">interval</a></div><h1>Function <span class="fn">lookup_<wbr>key_<wbr>in_<wbr>interval</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../../src/cqlite_core/storage/sstable/summary_reader/interval.rs.html#218-278">Source</a> </span></div><pre class="rust item-decl"><code>pub async fn lookup_key_in_interval(
+    index_path: &amp;<a class="struct" href="https://doc.rust-lang.org/1.97.1/std/path/struct.Path.html" title="struct std::path::Path">Path</a>,
+    interval: <a class="struct" href="struct.SummaryInterval.html" title="struct cqlite_core::storage::sstable::summary_reader::interval::SummaryInterval">SummaryInterval</a>,
+    key: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.u8.html">u8</a>],
+    min_index_interval: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.u32.html">u32</a>,
+    sampling_level: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.u32.html">u32</a>,
+) -&gt; <a class="type" href="../../../../error/type.Result.html" title="type cqlite_core::error::Result">Result</a>&lt;<a class="struct" href="struct.IntervalLookup.html" title="struct cqlite_core::storage::sstable::summary_reader::interval::IntervalLookup">IntervalLookup</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Read one Summary-bounded <code>Index.db</code> interval from disk and resolve <code>key</code> within it
+(issue #2412, design §B).</p>
+<p>Seeks to <code>interval.start_position</code>, reads the interval bytes (<code>[start, end)</code>, or to
+EOF when <code>interval.end_position</code> is <code>None</code>), and scans forward for the exact key.
+Increments <code>cqlite.sstable.index_interval_parses_total</code> exactly once (one bounded
+interval parse), never <code>index_parses_total</code> (design §F).</p>
+<p>Entry-count cap (roborev job 1709, High — downsampling false-negative fix):
+an END-BOUNDED interval (<code>end_position.is_some()</code>) is NOT entry-capped at all —
+its authoritative <code>[start, end)</code> byte range, delimited by two REAL adjacent
+<code>Summary.db</code> samples, already bounds the read; every whole entry the buffer
+holds is scanned regardless of Cassandra’s downsampling (which can widen an
+interval to <code>min_index_interval * 128 / sampling_level</code> partitions — a fixed
+<code>min_index_interval</code>-derived cap could otherwise stop short of a present key
+and be (wrongly) treated as an authoritative absence by the caller,
+<code>big_get_with_resolution</code>’s <code>covering_interval_is_end_bounded</code> gate). The
+read-to-EOF LAST interval keeps a cap — [<code>last_interval_entry_cap</code>], derived
+from the SAME downsampling-adjusted formula — because <code>covering_interval_is_end_bounded</code>
+is <code>false</code> for it, so a capped miss there is never promoted to an authoritative
+absence (the caller falls back to <code>scan_for_key</code> instead, preserving #1572).</p>
+<p>Corrupt-input hardening (roborev job 1709 follow-up, fuzz doctrine #1614: a
+parser must never panic/abort/OOM on arbitrary bytes — and through the
+bindings, an allocation-failure abort kills the WHOLE host process, not just
+this request):</p>
+<ul>
+<li><code>end_position</code> is validated against the <code>Index.db</code> file’s ACTUAL length
+BEFORE it ever sizes an allocation. An unvalidated, corrupt <code>Summary.db</code>
+sample claiming an <code>end</code> far beyond EOF would otherwise drive
+<code>Vec::resize</code> to attempt a huge (attacker/corruption-controlled)
+allocation — which aborts the process on failure — before <code>read_exact</code>
+ever gets a chance to fail cleanly. A too-large <code>end</code> now returns a clean
+<code>Err</code> (fail-closed), never a huge alloc.</li>
+<li>Non-monotone samples (<code>end &lt;= start</code>) are ALSO fail-closed <code>Err</code>, not
+silently routed into the read-to-EOF branch: <code>end_position</code> staying
+<code>Some(_)</code> there would leave <code>covering_interval_is_end_bounded</code> reporting
+<code>true</code>, so a corrupt/degenerate interval’s capped miss could otherwise be
+wrongly promoted to an AUTHORITATIVE absence (no <code>scan_for_key</code>
+fallback) — the exact false-negative class this job’s primary fix closes,
+re-opened through a different corrupt-input door.</li>
+</ul>
+</div></details></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_compressor"],"struct":["CompressedDataWriter","DeflateCompressor","Lz4Compressor","NoopCompressor","SnappyCompressor","ZstdCompressor"],"trait":["Compressor"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SsTableFormat","VersionGates"],"struct":["BigVersionGates","BtiVersionGates","SsTableDescriptor"]};
