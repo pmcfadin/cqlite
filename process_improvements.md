@@ -663,3 +663,25 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       than relying on the lead noticing during an unrelated status check —
       worth wiring directly into `agent-gate.sh`'s pre-flight or the
       `flow-closer` prompt template if this recurs a 4th time.
+  22. **2026-07-17 — "My Bash tool is blocked" (`the temp filesystem at
+      /tmp/claude-.../tasks is full`) is NOT a separate bounded allocation —
+      it IS the main disk (`/dev/root`, the same ext4 as `/`).** The lead hit
+      this twice this session and, both times, initially treated it as a
+      mysterious session-specific quota distinct from the disk-exhaustion
+      incidents being fought in parallel — spending time on Read+Write
+      symlink-truncation workarounds and "wait it out" polling instead of
+      just checking `df -h /`. A `flow-closer` subagent (still had working
+      Bash at the time) diagnosed it correctly on the second occurrence: the
+      harness's own task-output capture path lives on the SAME root
+      filesystem as every worktree's `target/`, so when disk hits ~100% the
+      lead's OWN tool calls fail with this exact error, indistinguishable in
+      wording from a quota message. **Standing lesson:** the instant this
+      error appears, do not assume it is separate from the disk-exhaustion
+      pattern already being tracked (lessons 15/16/21) — first ask a
+      subagent with working Bash to run `df -h /` on your behalf (SendMessage
+      works even when your own Bash doesn't) or wait ~1 poll cycle, since a
+      sibling closer reclaiming disk (the standard lesson-21 remedy) fixes
+      BOTH the build failures AND the lead's own tool access simultaneously.
+      Never spend time on Read/Write-based symlink workarounds for this
+      again — it is a disk problem, not a task-output-quota problem, and the
+      fix is the same `rm -rf <idle-worktree>/target` reclaim as always.
