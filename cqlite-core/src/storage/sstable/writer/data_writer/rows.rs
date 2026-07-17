@@ -779,7 +779,7 @@ impl DataWriter {
                 }
                 _ => false,
             });
-            let regular_column_count = self.regular_columns(schema).len();
+            let regular_column_count = self.cached_cols(schema).regular.len();
             if all_writes && !has_nulls && row.ops.len() == regular_column_count {
                 flags |= ROW_HAS_ALL_COLUMNS;
             }
@@ -1070,8 +1070,9 @@ impl DataWriter {
             })
             .collect();
 
-        let regular_columns = self.regular_columns(schema);
-        self.write_column_subset(buf, &regular_columns, &present_columns)
+        // Issue #1674 (R3): pass cached regular-column indices — no per-row vec.
+        let regular = &self.cached_cols(schema).regular;
+        self.write_column_subset(buf, schema, regular, &present_columns)
     }
 
     /// Write the columns subset for a merged row's surviving operations.
@@ -1118,24 +1119,36 @@ impl DataWriter {
             }
         }
 
-        let regular_columns = self.regular_columns(schema);
-        self.write_column_subset(buf, &regular_columns, &present_columns)
+        // Issue #1674 (R3): pass cached regular-column indices — no per-row vec.
+        let regular = &self.cached_cols(schema).regular;
+        self.write_column_subset(buf, schema, regular, &present_columns)
     }
 
+    /// Emit the Cassandra `Columns.Serializer.serializeSubset()` bitmap for a row.
+    ///
+    /// Issue #1674 (R3): takes the cached ordered column INDICES (`&[usize]` into
+    /// `schema.columns`, the regular or static subset already in serialization-
+    /// header order) rather than a freshly-collected `Vec<&Column>`, so the per-row
+    /// hot path allocates no throwaway column vec — preserving issue #1673's
+    /// row-allocation ratchet. Bit positions are the column's position WITHIN the
+    /// ordered subset (the `enumerate` index), identical to the prior `&[&Column]`
+    /// form, so the emitted bytes are unchanged.
     pub(super) fn write_column_subset(
         &self,
         buf: &mut Vec<u8>,
-        columns: &[&Column],
+        schema: &TableSchema,
+        col_indices: &[usize],
         present_columns: &std::collections::HashSet<&str>,
     ) -> Result<()> {
+        let columns_len = col_indices.len();
         let mut present_indices = Vec::new();
         let mut missing_indices = Vec::new();
 
-        for (idx, column) in columns.iter().enumerate() {
-            if present_columns.contains(column.name.as_str()) {
-                present_indices.push(idx);
+        for (pos, &col_idx) in col_indices.iter().enumerate() {
+            if present_columns.contains(schema.columns[col_idx].name.as_str()) {
+                present_indices.push(pos);
             } else {
-                missing_indices.push(idx);
+                missing_indices.push(pos);
             }
         }
 
@@ -1144,7 +1157,7 @@ impl DataWriter {
             return Ok(());
         }
 
-        if columns.len() < 64 {
+        if columns_len < 64 {
             let mut bitmap = 0u64;
             for idx in missing_indices {
                 bitmap |= 1u64 << idx;
@@ -1153,9 +1166,9 @@ impl DataWriter {
             return Ok(());
         }
 
-        encode_unsigned((columns.len() - present_indices.len()) as u64, buf);
+        encode_unsigned((columns_len - present_indices.len()) as u64, buf);
 
-        if present_indices.len() < columns.len() / 2 {
+        if present_indices.len() < columns_len / 2 {
             for idx in present_indices {
                 encode_unsigned(idx as u64, buf);
             }

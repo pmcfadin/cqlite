@@ -637,9 +637,10 @@ impl DataWriter {
 
         // Column bitmap: "all columns missing" for every static column.
         // write_column_subset with an empty present_set.
-        let static_columns = self.static_columns(schema);
+        // Issue #1674 (R3): cached static-column indices — no per-row vec.
+        let static_ = &self.cached_cols(schema).static_;
         let empty_present: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        self.write_column_subset(&mut body, &static_columns, &empty_present)?;
+        self.write_column_subset(&mut body, schema, static_, &empty_present)?;
 
         let prev_size_vint_len = unsigned_len(prev_size);
         let row_body_size = prev_size_vint_len as u64 + body.len() as u64;

@@ -23,6 +23,12 @@ impl DataWriter {
     /// header and clustering prefix. Within the regular set, simple columns
     /// sort before complex columns, then by name. The order is served from the
     /// per-writer cache (issue #1674, R3), so no per-row sort runs.
+    ///
+    /// Test-only helper (issue #1674, R3): the per-row hot paths read the cached
+    /// indices directly (`cached_cols(...).regular`) to stay allocation-free
+    /// (issue #1673 ratchet); this `Vec<&Column>` form exists for order-assertion
+    /// tests (`scenarios_3`).
+    #[cfg(test)]
     pub(super) fn regular_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
         self.cached_cols(schema)
             .regular
@@ -32,6 +38,12 @@ impl DataWriter {
     }
 
     /// Get static columns from schema in Cassandra serialization-header order.
+    ///
+    /// Test-only helper (issue #1674, R3): per-row hot paths read the cached
+    /// indices directly (`cached_cols(...).static_`) to stay allocation-free
+    /// (issue #1673 ratchet); this `Vec<&Column>` form exists for order-assertion
+    /// tests (`scenarios_3`).
+    #[cfg(test)]
     pub(super) fn static_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
         self.cached_cols(schema)
             .static_
