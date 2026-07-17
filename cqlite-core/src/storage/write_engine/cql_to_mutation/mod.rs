@@ -24,6 +24,8 @@ mod builders;
 mod codec;
 #[cfg(feature = "write-support")]
 mod delta_helpers;
+#[cfg(feature = "write-support")]
+mod type_cache;
 
 #[cfg(feature = "write-support")]
 pub(crate) use builders::{
@@ -53,6 +55,9 @@ pub(crate) fn convert_cql_to_mutation(
     statement: &str,
     schema: &TableSchema,
 ) -> Result<Mutation, Error> {
+    // Cache parsed column types for the duration of this conversion so the builder
+    // sites reuse each schema type string's parse instead of re-parsing it (#1677).
+    let _type_cache = type_cache::TypeCacheScope::new();
     let trimmed = statement.trim();
 
     if trimmed.len() >= 6 && trimmed.as_bytes()[..6].eq_ignore_ascii_case(b"INSERT") {
@@ -82,6 +87,9 @@ pub(crate) fn convert_cql_to_mutations(
     statement: &str,
     schema: &TableSchema,
 ) -> Result<Vec<Mutation>, Error> {
+    // One parsed-type cache for the whole conversion; a BATCH of N statements then
+    // parses each distinct column type string once, not once per statement (#1677).
+    let _type_cache = type_cache::TypeCacheScope::new();
     let trimmed = statement.trim();
 
     if trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") {
@@ -428,6 +436,59 @@ mod tests {
         let result = convert_cql_to_mutations(sql, &schema);
         assert!(result.is_ok(), "Failed: {:?}", result.err());
         assert_eq!(result.unwrap().len(), 1);
+    }
+
+    /// Issue #1677 (R6): building the mutations for a 100-statement BATCH must
+    /// parse each column's `CqlType` from the (fixed) schema at most once — NOT
+    /// once per column per statement.
+    ///
+    /// The thread-local parse-call counter (`schema::work_counters`, the H5
+    /// pattern) is incremented inside `CqlType::parse`. Before this fix,
+    /// `batch_to_mutations` re-parsed every touched column's type string on every
+    /// statement, so a 100-row batch over a table with C columns performed ~100·C
+    /// parses (here ~400: 100 statements × 4 touched columns). After caching, the
+    /// count is bounded by the number of DISTINCT type strings the batch touches
+    /// (≤ C), independent of the row count. RED on main (~400 ≫ C), GREEN after.
+    #[test]
+    fn issue_1677_batch_parses_each_column_type_once() {
+        use crate::schema::work_counters;
+
+        let schema = simple_json_schema();
+        let column_count = schema.columns.len(); // C
+
+        // 100 INSERTs, each touching id/name/value/flag (4 columns).
+        const ROWS: usize = 100;
+        let mut sql = String::from("BEGIN BATCH ");
+        for i in 0..ROWS {
+            sql.push_str(&format!(
+                "INSERT INTO test_ks.test_tbl (id, name, value, flag) \
+                 VALUES ({i}, 'n{i}', {i}, true); "
+            ));
+        }
+        sql.push_str("APPLY BATCH");
+
+        // Measure only the conversion (schema is built by literal, so no parses
+        // happen before this point).
+        work_counters::reset();
+        let mutations = convert_cql_to_mutations(&sql, &schema).expect("batch converts");
+        let parse_calls = work_counters::parse_calls();
+
+        assert_eq!(mutations.len(), ROWS, "one mutation per batched INSERT");
+
+        // ≤ C total (once per distinct column type), NOT ~100·C. A small margin K
+        // absorbs any incidental parse; the load-bearing check is that it does not
+        // scale with ROWS.
+        assert!(
+            parse_calls <= column_count,
+            "expected ≤ C ({column_count}) parses for a {ROWS}-row batch, got {parse_calls} \
+             (main performs ~{}·C ≈ {})",
+            ROWS,
+            ROWS * column_count
+        );
+        assert!(
+            parse_calls < ROWS,
+            "parse count ({parse_calls}) must not scale with the {ROWS} rows"
+        );
     }
 
     #[test]
