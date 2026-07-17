@@ -12,6 +12,8 @@ use super::*;
 /// frozen collections which are stored as a single cell with blob value.
 /// Matches the reader logic in `row_decoder.rs`.
 pub(crate) fn is_complex_column(data_type: &str) -> bool {
+    #[cfg(test)] // #1674 R3: count calls to prove O(C)/writer, never per row
+    super::column_cache::is_complex_scope::record();
     let dt = data_type.to_lowercase();
 
     // Frozen collections are NOT complex (they're single-cell frozen types)
@@ -36,10 +38,8 @@ pub(crate) fn is_complex_column(data_type: &str) -> bool {
     // column (each field is a cell keyed by its 2-byte signed-short field index).
     // Frozen UDTs were excluded above; a UDT nested in a collection is matched by
     // its outer list/set/map branch. Bare CQL UDT names (e.g. `address`) are NOT
-    // detected here — the writer holds only a `&TableSchema` and cannot resolve a
-    // bare name to a UDT without a `UdtRegistry` (issue #927 item 4, follow-up).
-    // Compaction inputs always carry the full `UserType(...)` marshal string, so
-    // this covers the compaction path.
+    // detected here — the writer holds only a `&TableSchema`, no `UdtRegistry`
+    // (issue #927 item 4). Compaction inputs always carry the full `UserType(...)`.
     if is_udt_marshal(&dt) {
         return true;
     }

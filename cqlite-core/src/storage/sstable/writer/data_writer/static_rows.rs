@@ -301,10 +301,11 @@ impl DataWriter {
             // reader consume the next row's bytes as a subset bitmask
             // ("Invalid Columns subset bytes; too many bits set").
             if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
-                let static_columns = self.static_columns(schema);
+                // Issue #1674 (R3): cached static-column indices — no per-row vec.
+                let static_ = &self.cached_cols(schema).static_;
                 let empty_present: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
-                self.write_column_subset(&mut body, &static_columns, &empty_present)?;
+                self.write_column_subset(&mut body, schema, static_, &empty_present)?;
             }
 
             // No cells written for row tombstones. Store the body back into the
@@ -355,8 +356,9 @@ impl DataWriter {
             })
             .collect();
 
-        let static_columns = self.static_columns(schema);
-        self.write_column_subset(buf, &static_columns, &present_columns)
+        // Issue #1674 (R3): cached static-column indices — no per-row vec.
+        let static_ = &self.cached_cols(schema).static_;
+        self.write_column_subset(buf, schema, static_, &present_columns)
     }
 
     /// Write cells for static columns only.
@@ -501,11 +503,14 @@ impl DataWriter {
         ops: &'b [StaticMergedOp],
         schema: &'a TableSchema,
     ) -> Vec<&'b StaticMergedOp> {
-        let columns = self.static_columns(schema);
-        let column_order: std::collections::HashMap<&str, usize> = columns
+        // Issue #1674 (R3): build the ordering map from cached static-column
+        // indices — no per-row `Vec<&Column>` materialization.
+        let cache = self.cached_cols(schema);
+        let column_order: std::collections::HashMap<&str, usize> = cache
+            .static_
             .iter()
             .enumerate()
-            .map(|(idx, column)| (column.name.as_str(), idx))
+            .map(|(idx, &col_idx)| (schema.columns[col_idx].name.as_str(), idx))
             .collect();
 
         let mut sorted: Vec<&'b StaticMergedOp> = ops.iter().collect();

@@ -213,10 +213,43 @@ pub struct DataWriter {
     /// the read-side shadowing then treats as a partition delete). Default `false`
     /// preserves byte-identical `nb` output.
     oa_partition_deletion: bool,
+    /// Schema-constant ordered column lists + per-column complexity, computed
+    /// exactly once per writer (issue #1674, R3).
+    ///
+    /// The schema is fixed for a writer's lifetime, yet `regular_columns` /
+    /// `static_columns` were re-filtered and re-sorted up to 3× per row, and the
+    /// sort comparator (`column_order_key` → `is_complex_column`) allocated a
+    /// lowercased `String` on every comparison — `O(R·C·log C)` allocations for R
+    /// rows × C columns. This memoizes the ordered column INDICES (Cassandra
+    /// serialization-header order: `(is_complex, name)` key) plus a per-column
+    /// `is_complex` flag, so the per-row hot path reads cached data and
+    /// `to_lowercase` never runs per row. Stored as indices (not `&Column`) to
+    /// avoid entangling the long-lived cache with the per-call `schema` borrow;
+    /// callers resolve `schema.columns[idx]` at use. Filled lazily on first use
+    /// via [`OnceCell`](std::cell::OnceCell) (interior mutability keeps the
+    /// existing `&self` accessors), which also guarantees single computation.
+    column_cache: std::cell::OnceCell<OrderedCols>,
+}
+
+/// Schema-constant ordered column lists, memoized once per [`DataWriter`]
+/// (issue #1674, R3). See [`DataWriter::column_cache`].
+#[derive(Debug)]
+pub(super) struct OrderedCols {
+    /// Indices into `schema.columns` of the regular (non-PK/CK/static) columns,
+    /// in Cassandra serialization-header order (`(is_complex, name)` key).
+    pub(super) regular: Vec<usize>,
+    /// Indices into `schema.columns` of the static columns, same order key.
+    pub(super) static_: Vec<usize>,
+    /// Per-column `is_complex_column` classification, parallel to
+    /// `schema.columns` (one `to_lowercase` per column at cache-build time).
+    pub(super) is_complex: Vec<bool>,
 }
 
 mod cells;
 mod collection_order;
+/// Schema-constant ordered column lists memoized once per writer (issue #1674,
+/// R3). See [`column_cache`].
+mod column_cache;
 mod complex;
 mod encoding;
 /// Incremental partition-write entry point (issue #1668, stage 5c-iv, part
@@ -322,6 +355,7 @@ impl DataWriter {
             crc: StreamingCrc::new(),
             stats: EncodingStatsBaselines::from(&stats),
             oa_partition_deletion: false,
+            column_cache: std::cell::OnceCell::new(),
         }
     }
 
@@ -353,6 +387,7 @@ impl DataWriter {
             crc: StreamingCrc::new(),
             stats: EncodingStatsBaselines::from(&stats),
             oa_partition_deletion: false,
+            column_cache: std::cell::OnceCell::new(),
         }
     }
 
